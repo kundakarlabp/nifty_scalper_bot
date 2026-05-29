@@ -229,6 +229,20 @@ def test_active_future_resolver_replaces_expired_month_future(broker: DummyBroke
     assert symbol == "NFO:NIFTY26JUNFUT"
 
 
+def test_active_future_resolver_uses_broker_instruments_when_resolver_unavailable(ws: DummyWebSocket) -> None:
+    class BrokerWithInstruments(DummyBroker):
+        def instruments(self, exchange: str):
+            assert exchange == "NFO"
+            return [
+                {"segment": "NFO-FUT", "instrument_type": "FUT", "name": "NIFTY", "tradingsymbol": "NIFTY26MAYFUT", "expiry": "2026-05-20"},
+                {"segment": "NFO-FUT", "instrument_type": "FUT", "name": "NIFTY", "tradingsymbol": "NIFTY26JUNFUT", "expiry": "2026-06-25"},
+            ]
+
+    manager = MarketDataManager(BrokerWithInstruments(), ws, resolver=None)
+
+    assert manager.get_active_nifty_future_symbol_cached(now=datetime(2026, 5, 27, tzinfo=timezone.utc)) == "NFO:NIFTY26JUNFUT"
+
+
 def test_active_future_resolver_rejects_banknifty_and_finnifty(broker: DummyBroker, ws: DummyWebSocket) -> None:
     resolver = type(
         "Resolver",

@@ -1320,7 +1320,7 @@ class StrategyManager:
         return canonical
 
     def _resolve_active_futures_symbol_for_metrics(self) -> str | None:
-        """Resolve active NIFTY future from DataHub/MDM SSOT only."""
+        """Resolve active NIFTY future for metrics without calendar generation."""
         data_hub = getattr(self, "_data_hub", None)
         get_active = getattr(data_hub, "get_active_futures_symbol", None)
         if callable(get_active):
@@ -1332,6 +1332,19 @@ class StrategyManager:
             if canonical:
                 self.set_active_futures_symbol(canonical, source="data_hub.get_active_futures_symbol")
                 return canonical
+
+        canonical = canonical_nifty_future_symbol(self._futures_symbol)
+        if canonical:
+            self._logger.info(
+                "STRATEGY_MANAGER_ACTIVE_FUTURES_FALLBACK_USED symbol=%s source=self._futures_symbol",
+                canonical,
+                extra={
+                    "event": "STRATEGY_MANAGER_ACTIVE_FUTURES_FALLBACK_USED",
+                    "symbol": canonical,
+                    "source": "self._futures_symbol",
+                },
+            )
+            return canonical
         return None
 
     def generate_signal(self, symbol: str, current_price: float) -> Signal | None:

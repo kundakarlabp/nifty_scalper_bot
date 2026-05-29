@@ -6734,13 +6734,11 @@ class MarketDataManager:
         return quote
 
     def resolve_active_nifty_future_symbol(self, now: datetime | None = None) -> str | None:
-        """Resolve nearest non-expired NIFTY futures symbol from resolver/instrument master."""
+        """Resolve nearest non-expired NIFTY futures symbol from instrument masters."""
         ref_now = now or datetime.now(timezone.utc)
-        resolver = getattr(self, "_resolver", None)
-        if resolver is None:
-            return None
         fetchers = ("list_instruments", "get_instruments", "instruments")
         instruments: list[Mapping[str, Any]] = []
+
         def _call_instrument_fetcher(fetcher: Callable[..., Any]) -> list[Mapping[str, Any]]:
             attempts = (lambda: fetcher(), lambda: fetcher("NFO"), lambda: fetcher(exchange="NFO"))
             for call in attempts:
@@ -6757,12 +6755,16 @@ class MarketDataManager:
                     if rows:
                         return rows
             return []
-        for fetcher_name in fetchers:
-            fetcher = getattr(resolver, fetcher_name, None)
-            if callable(fetcher):
-                instruments = _call_instrument_fetcher(fetcher)
-                if instruments:
-                    break
+
+        resolver = getattr(self, "_resolver", None)
+        if resolver is not None:
+            for fetcher_name in fetchers:
+                fetcher = getattr(resolver, fetcher_name, None)
+                if callable(fetcher):
+                    instruments = _call_instrument_fetcher(fetcher)
+                    if instruments:
+                        break
+
         best_symbol: str | None = None
         best_expiry: datetime | None = None
         for row in instruments:
@@ -6775,7 +6777,30 @@ class MarketDataManager:
             if best_expiry is None or expiry < best_expiry:
                 best_expiry = expiry
                 best_symbol = f"NFO:{tradingsymbol}"
-        return best_symbol
+        if best_symbol:
+            return self._set_active_nifty_future_cache(best_symbol)
+
+        broker_instruments = getattr(self._broker, "instruments", None)
+        if callable(broker_instruments):
+            try:
+                rows = broker_instruments("NFO") or []
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "ACTIVE_NIFTY_FUTURE_BROKER_INSTRUMENTS_FAILED error=%s",
+                    exc,
+                    extra={"event": "ACTIVE_NIFTY_FUTURE_BROKER_INSTRUMENTS_FAILED", "error": str(exc)},
+                )
+            else:
+                if isinstance(rows, Mapping):
+                    rows = rows.values()
+                if isinstance(rows, Iterable):
+                    resolved = self._resolve_active_nifty_future_from_instruments(
+                        [row for row in rows if isinstance(row, Mapping)],
+                        now=now,
+                    )
+                    if resolved:
+                        return self._set_active_nifty_future_cache(resolved)
+        return None
 
     def get_active_nifty_future_symbol_cached(self, *, now: datetime | None = None, ttl_seconds: float = 30.0) -> str | None:
         now_mono = time.monotonic()

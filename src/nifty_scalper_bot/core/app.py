@@ -1104,6 +1104,25 @@ def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None
         canonical = canonical_nifty_future_symbol(resolved)
         if canonical:
             return canonical
+
+    active_universe = getattr(ctx, "active_trading_universe", {}) or {}
+    if isinstance(active_universe, Mapping):
+        canonical = canonical_nifty_future_symbol(
+            active_universe.get("futures_symbol") or active_universe.get("future_symbol")
+        )
+        if canonical:
+            return canonical
+
+    runner = getattr(ctx, "strategy_runner", None)
+    canonical = canonical_nifty_future_symbol(getattr(runner, "_active_futures_symbol", None))
+    if canonical:
+        return canonical
+
+    strategy_manager = getattr(ctx, "strategy_manager", None)
+    canonical = canonical_nifty_future_symbol(getattr(strategy_manager, "_futures_symbol", None))
+    if canonical:
+        return canonical
+
     LOGGER.warning(
         "FUTURES_CONTEXT_UNAVAILABLE requested=%s reason=active_future_unresolved",
         requested,

@@ -62,7 +62,16 @@ def test_configured_bare_nifty_does_not_generate_nfo_niftyfut() -> None:
     assert manager._resolve_active_futures_symbol_for_metrics() != "NFO:NIFTYFUT"
 
 
-def test_resolve_active_future_does_not_fallback_to_cached_stale_symbol() -> None:
+def test_resolve_active_future_falls_back_to_configured_runtime_future() -> None:
     hub = _Hub(active=None)
-    manager = _manager(futures_symbol="NFO:NIFTY26MAYFUT", hub=hub)
-    assert manager._resolve_active_futures_symbol_for_metrics() is None
+    manager = _manager(futures_symbol="NFO:NIFTY26JUNFUT", hub=hub)
+    assert manager._resolve_active_futures_symbol_for_metrics() == "NFO:NIFTY26JUNFUT"
+
+
+def test_augment_futures_metrics_tries_configured_runtime_future_when_hub_unresolved() -> None:
+    hub = _Hub(active=None)
+    manager = _manager(futures_symbol="NFO:NIFTY26JUNFUT", hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+    assert "NFO:NIFTY26JUNFUT" in hub.calls
+    assert "NFO:NIFTY26MAYFUT" not in hub.calls

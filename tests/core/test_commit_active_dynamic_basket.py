@@ -142,3 +142,21 @@ def test_resolve_active_futures_for_basket_no_calendar_fallback(monkeypatch) -> 
     ctx = SimpleNamespace(market_data_manager=_Mdm())
 
     assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == ""
+
+
+def test_resolve_active_futures_for_basket_uses_active_universe_when_mdm_unresolved(monkeypatch) -> None:
+    class _Mdm:
+        def get_active_nifty_future_symbol_cached(self):
+            return None
+        def resolve_active_nifty_future_symbol(self):
+            return None
+
+    monkeypatch.setattr(app, "_get_current_nifty_futures_symbol", lambda: (_ for _ in ()).throw(AssertionError("calendar fallback used")))
+    ctx = SimpleNamespace(
+        market_data_manager=_Mdm(),
+        active_trading_universe={"futures_symbol": "NFO:NIFTY26JUNFUT"},
+        strategy_runner=None,
+        strategy_manager=None,
+    )
+
+    assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == "NFO:NIFTY26JUNFUT"
