@@ -49,6 +49,12 @@ class _DummyMarketDataManager:
         self.subscribe_calls = 0
         self.unsubscribe_calls = 0
 
+    def request_token_subscription(self, token: int, symbol: str | None = None) -> bool:
+        self.subscribe_calls += 1
+        before = len(self.desired)
+        self.desired.add(int(token))
+        return len(self.desired) > before
+
     def request_token_subscriptions(self, tokens: list[int]) -> int:
         self.subscribe_calls += 1
         before = len(self.desired)
@@ -155,3 +161,32 @@ def test_supervisor_subscription_methods_route_via_mdm() -> None:
     assert remaining == 1
     assert mdm.unsubscribe_calls == 1
     assert streamer.unsubscribe_calls == 0
+
+
+def test_stream_supervisor_preserves_symbol_token_mapping() -> None:
+    class _MappingMdm(_DummyMarketDataManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[tuple[int, str | None]] = []
+            self.active = "NFO:NIFTY26JUNFUT"
+
+        def request_token_subscription(self, token: int, symbol: str | None = None) -> bool:
+            self.calls.append((int(token), symbol))
+            if symbol == "NFO:NIFTY26MAYFUT":
+                return False
+            return super().request_token_subscription(token, symbol)
+
+    mdm = _MappingMdm()
+    supervisor = StreamSupervisor(
+        streamer=_DummyStreamer(),
+        resolver=_DummyResolver({"NFO:NIFTY26MAYFUT": 111, "NFO:NIFTY26JUNFUT": 222}),
+        market_data_manager=mdm,
+        autostart=False,
+    )
+
+    supervisor.subscribe_symbols(["NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT"])
+
+    assert (111, "NFO:NIFTY26MAYFUT") in mdm.calls
+    assert (222, "NFO:NIFTY26JUNFUT") in mdm.calls
+    assert 111 not in mdm.desired_tokens_snapshot()
+    assert mdm.desired_tokens_snapshot() == [222]

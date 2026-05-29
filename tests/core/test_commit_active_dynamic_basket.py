@@ -129,3 +129,16 @@ def test_app_active_basket_uses_active_future_not_requested() -> None:
     assert "NFO:NIFTY26MAYFUT" not in committed["symbols"]
     assert mdm.purged == [("NFO:NIFTY26JUNFUT", "active_dynamic_basket_commit")]
     assert mdm.rotated[0] == "NFO:NIFTY26MAYFUT"
+
+
+def test_resolve_active_futures_for_basket_no_calendar_fallback(monkeypatch) -> None:
+    class _Mdm:
+        def get_active_nifty_future_symbol_cached(self):
+            return None
+        def resolve_active_nifty_future_symbol(self):
+            return None
+
+    monkeypatch.setattr(app, "_get_current_nifty_futures_symbol", lambda: (_ for _ in ()).throw(AssertionError("calendar fallback used")))
+    ctx = SimpleNamespace(market_data_manager=_Mdm())
+
+    assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == ""

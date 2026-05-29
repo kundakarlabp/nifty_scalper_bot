@@ -40,10 +40,15 @@ class DummyWebSocket:
     def __init__(self) -> None:
         self.calls: list[list[int]] = []
         self.connected = True
+        self._tokens: set[int] = set()
 
     def set_tokens(self, tokens) -> bool:  # noqa: ANN001
+        self._tokens = {int(token) for token in tokens}
         self.calls.append(list(tokens))
         return True
+
+    def tokens_snapshot(self) -> list[int]:
+        return sorted(self._tokens)
 
     def is_connected(self) -> bool:
         return self.connected
@@ -400,3 +405,45 @@ def test_mdm_purge_stale_nifty_future_removes_old_desired_token() -> None:
     assert jun in mdm._tracked_symbols  # noqa: SLF001
     assert ce in mdm._tracked_symbols and pe in mdm._tracked_symbols  # noqa: SLF001
     assert ws.calls[-1] == [256265, 222, 333, 444]
+
+
+def test_request_token_subscriptions_rejects_stale_future_token_when_mapping_exists() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    may = "NFO:NIFTY26MAYFUT"
+    jun = "NFO:NIFTY26JUNFUT"
+    mdm._symbol_by_token.update({111: may, 222: jun})  # noqa: SLF001
+    mdm._token_to_symbol.update({111: may, 222: jun})  # noqa: SLF001
+    mdm._token_by_symbol.update({may: 111, jun: 222})  # noqa: SLF001
+    mdm._symbol_to_token.update({may: 111, jun: 222})  # noqa: SLF001
+    mdm._set_active_nifty_future_cache(jun)  # noqa: SLF001
+
+    added = mdm.request_token_subscriptions([111, 222])
+
+    assert added == 1
+    assert mdm.desired_tokens_snapshot() == [222]
+    assert ws.tokens_snapshot() == [222]
+
+
+def test_websocket_replay_after_purge_has_no_may() -> None:
+    from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
+    from tests.streaming.test_websocket_manager import FakeKiteTicker
+
+    ws = WebSocketManager("k", "t", [111, 222], trading_window_enabled=False)
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    may = "NFO:NIFTY26MAYFUT"
+    jun = "NFO:NIFTY26JUNFUT"
+    mdm._token_by_symbol.update({may: 111, jun: 222})  # noqa: SLF001
+    mdm._symbol_to_token.update({may: 111, jun: 222})  # noqa: SLF001
+    mdm._symbol_by_token.update({111: may, 222: jun})  # noqa: SLF001
+    mdm._token_to_symbol.update({111: may, 222: jun})  # noqa: SLF001
+    mdm._desired_tokens.update({111, 222})  # noqa: SLF001
+    mdm._set_active_nifty_future_cache(jun)  # noqa: SLF001
+
+    mdm.purge_stale_nifty_futures(jun, reason="unit_test")
+    fake = FakeKiteTicker("k", "t")
+    ws._on_connect(fake, {"status": "ok"})  # noqa: SLF001
+
+    assert 111 not in mdm.desired_tokens_snapshot()
+    assert 111 not in ws.tokens_snapshot()
+    assert fake.subscribed == [222]

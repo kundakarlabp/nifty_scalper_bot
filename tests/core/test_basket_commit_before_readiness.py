@@ -80,3 +80,36 @@ async def test_startup_hydration_uses_active_future_not_requested_expired_future
     out = await app._build_and_hydrate_live_basket_from_spot(ctx, spot_ltp=23701.0, configured_mode='LIVE')
     assert out.get("futures_symbol") == "NFO:NIFTY26JUNFUT"
     assert "NFO:NIFTY26MAYFUT" not in (out.get("symbols") or [])
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_generate_calendar_future(monkeypatch):
+    basket = {
+        'futures_symbol': 'NFO:NIFTY26MAYFUT',
+        'selected_ce': 'NFO:NIFTY26JUN23700CE',
+        'selected_pe': 'NFO:NIFTY26JUN23700PE',
+        'atm_ce': 'NFO:NIFTY26JUN23700CE',
+        'atm_pe': 'NFO:NIFTY26JUN23700PE',
+        'atm_strike': 23700,
+        'symbols': ['NSE:NIFTY', 'NFO:NIFTY26MAYFUT', 'NFO:NIFTY26JUN23700CE', 'NFO:NIFTY26JUN23700PE'],
+        'option_symbols': ['NFO:NIFTY26JUN23700CE', 'NFO:NIFTY26JUN23700PE'],
+    }
+    monkeypatch.setattr(app, '_get_current_nifty_futures_symbol', lambda: (_ for _ in ()).throw(AssertionError('calendar future generated')))
+    monkeypatch.setattr(app, '_build_canonical_active_basket', lambda **kwargs: {**basket, 'futures_symbol': kwargs.get('futures_symbol') or ''})
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.CLOSED)
+    ctx = SimpleNamespace(
+        instrument_manager=_IM(),
+        market_data_manager=_MDM(),
+        broker_client=_Broker(),
+        settings=SimpleNamespace(option_universe=SimpleNamespace(strike_step=50), execution_mode='LIVE'),
+        strategy_runner=SimpleNamespace(_indicator_engine=SimpleNamespace(get_history=lambda s: [1] * 30)),
+        order_manager=object(),
+        active_trading_universe={},
+        selected_ce=None,
+        selected_pe=None,
+    )
+
+    out = await app._build_and_hydrate_live_basket_from_spot(ctx, spot_ltp=23701.0, configured_mode='LIVE')
+
+    assert out.get('futures_symbol') == 'NFO:NIFTY26JUNFUT'
+    assert 'NFO:NIFTY26MAYFUT' not in (out.get('symbols') or [])

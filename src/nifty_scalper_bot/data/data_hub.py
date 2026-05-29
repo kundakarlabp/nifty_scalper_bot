@@ -1336,8 +1336,14 @@ class DataHub:
 
     def purge_symbol_aliases(self, symbols: Iterable[str] = (), tokens: Iterable[int] = ()) -> int:
         """Remove stale symbol/token aliases from DataHub caches."""
-        normalized_symbols = {str(sym or "").strip().upper() for sym in symbols if str(sym or "").strip()}
+        normalized_symbols: set[str] = set()
         normalized_tokens: set[int] = set()
+        for sym in symbols:
+            canonical_sym = self._canonical_quote_symbol(sym)
+            if canonical_sym:
+                normalized_symbols.add(canonical_sym)
+                if ":" in canonical_sym:
+                    normalized_symbols.add(canonical_sym.split(":", 1)[1])
         for token in tokens:
             try:
                 token_int = int(token)
@@ -1345,11 +1351,15 @@ class DataHub:
                 continue
             if token_int > 0:
                 normalized_tokens.add(token_int)
+                normalized_symbols.add(str(token_int))
         with self._lock:
             for token in list(normalized_tokens):
                 mapped = self._symbol_by_token.pop(token, None)
                 if mapped:
-                    normalized_symbols.add(str(mapped).strip().upper())
+                    canonical_mapped = self._canonical_quote_symbol(mapped)
+                    normalized_symbols.add(canonical_mapped)
+                    if ":" in canonical_mapped:
+                        normalized_symbols.add(canonical_mapped.split(":", 1)[1])
                 self._ticks.pop(token, None)
                 self._token_quotes.pop(token, None)
             for symbol in list(normalized_symbols):
@@ -1360,10 +1370,20 @@ class DataHub:
                     self._ticks.pop(int(token), None)
                     self._token_quotes.pop(int(token), None)
                 aliases = set(self._symbol_aliases.pop(symbol, set()))
-                for alias in aliases:
-                    self._symbol_aliases.get(alias, set()).discard(symbol)
+                normalized_symbols.update(str(alias).strip().upper() for alias in aliases if str(alias).strip())
                 for cache in (self._quotes, self._last_ts, self._last_arrival, self._last_ws_arrival, self._last_poll_arrival, self._last_arrival_mono):
                     cache.pop(symbol, None)
+            for symbol, aliases in list(self._symbol_aliases.items()):
+                aliases.difference_update(normalized_symbols)
+                if not aliases:
+                    self._symbol_aliases.pop(symbol, None)
+            for symbol in list(normalized_symbols):
+                self._quotes.pop(symbol, None)
+                self._last_ts.pop(symbol, None)
+                self._last_arrival.pop(symbol, None)
+                self._last_ws_arrival.pop(symbol, None)
+                self._last_poll_arrival.pop(symbol, None)
+                self._last_arrival_mono.pop(symbol, None)
             return len(normalized_symbols) + len(normalized_tokens)
 
     def pull_quote(self, symbol: str) -> Dict[str, Any]:
