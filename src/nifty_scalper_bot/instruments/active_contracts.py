@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 import calendar
 import re
 from typing import Any, Iterable, Mapping, Sequence
@@ -9,6 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 NIFTY_FUT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})FUT$")
 NIFTY_OPT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<strike>\d{4,6})(?P<side>CE|PE)$")
 MONTH_ABBR_TO_NUM = {m.upper(): i for i, m in enumerate(calendar.month_abbr) if m}
+IST = ZoneInfo("Asia/Kolkata")
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,16 @@ def normalize_symbol(symbol: Any) -> str:
             return "NSE:NIFTY"
         return f"NFO:{raw}"
     return raw
+
+
+def _trading_date(now: datetime | date | None = None) -> date:
+    if now is None:
+        return datetime.now(IST).date()
+    if isinstance(now, datetime):
+        if now.tzinfo is None:
+            return now.date()
+        return now.astimezone(IST).date()
+    return now
 
 
 def canonical_nifty_future_symbol(symbol: Any) -> str | None:
@@ -94,8 +106,7 @@ def is_nifty_future_expired(symbol: Any, *, now: datetime | date | None = None) 
     expiry = parse_nifty_future_expiry(symbol)
     if expiry is None:
         return False
-    today = (datetime.now(timezone.utc).date() if now is None else now.date() if isinstance(now, datetime) else now)
-    return today > expiry
+    return _trading_date(now) > expiry
 
 
 def _is_nifty_future_row(row: Mapping[str, Any]) -> bool:
@@ -107,7 +118,7 @@ def _is_nifty_future_row(row: Mapping[str, Any]) -> bool:
 
 
 def resolve_active_nifty_future_from_instruments(instruments: Iterable[Mapping[str, Any]], *, now: datetime | date | None = None) -> ActiveFutureResolution:
-    today = (datetime.now(timezone.utc).date() if now is None else now.date() if isinstance(now, datetime) else now)
+    today = _trading_date(now)
     best_symbol: str | None = None
     best_expiry: date | None = None
     for row in instruments:
@@ -138,14 +149,22 @@ def derive_nifty_future_from_selected_options(selected_option_symbols: Sequence[
     return ActiveFutureResolution(candidate, "selected_options")
 
 
-def resolve_active_nifty_future(*, instruments: Iterable[Mapping[str, Any]] | None = None, selected_option_symbols: Sequence[Any] | None = None, configured_symbol: Any | None = None, now: datetime | date | None = None) -> ActiveFutureResolution:
+def resolve_active_nifty_future(
+    *,
+    instruments: Iterable[Mapping[str, Any]] | None = None,
+    selected_option_symbols: Sequence[Any] | None = None,
+    configured_symbol: Any | None = None,
+    now: datetime | date | None = None,
+    allow_selected_option_fallback: bool = False,
+) -> ActiveFutureResolution:
     if instruments is not None:
         resolved = resolve_active_nifty_future_from_instruments(instruments, now=now)
         if resolved.symbol:
             return resolved
-    selected = derive_nifty_future_from_selected_options(selected_option_symbols, now=now)
-    if selected.symbol:
-        return selected
+    if allow_selected_option_fallback:
+        selected = derive_nifty_future_from_selected_options(selected_option_symbols, now=now)
+        if selected.symbol:
+            return selected
     configured = canonical_nifty_future_symbol(configured_symbol)
     if configured and not is_nifty_future_expired(configured, now=now):
         return ActiveFutureResolution(configured, "configured_symbol")

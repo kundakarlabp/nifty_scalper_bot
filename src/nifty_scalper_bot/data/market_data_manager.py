@@ -1571,12 +1571,17 @@ class MarketDataManager:
                     token_int,
                 )
 
+        active_future = self.get_active_nifty_future_symbol_cached()
+        if active_future:
+            self.purge_stale_nifty_futures(active_future, reason="request_token_subscription_pre")
         with self._lock:
             self._desired_tokens.add(token_int)
             if normalized_symbol:
                 self._symbol_to_token[normalized_symbol] = token_int
                 self._token_to_symbol[token_int] = normalized_symbol
                 self._symbol_by_token[token_int] = normalized_symbol
+        if active_future:
+            self.purge_stale_nifty_futures(active_future, reason="request_token_subscription_post")
         self._reconcile_ws_subscriptions()
         if normalized_symbol and normalized_symbol.endswith(("CE", "PE")):
             with self._lock:
@@ -1601,10 +1606,15 @@ class MarketDataManager:
                 normalized.add(token_int)
         if not normalized:
             return 0
+        active_future = self.get_active_nifty_future_symbol_cached()
+        if active_future:
+            self.purge_stale_nifty_futures(active_future, reason="request_token_subscriptions_pre")
         with self._lock:
             before = len(self._desired_tokens)
             self._desired_tokens.update(normalized)
             added_count = len(self._desired_tokens) - before
+        if active_future:
+            self.purge_stale_nifty_futures(active_future, reason="request_token_subscriptions_post")
         self._reconcile_ws_subscriptions()
         return added_count
 
@@ -2555,6 +2565,7 @@ class MarketDataManager:
                 level=logging.WARNING,
                 extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote", "already_suspended": already_suspended},
             )
+            self.purge_stale_nifty_futures(active, reason="pull_quote_expired_future")
             return {}
         if self.is_context_symbol_suspended(canonical_symbol):
             with self._lock:
@@ -6771,9 +6782,11 @@ class MarketDataManager:
             )
             return FuturesContextRotationResult(None, current_symbol, False, True, reason, "unresolved")
         if current_symbol and self._canonical_symbol(current_symbol) == self._canonical_symbol(active):
+            self.purge_stale_nifty_futures(active, reason=reason)
             return FuturesContextRotationResult(current_symbol, current_symbol, False, False, reason, source)
         old_symbol = current_symbol
         self.rotate_active_nifty_future_context(old_symbol, active, reason=reason, trace_id=trace_id)
+        self.purge_stale_nifty_futures(active, reason=reason)
         self._logger.warning(
             "FUTURES_CONTEXT_SYMBOL_ROTATED old_symbol=%s new_symbol=%s reason=%s",
             old_symbol, active, reason,
@@ -6789,6 +6802,134 @@ class MarketDataManager:
         if active:
             return canonical_nifty_future_symbol(active) != canonical
         return is_nifty_future_expired(canonical, now=now)
+
+    def purge_stale_nifty_futures(self, active_symbol: str | None = None, *, reason: str = "active_future_rotation") -> list[int]:
+        """Purge stale NIFTY futures symbols/tokens from runtime subscription state."""
+        active = canonical_nifty_future_symbol(active_symbol) or canonical_nifty_future_symbol(
+            self.get_active_nifty_future_symbol_cached()
+        )
+        if not active:
+            return []
+
+        stale_symbols: set[str] = set()
+        stale_tokens: set[int] = set()
+
+        def _mark_symbol(value: Any) -> None:
+            canonical = canonical_nifty_future_symbol(value)
+            if canonical and canonical != active:
+                stale_symbols.add(canonical)
+
+        def _mark_token(value: Any) -> None:
+            try:
+                token_int = int(value)
+            except (TypeError, ValueError):
+                return
+            if token_int > 0:
+                stale_tokens.add(token_int)
+
+        with self._lock:
+            for symbol in list(self._tracked_symbols) + list(self._active_subscribed_symbols):
+                _mark_symbol(symbol)
+            for mapping_name in ("_token_by_symbol", "_symbol_to_token"):
+                mapping = getattr(self, mapping_name, {})
+                if isinstance(mapping, dict):
+                    for symbol, token in list(mapping.items()):
+                        canonical = canonical_nifty_future_symbol(symbol)
+                        if canonical and canonical != active:
+                            stale_symbols.add(canonical)
+                            _mark_token(token)
+            for mapping_name in ("_symbol_by_token", "_token_to_symbol"):
+                mapping = getattr(self, mapping_name, {})
+                if isinstance(mapping, dict):
+                    for token, symbol in list(mapping.items()):
+                        canonical = canonical_nifty_future_symbol(symbol)
+                        if canonical and canonical != active:
+                            stale_symbols.add(canonical)
+                            _mark_token(token)
+            for cache_name in ("_latest_ticks", "_tick_cache", "_last_tick_snapshot", "_history", "_poll_bar_state", "_last_poll_bucket"):
+                cache = getattr(self, cache_name, {})
+                if isinstance(cache, dict):
+                    for symbol in list(cache.keys()):
+                        _mark_symbol(symbol)
+            reqs = dict(getattr(self, "_readiness_requirements", {}) or {})
+            for key, value in list(reqs.items()):
+                canonical = canonical_nifty_future_symbol(value)
+                if canonical and canonical != active:
+                    stale_symbols.add(canonical)
+                    if key == "futures":
+                        reqs[key] = active
+                    else:
+                        reqs.pop(key, None)
+            reqs["futures"] = active
+            self._readiness_requirements = reqs
+
+            for symbol in list(stale_symbols):
+                token = self._token_by_symbol.get(symbol) or self._symbol_to_token.get(symbol)
+                if token is not None:
+                    _mark_token(token)
+                self._tracked_symbols.discard(symbol)
+                self._active_subscribed_symbols.discard(symbol)
+                self._subscribers.pop(symbol, None)
+                self._latest_ticks.pop(symbol, None)
+                self._tick_cache.pop(symbol, None)
+                self._last_tick_snapshot.pop(symbol, None)
+                self._history.pop(symbol, None)
+                self._ohlc.pop(self._bar_symbol_key(symbol), None)
+                self._poll_bar_state.pop(symbol, None)
+                self._last_poll_bucket.pop(symbol, None)
+                self._last_tick_time.pop(symbol, None)
+                self._last_tick_ts.pop(symbol, None)
+                self._last_tick_wallclock.pop(symbol, None)
+                self._last_quote_ts_ms.pop(symbol, None)
+                self._last_tick_source.pop(symbol, None)
+                self._last_signature.pop(symbol, None)
+                self._last_tick_hash.pop(symbol, None)
+                self._symbols_with_tick.discard(symbol)
+                self._ticks_received_per_symbol.pop(symbol, None)
+                self._last_rest_refresh_attempt.pop(symbol, None)
+                self._quote_direct_miss_count.pop(symbol, None)
+                self._quote_direct_miss_until.pop(symbol, None)
+                self._quote_direct_miss_reason.pop(symbol, None)
+                mapped_token = self._token_by_symbol.pop(symbol, None)
+                if mapped_token is not None:
+                    _mark_token(mapped_token)
+                mapped_token = self._symbol_to_token.pop(symbol, None)
+                if mapped_token is not None:
+                    _mark_token(mapped_token)
+                self._suspended_context_symbols.add(symbol)
+                self._suspended_context_symbol_until[symbol] = time.monotonic() + (48.0 * 3600.0)
+
+            for token in list(stale_tokens):
+                mapped_symbol = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
+                canonical = canonical_nifty_future_symbol(mapped_symbol)
+                if canonical == active:
+                    stale_tokens.discard(token)
+                    continue
+                self._symbol_by_token.pop(token, None)
+                self._token_to_symbol.pop(token, None)
+                self._desired_tokens.discard(token)
+                self._pending_subscription_tokens.discard(token)
+                self._pending_subscriptions.discard(token)
+                self._dispatched_subscriptions.discard(token)
+                self._confirmed_subscriptions.discard(token)
+
+        purged_tokens = sorted(stale_tokens)
+        if purged_tokens:
+            self._reconcile_ws_subscriptions()
+        hub = getattr(self, "data_hub", None) or getattr(self, "_data_hub", None)
+        purge_hub = getattr(hub, "purge_symbol_aliases", None)
+        if callable(purge_hub):
+            purge_hub(symbols=sorted(stale_symbols), tokens=purged_tokens)
+        if stale_symbols or purged_tokens:
+            self._logger.warning(
+                "FUTURES_STALE_SUBSCRIPTION_PURGED active=%s purged_symbols=%s purged_tokens=%s reason=%s",
+                active,
+                sorted(stale_symbols),
+                purged_tokens,
+                reason,
+                extra={"event": "FUTURES_STALE_SUBSCRIPTION_PURGED", "active_symbol": active, "purged_symbols": sorted(stale_symbols), "purged_tokens": purged_tokens, "reason": reason},
+            )
+        return purged_tokens
 
     def rotate_active_nifty_future_context(
         self,
@@ -6859,6 +7000,7 @@ class MarketDataManager:
         reqs = dict(self._readiness_requirements)
         reqs["futures"] = new_canonical
         self._readiness_requirements = reqs
+        self.purge_stale_nifty_futures(new_canonical, reason=reason)
         rotated = bool(old_canonical and old_canonical != new_canonical)
         if rotated and not already_suspended_old:
             self._logger.warning(

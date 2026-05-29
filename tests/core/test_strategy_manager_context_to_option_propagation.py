@@ -116,3 +116,23 @@ def test_futures_snapshot_derives_slope_and_volume_ratio():
     snap = m._latest_context_snapshots.get('futures_context', {})
     assert float(snap.get('futures_volume_ratio') or 0.0) == 2.0
     assert float(snap.get('vwap_slope') or 0.0) > 0.0
+
+
+def test_strategy_context_discards_stale_future() -> None:
+    class _Hub:
+        indicators_ready = True
+        def get_active_futures_symbol(self):
+            return "NFO:NIFTY26JUNFUT"
+        def get_quote(self, *_args, **_kwargs):
+            return {}
+
+    st = _S(); ie = _IE(); m = StrategyManager([st], ie, _PM(), data_hub=_Hub())
+    ie.payload = {'close': 110, 'previous_close': 100, 'volume': 100, 'avg_volume': 100}
+    m.generate_signal('NSE:NIFTY', 110)
+    ie.payload = {'close': 100, 'tick_slope': 0.2, 'volume': 100, 'avg_volume': 100}
+    m.generate_signal('NFO:NIFTY26MAYFUT', 100)
+    ie.payload = {'vwap': 102, 'exchange_vwap': 102, 'volume': 100, 'avg_volume': 100}
+    m.generate_signal('NFO:NIFTY26JUN23900CE', 102)
+    assert st.last.get('futures_context') is None
+    assert 'stale_futures_context_discarded' in st.last.get('context_discard_reasons', [])
+    assert st.last.get('spot_context')

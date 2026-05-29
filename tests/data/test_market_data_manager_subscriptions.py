@@ -372,3 +372,31 @@ def test_request_token_subscriptions_ignores_invalid_tokens() -> None:
 
     assert added == 2
     assert ws.calls == [[101, 202]]
+
+
+def test_mdm_purge_stale_nifty_future_removes_old_desired_token() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    may = "NFO:NIFTY26MAYFUT"
+    jun = "NFO:NIFTY26JUNFUT"
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+    mapping = {"NSE:NIFTY": 256265, may: 111, jun: 222, ce: 333, pe: 444}
+    mdm._token_by_symbol.update(mapping)  # noqa: SLF001
+    mdm._symbol_to_token.update(mapping)  # noqa: SLF001
+    mdm._symbol_by_token.update({token: sym for sym, token in mapping.items()})  # noqa: SLF001
+    mdm._token_to_symbol.update({token: sym for sym, token in mapping.items()})  # noqa: SLF001
+    mdm._tracked_symbols.update(mapping)  # noqa: SLF001
+    mdm._active_subscribed_symbols.update(mapping)  # noqa: SLF001
+    mdm._desired_tokens.update(mapping.values())  # noqa: SLF001
+    mdm._set_active_nifty_future_cache(jun)  # noqa: SLF001
+
+    purged = mdm.purge_stale_nifty_futures(jun, reason="unit_test")
+
+    assert purged == [111]
+    assert 111 not in mdm.desired_tokens_snapshot()
+    assert set(mdm.desired_tokens_snapshot()) == {256265, 222, 333, 444}
+    assert may not in mdm._tracked_symbols  # noqa: SLF001
+    assert jun in mdm._tracked_symbols  # noqa: SLF001
+    assert ce in mdm._tracked_symbols and pe in mdm._tracked_symbols  # noqa: SLF001
+    assert ws.calls[-1] == [256265, 222, 333, 444]

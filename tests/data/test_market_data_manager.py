@@ -1415,20 +1415,29 @@ def test_pull_quote_expired_future_is_suppressed_without_broker_call(ws: DummyWe
 
 def test_repeated_expired_future_pull_quote_rotates_only_once(ws: DummyWebSocket, monkeypatch: pytest.MonkeyPatch) -> None:
     manager = MarketDataManager(DummyBroker(), ws)
-    monkeypatch.setattr(manager, "_is_nifty_future_symbol_expired", lambda sym: str(sym).upper() == "NFO:NIFTY26MAYFUT")
-    monkeypatch.setattr(manager, "get_active_nifty_future_symbol_cached", lambda: "NFO:NIFTY26JUNFUT")
+    may = "NFO:NIFTY26MAYFUT"
+    jun = "NFO:NIFTY26JUNFUT"
+    manager._token_by_symbol.update({may: 111, jun: 222})  # noqa: SLF001
+    manager._symbol_to_token.update({may: 111, jun: 222})  # noqa: SLF001
+    manager._symbol_by_token.update({111: may, 222: jun})  # noqa: SLF001
+    manager._token_to_symbol.update({111: may, 222: jun})  # noqa: SLF001
+    manager._desired_tokens.update({111, 222})  # noqa: SLF001
+    monkeypatch.setattr(manager, "_is_nifty_future_symbol_expired", lambda sym: str(sym).upper() == may)
+    monkeypatch.setattr(manager, "get_active_nifty_future_symbol_cached", lambda *args, **kwargs: jun)
     calls: list[tuple[str | None, str, str]] = []
 
     def _rotate(old_symbol: str | None, new_symbol: str, *, reason: str, trace_id: str | None = None) -> None:
         calls.append((old_symbol, new_symbol, reason))
-        manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
+        manager._suspended_context_symbols.add(may)  # noqa: SLF001
 
     monkeypatch.setattr(manager, "rotate_active_nifty_future_context", _rotate)
-    first = manager.pull_quote("NFO:NIFTY26MAYFUT")
-    second = manager.pull_quote("NFO:NIFTY26MAYFUT")
+    first = manager.pull_quote(may)
+    second = manager.pull_quote(may)
     assert first == {}
     assert second == {}
     assert len(calls) == 1
+    assert 111 not in manager.desired_tokens_snapshot()
+    assert 222 in manager.desired_tokens_snapshot()
 
 
 def test_symbols_for_poll_excludes_expired_futures(monkeypatch: pytest.MonkeyPatch, ws: DummyWebSocket) -> None:

@@ -7406,6 +7406,10 @@ def _commit_active_dynamic_basket(
     active_futures_symbol = _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket = dict(basket)
     basket["futures_symbol"] = active_futures_symbol
+    mdm_for_purge = getattr(ctx, "market_data_manager", None)
+    purge_stale_futures = getattr(mdm_for_purge, "purge_stale_nifty_futures", None)
+    if callable(purge_stale_futures):
+        purge_stale_futures(active_futures_symbol, reason="active_dynamic_basket_commit")
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
     current_symbols = [str(sym) for sym in symbols if sym]
     local_basket = dict(basket or {})
@@ -7519,7 +7523,7 @@ def _commit_active_dynamic_basket(
     if callable(rotate_result):
         try:
             rotate_result(
-                active_futures_symbol,
+                requested_futures_symbol,
                 reason="active_dynamic_basket_commit",
                 selected_option_symbols=list(current_options),
             )

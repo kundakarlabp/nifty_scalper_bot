@@ -16,6 +16,7 @@ import pandas as pd
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Optional
 
 from nifty_scalper_bot.storage.hub_store import HubStore
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
 from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.utils.symbols import canonical
@@ -1331,6 +1332,39 @@ class DataHub:
             if canonical:
                 return canonical
         return None
+
+
+    def purge_symbol_aliases(self, symbols: Iterable[str] = (), tokens: Iterable[int] = ()) -> int:
+        """Remove stale symbol/token aliases from DataHub caches."""
+        normalized_symbols = {str(sym or "").strip().upper() for sym in symbols if str(sym or "").strip()}
+        normalized_tokens: set[int] = set()
+        for token in tokens:
+            try:
+                token_int = int(token)
+            except (TypeError, ValueError):
+                continue
+            if token_int > 0:
+                normalized_tokens.add(token_int)
+        with self._lock:
+            for token in list(normalized_tokens):
+                mapped = self._symbol_by_token.pop(token, None)
+                if mapped:
+                    normalized_symbols.add(str(mapped).strip().upper())
+                self._ticks.pop(token, None)
+                self._token_quotes.pop(token, None)
+            for symbol in list(normalized_symbols):
+                token = self._token_by_symbol.pop(symbol, None)
+                if token is not None:
+                    normalized_tokens.add(int(token))
+                    self._symbol_by_token.pop(int(token), None)
+                    self._ticks.pop(int(token), None)
+                    self._token_quotes.pop(int(token), None)
+                aliases = set(self._symbol_aliases.pop(symbol, set()))
+                for alias in aliases:
+                    self._symbol_aliases.get(alias, set()).discard(symbol)
+                for cache in (self._quotes, self._last_ts, self._last_arrival, self._last_ws_arrival, self._last_poll_arrival, self._last_arrival_mono):
+                    cache.pop(symbol, None)
+            return len(normalized_symbols) + len(normalized_tokens)
 
     def pull_quote(self, symbol: str) -> Dict[str, Any]:
         mdm_fn = getattr(self._mdm, "pull_quote", None)
