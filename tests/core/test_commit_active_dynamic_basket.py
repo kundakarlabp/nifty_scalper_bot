@@ -49,3 +49,96 @@ def test_commit_active_dynamic_basket_preserves_old_selected_when_valid() -> Non
     )
     assert selected_ce == old_ce
     assert selected_pe == old_pe
+
+
+def test_commit_active_dynamic_basket_replaces_stale_futures_with_active_mdm_future() -> None:
+    class _Mdm:
+        def __init__(self) -> None:
+            self.rotate_args = None
+
+        def get_active_nifty_future_symbol_cached(self) -> str:
+            return "NFO:NIFTY26JUNFUT"
+        def maybe_rotate_nifty_futures_context_result(self, current_symbol, **kwargs):
+            self.rotate_args = (current_symbol, kwargs)
+            return None
+    mdm = _Mdm()
+
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe={},
+        strategy_runner=None,
+        market_data_manager=mdm,
+        strategy_manager=None,
+    )
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={"futures_symbol": "NFO:NIFTY26MAYFUT"},
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", "NFO:NIFTY26MAYFUT", ce, pe],
+        atm_strike=23900,
+    )
+    committed = ctx.active_trading_universe
+    assert committed["futures_symbol"] == "NFO:NIFTY26JUNFUT"
+    assert "NFO:NIFTY26MAYFUT" not in committed["symbols"]
+    assert mdm.rotate_args is not None
+    assert mdm.rotate_args[0] == "NFO:NIFTY26MAYFUT"
+
+
+def test_app_active_basket_uses_active_future_not_requested() -> None:
+    class _Mdm:
+        def __init__(self) -> None:
+            self.purged: list[tuple[str, str]] = []
+        def get_active_nifty_future_symbol_cached(self) -> str:
+            return "NFO:NIFTY26JUNFUT"
+        def purge_stale_nifty_futures(self, active_symbol, *, reason):
+            self.purged.append((active_symbol, reason))
+            return [111]
+        def maybe_rotate_nifty_futures_context_result(self, current_symbol, **kwargs):
+            self.rotated = (current_symbol, kwargs)
+            return None
+
+    mdm = _Mdm()
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe={},
+        strategy_runner=None,
+        market_data_manager=mdm,
+        strategy_manager=None,
+    )
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={"futures_symbol": "NFO:NIFTY26MAYFUT", "spot_symbol": "NSE:NIFTY"},
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", "NFO:NIFTY26MAYFUT", ce, pe],
+        atm_strike=23900,
+    )
+
+    committed = ctx.active_trading_universe
+    assert committed["futures_symbol"] == "NFO:NIFTY26JUNFUT"
+    assert "NFO:NIFTY26JUNFUT" in committed["symbols"]
+    assert "NFO:NIFTY26MAYFUT" not in committed["symbols"]
+    assert mdm.purged == [("NFO:NIFTY26JUNFUT", "active_dynamic_basket_commit")]
+    assert mdm.rotated[0] == "NFO:NIFTY26MAYFUT"
+
+
+def test_resolve_active_futures_for_basket_no_calendar_fallback(monkeypatch) -> None:
+    class _Mdm:
+        def get_active_nifty_future_symbol_cached(self):
+            return None
+        def resolve_active_nifty_future_symbol(self):
+            return None
+
+    monkeypatch.setattr(app, "_get_current_nifty_futures_symbol", lambda: (_ for _ in ()).throw(AssertionError("calendar fallback used")))
+    ctx = SimpleNamespace(market_data_manager=_Mdm())
+
+    assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == ""

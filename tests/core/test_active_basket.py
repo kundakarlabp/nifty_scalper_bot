@@ -48,3 +48,4 @@ def test_build_canonical_active_basket_returns_selected_symbols() -> None:
     )
     assert basket['selected_ce'] == basket['atm_ce']
     assert basket['selected_pe'] == basket['atm_pe']
+

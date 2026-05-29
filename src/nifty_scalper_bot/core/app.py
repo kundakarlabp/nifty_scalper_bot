@@ -54,6 +54,7 @@ from nifty_scalper_bot.data.robust_provider import (
     RobustDataProvider,
 )
 from nifty_scalper_bot.infra.watchdog import start_watchdog
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
@@ -1082,6 +1083,33 @@ _HTTP_APP: FastAPI | None = None
 _HTTP_NOTIFIER: TelegramEnhancedNotifier | None = None
 _HTTP_CONTROLLER: TelegramWebhookController | None = None
 _LATEST_CTX: "BotContext | None" = None
+
+
+def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None) -> str:
+    """Return authoritative active NIFTY futures symbol for runtime basket."""
+    mdm = getattr(ctx, "market_data_manager", None)
+    for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
+        method = getattr(mdm, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            resolved = method()
+        except TypeError:
+            try:
+                resolved = method(now=None)
+            except Exception:
+                resolved = None
+        except Exception:
+            resolved = None
+        canonical = canonical_nifty_future_symbol(resolved)
+        if canonical:
+            return canonical
+    LOGGER.warning(
+        "FUTURES_CONTEXT_UNAVAILABLE requested=%s reason=active_future_unresolved",
+        requested,
+        extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "requested_symbol": str(requested or ""), "reason": "active_future_unresolved"},
+    )
+    return ""
 
 
 class _LifecycleTrackerAdapter:
@@ -4873,8 +4901,19 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     LOGGER.warning(
                         f"Failed to inject DataHub into {strategy.name}: {exc}"
                     )
-    futures_symbol = _get_current_nifty_futures_symbol()
-    LOGGER.info("📅 Using futures symbol: %s", futures_symbol)
+    futures_symbol = ""
+    for _method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
+        _method = getattr(market_data_manager, _method_name, None)
+        if callable(_method):
+            try:
+                futures_symbol = canonical_nifty_future_symbol(_method()) or ""
+            except TypeError:
+                futures_symbol = canonical_nifty_future_symbol(_method(now=None)) or ""
+            except Exception:
+                futures_symbol = ""
+            if futures_symbol:
+                break
+    LOGGER.info("📅 Using active futures symbol: %s", futures_symbol or "unavailable")
     orchestrator = StrategyOrchestrator(
         risk_manager=risk_manager,
         order_manager=safe_order_manager,
@@ -7374,7 +7413,15 @@ def _commit_active_dynamic_basket(
     atm_strike: int | float | str | None,
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
-    basket = normalize_active_basket_schema(basket)
+    requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
+    active_futures_symbol = _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
+    basket_copy = dict(basket or {})
+    basket_copy["futures_symbol"] = active_futures_symbol
+    basket = normalize_active_basket_schema(basket_copy)
+    mdm_for_purge = getattr(ctx, "market_data_manager", None)
+    purge_stale_futures = getattr(mdm_for_purge, "purge_stale_nifty_futures", None)
+    if callable(purge_stale_futures):
+        purge_stale_futures(active_futures_symbol, reason="active_dynamic_basket_commit")
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
     current_symbols = [str(sym) for sym in symbols if sym]
     local_basket = dict(basket or {})
@@ -7449,7 +7496,7 @@ def _commit_active_dynamic_basket(
         {
             "spot_symbol": basket.get("spot_symbol") or "NSE:NIFTY",
             "spot_token": basket.get("spot_token"),
-            "futures_symbol": basket.get("futures_symbol") or "",
+            "futures_symbol": active_futures_symbol,
             "futures_token": basket.get("futures_token"),
             "selected_ce": selected_ce,
             "selected_pe": selected_pe,
@@ -7461,9 +7508,13 @@ def _commit_active_dynamic_basket(
             "symbols": list(
                 dict.fromkeys(
                     [
-                        basket.get("spot_symbol") or "NSE:NIFTY",
-                        basket.get("futures_symbol") or "",
-                        *current_options,
+                        s
+                        for s in [
+                            basket.get("spot_symbol") or "NSE:NIFTY",
+                            active_futures_symbol or None,
+                            *current_options,
+                        ]
+                        if s
                     ]
                 )
             ),
@@ -7475,6 +7526,25 @@ def _commit_active_dynamic_basket(
     runner = getattr(ctx, "strategy_runner", None)
     if runner is not None and hasattr(runner, "set_active_trading_universe"):
         runner.set_active_trading_universe(committed)
+    strategy_manager = getattr(ctx, "strategy_manager", None)
+    set_fut = getattr(strategy_manager, "set_active_futures_symbol", None)
+    if callable(set_fut):
+        set_fut(active_futures_symbol, source="active_dynamic_basket_commit")
+    mdm = getattr(ctx, "market_data_manager", None)
+    rotate_result = getattr(mdm, "maybe_rotate_nifty_futures_context_result", None)
+    if callable(rotate_result):
+        try:
+            rotate_result(
+                requested_futures_symbol,
+                reason="active_dynamic_basket_commit",
+                selected_option_symbols=list(current_options),
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "ACTIVE_BASKET_FUTURES_ROTATION_CHECK_FAILED error=%s",
+                exc,
+                extra={"event": "ACTIVE_BASKET_FUTURES_ROTATION_CHECK_FAILED", "error": str(exc)},
+            )
     return selected_ce, selected_pe
 
 
@@ -7660,15 +7730,16 @@ async def _build_and_hydrate_live_basket_from_spot(
             if ctx.broker_client is None:
                 raise RuntimeError('broker_client_unavailable_for_live_basket')
 
-            import calendar
-            now = datetime.now()
-            year, month = now.year, now.month
-            last_day = calendar.monthrange(year, month)[1]
-            expiry_date = datetime(year, month, last_day)
-            while expiry_date.weekday() != 1:
-                expiry_date -= timedelta(days=1)
-            target_date = expiry_date + timedelta(days=7) if now.date() > expiry_date.date() else now
-            future_symbol = f"NFO:NIFTY{target_date.strftime('%y')}{target_date.strftime('%b').upper()}FUT"
+            future_symbol = _resolve_active_futures_for_basket(ctx, None)
+            if future_symbol:
+                purge_stale = getattr(ctx.market_data_manager, "purge_stale_nifty_futures", None)
+                if callable(purge_stale):
+                    purge_stale(future_symbol, reason="startup_active_future_resolution")
+            else:
+                LOGGER.warning(
+                    "FUTURES_CONTEXT_UNAVAILABLE reason=startup_active_future_unresolved",
+                    extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "reason": "startup_active_future_unresolved"},
+                )
 
             basket = _build_canonical_active_basket(
                 instrument_manager=ctx.instrument_manager,
@@ -8322,40 +8393,37 @@ async def startup_sequence(ctx: BotContext) -> None:
                 market_data_manager=ctx.market_data_manager,
             )
 
-            # ---------- Futures rollover logic (unchanged) ----------
-            import calendar
-
-            now = datetime.now()
-            year, month = now.year, now.month
-            last_day = calendar.monthrange(year, month)[1]
-            expiry_date = datetime(year, month, last_day)
-
-            while expiry_date.weekday() != 1:  # Tuesday
-                expiry_date -= timedelta(days=1)
-
-            target_date = (
-                expiry_date + timedelta(days=7)
-                if now.date() > expiry_date.date()
-                else now
-            )
-            y_str = target_date.strftime("%y")
-            m_str = target_date.strftime("%b").upper()
-            future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
-
-            if ctx.instrument_manager and ctx.instrument_manager.is_loaded():
+            active_futures_symbol = _resolve_active_futures_for_basket(ctx, None)
+            if active_futures_symbol:
                 try:
-                    fut_token = ctx.instrument_manager.get_token(future_symbol)
-                    if fut_token:
-                        LOGGER.info(
-                            f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}"
-                        )
-                        targets.append(future_symbol)
-                        if ctx.strategy_manager and hasattr(
-                            ctx.strategy_manager, "orchestrator"
-                        ):
-                            ctx.strategy_manager.orchestrator.futures_symbol = future_symbol
-                except RuntimeError:
-                    LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
+                    fut_token = ctx.instrument_manager.get_token(active_futures_symbol) if ctx.instrument_manager and ctx.instrument_manager.is_loaded() else None
+                except Exception:
+                    fut_token = None
+                if fut_token:
+                    LOGGER.info(
+                        "ACTIVE_FUTURES_TARGET_RESOLVED symbol=%s token=%s",
+                        active_futures_symbol,
+                        fut_token,
+                        extra={"event": "ACTIVE_FUTURES_TARGET_RESOLVED", "symbol": active_futures_symbol, "token": int(fut_token)},
+                    )
+                    targets.append(active_futures_symbol)
+                    purge_stale = getattr(ctx.market_data_manager, "purge_stale_nifty_futures", None)
+                    if callable(purge_stale):
+                        purge_stale(active_futures_symbol, reason="startup_active_future_resolution")
+                    orchestrator = getattr(getattr(ctx, "strategy_manager", None), "orchestrator", None)
+                    if orchestrator is not None:
+                        orchestrator.futures_symbol = active_futures_symbol
+                else:
+                    LOGGER.warning(
+                        "FUTURES_CONTEXT_UNAVAILABLE symbol=%s reason=startup_active_future_token_missing",
+                        active_futures_symbol,
+                        extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "symbol": active_futures_symbol, "reason": "startup_active_future_token_missing"},
+                    )
+            else:
+                LOGGER.warning(
+                    "FUTURES_CONTEXT_UNAVAILABLE reason=startup_active_future_unresolved",
+                    extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "reason": "startup_active_future_unresolved"},
+                )
 
             if "NSE:NIFTY" not in targets:
                 targets.append("NSE:NIFTY")
@@ -8500,7 +8568,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 dict.fromkeys(
                     [
                         "NSE:NIFTY",
-                        basket.get("futures_symbol"),
+                        active_futures_symbol,
                         *selected_symbols,
                         *other_option_symbols,
                     ]
@@ -8751,6 +8819,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
 
             basket = normalize_active_basket_schema(basket)
+            active_futures_symbol = str(basket.get("futures_symbol") or "")
             active_option_symbols = select_active_option_symbols(
                 option_symbols=basket.get("option_symbols", []) or [],
                 atm=basket.get("atm_strike"),
@@ -8758,7 +8827,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
             readiness_symbols = list(dict.fromkeys([
                 basket.get("spot_symbol"),
-                basket.get("futures_symbol"),
+                active_futures_symbol,
                 *active_option_symbols,
             ]))
             readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
@@ -8766,14 +8835,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "READINESS_SYMBOLS_SELECTED count=%d spot=%s futures=%s option_count=%d symbols=%s",
                 len(readiness_symbols),
                 basket.get("spot_symbol"),
-                basket.get("futures_symbol"),
+                active_futures_symbol,
                 len(basket.get("option_symbols", []) or []),
                 readiness_symbols,
                 extra={
                     "event": "READINESS_SYMBOLS_SELECTED",
                     "count": len(readiness_symbols),
                     "spot": basket.get("spot_symbol"),
-                    "futures": basket.get("futures_symbol"),
+                    "futures": active_futures_symbol,
                     "option_count": len(basket.get("option_symbols", []) or []),
                     "symbols": readiness_symbols,
                 },
@@ -9307,7 +9376,15 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             if tokens_to_poll:
                 if mdm is not None:
-                    seeded = mdm.request_token_subscriptions(tokens_to_poll)
+                    seeded = 0
+                    seeded_tokens: set[int] = set()
+                    for _sym, _tok in sorted(active_symbol_tokens.items()):
+                        if _tok in tokens_to_poll and mdm.request_token_subscription(int(_tok), str(_sym)):
+                            seeded += 1
+                            seeded_tokens.add(int(_tok))
+                    remaining_tokens = [int(_tok) for _tok in tokens_to_poll if int(_tok) not in seeded_tokens]
+                    if remaining_tokens:
+                        seeded += mdm.request_token_subscriptions(remaining_tokens)
                     LOGGER.info(
                         "✅ Routed %d/%d startup tokens via MarketDataManager",
                         seeded,

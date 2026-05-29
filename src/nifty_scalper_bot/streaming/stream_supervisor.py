@@ -207,8 +207,21 @@ class StreamSupervisor:
     def subscribe_symbols(self, symbols: Iterable[str]) -> int:
         """Resolve *symbols* into tokens and subscribe."""
 
-        tokens, _, _ = self.resolve_symbols(symbols)
-        return self.subscribe_tokens(tokens)
+        tokens, _, mapping = self.resolve_symbols(symbols)
+        mdm = self.market_data_manager
+        if mdm is None:
+            return self.subscribe_tokens(tokens)
+        added = 0
+        for symbol, token in mapping.items():
+            request_one = getattr(mdm, "request_token_subscription", None)
+            if callable(request_one):
+                if request_one(int(token), symbol):
+                    added += 1
+            else:
+                added += int(self.subscribe_tokens([int(token)]) > 0)
+        if self._autostart and mapping:
+            self.ensure_started()
+        return self.token_count()
 
     def resolve_symbols(
         self, symbols: Iterable[str]

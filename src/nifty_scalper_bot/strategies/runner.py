@@ -2278,7 +2278,31 @@ class StrategyRunner:
 
     def set_active_trading_universe(self, basket: Mapping[str, Any]) -> None:
         """Set active trading universe snapshot. Args: basket. Returns: none. Raises: none."""
-        option_symbols = basket.get("option_symbols") or basket.get("symbols") or []
+        raw_symbols = basket.get("option_symbols") or basket.get("symbols") or []
+        option_symbols: list[str] = []
+        for sym in raw_symbols:
+            normalized = normalize_symbol(str(sym))
+            if normalized.endswith(("CE", "PE")):
+                option_symbols.append(normalized)
+        futures_symbol = normalize_symbol(str(basket.get("futures_symbol") or ""))
+        previous_futures = normalize_symbol(str(getattr(self, "_active_futures_symbol", "") or ""))
+        self._active_futures_symbol = futures_symbol or None
+        if previous_futures and futures_symbol and previous_futures != futures_symbol:
+            active_symbols = getattr(self, "_active_symbols", set())
+            if isinstance(active_symbols, set):
+                active_symbols.discard(previous_futures)
+                active_symbols.add(futures_symbol)
+            context_snapshots = getattr(self, "_latest_context_snapshots", None)
+            if isinstance(context_snapshots, dict):
+                fut_ctx = context_snapshots.get("futures_context")
+                if isinstance(fut_ctx, dict) and normalize_symbol(str(fut_ctx.get("symbol") or "")) == previous_futures:
+                    context_snapshots.pop("futures_context", None)
+            self._logger.warning(
+                "RUNNER_FUTURES_CONTEXT_ROTATED old=%s new=%s source=active_trading_universe",
+                previous_futures,
+                futures_symbol,
+                extra={"event": "RUNNER_FUTURES_CONTEXT_ROTATED", "old_symbol": previous_futures, "new_symbol": futures_symbol, "source": "active_trading_universe"},
+            )
         self.set_active_option_context(
             selected_ce=cast(str | None, basket.get("selected_ce") or basket.get("atm_ce")),
             selected_pe=cast(str | None, basket.get("selected_pe") or basket.get("atm_pe")),
@@ -2286,10 +2310,12 @@ class StrategyRunner:
             option_symbols=cast(list[str] | tuple[str, ...] | set[str], option_symbols),
         )
         self._logger.info(
-            "RUNNER_ACTIVE_BASKET_UPDATED selected_ce=%s selected_pe=%s option_count=%d",
+            "RUNNER_ACTIVE_BASKET_UPDATED selected_ce=%s selected_pe=%s futures_symbol=%s option_count=%d",
             self._active_selected_ce,
             self._active_selected_pe,
+            self._active_futures_symbol,
             len(self._active_option_symbols),
+            extra={"event": "RUNNER_ACTIVE_BASKET_UPDATED", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "futures_symbol": self._active_futures_symbol, "option_count": len(self._active_option_symbols)},
         )
 
     def set_runtime_readiness(

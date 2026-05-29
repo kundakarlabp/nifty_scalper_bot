@@ -314,6 +314,11 @@ class WebSocketManager:
         )
         return True
 
+
+    def tokens_snapshot(self) -> list[int]:
+        """Return a sorted snapshot of websocket transport tokens."""
+        return sorted(self._tokens)
+
     def add_tokens(self, tokens: Sequence[int]) -> bool:
         """Add transport tokens. Args: tokens. Returns: changed flag. Raises: none."""
 

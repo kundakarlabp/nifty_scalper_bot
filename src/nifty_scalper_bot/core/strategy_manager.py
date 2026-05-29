@@ -22,6 +22,7 @@ from nifty_scalper_bot.core.adaptive_calibration import (
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.signal_quality import infer_option_side
 from nifty_scalper_bot.strategies.signal_generator import (
@@ -2639,6 +2640,23 @@ class StrategyManager(_BaseStrategyManager):
             context_snapshots = getattr(self, "_latest_context_snapshots", {})
             spot_ctx = context_snapshots.get("spot_context", {})
             fut_ctx = context_snapshots.get("futures_context", {})
+            active_fut = self._resolve_active_futures_symbol_for_metrics()
+            fut_ctx_symbol = canonical_nifty_future_symbol((fut_ctx or {}).get("symbol") if isinstance(fut_ctx, dict) else None)
+            active_fut_canonical = canonical_nifty_future_symbol(active_fut)
+            if fut_ctx_symbol and active_fut_canonical and fut_ctx_symbol != active_fut_canonical:
+                fut_ctx = {}
+                indicators.setdefault("context_discard_reasons", []).append("stale_futures_context_discarded")
+                log_throttled(
+                    log,
+                    f"stale_futures_context_discarded:{symbol}",
+                    "STALE_FUTURES_CONTEXT_DISCARDED symbol=%s stale=%s active=%s",
+                    symbol,
+                    fut_ctx_symbol,
+                    active_fut_canonical,
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                    extra={"event": "STALE_FUTURES_CONTEXT_DISCARDED", "symbol": symbol, "stale_symbol": fut_ctx_symbol, "active_symbol": active_fut_canonical},
+                )
             max_context_age = self._live_context_max_age_seconds()
             now_ts = time.time()
             def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:

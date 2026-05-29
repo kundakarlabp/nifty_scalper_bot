@@ -16,6 +16,7 @@ from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Proto
 
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
@@ -1257,7 +1258,7 @@ class StrategyManager:
         self._data_hub = data_hub
         self._logger = logger
         self._orchestrator = orchestrator
-        self._futures_symbol = (futures_symbol or 'NIFTY').strip().upper()
+        self._futures_symbol = self._canonical_futures_symbol(futures_symbol)
         self._futures_volume_history: Deque[float] = deque(maxlen=120)
         self._last_index_ltp: float | None = None
         self._last_index_vwap: float | None = None
@@ -1296,6 +1297,42 @@ class StrategyManager:
             self.min_delta = 0.30
             self.max_iv_percentile = 85.0
             self.max_spread_pct = 5.0
+
+    @staticmethod
+    def _canonical_futures_symbol(symbol: Any) -> str | None:
+        return canonical_nifty_future_symbol(symbol)
+
+    def set_active_futures_symbol(self, symbol: Any, *, source: str = "external") -> str | None:
+        """Cache latest active futures symbol from SSOT; not an independent resolver."""
+        canonical = self._canonical_futures_symbol(symbol)
+        if not canonical:
+            return self._futures_symbol
+        previous = self._futures_symbol
+        if previous != canonical:
+            self._logger.info(
+                "STRATEGY_MANAGER_ACTIVE_FUTURES_SYMBOL_UPDATED old=%s new=%s source=%s",
+                previous,
+                canonical,
+                source,
+                extra={"event": "STRATEGY_MANAGER_ACTIVE_FUTURES_SYMBOL_UPDATED", "old_symbol": previous, "new_symbol": canonical, "source": source},
+            )
+        self._futures_symbol = canonical
+        return canonical
+
+    def _resolve_active_futures_symbol_for_metrics(self) -> str | None:
+        """Resolve active NIFTY future from DataHub/MDM SSOT only."""
+        data_hub = getattr(self, "_data_hub", None)
+        get_active = getattr(data_hub, "get_active_futures_symbol", None)
+        if callable(get_active):
+            try:
+                symbol = get_active()
+            except Exception:
+                symbol = None
+            canonical = canonical_nifty_future_symbol(symbol)
+            if canonical:
+                self.set_active_futures_symbol(canonical, source="data_hub.get_active_futures_symbol")
+                return canonical
+        return None
 
     def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
         """
@@ -1954,62 +1991,49 @@ class StrategyManager:
             # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
             # ═══════════════════════════════════════════════════════
             if not indicators.get('nifty_index_vwap'):
-                now = dt.datetime.now()
-                y_str = now.strftime('%y')
-                m_str = now.strftime('%b').upper()
+                symbols_to_try: list[str] = []
+                active_fut = self._resolve_active_futures_symbol_for_metrics()
+                if active_fut:
+                    symbols_to_try.append(active_fut)
 
-                # Build list of symbols to try (in order of preference)
-                symbols_to_try = [
-                    f'NFO:NIFTY{y_str}{m_str}FUT',  # Current month: NFO:NIFTY26FEBFUT
-                ]
+                if not symbols_to_try:
+                    self._logger.warning(
+                        "FUTURES_VWAP_FALLBACK_SKIPPED reason=active_future_unresolved",
+                        extra={"event": "FUTURES_VWAP_FALLBACK_SKIPPED", "reason": "active_future_unresolved", "configured_futures_symbol": self._futures_symbol},
+                    )
 
-                # Add configured symbol and variations
-                if self._futures_symbol:
-                    if self._futures_symbol not in symbols_to_try:
-                        symbols_to_try.append(self._futures_symbol)
-                    # Try with NFO: prefix if not present
-                    if not self._futures_symbol.startswith('NFO:'):
-                        prefixed = f'NFO:{self._futures_symbol}'
-                        if prefixed not in symbols_to_try:
-                            symbols_to_try.append(prefixed)
-                        # Also try NFO:NIFTY{symbol}FUT pattern
-                        if 'FUT' not in self._futures_symbol.upper():
-                            fut_pattern = f'NFO:{self._futures_symbol}FUT'
-                            if fut_pattern not in symbols_to_try:
-                                symbols_to_try.append(fut_pattern)
-
-                fut_quote = None
+                usable_fut_quote = None
                 working_symbol = None
 
                 for fut_sym in symbols_to_try:
                     try:
-                        fut_quote = data_hub.get_quote(fut_sym, allow_pull=True)
-                        if fut_quote:
-                            working_symbol = fut_sym
-                            if not getattr(self, '_vwap_source_logged', False):
-                                self._logger.info(
-                                    f'✅ Futures VWAP source resolved: {fut_sym}',
-                                    extra={
-                                        'event': 'futures_vwap_resolved',
-                                        'symbol': fut_sym,
-                                    },
-                                )
-                                self._vwap_source_logged = True
-                            break
-
+                        candidate_quote = data_hub.get_quote(fut_sym, allow_pull=True) or {}
+                        if not candidate_quote:
+                            continue
+                        if self._extract_float(candidate_quote, ("vwap", "average_price", "last_price", "ltp", "close")) is None:
+                            continue
+                        usable_fut_quote = candidate_quote
+                        working_symbol = fut_sym
+                        if not getattr(self, '_vwap_source_logged', False):
+                            self._logger.info(
+                                f'✅ Futures VWAP source resolved: {fut_sym}',
+                                extra={'event': 'futures_vwap_resolved', 'symbol': fut_sym},
+                            )
+                            self._vwap_source_logged = True
+                        break
                     except Exception as e:
-                        self._logger.debug(f"Futures symbol {fut_sym} failed: {e}")
+                        self._logger.debug("Futures symbol %s failed: %s", fut_sym, e)
                         continue
 
-                if not fut_quote:
-                    self._logger.error(
-                        f"❌ CRITICAL: Could not get futures quote from any symbol: {symbols_to_try}",
-                        extra={
-                            "event": "futures_vwap_fallback_failed",
-                            "symbols_tried": symbols_to_try,
-                        },
+                if not usable_fut_quote:
+                    self._logger.warning(
+                        "FUTURES_VWAP_FALLBACK_FAILED symbols_tried=%s",
+                        symbols_to_try,
+                        extra={"event": "futures_vwap_fallback_failed", "symbols_tried": symbols_to_try},
                     )
+                    return
 
+                fut_quote = usable_fut_quote
                 if fut_quote:
                     fut_vwap = self._extract_float(fut_quote, ("vwap", "average_price"))
                     fut_ltp = self._extract_float(

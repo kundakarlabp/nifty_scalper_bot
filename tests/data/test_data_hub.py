@@ -188,6 +188,18 @@ def test_get_quote_pulls_when_missing(
     assert quote["ltp"] == pytest.approx(150.0)
 
 
+def test_datahub_does_not_store_expired_future_empty_quote_payload() -> None:
+    class _Mdm:
+        def pull_quote(self, _symbol: str) -> dict[str, Any]:
+            return {}
+
+    hub = DataHub(_Mdm(), _StubResolver(), options_only=True)
+    out = hub.pull_quote("NFO:NIFTY26MAYFUT")
+    assert out == {}
+    cached = hub.get_quote("NFO:NIFTY26MAYFUT", allow_pull=False)
+    assert cached in (None, {})
+
+
 def test_upsert_order_drops_duplicate_sequences(hub: DataHub) -> None:
     payload = {
         "order_id": "OID1",
@@ -527,3 +539,36 @@ def test_quote_update_version_by_token_string(hub: DataHub) -> None:
         }
     )
     assert hub.quote_update_version("256265") == 1
+
+
+def test_datahub_purge_removes_prefixed_and_unprefixed_aliases() -> None:
+    hub = DataHub(_StubMarketDataManager(), _StubResolver(), options_only=True)
+    symbol = "NFO:NIFTY26MAYFUT"
+    bare = "NIFTY26MAYFUT"
+    token = 111
+    for key in (symbol, bare, str(token)):
+        hub._quotes[key] = {"ltp": 100.0}  # noqa: SLF001
+        hub._last_ts[key] = 1.0  # noqa: SLF001
+        hub._last_arrival[key] = 1.0  # noqa: SLF001
+        hub._last_ws_arrival[key] = 1.0  # noqa: SLF001
+        hub._last_poll_arrival[key] = 1.0  # noqa: SLF001
+    hub._token_by_symbol[symbol] = token  # noqa: SLF001
+    hub._token_by_symbol[bare] = token  # noqa: SLF001
+    hub._symbol_by_token[token] = symbol  # noqa: SLF001
+    hub._token_quotes[token] = {"ltp": 100.0}  # noqa: SLF001
+    hub._ticks[token] = {"ltp": 100.0}  # noqa: SLF001
+    hub._symbol_aliases[symbol].update({bare, str(token)})  # noqa: SLF001
+    hub._symbol_aliases[bare].add(symbol)  # noqa: SLF001
+
+    removed = hub.purge_symbol_aliases(symbols=[symbol], tokens=[token])
+
+    assert removed > 0
+    for key in (symbol, bare, str(token)):
+        assert key not in hub._quotes  # noqa: SLF001
+        assert key not in hub._last_ts  # noqa: SLF001
+        assert key not in hub._symbol_aliases  # noqa: SLF001
+    assert symbol not in hub._token_by_symbol  # noqa: SLF001
+    assert bare not in hub._token_by_symbol  # noqa: SLF001
+    assert token not in hub._symbol_by_token  # noqa: SLF001
+    assert token not in hub._token_quotes  # noqa: SLF001
+    assert token not in hub._ticks  # noqa: SLF001

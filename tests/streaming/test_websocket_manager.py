@@ -315,3 +315,15 @@ def test_resubscribe_delegates_to_set_tokens(monkeypatch: pytest.MonkeyPatch) ->
     manager.resubscribe([1, 2, 2])
 
     assert called == [[1, 2, 2]]
+
+
+def test_websocket_reconnect_replays_only_clean_tokens() -> None:
+    manager = ws_module.WebSocketManager("k", "t", [111, 222], trading_window_enabled=False)
+    manager.set_tokens([222])
+    fake = FakeKiteTicker("k", "t")
+
+    manager._on_connect(fake, {"status": "ok"})
+
+    assert manager.tokens_snapshot() == [222]
+    assert fake.subscribed == [222]
+    assert fake.mode_set == [222]
