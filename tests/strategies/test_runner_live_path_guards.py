@@ -2589,3 +2589,44 @@ def test_entry_exception_rolls_back_dedup(monkeypatch) -> None:
     result = runner._handle_entry_signal_inner(signal, sym, sym, 100.0, datetime.now(timezone.utc), trace_id='entry-exc')
     assert result.reason == 'entry_exception'
     assert 'NIFTY:PE:OrderFlow' not in runner._signal_attempt_debounce_state
+
+
+def test_strategy_evaluation_allowed_excludes_spot_and_futures_context_symbols(caplog):
+    runner = StrategyRunner()
+    runner._active_symbols.update({"NSE:NIFTY", "NFO:NIFTY26JUNFUT", "NFO:NIFTY26JUN23900CE"})
+    runner._indicator_engine.has_min_bars = MagicMock(return_value=True)
+    runner._indicator_engine.get_history = MagicMock(return_value=[object()] * 40)
+
+    with caplog.at_level(logging.INFO):
+        assert runner._strategy_evaluation_allowed("NSE:NIFTY", trace_id="spot") is False
+        assert runner._strategy_evaluation_allowed("NFO:NIFTY26JUNFUT", trace_id="fut") is False
+
+    assert runner._indicator_engine.has_min_bars.call_count == 0
+    assert "RUNNER_GLOBAL_READINESS_DECISION" in caplog.text
+
+
+def test_live_universe_bootstrap_accepts_desired_tokens_and_fresh_ticks(caplog):
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+    runner = StrategyRunner()
+    runner._active_selected_ce = ce
+    runner._active_selected_pe = pe
+    runner._active_symbols.update({ce, pe})
+    runner._market_data = SimpleNamespace(
+        _token_by_symbol={ce: 11, pe: 12},
+        _desired_tokens={11, 12},
+        _subscribed_tokens=set(),
+        _confirmed_subscriptions=set(),
+        _active_subscribed_symbols=set(),
+    )
+    runner._is_option_symbol_tick_fresh = MagicMock(return_value=True)
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._indicator_engine.get_history = MagicMock(return_value=[object()] * 40)
+
+    with caplog.at_level(logging.INFO):
+        ready, reason = runner._emit_live_universe_bootstrap_status(symbol=ce)
+
+    assert ready is True
+    assert reason is None
+    assert "selected_option_subscription_pending" not in caplog.text
+    assert "SELECTED_OPTION_SUBSCRIPTION_STATE" in caplog.text

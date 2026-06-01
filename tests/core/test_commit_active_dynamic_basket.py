@@ -172,3 +172,77 @@ def test_resolve_active_futures_for_basket_uses_active_universe_when_mdm_unresol
     )
 
     assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == "NFO:NIFTY26MAYFUT"
+
+
+def test_real_botcontext_active_symbol_tokens_and_selected_subscription_aliases() -> None:
+    from nifty_scalper_bot.config.settings import Settings
+    from nifty_scalper_bot.core.app import AppConfig, BotContext, RateLimiter
+
+    class _Mdm:
+        def __init__(self) -> None:
+            self.desired: set[int] = set()
+            self.received_basket = None
+
+        def purge_stale_nifty_futures(self, active_symbol, *, reason):
+            return []
+
+        def set_active_contract_basket(self, basket):
+            self.received_basket = basket
+            self.desired.update(int(t) for t in basket.get("all_tokens", []) if t)
+
+        def request_token_subscription(self, token: int, symbol: str | None = None) -> bool:
+            self.desired.add(int(token))
+            return True
+
+        def desired_token_count(self) -> int:
+            return len(self.desired)
+
+        def desired_tokens_snapshot(self) -> list[int]:
+            return sorted(self.desired)
+
+        def ws_token_count(self):
+            return None
+
+    mdm = _Mdm()
+    ctx = BotContext(
+        settings=Settings(),
+        config=AppConfig(),
+        rate_limiter=RateLimiter(),
+        broker_client=None,
+        websocket_client=None,
+        websocket_manager=None,
+        streamer=None,
+        stream_supervisor=None,
+        polling_fallback_streamer=None,
+        message_bus=None,
+        market_data_manager=mdm,
+        strategy_runner=None,
+        strategy_manager=None,
+    )
+    assert hasattr(ctx, "active_symbol_tokens")
+
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={
+            "spot_symbol": "NSE:NIFTY",
+            "spot_token": 256265,
+            "selected_ce": ce,
+            "selected_pe": pe,
+            "selected_ce_token": 11,
+            "selected_pe_token": 12,
+            "all_symbols": ["NSE:NIFTY", ce, pe],
+            "all_tokens": [256265, 11, 12],
+            "token_by_symbol": {"NSE:NIFTY": 256265, ce: 11, pe: 12},
+        },
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", ce, pe],
+        atm_strike=23900,
+    )
+
+    assert ctx.active_symbol_tokens[ce] == 11
+    assert ctx.active_symbol_tokens["NIFTY26JUN23900CE"] == 11
+    assert ctx.active_symbol_tokens[pe] == 12
+    assert ctx.active_symbol_tokens["NIFTY26JUN23900PE"] == 12
+    assert {11, 12}.issubset(set(mdm.desired_tokens_snapshot()))

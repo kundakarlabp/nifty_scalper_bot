@@ -6398,12 +6398,47 @@ class StrategyRunner:
         pe_token = token_by_symbol.get(pe_symbol) if pe_symbol else None
         fut_token = token_by_symbol.get(fut_symbol) if fut_symbol else None
         active_subs = set(getattr(mdm, "_active_subscribed_symbols", set()) or set())
-        ce_sub = bool(ce_symbol and ce_symbol in active_subs)
-        pe_sub = bool(pe_symbol and pe_symbol in active_subs)
-        fut_sub = bool(fut_symbol and fut_symbol in active_subs)
+        desired_tokens = set(getattr(mdm, "_desired_tokens", set()) or set())
+        subscribed_tokens = set(getattr(mdm, "_subscribed_tokens", set()) or set())
+        ws = getattr(mdm, "_ws", None) if mdm is not None else None
+        subscribed_tokens.update(set(getattr(ws, "_tokens", set()) or set()))
+        confirmed_tokens = set(getattr(mdm, "_confirmed_subscriptions", set()) or set())
         ce_quote = bool(ce_symbol and self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0))
         pe_quote = bool(pe_symbol and self._is_option_symbol_tick_fresh(pe_symbol, max_age_s=60.0))
         fut_quote = bool(fut_symbol and self._is_option_symbol_tick_fresh(fut_symbol, max_age_s=60.0)) if fut_symbol else False
+        def _sub_state(sym: str | None, token: Any, fresh_tick: bool) -> bool:
+            token_int = None
+            try:
+                token_int = int(token) if token is not None else None
+            except (TypeError, ValueError):
+                token_int = None
+            def _int_set(values: set[Any]) -> set[int]:
+                normalized: set[int] = set()
+                for value in values:
+                    try:
+                        value_int = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if value_int > 0:
+                        normalized.add(value_int)
+                return normalized
+            desired = bool(token_int is not None and token_int in _int_set(desired_tokens))
+            subscribed = bool(token_int is not None and token_int in _int_set(subscribed_tokens))
+            confirmed = bool(token_int is not None and token_int in _int_set(confirmed_tokens))
+            active_symbol = bool(sym and sym in active_subs)
+            self._logger.info(
+                "SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s",
+                sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, None,
+                extra={"event": "SELECTED_OPTION_SUBSCRIPTION_STATE", "symbol": sym, "token": token_int, "desired": desired, "subscribed": subscribed or active_symbol or confirmed, "fresh_tick": fresh_tick, "tick_age_s": None},
+            )
+            return bool(active_symbol or desired or subscribed or confirmed or fresh_tick)
+        ce_sub = _sub_state(ce_symbol, ce_token, ce_quote)
+        pe_sub = _sub_state(pe_symbol, pe_token, pe_quote)
+        try:
+            fut_token_int = int(fut_token) if fut_token is not None else None
+        except (TypeError, ValueError):
+            fut_token_int = None
+        fut_sub = bool(fut_symbol and (fut_symbol in active_subs or (fut_token_int is not None and fut_token_int in desired_tokens)))
         ce_depth = bool(ce_symbol and self._is_symbol_execution_ready(ce_symbol))
         pe_depth = bool(pe_symbol and self._is_symbol_execution_ready(pe_symbol))
         ce_hist = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
@@ -7115,6 +7150,21 @@ class StrategyRunner:
     ) -> bool:
         """Args: symbol + trace_id. Returns: bool gate verdict. Raises: none."""
         try:
+            if self._is_context_symbol(symbol):
+                self._logger.info(
+                    "RUNNER_GLOBAL_READINESS_DECISION symbol=%s allowed=%s reason=%s",
+                    symbol,
+                    False,
+                    "context_symbol_not_strategy_candidate",
+                    extra={
+                        "event": "RUNNER_GLOBAL_READINESS_DECISION",
+                        "symbol": symbol,
+                        "stage": "phase9",
+                        "allowed": False,
+                        "reason": "context_symbol_not_strategy_candidate",
+                    },
+                )
+                return False
             if symbol not in self._active_symbols:
                 self._emit_no_trade_decision(
                     symbol=symbol,
