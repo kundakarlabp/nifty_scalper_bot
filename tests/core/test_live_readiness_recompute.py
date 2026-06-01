@@ -59,6 +59,7 @@ async def test_recompute_readiness_arms_with_spot_selected_ce_pe() -> None:
     mdm = SimpleNamespace(
         get_ohlc_bars=lambda s: list(range(40)) if s != 'NSE:NIFTY' else list(range(40)),
         get_symbol_snapshot=lambda s: _Snap() if s in {'NSE:NIFTY', 'NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'} else None,
+        hydrate_active_contract_basket=lambda basket=None: {"hard_ready": True, "missing": [], "symbols": {}},
     )
     ctx = _ctx(mdm)
     ctx.active_trading_universe = {
@@ -75,6 +76,7 @@ async def test_runtime_readiness_arms_with_option_candles() -> None:
     mdm = SimpleNamespace(
         get_ohlc_bars=lambda s: [1, 2, 3] if s.startswith('NFO:') else [1],
         get_symbol_snapshot=lambda s: None,
+        hydrate_active_contract_basket=lambda basket=None: {"hard_ready": True, "missing": [], "symbols": {}},
     )
     ctx = _ctx(mdm)
     ctx.active_trading_universe = {
@@ -117,6 +119,7 @@ async def test_dynamic_basket_commit_sets_selected_symbols_and_readiness() -> No
     mdm = SimpleNamespace(
         get_ohlc_bars=lambda s: list(range(60)),
         get_symbol_snapshot=lambda s: _Snap(),
+        hydrate_active_contract_basket=lambda basket=None: {"hard_ready": True, "missing": [], "symbols": {}},
     )
     ctx = _ctx(mdm)
     ctx.active_trading_universe = {'spot_symbol': 'NSE:NIFTY', 'atm_strike': 24600}

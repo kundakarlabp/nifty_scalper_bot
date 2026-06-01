@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from nifty_scalper_bot.core.instrument_manager import ActiveContractBasket
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
@@ -76,7 +78,8 @@ def test_mdm_hydrate_counts_list_and_dataframe_bars(monkeypatch):
 
     mdm = MarketDataManager(websocket=WS())
     b = basket()
-    mdm._min_required_bars = 2
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "2")
+    mdm._min_required_bars = 20
     mdm.set_active_contract_basket(b)
     quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
     monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
@@ -99,7 +102,8 @@ def test_mdm_hydrate_counts_list_and_dataframe_bars(monkeypatch):
 def test_mdm_selected_missing_ohlc_triggers_reseed_attempt(monkeypatch):
     mdm = MarketDataManager(websocket=WS())
     b = basket()
-    mdm._min_required_bars = 3
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "3")
+    mdm._min_required_bars = 20
     mdm.set_active_contract_basket(b)
     quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
     monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
@@ -117,3 +121,62 @@ def test_mdm_selected_missing_ohlc_triggers_reseed_attempt(monkeypatch):
     assert b.selected_pe in [item[0] for item in attempts]
     assert report["hard_ready"] is False
     assert f"{b.selected_ce}:ohlc_insufficient" in report["missing"]
+
+
+def test_mdm_selected_matching_uses_canonical_symbol_alias(monkeypatch):
+    mdm = MarketDataManager(websocket=WS())
+    payload = {
+        "spot_symbol": "NSE:NIFTY",
+        "spot_token": 256265,
+        "selected_ce": "NFO:NIFTY26JUN25000CE",
+        "selected_pe": "NFO:NIFTY26JUN25000PE",
+        "option_symbols": ["NIFTY26JUN25000CE", "NIFTY26JUN25000PE"],
+        "all_symbols": ["NSE:NIFTY", "NIFTY26JUN25000CE", "NIFTY26JUN25000PE"],
+        "token_by_symbol": {"NSE:NIFTY": 256265, "NIFTY26JUN25000PE": 12},
+        "atm_strike": 25000,
+    }
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "2")
+    mdm.set_active_contract_basket(payload)
+    monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0} if sym.endswith("PE") else None)
+    monkeypatch.setattr(mdm, "get_quote", lambda sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0} if sym.endswith("PE") else None)
+    monkeypatch.setattr(mdm, "get_ohlc_bars", lambda sym: [{"close": 1}, {"close": 2}])
+    report = mdm.hydrate_active_contract_basket(payload)
+    assert report["hard_ready"] is False
+    assert "NIFTY26JUN25000CE:token_missing" in report["missing"]
+
+
+@pytest.mark.asyncio
+async def test_async_reseed_deferred_is_reported_not_silent(monkeypatch):
+    mdm = MarketDataManager(websocket=WS())
+    b = basket()
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "3")
+    mdm.set_active_contract_basket(b)
+    quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
+    monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_quote", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_ohlc_bars", lambda sym: [])
+
+    async def hydrate_symbol_history(symbol, **kwargs):
+        return []
+
+    monkeypatch.setattr(mdm, "hydrate_symbol_history", hydrate_symbol_history)
+    report = mdm.hydrate_active_contract_basket(b)
+    assert report["symbols"][b.selected_ce]["reseed_deferred"] is True
+    assert report["symbols"][b.selected_ce]["last_error"] == "reseed_deferred"
+    assert report["hard_ready"] is False
+
+
+def test_hydration_uses_hydration_min_bars_not_execution_min_bars(monkeypatch):
+    mdm = MarketDataManager(websocket=WS())
+    b = basket()
+    mdm._min_required_bars = 30
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "5")
+    mdm.set_active_contract_basket(b)
+    quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
+    monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_quote", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_ohlc_bars", lambda sym: [{"close": i} for i in range(5)] if sym in {b.selected_ce, b.selected_pe} else [])
+    report = mdm.hydrate_active_contract_basket(b)
+    assert report["hydration_min_bars_required"] == 5
+    assert report["symbols"][b.selected_ce]["bars_count"] == 5
+    assert report["hard_ready"] is True

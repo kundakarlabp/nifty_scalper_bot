@@ -29,6 +29,8 @@ class Runner:
 
 
 def make_ctx(mdm, live: bool = True):
+    if not hasattr(mdm, "hydrate_active_contract_basket"):
+        mdm.hydrate_active_contract_basket = lambda basket=None: {"hard_ready": True, "missing": [], "symbols": {}}
     return SimpleNamespace(
         settings=SimpleNamespace(execution_mode='LIVE' if live else 'PAPER'),
         market_data_manager=mdm,

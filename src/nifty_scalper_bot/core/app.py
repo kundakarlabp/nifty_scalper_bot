@@ -7372,7 +7372,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not context_exec_ready: missing.append('context_exec_not_ready')
         if not broker_ready: missing.append('broker_not_ready')
     if not hydration_hard_ready:
-        block_reason = f"ACTIVE_BASKET_HYDRATION_NOT_READY:{','.join(dict.fromkeys(str(m) for m in hydration_missing))}"
+        hydration_blockers = list(dict.fromkeys([*(str(m) for m in hydration_missing), *(str(m) for m in missing)]))
+        block_reason = f"ACTIVE_BASKET_HYDRATION_NOT_READY:{','.join(hydration_blockers)}"
     else:
         block_reason=None if live_orders_armed else f"execution_not_armed:{','.join(dict.fromkeys(missing))}"
     ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=evaluation_ready; ctx.live_block_reason=block_reason
@@ -7391,15 +7392,25 @@ def _hydrate_committed_active_basket(ctx: BotContext, *, reason: str) -> dict[st
     """Hydrate the committed ActiveContractBasket before strategy evaluation."""
     mdm = getattr(ctx, "market_data_manager", None)
     hydrate = getattr(mdm, "hydrate_active_contract_basket", None)
+    mode = str(getattr(getattr(ctx, "settings", None), "execution_mode", os.getenv("EXECUTION_MODE", "PAPER")) or "PAPER").upper()
+    allow_missing_gate = str(os.getenv("ALLOW_MISSING_HYDRATION_GATE", "false") or "false").strip().lower() == "true"
+    basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
     if not callable(hydrate):
+        hard_ready = bool(mode in {"PAPER", "SHADOW"} and allow_missing_gate)
         report: dict[str, object] = {
-            "hard_ready": True,
-            "missing": [],
+            "hard_ready": hard_ready,
+            "missing": [] if hard_ready else ["hydrate_active_contract_basket_missing"],
             "symbols": {},
         }
+        LOGGER.warning(
+            "ACTIVE_BASKET_HYDRATION_METHOD_MISSING mode=%s hard_ready=%s reason=%s",
+            mode,
+            hard_ready,
+            reason,
+            extra={"event": "ACTIVE_BASKET_HYDRATION_METHOD_MISSING", "mode": mode, "hard_ready": hard_ready, "reason": reason},
+        )
         ctx.active_basket_hydration = report
         return report
-    basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
     try:
         report = dict(hydrate(basket))
     except Exception as exc:  # noqa: BLE001
@@ -7410,6 +7421,43 @@ def _hydrate_committed_active_basket(ctx: BotContext, *, reason: str) -> dict[st
             extra={"event": "ACTIVE_BASKET_HYDRATION_FAILED", "reason": reason, "error": str(exc)},
         )
         report = {"hard_ready": False, "missing": [f"hydration_exception:{type(exc).__name__}"], "symbols": {}}
+
+    spot_symbol = "NSE:NIFTY"
+    if isinstance(basket, Mapping):
+        spot_symbol = str(basket.get("spot_symbol") or spot_symbol)
+    else:
+        spot_symbol = str(getattr(basket, "spot_symbol", spot_symbol) or spot_symbol)
+    spot_quote = None
+    if mdm is not None:
+        try:
+            snap = getattr(mdm, "get_symbol_snapshot", lambda _s: None)(spot_symbol)
+            spot_quote = snap if snap is not None else getattr(mdm, "get_latest_tick", lambda _s: None)(spot_symbol)
+        except Exception:
+            spot_quote = None
+    try:
+        spot_bars = getattr(mdm, "get_ohlc_bars", lambda _s: [])(spot_symbol) if mdm is not None else []
+        spot_bars_count = len(spot_bars) if spot_bars is not None else 0
+    except Exception:
+        spot_bars_count = 0
+    direction_ctx = getattr(ctx, "direction_context", None) or getattr(ctx, "underlying_direction_context", None) or {}
+    if not isinstance(direction_ctx, Mapping):
+        direction_ctx = {}
+    direction_bias = (
+        direction_ctx.get("direction_bias")
+        or direction_ctx.get("underlying_direction_bias")
+        or getattr(ctx, "underlying_direction_bias", None)
+        or getattr(ctx, "direction_bias", None)
+    )
+    direction_age = direction_ctx.get("context_age_seconds") or direction_ctx.get("direction_context_age_seconds")
+    report.update(
+        {
+            "spot_quote_ready": bool(spot_quote),
+            "spot_bars_count": int(spot_bars_count),
+            "underlying_direction_bias": direction_bias,
+            "direction_context_age_seconds": direction_age,
+            "direction_context_ready": bool(str(direction_bias or "").upper() in {"CE", "PE"}),
+        }
+    )
     ctx.active_basket_hydration = report
     if not bool(report.get("hard_ready")):
         missing = list(report.get("missing") or [])

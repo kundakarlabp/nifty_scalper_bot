@@ -1706,17 +1706,37 @@ class MarketDataManager:
         count = cls._bars_count(bars)
         return bool(count >= max(1, int(min_bars or 1))), count
 
-    def _reseed_active_basket_symbol_bars(self, symbol: str, min_bars: int) -> None:
+    @staticmethod
+    def _canonical_active_symbol(symbol: Any) -> str:
+        """Canonicalize active-basket symbols for alias-safe selected-symbol matching."""
+        if symbol is None:
+            return ""
+        try:
+            return canonical_symbol(str(symbol))
+        except Exception:
+            return str(symbol or "").strip().upper()
+
+    @staticmethod
+    def _hydration_selected_option_min_bars() -> int:
+        """Return the lightweight hydration minimum separate from strategy/execution gates."""
+        try:
+            return max(1, int(os.getenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "5") or "5"))
+        except (TypeError, ValueError):
+            return 5
+
+    def _reseed_active_basket_symbol_bars(self, symbol: str, min_bars: int) -> dict[str, Any]:
         """Best-effort selected-option history reseed through the existing hydration path."""
+        status: dict[str, Any] = {"attempted": False, "deferred": False, "failed": False, "error": None}
         hydrate_fn = getattr(self, "hydrate_symbol_history", None)
         if not callable(hydrate_fn):
-            return
+            return status
+        status["attempted"] = True
         try:
             result = hydrate_fn(
                 symbol,
                 interval="minute",
                 days=max(1, int(math.ceil(float(min_bars) / 375.0)) + 1),
-                max_bars=max(int(min_bars), self._min_required_bars),
+                max_bars=max(int(min_bars), self._hydration_selected_option_min_bars()),
                 reason="active_basket_selected_option_reseed",
             )
             if inspect.isawaitable(result):
@@ -1726,35 +1746,42 @@ class MarketDataManager:
                     asyncio.run(result)
                 else:
                     loop.create_task(result)
+                    status["deferred"] = True
                     self._logger.info(
                         "MDM_BASKET_HYDRATION_RESEED_DEFERRED symbol=%s reason=running_event_loop",
                         symbol,
                         extra={"event": "MDM_BASKET_HYDRATION_RESEED_DEFERRED", "symbol": symbol},
                     )
         except Exception as exc:  # noqa: BLE001
+            status["failed"] = True
+            status["error"] = f"{type(exc).__name__}:{exc}"
             self._logger.warning(
                 "MDM_BASKET_HYDRATION_RESEED_FAILED symbol=%s error=%s",
                 symbol,
                 exc,
                 extra={"event": "MDM_BASKET_HYDRATION_RESEED_FAILED", "symbol": symbol, "error": str(exc)},
             )
+        return status
 
     def hydrate_active_contract_basket(self, basket: ActiveContractBasket | Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Hydrate cached quote/OHLC readiness for every active basket symbol."""
         active = basket or self._active_contract_basket
-        min_bars = max(1, int(getattr(self, "_min_required_bars", 1) or 1))
+        hydration_min_bars = self._hydration_selected_option_min_bars()
         if active is None:
-            report = {"hard_ready": False, "min_bars_required": min_bars, "symbols": {}, "missing": ["active_contract_basket_missing"]}
+            report = {"hard_ready": False, "min_bars_required": hydration_min_bars, "hydration_min_bars_required": hydration_min_bars, "symbols": {}, "missing": ["active_contract_basket_missing"]}
             self._active_basket_hydration_report = report
             return report
-        self._logger.info("MDM_BASKET_HYDRATION_STARTED", extra={"event": "MDM_BASKET_HYDRATION_STARTED", "min_bars_required": min_bars})
+        self._logger.info("MDM_BASKET_HYDRATION_STARTED", extra={"event": "MDM_BASKET_HYDRATION_STARTED", "hydration_min_bars_required": hydration_min_bars})
         all_symbols = tuple(str(s) for s in (self._basket_get(active, "all_symbols", None) or self._basket_get(active, "symbols", ()) or ()) if s)
         token_by_symbol = dict(self._basket_get(active, "token_by_symbol", {}) or {})
-        selected = {str(s) for s in (self._basket_get(active, "selected_ce", None), self._basket_get(active, "selected_pe", None)) if s}
+        token_by_canonical = {self._canonical_active_symbol(sym): tok for sym, tok in token_by_symbol.items()}
+        selected_canonical = {self._canonical_active_symbol(s) for s in (self._basket_get(active, "selected_ce", None), self._basket_get(active, "selected_pe", None)) if s}
         future_symbol = self._basket_get(active, "futures_symbol", None)
-        report: dict[str, Any] = {"hard_ready": True, "min_bars_required": min_bars, "symbols": {}, "missing": []}
+        report: dict[str, Any] = {"hard_ready": True, "min_bars_required": hydration_min_bars, "hydration_min_bars_required": hydration_min_bars, "symbols": {}, "missing": []}
         for sym in all_symbols:
-            token = token_by_symbol.get(sym) or self._token_by_symbol.get(sym)
+            canonical_sym = self._canonical_active_symbol(sym)
+            is_selected = canonical_sym in selected_canonical
+            token = token_by_symbol.get(sym) or token_by_canonical.get(canonical_sym) or self._token_by_symbol.get(sym) or self._token_by_symbol.get(canonical_sym)
             if sym in self._active_contract_roles:
                 role = self._active_contract_roles[sym]
             elif str(sym).upper().endswith("FUT"):
@@ -1771,7 +1798,7 @@ class MarketDataManager:
             if token is None:
                 last_error = "token_missing"
                 report["missing"].append(f"{sym}:token_missing")
-                if sym in selected or role != "futures_context":
+                if is_selected or role != "futures_context":
                     report["hard_ready"] = False
             else:
                 self.register_symbol(sym, int(token))
@@ -1784,21 +1811,26 @@ class MarketDataManager:
                     quote = None
             try:
                 bars = self.get_ohlc_bars(sym)
-                ohlc_ready, bars_count = self._bars_ready(bars, min_bars)
+                ohlc_ready, bars_count = self._bars_ready(bars, hydration_min_bars)
             except Exception as exc:  # noqa: BLE001
                 bars = []
                 bars_count = 0
                 ohlc_ready = False
                 last_error = f"bars_malformed:{type(exc).__name__}"
-            if sym in selected and not ohlc_ready:
-                self._reseed_active_basket_symbol_bars(sym, min_bars)
+            reseed_status: dict[str, Any] = {"attempted": False, "deferred": False, "failed": False, "error": None}
+            if is_selected and not ohlc_ready:
+                reseed_status = self._reseed_active_basket_symbol_bars(sym, hydration_min_bars)
                 try:
                     bars = self.get_ohlc_bars(sym)
-                    ohlc_ready, bars_count = self._bars_ready(bars, min_bars)
+                    ohlc_ready, bars_count = self._bars_ready(bars, hydration_min_bars)
                 except Exception as exc:  # noqa: BLE001
                     bars_count = 0
                     ohlc_ready = False
                     last_error = f"bars_malformed_after_reseed:{type(exc).__name__}"
+                if not ohlc_ready and reseed_status.get("deferred"):
+                    last_error = "reseed_deferred"
+                elif reseed_status.get("failed"):
+                    last_error = str(reseed_status.get("error") or "reseed_failed")
             if role in {"spot_context", "futures_context"}:
                 ohlc_ready = True
             quote_ready = bool(quote)
@@ -1809,17 +1841,18 @@ class MarketDataManager:
             oi_val = quote.get("oi", quote.get("open_interest")) if isinstance(quote, Mapping) else None
             ltp_only = quote_ready and not depth_ready
             source = str(quote.get("source") or quote.get("quote_source") or "cache") if isinstance(quote, Mapping) else "missing"
-            symbol_hard_ready = not (sym in selected and (not quote_ready or not ohlc_ready))
-            if sym in selected and not quote_ready:
+            symbol_hard_ready = not (is_selected and (not quote_ready or not ohlc_ready))
+            if is_selected and not quote_ready:
                 report["hard_ready"] = False
                 report["missing"].append(f"{sym}:quote_missing")
-            if sym in selected and not ohlc_ready:
+            if is_selected and not ohlc_ready:
                 report["hard_ready"] = False
                 report["missing"].append(f"{sym}:ohlc_insufficient")
             symbol_report = {
                 "token": int(token) if token is not None else None,
                 "role": role,
-                "min_bars_required": min_bars,
+                "min_bars_required": hydration_min_bars,
+                "hydration_min_bars_required": hydration_min_bars,
                 "bars_count": int(bars_count),
                 "quote_ready": quote_ready,
                 "ohlc_ready": bool(ohlc_ready),
@@ -1827,6 +1860,7 @@ class MarketDataManager:
                 "oi_ready": (oi_val is not None) if role == "tradable_option" else None,
                 "ltp_only": bool(ltp_only),
                 "hard_ready": bool(symbol_hard_ready),
+                "reseed_deferred": bool(reseed_status.get("deferred")),
                 "last_error": last_error,
                 "source": source,
             }
@@ -1840,7 +1874,7 @@ class MarketDataManager:
         self._logger.info(
             "MDM_BASKET_HYDRATION_COMPLETED hard_ready=%s missing=%s",
             report["hard_ready"], report["missing"],
-            extra={"event": "MDM_BASKET_HYDRATION_COMPLETED", "hard_ready": report["hard_ready"], "missing": list(report["missing"]), "min_bars_required": min_bars},
+            extra={"event": "MDM_BASKET_HYDRATION_COMPLETED", "hard_ready": report["hard_ready"], "missing": list(report["missing"]), "hydration_min_bars_required": hydration_min_bars},
         )
         self._active_basket_hydration_report = dict(report)
         return report

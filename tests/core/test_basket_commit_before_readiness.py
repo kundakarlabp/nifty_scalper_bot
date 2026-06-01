@@ -186,3 +186,36 @@ async def test_hydration_ready_allows_strategy_evaluation(monkeypatch):
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
     assert ctx.evaluation_ready is True
     assert calls[-1]['evaluation_ready'] is True
+
+
+@pytest.mark.asyncio
+async def test_missing_hydration_method_blocks_live_readiness(monkeypatch, caplog):
+    monkeypatch.delenv("ALLOW_MISSING_HYDRATION_GATE", raising=False)
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.CLOSED)
+    calls = []
+    ctx = SimpleNamespace(
+        active_trading_universe={
+            'selected_ce': 'NFO:NIFTY26MAY23700CE',
+            'selected_pe': 'NFO:NIFTY26MAY23700PE',
+            'atm_strike': 23700,
+            'option_symbols': ['NFO:NIFTY26MAY23700CE', 'NFO:NIFTY26MAY23700PE'],
+            'symbols': ['NSE:NIFTY', 'NFO:NIFTY26MAY23700CE', 'NFO:NIFTY26MAY23700PE'],
+        },
+        market_data_manager=_MDM(),
+        settings=SimpleNamespace(execution_mode='LIVE'),
+        strategy_runner=SimpleNamespace(
+            _indicator_engine=SimpleNamespace(get_history=lambda s: [1] * 30),
+            set_runtime_readiness=lambda **kwargs: calls.append(kwargs),
+            is_running=True,
+        ),
+        order_manager=object(),
+        broker_client=object(),
+        selected_ce=None,
+        selected_pe=None,
+    )
+    await app._recompute_and_push_runtime_readiness(ctx, reason='test')
+    assert ctx.evaluation_ready is False
+    assert ctx.active_basket_hydration["hard_ready"] is False
+    assert ctx.active_basket_hydration["missing"] == ["hydrate_active_contract_basket_missing"]
+    assert "ACTIVE_BASKET_HYDRATION_METHOD_MISSING" in caplog.text
+    assert calls[-1]['evaluation_ready'] is False
