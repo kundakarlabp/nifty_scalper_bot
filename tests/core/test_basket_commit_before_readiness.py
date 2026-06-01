@@ -263,3 +263,96 @@ async def test_early_spot_basket_build_deferred_without_active_basket_attr_error
     assert result["reason"] == "instrument_manager_not_ready"
     assert "LIVE_BASKET_BUILD_DEFERRED" in caplog.text
     assert "LIVE_BASKET_BUILD_FAILED" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_readiness_syncs_selected_option_runner_history_from_mdm_and_desired_subscription(caplog):
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+    base_bars = [
+        {
+            "timestamp": f"2026-05-01T09:{idx % 60:02d}:00+00:00",
+            "open": 100.0 + idx,
+            "high": 101.0 + idx,
+            "low": 99.0 + idx,
+            "close": 100.5 + idx,
+            "volume": 100 + idx,
+        }
+        for idx in range(305)
+    ]
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.counts = {ce: 18, pe: 18}
+            self._running = True
+            self.runtime_payloads = []
+            self._indicator_engine = SimpleNamespace(get_history=lambda sym: [object()] * self.counts.get(sym, 0))
+
+        def reseed_history_from_bars(self, sym, bars, source, min_bars):
+            self.counts[sym] = max(len(bars), min_bars)
+            return self.counts[sym]
+
+        def set_runtime_readiness(self, **kwargs):
+            self.runtime_payloads.append(kwargs)
+
+    class _Mdm:
+        _desired_tokens = {11, 12}
+        _confirmed_subscriptions = set()
+        _subscribed_tokens = set()
+        _symbol_to_token = {ce: 11, pe: 12}
+
+        def hydrate_active_contract_basket(self, basket):
+            return {"hard_ready": True, "missing": [], "symbols": {}}
+
+        def get_ohlc_bars(self, sym, limit=None):
+            bars = list(base_bars)
+            return bars[-limit:] if limit else bars
+
+        async def hydrate_symbol_history(self, *args, **kwargs):
+            raise AssertionError("MDM already has enough bars; broker hydration should not be called")
+
+        def get_symbol_snapshot(self, sym):
+            return SimpleNamespace(ltp=100.0, bid=99.0, ask=101.0, tradable_quote=True, depth_available=True, tick_age_s=0.1)
+
+        def has_ws_tradable_quote(self, sym):
+            return True
+
+        def desired_tokens_snapshot(self):
+            return [11, 12]
+
+    runner = _Runner()
+    ctx = SimpleNamespace(
+        market_data_manager=_Mdm(),
+        strategy_runner=runner,
+        settings=SimpleNamespace(execution_mode="SHADOW"),
+        broker_client=object(),
+        order_manager=object(),
+        selected_ce=ce,
+        selected_pe=pe,
+        active_symbol_tokens={ce: 11, "NIFTY26JUN23900CE": 11, pe: 12, "NIFTY26JUN23900PE": 12},
+        active_trading_universe={
+            "spot_symbol": "NSE:NIFTY",
+            "selected_ce": ce,
+            "selected_pe": pe,
+            "option_symbols": [ce, pe],
+            "all_symbols": ["NSE:NIFTY", ce, pe],
+            "token_by_symbol": {ce: 11, pe: 12},
+            "all_tokens": [256265, 11, 12],
+        },
+        active_contract_basket=None,
+        data_hard_ready=False,
+        evaluation_ready=False,
+        live_orders_armed=False,
+        trading_ready=False,
+    )
+
+    with caplog.at_level("INFO"):
+        await app._recompute_and_push_runtime_readiness(ctx, reason="test")
+
+    assert runner.counts[ce] >= 30
+    assert runner.counts[pe] >= 30
+    assert runner.runtime_payloads[-1]["evaluation_ready"] is True
+    assert "ce_eval_bars_missing" not in str(ctx.live_block_reason)
+    assert "pe_eval_bars_missing" not in str(ctx.live_block_reason)
+    assert "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM" in caplog.text
+    assert "SELECTED_OPTION_RESEED_FAILED" not in caplog.text

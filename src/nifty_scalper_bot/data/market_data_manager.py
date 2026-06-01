@@ -1841,7 +1841,8 @@ class MarketDataManager:
             oi_val = quote.get("oi", quote.get("open_interest")) if isinstance(quote, Mapping) else None
             ltp_only = quote_ready and not depth_ready
             source = str(quote.get("source") or quote.get("quote_source") or "cache") if isinstance(quote, Mapping) else "missing"
-            symbol_hard_ready = not (is_selected and (not quote_ready or not ohlc_ready))
+            required_for_readiness = bool(is_selected)
+            symbol_hard_ready = not (required_for_readiness and (not quote_ready or not ohlc_ready))
             if is_selected and not quote_ready:
                 report["hard_ready"] = False
                 report["missing"].append(f"{sym}:quote_missing")
@@ -1860,14 +1861,16 @@ class MarketDataManager:
                 "oi_ready": (oi_val is not None) if role == "tradable_option" else None,
                 "ltp_only": bool(ltp_only),
                 "hard_ready": bool(symbol_hard_ready),
+                "required_for_readiness": required_for_readiness,
+                "symbol_hard_ready": bool(symbol_hard_ready),
                 "reseed_deferred": bool(reseed_status.get("deferred")),
                 "last_error": last_error,
                 "source": source,
             }
             report["symbols"][sym] = symbol_report
             self._logger.info(
-                "MDM_BASKET_HYDRATION_SYMBOL_RESULT symbol=%s token=%s role=%s quote_ready=%s ohlc_ready=%s bars_count=%s depth_ready=%s oi_ready=%s ltp_only=%s hard_ready=%s error=%s",
-                sym, symbol_report["token"], role, quote_ready, ohlc_ready, bars_count, depth_ready, symbol_report["oi_ready"], ltp_only, symbol_hard_ready, last_error,
+                "MDM_BASKET_HYDRATION_SYMBOL_RESULT symbol=%s token=%s role=%s quote_ready=%s ohlc_ready=%s bars_count=%s depth_ready=%s oi_ready=%s ltp_only=%s required_for_readiness=%s symbol_hard_ready=%s error=%s",
+                sym, symbol_report["token"], role, quote_ready, ohlc_ready, bars_count, depth_ready, symbol_report["oi_ready"], ltp_only, required_for_readiness, symbol_hard_ready, last_error,
                 extra={"event": "MDM_BASKET_HYDRATION_SYMBOL_RESULT", "symbol": sym, **symbol_report},
             )
         report["missing"] = list(dict.fromkeys(report["missing"]))

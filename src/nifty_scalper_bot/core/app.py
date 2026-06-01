@@ -2287,6 +2287,7 @@ class BotContext:
     active_trading_universe: dict[str, Any] = field(default_factory=dict)
     active_contract_basket: dict[str, object] | None = None
     active_basket_hydration: dict[str, object] | None = None
+    active_symbol_tokens: dict[str, int] = field(default_factory=dict)
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     execution_locked_symbols: set[str] = field(default_factory=set)
@@ -7251,7 +7252,7 @@ async def _ensure_selected_options_hydrated(
             }
             continue
         hydrate_fn = getattr(mdm, "hydrate_symbol_history", None)
-        if callable(hydrate_fn):
+        if before_mdm_bars < required_bars and callable(hydrate_fn):
             await hydrate_fn(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_selected_option_force_hydration")
         try:
             bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
@@ -7292,6 +7293,16 @@ async def _ensure_selected_options_hydrated(
                     required_bars,
                     reason,
                 )
+                if reseeded_count >= required_bars:
+                    LOGGER.info(
+                        "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM symbol=%s mdm_bars=%d runner_bars=%d required_bars=%d reason=%s",
+                        sym,
+                        len(normalized_bars),
+                        reseeded_count,
+                        required_bars,
+                        reason,
+                        extra={"event": "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM", "symbol": sym, "mdm_bars": len(normalized_bars), "runner_bars": reseeded_count, "required_bars": required_bars, "reason": reason},
+                    )
             except Exception:
                 LOGGER.exception(
                     "SELECTED_OPTION_RUNNER_RESEED_FAILED symbol=%s required_bars=%d reason=%s",
@@ -7442,20 +7453,56 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
                 if not pd.isna(dt) and (pd.Timestamp.utcnow()-dt).total_seconds()<=limit:
                     return True
         return False
+    def _selected_option_subscription_state(sym: str | None) -> dict[str, Any]:
+        state = {"symbol": sym, "token": None, "desired": False, "subscribed": False, "confirmed": False, "fresh_tick": False, "tick_age_s": None}
+        if not sym or mdm is None:
+            return state
+        active_tokens = getattr(ctx, "active_symbol_tokens", None)
+        aliases = [str(sym), _bare_trading_symbol(sym)]
+        token = None
+        for alias in aliases:
+            token = _coerce_positive_token((active_tokens or {}).get(alias) if isinstance(active_tokens, Mapping) else None)
+            if token is not None:
+                break
+        if token is None:
+            try:
+                token = _coerce_positive_token(getattr(mdm, "_resolve_token_for_symbol", lambda _s: None)(sym))
+            except Exception:
+                token = None
+        if token is None:
+            token = _coerce_positive_token(getattr(mdm, "_symbol_to_token", {}).get(sym))
+        state["token"] = token
+        snap = _snapshot(sym)
+        state["tick_age_s"] = getattr(snap, "tick_age_s", None) if snap is not None else None
+        state["fresh_tick"] = _live_tick_seen(sym)
+        if token is not None:
+            desired_snapshot = getattr(mdm, "desired_tokens_snapshot", None)
+            desired_tokens = set(desired_snapshot() if callable(desired_snapshot) else getattr(mdm, "_desired_tokens", set()) or set())
+            subscribed_tokens = set(getattr(mdm, "_subscribed_tokens", set()) or set())
+            ws = getattr(mdm, "_ws", None) or getattr(mdm, "websocket", None)
+            subscribed_tokens.update(set(getattr(ws, "_tokens", set()) or set()))
+            confirmed_tokens = set(getattr(mdm, "_confirmed_subscriptions", set()) or set())
+            desired_ints = {coerced for raw in desired_tokens if (coerced := _coerce_positive_token(raw)) is not None}
+            subscribed_ints = {coerced for raw in subscribed_tokens if (coerced := _coerce_positive_token(raw)) is not None}
+            confirmed_ints = {coerced for raw in confirmed_tokens if (coerced := _coerce_positive_token(raw)) is not None}
+            state["desired"] = int(token) in desired_ints
+            state["subscribed"] = int(token) in subscribed_ints
+            state["confirmed"] = int(token) in confirmed_ints
+        LOGGER.info(
+            "SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s",
+            sym, state["token"], state["desired"], state["subscribed"], state["fresh_tick"], state["tick_age_s"],
+            extra={"event": "SELECTED_OPTION_SUBSCRIPTION_STATE", **state},
+        )
+        return state
     def _subscription_confirmed(sym: str | None) -> bool:
-        if not sym or mdm is None: return False
-        try:
-            token = getattr(mdm, "_resolve_token_for_symbol", lambda _s: None)(sym) or getattr(mdm, "_symbol_to_token", {}).get(sym)
-            confirmed = getattr(mdm, "_confirmed_subscriptions", set()) or set()
-            return bool(token is not None and int(token) in confirmed)
-        except Exception:
-            return False
+        state = _selected_option_subscription_state(sym)
+        return bool(state.get("confirmed") or state.get("desired") or state.get("subscribed") or state.get("fresh_tick"))
     def _subscription_or_live_tick(sym:str|None)->bool:
-        sub=_subscription_confirmed(sym)
-        if sub: return True
-        if _live_tick_seen(sym):
-            token=getattr(mdm, "_symbol_to_token", {}).get(sym) if mdm is not None else None
-            LOGGER.info("READINESS_SUBSCRIPTION_PROOF_FROM_LIVE_TICK symbol=%s token=%s", sym, token)
+        state = _selected_option_subscription_state(sym)
+        if state.get("confirmed") or state.get("desired") or state.get("subscribed"):
+            return True
+        if state.get("fresh_tick"):
+            LOGGER.info("READINESS_SUBSCRIPTION_PROOF_FROM_LIVE_TICK symbol=%s token=%s", sym, state.get("token"))
             return True
         return False
     def _bars(sym: str | None) -> int:
@@ -7626,6 +7673,23 @@ def _hydrate_committed_active_basket(ctx: BotContext, *, reason: str) -> dict[st
             extra={"event": "ACTIVE_BASKET_HYDRATION_NOT_READY", "reason": reason, "missing": missing},
         )
     return report
+
+
+def _ensure_active_symbol_tokens(ctx: Any) -> dict[str, int]:
+    """Return ctx.active_symbol_tokens, defensively initializing legacy contexts."""
+    current = getattr(ctx, "active_symbol_tokens", None)
+    if not isinstance(current, dict):
+        current = {}
+        try:
+            setattr(ctx, "active_symbol_tokens", current)
+        except AttributeError:
+            LOGGER.warning(
+                "ACTIVE_SYMBOL_TOKENS_INIT_FAILED context_type=%s",
+                type(ctx).__name__,
+                extra={"event": "ACTIVE_SYMBOL_TOKENS_INIT_FAILED", "context_type": type(ctx).__name__},
+            )
+            return {}
+    return current
 
 
 def _bare_trading_symbol(symbol: object) -> str:
@@ -7859,23 +7923,58 @@ def _commit_active_dynamic_basket(
     committed["symbol_by_token"] = symbol_by_token
     ctx.active_trading_universe = committed
     ctx.active_contract_basket = committed
+    active_symbol_tokens = _ensure_active_symbol_tokens(ctx)
+    active_symbol_tokens.update(dict(committed.get("token_by_symbol") or {}))
+    selected_ce_token = _resolve_committed_symbol_token(ctx, committed, selected_ce, "selected_ce_token")
+    selected_pe_token = _resolve_committed_symbol_token(ctx, committed, selected_pe, "selected_pe_token")
+    for selected_symbol, selected_token, token_key in (
+        (selected_ce, selected_ce_token, "selected_ce_token"),
+        (selected_pe, selected_pe_token, "selected_pe_token"),
+    ):
+        token_int = _coerce_positive_token(selected_token)
+        if selected_symbol and token_int is not None:
+            full_symbol = str(selected_symbol)
+            bare_symbol = _bare_trading_symbol(full_symbol)
+            token_by_symbol[full_symbol] = token_int
+            token_by_symbol[bare_symbol] = token_int
+            active_symbol_tokens[full_symbol] = token_int
+            active_symbol_tokens[bare_symbol] = token_int
+            symbol_by_token.setdefault(token_int, full_symbol)
+            committed[token_key] = token_int
+            existing_all_tokens = {coerced for raw in committed.get("all_tokens", []) if (coerced := _coerce_positive_token(raw)) is not None}
+            existing_option_tokens = {coerced for raw in committed.get("option_tokens", []) if (coerced := _coerce_positive_token(raw)) is not None}
+            if token_int not in existing_all_tokens:
+                committed.setdefault("all_tokens", []).append(token_int)
+            if token_int not in existing_option_tokens:
+                committed.setdefault("option_tokens", []).append(token_int)
+    committed["token_by_symbol"] = token_by_symbol
+    committed["symbol_by_token"] = symbol_by_token
+    committed["all_tokens"] = list(dict.fromkeys(coerced for raw in (committed.get("all_tokens") or []) if (coerced := _coerce_positive_token(raw)) is not None))
+    committed["option_tokens"] = list(dict.fromkeys(coerced for raw in (committed.get("option_tokens") or []) if (coerced := _coerce_positive_token(raw)) is not None))
     if getattr(ctx, "option_universe", None) is not None and hasattr(ctx.option_universe, "set_active_contract_basket"):
         ctx.option_universe.set_active_contract_basket(committed)
-    ctx.active_symbol_tokens = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
-    mdm_set = getattr(getattr(ctx, "market_data_manager", None), "set_active_contract_basket", None)
+    mdm = getattr(ctx, "market_data_manager", None)
+    mdm_set = getattr(mdm, "set_active_contract_basket", None)
     if callable(mdm_set):
         mdm_set(committed)
+    request_subscription = getattr(mdm, "request_token_subscription", None)
+    request_subscriptions = getattr(mdm, "request_token_subscriptions", None)
+    selected_subscription_tokens = [tok for tok in (selected_ce_token, selected_pe_token) if tok is not None]
+    if callable(request_subscription):
+        for selected_symbol, selected_token in ((selected_ce, selected_ce_token), (selected_pe, selected_pe_token)):
+            token_int = _coerce_positive_token(selected_token)
+            if selected_symbol and token_int is not None:
+                request_subscription(token_int, symbol=str(selected_symbol))
+    elif callable(request_subscriptions) and selected_subscription_tokens:
+        request_subscriptions(int(tok) for tok in selected_subscription_tokens if tok is not None)
     hub_set = getattr(getattr(ctx, "data_hub", None), "set_active_contract_basket", None)
     if callable(hub_set):
         hub_set(committed)
-    mdm = getattr(ctx, "market_data_manager", None)
     desired_count_fn = getattr(mdm, "desired_token_count", None)
     ws_count_fn = getattr(mdm, "ws_token_count", None)
     desired_token_count = int(desired_count_fn()) if callable(desired_count_fn) else len(committed.get("all_tokens") or [])
     ws_count_value = ws_count_fn() if callable(ws_count_fn) else None
     ws_token_count = int(ws_count_value) if ws_count_value is not None else None
-    selected_ce_token = _resolve_committed_symbol_token(ctx, committed, selected_ce, "selected_ce_token")
-    selected_pe_token = _resolve_committed_symbol_token(ctx, committed, selected_pe, "selected_pe_token")
     futures_token_for_log = _resolve_committed_symbol_token(ctx, committed, active_futures_symbol, "futures_token")
     if selected_ce and selected_ce_token is None:
         ctx.live_orders_armed = False
@@ -7896,6 +7995,16 @@ def _commit_active_dynamic_basket(
         desired_token_count,
         ws_token_count,
         extra={"event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED", "selected_ce": selected_ce, "selected_ce_token": selected_ce_token, "selected_pe": selected_pe, "selected_pe_token": selected_pe_token, "futures_symbol": active_futures_symbol, "futures_token": futures_token_for_log, "desired_token_count": desired_token_count, "ws_token_count": ws_token_count},
+    )
+    LOGGER.info(
+        "SELECTED_OPTION_SUBSCRIPTION_CONFIRMED selected_ce=%s selected_ce_token=%s selected_pe=%s selected_pe_token=%s desired_token_count=%s ws_token_count=%s",
+        selected_ce,
+        selected_ce_token,
+        selected_pe,
+        selected_pe_token,
+        desired_token_count,
+        ws_token_count,
+        extra={"event": "SELECTED_OPTION_SUBSCRIPTION_CONFIRMED", "selected_ce": selected_ce, "selected_ce_token": selected_ce_token, "selected_pe": selected_pe, "selected_pe_token": selected_pe_token, "desired_token_count": desired_token_count, "ws_token_count": ws_token_count},
     )
     _hydrate_committed_active_basket(ctx, reason="active_dynamic_basket_commit")
     LOGGER.info(
@@ -8291,6 +8400,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP" if configured_mode == "LIVE" else configured_mode
     ctx.effective_mode = ctx.readiness_mode
+    _ensure_active_symbol_tokens(ctx)
     LOGGER.info(
         "Startup | configured_mode=%s | effective_mode=%s | live_orders_armed=%s | trading_ready=%s | data_dir=%s | port=%s",
         configured_mode,
