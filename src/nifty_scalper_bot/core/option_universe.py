@@ -200,7 +200,7 @@ class OptionUniverseManager:
         """
         basket_symbols = self._basket_option_symbols(self._active_contract_basket)
         if basket_symbols:
-            return basket_symbols[:8]
+            return basket_symbols
         if not self._current_universe:
             return self._runtime_blocked_universe("get_current_universe")
         return list(self._current_universe)[:8]
@@ -217,13 +217,18 @@ class OptionUniverseManager:
         Raises:
             None.
         """
+        basket_symbols = self._basket_option_symbols(self._active_contract_basket)
+        if basket_symbols:
+            # Compatibility scan target cap only applies to primary symbols; full
+            # basket access remains available via get_current_universe().
+            return basket_symbols[:8]
         return self.get_current_universe()
 
     def get_filtered_universe(self, spot_ltp: float) -> list[str]:
         """Return the frozen intraday universe while tracking spot diagnostics."""
         basket_symbols = self._basket_option_symbols(self._active_contract_basket)
         if basket_symbols:
-            return basket_symbols[:8]
+            return basket_symbols
         if self._runtime_mode_is_live():
             return self._runtime_blocked_universe("get_filtered_universe")
         if spot_ltp <= 0:

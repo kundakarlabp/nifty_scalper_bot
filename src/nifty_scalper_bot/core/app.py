@@ -2941,19 +2941,35 @@ def _option_symbols_from_active_basket(basket: Mapping[str, Any] | Any | None) -
     """Extract authoritative option symbols from an ActiveContractBasket."""
     if basket is None:
         return []
-    if isinstance(basket, Mapping):
-        symbols = basket.get("option_symbols")
-        if not symbols:
-            symbols = [basket.get("selected_ce"), basket.get("selected_pe")]
+
+    def _get(key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    sources: list[Any] = []
+    option_symbols = _get("option_symbols")
+    if option_symbols:
+        sources.append(option_symbols)
     else:
-        symbols = getattr(basket, "option_symbols", None)
-        if not symbols:
-            symbols = [getattr(basket, "selected_ce", None), getattr(basket, "selected_pe", None)]
-    return [
-        str(sym)
-        for sym in dict.fromkeys(symbols or [])
-        if sym and str(sym).upper().endswith(("CE", "PE"))
-    ]
+        ce_symbols = _get("ce_symbols") or []
+        pe_symbols = _get("pe_symbols") or []
+        if ce_symbols or pe_symbols:
+            sources.extend([ce_symbols, pe_symbols])
+        else:
+            sources.append([_get("selected_ce"), _get("selected_pe")])
+
+    symbols: list[str] = []
+    for source in sources:
+        if isinstance(source, (str, bytes)):
+            iterable = [source]
+        else:
+            iterable = list(source or [])
+        for sym in iterable:
+            text = str(sym).strip() if sym is not None else ""
+            if text and text.upper().endswith(("CE", "PE")):
+                symbols.append(text)
+    return list(dict.fromkeys(symbols))
 
 
 def _active_basket_for_symbol_resolution(

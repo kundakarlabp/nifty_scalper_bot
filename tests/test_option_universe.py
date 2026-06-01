@@ -138,3 +138,14 @@ def test_option_universe_live_without_basket_returns_empty_not_crash(monkeypatch
 
     assert manager.get_primary_symbols() == []
     assert "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED" in caplog.text
+
+
+def test_active_basket_current_universe_returns_all_symbols_and_primary_is_capped(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbols = tuple(f"NFO:NIFTY26JUN{25000 + i * 50}CE" for i in range(10))
+    manager = OptionUniverseManager(OptionUniverseConfig())
+    manager.set_active_contract_basket({"option_symbols": symbols})
+
+    assert manager.get_current_universe() == list(symbols)
+    assert manager.get_filtered_universe(25000.0) == list(symbols)
+    assert manager.get_primary_symbols() == list(symbols[:8])

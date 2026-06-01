@@ -22,11 +22,16 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Dict, List, Mapping, Optional, Set
 
 LOGGER = logging.getLogger("nifty_scalper_bot.options.contracts")
+
+
+def _live_mode() -> bool:
+    return str(os.getenv("EXECUTION_MODE") or os.getenv("MODE") or "").strip().upper() == "LIVE"
 
 
 @dataclass(slots=True)
@@ -318,11 +323,33 @@ class OptionsContractStore:
                 )
                 return symbols
             except Exception as exc:
+                if _live_mode():
+                    LOGGER.error(
+                        "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED method=get_trading_universe reason=%s",
+                        exc,
+                        extra={
+                            "event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED",
+                            "method": "get_trading_universe",
+                            "reason": str(exc),
+                        },
+                    )
+                    return []
                 LOGGER.warning(
                     "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE reason=%s fallback=metadata_cache",
                     exc,
                     extra={"event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE", "reason": str(exc)},
                 )
+
+        if _live_mode():
+            LOGGER.error(
+                "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED method=get_trading_universe reason=instrument_manager_method_missing",
+                extra={
+                    "event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED",
+                    "method": "get_trading_universe",
+                    "reason": "instrument_manager_method_missing",
+                },
+            )
+            return []
 
         # Non-live compatibility fallback over already-loaded metadata cache only.
         atm_strike = int(round(spot_price / strike_step) * strike_step)
@@ -383,11 +410,35 @@ class OptionsContractStore:
                     spot_token=self._basket_get(basket, "spot_token", self._spot_token),
                 )
             except Exception as exc:
+                if _live_mode():
+                    LOGGER.error(
+                        "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED method=get_snapshot reason=%s",
+                        exc,
+                        extra={
+                            "event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED",
+                            "method": "get_snapshot",
+                            "reason": str(exc),
+                        },
+                    )
+                    raise RuntimeError(
+                        "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED method=get_snapshot"
+                    ) from exc
                 LOGGER.warning(
                     "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE reason=%s fallback=snapshot_metadata_cache",
                     exc,
                     extra={"event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE", "reason": str(exc), "fallback": "snapshot_metadata_cache"},
                 )
+
+        if _live_mode():
+            LOGGER.error(
+                "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED method=get_snapshot reason=instrument_manager_method_missing",
+                extra={
+                    "event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED",
+                    "method": "get_snapshot",
+                    "reason": "instrument_manager_method_missing",
+                },
+            )
+            raise RuntimeError("OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_REQUIRED method=get_snapshot")
 
         # Non-live compatibility fallback over loaded metadata cache only.
         atm_strike = int(round(spot_price / 50) * 50)
