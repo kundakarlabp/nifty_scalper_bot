@@ -2285,6 +2285,8 @@ class BotContext:
     atm_ce_symbol: str | None = None
     atm_pe_symbol: str | None = None
     active_trading_universe: dict[str, Any] = field(default_factory=dict)
+    active_contract_basket: dict[str, object] | None = None
+    active_basket_hydration: dict[str, object] | None = None
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     execution_locked_symbols: set[str] = field(default_factory=set)
@@ -2935,16 +2937,106 @@ def _find_existing_nifty_option_symbol(
     return None
 
 
+def _option_symbols_from_active_basket(basket: Mapping[str, Any] | Any | None) -> list[str]:
+    """Extract authoritative option symbols from an ActiveContractBasket."""
+    if basket is None:
+        return []
+
+    def _get(key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    sources: list[Any] = []
+    option_symbols = _get("option_symbols")
+    if option_symbols:
+        sources.append(option_symbols)
+    else:
+        ce_symbols = _get("ce_symbols") or []
+        pe_symbols = _get("pe_symbols") or []
+        if ce_symbols or pe_symbols:
+            sources.extend([ce_symbols, pe_symbols])
+        else:
+            sources.append([_get("selected_ce"), _get("selected_pe")])
+
+    symbols: list[str] = []
+    for source in sources:
+        if isinstance(source, (str, bytes)):
+            iterable = [source]
+        else:
+            iterable = list(source or [])
+        for sym in iterable:
+            text = str(sym).strip() if sym is not None else ""
+            if text and text.upper().endswith(("CE", "PE")):
+                symbols.append(text)
+    return list(dict.fromkeys(symbols))
+
+
+def _active_basket_for_symbol_resolution(
+    explicit_basket: Mapping[str, Any] | Any | None,
+    market_data_manager: MarketDataManager | None,
+) -> Mapping[str, Any] | Any | None:
+    """Find the already-committed ActiveContractBasket without invoking selectors."""
+    if explicit_basket is not None:
+        return explicit_basket
+    ctx = _LATEST_CTX
+    if ctx is not None:
+        basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
+        if basket:
+            return basket
+        hub = getattr(ctx, "data_hub", None)
+        hub_get = getattr(hub, "get_active_contract_basket", None)
+        if callable(hub_get):
+            basket = hub_get()
+            if basket:
+                return basket
+        mdm = getattr(ctx, "market_data_manager", None)
+        mdm_get = getattr(mdm, "get_active_contract_basket", None)
+        if callable(mdm_get):
+            basket = mdm_get()
+            if basket:
+                return basket
+    mdm_get = getattr(market_data_manager, "get_active_contract_basket", None)
+    if callable(mdm_get):
+        return mdm_get()
+    return None
+
+
 def _get_symbols(
     config: AppConfig,
     resolver: Any | None = None,
     broker: Any | None = None,
     option_universe: OptionUniverseManager | None = None,
     market_data_manager: MarketDataManager | None = None,
+    active_contract_basket: Mapping[str, Any] | Any | None = None,
 ) -> list[str]:
     """Return validated option symbols for trading."""
     LOGGER.info("=" * 60)
     LOGGER.info("🔍 _get_symbols() STARTING - Symbol Resolution")
+
+    basket = _active_basket_for_symbol_resolution(active_contract_basket, market_data_manager)
+    basket_symbols = _option_symbols_from_active_basket(basket)
+    if basket_symbols:
+        if option_universe is not None and hasattr(option_universe, "set_active_contract_basket"):
+            option_universe.set_active_contract_basket(basket)
+        LOGGER.info(
+            "SYMBOL_RESOLUTION_ACTIVE_BASKET_USED count=%d selected_ce=%s selected_pe=%s",
+            len(basket_symbols),
+            getattr(basket, "selected_ce", None) if not isinstance(basket, Mapping) else basket.get("selected_ce"),
+            getattr(basket, "selected_pe", None) if not isinstance(basket, Mapping) else basket.get("selected_pe"),
+            extra={"event": "SYMBOL_RESOLUTION_ACTIVE_BASKET_USED", "count": len(basket_symbols)},
+        )
+        LOGGER.info("🎯 FINAL SYMBOLS TO TRADE: %s", basket_symbols)
+        LOGGER.info("=" * 60)
+        return basket_symbols
+
+    execution_mode = str(os.getenv("EXECUTION_MODE") or os.getenv("MODE") or getattr(config, "execution_mode", "") or "").upper()
+    if execution_mode == "LIVE":
+        LOGGER.warning(
+            "SYMBOL_RESOLUTION_BLOCKED reason=ACTIVE_BASKET_MISSING stage=_get_symbols",
+            extra={"event": "SYMBOL_RESOLUTION_BLOCKED", "reason": "ACTIVE_BASKET_MISSING", "stage": "_get_symbols"},
+        )
+        return []
 
     symbols = getattr(config, "symbols", None)
     if symbols:
@@ -6289,6 +6381,90 @@ def _coerce_spot_price(tick: Mapping[str, Any] | None) -> float | None:
     return None
 
 
+def _resolve_startup_rest_spot_ltp(ctx: BotContext, *, stage_prefix: str = "startup_spot") -> float | None:
+    """Resolve startup spot from cache/REST without treating it as WS proof."""
+    policy = MarketDataPolicy.from_env()
+    mdm = getattr(ctx, "market_data_manager", None)
+    if mdm is None:
+        return None
+
+    cached_fn = getattr(mdm, "get_cached_ltp", None)
+    if callable(cached_fn):
+        try:
+            cached = float(
+                cached_fn(
+                    policy.nifty_internal_symbol,
+                    max_age_seconds=policy.startup_spot_max_age_seconds,
+                    require_ws=False,
+                )
+                or 0.0
+            )
+            if cached > 0:
+                return cached
+        except (TypeError, ValueError, RuntimeError) as exc:
+            LOGGER.warning(
+                "STARTUP_SPOT_REST_FALLBACK_FAILED stage=%s reason=%s",
+                "get_cached_ltp",
+                type(exc).__name__,
+                extra={
+                    "event": "STARTUP_SPOT_REST_FALLBACK_FAILED",
+                    "stage": "get_cached_ltp",
+                    "reason": type(exc).__name__,
+                },
+            )
+
+    get_ltp_fn = getattr(mdm, "get_ltp", None)
+    if callable(get_ltp_fn):
+        for stage, call in (
+            (
+                "get_ltp",
+                lambda: get_ltp_fn(
+                    policy.nifty_internal_symbol, allow_rest_fallback=True
+                ),
+            ),
+            ("get_ltp_fallback", lambda: get_ltp_fn(policy.nifty_internal_symbol)),
+        ):
+            try:
+                value = call()
+                if isinstance(value, Mapping):
+                    price = _coerce_spot_price(value)
+                else:
+                    price = float(value or 0.0)
+                if price and price > 0:
+                    return float(price)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                LOGGER.warning(
+                    "STARTUP_SPOT_REST_FALLBACK_FAILED stage=%s reason=%s",
+                    stage,
+                    type(exc).__name__,
+                    extra={
+                        "event": "STARTUP_SPOT_REST_FALLBACK_FAILED",
+                        "stage": stage,
+                        "reason": type(exc).__name__,
+                    },
+                )
+
+    refresh_fn = getattr(mdm, "refresh_quote_now", None)
+    if callable(refresh_fn):
+        try:
+            payload = refresh_fn(policy.nifty_internal_symbol)
+            price = _coerce_spot_price(payload if isinstance(payload, Mapping) else None)
+            if price and price > 0:
+                return float(price)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            LOGGER.warning(
+                "STARTUP_SPOT_REST_FALLBACK_FAILED stage=%s reason=%s",
+                "refresh_quote_now",
+                type(exc).__name__,
+                extra={
+                    "event": "STARTUP_SPOT_REST_FALLBACK_FAILED",
+                    "stage": "refresh_quote_now",
+                    "reason": type(exc).__name__,
+                },
+            )
+    return None
+
+
 async def _wait_for_live_spot_or_raise(
     ctx: BotContext,
     *,
@@ -6392,38 +6568,51 @@ async def _wait_for_live_spot_or_raise(
             extra={"event": "SPOT_REST_USED_FOR_LIVE_STARTUP", "symbol": policy.nifty_internal_symbol},
         )
 
-    # Paper / off-hours fallback path: try cached REST/poll value first.
-    cached_ltp_fn = getattr(mdm, "get_cached_ltp", None)
-    cached = (
-        float(
-            cached_ltp_fn(
-                policy.nifty_internal_symbol,
-                max_age_seconds=policy.startup_spot_max_age_seconds,
-                require_ws=False,
-            )
-            or 0.0
-        )
-        if callable(cached_ltp_fn)
-        else 0.0
-    )
+    # Paper/off-hours fallback path: try cached REST/poll value first; in LIVE
+    # this may seed basket hydration but must not be logged as WebSocket proof.
+    cached = _resolve_startup_rest_spot_ltp(ctx) or 0.0
     if cached > 0:
-        if not live_mode:
+        if live_mode:
+            LOGGER.warning(
+                "STARTUP_SPOT_REST_FALLBACK_USED symbol=%s price=%.2f live_orders_armed=%s",
+                policy.nifty_internal_symbol,
+                cached,
+                False,
+                extra={
+                    "event": "STARTUP_SPOT_REST_FALLBACK_USED",
+                    "symbol": policy.nifty_internal_symbol,
+                    "price": cached,
+                    "live_orders_armed": False,
+                },
+            )
+            LOGGER.info(
+                "STARTUP_SPOT_REST_FALLBACK_READY symbol=%s price=%.2f live_proof=false",
+                policy.nifty_internal_symbol,
+                cached,
+                extra={
+                    "event": "STARTUP_SPOT_REST_FALLBACK_READY",
+                    "symbol": policy.nifty_internal_symbol,
+                    "price": cached,
+                    "live_proof": False,
+                },
+            )
+        else:
             LOGGER.info(
                 "STARTUP_SPOT_FALLBACK_PROBE mode=%s source=rest_or_poll symbol=%s",
                 (configured_mode or "PAPER"),
                 policy.nifty_internal_symbol,
             )
-        LOGGER.info(
-            "LIVE_SPOT_READY symbol=%s price=%.2f source=cache",
-            policy.nifty_internal_symbol,
-            cached,
-            extra={
-                "event": "LIVE_SPOT_READY",
-                "symbol": policy.nifty_internal_symbol,
-                "price": cached,
-                "source": "cache",
-            },
-        )
+            LOGGER.info(
+                "LIVE_SPOT_READY symbol=%s price=%.2f source=cache",
+                policy.nifty_internal_symbol,
+                cached,
+                extra={
+                    "event": "LIVE_SPOT_READY",
+                    "symbol": policy.nifty_internal_symbol,
+                    "price": cached,
+                    "source": "cache",
+                },
+            )
         return float(cached)
 
     if live_mode:
@@ -7469,6 +7658,79 @@ def _hydrate_committed_active_basket(ctx: BotContext, *, reason: str) -> dict[st
         )
     return report
 
+def _bare_symbol(symbol: str | None) -> str | None:
+    text = str(symbol or "").strip()
+    if not text:
+        return None
+    return text.split(":", 1)[-1] if ":" in text else text
+
+
+def _coerce_positive_int_token(value: Any) -> int | None:
+    try:
+        token = int(value)
+    except (TypeError, ValueError):
+        return None
+    return token if token > 0 else None
+
+
+def _resolve_committed_symbol_token(
+    ctx: BotContext,
+    committed: Mapping[str, object],
+    symbol: str | None,
+    explicit_token_key: str | None = None,
+) -> int | None:
+    """Resolve token for a committed basket symbol without selecting contracts."""
+    if not symbol:
+        return None
+    full_symbol = str(symbol).strip()
+    bare_symbol = _bare_symbol(full_symbol)
+    if explicit_token_key:
+        token = _coerce_positive_int_token(committed.get(explicit_token_key))
+        if token is not None:
+            return token
+
+    token_by_symbol = committed.get("token_by_symbol")
+    if isinstance(token_by_symbol, Mapping):
+        for key in (full_symbol, bare_symbol):
+            token = _coerce_positive_int_token(token_by_symbol.get(key)) if key else None
+            if token is not None:
+                return token
+
+    active_symbol_tokens = getattr(ctx, "active_symbol_tokens", None)
+    if isinstance(active_symbol_tokens, Mapping):
+        for key in (full_symbol, bare_symbol):
+            token = _coerce_positive_int_token(active_symbol_tokens.get(key)) if key else None
+            if token is not None:
+                return token
+
+    instrument_manager = getattr(ctx, "instrument_manager", None)
+    get_token = getattr(instrument_manager, "get_token", None)
+    if callable(get_token):
+        for key in (full_symbol, bare_symbol):
+            if not key:
+                continue
+            try:
+                token = _coerce_positive_int_token(get_token(key))
+            except (RuntimeError, KeyError, ValueError, TypeError):
+                token = None
+            if token is not None:
+                return token
+
+    broker_client = getattr(ctx, "broker_client", None)
+    get_instrument_token = getattr(broker_client, "get_instrument_token", None)
+    if callable(get_instrument_token):
+        for key in (full_symbol, bare_symbol):
+            if not key:
+                continue
+            try:
+                token = _coerce_positive_int_token(get_instrument_token(key))
+            except (RuntimeError, KeyError, ValueError, TypeError):
+                token = None
+            if token is not None:
+                return token
+    return None
+
+
 def _commit_active_dynamic_basket(
     ctx: BotContext,
     *,
@@ -7601,21 +7863,93 @@ def _commit_active_dynamic_basket(
         try:
             fut_token_int = int(futures_token)
             token_by_symbol.setdefault(active_futures_symbol, fut_token_int)
+            bare_future = _bare_symbol(active_futures_symbol)
+            if bare_future:
+                token_by_symbol.setdefault(bare_future, fut_token_int)
             symbol_by_token.setdefault(fut_token_int, active_futures_symbol)
             if fut_token_int not in [int(t) for t in all_tokens if t is not None]:
                 all_tokens.insert(1 if all_tokens else 0, fut_token_int)
         except (TypeError, ValueError):
             pass
+
+    token_resolution_view: dict[str, object] = {
+        **dict(basket or {}),
+        **dict(committed or {}),
+        "token_by_symbol": token_by_symbol,
+    }
+    selected_ce_token = _resolve_committed_symbol_token(
+        ctx, token_resolution_view, selected_ce, "selected_ce_token"
+    )
+    selected_pe_token = _resolve_committed_symbol_token(
+        ctx, token_resolution_view, selected_pe, "selected_pe_token"
+    )
+    futures_token_resolved = _resolve_committed_symbol_token(
+        ctx, token_resolution_view, active_futures_symbol, "futures_token"
+    )
+
+    for opt_symbol, opt_token, token_key in (
+        (selected_ce, selected_ce_token, "selected_ce_token"),
+        (selected_pe, selected_pe_token, "selected_pe_token"),
+    ):
+        if opt_symbol and opt_token is not None:
+            committed[token_key] = opt_token
+            token_by_symbol.setdefault(str(opt_symbol), opt_token)
+            bare_option = _bare_symbol(str(opt_symbol))
+            if bare_option:
+                token_by_symbol.setdefault(bare_option, opt_token)
+            symbol_by_token.setdefault(opt_token, str(opt_symbol))
+            if str(opt_symbol) not in all_symbols:
+                all_symbols.append(str(opt_symbol))
+            if opt_token not in [int(t) for t in all_tokens if t is not None]:
+                all_tokens.append(opt_token)
+
+    if active_futures_symbol and futures_token_resolved is not None:
+        committed["futures_token"] = futures_token_resolved
+        token_by_symbol.setdefault(str(active_futures_symbol), futures_token_resolved)
+        bare_future = _bare_symbol(str(active_futures_symbol))
+        if bare_future:
+            token_by_symbol.setdefault(bare_future, futures_token_resolved)
+        symbol_by_token.setdefault(futures_token_resolved, str(active_futures_symbol))
+
     if token_by_symbol and not all_tokens:
         all_tokens = [int(token_by_symbol[s]) for s in all_symbols if s in token_by_symbol]
     if token_by_symbol and all_symbols:
-        all_tokens = [int(token_by_symbol[s]) for s in all_symbols if s in token_by_symbol]
+        resolved_all_tokens: list[int] = []
+        for sym in all_symbols:
+            token = _coerce_positive_int_token(token_by_symbol.get(sym))
+            if token is None:
+                bare = _bare_symbol(str(sym))
+                token = _coerce_positive_int_token(token_by_symbol.get(bare)) if bare else None
+            if token is not None:
+                resolved_all_tokens.append(token)
+        if resolved_all_tokens:
+            all_tokens = resolved_all_tokens
     committed["all_symbols"] = list(dict.fromkeys(all_symbols))
     committed["all_tokens"] = list(dict.fromkeys(all_tokens))
     committed["token_by_symbol"] = token_by_symbol
     committed["symbol_by_token"] = symbol_by_token
+    LOGGER.info(
+        "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED selected_ce=%s selected_ce_token=%s selected_pe=%s selected_pe_token=%s futures_symbol=%s futures_token=%s",
+        selected_ce,
+        selected_ce_token,
+        selected_pe,
+        selected_pe_token,
+        active_futures_symbol,
+        futures_token_resolved,
+        extra={
+            "event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED",
+            "selected_ce": selected_ce,
+            "selected_ce_token": selected_ce_token,
+            "selected_pe": selected_pe,
+            "selected_pe_token": selected_pe_token,
+            "futures_symbol": active_futures_symbol,
+            "futures_token": futures_token_resolved,
+        },
+    )
     ctx.active_trading_universe = committed
     ctx.active_contract_basket = committed
+    if getattr(ctx, "option_universe", None) is not None and hasattr(ctx.option_universe, "set_active_contract_basket"):
+        ctx.option_universe.set_active_contract_basket(committed)
     ctx.active_symbol_tokens = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
     mdm_set = getattr(getattr(ctx, "market_data_manager", None), "set_active_contract_basket", None)
     if callable(mdm_set):
@@ -8259,7 +8593,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.websocket_enabled,
                 symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
-            spot_wait_seconds = float(os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "8"))
+            spot_wait_seconds = float(os.getenv("STARTUP_SPOT_WS_PROOF_TIMEOUT_SEC", os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "8")))
             mode = str(getattr(ctx, "effective_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
             live_mode = mode == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).lower() in {"1", "true", "yes", "on"}
             try:
@@ -8283,23 +8617,63 @@ async def startup_sequence(ctx: BotContext) -> None:
                     await _refresh_readiness_after_first_tick(
                         ctx, reason="ws_spot_proof_ready"
                     )
-                elif live_mode and get_market_state() == MarketState.OPEN:
-                    ctx.live_orders_armed = False
-                    ctx.trading_ready = False
-                    ctx.live_block_reason = "fresh_spot_tick_missing"
-                    raise RuntimeError("fresh NIFTY WebSocket spot tick unavailable")
                 elif live_mode:
-                    ctx.live_orders_armed = False
-                    ctx.trading_ready = False
-                    ctx.readiness_mode = "DATA_WARMUP"
-                    ctx.effective_mode = "DATA_WARMUP"
-                    ctx.live_block_reason = "outside_market_waiting_for_spot_tick"
-                    LOGGER.warning(
-                        "STARTUP_WS_SPOT_PROOF_TIMEOUT_WARMUP symbol=%s mode=%s",
-                        policy.nifty_internal_symbol,
-                        mode,
-                        extra={"event": "STARTUP_WS_SPOT_PROOF_TIMEOUT_WARMUP"},
-                    )
+                    rest_spot = _resolve_startup_rest_spot_ltp(ctx)
+                    if rest_spot and rest_spot > 0:
+                        ctx.live_orders_armed = False
+                        ctx.trading_ready = False
+                        ctx.readiness_mode = "DATA_WARMUP"
+                        ctx.effective_mode = "DATA_WARMUP"
+                        ctx.live_block_reason = "rest_spot_fallback_waiting_for_ws_proof"
+                        LOGGER.warning(
+                            "STARTUP_SPOT_REST_FALLBACK_USED symbol=%s price=%.2f live_orders_armed=%s",
+                            policy.nifty_internal_symbol,
+                            rest_spot,
+                            False,
+                            extra={
+                                "event": "STARTUP_SPOT_REST_FALLBACK_USED",
+                                "symbol": policy.nifty_internal_symbol,
+                                "price": rest_spot,
+                                "live_orders_armed": False,
+                            },
+                        )
+                        LOGGER.info(
+                            "STARTUP_SPOT_REST_FALLBACK_READY symbol=%s price=%.2f live_proof=false",
+                            policy.nifty_internal_symbol,
+                            rest_spot,
+                            extra={
+                                "event": "STARTUP_SPOT_REST_FALLBACK_READY",
+                                "symbol": policy.nifty_internal_symbol,
+                                "price": rest_spot,
+                                "live_proof": False,
+                            },
+                        )
+                        await _build_and_hydrate_live_basket_from_spot(
+                            ctx,
+                            spot_ltp=float(rest_spot),
+                            configured_mode="LIVE",
+                            hydrate=True,
+                        )
+                        ctx.live_orders_armed = False
+                        if not getattr(ctx, "live_block_reason", None):
+                            ctx.live_block_reason = "rest_spot_fallback_waiting_for_ws_proof"
+                    elif get_market_state() == MarketState.OPEN:
+                        ctx.live_orders_armed = False
+                        ctx.trading_ready = False
+                        ctx.live_block_reason = "fresh_spot_tick_missing"
+                        raise RuntimeError("fresh NIFTY WebSocket spot tick unavailable")
+                    else:
+                        ctx.live_orders_armed = False
+                        ctx.trading_ready = False
+                        ctx.readiness_mode = "DATA_WARMUP"
+                        ctx.effective_mode = "DATA_WARMUP"
+                        ctx.live_block_reason = "outside_market_waiting_for_spot_tick"
+                        LOGGER.warning(
+                            "STARTUP_WS_SPOT_PROOF_TIMEOUT_WARMUP symbol=%s mode=%s",
+                            policy.nifty_internal_symbol,
+                            mode,
+                            extra={"event": "STARTUP_WS_SPOT_PROOF_TIMEOUT_WARMUP"},
+                        )
                 else:
                     LOGGER.warning(
                         "STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE symbol=%s mode=%s",
@@ -8486,6 +8860,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.broker_client,
                 option_universe=ctx.option_universe,
                 market_data_manager=ctx.market_data_manager,
+                active_contract_basket=getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None),
             )
 
             active_futures_symbol = _resolve_active_futures_for_basket(ctx, None)
@@ -9751,40 +10126,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                             pending_runner_symbols.clear()
                             pending_runner_symbols.update(still_pending)
 
-                        if not ctx.option_universe:
-                            await asyncio.sleep(30)
-                            continue
-
-                        spot = (
-                            ctx.market_data_manager.get_cached_ltp(
-                                policy.nifty_internal_symbol,
-                                max_age_seconds=policy.startup_spot_max_age_seconds,
-                                require_ws=False,
-                            )
-                            if ctx.market_data_manager
-                            and hasattr(ctx.market_data_manager, "get_cached_ltp")
-                            else None
-                        )
-                        
-                        # --- Objective 7: Auto ATM Resubscription via InstrumentManager ---
-                        _im = ctx.instrument_manager
-                        if spot and spot > 0 and _im and _im.is_loaded():
-                            target_tokens = _im.select_tokens_for_universe(
-                                base="NIFTY",
-                                spot_price=float(spot),
-                                strikes_around_atm=3,
-                                strike_step=ctx.settings.option_universe.strike_step
-                            )
-                            latest_symbols = set()
-                            for t in target_tokens:
-                                s = _im.get_symbol(t)
-                                if s:
-                                    qualified = f"NFO:{s}" if not s.startswith("NFO:") else s
-                                    if qualified.startswith("NFO:NIFTY"):
-                                        latest_symbols.add(qualified)
-                        else:
-                            latest_symbols = set(
-                                ctx.option_universe.get_current_universe()
+                        active_basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
+                        latest_symbols = set(_option_symbols_from_active_basket(active_basket))
+                        if not latest_symbols:
+                            LOGGER.warning(
+                                "OPTION_UNIVERSE_SYNC_SKIPPED reason=ACTIVE_BASKET_MISSING",
+                                extra={"event": "OPTION_UNIVERSE_SYNC_SKIPPED", "reason": "ACTIVE_BASKET_MISSING"},
                             )
 
                         added, removed = option_universe_controller.update(
@@ -10180,7 +10527,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 startup_trade_ready = True
             else:
-                norm_basket = normalize_active_basket_schema(dict(getattr(ctx, "active_trading_universe", {}) or {}))
+                norm_basket = normalize_active_basket_schema(dict((getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", {}) or {})))
                 LOGGER.exception(
                     "HYDRATION_TRACKING_FAILED error_type=%s error=%s basket_keys=%s selected_ce=%s selected_pe=%s spot_symbol=%s futures_symbol=%s",
                     type(e).__name__,
@@ -10203,17 +10550,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 ctx.live_orders_armed = False
                 ctx.trading_ready = False
-                ctx.live_block_reason = f"hydration_tracking_failed:{e}"
-            configured_mode = str(
-                getattr(ctx.settings, "execution_mode", None)
-                or os.getenv("EXECUTION_MODE", "PAPER")
-            ).upper()
-            if (
-                configured_mode == "LIVE"
-                and get_market_state() == MarketState.OPEN
-                and not is_warmup_like
-            ):
-                raise
+                if norm_basket.get("option_symbols") or norm_basket.get("selected_ce") or norm_basket.get("selected_pe"):
+                    ctx.live_block_reason = f"hydration_tracking_degraded:{type(e).__name__}"
+                    LOGGER.warning(
+                        "HYDRATION_TRACKING_DEGRADED_CONTINUE reason=%s active_basket_available=True",
+                        type(e).__name__,
+                        extra={"event": "HYDRATION_TRACKING_DEGRADED_CONTINUE", "reason": type(e).__name__, "active_basket_available": True},
+                    )
+                else:
+                    ctx.live_block_reason = "ACTIVE_BASKET_MISSING"
+                    LOGGER.warning(
+                        "LIVE_READINESS_BLOCKED reason=ACTIVE_BASKET_MISSING stage=hydration_tracking",
+                        extra={"event": "LIVE_READINESS_BLOCKED", "reason": "ACTIVE_BASKET_MISSING", "stage": "hydration_tracking"},
+                    )
 
     # ---------------------------------------------------------
     # 4. Start subsystems (guarded singleton startup)

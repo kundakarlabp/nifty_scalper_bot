@@ -172,3 +172,79 @@ def test_resolve_active_futures_for_basket_uses_active_universe_when_mdm_unresol
     )
 
     assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == "NFO:NIFTY26MAYFUT"
+
+
+def test_selected_option_token_resolution_accepts_bare_token_map(caplog) -> None:
+    ce = "NFO:NIFTY26JUN25000CE"
+    pe = "NFO:NIFTY26JUN25000PE"
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe={},
+        active_symbol_tokens={},
+        strategy_runner=None,
+        market_data_manager=None,
+        strategy_manager=None,
+        instrument_manager=None,
+        broker_client=None,
+    )
+
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={
+            "selected_ce": ce,
+            "selected_pe": pe,
+            "token_by_symbol": {
+                "NIFTY26JUN25000CE": 2001,
+                "NIFTY26JUN25000PE": 2002,
+            },
+        },
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", ce, pe],
+        atm_strike=25000,
+    )
+
+    assert ctx.active_trading_universe["selected_ce_token"] == 2001
+    assert ctx.active_trading_universe["selected_pe_token"] == 2002
+    assert ctx.active_trading_universe["token_by_symbol"][ce] == 2001
+    assert "option_token_missing" not in caplog.text
+
+
+def test_selected_option_token_resolution_uses_explicit_selected_tokens(caplog) -> None:
+    caplog.set_level("INFO", logger="nifty_scalper_bot.core.app")
+    ce = "NFO:NIFTY26JUN25000CE"
+    pe = "NFO:NIFTY26JUN25000PE"
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe={},
+        active_symbol_tokens={},
+        strategy_runner=None,
+        market_data_manager=None,
+        strategy_manager=None,
+        instrument_manager=None,
+        broker_client=None,
+    )
+
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={
+            "selected_ce": ce,
+            "selected_pe": pe,
+            "selected_ce_token": 2001,
+            "selected_pe_token": 2002,
+        },
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", ce, pe],
+        atm_strike=25000,
+    )
+
+    assert ctx.active_trading_universe["selected_ce_token"] == 2001
+    assert ctx.active_trading_universe["selected_pe_token"] == 2002
+    assert ctx.active_trading_universe["token_by_symbol"][ce] == 2001
+    assert "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED" in caplog.text
+    assert "selected_ce_token=2001" in caplog.text
