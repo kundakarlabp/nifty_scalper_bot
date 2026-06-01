@@ -4321,10 +4321,16 @@ class MarketDataManager:
         """Return whether a symbol has a fresh enough tick age."""
         return self.symbol_data_age_ms(symbol) <= int(max(max_age_ms, 1))
 
-    def _active_option_symbols(self) -> list[str]:
+    def _active_option_symbol_list(self) -> list[str]:
         """Return currently active option symbols used for hard feed checks."""
-        requirements = dict(self._readiness_requirements)
-        symbols = [str(s) for s in requirements.get("options") or [] if s]
+        requirements = self._readiness_requirements if isinstance(self._readiness_requirements, Mapping) else {}
+        raw_symbols = requirements.get("options") or []
+        if isinstance(raw_symbols, str):
+            symbols = [raw_symbols]
+        elif isinstance(raw_symbols, Iterable):
+            symbols = [str(s) for s in raw_symbols if s]
+        else:
+            symbols = []
         if not symbols:
             with self._lock:
                 symbols = [
@@ -4345,41 +4351,152 @@ class MarketDataManager:
         threshold = int(max_age_ms or self._tick_stale_threshold_ms)
         futures_symbol = str(self._readiness_requirements.get("futures") or "")
         if not futures_symbol:
-            return False
+            return True
         return self._is_symbol_fresh(futures_symbol, threshold)
 
     def _are_active_options_fresh(self, max_age_ms: int | None = None) -> bool:
         """Return whether active options feed is fresh enough for trading safety."""
         threshold = int(max_age_ms or self._tick_stale_threshold_ms)
-        option_symbols = self._active_option_symbols()
+        option_symbols = self._active_option_symbol_list()
         if not option_symbols:
             return False
         return all(self._is_symbol_fresh(symbol, threshold) for symbol in option_symbols)
 
-    def trading_feed_health(self, max_age_ms: int | None = None) -> dict[str, Any]:
-        """Return trading-critical feed health where spot is advisory only."""
-        threshold = int(max_age_ms or self._tick_stale_threshold_ms)
-        requirements = dict(self._readiness_requirements)
-        spot_symbol = str(requirements.get("spot") or "NSE:NIFTY")
-        futures_symbol = str(requirements.get("futures") or "")
-        option_symbols = self._active_option_symbols()
-        futures_fresh = self._is_futures_fresh(threshold)
-        options_fresh = self._are_active_options_fresh(threshold)
-        spot_fresh = self._is_spot_fresh(threshold)
-        return {
-            "trading_feed_healthy": futures_fresh and options_fresh,
-            "futures_fresh": futures_fresh,
-            "options_fresh": options_fresh,
-            "spot_fresh": spot_fresh,
-            "spot_symbol": spot_symbol,
-            "spot_age_ms": self.symbol_data_age_ms(spot_symbol),
-            "futures_symbol": futures_symbol,
-            "futures_age_ms": self.symbol_data_age_ms(futures_symbol)
-            if futures_symbol
-            else 1_000_000_000,
-            "option_symbols": option_symbols,
+    def trading_feed_health(self, max_age_ms: int | float | None = None) -> dict[str, Any]:
+        """Return trading-critical feed health where spot is advisory only.
+
+        This method is used by the polling-failover supervisor, so it must be
+        conservative and non-raising even when readiness state is malformed.
+        """
+
+        threshold = int(max(float(max_age_ms or self._tick_stale_threshold_ms), 1.0))
+        fallback: dict[str, Any] = {
+            "trading_feed_healthy": False,
+            "futures_fresh": False,
+            "options_fresh": False,
+            "spot_fresh": False,
+            "spot_symbol": "NSE:NIFTY",
+            "spot_age_ms": 1_000_000_000,
+            "futures_symbol": "",
+            "futures_age_ms": 1_000_000_000,
+            "option_symbols": [],
+            "options_age_ms": {},
             "threshold_ms": threshold,
         }
+        try:
+            reqs = self._readiness_requirements or {}
+            if not isinstance(reqs, Mapping):
+                raise TypeError(f"readiness_requirements_type={type(reqs).__name__}")
+
+            def _scalar_symbol(name: str, default: str = "") -> str:
+                value = reqs.get(name)
+                if value is None or value == "":
+                    return default
+                if isinstance(value, str):
+                    return normalize_symbol(value)
+                raise TypeError(f"{name}_symbol_type={type(value).__name__}")
+
+            def _option_symbol_list(value: Any) -> list[str]:
+                if value is None:
+                    return []
+                if isinstance(value, str):
+                    return [normalize_symbol(value)] if value.strip() else []
+                if isinstance(value, Iterable):
+                    return [normalize_symbol(str(symbol)) for symbol in value if symbol]
+                raise TypeError(f"options_type={type(value).__name__}")
+
+            spot_symbol = _scalar_symbol("spot", "NSE:NIFTY")
+            futures_symbol = _scalar_symbol("futures", "")
+            option_symbols = _option_symbol_list(reqs.get("options") or [])
+            if not option_symbols:
+                with self._lock:
+                    option_symbols = sorted(
+                        {
+                            symbol
+                            for symbol in self._active_subscribed_symbols
+                            if symbol.endswith("CE") or symbol.endswith("PE")
+                        }
+                    )
+
+            def _quote_for_symbol(symbol: str) -> Mapping[str, Any] | None:
+                quote = self.get_quote(symbol)
+                if quote:
+                    return quote
+                return self.get_latest_tick(symbol)
+
+            def _age_for_symbol(symbol: str) -> int | None:
+                if not symbol:
+                    return None
+                quote = _quote_for_symbol(symbol) or {}
+                raw_ts = (
+                    quote.get("timestamp_ms")
+                    or quote.get("last_trade_time_ms")
+                    or quote.get("received_at_ms")
+                )
+                if raw_ts is not None:
+                    try:
+                        raw_ms = float(raw_ts)
+                        if raw_ms > 1_000_000_000_000:
+                            return int(max(0.0, time.time() * 1000.0 - raw_ms))
+                        return int(max(0.0, time.time() * 1000.0 - raw_ms * 1000.0))
+                    except (TypeError, ValueError):
+                        pass
+                raw_ts = quote.get("timestamp") or quote.get("arrival_time") or quote.get("received_at")
+                if isinstance(raw_ts, datetime):
+                    ts = raw_ts.timestamp()
+                    return int(max(0.0, (time.time() - ts) * 1000.0))
+                if raw_ts is not None:
+                    try:
+                        return int(max(0.0, (time.time() - float(raw_ts)) * 1000.0))
+                    except (TypeError, ValueError):
+                        pass
+                age = self.symbol_data_age_ms_or_none(symbol)
+                return age
+
+            def _symbol_fresh(symbol: str) -> tuple[bool, int | None]:
+                age_ms = _age_for_symbol(symbol)
+                return (age_ms is not None and 0 <= int(age_ms) <= threshold), age_ms
+
+            spot_fresh, spot_age_ms = _symbol_fresh(spot_symbol)
+            if futures_symbol:
+                futures_fresh, futures_age_ms = _symbol_fresh(futures_symbol)
+            else:
+                futures_fresh, futures_age_ms = True, None
+
+            option_ages: dict[str, int | None] = {}
+            options_fresh = bool(option_symbols)
+            for symbol in option_symbols:
+                fresh, age_ms = _symbol_fresh(symbol)
+                option_ages[symbol] = age_ms
+                options_fresh = options_fresh and fresh
+
+            return {
+                "trading_feed_healthy": bool(futures_fresh and options_fresh),
+                "futures_fresh": bool(futures_fresh),
+                "options_fresh": bool(options_fresh),
+                "spot_fresh": bool(spot_fresh),
+                "spot_symbol": spot_symbol,
+                "spot_age_ms": spot_age_ms if spot_age_ms is not None else 1_000_000_000,
+                "futures_symbol": futures_symbol,
+                "futures_age_ms": futures_age_ms if futures_age_ms is not None else 1_000_000_000,
+                "option_symbols": option_symbols,
+                "options_age_ms": option_ages,
+                "threshold_ms": threshold,
+            }
+        except Exception as exc:  # noqa: BLE001 - supervisor health must never raise
+            self._logger.warning(
+                "TRADING_FEED_HEALTH_FAILED error_type=%s error=%s",
+                type(exc).__name__,
+                str(exc),
+                extra={
+                    "event": "TRADING_FEED_HEALTH_FAILED",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            fallback["error"] = str(exc)
+            fallback["error_type"] = type(exc).__name__
+            return fallback
 
     def ensure_spot_reference_fresh(
         self,

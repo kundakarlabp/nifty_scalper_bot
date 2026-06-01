@@ -106,3 +106,39 @@ def test_spot_stale_only_does_not_flip_trading_feed_health() -> None:
     _seed_tick(manager, 'NFO:NIFTYATMPE', age_seconds=0.2)
 
     assert manager.trading_feed_health(max_age_ms=5_000)['trading_feed_healthy'] is True
+
+
+def test_trading_feed_health_handles_tuple_fields_without_calling() -> None:
+    manager = _build_manager()
+    manager._readiness_requirements["options"] = (  # noqa: SLF001
+        "NFO:NIFTYATMCE",
+        "NFO:NIFTYATMPE",
+    )
+    _seed_tick(manager, "NFO:NIFTYFUT", age_seconds=0.2)
+    _seed_tick(manager, "NFO:NIFTYATMCE", age_seconds=0.2)
+    _seed_tick(manager, "NFO:NIFTYATMPE", age_seconds=0.2)
+
+    health = manager.trading_feed_health(max_age_ms=5_000)
+
+    assert isinstance(health, dict)
+    assert "futures_fresh" in health
+    assert "options_fresh" in health
+    assert "trading_feed_healthy" in health
+    assert health["futures_fresh"] is True
+    assert health["options_fresh"] is True
+    assert health["trading_feed_healthy"] is True
+
+
+def test_trading_feed_health_never_raises_when_requirements_malformed() -> None:
+    manager = _build_manager()
+    manager._readiness_requirements = {  # noqa: SLF001
+        "options": ("NFO:XCE", "NFO:XPE"),
+        "futures": ("NFO:FUT",),
+        "spot": ("NSE:NIFTY",),
+    }
+
+    health = manager.trading_feed_health(max_age_ms=5_000)
+
+    assert health["trading_feed_healthy"] is False
+    assert health["error_type"] == "TypeError"
+    assert "futures_symbol_type" in health["error"] or "spot_symbol_type" in health["error"]
