@@ -1,4 +1,9 @@
-"""Production ready Zerodha Kite REST and websocket clients."""
+"""Production ready Zerodha Kite REST and websocket clients.
+
+Runtime role:
+- Low-level Zerodha REST adapter for instruments, quotes, orders, and history.
+- Provides broker data to owner modules.
+- Must not own live contract selection."""
 
 from __future__ import annotations
 

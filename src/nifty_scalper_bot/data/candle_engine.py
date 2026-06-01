@@ -1,4 +1,9 @@
-"""Deterministic 1-minute candle engine and strict OHLC validation helpers."""
+"""Deterministic 1-minute candle engine and strict OHLC validation helpers.
+
+Runtime role:
+- Owns tick-to-OHLC bar construction, OHLC validation, and bar readiness.
+- Consumes normalized ticks from MarketDataManager.
+- Must not select contracts."""
 
 from __future__ import annotations
 

@@ -1,4 +1,10 @@
-"""Central market data manager responsible for tick fan-out and broker cache."""
+"""Central market data manager responsible for tick fan-out and broker cache.
+
+Runtime role:
+- Owns subscriptions, quote/depth/OI state, polling fallback, and hydration.
+- Consumes ActiveContractBasket.
+- Must not be the primary contract selector.
+"""
 
 from __future__ import annotations
 from nifty_scalper_bot.core.message_bus import Message, MessageType
@@ -28,6 +34,7 @@ from typing import (
 import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.core.instrument_manager import ActiveContractBasket
 from nifty_scalper_bot.data.candle_engine import CandleEngine
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.normalizers import normalize_history_row
@@ -346,6 +353,13 @@ class MarketDataManager:
             "MDM_ACCOUNT_CACHE_TTL", default=60.0, minimum=1.0
         )
         self._account_segment = _resolve_account_segment()
+        self._active_contract_basket: ActiveContractBasket | Mapping[str, Any] | None = None
+        self._active_contract_roles: dict[str, str] = {}
+        self._active_option_symbols: tuple[str, ...] = ()
+        self._active_option_tokens: tuple[int, ...] = ()
+        self._selected_ce: str | None = None
+        self._selected_pe: str | None = None
+        self._active_atm_strike: int | None = None
 
         self._margin_lock = threading.RLock()
         self._margin_snapshot: dict[str, Any] | None = None
@@ -1584,6 +1598,151 @@ class MarketDataManager:
         canonical = canonical_nifty_future_symbol(symbol)
         active = canonical_nifty_future_symbol(active_future)
         return bool(canonical and active and canonical != active)
+
+
+    @staticmethod
+    def _basket_get(basket: ActiveContractBasket | Mapping[str, Any], key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    def set_active_contract_basket(self, basket: ActiveContractBasket | Mapping[str, Any]) -> None:
+        """Store active SSOT basket, register mappings, and reconcile subscriptions."""
+        if basket is None:
+            raise ValueError("active contract basket is required")
+        token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
+        symbol_by_token = dict(self._basket_get(basket, "symbol_by_token", {}) or {})
+        all_symbols = tuple(str(s) for s in (self._basket_get(basket, "all_symbols", None) or self._basket_get(basket, "symbols", ()) or ()) if s)
+        all_tokens = tuple(int(t) for t in (self._basket_get(basket, "all_tokens", ()) or ()) if t)
+        option_symbols = tuple(str(s) for s in (self._basket_get(basket, "option_symbols", ()) or ()) if s)
+        option_tokens = tuple(int(t) for t in (self._basket_get(basket, "option_tokens", ()) or ()) if t)
+        spot_symbol = str(self._basket_get(basket, "spot_symbol", "NSE:NIFTY") or "NSE:NIFTY")
+        future_symbol = self._basket_get(basket, "futures_symbol", None)
+        future_token = self._basket_get(basket, "futures_token", None)
+        selected_ce = self._basket_get(basket, "selected_ce", None)
+        selected_pe = self._basket_get(basket, "selected_pe", None)
+
+        if not token_by_symbol:
+            for sym, tok in zip(all_symbols, all_tokens):
+                token_by_symbol[str(sym)] = int(tok)
+        if not symbol_by_token:
+            symbol_by_token = {int(tok): str(sym) for sym, tok in token_by_symbol.items()}
+        if not all_tokens:
+            all_tokens = tuple(token_by_symbol[s] for s in all_symbols if s in token_by_symbol)
+
+        roles: dict[str, str] = {spot_symbol: "spot_context"}
+        if future_symbol:
+            roles[str(future_symbol)] = "futures_context"
+        for sym in option_symbols:
+            roles[str(sym)] = "tradable_option"
+
+        with self._lock:
+            self._active_contract_basket = basket
+            self._active_option_symbols = option_symbols
+            self._active_option_tokens = option_tokens
+            self._selected_ce = str(selected_ce) if selected_ce else None
+            self._selected_pe = str(selected_pe) if selected_pe else None
+            try:
+                self._active_atm_strike = int(self._basket_get(basket, "atm_strike", 0) or 0) or None
+            except (TypeError, ValueError):
+                self._active_atm_strike = None
+            self._active_contract_roles = roles
+            for sym, tok in token_by_symbol.items():
+                try:
+                    token_int = int(tok)
+                except (TypeError, ValueError):
+                    continue
+                self._token_by_symbol[str(sym)] = token_int
+                self._symbol_to_token[str(sym)] = token_int
+                self._symbol_by_token[token_int] = str(sym)
+                self._token_to_symbol[token_int] = str(sym)
+            self._desired_tokens = {int(t) for t in all_tokens if int(t) > 0}
+            self._active_subscribed_symbols.update(option_symbols)
+
+        if future_symbol:
+            self._active_nifty_future_cache_symbol = str(future_symbol)
+            self._active_nifty_future_cache_until_mono = time.monotonic() + 3600.0
+        self.purge_stale_nifty_futures(str(future_symbol) if future_symbol else None, reason="active_contract_basket_set")
+        self._reconcile_ws_subscriptions()
+        self._logger.info(
+            "MDM_ACTIVE_BASKET_SET selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s option_count=%d token_count=%d",
+            selected_ce, selected_pe, future_symbol, self._basket_get(basket, "atm_strike", None), len(option_symbols), len(self._desired_tokens),
+            extra={"event": "MDM_ACTIVE_BASKET_SET", "selected_ce": selected_ce, "selected_pe": selected_pe, "futures_symbol": future_symbol, "atm_strike": self._basket_get(basket, "atm_strike", None), "option_count": len(option_symbols), "token_count": len(self._desired_tokens)},
+        )
+
+    def get_active_contract_basket(self) -> ActiveContractBasket | Mapping[str, Any] | None:
+        return self._active_contract_basket
+
+    def hydrate_active_contract_basket(self, basket: ActiveContractBasket | Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Hydrate cached quote/OHLC readiness for every active basket symbol."""
+        active = basket or self._active_contract_basket
+        if active is None:
+            return {"hard_ready": False, "symbols": {}, "missing": ["active_contract_basket_missing"]}
+        self._logger.info("MDM_BASKET_HYDRATION_STARTED", extra={"event": "MDM_BASKET_HYDRATION_STARTED"})
+        all_symbols = tuple(str(s) for s in (self._basket_get(active, "all_symbols", None) or self._basket_get(active, "symbols", ()) or ()) if s)
+        token_by_symbol = dict(self._basket_get(active, "token_by_symbol", {}) or {})
+        selected = {self._basket_get(active, "selected_ce", None), self._basket_get(active, "selected_pe", None)}
+        future_symbol = self._basket_get(active, "futures_symbol", None)
+        report: dict[str, Any] = {"hard_ready": True, "symbols": {}, "missing": []}
+        for sym in all_symbols:
+            token = token_by_symbol.get(sym) or self._token_by_symbol.get(sym)
+            role = self._active_contract_roles.get(sym) or ("spot_context" if sym == "NSE:NIFTY" else "futures_context" if future_symbol and sym == str(future_symbol) else "tradable_option")
+            last_error: str | None = None
+            if token is None:
+                last_error = "token_missing"
+                report["missing"].append(f"{sym}:token_missing")
+                if sym in selected or role != "futures_context":
+                    report["hard_ready"] = False
+            else:
+                self.register_symbol(sym, int(token))
+            quote = self.get_latest_tick(sym) or self.get_quote(sym)
+            if quote is None:
+                try:
+                    quote = self.refresh_quote_now(sym, trace_id="basket_hydration")
+                except Exception as exc:  # noqa: BLE001
+                    last_error = f"quote_refresh_failed:{type(exc).__name__}"
+                    quote = None
+            bars = self.get_ohlc_bars(sym)
+            quote_ready = bool(quote)
+            ohlc_ready = bool(bars) or role in {"spot_context", "futures_context"}
+            depth = quote.get("depth") if isinstance(quote, Mapping) else None
+            bid = quote.get("bid") if isinstance(quote, Mapping) else None
+            ask = quote.get("ask") if isinstance(quote, Mapping) else None
+            depth_ready = bool(depth) or (bid is not None and ask is not None)
+            oi_val = None
+            if isinstance(quote, Mapping):
+                oi_val = quote.get("oi", quote.get("open_interest"))
+            ltp_only = quote_ready and not depth_ready
+            source = str(quote.get("source") or quote.get("quote_source") or "cache") if isinstance(quote, Mapping) else "missing"
+            if sym in selected and not quote_ready:
+                report["hard_ready"] = False
+                report["missing"].append(f"{sym}:quote_missing")
+            if sym in selected and not ohlc_ready:
+                report["hard_ready"] = False
+                report["missing"].append(f"{sym}:ohlc_missing")
+            symbol_report = {
+                "token": int(token) if token is not None else None,
+                "role": role,
+                "quote_ready": quote_ready,
+                "ohlc_ready": ohlc_ready,
+                "depth_ready": depth_ready,
+                "oi_ready": (oi_val is not None) if role == "tradable_option" else None,
+                "ltp_only": bool(ltp_only),
+                "last_error": last_error,
+                "source": source,
+            }
+            report["symbols"][sym] = symbol_report
+            self._logger.info(
+                "MDM_BASKET_HYDRATION_SYMBOL_RESULT symbol=%s token=%s role=%s quote_ready=%s ohlc_ready=%s depth_ready=%s oi_ready=%s ltp_only=%s error=%s",
+                sym, symbol_report["token"], role, quote_ready, ohlc_ready, depth_ready, symbol_report["oi_ready"], ltp_only, last_error,
+                extra={"event": "MDM_BASKET_HYDRATION_SYMBOL_RESULT", "symbol": sym, **symbol_report},
+            )
+        self._logger.info(
+            "MDM_BASKET_HYDRATION_COMPLETED hard_ready=%s missing=%s",
+            report["hard_ready"], report["missing"],
+            extra={"event": "MDM_BASKET_HYDRATION_COMPLETED", "hard_ready": report["hard_ready"], "missing": list(report["missing"])},
+        )
+        return report
 
     def request_token_subscription(
         self,

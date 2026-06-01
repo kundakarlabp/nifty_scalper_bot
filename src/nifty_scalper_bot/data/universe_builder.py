@@ -1,4 +1,9 @@
-"""Helpers for instrument-driven symbol universe selection."""
+"""Helpers for instrument-driven symbol universe selection.
+
+Runtime role:
+- Deprecated universe builder wrapper.
+- Runtime delegates to InstrumentManager ActiveContractBasket.
+- Legacy independent universe is non-live/env-gated only."""
 
 from __future__ import annotations
 

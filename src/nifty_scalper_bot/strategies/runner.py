@@ -1,4 +1,9 @@
-"""Event-driven strategy runner coordinating trading managers."""
+"""Event-driven strategy runner coordinating trading managers.
+
+Runtime role:
+- Runs strategy evaluation over active basket symbols and cached bars.
+- Consumes DataHub/MDM context only.
+- Must not own contract selection or direct broker history fetching."""
 
 from __future__ import annotations
 

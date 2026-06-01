@@ -1,4 +1,9 @@
-"""Hardened WebSocket manager for Zerodha KiteTicker streaming."""
+"""Hardened WebSocket manager for Zerodha KiteTicker streaming.
+
+Runtime role:
+- WebSocket token transport: set_tokens/subscribe/unsubscribe/reconnect replay.
+- Consumes clean token sets from MDM.
+- Must not contain futures/options business logic."""
 
 from __future__ import annotations
 

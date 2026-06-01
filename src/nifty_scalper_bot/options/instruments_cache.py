@@ -1,4 +1,9 @@
-"""NFO instrument dump cache for deterministic option resolution."""
+"""NFO instrument dump cache for deterministic option resolution.
+
+Runtime role:
+- Deprecated duplicate instrument cache retained for tests/legacy only.
+- Runtime contract cache belongs to InstrumentManager.
+- Must not be imported by live strategy path."""
 
 from __future__ import annotations
 

@@ -1,4 +1,9 @@
-"""Strike selection helpers for option trading strategies."""
+"""Strike selection helpers for option trading strategies.
+
+Runtime role:
+- Deprecated strike selector wrapper; runtime must delegate to InstrumentManager context.
+- Option-chain ranking is diagnostic/fallback metadata only.
+- Must not be live contract authority."""
 
 from __future__ import annotations
 

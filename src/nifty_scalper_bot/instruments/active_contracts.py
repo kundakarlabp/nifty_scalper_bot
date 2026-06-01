@@ -1,3 +1,8 @@
+"""Runtime role:
+- Parsing/canonicalization utilities for active contract diagnostics.
+- Runtime active contract selection belongs to InstrumentManager.
+- Must not derive live futures from selected options."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -135,6 +140,9 @@ def resolve_active_nifty_future_from_instruments(instruments: Iterable[Mapping[s
 
 
 def derive_nifty_future_from_selected_options(selected_option_symbols: Sequence[Any] | None, *, now: datetime | date | None = None) -> ActiveFutureResolution:
+    import os
+    if os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE":
+        raise RuntimeError("derive_nifty_future_from_selected_options is diagnostic only; live runtime must use InstrumentManager")
     symbols = [canonical_nifty_option_symbol(s) for s in (selected_option_symbols or [])]
     months = set()
     for symbol in [s for s in symbols if s]:

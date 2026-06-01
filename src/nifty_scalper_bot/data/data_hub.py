@@ -1,4 +1,10 @@
-"""Canonical SSOT cache for ticks, positions, orders, and broker facades."""
+"""Canonical SSOT cache for ticks, positions, orders, and broker facades.
+
+Runtime role:
+- Read facade over active basket and market data.
+- Exposes quote/OHLC/OI/context to strategies.
+- Must not select contracts or infer active futures/options independently.
+"""
 
 from __future__ import annotations
 
@@ -124,6 +130,7 @@ class DataHub:
         self._orders: Dict[str, dict[str, Any]] = {}
         self._token_by_symbol: Dict[str, int] = {}
         self._symbol_by_token: Dict[int, str] = {}
+        self._active_contract_basket: Mapping[str, Any] | Any | None = None
         self._tick_subscribers: Dict[str, set[TickListener]] = defaultdict(set)
         self._tick_subscribers_by_token: dict[int, set[TickListener]] = defaultdict(set)
         self._symbol_aliases: dict[str, set[str]] = defaultdict(set)
@@ -192,6 +199,64 @@ class DataHub:
                 self._orders = {str(k): dict(v) for k, v in orders.items() if isinstance(v, dict)}
             if isinstance(positions, dict):
                 self._positions = {k: dict(v) for k, v in positions.items() if isinstance(v, dict)}
+
+
+    @staticmethod
+    def _basket_get(basket: Any, key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    def set_active_contract_basket(self, basket: Mapping[str, Any] | Any) -> None:
+        """Store read-only active basket context supplied by app/MDM."""
+        self._active_contract_basket = basket
+        token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
+        all_symbols = self._basket_get(basket, "all_symbols", None) or self._basket_get(basket, "symbols", ()) or ()
+        all_tokens = self._basket_get(basket, "all_tokens", ()) or ()
+        if not token_by_symbol:
+            token_by_symbol = {str(sym): int(tok) for sym, tok in zip(all_symbols, all_tokens) if sym and tok}
+        with self._lock:
+            for symbol, token in token_by_symbol.items():
+                try:
+                    token_int = int(token)
+                except (TypeError, ValueError):
+                    continue
+                normalized = self._register_symbol_alias(str(symbol), token_int)
+                self._token_by_symbol[normalized] = token_int
+                self._symbol_by_token[token_int] = normalized
+
+    def get_active_contract_basket(self) -> Any | None:
+        basket = self._active_contract_basket
+        if basket is not None:
+            return basket
+        mdm_get = getattr(self._mdm, "get_active_contract_basket", None)
+        if callable(mdm_get):
+            basket = mdm_get()
+            if basket is not None:
+                return basket
+        LOGGER.warning("DATAHUB_ACTIVE_BASKET_UNAVAILABLE", extra={"event": "DATAHUB_ACTIVE_BASKET_UNAVAILABLE"})
+        return None
+
+    def get_selected_option_symbols(self) -> tuple[str | None, str | None]:
+        basket = self.get_active_contract_basket()
+        if basket is None:
+            return None, None
+        return self._basket_get(basket, "selected_ce"), self._basket_get(basket, "selected_pe")
+
+    def get_option_metrics(self, symbol: str) -> dict[str, Any]:
+        quote = self.get_quote(symbol, allow_pull=False)
+        if quote is None:
+            LOGGER.warning("DATAHUB_OPTION_METRICS_MISSING symbol=%s", symbol, extra={"event": "DATAHUB_OPTION_METRICS_MISSING", "symbol": symbol})
+            return {}
+        return {
+            "oi": quote.get("oi", quote.get("open_interest")),
+            "iv": self.get_iv(symbol),
+            "greeks": self.get_greeks(symbol),
+            "bid": quote.get("bid"),
+            "ask": quote.get("ask"),
+            "depth": quote.get("depth"),
+            "source": quote.get("source") or quote.get("quote_source"),
+        }
 
     def checkpoint(self) -> None:
         if self._store is None:
@@ -876,7 +941,10 @@ class DataHub:
                 if t is not None:
                     return dict(t)
         if allow_pull:
-            return self.pull_quote(symbol) or None
+            pulled = self.pull_quote(symbol) or None
+            if pulled is not None:
+                return pulled
+        LOGGER.warning("DATAHUB_QUOTE_MISSING symbol=%s", symbol, extra={"event": "DATAHUB_QUOTE_MISSING", "symbol": symbol})
         return None
 
     def get_tick_by_token(self, token: int) -> Optional[Tick]:
@@ -1448,6 +1516,7 @@ class DataHub:
                 return mdm_fn(symbol)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("get_ohlc_bars delegate failed for %s: %s", symbol, exc)
+        LOGGER.warning("DATAHUB_OHLC_MISSING symbol=%s", symbol, extra={"event": "DATAHUB_OHLC_MISSING", "symbol": symbol})
         return []
 
     def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:
