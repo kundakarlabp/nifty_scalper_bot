@@ -166,6 +166,8 @@ class DataHub:
         self._drift_budget_ms = float(os.getenv("DRIFT_BUDGET_MS", "250"))
         self._warmup_grace_s = float(os.getenv("WARMUP_GRACE_S", "3"))
         self._tick_error_log_cooldown_sec = float(os.getenv("TICK_ERROR_LOG_COOLDOWN_SEC", "30"))
+        self._missing_data_log_cooldown_sec = float(os.getenv("DATAHUB_MISSING_DATA_LOG_COOLDOWN_SEC", "30"))
+        self._missing_data_log_at: dict[tuple[str, str], float] = {}
 
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
         self.tick_bus = TickBus()
@@ -234,7 +236,17 @@ class DataHub:
             basket = mdm_get()
             if basket is not None:
                 return basket
-        LOGGER.warning("DATAHUB_ACTIVE_BASKET_UNAVAILABLE", extra={"event": "DATAHUB_ACTIVE_BASKET_UNAVAILABLE"})
+        self._log_missing_market_data("DATAHUB_ACTIVE_BASKET_UNAVAILABLE", "active_contract_basket")
+        return None
+
+    def get_hydration_report(self) -> Mapping[str, Any] | None:
+        """Return the latest MDM active-basket hydration report when available."""
+        mdm_get = getattr(self._mdm, "get_hydration_report", None)
+        if callable(mdm_get):
+            try:
+                return mdm_get()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("DATAHUB_HYDRATION_REPORT_UNAVAILABLE error=%s", exc)
         return None
 
     def get_selected_option_symbols(self) -> tuple[str | None, str | None]:
@@ -278,10 +290,17 @@ class DataHub:
         return lookup in {self._canonical_quote_symbol(s) for s in selected if s}
 
     def _log_missing_market_data(self, event: str, symbol: Any) -> None:
+        symbol_key = str(symbol)
+        now = self._monotonic()
+        cache_key = (event, symbol_key)
+        last = float(self._missing_data_log_at.get(cache_key, 0.0))
+        if now - last < self._missing_data_log_cooldown_sec:
+            return
+        self._missing_data_log_at[cache_key] = now
         if self._is_active_selected_symbol(symbol):
-            LOGGER.warning("%s symbol=%s", event, symbol, extra={"event": event, "symbol": str(symbol)})
+            LOGGER.warning("%s symbol=%s", event, symbol, extra={"event": event, "symbol": symbol_key})
         else:
-            LOGGER.debug("%s symbol=%s", event, symbol, extra={"event": event, "symbol": str(symbol)})
+            LOGGER.debug("%s symbol=%s", event, symbol, extra={"event": event, "symbol": symbol_key})
 
     def checkpoint(self) -> None:
         if self._store is None:

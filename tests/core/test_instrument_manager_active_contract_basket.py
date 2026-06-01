@@ -88,3 +88,18 @@ def test_select_tokens_for_universe_uses_nearest_option_expiry_not_future_expiry
     monthly_option_tokens = {r["instrument_token"] for r in rows if r.get("expiry") == monthly and r.get("instrument_type") in {"CE", "PE"}}
     assert tokens & weekly_tokens
     assert not (tokens & monthly_option_tokens)
+
+
+def test_instrument_manager_uses_ist_exchange_trading_date(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from nifty_scalper_bot.core import instrument_manager as im
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz == ZoneInfo("Asia/Kolkata")
+            return cls(2026, 6, 2, 1, 0, tzinfo=tz)
+
+    monkeypatch.setattr(im, "datetime", FixedDateTime)
+    assert im._exchange_trading_date().isoformat() == "2026-06-02"

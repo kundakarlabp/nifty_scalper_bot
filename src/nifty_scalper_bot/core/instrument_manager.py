@@ -12,6 +12,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Mapping, Optional
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.instrument_manager")
@@ -52,6 +53,11 @@ class ActiveContractBasket:
     symbol_by_token: Mapping[int, str]
 
     metadata: Mapping[str, Any]
+
+
+def _exchange_trading_date() -> date:
+    """Return the current NSE trading date in IST. TODO: holiday calendar handling."""
+    return datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
 
 def _atm_strike_for_spot(spot: float, step: int) -> int:
@@ -303,7 +309,7 @@ class InstrumentManager:
         Returns: List of upcoming Tuesday expiry dates.
         Raises: None.
         """
-        today = date.today()
+        today = _exchange_trading_date()
         expiries = []
         
         # Find next Tuesday
@@ -383,7 +389,7 @@ class InstrumentManager:
         Raises: None.
         """
         key = str(underlying).strip().upper()
-        today = date.today()
+        today = _exchange_trading_date()
         contracts: List[Dict[str, Any]] = []
 
         with self._lock:
@@ -436,7 +442,7 @@ class InstrumentManager:
         Raises: None.
         """
         key = str(underlying).strip().upper()
-        today = date.today()
+        today = _exchange_trading_date()
         contracts: List[Dict[str, Any]] = []
 
         with self._lock:
@@ -505,7 +511,7 @@ class InstrumentManager:
         if strike_step <= 0:
             raise ValueError("strike_step must be positive")
 
-        today = date.today()
+        today = _exchange_trading_date()
         rows = self._nifty_rows_snapshot()
 
         futures: list[tuple[date, int, dict[str, Any]]] = []
@@ -659,7 +665,7 @@ class InstrumentManager:
         if base_upper in _WELL_KNOWN_TOKENS:
             tokens.add(_WELL_KNOWN_TOKENS[base_upper])
 
-        today = date.today()
+        today = _exchange_trading_date()
         nearest_future: tuple[date, int] | None = None
         nearest_option_expiry: date | None = None
         with self._lock:
