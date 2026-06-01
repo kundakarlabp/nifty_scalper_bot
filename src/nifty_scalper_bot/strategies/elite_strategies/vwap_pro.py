@@ -242,6 +242,16 @@ class VWAPProStrategy(EliteStrategy):
             if early_trend_pullback:
                 score += 1.2
                 reasons.append("early_trend_pullback_context")
+            if (
+                trend_alignment
+                and context_fresh
+                and underlying_direction_confidence >= float(os.getenv("VWAP_CONTEXT_BOOST_MIN_CONFIDENCE", "0.90") or "0.90")
+                and spread_pct <= float(os.getenv("LIVE_MAX_SPREAD_PCT", "0.75") or "0.75")
+                and premium_above_vwap
+            ):
+                boost = float(os.getenv("VWAP_PRO_TREND_CONTEXT_BOOST", "0.5") or "0.5")
+                score = min(10.0, score + boost)
+                reasons.append("trend_context_boost")
             threshold_source = 'trend_aligned' if trend_alignment else 'base'
 
             if score < min_score:

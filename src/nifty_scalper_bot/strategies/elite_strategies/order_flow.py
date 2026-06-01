@@ -169,6 +169,9 @@ class OrderFlowStrategy(EliteStrategy):
             if abs(depth_imbalance) >= 0.15:
                 score += 2.0
                 reasons.append('depth_imbalance')
+            if abs(depth_imbalance) >= 0.50:
+                score += 1.0
+                reasons.append('strong_depth_imbalance')
             tick_supports = tick_direction in {'UP', 'BUY'} if option_premium_domain else ((side == 'CE' and tick_direction in {'UP', 'BUY'}) or (side == 'PE' and tick_direction in {'DOWN', 'SELL'}))
             if tick_supports:
                 score += 2.0
@@ -211,6 +214,47 @@ class OrderFlowStrategy(EliteStrategy):
                 and tick_supports
                 and tick_age_ms <= max_tick_age_ms
             )
+            near_atm_threshold = safe_float_env('STRATEGY_NEAR_ATM_THRESHOLD_POINTS', 50.0)
+            selected_meta_available = any(indicators.get(name) is not None for name in ('is_selected_option', 'strike_distance_from_atm', 'selected_ce', 'selected_pe'))
+            selected_or_near_atm = bool(indicators.get('is_selected_option'))
+            if not selected_or_near_atm and indicators.get('strike_distance_from_atm') is not None:
+                try:
+                    selected_or_near_atm = float(indicators.get('strike_distance_from_atm')) <= near_atm_threshold
+                except (TypeError, ValueError):
+                    selected_or_near_atm = False
+            if is_live_mode and not selected_meta_available:
+                selected_or_near_atm = False
+            conflict_override_requested = bool(
+                not side_alignment_ok
+                and strategy_score >= float(os.getenv('ORDERFLOW_CONFLICT_OVERRIDE_MIN_SCORE', '9.0') or '9.0')
+                and bool(quote_depth_valid)
+                and bool(depth_available)
+                and spread_pct <= trigger_max_spread_pct
+                and bool(context_age_ok)
+                and bool(tick_supports)
+                and tick_age_ms <= max_tick_age_ms
+                and bool(selected_or_near_atm)
+            )
+            conflict_override_applied = False
+            if conflict_override_requested and not trigger_conditions_met:
+                trigger_conditions_met = bool(
+                    allow_orderflow_trigger
+                    and (tradable_quote or not (is_live_mode and require_tradable_quote_live))
+                    and bid > 0.0
+                    and ask > 0.0
+                    and direction_context_ok
+                )
+                conflict_override_applied = bool(trigger_conditions_met)
+                if conflict_override_applied:
+                    LOGGER.info(
+                        'ORDERFLOW_HIGH_CONVICTION_OVERRIDE symbol=%s side=%s score=%.2f spread_pct=%.2f context_age=%s',
+                        symbol,
+                        side,
+                        strategy_score,
+                        spread_pct,
+                        age_raw,
+                        extra={'event': 'ORDERFLOW_HIGH_CONVICTION_OVERRIDE', 'symbol': symbol, 'side': side, 'score': strategy_score, 'spread_pct': spread_pct, 'context_age': age_raw},
+                    )
             trigger_block_reason = ''
             if not allow_orderflow_trigger:
                 trigger_block_reason = 'trigger_role_disabled'
@@ -228,7 +272,7 @@ class OrderFlowStrategy(EliteStrategy):
                 trigger_block_reason = 'context_age_missing'
             elif not context_age_ok:
                 trigger_block_reason = 'context_stale'
-            elif not side_alignment_ok:
+            elif not side_alignment_ok and not conflict_override_applied:
                 trigger_block_reason = 'direction_bias_conflict'
             elif spread_pct > trigger_max_spread_pct:
                 trigger_block_reason = 'spread_too_wide'
@@ -264,6 +308,11 @@ class OrderFlowStrategy(EliteStrategy):
                 'negative_premium_flow_mode': 'hard' if clear_adverse_flow else 'soft',
                 'tick_age_ms': tick_age_ms,
                 'quote_update_version': indicators.get('quote_update_version'),
+                'selected_or_near_atm': selected_or_near_atm,
+                'orderflow_conflict_override_requested': conflict_override_requested,
+                'orderflow_conflict_override_applied': conflict_override_applied,
+                'orderflow_conflict_override': conflict_override_applied,
+                'conflict_override_reason': 'high_conviction_depth_spread_tick_near_atm' if conflict_override_applied else '',
             }
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'

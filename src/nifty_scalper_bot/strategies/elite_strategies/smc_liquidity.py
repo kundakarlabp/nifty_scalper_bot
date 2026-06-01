@@ -231,16 +231,44 @@ class SMCStrategy(EliteStrategy):
             if option_premium_domain:
                 premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))
                 structure_flip = bool(indicators.get('choch_confirmed') or indicators.get('bos_confirmed'))
+                partial_features_used = False
                 if not feature_ready:
-                    self._no_vote('strategy_feature_unavailable')
-                    LOGGER.info(
-                        "SMC_FEATURE_UNAVAILABLE symbol=%s missing_features=%s missing_feature_sources=%s",
-                        symbol,
-                        ",".join(missing_features),
-                        missing_feature_sources,
-                        extra={"event": "SMC_FEATURE_UNAVAILABLE", "symbol": symbol, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources},
+                    fallback_enabled = str(os.getenv("SMC_ALLOW_DERIVED_FEATURE_FALLBACK_LIVE", "false")).lower() in {"1", "true", "yes", "on"}
+                    momentum_min = float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80")
+                    fallback_signal_present = bool(
+                        indicators.get("premium_reclaim")
+                        or indicators.get("bos_confirmed")
+                        or indicators.get("choch_confirmed")
+                        or indicators.get("retest_confirmed")
+                        or (bullish_sweep and displacement_score >= 0.9)
                     )
-                    return None
+                    fallback_allowed = bool(
+                        is_live
+                        and fallback_enabled
+                        and effective_direction in {"CE", "PE"}
+                        and displacement_score >= momentum_min
+                        and fallback_signal_present
+                    )
+                    if fallback_allowed:
+                        partial_features_used = True
+                        LOGGER.info(
+                            "SMC_DERIVED_FEATURE_FALLBACK symbol=%s feature_completeness=%.3f displacement_score=%.3f effective_direction=%s",
+                            symbol,
+                            feature_completeness,
+                            displacement_score,
+                            effective_direction,
+                            extra={"event": "SMC_DERIVED_FEATURE_FALLBACK", "symbol": symbol, "feature_completeness": feature_completeness, "displacement_score": displacement_score, "effective_direction": effective_direction},
+                        )
+                    else:
+                        self._no_vote('strategy_feature_unavailable')
+                        LOGGER.info(
+                            "SMC_FEATURE_UNAVAILABLE symbol=%s missing_features=%s missing_feature_sources=%s",
+                            symbol,
+                            ",".join(missing_features),
+                            missing_feature_sources,
+                            extra={"event": "SMC_FEATURE_UNAVAILABLE", "symbol": symbol, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources},
+                        )
+                        return None
                 if not premium_reversal and not structure_flip:
                     self._no_vote('premium_not_reversing_up')
                     LOGGER.info(
@@ -277,6 +305,7 @@ class SMCStrategy(EliteStrategy):
                     return None
                 side = contract_side
             else:
+                partial_features_used = False
                 side = 'CE' if bullish_sweep else 'PE'
             sweep_level = low if bullish_sweep else high
             choch_confirmed = bool(indicators.get('choch_confirmed'))
@@ -311,6 +340,9 @@ class SMCStrategy(EliteStrategy):
                 reasons.append('clean_invalidation_rr')
 
             strategy_score = max(0.0, min(10.0, score))
+            if partial_features_used:
+                strategy_score = max(0.0, strategy_score - 0.5)
+                reasons.append('derived_feature_fallback')
             min_score = float(os.getenv('SMC_MIN_SCORE_LIVE', '6.5') if is_live else os.getenv('SMC_MIN_SCORE_SHADOW', '4.5'))
             require_structure_live = str(os.getenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'true')).lower() in {'1', 'true', 'yes', 'on'}
             allow_momentum_without_structure = str(os.getenv("SMC_ALLOW_MOMENTUM_WITHOUT_STRUCTURE_LIVE", "true")).lower() in {"1", "true", "yes", "on"}
@@ -497,6 +529,9 @@ class SMCStrategy(EliteStrategy):
                 'premium_stop_distance': max(atr * 1.2, current_price * 0.025, 1.0),
                 'premium_target_rr': 2.0,
                 'premium_reversal_gate_mode': 'hard' if option_premium_domain and not premium_reclaim and not structure_confirmed else 'soft',
+                'partial_features_used': partial_features_used,
+                'feature_completeness': feature_completeness,
+                'smc_fallback_reason': 'derived_feature_fallback' if partial_features_used else '',
             }
             LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', side, strategy_score)
             return EliteSignal(

@@ -62,6 +62,228 @@ REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
 }
 
 
+def _safe_float_value(value: t.Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result
+
+
+def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
+    normalised: list[dict[str, float]] = []
+    rows: t.Iterable[t.Any]
+    if bars is None:
+        rows = []
+    elif hasattr(bars, "tail") and hasattr(bars, "to_dict"):
+        try:
+            rows = bars.tail(100).to_dict("records")
+        except Exception as exc:  # noqa: BLE001 - malformed provider data is non-fatal
+            log.debug(
+                "SMC_OHLCV_NORMALISE_DATAFRAME_FAILED error=%s",
+                exc,
+                extra={"event": "SMC_OHLCV_NORMALISE_DATAFRAME_FAILED", "error": str(exc)},
+            )
+            rows = []
+    elif isinstance(bars, (list, tuple, deque)):
+        rows = bars
+    else:
+        rows = []
+    if not isinstance(rows, (list, tuple, deque)):
+        rows = []
+    for bar in rows:
+        if not isinstance(bar, t.Mapping):
+            continue
+        raw_open = bar.get("open") if bar.get("open") is not None else bar.get("o")
+        raw_high = bar.get("high") if bar.get("high") is not None else bar.get("h")
+        raw_low = bar.get("low") if bar.get("low") is not None else bar.get("l")
+        raw_close = bar.get("close") if bar.get("close") is not None else bar.get("c")
+        raw_volume = bar.get("volume") if bar.get("volume") is not None else bar.get("v")
+        open_v = _safe_float_value(raw_open)
+        high_v = _safe_float_value(raw_high)
+        low_v = _safe_float_value(raw_low)
+        close_v = _safe_float_value(raw_close)
+        volume_v = _safe_float_value(raw_volume)
+        if open_v is None or high_v is None or low_v is None or close_v is None:
+            continue
+        normalised.append({"open": open_v, "high": high_v, "low": low_v, "close": close_v, "volume": float(volume_v if volume_v is not None else 0.0)})
+    return normalised
+
+
+def _extract_option_strike(symbol: str) -> int | None:
+    match = re.search(r"(\d{4,6})(CE|PE)$", str(symbol or "").strip().upper())
+    return int(match.group(1)) if match else None
+
+
+def _enrich_option_candidate_metadata(symbol: str, indicators: t.Mapping[str, t.Any]) -> dict[str, t.Any]:
+    enriched = dict(indicators or {})
+    symbol_norm = str(symbol or "").strip().upper()
+    selected_ce = str(enriched.get("selected_ce") or "").strip().upper()
+    selected_pe = str(enriched.get("selected_pe") or "").strip().upper()
+    selected_same_side = selected_ce if symbol_norm.endswith("CE") else selected_pe if symbol_norm.endswith("PE") else ""
+    selected_symbols = {selected_ce, selected_pe}
+    selected_symbols.discard("")
+    if enriched.get("is_selected_option") is None:
+        enriched["is_selected_option"] = bool(symbol_norm in selected_symbols) if selected_symbols else False
+    if enriched.get("strike_distance_from_atm") is None:
+        symbol_strike = _extract_option_strike(symbol_norm)
+        atm_strike = _safe_float_value(enriched.get("atm_strike"))
+        if symbol_strike is not None and atm_strike is not None:
+            enriched["strike_distance_from_atm"] = abs(float(symbol_strike) - atm_strike)
+        else:
+            selected_strike = _extract_option_strike(selected_same_side)
+            if symbol_strike is not None and selected_strike is not None:
+                enriched["strike_distance_from_atm"] = abs(float(symbol_strike) - float(selected_strike))
+    return enriched
+
+
+def _enrich_smc_pre_strategy(
+    symbol: str,
+    indicators: t.Mapping[str, t.Any],
+    bars: t.Sequence[t.Mapping[str, t.Any]],
+) -> dict[str, t.Any]:
+    enriched = dict(indicators or {})
+    ohlcv = _normalise_ohlcv_bars(bars)
+    bar_count = len(ohlcv)
+    if bar_count < 20:
+        enriched.setdefault("smc_enrichment_bars", bar_count)
+        return enriched
+
+    window = 5
+    scan_start = max(0, bar_count - 100)
+    latest_high: float | None = None
+    latest_low: float | None = None
+    for idx in range(bar_count - 1 - window, scan_start - 1, -1):
+        left = max(0, idx - window)
+        right = min(bar_count, idx + window + 1)
+        segment = ohlcv[left:right]
+        candidate_high = ohlcv[idx]["high"]
+        candidate_low = ohlcv[idx]["low"]
+        if latest_high is None and candidate_high == max(item["high"] for item in segment):
+            latest_high = candidate_high
+        if latest_low is None and candidate_low == min(item["low"] for item in segment):
+            latest_low = candidate_low
+        if latest_high is not None and latest_low is not None:
+            break
+
+    latest = ohlcv[-1]
+    previous = ohlcv[-2]
+    closes = [bar["close"] for bar in ohlcv[-5:]]
+    symbol_side = "CE" if str(symbol).upper().endswith("CE") else "PE" if str(symbol).upper().endswith("PE") else ""
+    direction_bias = str(enriched.get("direction_bias") or enriched.get("underlying_direction_bias") or "").upper()
+    side = symbol_side if symbol_side in {"CE", "PE"} else direction_bias if direction_bias in {"CE", "PE"} else ""
+
+    bos_side: str | None = None
+    bos_confirmed = False
+    if latest_high is not None and any(close > latest_high for close in closes):
+        if side in {"", "CE"}:
+            bos_confirmed = True
+            bos_side = "CE"
+    if latest_low is not None and any(close < latest_low for close in closes):
+        if side in {"", "PE"}:
+            bos_confirmed = True
+            bos_side = "PE"
+
+    choch_side: str | None = None
+    choch_confirmed = False
+    if direction_bias == "CE" and latest_low is not None and any(close < latest_low for close in closes):
+        choch_confirmed = True
+        choch_side = "PE"
+    elif direction_bias == "PE" and latest_high is not None and any(close > latest_high for close in closes):
+        choch_confirmed = True
+        choch_side = "CE"
+
+    premium_current = latest["close"]
+    fallback_price = _safe_float_value(enriched.get("current_price") or enriched.get("ltp") or enriched.get("price"))
+    if premium_current <= 0 and fallback_price is not None:
+        premium_current = fallback_price
+    premium_prev_close = previous["close"]
+    premium_vwap = _safe_float_value(enriched.get("vwap"))
+    if premium_vwap is None:
+        premium_vwap = _safe_float_value(enriched.get("exchange_vwap"))
+    if premium_vwap is None:
+        volume_sum = sum(max(0.0, bar["volume"]) for bar in ohlcv)
+        if volume_sum > 0:
+            premium_vwap = sum(((bar["high"] + bar["low"] + bar["close"]) / 3.0) * max(0.0, bar["volume"]) for bar in ohlcv) / volume_sum
+        else:
+            premium_vwap = premium_current
+
+    tolerance = max(abs(premium_current) * 0.003, 0.05)
+    recent_bars = ohlcv[-5:]
+    retest_confirmed = False
+    if latest_high is not None and side in {"", "CE"}:
+        retest_confirmed = any(abs(bar["low"] - latest_high) <= tolerance or abs(bar["close"] - latest_high) <= tolerance for bar in recent_bars)
+    if not retest_confirmed and latest_low is not None and side in {"", "PE"}:
+        retest_confirmed = any(abs(bar["high"] - latest_low) <= tolerance or abs(bar["close"] - latest_low) <= tolerance for bar in recent_bars)
+    if not retest_confirmed and premium_vwap is not None:
+        retest_confirmed = any(bar["low"] - tolerance <= premium_vwap <= bar["high"] + tolerance for bar in recent_bars)
+
+    current_body = abs(latest["close"] - latest["open"])
+    previous_body = abs(previous["close"] - previous["open"])
+    body_floor = max(current_body, 0.05)
+    lower_wick = min(latest["open"], latest["close"]) - latest["low"]
+    upper_wick = latest["high"] - max(latest["open"], latest["close"])
+    bullish_reversal = bool(latest["close"] > latest["open"] and current_body >= previous_body and lower_wick >= 0.3 * body_floor)
+    bearish_reversal = bool(latest["close"] < latest["open"] and current_body >= previous_body and upper_wick >= 0.3 * body_floor)
+    premium_reclaim = bool(premium_vwap is not None and premium_prev_close < premium_vwap and premium_current >= premium_vwap)
+
+    derived: dict[str, t.Any] = {
+        "swing_high": latest_high,
+        "swing_low": latest_low,
+        "bos_confirmed": bos_confirmed,
+        "bos_side": bos_side,
+        "choch_confirmed": choch_confirmed,
+        "choch_side": choch_side,
+        "retest_confirmed": retest_confirmed,
+        "premium_current": premium_current,
+        "premium_prev_close": premium_prev_close,
+        "premium_vwap": premium_vwap,
+        "premium_reclaim": premium_reclaim,
+        "bullish_reversal": bullish_reversal,
+        "bearish_reversal": bearish_reversal,
+        "smc_enrichment_source": "strategy_manager_pre_strategy",
+        "smc_enrichment_bars": bar_count,
+        "smc_enrichment_lookahead_safe": True,
+    }
+    for key, value in derived.items():
+        if enriched.get(key) is None:
+            enriched[key] = value
+
+    required = ("premium_reclaim", "bullish_reversal", "choch_confirmed", "bos_confirmed", "retest_confirmed")
+    presence_ratio = sum(1 for name in required if enriched.get(name) is not None) / float(len(required))
+    positive_features = [name for name in required if enriched.get(name) is True]
+    positive_feature_count = len(positive_features)
+    if enriched.get("feature_completeness") is None:
+        enriched["feature_completeness"] = presence_ratio
+    enriched["smc_feature_presence_ratio"] = presence_ratio
+    enriched["smc_positive_feature_count"] = positive_feature_count
+    enriched["smc_positive_features"] = positive_features
+    log_throttled(
+        log,
+        f"smc_feature_enriched:{symbol}",
+        "SMC_FEATURE_ENRICHED symbol=%s feature_completeness=%.3f presence_ratio=%.3f positive_feature_count=%s positive_features=%s swing_high=%s swing_low=%s premium_current=%s premium_vwap=%s premium_reclaim=%s bos_confirmed=%s choch_confirmed=%s retest_confirmed=%s",
+        symbol,
+        presence_ratio,
+        presence_ratio,
+        positive_feature_count,
+        positive_features,
+        enriched.get("swing_high"),
+        enriched.get("swing_low"),
+        enriched.get("premium_current"),
+        enriched.get("premium_vwap"),
+        enriched.get("premium_reclaim"),
+        enriched.get("bos_confirmed"),
+        enriched.get("choch_confirmed"),
+        enriched.get("retest_confirmed"),
+        interval_sec=30.0,
+        level=logging.INFO,
+        extra={"event": "SMC_FEATURE_ENRICHED", "symbol": symbol, "feature_completeness": presence_ratio, "presence_ratio": presence_ratio, "positive_feature_count": positive_feature_count, "positive_features": positive_features},
+    )
+    return enriched
+
+
 @dataclass(frozen=True)
 class StrategyNoSignalDecision:
     symbol: str
@@ -1052,6 +1274,18 @@ class StrategyManager(_BaseStrategyManager):
         """
 
         log.debug("Entered StrategyManager.__init__")
+        log.info(
+            "RUNTIME_STRATEGY_MANAGER_CLASS module=%s class=%s id=%s",
+            self.__class__.__module__,
+            self.__class__.__name__,
+            id(self),
+            extra={
+                "event": "RUNTIME_STRATEGY_MANAGER_CLASS",
+                "module": self.__class__.__module__,
+                "class": self.__class__.__name__,
+                "id": id(self),
+            },
+        )
         super().__init__(
             strategies,
             indicator_engine,
@@ -2799,6 +3033,49 @@ class StrategyManager(_BaseStrategyManager):
             if fut_fresh and fut_ctx.get("vwap_slope") is not None:
                 indicators.setdefault("futures_vwap_slope", fut_ctx.get("vwap_slope"))
 
+        if symbol_role == "tradable_option":
+            indicators = _enrich_option_candidate_metadata(symbol, indicators)
+            recent_bars: list[dict[str, float]] = []
+            for owner, method_name in (
+                (self._data_hub, "get_ohlc_bars"),
+                (self._indicator_engine, "get_history"),
+                (self._indicator_engine, "get_bars"),
+            ):
+                if recent_bars or owner is None:
+                    continue
+                method = getattr(owner, method_name, None)
+                if not callable(method):
+                    continue
+                provider_name = owner.__class__.__name__
+                raw_bars: t.Any = []
+                try:
+                    try:
+                        raw_bars = method(symbol, limit=100) if method_name == "get_ohlc_bars" else method(symbol)
+                    except TypeError:
+                        raw_bars = method(symbol)
+                except Exception as exc:  # noqa: BLE001 - provider failure must not crash strategy evaluation
+                    raw_bars = []
+                    log_throttled(
+                        log,
+                        f"smc_history_provider_failed:{symbol}:{provider_name}:{method_name}",
+                        "SMC_HISTORY_PROVIDER_FAILED symbol=%s provider=%s method=%s error=%s",
+                        symbol,
+                        provider_name,
+                        method_name,
+                        str(exc),
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                        extra={
+                            "event": "SMC_HISTORY_PROVIDER_FAILED",
+                            "symbol": symbol,
+                            "provider": provider_name,
+                            "method": method_name,
+                            "error": str(exc),
+                        },
+                    )
+                recent_bars = _normalise_ohlcv_bars(raw_bars)[-100:]
+            indicators = _enrich_smc_pre_strategy(symbol, indicators, recent_bars)
+
         position = self._position_manager.get_position(symbol)
 
         max_votes = max(1, int(getattr(app_settings, "MAX_STRATEGY_VOTES", 5)))
@@ -3693,19 +3970,30 @@ class StrategyManager(_BaseStrategyManager):
             else:
                 allow_candidate_switch = str(os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false")).lower() in {"1", "true", "yes", "on"}
                 max_candidate_switch_distance = float(os.getenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "100") or "100")
-                quote_depth_valid = bool(metadata.get("quote_depth_valid", True))
+                raw_qdv = metadata.get("quote_depth_valid")
+                if raw_qdv is None:
+                    raw_qdv = indicator_map.get("quote_depth_valid")
+                quote_depth_valid = bool(raw_qdv)
+                raw_spread = metadata.get("spread_pct")
+                if raw_spread is None:
+                    raw_spread = indicator_map.get("spread_pct")
+                try:
+                    switch_spread_pct = float(raw_spread) if raw_spread is not None else 999.0
+                except (TypeError, ValueError):
+                    switch_spread_pct = 999.0
+                switch_min_score = 8.0 if best_vote.strategy == "OrderFlow" else 8.5
                 switch_allowed = (
                     allow_candidate_switch
                     and (strike_distance_from_atm is not None)
-                    and raw_trigger_score >= 7.0
-                    and best_vote.confidence >= 0.60
+                    and raw_trigger_score >= switch_min_score
                     and quote_depth_valid
+                    and switch_spread_pct <= self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)
                     and strike_distance_from_atm <= max_candidate_switch_distance
                 )
                 if switch_allowed:
                     metadata_stage = "single_vote_candidate_switch"
                     metadata["candidate_switch_requested"] = True
-                    metadata["candidate_switch_reason"] = "high_raw_score_nearby_strike"
+                    metadata["candidate_switch_reason"] = "high_score_nearby_option_candidate"
                 else:
                     if not score_ok:
                         blocked_reason = "raw_score_below_min"
