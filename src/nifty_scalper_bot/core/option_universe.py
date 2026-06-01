@@ -64,6 +64,8 @@ class OptionUniverseManager:
         self._current_universe: list[str] = []
         self._frozen_universe: set[str] = set()
         self._last_recalc_spot: float | None = None
+        self._active_contract_basket: Any | None = None
+        self._runtime_call_blocked_logged = False
 
     def update_underlying(self, spot_price: float) -> None:
         """Refresh ATM, expiry and universe based on latest underlying spot.
@@ -124,6 +126,66 @@ class OptionUniverseManager:
                 extra={"event": "option_universe_frozen_skip", "atm": new_atm},
             )
 
+    def set_active_contract_basket(self, basket: Any | None) -> None:
+        """Attach the InstrumentManager-selected ActiveContractBasket for runtime callers."""
+        self._active_contract_basket = basket
+
+    @classmethod
+    def from_active_contract_basket(
+        cls,
+        basket: Any,
+        config: OptionUniverseConfig | dict[str, Any] | Any | None = None,
+    ) -> "OptionUniverseManager":
+        """Create a compatibility wrapper backed by an ActiveContractBasket."""
+        manager = cls(config or OptionUniverseConfig())
+        manager.set_active_contract_basket(basket)
+        return manager
+
+    @staticmethod
+    def _basket_option_symbols(basket: Any | None) -> list[str]:
+        if basket is None:
+            return []
+        if isinstance(basket, dict):
+            symbols = basket.get("option_symbols")
+            if not symbols:
+                symbols = [basket.get("selected_ce"), basket.get("selected_pe")]
+        else:
+            symbols = getattr(basket, "option_symbols", None)
+            if not symbols:
+                symbols = [getattr(basket, "selected_ce", None), getattr(basket, "selected_pe", None)]
+        return [str(sym) for sym in dict.fromkeys(symbols or []) if sym]
+
+    @staticmethod
+    def _runtime_mode_is_live() -> bool:
+        return str(os.getenv("EXECUTION_MODE") or os.getenv("MODE") or "").strip().upper() == "LIVE"
+
+    def _runtime_blocked_universe(self, method: str) -> list[str]:
+        if self._runtime_mode_is_live():
+            if not self._runtime_call_blocked_logged:
+                LOGGER.warning(
+                    "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED method=%s reason=active_contract_basket_missing",
+                    method,
+                    extra={
+                        "event": "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED",
+                        "method": method,
+                        "reason": "active_contract_basket_missing",
+                    },
+                )
+                self._runtime_call_blocked_logged = True
+            return []
+        if not _legacy_fallback_enabled():
+            LOGGER.warning(
+                "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED method=%s reason=legacy_fallback_disabled",
+                method,
+                extra={
+                    "event": "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED",
+                    "method": method,
+                    "reason": "legacy_fallback_disabled",
+                },
+            )
+            return []
+        return list(self._current_universe)[:8]
+
     def get_current_universe(self) -> list[str]:
         """Return the latest full option universe.
 
@@ -136,6 +198,11 @@ class OptionUniverseManager:
         Raises:
             None.
         """
+        basket_symbols = self._basket_option_symbols(self._active_contract_basket)
+        if basket_symbols:
+            return basket_symbols[:8]
+        if not self._current_universe:
+            return self._runtime_blocked_universe("get_current_universe")
         return list(self._current_universe)[:8]
 
     def get_primary_symbols(self) -> list[str]:
@@ -154,6 +221,11 @@ class OptionUniverseManager:
 
     def get_filtered_universe(self, spot_ltp: float) -> list[str]:
         """Return the frozen intraday universe while tracking spot diagnostics."""
+        basket_symbols = self._basket_option_symbols(self._active_contract_basket)
+        if basket_symbols:
+            return basket_symbols[:8]
+        if self._runtime_mode_is_live():
+            return self._runtime_blocked_universe("get_filtered_universe")
         if spot_ltp <= 0:
             return list(self._current_universe)[:8]
         threshold = max(1.0, float(self._config.spot_recalc_threshold_points))

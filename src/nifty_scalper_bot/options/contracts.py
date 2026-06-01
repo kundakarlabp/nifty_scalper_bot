@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 LOGGER = logging.getLogger("nifty_scalper_bot.options.contracts")
 
@@ -239,6 +239,34 @@ class OptionsContractStore:
         """
         return self._im.get_exchange(int(token))
     
+    @staticmethod
+    def _basket_get(basket: Any, key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    def _active_basket_symbols(
+        self,
+        basket: Any,
+        *,
+        include_futures: bool,
+        include_spot: bool,
+    ) -> List[str]:
+        symbols: List[str] = []
+        if include_spot:
+            spot_symbol = self._basket_get(basket, "spot_symbol")
+            if spot_symbol:
+                symbols.append(str(spot_symbol))
+        if include_futures:
+            futures_symbol = self._basket_get(basket, "futures_symbol")
+            if futures_symbol:
+                symbols.append(str(futures_symbol))
+        option_symbols = self._basket_get(basket, "option_symbols") or []
+        if not option_symbols:
+            option_symbols = [self._basket_get(basket, "selected_ce"), self._basket_get(basket, "selected_pe")]
+        symbols.extend(str(sym) for sym in option_symbols if sym)
+        return list(dict.fromkeys(symbols))
+
     def get_trading_universe(
         self,
         spot_price: float,
@@ -261,50 +289,63 @@ class OptionsContractStore:
         """
         if spot_price <= 0:
             raise ValueError("spot_price must be positive")
-        
-        # Calculate ATM strike
+
+        get_active = getattr(self._im, "get_active_nifty_contracts", None)
+        if callable(get_active):
+            try:
+                basket = get_active(
+                    float(spot_price),
+                    strikes_around_atm=int(strikes_around_atm),
+                    strike_step=int(strike_step),
+                    include_future=bool(include_futures),
+                )
+                symbols = self._active_basket_symbols(
+                    basket,
+                    include_futures=include_futures,
+                    include_spot=include_spot,
+                )
+                LOGGER.info(
+                    "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_USED symbols=%d include_spot=%s include_futures=%s",
+                    len(symbols),
+                    include_spot,
+                    include_futures,
+                    extra={
+                        "event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_USED",
+                        "symbols": len(symbols),
+                        "include_spot": include_spot,
+                        "include_futures": include_futures,
+                    },
+                )
+                return symbols
+            except Exception as exc:
+                LOGGER.warning(
+                    "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE reason=%s fallback=metadata_cache",
+                    exc,
+                    extra={"event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE", "reason": str(exc)},
+                )
+
+        # Non-live compatibility fallback over already-loaded metadata cache only.
         atm_strike = int(round(spot_price / strike_step) * strike_step)
-        
-        # Find nearest expiry
-        today = date.today()
+        today = datetime.now().date()
         future_expiries = sorted([exp for exp in self._by_expiry.keys() if exp >= today])
         
         if not future_expiries:
             raise RuntimeError("No valid expiry dates found")
         
         active_expiry = future_expiries[0]
-        
-        # Generate target strikes
         target_strikes = {
             atm_strike + (i * strike_step)
             for i in range(-strikes_around_atm, strikes_around_atm + 1)
         }
-        
-        # Collect symbols
         symbols: List[str] = []
-        
-        # Add spot
         if include_spot and self._spot_token:
             symbols.append("NSE:NIFTY")
-        
-        # Add futures
         if include_futures and active_expiry in self._futures:
             symbols.append(self._futures[active_expiry].qualified_symbol)
-        
-        # Add options
         contracts_for_expiry = self._by_expiry.get(active_expiry, [])
         for contract in contracts_for_expiry:
             if contract.strike in target_strikes:
                 symbols.append(contract.qualified_symbol)
-        
-        LOGGER.info(
-            "Trading universe: spot=%.2f ATM=%d expiry=%s symbols=%d",
-            spot_price,
-            atm_strike,
-            active_expiry,
-            len(symbols),
-        )
-        
         return symbols
     
     def get_snapshot(self, spot_price: float) -> ContractsSnapshot:
@@ -316,19 +357,49 @@ class OptionsContractStore:
         Returns:
             ContractsSnapshot with all current contract data.
         """
+        get_active = getattr(self._im, "get_active_nifty_contracts", None)
+        if callable(get_active) and spot_price > 0:
+            try:
+                basket = get_active(float(spot_price), strikes_around_atm=2, strike_step=50, include_future=True)
+                atm_strike = int(self._basket_get(basket, "atm_strike", int(round(spot_price / 50) * 50)))
+                active_expiry = self._basket_get(basket, "option_expiry")
+                option_symbols = [str(sym).split(":", 1)[-1].upper() for sym in (self._basket_get(basket, "option_symbols") or [])]
+                selected_contracts = [self._contracts[sym] for sym in option_symbols if sym in self._contracts]
+                ce_contracts = [c for c in selected_contracts if c.instrument_type == "CE"]
+                pe_contracts = [c for c in selected_contracts if c.instrument_type == "PE"]
+                LOGGER.info(
+                    "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_USED snapshot=True option_count=%d",
+                    len(selected_contracts),
+                    extra={"event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_USED", "snapshot": True, "option_count": len(selected_contracts)},
+                )
+                return ContractsSnapshot(
+                    timestamp=datetime.now(),
+                    spot_price=spot_price,
+                    atm_strike=atm_strike,
+                    active_expiry=active_expiry,
+                    ce_contracts=ce_contracts,
+                    pe_contracts=pe_contracts,
+                    future_token=self._basket_get(basket, "futures_token"),
+                    spot_token=self._basket_get(basket, "spot_token", self._spot_token),
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE reason=%s fallback=snapshot_metadata_cache",
+                    exc,
+                    extra={"event": "OPTIONS_CONTRACT_STORE_ACTIVE_BASKET_UNAVAILABLE", "reason": str(exc), "fallback": "snapshot_metadata_cache"},
+                )
+
+        # Non-live compatibility fallback over loaded metadata cache only.
         atm_strike = int(round(spot_price / 50) * 50)
-        today = date.today()
+        today = datetime.now().date()
         future_expiries = sorted([exp for exp in self._by_expiry.keys() if exp >= today])
         active_expiry = future_expiries[0] if future_expiries else today
-        
         contracts_for_expiry = self._by_expiry.get(active_expiry, [])
         ce_contracts = [c for c in contracts_for_expiry if c.instrument_type == "CE"]
         pe_contracts = [c for c in contracts_for_expiry if c.instrument_type == "PE"]
-        
         future_token = None
         if active_expiry in self._futures:
             future_token = self._futures[active_expiry].instrument_token
-        
         return ContractsSnapshot(
             timestamp=datetime.now(),
             spot_price=spot_price,
