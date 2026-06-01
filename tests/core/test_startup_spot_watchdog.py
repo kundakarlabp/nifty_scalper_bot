@@ -144,7 +144,25 @@ async def test_spot_ws_timeout_uses_rest_fallback_for_basket_build(monkeypatch: 
 
     assert ctx.active_contract_basket["selected_ce"] == "NFO:NIFTY26JUN25000CE"
     assert ctx.live_orders_armed is False
+    assert ctx.live_block_reason is not None
     assert "STARTUP_SPOT_REST_FALLBACK_USED" in caplog.text
+
+
+def test_rest_fallback_get_ltp_runtime_error_does_not_crash(caplog: pytest.LogCaptureFixture) -> None:
+    class RuntimeMdm(_Mdm):
+        def get_cached_ltp(self, *_a: Any, **_k: Any) -> float:
+            return 0.0
+
+        def get_ltp(self, *_a: Any, **_k: Any) -> float:
+            raise RuntimeError("broker_unavailable")
+
+        def refresh_quote_now(self, *_a: Any, **_k: Any) -> dict[str, float]:
+            return {"last_price": 25000.0}
+
+    caplog.set_level("WARNING", logger="nifty_scalper_bot.core.app")
+    assert app._resolve_startup_rest_spot_ltp(_ctx(RuntimeMdm())) == 25000.0
+    assert "STARTUP_SPOT_REST_FALLBACK_FAILED stage=get_ltp" in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -196,6 +214,51 @@ def test_selected_option_tokens_subscribed_after_basket_commit(caplog: pytest.Lo
 
     assert {2001, 2002}.issubset(mdm.desired)
     assert "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED" in caplog.text
+
+
+def test_selected_option_token_resolution_accepts_bare_token_map(caplog: pytest.LogCaptureFixture) -> None:
+    basket = _basket()
+    basket["token_by_symbol"] = {
+        "NIFTY26JUN25000CE": 2001,
+        "NIFTY26JUN25000PE": 2002,
+        "NSE:NIFTY": 256265,
+        "NFO:NIFTY26JUNFUT": 1001,
+    }
+    basket["all_tokens"] = []
+    mdm = _Mdm()
+    ctx = _ctx(mdm)
+    ctx.instrument_manager = None
+    ctx.broker_client = None
+    caplog.set_level("INFO", logger="nifty_scalper_bot.core.app")
+
+    app._commit_active_dynamic_basket(ctx, basket=basket, option_symbols=basket["option_symbols"], symbols=basket["symbols"], atm_strike=25000)
+
+    assert ctx.live_block_reason != "option_token_missing:selected_ce"
+    assert ctx.live_block_reason != "option_token_missing:selected_pe"
+    assert {2001, 2002}.issubset(mdm.desired)
+    assert "selected_ce_token=2001" in caplog.text
+    assert "selected_pe_token=2002" in caplog.text
+
+
+def test_selected_option_token_resolution_uses_explicit_selected_tokens(caplog: pytest.LogCaptureFixture) -> None:
+    basket = _basket()
+    basket["token_by_symbol"] = {"NSE:NIFTY": 256265, "NFO:NIFTY26JUNFUT": 1001}
+    basket["all_tokens"] = [256265, 1001]
+    basket["option_tokens"] = []
+    basket["selected_ce_token"] = 2001
+    basket["selected_pe_token"] = 2002
+    mdm = _Mdm()
+    ctx = _ctx(mdm)
+    ctx.instrument_manager = None
+    ctx.broker_client = None
+    caplog.set_level("INFO", logger="nifty_scalper_bot.core.app")
+
+    app._commit_active_dynamic_basket(ctx, basket=basket, option_symbols=basket["option_symbols"], symbols=basket["symbols"], atm_strike=25000)
+
+    assert ctx.live_block_reason != "option_token_missing:selected_ce"
+    assert ctx.live_block_reason != "option_token_missing:selected_pe"
+    assert "selected_ce_token=2001" in caplog.text
+    assert "selected_pe_token=2002" in caplog.text
 
 
 def test_hydration_runs_after_basket_commit() -> None:

@@ -6416,14 +6416,14 @@ def _resolve_startup_rest_spot_ltp(ctx: BotContext, *, max_age_seconds: float | 
         except TypeError:
             try:
                 rest_value = get_ltp_fn(policy.nifty_internal_symbol)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, RuntimeError, ValueError) as exc:
                 LOGGER.warning(
                     "STARTUP_SPOT_REST_FALLBACK_FAILED stage=get_ltp reason=%s",
                     type(exc).__name__,
                     extra={"event": "STARTUP_SPOT_REST_FALLBACK_FAILED", "stage": "get_ltp", "reason": type(exc).__name__},
                 )
                 rest_value = 0.0
-        except ValueError as exc:
+        except (RuntimeError, ValueError) as exc:
             LOGGER.warning(
                 "STARTUP_SPOT_REST_FALLBACK_FAILED stage=get_ltp reason=%s",
                 type(exc).__name__,
@@ -6564,14 +6564,15 @@ async def _wait_for_live_spot_or_raise(
                 policy.nifty_internal_symbol,
             )
         LOGGER.info(
-            "LIVE_SPOT_READY symbol=%s price=%.2f source=rest_fallback",
+            "STARTUP_SPOT_REST_FALLBACK_READY symbol=%s price=%.2f live_proof=%s",
             policy.nifty_internal_symbol,
             float(fallback),
+            False,
             extra={
-                "event": "LIVE_SPOT_READY",
+                "event": "STARTUP_SPOT_REST_FALLBACK_READY",
                 "symbol": policy.nifty_internal_symbol,
                 "price": float(fallback),
-                "source": "rest_fallback",
+                "live_proof": False,
             },
         )
         return float(fallback)
@@ -7626,6 +7627,70 @@ def _hydrate_committed_active_basket(ctx: BotContext, *, reason: str) -> dict[st
         )
     return report
 
+
+def _bare_trading_symbol(symbol: object) -> str:
+    """Return exchange-less trading symbol for token-map alias checks."""
+    raw = str(symbol or "").strip()
+    return raw.split(":", 1)[1] if ":" in raw else raw
+
+
+def _coerce_positive_token(value: object) -> int | None:
+    """Coerce valid positive instrument token values."""
+    try:
+        token = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return token if token > 0 else None
+
+
+def _resolve_committed_symbol_token(
+    ctx: BotContext,
+    committed: Mapping[str, object],
+    symbol: str | None,
+    explicit_token_key: str | None = None,
+) -> int | None:
+    """Resolve a committed basket symbol token from explicit, full, and bare aliases."""
+    if not symbol:
+        return None
+    aliases = list(dict.fromkeys([str(symbol), _bare_trading_symbol(symbol)]))
+    if explicit_token_key:
+        token = _coerce_positive_token(committed.get(explicit_token_key))
+        if token is not None:
+            return token
+    token_map = committed.get("token_by_symbol")
+    if isinstance(token_map, Mapping):
+        for alias in aliases:
+            token = _coerce_positive_token(token_map.get(alias))
+            if token is not None:
+                return token
+    active_tokens = getattr(ctx, "active_symbol_tokens", None)
+    if isinstance(active_tokens, Mapping):
+        for alias in aliases:
+            token = _coerce_positive_token(active_tokens.get(alias))
+            if token is not None:
+                return token
+    instrument_manager = getattr(ctx, "instrument_manager", None)
+    get_token = getattr(instrument_manager, "get_token", None)
+    if callable(get_token):
+        for alias in aliases:
+            try:
+                token = _coerce_positive_token(get_token(alias))
+            except (KeyError, RuntimeError, TypeError, ValueError):
+                token = None
+            if token is not None:
+                return token
+    broker_client = getattr(ctx, "broker_client", None)
+    get_instrument_token = getattr(broker_client, "get_instrument_token", None)
+    if callable(get_instrument_token):
+        for alias in aliases:
+            try:
+                token = _coerce_positive_token(get_instrument_token(alias))
+            except (KeyError, RuntimeError, TypeError, ValueError):
+                token = None
+            if token is not None:
+                return token
+    return None
+
 def _commit_active_dynamic_basket(
     ctx: BotContext,
     *,
@@ -7722,6 +7787,8 @@ def _commit_active_dynamic_basket(
             "spot_token": basket.get("spot_token"),
             "futures_symbol": active_futures_symbol,
             "futures_token": basket.get("futures_token"),
+            "selected_ce_token": basket.get("selected_ce_token"),
+            "selected_pe_token": basket.get("selected_pe_token"),
             "selected_ce": selected_ce,
             "selected_pe": selected_pe,
             "atm_ce": selected_ce,
@@ -7751,6 +7818,25 @@ def _commit_active_dynamic_basket(
     symbol_by_token = dict(basket.get("symbol_by_token") or {})
     all_symbols = list(basket.get("all_symbols") or committed.get("symbols") or [])
     all_tokens = list(basket.get("all_tokens") or [])
+    for explicit_symbol, explicit_key in (
+        (selected_ce, "selected_ce_token"),
+        (selected_pe, "selected_pe_token"),
+        (active_futures_symbol, "futures_token"),
+    ):
+        explicit_token = _coerce_positive_token(committed.get(explicit_key))
+        if explicit_symbol and explicit_token is not None:
+            token_by_symbol.setdefault(str(explicit_symbol), explicit_token)
+            token_by_symbol.setdefault(_bare_trading_symbol(explicit_symbol), explicit_token)
+            symbol_by_token.setdefault(explicit_token, str(explicit_symbol))
+    for sym in list(all_symbols):
+        sym_str = str(sym)
+        bare_sym = _bare_trading_symbol(sym_str)
+        full_token = _coerce_positive_token(token_by_symbol.get(sym_str))
+        bare_token = _coerce_positive_token(token_by_symbol.get(bare_sym))
+        if full_token is None and bare_token is not None:
+            token_by_symbol[sym_str] = bare_token
+        elif full_token is not None and bare_sym:
+            token_by_symbol.setdefault(bare_sym, full_token)
     if active_futures_symbol and active_futures_symbol not in all_symbols:
         all_symbols.insert(1 if all_symbols else 0, active_futures_symbol)
     futures_token = basket.get("futures_token")
@@ -7788,8 +7874,9 @@ def _commit_active_dynamic_basket(
     desired_token_count = int(desired_count_fn()) if callable(desired_count_fn) else len(committed.get("all_tokens") or [])
     ws_count_value = ws_count_fn() if callable(ws_count_fn) else None
     ws_token_count = int(ws_count_value) if ws_count_value is not None else None
-    selected_ce_token = token_by_symbol.get(str(selected_ce)) if selected_ce else None
-    selected_pe_token = token_by_symbol.get(str(selected_pe)) if selected_pe else None
+    selected_ce_token = _resolve_committed_symbol_token(ctx, committed, selected_ce, "selected_ce_token")
+    selected_pe_token = _resolve_committed_symbol_token(ctx, committed, selected_pe, "selected_pe_token")
+    futures_token_for_log = _resolve_committed_symbol_token(ctx, committed, active_futures_symbol, "futures_token")
     if selected_ce and selected_ce_token is None:
         ctx.live_orders_armed = False
         ctx.trading_ready = False
@@ -7805,10 +7892,10 @@ def _commit_active_dynamic_basket(
         selected_pe,
         selected_pe_token,
         active_futures_symbol,
-        committed.get("futures_token"),
+        futures_token_for_log,
         desired_token_count,
         ws_token_count,
-        extra={"event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED", "selected_ce": selected_ce, "selected_ce_token": selected_ce_token, "selected_pe": selected_pe, "selected_pe_token": selected_pe_token, "futures_symbol": active_futures_symbol, "futures_token": committed.get("futures_token"), "desired_token_count": desired_token_count, "ws_token_count": ws_token_count},
+        extra={"event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED", "selected_ce": selected_ce, "selected_ce_token": selected_ce_token, "selected_pe": selected_pe, "selected_pe_token": selected_pe_token, "futures_symbol": active_futures_symbol, "futures_token": futures_token_for_log, "desired_token_count": desired_token_count, "ws_token_count": ws_token_count},
     )
     _hydrate_committed_active_basket(ctx, reason="active_dynamic_basket_commit")
     LOGGER.info(

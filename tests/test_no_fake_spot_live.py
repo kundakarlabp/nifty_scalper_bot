@@ -94,6 +94,8 @@ def test_live_mode_uses_rest_fallback_without_synthetic(
     assert price != _SYNTHETIC_FALLBACK_SPOT
     assert ctx.live_orders_armed is False
     assert "STARTUP_SPOT_REST_FALLBACK_USED" in caplog.text
+    assert "STARTUP_SPOT_REST_FALLBACK_READY" in caplog.text
+    assert "LIVE_SPOT_READY symbol=NSE:NIFTY price=24123.45 source=rest_fallback" not in caplog.text
 
 
 def test_paper_mode_falls_back_to_synthetic_with_log(
