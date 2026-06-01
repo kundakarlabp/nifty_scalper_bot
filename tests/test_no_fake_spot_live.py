@@ -75,7 +75,25 @@ def test_live_mode_without_fresh_tick_raises(
                 _ctx(mdm), timeout=0.1, configured_mode="LIVE"
             )
         )
-    assert "fresh NIFTY WebSocket spot tick unavailable" in str(excinfo.value)
+    assert "spot_ltp_unavailable" in str(excinfo.value)
+
+
+def test_live_mode_uses_rest_fallback_without_synthetic(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    mdm = _StubMDM(ws_tick=None, cached_price=24123.45)
+    ctx = _ctx(mdm)
+    with caplog.at_level("INFO"):
+        price = asyncio.run(
+            _wait_for_live_spot_or_raise(
+                ctx, timeout=0.1, configured_mode="LIVE"
+            )
+        )
+    assert price == pytest.approx(24123.45)
+    assert price != _SYNTHETIC_FALLBACK_SPOT
+    assert ctx.live_orders_armed is False
+    assert "STARTUP_SPOT_REST_FALLBACK_USED" in caplog.text
 
 
 def test_paper_mode_falls_back_to_synthetic_with_log(

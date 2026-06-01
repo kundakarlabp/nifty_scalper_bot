@@ -6381,6 +6381,92 @@ def _coerce_spot_price(tick: Mapping[str, Any] | None) -> float | None:
     return None
 
 
+def _resolve_startup_rest_spot_ltp(ctx: BotContext, *, max_age_seconds: float | None = None) -> float | None:
+    """Resolve bounded startup spot from cached/REST fallback without treating it as live proof."""
+
+    policy = MarketDataPolicy.from_env()
+    mdm = getattr(ctx, "market_data_manager", None)
+    if mdm is None:
+        return None
+    cached_fn = getattr(mdm, "get_cached_ltp", None)
+    if callable(cached_fn):
+        try:
+            cached = float(
+                cached_fn(
+                    policy.nifty_internal_symbol,
+                    max_age_seconds=max_age_seconds,
+                    require_ws=False,
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError) as exc:
+            LOGGER.warning(
+                "STARTUP_SPOT_REST_FALLBACK_FAILED stage=get_cached_ltp reason=%s",
+                type(exc).__name__,
+                extra={"event": "STARTUP_SPOT_REST_FALLBACK_FAILED", "stage": "get_cached_ltp", "reason": type(exc).__name__},
+            )
+            cached = 0.0
+        if cached > 0:
+            return cached
+    get_ltp_fn = getattr(mdm, "get_ltp", None) or getattr(mdm, "get_latest_price", None)
+    if callable(get_ltp_fn):
+        rest_ltp = 0.0
+        try:
+            rest_value = get_ltp_fn(policy.nifty_internal_symbol, allow_rest_fallback=True)
+        except TypeError:
+            try:
+                rest_value = get_ltp_fn(policy.nifty_internal_symbol)
+            except (TypeError, ValueError) as exc:
+                LOGGER.warning(
+                    "STARTUP_SPOT_REST_FALLBACK_FAILED stage=get_ltp reason=%s",
+                    type(exc).__name__,
+                    extra={"event": "STARTUP_SPOT_REST_FALLBACK_FAILED", "stage": "get_ltp", "reason": type(exc).__name__},
+                )
+                rest_value = 0.0
+        except ValueError as exc:
+            LOGGER.warning(
+                "STARTUP_SPOT_REST_FALLBACK_FAILED stage=get_ltp reason=%s",
+                type(exc).__name__,
+                extra={"event": "STARTUP_SPOT_REST_FALLBACK_FAILED", "stage": "get_ltp", "reason": type(exc).__name__},
+            )
+            rest_value = 0.0
+        try:
+            rest_ltp = float(rest_value or 0.0)
+        except (TypeError, ValueError) as exc:
+            LOGGER.warning(
+                "STARTUP_SPOT_REST_FALLBACK_FAILED stage=get_ltp_coerce reason=%s",
+                type(exc).__name__,
+                extra={"event": "STARTUP_SPOT_REST_FALLBACK_FAILED", "stage": "get_ltp_coerce", "reason": type(exc).__name__},
+            )
+        if rest_ltp > 0:
+            return rest_ltp
+    refresh_fn = getattr(mdm, "refresh_quote_now", None)
+    if callable(refresh_fn):
+        try:
+            quote = refresh_fn(policy.nifty_internal_symbol, trace_id="startup_spot_rest_fallback")
+        except TypeError:
+            try:
+                quote = refresh_fn(policy.nifty_internal_symbol)
+            except (TypeError, RuntimeError, ValueError) as exc:
+                LOGGER.warning(
+                    "STARTUP_SPOT_REST_FALLBACK_FAILED stage=refresh_quote_now reason=%s",
+                    type(exc).__name__,
+                    extra={"event": "STARTUP_SPOT_REST_FALLBACK_FAILED", "stage": "refresh_quote_now", "reason": type(exc).__name__},
+                )
+                quote = None
+        except (RuntimeError, ValueError) as exc:
+            LOGGER.warning(
+                "STARTUP_SPOT_REST_FALLBACK_FAILED stage=refresh_quote_now reason=%s",
+                type(exc).__name__,
+                extra={"event": "STARTUP_SPOT_REST_FALLBACK_FAILED", "stage": "refresh_quote_now", "reason": type(exc).__name__},
+            )
+            quote = None
+        price = _coerce_spot_price(quote if isinstance(quote, Mapping) else None)
+        if price and price > 0:
+            return float(price)
+    return None
+
+
 async def _wait_for_live_spot_or_raise(
     ctx: BotContext,
     *,
@@ -6389,11 +6475,11 @@ async def _wait_for_live_spot_or_raise(
 ) -> float:
     """Resolve the NIFTY spot price to use for live option universe selection.
 
-    In LIVE mode this requires fresh WebSocket tick proof for ``NSE:NIFTY``
-    so the ATM basket cannot be built from a stale REST quote or synthetic
-    fallback.  In PAPER/SHADOW mode it allows REST/cached values and finally
-    a synthetic 25600.0 reference (with a clear log) so off-hours
-    simulations keep working.
+    In LIVE mode this first waits for fresh WebSocket proof for ``NSE:NIFTY``.
+    If the bounded wait expires, a positive cached/REST spot may build and
+    hydrate the basket, but live orders remain disarmed until live option
+    quote/depth readiness passes.  PAPER/SHADOW may still use the synthetic
+    25600.0 reference (with a clear log) so off-hours simulations keep working.
 
     Args:
         ctx: Bot context with an attached MarketDataManager.
@@ -6404,8 +6490,8 @@ async def _wait_for_live_spot_or_raise(
         Positive NIFTY spot price.
 
     Raises:
-        RuntimeError: When LIVE mode is active but no fresh WebSocket
-            spot tick is available within ``timeout``.
+        RuntimeError: When LIVE mode is active and neither WebSocket nor
+            cached/REST spot LTP is available within ``timeout``.
     """
 
     policy = MarketDataPolicy.from_env()
@@ -6447,81 +6533,60 @@ async def _wait_for_live_spot_or_raise(
         )
         return float(price)
 
-    allow_rest_live = str(os.getenv("MARKETDATA_ALLOW_REST_SPOT_FOR_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
-    if live_mode and policy.block_live_if_no_ws_spot and not allow_rest_live:
-        cached_probe_fn = getattr(mdm, "get_cached_ltp", None)
-        rest_probe = (
-            float(
-                cached_probe_fn(
-                    policy.nifty_internal_symbol,
-                    max_age_seconds=policy.startup_spot_max_age_seconds,
-                    require_ws=False,
-                )
-                or 0.0
-            )
-            if callable(cached_probe_fn)
-            else 0.0
-        )
-        if rest_probe > 0:
+    # Bounded fallback: REST/cached spot may select and hydrate the option basket,
+    # but it is never live-order proof. Readiness still requires live option quote
+    # quality before live_orders_armed can become true.
+    fallback = _resolve_startup_rest_spot_ltp(
+        ctx,
+        max_age_seconds=policy.startup_spot_max_age_seconds,
+    )
+    if fallback and fallback > 0:
+        if live_mode:
+            ctx.live_orders_armed = False
+            ctx.trading_ready = False
+            ctx.live_block_reason = "live_option_quote_required_after_rest_spot_fallback"
             LOGGER.info(
-                "SPOT_REST_AVAILABLE_BUT_WS_REQUIRED rest_ltp=%.2f reason=live_requires_ws",
-                rest_probe,
+                "STARTUP_SPOT_REST_FALLBACK_USED symbol=%s price=%.2f live_orders_armed=%s",
+                policy.nifty_internal_symbol,
+                float(fallback),
+                bool(getattr(ctx, "live_orders_armed", False)),
                 extra={
-                    "event": "SPOT_REST_AVAILABLE_BUT_WS_REQUIRED",
-                    "rest_ltp": rest_probe,
-                    "reason": "live_requires_ws",
+                    "event": "STARTUP_SPOT_REST_FALLBACK_USED",
+                    "symbol": policy.nifty_internal_symbol,
+                    "price": float(fallback),
+                    "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False)),
                 },
             )
-        raise RuntimeError(
-            "fresh NIFTY WebSocket spot tick unavailable; "
-            "cannot build live option universe"
-        )
-
-    if live_mode and allow_rest_live:
-        LOGGER.error(
-            "SPOT_REST_USED_FOR_LIVE_STARTUP symbol=%s severity=high",
-            policy.nifty_internal_symbol,
-            extra={"event": "SPOT_REST_USED_FOR_LIVE_STARTUP", "symbol": policy.nifty_internal_symbol},
-        )
-
-    # Paper / off-hours fallback path: try cached REST/poll value first.
-    cached_ltp_fn = getattr(mdm, "get_cached_ltp", None)
-    cached = (
-        float(
-            cached_ltp_fn(
-                policy.nifty_internal_symbol,
-                max_age_seconds=policy.startup_spot_max_age_seconds,
-                require_ws=False,
-            )
-            or 0.0
-        )
-        if callable(cached_ltp_fn)
-        else 0.0
-    )
-    if cached > 0:
-        if not live_mode:
+        else:
             LOGGER.info(
                 "STARTUP_SPOT_FALLBACK_PROBE mode=%s source=rest_or_poll symbol=%s",
                 (configured_mode or "PAPER"),
                 policy.nifty_internal_symbol,
             )
         LOGGER.info(
-            "LIVE_SPOT_READY symbol=%s price=%.2f source=cache",
+            "LIVE_SPOT_READY symbol=%s price=%.2f source=rest_fallback",
             policy.nifty_internal_symbol,
-            cached,
+            float(fallback),
             extra={
                 "event": "LIVE_SPOT_READY",
                 "symbol": policy.nifty_internal_symbol,
-                "price": cached,
-                "source": "cache",
+                "price": float(fallback),
+                "source": "rest_fallback",
             },
         )
-        return float(cached)
+        return float(fallback)
 
     if live_mode:
-        raise RuntimeError(
-            "fresh NIFTY spot unavailable; refusing synthetic spot in LIVE mode"
+        ctx.live_orders_armed = False
+        ctx.trading_ready = False
+        ctx.live_block_reason = "spot_ltp_unavailable"
+        LOGGER.warning(
+            "STARTUP_SPOT_PROOF_TIMEOUT symbol=%s timeout=%.2f reason=spot_ltp_unavailable",
+            policy.nifty_internal_symbol,
+            float(timeout),
+            extra={"event": "STARTUP_SPOT_PROOF_TIMEOUT", "symbol": policy.nifty_internal_symbol, "timeout": float(timeout), "reason": "spot_ltp_unavailable"},
         )
+        raise RuntimeError("spot_ltp_unavailable")
 
     LOGGER.warning(
         "SYNTHETIC_SPOT_USED mode=%s price=%.2f reason=no_live_tick",
@@ -7474,7 +7539,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.selected_pe_exec_ready = bool(pe_exec_ready)
     ctx.context_exec_ready = bool(context_exec_ready)
     ctx.broker_ready = bool(broker_ready)
-    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, ce_exec_ready, pe_exec_ready, execution_ready_by_symbol, block_reason)
+    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s trading_ready=%s live_orders_armed=%s ce_quote_ready=%s pe_quote_ready=%s ce_exec_ready=%s pe_exec_ready=%s direction_context_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, bool(ctx.trading_ready), live_orders_armed, ce_quote_fresh, pe_quote_fresh, ce_exec_ready, pe_exec_ready, bool(context_exec_ready), execution_ready_by_symbol, block_reason)
     if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
         ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}))
 
@@ -7714,10 +7779,38 @@ def _commit_active_dynamic_basket(
     mdm_set = getattr(getattr(ctx, "market_data_manager", None), "set_active_contract_basket", None)
     if callable(mdm_set):
         mdm_set(committed)
-    _hydrate_committed_active_basket(ctx, reason="active_dynamic_basket_commit")
     hub_set = getattr(getattr(ctx, "data_hub", None), "set_active_contract_basket", None)
     if callable(hub_set):
         hub_set(committed)
+    mdm = getattr(ctx, "market_data_manager", None)
+    desired_count_fn = getattr(mdm, "desired_token_count", None)
+    ws_count_fn = getattr(mdm, "ws_token_count", None)
+    desired_token_count = int(desired_count_fn()) if callable(desired_count_fn) else len(committed.get("all_tokens") or [])
+    ws_count_value = ws_count_fn() if callable(ws_count_fn) else None
+    ws_token_count = int(ws_count_value) if ws_count_value is not None else None
+    selected_ce_token = token_by_symbol.get(str(selected_ce)) if selected_ce else None
+    selected_pe_token = token_by_symbol.get(str(selected_pe)) if selected_pe else None
+    if selected_ce and selected_ce_token is None:
+        ctx.live_orders_armed = False
+        ctx.trading_ready = False
+        ctx.live_block_reason = "option_token_missing:selected_ce"
+    if selected_pe and selected_pe_token is None:
+        ctx.live_orders_armed = False
+        ctx.trading_ready = False
+        ctx.live_block_reason = "option_token_missing:selected_pe"
+    LOGGER.info(
+        "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED selected_ce=%s selected_ce_token=%s selected_pe=%s selected_pe_token=%s futures_symbol=%s futures_token=%s desired_token_count=%s ws_token_count=%s",
+        selected_ce,
+        selected_ce_token,
+        selected_pe,
+        selected_pe_token,
+        active_futures_symbol,
+        committed.get("futures_token"),
+        desired_token_count,
+        ws_token_count,
+        extra={"event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED", "selected_ce": selected_ce, "selected_ce_token": selected_ce_token, "selected_pe": selected_pe, "selected_pe_token": selected_pe_token, "futures_symbol": active_futures_symbol, "futures_token": committed.get("futures_token"), "desired_token_count": desired_token_count, "ws_token_count": ws_token_count},
+    )
+    _hydrate_committed_active_basket(ctx, reason="active_dynamic_basket_commit")
     LOGGER.info(
         "ACTIVE_CONTRACT_BASKET_COMMITTED selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s option_count=%d token_count=%d",
         selected_ce, selected_pe, active_futures_symbol, atm_strike, len(current_options), len(committed.get("all_tokens") or []),
@@ -7805,22 +7898,29 @@ async def _deferred_basket_hydration_retry(
         await asyncio.sleep(delay_seconds)
         if getattr(ctx, "trading_ready", False) and getattr(ctx, "live_orders_armed", False):
             return
+        LOGGER.info(
+            "DEFERRED_BASKET_RETRY_STARTED attempt=%d/%d",
+            attempt,
+            max_attempts,
+            extra={"event": "DEFERRED_BASKET_RETRY_STARTED", "attempt": attempt, "max_attempts": max_attempts},
+        )
         try:
             spot_ltp = await _wait_for_live_spot_or_raise(
                 ctx,
                 timeout=min(10.0, float(policy.startup_wait_for_ws_spot_seconds or 60.0)),
                 configured_mode=configured_mode,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
             LOGGER.info(
-                "DEFERRED_BASKET_RETRY_WAITING attempt=%d/%d reason=no_fresh_ws_spot",
+                "DEFERRED_BASKET_RETRY_FAILED attempt=%d/%d reason=%s",
                 attempt,
                 max_attempts,
+                str(exc) or "spot_ltp_unavailable",
                 extra={
-                    "event": "DEFERRED_BASKET_RETRY_WAITING",
+                    "event": "DEFERRED_BASKET_RETRY_FAILED",
                     "attempt": attempt,
                     "max_attempts": max_attempts,
-                    "reason": "no_fresh_ws_spot",
+                    "reason": str(exc) or "spot_ltp_unavailable",
                 },
             )
             continue
@@ -7831,6 +7931,15 @@ async def _deferred_basket_hydration_retry(
                 spot_ltp=float(spot_ltp),
                 configured_mode=configured_mode,
             )
+            if isinstance(basket, Mapping) and basket.get("deferred"):
+                LOGGER.info(
+                    "DEFERRED_BASKET_RETRY_FAILED attempt=%d/%d reason=%s",
+                    attempt,
+                    max_attempts,
+                    basket.get("reason") or "basket_build_deferred",
+                    extra={"event": "DEFERRED_BASKET_RETRY_FAILED", "attempt": attempt, "max_attempts": max_attempts, "reason": basket.get("reason") or "basket_build_deferred"},
+                )
+                continue
             if basket and not getattr(ctx, "selected_ce", None):
                 _commit_active_dynamic_basket(
                     ctx,
@@ -7859,16 +7968,16 @@ async def _deferred_basket_hydration_retry(
             return
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
-                "DEFERRED_BASKET_HYDRATION_FAILED attempt=%d/%d error=%s",
+                "DEFERRED_BASKET_RETRY_FAILED attempt=%d/%d reason=%s",
                 attempt,
                 max_attempts,
                 exc,
                 exc_info=True,
                 extra={
-                    "event": "DEFERRED_BASKET_HYDRATION_FAILED",
+                    "event": "DEFERRED_BASKET_RETRY_FAILED",
                     "attempt": attempt,
                     "max_attempts": max_attempts,
-                    "error": str(exc),
+                    "reason": str(exc),
                 },
             )
     LOGGER.error(
@@ -8029,7 +8138,7 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, re
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP"
     ctx.effective_mode = ctx.readiness_mode
-    ctx.live_block_reason = "fresh_ws_spot_unavailable"
+    ctx.live_block_reason = "spot_ltp_unavailable" if reason == "spot_ltp_unavailable" else "fresh_ws_spot_unavailable"
     if bool(getattr(ctx, "deferred_basket_retry_started", False)):
         LOGGER.info("DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s already_scheduled=%s", reason, spot_ltp, True)
         return
@@ -8048,7 +8157,7 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, re
         reason,
         spot_ltp,
         extra={
-            "event": "BASKET_BUILD_DEFERRED",
+            "event": "DEFERRED_BASKET_RETRY_SCHEDULED",
             "reason": reason,
         },
     )
@@ -8196,7 +8305,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                 def _startup_spot_tick_listener(tick: Mapping[str, Any]) -> None:
                     try:
                         symbol = str(tick.get("symbol") or "").upper()
-                        if symbol != policy.nifty_internal_symbol:
+                        token_raw = tick.get("instrument_token") or tick.get("token")
+                        try:
+                            token_int = int(token_raw) if token_raw is not None else None
+                        except (TypeError, ValueError):
+                            token_int = None
+                        spot_aliases = {policy.nifty_internal_symbol, "NIFTY", "NIFTY 50", "NSE:NIFTY50", "NIFTY50"}
+                        if symbol not in spot_aliases and token_int != int(policy.nifty_spot_token):
                             return
                         if ctx.startup_spot_refresh_done:
                             return
@@ -8353,7 +8468,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.websocket_enabled,
                 symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
-            spot_wait_seconds = float(os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "8"))
+            spot_wait_seconds = float(os.getenv("STARTUP_SPOT_WS_PROOF_TIMEOUT_SEC", os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "10")))
             mode = str(getattr(ctx, "effective_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
             live_mode = mode == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).lower() in {"1", "true", "yes", "on"}
             try:
@@ -8380,8 +8495,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                 elif live_mode and get_market_state() == MarketState.OPEN:
                     ctx.live_orders_armed = False
                     ctx.trading_ready = False
-                    ctx.live_block_reason = "fresh_spot_tick_missing"
-                    raise RuntimeError("fresh NIFTY WebSocket spot tick unavailable")
+                    ctx.live_block_reason = "spot_ltp_unavailable"
+                    LOGGER.warning(
+                        "STARTUP_SPOT_PROOF_TIMEOUT symbol=%s timeout=%.2f reason=ws_tick_missing",
+                        policy.nifty_internal_symbol,
+                        spot_wait_seconds,
+                        extra={"event": "STARTUP_SPOT_PROOF_TIMEOUT", "symbol": policy.nifty_internal_symbol, "timeout": spot_wait_seconds, "reason": "ws_tick_missing"},
+                    )
+                    rest_spot = _resolve_startup_rest_spot_ltp(
+                        ctx,
+                        max_age_seconds=policy.startup_spot_max_age_seconds,
+                    )
+                    if rest_spot and rest_spot > 0:
+                        ctx.live_block_reason = "live_option_quote_required_after_rest_spot_fallback"
+                        LOGGER.info(
+                            "STARTUP_SPOT_REST_FALLBACK_USED symbol=%s price=%.2f live_orders_armed=%s",
+                            policy.nifty_internal_symbol,
+                            float(rest_spot),
+                            bool(getattr(ctx, "live_orders_armed", False)),
+                            extra={"event": "STARTUP_SPOT_REST_FALLBACK_USED", "symbol": policy.nifty_internal_symbol, "price": float(rest_spot), "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False))},
+                        )
+                        await _build_and_hydrate_live_basket_from_spot(
+                            ctx,
+                            spot_ltp=float(rest_spot),
+                            configured_mode=mode,
+                            hydrate=True,
+                        )
+                    else:
+                        _schedule_deferred_basket_retry(
+                            ctx,
+                            configured_mode=mode,
+                            reason="spot_ltp_unavailable",
+                            spot_ltp=None,
+                        )
                 elif live_mode:
                     ctx.live_orders_armed = False
                     ctx.trading_ready = False
@@ -8406,8 +8552,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
             except RuntimeError as exc:
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.live_block_reason = str(exc) or "spot_ltp_unavailable"
                 LOGGER.error("STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE symbol=%s reason=%s", policy.nifty_internal_symbol, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE", "symbol": policy.nifty_internal_symbol, "reason": str(exc)})
-                raise
+                _schedule_deferred_basket_retry(
+                    ctx,
+                    configured_mode=mode,
+                    reason=str(exc) or "spot_ltp_unavailable",
+                    spot_ltp=None,
+                )
         except Exception as _ws_spot_first_exc:  # noqa: BLE001
             is_live_configured = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper() == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
             if is_live_configured and get_market_state() == MarketState.OPEN:
