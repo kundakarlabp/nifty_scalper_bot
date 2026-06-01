@@ -95,3 +95,18 @@ def test_non_live_option_chain_fallback_requires_env(monkeypatch):
     )
     assert hub.option_chain_called is True
     assert selected is not None
+
+
+def test_non_live_strike_selector_prefers_active_basket_without_option_chain_env(monkeypatch):
+    monkeypatch.delenv("EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("MODE", raising=False)
+    monkeypatch.delenv("OPTION_CHAIN_SELECTOR_FALLBACK_ENABLED", raising=False)
+    monkeypatch.setattr(strike_module, "OptionResolver", lambda *a, **k: (_ for _ in ()).throw(AssertionError("OptionResolver called")))
+    hub = Hub(_basket())
+    selected = _selector(hub).select_contract(
+        underlying="NIFTY", side="BUY", option_type="CE", underlying_price=25001.0
+    )
+    assert selected is not None
+    assert selected.symbol == "NFO:NIFTY26JUN25000CE"
+    assert selected.metadata["source"] == "active_contract_basket"
+    assert hub.option_chain_called is False

@@ -556,14 +556,7 @@ class StrikeSelector:
                 basket = get_basket()
             except Exception:
                 basket = None
-        if live_mode:
-            if basket is None:
-                LOGGER.warning(
-                    "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING option_type=%s",
-                    requested_option_type,
-                    extra={"event": "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING", "option_type": requested_option_type},
-                )
-                return None
+        if basket is not None:
             selected = self._contract_from_active_basket(
                 basket, option_type=requested_option_type, underlying_price=underlying_price
             )
@@ -579,6 +572,13 @@ class StrikeSelector:
                 },
             )
             return selected
+        if live_mode:
+            LOGGER.warning(
+                "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING option_type=%s",
+                requested_option_type,
+                extra={"event": "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING", "option_type": requested_option_type},
+            )
+            return None
 
         fallback_enabled = os.getenv("OPTION_CHAIN_SELECTOR_FALLBACK_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
         if not fallback_enabled:
