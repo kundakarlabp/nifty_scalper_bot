@@ -417,41 +417,6 @@ src/nifty_scalper_bot/
     └── pricing.py          # Options pricing utilities
 ```
 
-## Runtime Contract/Data Architecture
-
-| Layer | Owner | Responsibility |
-|---|---|---|
-| Contract / instrument SSOT | `src/nifty_scalper_bot/core/instrument_manager.py` | Loads broker instruments, owns NIFTY spot token, active future, nearest option expiry, ATM CE/PE, nearby option universe, and symbol-token mappings. |
-| Runtime basket commit | `src/nifty_scalper_bot/core/app.py` | Commits `ActiveContractBasket` and propagates it to MDM, DataHub, runner, and StrategyManager. |
-| Market data / hydration | `src/nifty_scalper_bot/data/market_data_manager.py` | Subscribes `basket.all_tokens`, preserves quote/depth/OI metadata, and reports hydration readiness. |
-| Bars | `src/nifty_scalper_bot/data/candle_engine.py` | Builds and validates tick-to-OHLC bars. |
-| Strategy read facade | `src/nifty_scalper_bot/data/data_hub.py` | Exposes read-only quote, OHLC, OI/IV/greeks, and active basket context. |
-| Strategy evaluation | `src/nifty_scalper_bot/core/strategy_manager.py`, `src/nifty_scalper_bot/strategies/*` | Consumes prepared context and evaluates NIFTY option symbols only. |
-| Execution | `src/nifty_scalper_bot/execution/*` | Trades NIFTY options only after risk and execution safety gates pass. |
-
-Runtime flow:
-
-```text
-InstrumentManager.load()
-→ InstrumentManager.get_active_nifty_contracts()
-→ app commits ActiveContractBasket
-→ MDM subscribes basket.all_tokens
-→ MDM hydrates quote/OHLC/depth/OI
-→ CandleEngine builds bars
-→ DataHub exposes reads
-→ StrategyManager evaluates option symbols only
-→ Execution trades options only
-```
-
-## Runtime Troubleshooting
-
-- `active_future_unresolved`: futures context is unavailable; option trading can continue when spot and option context are ready.
-- `option_token_missing`: the selected option is absent from the broker instrument dump or token map.
-- `basket_hydration_failed`: MDM could not seed required quote/OHLC state for selected CE/PE.
-- `option_ohlc_insufficient`: selected option bars are not ready for strategy evaluation.
-- `candidate_not_selected_or_near_atm`: strategy candidate is outside the committed active basket.
-- `direction_context_missing_live`: spot context is missing/stale for live directional evaluation.
-
 ## Getting Started
 
 ### Prerequisites

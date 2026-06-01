@@ -258,6 +258,31 @@ class DataHub:
             "source": quote.get("source") or quote.get("quote_source"),
         }
 
+
+    def _is_active_selected_symbol(self, symbol: Any) -> bool:
+        basket = self._active_contract_basket
+        if basket is None:
+            mdm_get = getattr(self._mdm, "get_active_contract_basket", None)
+            if callable(mdm_get):
+                try:
+                    basket = mdm_get()
+                except Exception:
+                    basket = None
+        if basket is None:
+            return False
+        lookup = self._canonical_quote_symbol(symbol)
+        selected = {
+            self._basket_get(basket, "selected_ce"),
+            self._basket_get(basket, "selected_pe"),
+        }
+        return lookup in {self._canonical_quote_symbol(s) for s in selected if s}
+
+    def _log_missing_market_data(self, event: str, symbol: Any) -> None:
+        if self._is_active_selected_symbol(symbol):
+            LOGGER.warning("%s symbol=%s", event, symbol, extra={"event": event, "symbol": str(symbol)})
+        else:
+            LOGGER.debug("%s symbol=%s", event, symbol, extra={"event": event, "symbol": str(symbol)})
+
     def checkpoint(self) -> None:
         if self._store is None:
             return
@@ -944,7 +969,7 @@ class DataHub:
             pulled = self.pull_quote(symbol) or None
             if pulled is not None:
                 return pulled
-        LOGGER.warning("DATAHUB_QUOTE_MISSING symbol=%s", symbol, extra={"event": "DATAHUB_QUOTE_MISSING", "symbol": symbol})
+        self._log_missing_market_data("DATAHUB_QUOTE_MISSING", symbol)
         return None
 
     def get_tick_by_token(self, token: int) -> Optional[Tick]:
@@ -1516,7 +1541,7 @@ class DataHub:
                 return mdm_fn(symbol)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("get_ohlc_bars delegate failed for %s: %s", symbol, exc)
-        LOGGER.warning("DATAHUB_OHLC_MISSING symbol=%s", symbol, extra={"event": "DATAHUB_OHLC_MISSING", "symbol": symbol})
+        self._log_missing_market_data("DATAHUB_OHLC_MISSING", symbol)
         return []
 
     def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:

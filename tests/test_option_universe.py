@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from nifty_scalper_bot.core.option_universe import (
     OptionUniverseConfig,
     OptionUniverseManager,
 )
+
+
+@pytest.fixture(autouse=True)
+def legacy_option_universe_enabled(monkeypatch):
+    monkeypatch.setenv("OPTION_UNIVERSE_LEGACY_FALLBACK_ENABLED", "true")
+    monkeypatch.delenv("EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("MODE", raising=False)
 
 
 def test_option_universe_builds_atm_range() -> None:
@@ -82,3 +91,23 @@ def test_filtered_universe_reuses_spot_within_threshold() -> None:
     second = manager.get_filtered_universe(18640.0)
 
     assert first == second
+
+
+def test_live_option_universe_manual_generation_raises(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = OptionUniverseManager(
+        OptionUniverseConfig(strike_step=50, strikes_around_atm=1),
+        now_fn=lambda: datetime(2026, 2, 1, 10, 0, 0),
+    )
+    with pytest.raises(RuntimeError, match="InstrumentManager ActiveContractBasket"):
+        manager.update_underlying(18638.0)
+
+
+def test_option_universe_legacy_requires_env(monkeypatch) -> None:
+    monkeypatch.delenv("OPTION_UNIVERSE_LEGACY_FALLBACK_ENABLED", raising=False)
+    manager = OptionUniverseManager(
+        OptionUniverseConfig(strike_step=50, strikes_around_atm=1),
+        now_fn=lambda: datetime(2026, 2, 1, 10, 0, 0),
+    )
+    with pytest.raises(RuntimeError, match="manual generation disabled"):
+        manager.update_underlying(18638.0)

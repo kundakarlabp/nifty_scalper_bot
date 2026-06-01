@@ -8,6 +8,7 @@ Runtime role:
 from __future__ import annotations
 
 from datetime import date, datetime
+import os
 from typing import Any
 
 
@@ -26,7 +27,18 @@ def _coerce_expiry(value: Any) -> date | None:
 
 
 def build_nifty_universe(kite: Any, spot_price: float) -> list[dict[str, int | str]]:
-    """Build NIFTY option universe from broker instruments; Args: kite/spot_price. Returns: symbol-token rows. Raises: ValueError."""
+    """Build legacy NIFTY option universe; disabled in live runtime."""
+    im_method = getattr(kite, "get_active_nifty_contracts", None)
+    if callable(im_method):
+        basket = im_method(float(spot_price))
+        return [
+            {"symbol": sym, "token": int(tok)}
+            for sym, tok in zip(basket.option_symbols, basket.option_tokens)
+        ]
+    live_mode = os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE"
+    legacy_enabled = os.getenv("OPTION_UNIVERSE_LEGACY_FALLBACK_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    if live_mode or not legacy_enabled:
+        raise RuntimeError("UniverseBuilder legacy broker instruments fallback disabled; use InstrumentManager ActiveContractBasket")
     instruments = kite.instruments('NFO')
     atm = round(float(spot_price) / 50.0) * 50
     expiries = [

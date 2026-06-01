@@ -51,13 +51,18 @@ def test_commit_active_dynamic_basket_preserves_old_selected_when_valid() -> Non
     assert selected_pe == old_pe
 
 
-def test_commit_active_dynamic_basket_replaces_stale_futures_with_active_mdm_future() -> None:
+def test_commit_active_dynamic_basket_preserves_requested_ssot_future_and_tokens() -> None:
     class _Mdm:
         def __init__(self) -> None:
             self.rotate_args = None
+            self.received_basket = None
 
         def get_active_nifty_future_symbol_cached(self) -> str:
-            return "NFO:NIFTY26JUNFUT"
+            raise AssertionError("MDM fallback must not override requested SSOT future")
+        def purge_stale_nifty_futures(self, active_symbol, *, reason):
+            return []
+        def set_active_contract_basket(self, basket):
+            self.received_basket = basket
         def maybe_rotate_nifty_futures_context_result(self, current_symbol, **kwargs):
             self.rotate_args = (current_symbol, kwargs)
             return None
@@ -77,19 +82,27 @@ def test_commit_active_dynamic_basket_replaces_stale_futures_with_active_mdm_fut
     pe = "NFO:NIFTY26JUN23900PE"
     app._commit_active_dynamic_basket(
         ctx,
-        basket={"futures_symbol": "NFO:NIFTY26MAYFUT"},
+        basket={
+            "futures_symbol": "NFO:NIFTY26MAYFUT",
+            "futures_token": 222,
+            "all_symbols": ["NSE:NIFTY", "NFO:NIFTY26MAYFUT", ce, pe],
+            "all_tokens": [256265, 222, 11, 12],
+            "token_by_symbol": {"NSE:NIFTY": 256265, "NFO:NIFTY26MAYFUT": 222, ce: 11, pe: 12},
+        },
         option_symbols=[ce, pe],
         symbols=["NSE:NIFTY", "NFO:NIFTY26MAYFUT", ce, pe],
         atm_strike=23900,
     )
     committed = ctx.active_trading_universe
-    assert committed["futures_symbol"] == "NFO:NIFTY26JUNFUT"
-    assert "NFO:NIFTY26MAYFUT" not in committed["symbols"]
-    assert mdm.rotate_args is not None
-    assert mdm.rotate_args[0] == "NFO:NIFTY26MAYFUT"
+    assert committed["futures_symbol"] == "NFO:NIFTY26MAYFUT"
+    assert committed["futures_token"] == 222
+    assert "NFO:NIFTY26MAYFUT" in committed["all_symbols"]
+    assert 222 in committed["all_tokens"]
+    assert committed["token_by_symbol"]["NFO:NIFTY26MAYFUT"] == 222
+    assert mdm.received_basket is committed
 
 
-def test_app_active_basket_uses_active_future_not_requested() -> None:
+def test_app_active_basket_uses_requested_future_not_mdm_fallback() -> None:
     class _Mdm:
         def __init__(self) -> None:
             self.purged: list[tuple[str, str]] = []
@@ -124,10 +137,9 @@ def test_app_active_basket_uses_active_future_not_requested() -> None:
     )
 
     committed = ctx.active_trading_universe
-    assert committed["futures_symbol"] == "NFO:NIFTY26JUNFUT"
-    assert "NFO:NIFTY26JUNFUT" in committed["symbols"]
-    assert "NFO:NIFTY26MAYFUT" not in committed["symbols"]
-    assert mdm.purged == [("NFO:NIFTY26JUNFUT", "active_dynamic_basket_commit")]
+    assert committed["futures_symbol"] == "NFO:NIFTY26MAYFUT"
+    assert "NFO:NIFTY26MAYFUT" in committed["symbols"]
+    assert mdm.purged == [("NFO:NIFTY26MAYFUT", "active_dynamic_basket_commit")]
     assert mdm.rotated[0] == "NFO:NIFTY26MAYFUT"
 
 
@@ -141,7 +153,7 @@ def test_resolve_active_futures_for_basket_no_calendar_fallback(monkeypatch) -> 
     monkeypatch.setattr(app, "_get_current_nifty_futures_symbol", lambda: (_ for _ in ()).throw(AssertionError("calendar fallback used")))
     ctx = SimpleNamespace(market_data_manager=_Mdm())
 
-    assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == ""
+    assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == "NFO:NIFTY26MAYFUT"
 
 
 def test_resolve_active_futures_for_basket_uses_active_universe_when_mdm_unresolved(monkeypatch) -> None:
@@ -159,4 +171,4 @@ def test_resolve_active_futures_for_basket_uses_active_universe_when_mdm_unresol
         strategy_manager=None,
     )
 
-    assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == "NFO:NIFTY26JUNFUT"
+    assert app._resolve_active_futures_for_basket(ctx, "NFO:NIFTY26MAYFUT") == "NFO:NIFTY26MAYFUT"

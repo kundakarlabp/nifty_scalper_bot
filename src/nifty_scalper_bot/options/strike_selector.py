@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from math import isfinite
+import os
 import re
 from typing import (
     TYPE_CHECKING,
@@ -365,6 +366,70 @@ class StrikeSelector:
         self._locked_spot: float | None = None
         self._locked_at: datetime | None = None
 
+
+    @staticmethod
+    def _basket_get(basket: Any, key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    @staticmethod
+    def _symbol_strike(symbol: str) -> float:
+        match = _SYMBOL_STRIKE_PATTERN.search(str(symbol or ""))
+        return float(match.group("strike")) if match else 0.0
+
+    def _contract_from_active_basket(
+        self,
+        basket: Any,
+        *,
+        option_type: str,
+        underlying_price: float,
+    ) -> SelectedContract | None:
+        symbol_key = "selected_ce" if option_type == "CE" else "selected_pe"
+        token_key = "selected_ce_token" if option_type == "CE" else "selected_pe_token"
+        symbol = self._basket_get(basket, symbol_key)
+        if not symbol:
+            return None
+        symbol = str(symbol).strip().upper()
+        token = self._basket_get(basket, token_key)
+        token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
+        if token is None:
+            token = token_by_symbol.get(symbol)
+        quote = None
+        get_quote = getattr(self._data_hub, "get_quote", None)
+        if callable(get_quote):
+            try:
+                quote = get_quote(symbol, allow_pull=False)
+            except TypeError:
+                quote = get_quote(symbol)
+            except Exception:
+                quote = None
+        ltp = 0.0
+        if isinstance(quote, Mapping):
+            for key in ("ltp", "last_price", "price", "close"):
+                value = _coerce_float(quote.get(key))
+                if value is not None and value > 0:
+                    ltp = float(value)
+                    break
+            if ltp <= 0:
+                ltp = float(_mid_price(_coerce_float(quote.get("bid")), _coerce_float(quote.get("ask"))) or 0.0)
+        expiry_raw = self._basket_get(basket, "option_expiry", None)
+        expiry = _parse_expiry(expiry_raw) or datetime.now(timezone.utc)
+        strike = float(self._basket_get(basket, "atm_strike", 0) or 0) or self._symbol_strike(symbol)
+        return SelectedContract(
+            symbol=symbol,
+            option_type=option_type,
+            strike=float(strike),
+            expiry=expiry,
+            ltp=float(ltp),
+            delta=None,
+            metadata={
+                "instrument_token": token,
+                "source": "active_contract_basket",
+                "underlying_price": float(underlying_price),
+            },
+        )
+
     @property
     def settings(self) -> "SelectorSettings":
         """Return selector configuration."""
@@ -482,6 +547,52 @@ class StrikeSelector:
         if requested_option_type is None:
             LOGGER.info("Condition met: selector_missing_option_type")
             return None
+
+        live_mode = os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE"
+        basket = None
+        get_basket = getattr(self._data_hub, "get_active_contract_basket", None)
+        if callable(get_basket):
+            try:
+                basket = get_basket()
+            except Exception:
+                basket = None
+        if live_mode:
+            if basket is None:
+                LOGGER.warning(
+                    "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING option_type=%s",
+                    requested_option_type,
+                    extra={"event": "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING", "option_type": requested_option_type},
+                )
+                return None
+            selected = self._contract_from_active_basket(
+                basket, option_type=requested_option_type, underlying_price=underlying_price
+            )
+            LOGGER.info(
+                "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED source=active_contract_basket live_mode=%s symbol=%s",
+                live_mode,
+                getattr(selected, "symbol", None),
+                extra={
+                    "event": "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED",
+                    "source": "active_contract_basket",
+                    "live_mode": live_mode,
+                    "symbol": getattr(selected, "symbol", None),
+                },
+            )
+            return selected
+
+        fallback_enabled = os.getenv("OPTION_CHAIN_SELECTOR_FALLBACK_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+        if not fallback_enabled:
+            LOGGER.warning(
+                "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED source=fallback_disabled live_mode=%s",
+                live_mode,
+                extra={"event": "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED", "source": "fallback_disabled", "live_mode": live_mode},
+            )
+            return None
+        LOGGER.warning(
+            "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED source=legacy_option_chain live_mode=%s",
+            live_mode,
+            extra={"event": "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED", "source": "legacy_option_chain", "live_mode": live_mode},
+        )
 
         sticky_seconds = int(getattr(self._selector_settings, "option_sticky_seconds", 120) or 120)
         min_move = float(getattr(self._selector_settings, "option_reselection_min_move", 80.0) or 80.0)

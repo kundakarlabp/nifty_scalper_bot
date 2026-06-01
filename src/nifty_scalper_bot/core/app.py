@@ -1084,6 +1084,18 @@ _LATEST_CTX: "BotContext | None" = None
 
 def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None) -> str:
     """Return authoritative active NIFTY futures symbol for runtime basket."""
+    canonical_requested = canonical_nifty_future_symbol(requested)
+    if canonical_requested:
+        LOGGER.info(
+            "ACTIVE_BASKET_FUTURES_REQUESTED_ACCEPTED symbol=%s source=instrument_manager_basket",
+            canonical_requested,
+            extra={
+                "event": "ACTIVE_BASKET_FUTURES_REQUESTED_ACCEPTED",
+                "symbol": canonical_requested,
+                "source": "instrument_manager_basket",
+            },
+        )
+        return canonical_requested
     mdm = getattr(ctx, "market_data_manager", None)
     for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
         method = getattr(mdm, method_name, None)
@@ -7481,12 +7493,32 @@ def _commit_active_dynamic_basket(
             "committed_at": datetime.now(timezone.utc).isoformat(),
         }
     )
-    ctx.active_trading_universe = committed
     committed["option_tokens"] = list(basket.get("option_tokens") or [])
-    committed["all_symbols"] = list(basket.get("all_symbols") or committed.get("symbols") or [])
-    committed["all_tokens"] = list(basket.get("all_tokens") or [])
-    committed["token_by_symbol"] = dict(basket.get("token_by_symbol") or {})
-    committed["symbol_by_token"] = dict(basket.get("symbol_by_token") or {})
+    token_by_symbol = dict(basket.get("token_by_symbol") or {})
+    symbol_by_token = dict(basket.get("symbol_by_token") or {})
+    all_symbols = list(basket.get("all_symbols") or committed.get("symbols") or [])
+    all_tokens = list(basket.get("all_tokens") or [])
+    if active_futures_symbol and active_futures_symbol not in all_symbols:
+        all_symbols.insert(1 if all_symbols else 0, active_futures_symbol)
+    futures_token = basket.get("futures_token")
+    if active_futures_symbol and futures_token is not None:
+        try:
+            fut_token_int = int(futures_token)
+            token_by_symbol.setdefault(active_futures_symbol, fut_token_int)
+            symbol_by_token.setdefault(fut_token_int, active_futures_symbol)
+            if fut_token_int not in [int(t) for t in all_tokens if t is not None]:
+                all_tokens.insert(1 if all_tokens else 0, fut_token_int)
+        except (TypeError, ValueError):
+            pass
+    if token_by_symbol and not all_tokens:
+        all_tokens = [int(token_by_symbol[s]) for s in all_symbols if s in token_by_symbol]
+    if token_by_symbol and all_symbols:
+        all_tokens = [int(token_by_symbol[s]) for s in all_symbols if s in token_by_symbol]
+    committed["all_symbols"] = list(dict.fromkeys(all_symbols))
+    committed["all_tokens"] = list(dict.fromkeys(all_tokens))
+    committed["token_by_symbol"] = token_by_symbol
+    committed["symbol_by_token"] = symbol_by_token
+    ctx.active_trading_universe = committed
     ctx.active_contract_basket = committed
     ctx.active_symbol_tokens = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
     mdm_set = getattr(getattr(ctx, "market_data_manager", None), "set_active_contract_basket", None)

@@ -1633,8 +1633,18 @@ class MarketDataManager:
         roles: dict[str, str] = {spot_symbol: "spot_context"}
         if future_symbol:
             roles[str(future_symbol)] = "futures_context"
+        for sym in all_symbols:
+            if str(sym).upper().endswith("FUT"):
+                roles[str(sym)] = "futures_context"
+                if not future_symbol:
+                    self._logger.warning(
+                        "MDM_BASKET_ROLE_INCONSISTENCY symbol=%s reason=fut_symbol_present_but_futures_symbol_missing",
+                        sym,
+                        extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": str(sym), "reason": "fut_symbol_present_but_futures_symbol_missing"},
+                    )
         for sym in option_symbols:
-            roles[str(sym)] = "tradable_option"
+            if not str(sym).upper().endswith("FUT"):
+                roles[str(sym)] = "tradable_option"
 
         with self._lock:
             self._active_contract_basket = basket
@@ -1686,7 +1696,18 @@ class MarketDataManager:
         report: dict[str, Any] = {"hard_ready": True, "symbols": {}, "missing": []}
         for sym in all_symbols:
             token = token_by_symbol.get(sym) or self._token_by_symbol.get(sym)
-            role = self._active_contract_roles.get(sym) or ("spot_context" if sym == "NSE:NIFTY" else "futures_context" if future_symbol and sym == str(future_symbol) else "tradable_option")
+            if sym in self._active_contract_roles:
+                role = self._active_contract_roles[sym]
+            elif str(sym).upper().endswith("FUT"):
+                role = "futures_context"
+                if not future_symbol:
+                    self._logger.warning(
+                        "MDM_BASKET_ROLE_INCONSISTENCY symbol=%s reason=fut_symbol_present_but_futures_symbol_missing",
+                        sym,
+                        extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": str(sym), "reason": "fut_symbol_present_but_futures_symbol_missing"},
+                    )
+            else:
+                role = "spot_context" if sym == "NSE:NIFTY" else "futures_context" if future_symbol and sym == str(future_symbol) else "tradable_option"
             last_error: str | None = None
             if token is None:
                 last_error = "token_missing"
