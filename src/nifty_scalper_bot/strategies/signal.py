@@ -161,7 +161,7 @@ def build_default_strategy_manager(
                 module,
                 exc,
                 exc_info=exc,
-                extra={"event": "elite_strategy_load_error", "module": module},
+                extra={"event": "elite_strategy_load_error", "strategy_module": module},
             )
             continue
         strategies.append(strategy_instance)

@@ -140,9 +140,21 @@ def test_runtime_strategy_manager_class_is_core_manager_or_enrichment_hook_execu
         manager = StrategyManager([st], _IE(), _PM())
         manager.generate_signal(symbol, 101)
 
+    runtime_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "RUNTIME_STRATEGY_MANAGER_CLASS"
+    ]
+
     assert manager.__class__.__module__ == "nifty_scalper_bot.core.strategy_manager"
     assert st.last["smc_enrichment_source"] == "strategy_manager_pre_strategy"
     assert "RUNTIME_STRATEGY_MANAGER_CLASS" in caplog.text
+    assert "Attempt to overwrite 'module' in LogRecord" not in caplog.text
+    assert "degraded" not in caplog.text.lower()
+    assert runtime_records
+    assert runtime_records[0].strategy_manager_module == "nifty_scalper_bot.core.strategy_manager"
+    assert runtime_records[0].strategy_manager_class == "StrategyManager"
+    assert isinstance(runtime_records[0].strategy_manager_id, int)
 
 
 def test_history_provider_exception_does_not_crash_generate_signal(caplog):

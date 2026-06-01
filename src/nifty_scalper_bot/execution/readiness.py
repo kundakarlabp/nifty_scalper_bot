@@ -25,7 +25,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
             name,
             raw,
             default,
-            extra={"event": "INVALID_HISTORY_POLICY_ENV", "name": name, "value": raw, "default": default},
+            extra={"event": "INVALID_HISTORY_POLICY_ENV", "env_name": name, "value": raw, "default": default},
         )
         return max(default, minimum)
 

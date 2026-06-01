@@ -421,7 +421,7 @@ def _env_csv(*names: str) -> list[str]:
                 os.environ.pop(sentinel, None)
             LOGGER.debug(
                 "Condition met: settings_env_csv_resolved",
-                extra={"event": "settings_env_csv_resolved", "name": name},
+                extra={"event": "settings_env_csv_resolved", "env_name": name},
             )
             return values
         LOGGER.debug(
