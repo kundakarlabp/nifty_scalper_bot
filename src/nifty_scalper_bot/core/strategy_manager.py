@@ -72,24 +72,48 @@ def _safe_float_value(value: t.Any) -> float | None:
     return result
 
 
-def _normalise_ohlcv_bars(bars: t.Sequence[t.Mapping[str, t.Any]] | t.Sequence[t.Any]) -> list[dict[str, float]]:
+def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
     normalised: list[dict[str, float]] = []
-    for bar in bars or []:
+    rows: t.Iterable[t.Any]
+    if bars is None:
+        rows = []
+    elif hasattr(bars, "tail") and hasattr(bars, "to_dict"):
+        try:
+            rows = bars.tail(100).to_dict("records")
+        except Exception as exc:  # noqa: BLE001 - malformed provider data is non-fatal
+            log.debug(
+                "SMC_OHLCV_NORMALISE_DATAFRAME_FAILED error=%s",
+                exc,
+                extra={"event": "SMC_OHLCV_NORMALISE_DATAFRAME_FAILED", "error": str(exc)},
+            )
+            rows = []
+    elif isinstance(bars, (list, tuple, deque)):
+        rows = bars
+    else:
+        rows = []
+    if not isinstance(rows, (list, tuple, deque)):
+        rows = []
+    for bar in rows:
         if not isinstance(bar, t.Mapping):
             continue
-        open_v = _safe_float_value(bar.get("open") or bar.get("o"))
-        high_v = _safe_float_value(bar.get("high") or bar.get("h"))
-        low_v = _safe_float_value(bar.get("low") or bar.get("l"))
-        close_v = _safe_float_value(bar.get("close") or bar.get("c"))
-        volume_v = _safe_float_value(bar.get("volume") or bar.get("v") or 0.0)
+        raw_open = bar.get("open") if bar.get("open") is not None else bar.get("o")
+        raw_high = bar.get("high") if bar.get("high") is not None else bar.get("h")
+        raw_low = bar.get("low") if bar.get("low") is not None else bar.get("l")
+        raw_close = bar.get("close") if bar.get("close") is not None else bar.get("c")
+        raw_volume = bar.get("volume") if bar.get("volume") is not None else bar.get("v")
+        open_v = _safe_float_value(raw_open)
+        high_v = _safe_float_value(raw_high)
+        low_v = _safe_float_value(raw_low)
+        close_v = _safe_float_value(raw_close)
+        volume_v = _safe_float_value(raw_volume)
         if open_v is None or high_v is None or low_v is None or close_v is None:
             continue
-        normalised.append({"open": open_v, "high": high_v, "low": low_v, "close": close_v, "volume": float(volume_v or 0.0)})
+        normalised.append({"open": open_v, "high": high_v, "low": low_v, "close": close_v, "volume": float(volume_v if volume_v is not None else 0.0)})
     return normalised
 
 
 def _extract_option_strike(symbol: str) -> int | None:
-    match = re.search(r"(\d{5})(CE|PE)$", str(symbol or "").strip().upper())
+    match = re.search(r"(\d{4,6})(CE|PE)$", str(symbol or "").strip().upper())
     return int(match.group(1)) if match else None
 
 
@@ -228,15 +252,23 @@ def _enrich_smc_pre_strategy(
             enriched[key] = value
 
     required = ("premium_reclaim", "bullish_reversal", "choch_confirmed", "bos_confirmed", "retest_confirmed")
-    feature_completeness = sum(1 for name in required if enriched.get(name) is not None) / float(len(required))
+    presence_ratio = sum(1 for name in required if enriched.get(name) is not None) / float(len(required))
+    positive_features = [name for name in required if enriched.get(name) is True]
+    positive_feature_count = len(positive_features)
     if enriched.get("feature_completeness") is None:
-        enriched["feature_completeness"] = feature_completeness
+        enriched["feature_completeness"] = presence_ratio
+    enriched["smc_feature_presence_ratio"] = presence_ratio
+    enriched["smc_positive_feature_count"] = positive_feature_count
+    enriched["smc_positive_features"] = positive_features
     log_throttled(
         log,
         f"smc_feature_enriched:{symbol}",
-        "SMC_FEATURE_ENRICHED symbol=%s feature_completeness=%.3f swing_high=%s swing_low=%s premium_current=%s premium_vwap=%s premium_reclaim=%s bos_confirmed=%s choch_confirmed=%s retest_confirmed=%s",
+        "SMC_FEATURE_ENRICHED symbol=%s feature_completeness=%.3f presence_ratio=%.3f positive_feature_count=%s positive_features=%s swing_high=%s swing_low=%s premium_current=%s premium_vwap=%s premium_reclaim=%s bos_confirmed=%s choch_confirmed=%s retest_confirmed=%s",
         symbol,
-        feature_completeness,
+        presence_ratio,
+        presence_ratio,
+        positive_feature_count,
+        positive_features,
         enriched.get("swing_high"),
         enriched.get("swing_low"),
         enriched.get("premium_current"),
@@ -247,7 +279,7 @@ def _enrich_smc_pre_strategy(
         enriched.get("retest_confirmed"),
         interval_sec=30.0,
         level=logging.INFO,
-        extra={"event": "SMC_FEATURE_ENRICHED", "symbol": symbol, "feature_completeness": feature_completeness},
+        extra={"event": "SMC_FEATURE_ENRICHED", "symbol": symbol, "feature_completeness": presence_ratio, "presence_ratio": presence_ratio, "positive_feature_count": positive_feature_count, "positive_features": positive_features},
     )
     return enriched
 
@@ -1242,6 +1274,18 @@ class StrategyManager(_BaseStrategyManager):
         """
 
         log.debug("Entered StrategyManager.__init__")
+        log.info(
+            "RUNTIME_STRATEGY_MANAGER_CLASS module=%s class=%s id=%s",
+            self.__class__.__module__,
+            self.__class__.__name__,
+            id(self),
+            extra={
+                "event": "RUNTIME_STRATEGY_MANAGER_CLASS",
+                "module": self.__class__.__module__,
+                "class": self.__class__.__name__,
+                "id": id(self),
+            },
+        )
         super().__init__(
             strategies,
             indicator_engine,
@@ -3002,11 +3046,34 @@ class StrategyManager(_BaseStrategyManager):
                 method = getattr(owner, method_name, None)
                 if not callable(method):
                     continue
+                provider_name = owner.__class__.__name__
+                raw_bars: t.Any = []
                 try:
-                    raw_bars = method(symbol, limit=100) if method_name == "get_ohlc_bars" else method(symbol)
-                except TypeError:
-                    raw_bars = method(symbol)
-                recent_bars = _normalise_ohlcv_bars(raw_bars or [])[-100:]
+                    try:
+                        raw_bars = method(symbol, limit=100) if method_name == "get_ohlc_bars" else method(symbol)
+                    except TypeError:
+                        raw_bars = method(symbol)
+                except Exception as exc:  # noqa: BLE001 - provider failure must not crash strategy evaluation
+                    raw_bars = []
+                    log_throttled(
+                        log,
+                        f"smc_history_provider_failed:{symbol}:{provider_name}:{method_name}",
+                        "SMC_HISTORY_PROVIDER_FAILED symbol=%s provider=%s method=%s error=%s",
+                        symbol,
+                        provider_name,
+                        method_name,
+                        str(exc),
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                        extra={
+                            "event": "SMC_HISTORY_PROVIDER_FAILED",
+                            "symbol": symbol,
+                            "provider": provider_name,
+                            "method": method_name,
+                            "error": str(exc),
+                        },
+                    )
+                recent_bars = _normalise_ohlcv_bars(raw_bars)[-100:]
             indicators = _enrich_smc_pre_strategy(symbol, indicators, recent_bars)
 
         position = self._position_manager.get_position(symbol)
@@ -3903,9 +3970,15 @@ class StrategyManager(_BaseStrategyManager):
             else:
                 allow_candidate_switch = str(os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false")).lower() in {"1", "true", "yes", "on"}
                 max_candidate_switch_distance = float(os.getenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "100") or "100")
-                quote_depth_valid = bool(metadata.get("quote_depth_valid") or indicator_map.get("quote_depth_valid"))
+                raw_qdv = metadata.get("quote_depth_valid")
+                if raw_qdv is None:
+                    raw_qdv = indicator_map.get("quote_depth_valid")
+                quote_depth_valid = bool(raw_qdv)
+                raw_spread = metadata.get("spread_pct")
+                if raw_spread is None:
+                    raw_spread = indicator_map.get("spread_pct")
                 try:
-                    switch_spread_pct = float(metadata.get("spread_pct") or indicator_map.get("spread_pct") or 999.0)
+                    switch_spread_pct = float(raw_spread) if raw_spread is not None else 999.0
                 except (TypeError, ValueError):
                     switch_spread_pct = 999.0
                 switch_min_score = 8.0 if best_vote.strategy == "OrderFlow" else 8.5

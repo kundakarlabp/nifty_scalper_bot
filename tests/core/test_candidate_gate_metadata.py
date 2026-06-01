@@ -70,3 +70,21 @@ def test_high_score_candidate_switch_only_within_configured_distance(monkeypatch
     assert near.metadata["candidate_switch_requested"] is True
     assert near.metadata["candidate_switch_reason"] == "high_score_nearby_option_candidate"
     assert far is None
+
+
+def test_candidate_switch_does_not_override_metadata_false_with_indicator_true(monkeypatch):
+    monkeypatch.setenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "true")
+    monkeypatch.setenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "75")
+    monkeypatch.setenv("LIVE_MAX_SPREAD_PCT", "0.75")
+    manager = StrategyManager()
+    signal, vote = _signal_vote(50.0)
+    signal.metadata["quote_depth_valid"] = False
+    vote.metadata["quote_depth_valid"] = False
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY26MAY24050CE",
+        signals=[(signal, vote)],
+        indicators={"quote_depth_valid": True, "spread_pct": 0.5},
+    )
+
+    assert result is None

@@ -224,18 +224,19 @@ class OrderFlowStrategy(EliteStrategy):
                     selected_or_near_atm = False
             if is_live_mode and not selected_meta_available:
                 selected_or_near_atm = False
-            conflict_override = bool(
+            conflict_override_requested = bool(
                 not side_alignment_ok
                 and strategy_score >= float(os.getenv('ORDERFLOW_CONFLICT_OVERRIDE_MIN_SCORE', '9.0') or '9.0')
-                and quote_depth_valid is True
-                and depth_available is True
+                and bool(quote_depth_valid)
+                and bool(depth_available)
                 and spread_pct <= trigger_max_spread_pct
-                and context_age_ok is True
-                and tick_supports is True
+                and bool(context_age_ok)
+                and bool(tick_supports)
                 and tick_age_ms <= max_tick_age_ms
-                and selected_or_near_atm is True
+                and bool(selected_or_near_atm)
             )
-            if conflict_override and not trigger_conditions_met:
+            conflict_override_applied = False
+            if conflict_override_requested and not trigger_conditions_met:
                 trigger_conditions_met = bool(
                     allow_orderflow_trigger
                     and (tradable_quote or not (is_live_mode and require_tradable_quote_live))
@@ -243,7 +244,8 @@ class OrderFlowStrategy(EliteStrategy):
                     and ask > 0.0
                     and direction_context_ok
                 )
-                if trigger_conditions_met:
+                conflict_override_applied = bool(trigger_conditions_met)
+                if conflict_override_applied:
                     LOGGER.info(
                         'ORDERFLOW_HIGH_CONVICTION_OVERRIDE symbol=%s side=%s score=%.2f spread_pct=%.2f context_age=%s',
                         symbol,
@@ -270,7 +272,7 @@ class OrderFlowStrategy(EliteStrategy):
                 trigger_block_reason = 'context_age_missing'
             elif not context_age_ok:
                 trigger_block_reason = 'context_stale'
-            elif not side_alignment_ok and not conflict_override:
+            elif not side_alignment_ok and not conflict_override_applied:
                 trigger_block_reason = 'direction_bias_conflict'
             elif spread_pct > trigger_max_spread_pct:
                 trigger_block_reason = 'spread_too_wide'
@@ -307,8 +309,10 @@ class OrderFlowStrategy(EliteStrategy):
                 'tick_age_ms': tick_age_ms,
                 'quote_update_version': indicators.get('quote_update_version'),
                 'selected_or_near_atm': selected_or_near_atm,
-                'orderflow_conflict_override': conflict_override,
-                'conflict_override_reason': 'high_conviction_depth_spread_tick_near_atm' if conflict_override else '',
+                'orderflow_conflict_override_requested': conflict_override_requested,
+                'orderflow_conflict_override_applied': conflict_override_applied,
+                'orderflow_conflict_override': conflict_override_applied,
+                'conflict_override_reason': 'high_conviction_depth_spread_tick_near_atm' if conflict_override_applied else '',
             }
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'

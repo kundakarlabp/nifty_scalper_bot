@@ -46,3 +46,20 @@ def test_orderflow_high_conviction_conflict_override_requires_depth_tick_and_nea
     assert signal.metadata["trigger_conditions_met"] is True
     assert signal.metadata["orderflow_conflict_override"] is True
     assert signal.metadata["conflict_override_reason"] == "high_conviction_depth_spread_tick_near_atm"
+
+
+def test_orderflow_override_requested_vs_applied(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
+    indicators = _ind(score_high=True)
+    indicators["tradable_quote"] = False
+
+    signal = strategy._evaluate_signal("NFO:NIFTY26MAY24000CE", indicators, current_price=100.2)
+
+    assert signal is not None
+    assert signal.metadata["orderflow_conflict_override_requested"] is True
+    assert signal.metadata["orderflow_conflict_override_applied"] is False
+    assert signal.metadata["orderflow_conflict_override"] is False
+    assert signal.metadata["conflict_override_reason"] == ""
+    assert signal.metadata["trigger_conditions_met"] is False
+    assert signal.metadata["trigger_block_reason"] == "tradable_quote_false"
