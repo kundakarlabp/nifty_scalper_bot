@@ -360,6 +360,7 @@ class MarketDataManager:
         self._selected_ce: str | None = None
         self._selected_pe: str | None = None
         self._active_atm_strike: int | None = None
+        self._active_basket_hydration_report: dict[str, Any] | None = None
 
         self._margin_lock = threading.RLock()
         self._margin_snapshot: dict[str, Any] | None = None
@@ -1683,17 +1684,75 @@ class MarketDataManager:
     def get_active_contract_basket(self) -> ActiveContractBasket | Mapping[str, Any] | None:
         return self._active_contract_basket
 
+    def get_hydration_report(self) -> dict[str, Any] | None:
+        """Return the last active-basket hydration report without triggering a fetch."""
+        return dict(self._active_basket_hydration_report) if self._active_basket_hydration_report is not None else None
+
+    @staticmethod
+    def _bars_count(bars: Any) -> int:
+        """Return a safe bar count for list/deque/tuple/DataFrame-like inputs."""
+        if bars is None:
+            return 0
+        if isinstance(bars, pd.DataFrame):
+            return int(len(bars.index))
+        try:
+            return int(len(bars))
+        except (TypeError, ValueError, AttributeError):
+            return 0
+
+    @classmethod
+    def _bars_ready(cls, bars: Any, min_bars: int) -> tuple[bool, int]:
+        """Safely check OHLC readiness without relying on ambiguous truthiness."""
+        count = cls._bars_count(bars)
+        return bool(count >= max(1, int(min_bars or 1))), count
+
+    def _reseed_active_basket_symbol_bars(self, symbol: str, min_bars: int) -> None:
+        """Best-effort selected-option history reseed through the existing hydration path."""
+        hydrate_fn = getattr(self, "hydrate_symbol_history", None)
+        if not callable(hydrate_fn):
+            return
+        try:
+            result = hydrate_fn(
+                symbol,
+                interval="minute",
+                days=max(1, int(math.ceil(float(min_bars) / 375.0)) + 1),
+                max_bars=max(int(min_bars), self._min_required_bars),
+                reason="active_basket_selected_option_reseed",
+            )
+            if inspect.isawaitable(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(result)
+                else:
+                    loop.create_task(result)
+                    self._logger.info(
+                        "MDM_BASKET_HYDRATION_RESEED_DEFERRED symbol=%s reason=running_event_loop",
+                        symbol,
+                        extra={"event": "MDM_BASKET_HYDRATION_RESEED_DEFERRED", "symbol": symbol},
+                    )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                "MDM_BASKET_HYDRATION_RESEED_FAILED symbol=%s error=%s",
+                symbol,
+                exc,
+                extra={"event": "MDM_BASKET_HYDRATION_RESEED_FAILED", "symbol": symbol, "error": str(exc)},
+            )
+
     def hydrate_active_contract_basket(self, basket: ActiveContractBasket | Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Hydrate cached quote/OHLC readiness for every active basket symbol."""
         active = basket or self._active_contract_basket
+        min_bars = max(1, int(getattr(self, "_min_required_bars", 1) or 1))
         if active is None:
-            return {"hard_ready": False, "symbols": {}, "missing": ["active_contract_basket_missing"]}
-        self._logger.info("MDM_BASKET_HYDRATION_STARTED", extra={"event": "MDM_BASKET_HYDRATION_STARTED"})
+            report = {"hard_ready": False, "min_bars_required": min_bars, "symbols": {}, "missing": ["active_contract_basket_missing"]}
+            self._active_basket_hydration_report = report
+            return report
+        self._logger.info("MDM_BASKET_HYDRATION_STARTED", extra={"event": "MDM_BASKET_HYDRATION_STARTED", "min_bars_required": min_bars})
         all_symbols = tuple(str(s) for s in (self._basket_get(active, "all_symbols", None) or self._basket_get(active, "symbols", ()) or ()) if s)
         token_by_symbol = dict(self._basket_get(active, "token_by_symbol", {}) or {})
-        selected = {self._basket_get(active, "selected_ce", None), self._basket_get(active, "selected_pe", None)}
+        selected = {str(s) for s in (self._basket_get(active, "selected_ce", None), self._basket_get(active, "selected_pe", None)) if s}
         future_symbol = self._basket_get(active, "futures_symbol", None)
-        report: dict[str, Any] = {"hard_ready": True, "symbols": {}, "missing": []}
+        report: dict[str, Any] = {"hard_ready": True, "min_bars_required": min_bars, "symbols": {}, "missing": []}
         for sym in all_symbols:
             token = token_by_symbol.get(sym) or self._token_by_symbol.get(sym)
             if sym in self._active_contract_roles:
@@ -1723,46 +1782,67 @@ class MarketDataManager:
                 except Exception as exc:  # noqa: BLE001
                     last_error = f"quote_refresh_failed:{type(exc).__name__}"
                     quote = None
-            bars = self.get_ohlc_bars(sym)
+            try:
+                bars = self.get_ohlc_bars(sym)
+                ohlc_ready, bars_count = self._bars_ready(bars, min_bars)
+            except Exception as exc:  # noqa: BLE001
+                bars = []
+                bars_count = 0
+                ohlc_ready = False
+                last_error = f"bars_malformed:{type(exc).__name__}"
+            if sym in selected and not ohlc_ready:
+                self._reseed_active_basket_symbol_bars(sym, min_bars)
+                try:
+                    bars = self.get_ohlc_bars(sym)
+                    ohlc_ready, bars_count = self._bars_ready(bars, min_bars)
+                except Exception as exc:  # noqa: BLE001
+                    bars_count = 0
+                    ohlc_ready = False
+                    last_error = f"bars_malformed_after_reseed:{type(exc).__name__}"
+            if role in {"spot_context", "futures_context"}:
+                ohlc_ready = True
             quote_ready = bool(quote)
-            ohlc_ready = bool(bars) or role in {"spot_context", "futures_context"}
             depth = quote.get("depth") if isinstance(quote, Mapping) else None
             bid = quote.get("bid") if isinstance(quote, Mapping) else None
             ask = quote.get("ask") if isinstance(quote, Mapping) else None
             depth_ready = bool(depth) or (bid is not None and ask is not None)
-            oi_val = None
-            if isinstance(quote, Mapping):
-                oi_val = quote.get("oi", quote.get("open_interest"))
+            oi_val = quote.get("oi", quote.get("open_interest")) if isinstance(quote, Mapping) else None
             ltp_only = quote_ready and not depth_ready
             source = str(quote.get("source") or quote.get("quote_source") or "cache") if isinstance(quote, Mapping) else "missing"
+            symbol_hard_ready = not (sym in selected and (not quote_ready or not ohlc_ready))
             if sym in selected and not quote_ready:
                 report["hard_ready"] = False
                 report["missing"].append(f"{sym}:quote_missing")
             if sym in selected and not ohlc_ready:
                 report["hard_ready"] = False
-                report["missing"].append(f"{sym}:ohlc_missing")
+                report["missing"].append(f"{sym}:ohlc_insufficient")
             symbol_report = {
                 "token": int(token) if token is not None else None,
                 "role": role,
+                "min_bars_required": min_bars,
+                "bars_count": int(bars_count),
                 "quote_ready": quote_ready,
-                "ohlc_ready": ohlc_ready,
+                "ohlc_ready": bool(ohlc_ready),
                 "depth_ready": depth_ready,
                 "oi_ready": (oi_val is not None) if role == "tradable_option" else None,
                 "ltp_only": bool(ltp_only),
+                "hard_ready": bool(symbol_hard_ready),
                 "last_error": last_error,
                 "source": source,
             }
             report["symbols"][sym] = symbol_report
             self._logger.info(
-                "MDM_BASKET_HYDRATION_SYMBOL_RESULT symbol=%s token=%s role=%s quote_ready=%s ohlc_ready=%s depth_ready=%s oi_ready=%s ltp_only=%s error=%s",
-                sym, symbol_report["token"], role, quote_ready, ohlc_ready, depth_ready, symbol_report["oi_ready"], ltp_only, last_error,
+                "MDM_BASKET_HYDRATION_SYMBOL_RESULT symbol=%s token=%s role=%s quote_ready=%s ohlc_ready=%s bars_count=%s depth_ready=%s oi_ready=%s ltp_only=%s hard_ready=%s error=%s",
+                sym, symbol_report["token"], role, quote_ready, ohlc_ready, bars_count, depth_ready, symbol_report["oi_ready"], ltp_only, symbol_hard_ready, last_error,
                 extra={"event": "MDM_BASKET_HYDRATION_SYMBOL_RESULT", "symbol": sym, **symbol_report},
             )
+        report["missing"] = list(dict.fromkeys(report["missing"]))
         self._logger.info(
             "MDM_BASKET_HYDRATION_COMPLETED hard_ready=%s missing=%s",
             report["hard_ready"], report["missing"],
-            extra={"event": "MDM_BASKET_HYDRATION_COMPLETED", "hard_ready": report["hard_ready"], "missing": list(report["missing"])},
+            extra={"event": "MDM_BASKET_HYDRATION_COMPLETED", "hard_ready": report["hard_ready"], "missing": list(report["missing"]), "min_bars_required": min_bars},
         )
+        self._active_basket_hydration_report = dict(report)
         return report
 
     def request_token_subscription(

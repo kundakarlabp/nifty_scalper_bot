@@ -69,3 +69,51 @@ def test_mdm_hydration_never_classifies_fut_as_tradable_option(caplog):
     assert report["symbols"]["NFO:NIFTY26JUNFUT"]["ohlc_ready"] is True
     assert "NFO:NIFTY26JUNFUT:quote_missing" not in report["missing"]
     assert "MDM_BASKET_ROLE_INCONSISTENCY" in caplog.text
+
+
+def test_mdm_hydrate_counts_list_and_dataframe_bars(monkeypatch):
+    import pandas as pd
+
+    mdm = MarketDataManager(websocket=WS())
+    b = basket()
+    mdm._min_required_bars = 2
+    mdm.set_active_contract_basket(b)
+    quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
+    monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_quote", lambda sym: quotes.get(sym))
+
+    def bars(sym):
+        if sym == b.selected_ce:
+            return [{"close": 1}, {"close": 2}]
+        if sym == b.selected_pe:
+            return pd.DataFrame([{"close": 1}, {"close": 2}])
+        return []
+
+    monkeypatch.setattr(mdm, "get_ohlc_bars", bars)
+    report = mdm.hydrate_active_contract_basket(b)
+    assert report["hard_ready"] is True
+    assert report["symbols"][b.selected_ce]["bars_count"] == 2
+    assert report["symbols"][b.selected_pe]["bars_count"] == 2
+
+
+def test_mdm_selected_missing_ohlc_triggers_reseed_attempt(monkeypatch):
+    mdm = MarketDataManager(websocket=WS())
+    b = basket()
+    mdm._min_required_bars = 3
+    mdm.set_active_contract_basket(b)
+    quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
+    monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_quote", lambda sym: quotes.get(sym))
+    attempts = []
+
+    def hydrate_symbol_history(symbol, **kwargs):
+        attempts.append((symbol, kwargs))
+        return []
+
+    monkeypatch.setattr(mdm, "hydrate_symbol_history", hydrate_symbol_history)
+    monkeypatch.setattr(mdm, "get_ohlc_bars", lambda sym: [])
+    report = mdm.hydrate_active_contract_basket(b)
+    assert b.selected_ce in [item[0] for item in attempts]
+    assert b.selected_pe in [item[0] for item in attempts]
+    assert report["hard_ready"] is False
+    assert f"{b.selected_ce}:ohlc_insufficient" in report["missing"]

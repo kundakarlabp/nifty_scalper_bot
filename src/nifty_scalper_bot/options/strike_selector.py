@@ -395,6 +395,18 @@ class StrikeSelector:
         token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
         if token is None:
             token = token_by_symbol.get(symbol)
+        try:
+            token_int = int(token)
+        except (TypeError, ValueError):
+            token_int = 0
+        if token_int <= 0:
+            LOGGER.warning(
+                "STRIKE_SELECTOR_TOKEN_MISSING symbol=%s option_type=%s",
+                symbol,
+                option_type,
+                extra={"event": "STRIKE_SELECTOR_TOKEN_MISSING", "symbol": symbol, "option_type": option_type},
+            )
+            return None
         quote = None
         get_quote = getattr(self._data_hub, "get_quote", None)
         if callable(get_quote):
@@ -413,6 +425,14 @@ class StrikeSelector:
                     break
             if ltp <= 0:
                 ltp = float(_mid_price(_coerce_float(quote.get("bid")), _coerce_float(quote.get("ask"))) or 0.0)
+        if ltp <= 0:
+            LOGGER.warning(
+                "STRIKE_SELECTOR_QUOTE_MISSING symbol=%s option_type=%s",
+                symbol,
+                option_type,
+                extra={"event": "STRIKE_SELECTOR_QUOTE_MISSING", "symbol": symbol, "option_type": option_type},
+            )
+            return None
         expiry_raw = self._basket_get(basket, "option_expiry", None)
         expiry = _parse_expiry(expiry_raw) or datetime.now(timezone.utc)
         strike = float(self._basket_get(basket, "atm_strike", 0) or 0) or self._symbol_strike(symbol)
@@ -424,7 +444,7 @@ class StrikeSelector:
             ltp=float(ltp),
             delta=None,
             metadata={
-                "instrument_token": token,
+                "instrument_token": token_int,
                 "source": "active_contract_basket",
                 "underlying_price": float(underlying_price),
             },

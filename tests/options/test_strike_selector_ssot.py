@@ -110,3 +110,29 @@ def test_non_live_strike_selector_prefers_active_basket_without_option_chain_env
     assert selected.symbol == "NFO:NIFTY26JUN25000CE"
     assert selected.metadata["source"] == "active_contract_basket"
     assert hub.option_chain_called is False
+
+
+def test_live_strike_selector_active_basket_token_missing_returns_none(monkeypatch, caplog):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    b = _basket()
+    b.pop("selected_ce_token")
+    b["token_by_symbol"].pop("NFO:NIFTY26JUN25000CE")
+    selected = _selector(Hub(b)).select_contract(
+        underlying="NIFTY", side="BUY", option_type="CE", underlying_price=25001.0
+    )
+    assert selected is None
+    assert "STRIKE_SELECTOR_TOKEN_MISSING" in caplog.text
+
+
+def test_live_strike_selector_active_basket_quote_missing_returns_none(monkeypatch, caplog):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+
+    class NoQuoteHub(Hub):
+        def get_quote(self, symbol: str, allow_pull: bool = False):
+            return {"ltp": 0.0, "bid": 0.0, "ask": 0.0}
+
+    selected = _selector(NoQuoteHub(_basket())).select_contract(
+        underlying="NIFTY", side="BUY", option_type="CE", underlying_price=25001.0
+    )
+    assert selected is None
+    assert "STRIKE_SELECTOR_QUOTE_MISSING" in caplog.text
