@@ -2630,3 +2630,16 @@ def test_live_universe_bootstrap_accepts_desired_tokens_and_fresh_ticks(caplog):
     assert reason is None
     assert "selected_option_subscription_pending" not in caplog.text
     assert "SELECTED_OPTION_SUBSCRIPTION_STATE" in caplog.text
+
+
+def test_on_tick_event_context_symbols_emit_global_readiness_not_eval_decision(caplog):
+    runner = StrategyRunner()
+    runner._active_symbols.update({"NSE:NIFTY", "NFO:NIFTY26JUNFUT", "NFO:NIFTY26JUN23900CE"})
+    with caplog.at_level(logging.INFO):
+        runner.on_tick_event({"symbol": "NSE:NIFTY", "last_price": 24000.0, "trace_id": "spot-tick"})
+        runner.on_tick_event({"symbol": "NFO:NIFTY26JUNFUT", "last_price": 24100.0, "trace_id": "fut-tick"})
+
+    assert "RUNNER_GLOBAL_READINESS_DECISION" in caplog.text
+    assert "context_symbol_not_strategy_candidate" in caplog.text
+    assert "RUNNER_EVAL_DECISION symbol=NSE:NIFTY" not in caplog.text
+    assert "RUNNER_EVAL_DECISION symbol=NFO:NIFTY26JUNFUT" not in caplog.text

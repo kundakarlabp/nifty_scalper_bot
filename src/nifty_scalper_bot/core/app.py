@@ -138,6 +138,199 @@ def _polling_fallback_degraded(
     return False
 
 
+def _safe_supervisor_call(
+    name: str,
+    candidate: Any,
+    *args: Any,
+    default: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """Call supervisor dependencies safely without letting bad attributes spam the loop."""
+
+    if not callable(candidate):
+        log_throttled(
+            LOGGER,
+            f"polling_supervisor_noncallable:{name}",
+            "POLLING_SUPERVISOR_NONCALLABLE name=%s type=%s repr=%s"
+            % (name, type(candidate).__name__, repr(candidate)[:160]),
+            interval_sec=60.0,
+            level=logging.WARNING,
+            extra={
+                "event": "POLLING_SUPERVISOR_NONCALLABLE",
+                "callable_name": name,
+                "candidate_type": type(candidate).__name__,
+                "candidate_repr": repr(candidate)[:160],
+            },
+        )
+        return default
+    try:
+        return candidate(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - supervisor dependencies must degrade safely
+        log_throttled(
+            LOGGER,
+            f"polling_supervisor_call_failed:{name}:{type(exc).__name__}",
+            "POLLING_SUPERVISOR_CALL_FAILED name=%s error_type=%s error=%s"
+            % (name, type(exc).__name__, str(exc)),
+            interval_sec=60.0,
+            level=logging.WARNING,
+            extra={
+                "event": "POLLING_SUPERVISOR_CALL_FAILED",
+                "callable_name": name,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        return default
+
+
+async def _polling_failover_supervisor_iteration(
+    ctx: Any,
+    polling_fallback: Any,
+    *,
+    quote_stale_ms: int,
+    degraded_since: float | None,
+    recovered_since: float | None,
+    activate_after: float = 3.0,
+    recover_cooldown: float = 10.0,
+) -> tuple[float | None, float | None]:
+    """Run one polling failover supervisor pass. Args: ctx/fallback/state. Returns: state."""
+
+    market_open = bool(_safe_supervisor_call("is_market_open_now", is_market_open_now, default=False))
+    ws_ok = bool(_safe_supervisor_call(
+        "websocket_manager.is_connected",
+        getattr(ctx.websocket_manager, "is_connected", None),
+        default=False,
+    ))
+    feed_health = _safe_supervisor_call(
+        "market_data_manager.trading_feed_health",
+        getattr(ctx.market_data_manager, "trading_feed_health", None),
+        max_age_ms=quote_stale_ms,
+        default={},
+    )
+    if not isinstance(feed_health, Mapping):
+        feed_health = {}
+    futures_fresh = bool(feed_health.get("futures_fresh"))
+    options_fresh = bool(feed_health.get("options_fresh"))
+    spot_fresh = bool(feed_health.get("spot_fresh"))
+    spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
+    spot_age_ms = feed_health.get("spot_age_ms")
+    auth_tick_age_raw = _safe_supervisor_call(
+        "market_data_manager.data_age_ms",
+        getattr(ctx.market_data_manager, "data_age_ms", None),
+        default=10**9,
+    )
+    try:
+        auth_tick_age_ms = float(auth_tick_age_raw)
+    except (TypeError, ValueError):
+        auth_tick_age_ms = float(10**9)
+    lagging = auth_tick_age_ms > quote_stale_ms
+    degraded = _polling_fallback_degraded(
+        ws_ok=ws_ok,
+        lagging=lagging,
+        futures_fresh=futures_fresh,
+        options_fresh=options_fresh,
+    )
+    now_mono = time_module.monotonic()
+    if not market_open:
+        # Off-market: never aggressively activate the REST polling fallback
+        # just because the last quote crossed the open-market threshold.
+        log_throttled(
+            LOGGER,
+            f"polling_fallback_skipped:{spot_symbol}:market_closed",
+            "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s"
+            % spot_age_ms,
+            interval_sec=60.0,
+            level=logging.DEBUG,
+            extra={
+                "event": "POLLING_FALLBACK_SKIPPED",
+                "reason": "market_closed",
+                "age_ms": spot_age_ms,
+            },
+        )
+        degraded_since = None
+        if polling_fallback.is_running():
+            polling_fallback.set_websocket_mode(True)
+            polling_fallback.stop()
+        return degraded_since, recovered_since
+    if degraded:
+        recovered_since = None
+        degraded_since = degraded_since or now_mono
+        if (
+            now_mono - degraded_since >= activate_after
+            and not polling_fallback.is_running()
+        ):
+            if (
+                spot_age_ms is not None
+                and float(spot_age_ms) <= float(quote_stale_ms)
+                and ws_ok
+            ):
+                log_throttled(
+                    LOGGER,
+                    f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",
+                    "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s"
+                    % (spot_age_ms, quote_stale_ms, ws_ok),
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "POLLING_FALLBACK_SKIPPED",
+                        "reason": "within_spot_stale_threshold",
+                        "age_ms": spot_age_ms,
+                        "threshold_ms": quote_stale_ms,
+                        "ws_ok": ws_ok,
+                    },
+                )
+                return degraded_since, recovered_since
+            LOGGER.warning(
+                "POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s",
+                spot_age_ms,
+                quote_stale_ms,
+                ws_ok,
+                lagging,
+                extra={
+                    "event": "POLLING_FALLBACK_ACTIVATE",
+                    "reason": (
+                        "ws_disconnected"
+                        if not ws_ok
+                        else "tick_lag"
+                        if lagging
+                        else "futures_stale"
+                        if not futures_fresh
+                        else "options_stale"
+                    ),
+                    "lagging": lagging,
+                    "futures_fresh": futures_fresh,
+                    "options_fresh": options_fresh,
+                    "authoritative_age_ms": auth_tick_age_ms,
+                },
+            )
+            polling_fallback.set_websocket_mode(False)
+            polling_fallback.start()
+    else:
+        if not spot_fresh:
+            ctx.market_data_manager.ensure_spot_reference_fresh(
+                symbol=spot_symbol,
+                stale_after_ms=quote_stale_ms,
+            )
+            LOGGER.info(
+                "poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s",
+                spot_symbol,
+                spot_age_ms,
+            )
+        degraded_since = None
+        recovered_since = recovered_since or now_mono
+        if (
+            now_mono - recovered_since >= recover_cooldown
+            and polling_fallback.is_running()
+        ):
+            LOGGER.info(
+                "Polling fallback deactivate (supervisor) after ws recovery cooldown",
+                extra={"event": "polling_fallback_deactivated"},
+            )
+            polling_fallback.set_websocket_mode(True)
+            polling_fallback.stop()
+    return degraded_since, recovered_since
+
+
 def _run_sync_locked(operation: Callable[[], Any]) -> Any:
     """Run synchronization-critical broker operations under a process-wide lock."""
     with SYNC_LOCK:
@@ -9958,130 +10151,25 @@ async def startup_sequence(ctx: BotContext) -> None:
                         quote_stale_ms = int(fallback_stale_sec * 1000.0)
                         while True:
                             try:
-                                market_open = is_market_open_now()
-                                ws_ok = bool(ctx.websocket_manager.is_connected())
-                                feed_health = ctx.market_data_manager.trading_feed_health(
-                                    max_age_ms=quote_stale_ms
+                                degraded_since, recovered_since = await _polling_failover_supervisor_iteration(
+                                    ctx,
+                                    polling_fallback,
+                                    quote_stale_ms=quote_stale_ms,
+                                    degraded_since=degraded_since,
+                                    recovered_since=recovered_since,
+                                    activate_after=activate_after,
+                                    recover_cooldown=recover_cooldown,
                                 )
-                                futures_fresh = bool(feed_health.get("futures_fresh"))
-                                options_fresh = bool(feed_health.get("options_fresh"))
-                                spot_fresh = bool(feed_health.get("spot_fresh"))
-                                spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
-                                spot_age_ms = feed_health.get("spot_age_ms")
-                                auth_tick_age_ms = ctx.market_data_manager.data_age_ms()
-                                lagging = auth_tick_age_ms > quote_stale_ms
-                                degraded = _polling_fallback_degraded(
-                                    ws_ok=ws_ok,
-                                    lagging=lagging,
-                                    futures_fresh=futures_fresh,
-                                    options_fresh=options_fresh,
-                                )
-                                now_mono = time_module.monotonic()
-                                if not market_open:
-                                    # Off-market: never aggressively activate
-                                    # the REST polling fallback just because the
-                                    # last quote crossed the open-market threshold.
-                                    log_throttled(
-                                        LOGGER,
-                                        f"polling_fallback_skipped:{spot_symbol}:market_closed",
-                                        "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s"
-                                        % spot_age_ms,
-                                        interval_sec=60.0,
-                                        level=logging.DEBUG,
-                                        extra={
-                                            "event": "POLLING_FALLBACK_SKIPPED",
-                                            "reason": "market_closed",
-                                            "age_ms": spot_age_ms,
-                                        },
-                                    )
-                                    degraded_since = None
-                                    if polling_fallback.is_running():
-                                        polling_fallback.set_websocket_mode(True)
-                                        polling_fallback.stop()
-                                    await asyncio.sleep(1.0)
-                                    continue
-                                if degraded:
-                                    recovered_since = None
-                                    degraded_since = degraded_since or now_mono
-                                    if (
-                                        now_mono - degraded_since >= activate_after
-                                        and not polling_fallback.is_running()
-                                    ):
-                                        if (
-                                            spot_age_ms is not None
-                                            and float(spot_age_ms) <= float(quote_stale_ms)
-                                            and ws_ok
-                                        ):
-                                            log_throttled(
-                                                LOGGER,
-                                                f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",
-                                                "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s"
-                                                % (spot_age_ms, quote_stale_ms, ws_ok),
-                                                interval_sec=60.0,
-                                                level=logging.INFO,
-                                                extra={
-                                                    "event": "POLLING_FALLBACK_SKIPPED",
-                                                    "reason": "within_spot_stale_threshold",
-                                                    "age_ms": spot_age_ms,
-                                                    "threshold_ms": quote_stale_ms,
-                                                    "ws_ok": ws_ok,
-                                                },
-                                            )
-                                            await asyncio.sleep(1.0)
-                                            continue
-                                        LOGGER.warning(
-                                            "POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s",
-                                            spot_age_ms,
-                                            quote_stale_ms,
-                                            ws_ok,
-                                            lagging,
-                                            extra={
-                                                "event": "poll_fallback_activate",
-                                                "reason": (
-                                                    "ws_disconnected"
-                                                    if not ws_ok
-                                                    else "tick_lag"
-                                                    if lagging
-                                                    else "futures_stale"
-                                                    if not futures_fresh
-                                                    else "options_stale"
-                                                ),
-                                                "lagging": lagging,
-                                                "futures_fresh": futures_fresh,
-                                                "options_fresh": options_fresh,
-                                                "authoritative_age_ms": auth_tick_age_ms,
-                                            },
-                                        )
-                                        polling_fallback.set_websocket_mode(False)
-                                        polling_fallback.start()
-                                else:
-                                    if not spot_fresh:
-                                        ctx.market_data_manager.ensure_spot_reference_fresh(
-                                            symbol=spot_symbol,
-                                            stale_after_ms=quote_stale_ms,
-                                        )
-                                        LOGGER.info(
-                                            "poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s",
-                                            spot_symbol,
-                                            spot_age_ms,
-                                        )
-                                    degraded_since = None
-                                    recovered_since = recovered_since or now_mono
-                                    if (
-                                        now_mono - recovered_since >= recover_cooldown
-                                        and polling_fallback.is_running()
-                                    ):
-                                        LOGGER.info(
-                                            "Polling fallback deactivate (supervisor) after ws recovery cooldown",
-                                            extra={"event": "polling_fallback_deactivated"},
-                                        )
-                                        polling_fallback.set_websocket_mode(True)
-                                        polling_fallback.stop()
                             except Exception as failover_exc:  # noqa: BLE001
                                 LOGGER.error(
                                     "Failure in polling failover supervisor: %s",
                                     failover_exc,
-                                    exc_info=failover_exc,
+                                    exc_info=True,
+                                    extra={
+                                        "event": "POLLING_FAILOVER_SUPERVISOR_FAILED",
+                                        "error_type": type(failover_exc).__name__,
+                                        "error": str(failover_exc),
+                                    },
                                 )
                             await asyncio.sleep(1.0)
 
@@ -11018,14 +11106,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     else "DATA_WARMUP"
                                 )
                                 ctx.effective_mode = ctx.readiness_mode
+                                pre_final_reason = (
+                                    "selected_option_history_or_quote_pending_pre_final_readiness"
+                                    if ctx.readiness_mode == "EVALUATION_READY"
+                                    else "awaiting_spot_or_active_basket_pre_final_readiness"
+                                )
                                 LOGGER.info(
-                                    "STARTUP_MODE_BLOCKED current=%s reason=%s",
+                                    "STARTUP_MODE_PRE_FINAL_READINESS current=%s reason=%s stage=%s",
                                     ctx.readiness_mode,
-                                    (
-                                        "selected_option_history_or_quote_not_ready"
-                                        if ctx.readiness_mode == "EVALUATION_READY"
-                                        else "awaiting_spot_or_active_basket"
-                                    ),
+                                    pre_final_reason,
+                                    "pre_final_readiness",
+                                    extra={
+                                        "event": "STARTUP_MODE_PRE_FINAL_READINESS",
+                                        "current": ctx.readiness_mode,
+                                        "reason": pre_final_reason,
+                                        "stage": "pre_final_readiness",
+                                    },
                                 )
                                 if previous_mode != ctx.readiness_mode:
                                     LOGGER.info(

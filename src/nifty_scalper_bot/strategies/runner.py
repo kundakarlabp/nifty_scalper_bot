@@ -5457,6 +5457,22 @@ class StrategyRunner:
             # Reuse an upstream trace_id if the tick payload already carries one
             # (set by RunnerCallback or by an outer caller); otherwise mint here.
             trace_id = tick.get("trace_id") or f"{normalized_symbol}-{time_module.monotonic_ns()}"
+            if self._is_context_symbol(normalized_symbol):
+                self._logger.info(
+                    "RUNNER_GLOBAL_READINESS_DECISION symbol=%s allowed=%s reason=%s",
+                    normalized_symbol,
+                    False,
+                    "context_symbol_not_strategy_candidate",
+                    extra={
+                        "event": "RUNNER_GLOBAL_READINESS_DECISION",
+                        "symbol": normalized_symbol,
+                        "trace_id": trace_id,
+                        "stage": "tick_ingress",
+                        "allowed": False,
+                        "reason": "context_symbol_not_strategy_candidate",
+                    },
+                )
+                return
             # RUNNER_TICK_CONSUMED: the tick has been pulled off the event bus
             # and accepted by the runner's evaluation entry point.  This is the
             # canonical observability breakpoint between publication and
