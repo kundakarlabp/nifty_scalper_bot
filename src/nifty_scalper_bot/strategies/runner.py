@@ -153,7 +153,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
         default,
         extra={
             "event": "INVALID_ENV_BOOL",
-            "name": name,
+            "env_name": name,
             "value": raw,
             "default": bool(default),
         },

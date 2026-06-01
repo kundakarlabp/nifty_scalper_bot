@@ -783,7 +783,7 @@ def instantiate_strategy(name: str, **kwargs: t.Any) -> StrategyInterface:
         "Entered instantiate_strategy",
         extra={
             "event": "instantiate_strategy",
-            "name": name,
+            "strategy_name": name,
             "kwargs": list(kwargs.keys()),
         },
     )
@@ -1280,15 +1280,15 @@ class StrategyManager(_BaseStrategyManager):
 
         log.debug("Entered StrategyManager.__init__")
         log.info(
-            "RUNTIME_STRATEGY_MANAGER_CLASS module=%s class=%s id=%s",
+            "RUNTIME_STRATEGY_MANAGER_CLASS strategy_manager_module=%s strategy_manager_class=%s strategy_manager_id=%s",
             self.__class__.__module__,
             self.__class__.__name__,
             id(self),
             extra={
                 "event": "RUNTIME_STRATEGY_MANAGER_CLASS",
-                "module": self.__class__.__module__,
-                "class": self.__class__.__name__,
-                "id": id(self),
+                "strategy_manager_module": self.__class__.__module__,
+                "strategy_manager_class": self.__class__.__name__,
+                "strategy_manager_id": id(self),
             },
         )
         super().__init__(
