@@ -1,4 +1,9 @@
-"""Strategy scoring and dynamic allocation manager."""
+"""Strategy scoring and dynamic allocation manager.
+
+Runtime role:
+- Evaluates strategies using prepared DataHub/ActiveContractBasket context.
+- Propagates selected option/futures context to strategy code.
+- Must not select contracts or call broker instruments."""
 
 from __future__ import annotations
 

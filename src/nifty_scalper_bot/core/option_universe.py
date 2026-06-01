@@ -1,8 +1,14 @@
-"""Dynamic option universe construction for NIFTY contracts."""
+"""Dynamic option universe construction for NIFTY contracts.
+
+Runtime role:
+- Deprecated runtime universe builder; live universe must come from InstrumentManager ActiveContractBasket.
+- Legacy calendar fallback is non-live/env-gated only.
+- Must not manually build live NIFTY symbols."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 
@@ -229,7 +235,12 @@ class OptionUniverseManager:
         return weekly, monthly
 
     def _build_universe(self, atm_strike: int, expiry: date) -> list[str]:
-        """Build CE/PE symbol list for configured strike range and expiry."""
+        """Legacy CE/PE calendar symbol list, disabled for live runtime."""
+        live_mode = os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE"
+        legacy_enabled = os.getenv("OPTION_UNIVERSE_LEGACY_FALLBACK_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+        LOGGER.warning("DEPRECATED_OPTION_UNIVERSE_WRAPPER_USED", extra={"event": "DEPRECATED_OPTION_UNIVERSE_WRAPPER_USED", "legacy_enabled": legacy_enabled, "live_mode": live_mode})
+        if live_mode or not legacy_enabled:
+            raise RuntimeError("OptionUniverseManager manual generation disabled; use InstrumentManager ActiveContractBasket")
         expiry_code = self._format_expiry_code(expiry)
         strikes = [
             atm_strike + (offset * self._config.strike_step)

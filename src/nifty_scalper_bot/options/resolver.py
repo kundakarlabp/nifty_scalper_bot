@@ -1,8 +1,14 @@
-"""Deterministic token-based resolver for ATM NIFTY options."""
+"""Deterministic token-based resolver for ATM NIFTY options.
+
+Runtime role:
+- Deprecated ATM resolver; runtime must use InstrumentManager.
+- Legacy InstrumentsCache path is tests/non-live compatibility only.
+- Must not resolve live contracts without InstrumentManager."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from datetime import date
 from typing import Any
 
@@ -31,7 +37,8 @@ class OptionResolver:
     def __init__(self, kite: Any) -> None:
         """Create resolver from kite client. Args: kite. Returns: none. Raises: none."""
 
-        self._cache = InstrumentsCache(kite)
+        self._instrument_manager = kite if hasattr(kite, "get_active_nifty_contracts") else None
+        self._cache = None if self._instrument_manager is not None else InstrumentsCache(kite)
 
     def resolve_atm_pair(
         self, spot: float, *, today: date | None = None
@@ -40,6 +47,25 @@ class OptionResolver:
 
         if spot <= 0:
             raise ValueError("spot must be positive")
+        LOGGER.warning("DEPRECATED_OPTION_RESOLVER_WRAPPER_USED", extra={"event": "DEPRECATED_OPTION_RESOLVER_WRAPPER_USED"})
+        if self._instrument_manager is not None:
+            basket = self._instrument_manager.get_active_nifty_contracts(float(spot), strikes_around_atm=0)
+            ce_row = self._instrument_manager.lookup(basket.selected_ce)
+            pe_row = self._instrument_manager.lookup(basket.selected_pe)
+            if ce_row and pe_row:
+                def _to_inst(row):
+                    return OptionInstrument(
+                        instrument_token=int(row["instrument_token"]),
+                        tradingsymbol=str(row["tradingsymbol"]),
+                        expiry=row["expiry"],
+                        strike=float(row["strike"]),
+                        option_type=str(row["instrument_type"]),
+                    )
+                return AtmOptionPair(ce=_to_inst(ce_row), pe=_to_inst(pe_row), expiry=basket.option_expiry, strike=float(basket.atm_strike))
+        if os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE":
+            raise RuntimeError("OptionResolver live path requires InstrumentManager")
+        if self._cache is None:
+            raise RuntimeError("OptionResolver legacy cache unavailable")
         options = self._cache.get_nifty_options()
         if not options:
             raise ValueError("No NIFTY options available from broker dump")

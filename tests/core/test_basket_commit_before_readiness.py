@@ -53,7 +53,7 @@ async def test_build_commits_selected_before_readiness(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_startup_hydration_uses_active_future_not_requested_expired_future(monkeypatch):
+async def test_startup_hydration_preserves_requested_ssot_future(monkeypatch):
     basket = {
         'futures_symbol': 'NFO:NIFTY26MAYFUT',
         'selected_ce': 'NFO:NIFTY26JUN23700CE',
@@ -78,8 +78,8 @@ async def test_startup_hydration_uses_active_future_not_requested_expired_future
         selected_pe=None,
     )
     out = await app._build_and_hydrate_live_basket_from_spot(ctx, spot_ltp=23701.0, configured_mode='LIVE')
-    assert out.get("futures_symbol") == "NFO:NIFTY26JUNFUT"
-    assert "NFO:NIFTY26MAYFUT" not in (out.get("symbols") or [])
+    assert out.get("futures_symbol") == "NFO:NIFTY26MAYFUT"
+    assert "NFO:NIFTY26MAYFUT" in (out.get("symbols") or [])
 
 
 @pytest.mark.asyncio

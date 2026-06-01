@@ -7,6 +7,13 @@ from nifty_scalper_bot.config.settings import LiquiditySettings, SelectorSetting
 from nifty_scalper_bot.options.strike_selector import StrikeSelector
 
 
+@pytest.fixture(autouse=True)
+def enable_legacy_selector_fallback(monkeypatch):
+    monkeypatch.setenv("OPTION_CHAIN_SELECTOR_FALLBACK_ENABLED", "true")
+    monkeypatch.delenv("EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("MODE", raising=False)
+
+
 class _StubHub:
     def __init__(
         self,

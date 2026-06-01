@@ -1,4 +1,9 @@
-"""Data-source integrity helpers for strategy execution."""
+"""Data-source integrity helpers for strategy execution.
+
+Runtime role:
+- Low-level broker data adapter for quote/LTP/historical fetches.
+- Consumed by MarketDataManager hydration.
+- Must not select contracts."""
 
 from __future__ import annotations
 

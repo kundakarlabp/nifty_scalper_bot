@@ -97,6 +97,21 @@ startup
 
 ---
 
+## Strict contract/data SSOT
+
+- `core/instrument_manager.py` is the only live contract selector/cache for NIFTY spot, futures, options, symbol-token mappings, ATM CE/PE, and `ActiveContractBasket`.
+- `data/market_data_manager.py` owns token subscriptions, quote/depth/OI state, polling fallback, and basket hydration.
+- `data/candle_engine.py` owns tick-to-OHLC bars and bar readiness.
+- `data/data_hub.py` is a read facade over the active basket and market data only.
+- Strategies consume prepared context only; they must not select contracts, call broker instruments, or fetch historical data directly in the live loop.
+- Duplicate selectors are compatibility wrappers only and must delegate to InstrumentManager or remain non-live/env-gated legacy fallback.
+- Do not create new runtime selector files.
+- Do not manually generate live NIFTY futures/options symbols.
+- Do not derive futures from selected option month in live runtime.
+- Do not silently ignore token, subscription, quote, depth, OI, or OHLC hydration failures.
+
+---
+
 ## Readiness and hydration rules
 
 Do not bypass readiness gates.

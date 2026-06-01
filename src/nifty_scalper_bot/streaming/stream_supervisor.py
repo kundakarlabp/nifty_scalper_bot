@@ -1,4 +1,9 @@
-"""Coordinator for polling-based market data streaming."""
+"""Coordinator for polling-based market data streaming.
+
+Runtime role:
+- Supervises token transport subscriptions provided by MarketDataManager.
+- Preserves symbol-token mapping.
+- Must not select contracts."""
 
 from __future__ import annotations
 

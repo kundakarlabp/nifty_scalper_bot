@@ -1,4 +1,9 @@
-"""Lightweight active basket helpers without app boot dependencies."""
+"""Lightweight active basket helpers without app boot dependencies.
+
+Runtime role:
+- Normalizes provided active basket schemas.
+- Does not infer missing futures/options.
+- Must not select contracts."""
 
 from __future__ import annotations
 

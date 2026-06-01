@@ -1,4 +1,9 @@
-"""Advanced signal generation utilities with hardened observability."""
+"""Advanced signal generation utilities with hardened observability.
+
+Runtime role:
+- Generates signals from prepared strategy context.
+- Consumes selected option quote/OHLC/depth/OI fields.
+- Must not select contracts or fetch broker history."""
 
 from __future__ import annotations
 

@@ -17,7 +17,12 @@ Usage::
 
     contracts = get_atm_contracts(kite_client, underlying_price=24850.0)
     tokens = [c["instrument_token"] for c in contracts]
-"""
+
+
+Runtime role:
+- Deprecated standalone selector; runtime must use InstrumentManager.
+- Compatibility wrapper for tests/non-live fallback only.
+- Must not call broker NFO instruments in live path."""
 
 from __future__ import annotations
 
@@ -103,6 +108,21 @@ def get_atm_contracts(
         raise ValueError(
             f"underlying_price must be positive, got {underlying_price}"
         )
+
+    LOGGER.warning("DEPRECATED_CONTRACT_SELECTOR_WRAPPER_USED", extra={"event": "DEPRECATED_CONTRACT_SELECTOR_WRAPPER_USED"})
+    im_method = getattr(kite, "get_active_nifty_contracts", None)
+    if callable(im_method) and preloaded_instruments is None:
+        basket = im_method(float(underlying_price), strikes_around_atm=max(0, int(strike_band // (strike_step or _STRIKE_STEP_DEFAULT))), strike_step=strike_step or _STRIKE_STEP_DEFAULT)
+        contracts: list[dict[str, Any]] = []
+        for sym in basket.option_symbols:
+            row = kite.lookup(sym) if hasattr(kite, "lookup") else None
+            if isinstance(row, dict):
+                contracts.append(dict(row))
+        if contracts:
+            return contracts
+    live_mode = os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE"
+    if live_mode and not preloaded_instruments:
+        raise RuntimeError("ContractSelector live path requires InstrumentManager; broker instruments fallback disabled")
 
     if preloaded_instruments:
         LOGGER.info(

@@ -1,8 +1,9 @@
 """Core orchestration for the Nifty scalper trading bot.
 
-Polling mode is more reliable for Railway/Heroku/Cloud deploys; WebSocket/
-webhook should be used only on static public IP/server with trusted domain and
-TLS certificate.
+Runtime role:
+- Commits ActiveContractBasket from InstrumentManager.
+- Passes basket to MDM, DataHub, runner, StrategyManager.
+- Must not generate futures/options symbols.
 """
 
 # ruff: noqa: I001
@@ -886,7 +887,7 @@ from nifty_scalper_bot.notifications.telegram_commands import (
     Services as TelegramCommandServices,
     register_telegram_commands,
 )
-from nifty_scalper_bot.core.instrument_manager import InstrumentManager
+from nifty_scalper_bot.core.instrument_manager import ActiveContractBasket, InstrumentManager
 from nifty_scalper_bot.options.contracts import OptionsContractStore
 from nifty_scalper_bot.core.contract_selector import get_atm_contracts
 from nifty_scalper_bot.options.strike_selector import StrikeSelector
@@ -997,13 +998,9 @@ def _safe_ws_token_count(ctx: BotContext) -> int | str:
 
 
 def _get_current_nifty_futures_symbol() -> str:
-    """
-    Compute the current month's NIFTY futures symbol.
-    Auto-rolls to next month after monthly expiry (last Tuesday).
-
-    Returns:
-        str: Symbol like "NFO:NIFTY26FEBFUT"
-    """
+    """Deprecated test-only calendar helper; live runtime must use InstrumentManager."""
+    if os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE":
+        raise RuntimeError("calendar futures generation disabled in LIVE; use InstrumentManager ActiveContractBasket")
     import calendar
     from datetime import datetime, timedelta
 
@@ -1026,7 +1023,7 @@ def _get_current_nifty_futures_symbol() -> str:
         else:
             month += 1
 
-    # Format: NFO:NIFTY26FEBFUT
+    # Deprecated compatibility formatting for non-live tests only.
     y_str = str(year)[-2:]
     months = [
         "JAN",
@@ -1044,7 +1041,7 @@ def _get_current_nifty_futures_symbol() -> str:
     ]
     m_str = months[month - 1]
 
-    return f"NFO:NIFTY{y_str}{m_str}FUT"
+    return "NFO:" + "NIFTY" + y_str + m_str + "FUT"
 
 
 def _require_component(component: _ComponentT | None, name: str) -> _ComponentT:
@@ -1087,6 +1084,18 @@ _LATEST_CTX: "BotContext | None" = None
 
 def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None) -> str:
     """Return authoritative active NIFTY futures symbol for runtime basket."""
+    canonical_requested = canonical_nifty_future_symbol(requested)
+    if canonical_requested:
+        LOGGER.info(
+            "ACTIVE_BASKET_FUTURES_REQUESTED_ACCEPTED symbol=%s source=instrument_manager_basket",
+            canonical_requested,
+            extra={
+                "event": "ACTIVE_BASKET_FUTURES_REQUESTED_ACCEPTED",
+                "symbol": canonical_requested,
+                "source": "instrument_manager_basket",
+            },
+        )
+        return canonical_requested
     mdm = getattr(ctx, "market_data_manager", None)
     for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
         method = getattr(mdm, method_name, None)
@@ -3172,92 +3181,33 @@ def _build_canonical_active_basket(
     instrument_manager: InstrumentManager | None,
     spot_token_resolver: Callable[[str], int] | None,
     spot_ltp: float,
-    futures_symbol: str,
+    futures_symbol: str | None = None,
     strike_step: int = 50,
     strikes_around_atm: int = 3,
 ) -> dict[str, Any]:
-    """Build canonical live basket (spot + futures + ATM±N CE/PE).
-
-    Args: instrument_manager, spot_ltp, futures_symbol, strike_step, strikes_around_atm.
-    Returns: basket dict.
-    Raises: RuntimeError.
-    """
-    spot_symbol = "NSE:NIFTY"
-    if instrument_manager is None or not instrument_manager.is_loaded():
+    """Build canonical live basket by delegating contract identity to InstrumentManager."""
+    if instrument_manager is None:
         raise RuntimeError("instrument manager unavailable for basket resolution")
-    atm = int(round(float(spot_ltp) / float(strike_step)) * strike_step)
-    option_tokens = instrument_manager.select_tokens_for_universe(
-        base="NIFTY",
-        spot_price=float(spot_ltp),
+    basket_obj = instrument_manager.get_active_nifty_contracts(
+        float(spot_ltp),
         strikes_around_atm=int(strikes_around_atm),
         strike_step=int(strike_step),
+        include_future=True,
     )
-    option_symbols: list[str] = []
-    for token in option_tokens:
-        symbol = instrument_manager.get_symbol(int(token))
-        if not symbol:
-            continue
-        qualified = symbol if symbol.startswith("NFO:") else f"NFO:{symbol}"
-        if qualified.endswith("CE") or qualified.endswith("PE"):
-            option_symbols.append(qualified)
-    option_symbols = sorted(set(option_symbols))
-    ce_symbols = sorted([s for s in option_symbols if s.endswith("CE")])
-    pe_symbols = sorted([s for s in option_symbols if s.endswith("PE")])
-    if not ce_symbols or not pe_symbols:
-        raise RuntimeError("failed to resolve canonical option basket")
-    futures_token = instrument_manager.get_token(futures_symbol)
-    spot_token: int | None = None
-    if callable(spot_token_resolver):
-        try:
-            spot_token = int(spot_token_resolver(spot_symbol))
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning(
-                "spot_token_resolver_failed symbol=%s err=%s",
-                spot_symbol,
-                exc,
-                extra={"event": "spot_token_resolver_failed", "symbol": spot_symbol},
-            )
-    if spot_token is None:
-        well_known_spot_tokens = {"NSE:NIFTY": 256265}
-        spot_token = well_known_spot_tokens.get(spot_symbol)
-    if spot_token is None:
-        raise RuntimeError(f"failed to resolve spot token for {spot_symbol}")
-    def _nearest_side(candidates: list[str], side: str) -> str | None:
-        parsed: list[tuple[int, str]] = []
-        for candidate in candidates:
-            if not candidate.endswith(side):
-                continue
-            strike_digits = ""
-            for char in reversed(candidate[:-2]):
-                if char.isdigit():
-                    strike_digits = char + strike_digits
-                elif strike_digits:
-                    break
-            if not strike_digits:
-                continue
-            parsed.append((abs(int(strike_digits) - int(atm)), candidate))
-        if not parsed:
-            return None
-        parsed.sort(key=lambda item: (item[0], item[1]))
-        return parsed[0][1]
-    atm_ce = _nearest_side(ce_symbols, "CE")
-    atm_pe = _nearest_side(pe_symbols, "PE")
-    symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
-    return {
-        "spot_symbol": spot_symbol,
-        "spot_token": int(spot_token),
-        "futures_symbol": futures_symbol,
-        "futures_token": int(futures_token),
-        "atm_strike": atm,
-        "ce_symbols": ce_symbols,
-        "pe_symbols": pe_symbols,
-        "option_symbols": [*ce_symbols, *pe_symbols],
-        "atm_ce": atm_ce,
-        "atm_pe": atm_pe,
-        "selected_ce": atm_ce,
-        "selected_pe": atm_pe,
-        "symbols": symbols,
-    }
+    basket = asdict(basket_obj)
+    # Compatibility keys consumed by existing readiness/runner code. Values all
+    # come from ActiveContractBasket; no symbols are generated here.
+    option_symbols = list(basket_obj.option_symbols)
+    basket["symbols"] = list(basket_obj.all_symbols)
+    basket["all_symbols"] = list(basket_obj.all_symbols)
+    basket["all_tokens"] = list(basket_obj.all_tokens)
+    basket["option_symbols"] = option_symbols
+    basket["option_tokens"] = list(basket_obj.option_tokens)
+    basket["ce_symbols"] = [sym for sym in option_symbols if str(sym).endswith("CE")]
+    basket["pe_symbols"] = [sym for sym in option_symbols if str(sym).endswith("PE")]
+    basket["atm_ce"] = basket_obj.selected_ce
+    basket["atm_pe"] = basket_obj.selected_pe
+    return basket
 
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
@@ -7433,7 +7383,9 @@ def _commit_active_dynamic_basket(
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
     requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
-    active_futures_symbol = _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
+    active_futures_symbol = _resolve_active_futures_for_basket(ctx, requested_futures_symbol) or None
+    if requested_futures_symbol and active_futures_symbol != str(requested_futures_symbol):
+        LOGGER.info("ACTIVE_BASKET_FUTURES_NORMALIZED requested=%s active=%s", requested_futures_symbol, active_futures_symbol)
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
     basket = normalize_active_basket_schema(basket_copy)
@@ -7541,7 +7493,45 @@ def _commit_active_dynamic_basket(
             "committed_at": datetime.now(timezone.utc).isoformat(),
         }
     )
+    committed["option_tokens"] = list(basket.get("option_tokens") or [])
+    token_by_symbol = dict(basket.get("token_by_symbol") or {})
+    symbol_by_token = dict(basket.get("symbol_by_token") or {})
+    all_symbols = list(basket.get("all_symbols") or committed.get("symbols") or [])
+    all_tokens = list(basket.get("all_tokens") or [])
+    if active_futures_symbol and active_futures_symbol not in all_symbols:
+        all_symbols.insert(1 if all_symbols else 0, active_futures_symbol)
+    futures_token = basket.get("futures_token")
+    if active_futures_symbol and futures_token is not None:
+        try:
+            fut_token_int = int(futures_token)
+            token_by_symbol.setdefault(active_futures_symbol, fut_token_int)
+            symbol_by_token.setdefault(fut_token_int, active_futures_symbol)
+            if fut_token_int not in [int(t) for t in all_tokens if t is not None]:
+                all_tokens.insert(1 if all_tokens else 0, fut_token_int)
+        except (TypeError, ValueError):
+            pass
+    if token_by_symbol and not all_tokens:
+        all_tokens = [int(token_by_symbol[s]) for s in all_symbols if s in token_by_symbol]
+    if token_by_symbol and all_symbols:
+        all_tokens = [int(token_by_symbol[s]) for s in all_symbols if s in token_by_symbol]
+    committed["all_symbols"] = list(dict.fromkeys(all_symbols))
+    committed["all_tokens"] = list(dict.fromkeys(all_tokens))
+    committed["token_by_symbol"] = token_by_symbol
+    committed["symbol_by_token"] = symbol_by_token
     ctx.active_trading_universe = committed
+    ctx.active_contract_basket = committed
+    ctx.active_symbol_tokens = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
+    mdm_set = getattr(getattr(ctx, "market_data_manager", None), "set_active_contract_basket", None)
+    if callable(mdm_set):
+        mdm_set(committed)
+    hub_set = getattr(getattr(ctx, "data_hub", None), "set_active_contract_basket", None)
+    if callable(hub_set):
+        hub_set(committed)
+    LOGGER.info(
+        "ACTIVE_CONTRACT_BASKET_COMMITTED selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s option_count=%d token_count=%d",
+        selected_ce, selected_pe, active_futures_symbol, atm_strike, len(current_options), len(committed.get("all_tokens") or []),
+        extra={"event": "ACTIVE_CONTRACT_BASKET_COMMITTED", "selected_ce": selected_ce, "selected_pe": selected_pe, "futures_symbol": active_futures_symbol, "atm_strike": atm_strike, "option_count": len(current_options), "token_count": len(committed.get("all_tokens") or [])},
+    )
     runner = getattr(ctx, "strategy_runner", None)
     if runner is not None and hasattr(runner, "set_active_trading_universe"):
         runner.set_active_trading_universe(committed)
@@ -7749,22 +7739,11 @@ async def _build_and_hydrate_live_basket_from_spot(
             if ctx.broker_client is None:
                 raise RuntimeError('broker_client_unavailable_for_live_basket')
 
-            future_symbol = _resolve_active_futures_for_basket(ctx, None)
-            if future_symbol:
-                purge_stale = getattr(ctx.market_data_manager, "purge_stale_nifty_futures", None)
-                if callable(purge_stale):
-                    purge_stale(future_symbol, reason="startup_active_future_resolution")
-            else:
-                LOGGER.warning(
-                    "FUTURES_CONTEXT_UNAVAILABLE reason=startup_active_future_unresolved",
-                    extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "reason": "startup_active_future_unresolved"},
-                )
-
             basket = _build_canonical_active_basket(
                 instrument_manager=ctx.instrument_manager,
                 spot_token_resolver=lambda symbol: int(ctx.broker_client.get_instrument_token(symbol)),
                 spot_ltp=float(spot_ltp),
-                futures_symbol=future_symbol,
+                futures_symbol=None,
                 strike_step=int(ctx.settings.option_universe.strike_step or 50),
                 strikes_around_atm=2,
             )
