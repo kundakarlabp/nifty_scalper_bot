@@ -111,3 +111,41 @@ def test_option_universe_legacy_requires_env(monkeypatch) -> None:
     )
     with pytest.raises(RuntimeError, match="manual generation disabled"):
         manager.update_underlying(18638.0)
+
+
+def _active_basket() -> dict[str, object]:
+    return {
+        "selected_ce": "NFO:NIFTY26JUN25000CE",
+        "selected_pe": "NFO:NIFTY26JUN25000PE",
+        "option_symbols": ("NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"),
+        "all_symbols": ("NSE:NIFTY", "NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"),
+        "token_by_symbol": {"NFO:NIFTY26JUN25000CE": 111, "NFO:NIFTY26JUN25000PE": 112},
+    }
+
+
+def test_no_option_universe_runtime_crash_live(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = OptionUniverseManager(OptionUniverseConfig())
+    manager.set_active_contract_basket(_active_basket())
+
+    assert manager.get_primary_symbols() == ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"]
+    assert manager.get_current_universe() == ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"]
+
+
+def test_option_universe_live_without_basket_returns_empty_not_crash(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = OptionUniverseManager(OptionUniverseConfig())
+
+    assert manager.get_primary_symbols() == []
+    assert "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED" in caplog.text
+
+
+def test_active_basket_current_universe_returns_all_symbols_and_primary_is_capped(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbols = tuple(f"NFO:NIFTY26JUN{25000 + i * 50}CE" for i in range(10))
+    manager = OptionUniverseManager(OptionUniverseConfig())
+    manager.set_active_contract_basket({"option_symbols": symbols})
+
+    assert manager.get_current_universe() == list(symbols)
+    assert manager.get_filtered_universe(25000.0) == list(symbols)
+    assert manager.get_primary_symbols() == list(symbols[:8])

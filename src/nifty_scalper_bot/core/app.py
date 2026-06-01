@@ -2285,6 +2285,8 @@ class BotContext:
     atm_ce_symbol: str | None = None
     atm_pe_symbol: str | None = None
     active_trading_universe: dict[str, Any] = field(default_factory=dict)
+    active_contract_basket: dict[str, object] | None = None
+    active_basket_hydration: dict[str, object] | None = None
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     execution_locked_symbols: set[str] = field(default_factory=set)
@@ -2935,16 +2937,106 @@ def _find_existing_nifty_option_symbol(
     return None
 
 
+def _option_symbols_from_active_basket(basket: Mapping[str, Any] | Any | None) -> list[str]:
+    """Extract authoritative option symbols from an ActiveContractBasket."""
+    if basket is None:
+        return []
+
+    def _get(key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    sources: list[Any] = []
+    option_symbols = _get("option_symbols")
+    if option_symbols:
+        sources.append(option_symbols)
+    else:
+        ce_symbols = _get("ce_symbols") or []
+        pe_symbols = _get("pe_symbols") or []
+        if ce_symbols or pe_symbols:
+            sources.extend([ce_symbols, pe_symbols])
+        else:
+            sources.append([_get("selected_ce"), _get("selected_pe")])
+
+    symbols: list[str] = []
+    for source in sources:
+        if isinstance(source, (str, bytes)):
+            iterable = [source]
+        else:
+            iterable = list(source or [])
+        for sym in iterable:
+            text = str(sym).strip() if sym is not None else ""
+            if text and text.upper().endswith(("CE", "PE")):
+                symbols.append(text)
+    return list(dict.fromkeys(symbols))
+
+
+def _active_basket_for_symbol_resolution(
+    explicit_basket: Mapping[str, Any] | Any | None,
+    market_data_manager: MarketDataManager | None,
+) -> Mapping[str, Any] | Any | None:
+    """Find the already-committed ActiveContractBasket without invoking selectors."""
+    if explicit_basket is not None:
+        return explicit_basket
+    ctx = _LATEST_CTX
+    if ctx is not None:
+        basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
+        if basket:
+            return basket
+        hub = getattr(ctx, "data_hub", None)
+        hub_get = getattr(hub, "get_active_contract_basket", None)
+        if callable(hub_get):
+            basket = hub_get()
+            if basket:
+                return basket
+        mdm = getattr(ctx, "market_data_manager", None)
+        mdm_get = getattr(mdm, "get_active_contract_basket", None)
+        if callable(mdm_get):
+            basket = mdm_get()
+            if basket:
+                return basket
+    mdm_get = getattr(market_data_manager, "get_active_contract_basket", None)
+    if callable(mdm_get):
+        return mdm_get()
+    return None
+
+
 def _get_symbols(
     config: AppConfig,
     resolver: Any | None = None,
     broker: Any | None = None,
     option_universe: OptionUniverseManager | None = None,
     market_data_manager: MarketDataManager | None = None,
+    active_contract_basket: Mapping[str, Any] | Any | None = None,
 ) -> list[str]:
     """Return validated option symbols for trading."""
     LOGGER.info("=" * 60)
     LOGGER.info("🔍 _get_symbols() STARTING - Symbol Resolution")
+
+    basket = _active_basket_for_symbol_resolution(active_contract_basket, market_data_manager)
+    basket_symbols = _option_symbols_from_active_basket(basket)
+    if basket_symbols:
+        if option_universe is not None and hasattr(option_universe, "set_active_contract_basket"):
+            option_universe.set_active_contract_basket(basket)
+        LOGGER.info(
+            "SYMBOL_RESOLUTION_ACTIVE_BASKET_USED count=%d selected_ce=%s selected_pe=%s",
+            len(basket_symbols),
+            getattr(basket, "selected_ce", None) if not isinstance(basket, Mapping) else basket.get("selected_ce"),
+            getattr(basket, "selected_pe", None) if not isinstance(basket, Mapping) else basket.get("selected_pe"),
+            extra={"event": "SYMBOL_RESOLUTION_ACTIVE_BASKET_USED", "count": len(basket_symbols)},
+        )
+        LOGGER.info("🎯 FINAL SYMBOLS TO TRADE: %s", basket_symbols)
+        LOGGER.info("=" * 60)
+        return basket_symbols
+
+    execution_mode = str(os.getenv("EXECUTION_MODE") or os.getenv("MODE") or getattr(config, "execution_mode", "") or "").upper()
+    if execution_mode == "LIVE":
+        LOGGER.warning(
+            "SYMBOL_RESOLUTION_BLOCKED reason=ACTIVE_BASKET_MISSING stage=_get_symbols",
+            extra={"event": "SYMBOL_RESOLUTION_BLOCKED", "reason": "ACTIVE_BASKET_MISSING", "stage": "_get_symbols"},
+        )
+        return []
 
     symbols = getattr(config, "symbols", None)
     if symbols:
@@ -7616,6 +7708,8 @@ def _commit_active_dynamic_basket(
     committed["symbol_by_token"] = symbol_by_token
     ctx.active_trading_universe = committed
     ctx.active_contract_basket = committed
+    if getattr(ctx, "option_universe", None) is not None and hasattr(ctx.option_universe, "set_active_contract_basket"):
+        ctx.option_universe.set_active_contract_basket(committed)
     ctx.active_symbol_tokens = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
     mdm_set = getattr(getattr(ctx, "market_data_manager", None), "set_active_contract_basket", None)
     if callable(mdm_set):
@@ -8486,6 +8580,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.broker_client,
                 option_universe=ctx.option_universe,
                 market_data_manager=ctx.market_data_manager,
+                active_contract_basket=getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None),
             )
 
             active_futures_symbol = _resolve_active_futures_for_basket(ctx, None)
@@ -9751,40 +9846,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                             pending_runner_symbols.clear()
                             pending_runner_symbols.update(still_pending)
 
-                        if not ctx.option_universe:
-                            await asyncio.sleep(30)
-                            continue
-
-                        spot = (
-                            ctx.market_data_manager.get_cached_ltp(
-                                policy.nifty_internal_symbol,
-                                max_age_seconds=policy.startup_spot_max_age_seconds,
-                                require_ws=False,
-                            )
-                            if ctx.market_data_manager
-                            and hasattr(ctx.market_data_manager, "get_cached_ltp")
-                            else None
-                        )
-                        
-                        # --- Objective 7: Auto ATM Resubscription via InstrumentManager ---
-                        _im = ctx.instrument_manager
-                        if spot and spot > 0 and _im and _im.is_loaded():
-                            target_tokens = _im.select_tokens_for_universe(
-                                base="NIFTY",
-                                spot_price=float(spot),
-                                strikes_around_atm=3,
-                                strike_step=ctx.settings.option_universe.strike_step
-                            )
-                            latest_symbols = set()
-                            for t in target_tokens:
-                                s = _im.get_symbol(t)
-                                if s:
-                                    qualified = f"NFO:{s}" if not s.startswith("NFO:") else s
-                                    if qualified.startswith("NFO:NIFTY"):
-                                        latest_symbols.add(qualified)
-                        else:
-                            latest_symbols = set(
-                                ctx.option_universe.get_current_universe()
+                        active_basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
+                        latest_symbols = set(_option_symbols_from_active_basket(active_basket))
+                        if not latest_symbols:
+                            LOGGER.warning(
+                                "OPTION_UNIVERSE_SYNC_SKIPPED reason=ACTIVE_BASKET_MISSING",
+                                extra={"event": "OPTION_UNIVERSE_SYNC_SKIPPED", "reason": "ACTIVE_BASKET_MISSING"},
                             )
 
                         added, removed = option_universe_controller.update(
@@ -10180,7 +10247,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 startup_trade_ready = True
             else:
-                norm_basket = normalize_active_basket_schema(dict(getattr(ctx, "active_trading_universe", {}) or {}))
+                norm_basket = normalize_active_basket_schema(dict((getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", {}) or {})))
                 LOGGER.exception(
                     "HYDRATION_TRACKING_FAILED error_type=%s error=%s basket_keys=%s selected_ce=%s selected_pe=%s spot_symbol=%s futures_symbol=%s",
                     type(e).__name__,
@@ -10203,17 +10270,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 ctx.live_orders_armed = False
                 ctx.trading_ready = False
-                ctx.live_block_reason = f"hydration_tracking_failed:{e}"
-            configured_mode = str(
-                getattr(ctx.settings, "execution_mode", None)
-                or os.getenv("EXECUTION_MODE", "PAPER")
-            ).upper()
-            if (
-                configured_mode == "LIVE"
-                and get_market_state() == MarketState.OPEN
-                and not is_warmup_like
-            ):
-                raise
+                if norm_basket.get("option_symbols") or norm_basket.get("selected_ce") or norm_basket.get("selected_pe"):
+                    ctx.live_block_reason = f"hydration_tracking_degraded:{type(e).__name__}"
+                    LOGGER.warning(
+                        "HYDRATION_TRACKING_DEGRADED_CONTINUE reason=%s active_basket_available=True",
+                        type(e).__name__,
+                        extra={"event": "HYDRATION_TRACKING_DEGRADED_CONTINUE", "reason": type(e).__name__, "active_basket_available": True},
+                    )
+                else:
+                    ctx.live_block_reason = "ACTIVE_BASKET_MISSING"
+                    LOGGER.warning(
+                        "LIVE_READINESS_BLOCKED reason=ACTIVE_BASKET_MISSING stage=hydration_tracking",
+                        extra={"event": "LIVE_READINESS_BLOCKED", "reason": "ACTIVE_BASKET_MISSING", "stage": "hydration_tracking"},
+                    )
 
     # ---------------------------------------------------------
     # 4. Start subsystems (guarded singleton startup)

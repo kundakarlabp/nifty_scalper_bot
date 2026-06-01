@@ -154,3 +154,43 @@ def test_build_canonical_active_basket_is_limited_to_spot_futures_atm_pm3() -> N
     assert len(basket["ce_symbols"]) == 7
     assert len(basket["pe_symbols"]) == 7
     assert len(basket["symbols"]) == 16
+
+
+def test_hydration_tracking_uses_active_basket_not_option_universe(monkeypatch) -> None:
+    from nifty_scalper_bot.core.option_universe import OptionUniverseConfig, OptionUniverseManager
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setattr(
+        OptionUniverseManager,
+        "_build_universe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("manual generation should not run")),
+    )
+    universe = OptionUniverseManager(OptionUniverseConfig())
+    basket = {
+        "selected_ce": "NFO:NIFTY26JUN25000CE",
+        "selected_pe": "NFO:NIFTY26JUN25000PE",
+        "option_symbols": ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"],
+    }
+
+    symbols = app._get_symbols(app.AppConfig(), option_universe=universe, active_contract_basket=basket)
+
+    assert symbols == ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"]
+
+
+def test_get_symbols_uses_ce_pe_symbol_fallback_without_option_symbols(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    basket = {
+        "ce_symbols": ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25050CE"],
+        "pe_symbols": ["NFO:NIFTY26JUN25000PE", "NFO:NIFTY26JUN25050PE"],
+        "selected_ce": "NFO:NIFTY26JUN99999CE",
+        "selected_pe": "NFO:NIFTY26JUN99999PE",
+    }
+
+    symbols = app._get_symbols(app.AppConfig(), active_contract_basket=basket)
+
+    assert symbols == [
+        "NFO:NIFTY26JUN25000CE",
+        "NFO:NIFTY26JUN25050CE",
+        "NFO:NIFTY26JUN25000PE",
+        "NFO:NIFTY26JUN25050PE",
+    ]
