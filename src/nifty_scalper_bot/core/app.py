@@ -196,6 +196,31 @@ async def _polling_failover_supervisor_iteration(
     """Run one polling failover supervisor pass. Args: ctx/fallback/state. Returns: state."""
 
     market_open = bool(_safe_supervisor_call("is_market_open_now", is_market_open_now, default=False))
+    spot_symbol = "NSE:NIFTY"
+    spot_age_ms = None
+    now_mono = time_module.monotonic()
+    if not market_open:
+        # Off-market: never aggressively activate the REST polling fallback
+        # just because the last quote crossed the open-market threshold.
+        log_throttled(
+            LOGGER,
+            f"polling_fallback_skipped:{spot_symbol}:market_closed",
+            "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s"
+            % spot_age_ms,
+            interval_sec=60.0,
+            level=logging.DEBUG,
+            extra={
+                "event": "POLLING_FALLBACK_SKIPPED",
+                "reason": "market_closed",
+                "age_ms": spot_age_ms,
+            },
+        )
+        degraded_since = None
+        if polling_fallback.is_running():
+            polling_fallback.set_websocket_mode(True)
+            polling_fallback.stop()
+        return degraded_since, recovered_since
+
     ws_ok = bool(_safe_supervisor_call(
         "websocket_manager.is_connected",
         getattr(ctx.websocket_manager, "is_connected", None),
@@ -230,28 +255,6 @@ async def _polling_failover_supervisor_iteration(
         futures_fresh=futures_fresh,
         options_fresh=options_fresh,
     )
-    now_mono = time_module.monotonic()
-    if not market_open:
-        # Off-market: never aggressively activate the REST polling fallback
-        # just because the last quote crossed the open-market threshold.
-        log_throttled(
-            LOGGER,
-            f"polling_fallback_skipped:{spot_symbol}:market_closed",
-            "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s"
-            % spot_age_ms,
-            interval_sec=60.0,
-            level=logging.DEBUG,
-            extra={
-                "event": "POLLING_FALLBACK_SKIPPED",
-                "reason": "market_closed",
-                "age_ms": spot_age_ms,
-            },
-        )
-        degraded_since = None
-        if polling_fallback.is_running():
-            polling_fallback.set_websocket_mode(True)
-            polling_fallback.stop()
-        return degraded_since, recovered_since
     if degraded:
         recovered_since = None
         degraded_since = degraded_since or now_mono

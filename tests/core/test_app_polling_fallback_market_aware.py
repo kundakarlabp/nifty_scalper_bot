@@ -152,3 +152,57 @@ async def test_polling_failover_supervisor_offmarket_no_activation(monkeypatch):
     )
 
     fallback.start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_polling_failover_supervisor_offmarket_does_not_call_feed_health(monkeypatch):
+    monkeypatch.setattr(app, "is_market_open_now", lambda: False)
+    ctx = _supervisor_ctx(is_connected=False)
+    ctx.websocket_manager.is_connected = MagicMock(side_effect=AssertionError("should not be called"))
+    ctx.market_data_manager.trading_feed_health = MagicMock(
+        side_effect=AssertionError("should not be called")
+    )
+    ctx.market_data_manager.data_age_ms = MagicMock(
+        side_effect=AssertionError("should not be called")
+    )
+    fallback = _Fallback()
+
+    await app._polling_failover_supervisor_iteration(
+        ctx,
+        fallback,
+        quote_stale_ms=1000,
+        degraded_since=0.0,
+        recovered_since=None,
+        activate_after=0.0,
+    )
+
+    fallback.start.assert_not_called()
+    fallback.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_polling_failover_supervisor_offmarket_stops_running_fallback(monkeypatch):
+    monkeypatch.setattr(app, "is_market_open_now", lambda: False)
+    ctx = _supervisor_ctx(is_connected=False)
+    ctx.websocket_manager.is_connected = MagicMock(side_effect=AssertionError("should not be called"))
+    ctx.market_data_manager.trading_feed_health = MagicMock(
+        side_effect=AssertionError("should not be called")
+    )
+    ctx.market_data_manager.data_age_ms = MagicMock(
+        side_effect=AssertionError("should not be called")
+    )
+    fallback = _Fallback()
+    fallback._running = True
+
+    await app._polling_failover_supervisor_iteration(
+        ctx,
+        fallback,
+        quote_stale_ms=1000,
+        degraded_since=0.0,
+        recovered_since=None,
+        activate_after=0.0,
+    )
+
+    fallback.start.assert_not_called()
+    fallback.set_websocket_mode.assert_called_once_with(True)
+    fallback.stop.assert_called_once()
