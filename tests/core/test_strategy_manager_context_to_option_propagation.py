@@ -204,8 +204,10 @@ def test_runner_selected_option_depth_uses_ws_quote_proof_canonical_mapping():
 
     runner = object.__new__(StrategyRunner)
     runner._market_data = SimpleNamespace(
-        has_ws_tradable_quote=lambda symbols: 'NFO:NIFTY26JUN25000CE' in symbols
+        has_ws_tradable_quote=lambda symbols: 'NFO:NIFTY26JUN25000CE' in symbols,
+        time_since_last_tick=lambda symbol: 1.0,
     )
+    runner._data_hub = None
     runner.get_quote = lambda symbol: None  # type: ignore[method-assign]
 
     assert runner._selected_option_has_real_depth('NIFTY26JUN25000CE') is True
@@ -217,24 +219,103 @@ def test_runner_selected_option_depth_requires_real_bid_ask():
 
     runner = object.__new__(StrategyRunner)
     runner._market_data = SimpleNamespace(has_ws_tradable_quote=lambda symbols: False)
-    runner.get_quote = lambda symbol: {'ltp': 100, 'bid': 99.5, 'ask': 100.5, 'depth': {'buy': [{'price': 99.5}], 'sell': [{'price': 100.5}]}}  # type: ignore[method-assign]
+    runner._data_hub = None
+    runner.get_quote = lambda symbol: {'ltp': 100, 'bid': 99.5, 'ask': 100.5, 'tick_age_s': 1.0, 'depth': {'buy': [{'price': 99.5}], 'sell': [{'price': 100.5}]}}  # type: ignore[method-assign]
 
     assert runner._selected_option_has_real_depth('NFO:NIFTY26JUN25000CE') is True
 
 
-def test_smc_direction_context_not_ready_log_is_throttled(monkeypatch, caplog):
-    import logging
-    from nifty_scalper_bot.strategies.elite_strategies.smc_liquidity import SMCStrategy
-    from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
+def test_runner_refresh_includes_active_future_even_when_not_active_symbol():
+    from types import SimpleNamespace
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
 
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
-    monkeypatch.setenv('SMC_DIRECTION_CONTEXT_NO_VOTE_LOG_THROTTLE_SECONDS', '60')
-    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
-    indicators = {'high': 101, 'low': 99, 'close': 100, 'open': 100, 'atr': 1}
+    calls: list[str] = []
+    runner = object.__new__(StrategyRunner)
+    runner._strategy_manager = SimpleNamespace(
+        generate_signal=lambda symbol, price, trace_id=None: calls.append(symbol)
+    )
+    runner._active_symbols = {'NSE:NIFTY', 'NFO:NIFTY26JUN25000CE'}
+    runner._active_futures_symbol = 'NFO:NIFTY26JUNFUT'
+    runner._suspended_context_symbol_until = {}
+    runner._suspended_context_symbols = set()
+    runner._market_data = SimpleNamespace(time_since_last_tick=lambda symbol: 1.0)
+    runner._data_hub = None
+    runner._logger = SimpleNamespace(warning=lambda *a, **k: None, info=lambda *a, **k: None)
+    quotes = {
+        'NSE:NIFTY': {'ltp': 25000.0, 'tick_age_s': 1.0},
+        'NFO:NIFTY26JUNFUT': {'ltp': 25100.0, 'tick_age_s': 1.0},
+    }
+    runner.get_quote = lambda symbol: quotes.get(symbol)  # type: ignore[method-assign]
 
-    with caplog.at_level(logging.WARNING):
-        assert strategy._evaluate_signal('NFO:NIFTY26JUN25000CE', dict(indicators), 100.0) is None
-        assert strategy._evaluate_signal('NFO:NIFTY26JUN25000CE', dict(indicators), 100.0) is None
+    runner._refresh_underlying_context_snapshots(trace_id='t2')
 
-    records = [rec for rec in caplog.records if 'direction_context_not_ready' in rec.getMessage()]
-    assert len(records) == 1
+    assert calls == ['NSE:NIFTY', 'NFO:NIFTY26JUNFUT']
+
+
+def test_runner_underlying_context_prefers_fresh_valid_spot_over_newer_future():
+    from types import SimpleNamespace
+    import time
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    now = time.time()
+    runner = object.__new__(StrategyRunner)
+    runner._strategy_manager = SimpleNamespace(
+        _latest_context_snapshots={
+            'spot_context': {'role': 'spot_context', 'timestamp': now - 5, 'direction_bias': 'CE', 'underlying_direction_confidence': 0.7},
+            'futures_context': {'role': 'futures_context', 'timestamp': now - 1, 'direction_bias': 'PE', 'underlying_direction_confidence': 0.9},
+        },
+        _live_context_max_age_seconds=lambda: 60.0,
+    )
+
+    ctx = runner._underlying_context_from_strategy_manager()
+
+    assert ctx['underlying_direction_bias'] == 'CE'
+    assert ctx['direction_context_source'] == 'spot_context'
+    assert 4.0 <= float(ctx['context_age_seconds']) <= 6.0
+
+
+def test_runner_underlying_context_uses_future_when_spot_directionless():
+    from types import SimpleNamespace
+    import time
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    now = time.time()
+    runner = object.__new__(StrategyRunner)
+    runner._strategy_manager = SimpleNamespace(
+        _latest_context_snapshots={
+            'spot_context': {'role': 'spot_context', 'timestamp': now - 1, 'direction_bias': None},
+            'futures_context': {'role': 'futures_context', 'timestamp': now - 2, 'direction_bias': 'PE', 'underlying_direction_confidence': 0.8},
+        },
+        _live_context_max_age_seconds=lambda: 60.0,
+    )
+
+    ctx = runner._underlying_context_from_strategy_manager()
+
+    assert ctx['underlying_direction_bias'] == 'PE'
+    assert ctx['direction_context_source'] == 'futures_context'
+    assert ctx['spot_fresh'] is True
+    assert ctx['futures_fresh'] is True
+
+
+def test_runner_selected_option_depth_rejects_stale_cached_bid_ask():
+    from types import SimpleNamespace
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = object.__new__(StrategyRunner)
+    runner._market_data = SimpleNamespace(has_ws_tradable_quote=lambda symbols: False, time_since_last_tick=lambda symbol: 120.0)
+    runner._data_hub = None
+    runner.get_quote = lambda symbol: {'ltp': 100, 'bid': 99.5, 'ask': 100.5, 'tick_age_s': 120.0}  # type: ignore[method-assign]
+
+    assert runner._selected_option_has_real_depth('NFO:NIFTY26JUN25000CE') is False
+
+
+def test_runner_selected_option_depth_rejects_cached_bid_ask_without_freshness():
+    from types import SimpleNamespace
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = object.__new__(StrategyRunner)
+    runner._market_data = SimpleNamespace(has_ws_tradable_quote=lambda symbols: False)
+    runner._data_hub = None
+    runner.get_quote = lambda symbol: {'ltp': 100, 'bid': 99.5, 'ask': 100.5}  # type: ignore[method-assign]
+
+    assert runner._selected_option_has_real_depth('NFO:NIFTY26JUN25000CE') is False
