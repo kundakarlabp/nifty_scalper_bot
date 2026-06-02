@@ -1324,25 +1324,30 @@ class StrategyRunner:
                     continue
         return []
 
-    def _request_mdm_hydration(self, symbol: str, min_bars: int) -> None:
-        """Request async hydration from owner service. Args: symbol/min_bars. Returns: None. Raises: None."""
+    def _request_mdm_hydration(self, symbol: str, min_bars: int, *, reason: str = "runner_missing_bars") -> None:
+        """Request async hydration from owner service. Args: symbol/min_bars/reason. Returns: None. Raises: None."""
         self._hydration_attempted_symbols.add(symbol)
-        self._last_hydration_reason_by_symbol[symbol] = "runner_missing_bars"
+        self._last_hydration_reason_by_symbol[symbol] = reason
         for source in (self._market_data, self._data_hub):
             fn = getattr(source, "request_hydration", None)
             if callable(fn):
                 try:
-                    fn(symbol, min_bars=min_bars, reason="runner_missing_bars")
+                    fn(symbol, min_bars=min_bars, reason=reason)
                     return
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - owner request failures are diagnostic only
+                    self._logger.warning(
+                        "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=request_hydration error=%s",
+                        symbol,
+                        exc,
+                        extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": symbol, "source": "request_hydration", "error": str(exc), "reason": reason},
+                    )
         log_throttled(
             self._logger,
             f"runner_waiting_for_mdm_hydration:{symbol}",
             f"RUNNER_WAITING_FOR_MDM_HYDRATION symbol={symbol} min_bars={min_bars}",
             interval_sec=60.0,
             level=logging.INFO,
-            extra={"event": "RUNNER_WAITING_FOR_MDM_HYDRATION", "symbol": symbol, "min_bars": min_bars},
+            extra={"event": "RUNNER_WAITING_FOR_MDM_HYDRATION", "symbol": symbol, "min_bars": min_bars, "reason": reason},
         )
 
     def _hydrate_from_mdm_cache(self, symbol: str) -> int:
@@ -1369,6 +1374,149 @@ class StrategyRunner:
             extra={"event": "RUNNER_MDM_CACHE_HYDRATION", "symbol": symbol, "ingested": ingested, "target": target},
         )
         return ingested
+
+    def _emit_history_hydration_trace(
+        self,
+        symbol: str,
+        *,
+        source: str,
+        fetched_bars: int,
+        ingested_bars: int,
+    ) -> None:
+        """Emit concise hydration trace. Args: symbol/source/counts. Returns: None. Raises: None."""
+        indicator_count = self._history_count_for_symbol(symbol)
+        self._logger.info(
+            "HISTORY_HYDRATION_TRACE symbol=%s source=%s fetched_bars=%d ingested_bars=%d indicator_history_count=%d",
+            symbol,
+            source,
+            int(fetched_bars),
+            int(ingested_bars),
+            int(indicator_count),
+            extra={
+                "event": "HISTORY_HYDRATION_TRACE",
+                "symbol": symbol,
+                "source": source,
+                "fetched_bars": int(fetched_bars),
+                "ingested_bars": int(ingested_bars),
+                "indicator_history_count": int(indicator_count),
+            },
+        )
+
+    def _sync_history_from_mdm_cache(
+        self,
+        symbol: str,
+        *,
+        required_bars: int | None = None,
+        source: str = "mdm_cache_sync",
+        request_if_short: bool = True,
+    ) -> int:
+        """Sync cached DataHub/MDM bars into IndicatorEngine. Args: symbol/required/source. Returns: indicator count."""
+        normalized = self._normalize_symbol(symbol)
+        if not normalized:
+            return 0
+        target = max(1, int(required_bars or self._required_bars_for_symbol(normalized) or 1))
+        indicator_before = self._history_count_for_symbol(normalized)
+        rows = self._get_mdm_bars(normalized, max(target, indicator_before))
+        ingested = 0
+        if rows and indicator_before < min(target, len(rows)):
+            ingested = int(
+                self.reseed_history_from_bars(
+                    normalized,
+                    rows,
+                    source=source,
+                    min_bars=target,
+                )
+                or 0
+            )
+        indicator_after = self._history_count_for_symbol(normalized)
+        self._emit_history_hydration_trace(
+            normalized,
+            source=source,
+            fetched_bars=len(rows),
+            ingested_bars=ingested if ingested else max(0, indicator_after - indicator_before),
+        )
+        if indicator_after < target and request_if_short:
+            self._request_mdm_hydration(normalized, target, reason=source)
+        return indicator_after
+
+    def _active_context_symbols_for_history(self) -> list[str]:
+        """Return canonical spot/futures context symbols. Args: none. Returns: symbols."""
+        symbols = ["NSE:NIFTY"]
+        futures_symbol = normalize_symbol(str(getattr(self, "_active_futures_symbol", "") or ""))
+        if not futures_symbol:
+            futures_symbol = next(
+                (
+                    sym
+                    for sym in getattr(self, "_active_symbols", set())
+                    if self._symbol_role_for_runner(sym) == "futures_context"
+                    and not self._is_context_symbol_suspended(sym)
+                ),
+                "",
+            )
+        if futures_symbol:
+            symbols.append(futures_symbol)
+        return symbols
+
+    def _sync_context_history_if_cold(self, *, source: str = "context_history_sync") -> None:
+        """Ensure spot/futures cached history is visible to IndicatorEngine."""
+        for ctx_symbol in self._active_context_symbols_for_history():
+            count = self._history_count_for_symbol(ctx_symbol)
+            if count >= self._context_required_bars:
+                self._emit_history_hydration_trace(
+                    ctx_symbol,
+                    source=source,
+                    fetched_bars=0,
+                    ingested_bars=0,
+                )
+                continue
+            try:
+                after = self._sync_history_from_mdm_cache(
+                    ctx_symbol,
+                    required_bars=self._context_required_bars,
+                    source=source,
+                )
+                if after < self._context_required_bars:
+                    self._logger.warning(
+                        "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
+                        ctx_symbol,
+                        source,
+                        "insufficient_cached_bars",
+                        extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": ctx_symbol, "source": source, "error": "insufficient_cached_bars", "indicator_history_count": after, "required_bars": self._context_required_bars},
+                    )
+            except Exception as exc:  # noqa: BLE001 - keep evaluation safely blocked with diagnostics
+                self._logger.warning(
+                    "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
+                    ctx_symbol,
+                    source,
+                    exc,
+                    extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": ctx_symbol, "source": source, "error": str(exc)},
+                )
+
+    def _prewarm_active_option_history(self, *, trace_id: str | None = None, source: str = "active_basket_commit") -> None:
+        """Proactively prewarm selected and active-basket option history."""
+        symbols: list[str] = []
+        for raw in (getattr(self, "_active_selected_ce", None), getattr(self, "_active_selected_pe", None)):
+            if raw:
+                symbols.append(normalize_symbol(str(raw)))
+        for raw in sorted(getattr(self, "_active_option_symbols", set()) or set()):
+            normalized = normalize_symbol(str(raw))
+            if normalized and normalized not in symbols:
+                symbols.append(normalized)
+        required = max(self._option_required_bars, safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
+        for option_symbol in symbols:
+            before = self._sync_history_from_mdm_cache(
+                option_symbol,
+                required_bars=required,
+                source=f"{source}_option_cache_sync",
+                request_if_short=False,
+            )
+            if before < required:
+                self._request_selected_option_history_prewarm(
+                    option_symbol,
+                    bars_before=before,
+                    required_bars=required,
+                    trace_id=trace_id,
+                )
 
     def _should_log_throttled(self, key: str, interval_s: float = 30.0) -> bool:
         """Decide whether a throttled log should emit. Args: key/interval_s. Returns: bool. Raises: None."""
@@ -2280,6 +2428,7 @@ class StrategyRunner:
             len(self._active_option_symbols),
             extra={"event": "RUNNER_ACTIVE_OPTION_CONTEXT", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "atm_strike": self._active_atm_strike, "option_count": len(self._active_option_symbols)},
         )
+        self._prewarm_active_option_history(source="active_option_context")
 
     def set_active_trading_universe(self, basket: Mapping[str, Any]) -> None:
         """Set active trading universe snapshot. Args: basket. Returns: none. Raises: none."""
@@ -2322,6 +2471,7 @@ class StrategyRunner:
             len(self._active_option_symbols),
             extra={"event": "RUNNER_ACTIVE_BASKET_UPDATED", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "futures_symbol": self._active_futures_symbol, "option_count": len(self._active_option_symbols)},
         )
+        self._sync_context_history_if_cold(source="active_basket_context_sync")
 
     def set_runtime_readiness(
         self,
@@ -6729,10 +6879,40 @@ class StrategyRunner:
                     result = await result
                 success = result is not None
                 if isinstance(result, list):
-                    bars_after = len(result)
+                    fetched = len(result)
+                    if fetched:
+                        self.reseed_history_from_bars(
+                            symbol,
+                            result,
+                            source="selected_option_history_prewarm",
+                            min_bars=required_bars,
+                        )
+                    bars_after = self._history_count_for_symbol(symbol)
+                    self._emit_history_hydration_trace(
+                        symbol,
+                        source="selected_option_history_prewarm",
+                        fetched_bars=fetched,
+                        ingested_bars=bars_after,
+                    )
                 elif isinstance(result, Mapping):
-                    bars_after = int(result.get("bars_after") or result.get("count") or bars_before)
+                    rows = result.get("bars") or result.get("rows")
+                    if isinstance(rows, list) and rows:
+                        self.reseed_history_from_bars(
+                            symbol,
+                            rows,
+                            source="selected_option_history_prewarm",
+                            min_bars=required_bars,
+                        )
+                    bars_after = self._history_count_for_symbol(symbol)
+                    if bars_after <= bars_before:
+                        bars_after = int(result.get("bars_after") or result.get("count") or bars_before)
                     success = bool(result.get("success", success))
+                    self._emit_history_hydration_trace(
+                        symbol,
+                        source="selected_option_history_prewarm",
+                        fetched_bars=len(rows) if isinstance(rows, list) else int(result.get("count") or 0),
+                        ingested_bars=bars_after,
+                    )
                 else:
                     bars_after = self._history_count_for_symbol(symbol)
             except Exception as exc:
@@ -7414,6 +7594,12 @@ class StrategyRunner:
             if self._is_tradable_symbol(symbol):
                 option_execution_min_bars = safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1)
                 required_bars = max(required_bars, option_execution_min_bars)
+                self._sync_context_history_if_cold(source="pre_option_eval_context_sync")
+                self._sync_history_from_mdm_cache(
+                    symbol,
+                    required_bars=required_bars,
+                    source="pre_option_eval_option_sync",
+                )
             history_count = len(self._indicator_engine.get_history(symbol) or [])
             restored_from_cache = symbol in self._restored_from_cache_symbols
             if restored_from_cache and history_count >= required_bars:
@@ -9371,7 +9557,32 @@ class StrategyRunner:
                         context_fresh = bool(indicators_ctx.get("context_fresh") or spot_fresh or fut_fresh)
                         live_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE"
                         if live_mode and (resolved_bias not in {"CE", "PE"} or not context_fresh):
-                            log_throttled(
+                            refreshed_context = self._underlying_context_from_strategy_manager()
+                            if refreshed_context:
+                                runtime_ctx.update(refreshed_context)
+                                indicators_ctx.update(refreshed_context)
+                                direction_bias = str((indicators_ctx.get("direction_bias") or "")).upper()
+                                underlying_bias = str((indicators_ctx.get("underlying_direction_bias") or "")).upper()
+                                resolved_bias = underlying_bias or direction_bias
+                                resolved_confidence = float(
+                                    indicators_ctx.get("direction_confidence")
+                                    or indicators_ctx.get("underlying_direction_confidence")
+                                    or 0.0
+                                )
+                                spot_fresh = bool(indicators_ctx.get("spot_fresh"))
+                                fut_fresh = bool(indicators_ctx.get("futures_fresh") or indicators_ctx.get("fut_fresh"))
+                                context_fresh = bool(indicators_ctx.get("context_fresh") or spot_fresh or fut_fresh)
+                            if resolved_bias in {"CE", "PE"} and context_fresh:
+                                runtime_indicators[symbol] = {
+                                    **(runtime_indicators.get(symbol, {}) or {}),
+                                    "direction_bias": indicators_ctx.get("direction_bias"),
+                                    "underlying_direction_bias": indicators_ctx.get("underlying_direction_bias"),
+                                    "context_age_seconds": indicators_ctx.get("context_age_seconds"),
+                                    "underlying_direction_confidence": indicators_ctx.get("underlying_direction_confidence"),
+                                }
+                                self._last_direction_context = runtime_indicators[symbol]
+                            else:
+                                log_throttled(
                                 self._logger,
                                 f"direction_context_missing_live:{symbol}",
                                 "TRIGGER_EVAL_SKIPPED symbol=%s reason=direction_context_missing_live spot_fresh=%s fut_fresh=%s",
@@ -9381,9 +9592,9 @@ class StrategyRunner:
                                 interval_sec=30.0,
                                 level=logging.WARNING,
                                 extra={"event": "trigger_eval_skipped", "reason": "direction_context_missing_live", "symbol": symbol, "spot_fresh": spot_fresh, "fut_fresh": fut_fresh},
-                            )
-                            self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="direction_context_missing_live", allowed=False, trace_id=trace_id)
-                            return
+                                )
+                                self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="direction_context_missing_live", allowed=False, trace_id=trace_id)
+                                return
                         if getattr(self, "_orchestrator", None) is not None and hasattr(self._orchestrator, "reconcile_direction_bias"):
                             self._orchestrator.reconcile_direction_bias(
                                 resolved_bias=resolved_bias or None,
