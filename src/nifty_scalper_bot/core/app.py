@@ -7561,8 +7561,19 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         dt=pd.to_datetime(ts,utc=True,errors='coerce')
         if pd.isna(dt): return False
         return (pd.Timestamp.utcnow()-dt).total_seconds()<=age_limit
+    def _snapshot_value(snap: Any, key: str, default: Any = None) -> Any:
+        if isinstance(snap, Mapping):
+            return snap.get(key, default)
+        return getattr(snap, key, default)
+    def _selected_option_bid_ask_complete(sym:str|None)->bool:
+        snap=_snapshot(sym)
+        if snap is None: return False
+        bid=float(_snapshot_value(snap,'bid',0.0) or 0.0)
+        ask=float(_snapshot_value(snap,'ask',0.0) or 0.0)
+        return bid>0 and ask>bid
     def _tradable_quote(sym:str|None)->bool:
         if not sym or mdm is None: return False
+        if not _selected_option_bid_ask_complete(sym): return False
         h=getattr(mdm,'has_ws_tradable_quote',None)
         if callable(h):
             try: return bool(h([sym]))
@@ -7572,8 +7583,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
                 pass
         snap=_snapshot(sym)
         if snap is None: return False
-        bid=float(getattr(snap,'bid',0.0) or 0.0); ask=float(getattr(snap,'ask',0.0) or 0.0)
-        return bool(getattr(snap,'tradable_quote',False)) and bid>0 and ask>bid
+        return bool(_snapshot_value(snap,'tradable_quote',False))
     def _live_tick_seen(sym:str|None)->bool:
         if _fresh_ltp(sym): return True
         if not sym or mdm is None: return False
@@ -7654,8 +7664,10 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ce_bars, ce_mdm_bars, ce_runner_bars = _readiness_bars(selected_ce)
     pe_bars, pe_mdm_bars, pe_runner_bars = _readiness_bars(selected_pe)
     ce_quote_fresh=_fresh_ltp(selected_ce); pe_quote_fresh=_fresh_ltp(selected_pe)
-    ce_exec_ready = bool(selected_ce) and ce_quote_fresh and _tradable_quote(selected_ce) and ce_bars >= option_execution_min_bars
-    pe_exec_ready = bool(selected_pe) and pe_quote_fresh and _tradable_quote(selected_pe) and pe_bars >= option_execution_min_bars
+    ce_bid_ask_complete = _selected_option_bid_ask_complete(selected_ce)
+    pe_bid_ask_complete = _selected_option_bid_ask_complete(selected_pe)
+    ce_exec_ready = bool(selected_ce) and ce_quote_fresh and ce_bid_ask_complete and _tradable_quote(selected_ce) and ce_bars >= option_execution_min_bars
+    pe_exec_ready = bool(selected_pe) and pe_quote_fresh and pe_bid_ask_complete and _tradable_quote(selected_pe) and pe_bars >= option_execution_min_bars
     ce_eval_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_eval_min_live_bars
     pe_eval_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_eval_min_live_bars
     spot_ready=_fresh_ltp(spot_symbol) or _bars(spot_symbol)>=1
@@ -7685,6 +7697,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     if pe_runner_bars < option_execution_min_bars: missing.append('pe_exec_bars_missing')
     if not ce_quote_fresh: missing.append('ce_quote_not_fresh')
     if not pe_quote_fresh: missing.append('pe_quote_not_fresh')
+    if (selected_ce and not ce_bid_ask_complete) or (selected_pe and not pe_bid_ask_complete): missing.append('selected_option_bid_ask_missing')
     if not _tradable_quote(selected_ce): missing.append('ce_depth_not_tradable')
     if not _tradable_quote(selected_pe): missing.append('pe_depth_not_tradable')
     if not runner_running: missing.append('runner_not_running')

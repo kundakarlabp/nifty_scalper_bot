@@ -130,7 +130,7 @@ class MarketDataSource:
     def get_ltp_poll(self, tokens: Sequence[int]) -> dict[int, float]:
         """Fetch LTP by polling API. Args: tokens. Returns: token->price. Raises: DataIntegrityError."""
 
-        normalized_tokens = [int(token) for token in tokens]
+        normalized_tokens = self._normalize_poll_tokens(tokens)
         if not normalized_tokens:
             return {}
         try:
@@ -154,6 +154,23 @@ class MarketDataSource:
         except Exception as e:
             raise DataIntegrityError(f"Polling LTP failed: {e}") from e
         return {}
+
+    @staticmethod
+    def _normalize_poll_tokens(tokens: Sequence[Any]) -> list[int]:
+        """Return positive integer tokens, skipping malformed inputs."""
+
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for raw_token in tokens:
+            try:
+                token = int(raw_token)
+            except (TypeError, ValueError):
+                continue
+            if token <= 0 or token in seen:
+                continue
+            normalized.append(token)
+            seen.add(token)
+        return normalized
 
     def _extract_token_ltps(
         self,
@@ -209,8 +226,23 @@ class MarketDataSource:
                 except (TypeError, ValueError):
                     continue
                 if token in wanted and raw_symbol:
-                    lookup[token] = str(raw_symbol)
+                    normalized_symbol = self._normalize_ltp_symbol(str(raw_symbol))
+                    if normalized_symbol:
+                        lookup[token] = normalized_symbol
         return lookup
+
+    @staticmethod
+    def _normalize_ltp_symbol(symbol: str) -> str:
+        """Normalize token-symbol mappings for raw Kite LTP compatibility."""
+
+        text = str(symbol or "").strip().upper()
+        if not text:
+            return ""
+        if text in {"NIFTY", "NIFTY 50", "NSE:NIFTY"}:
+            return "NSE:NIFTY 50"
+        if ":" not in text and (text.endswith("CE") or text.endswith("PE") or text.endswith("FUT")):
+            return f"NFO:{text}"
+        return text
 
     def get_ltp(self, tokens: Sequence[int], *, stale_after_seconds: int = 5) -> dict[int, float]:
         """Get token LTPs using WS first and polling fallback. Args: tokens/stale_after_seconds. Returns: token->price. Raises: none."""

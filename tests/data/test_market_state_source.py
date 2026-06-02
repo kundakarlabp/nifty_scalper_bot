@@ -11,6 +11,7 @@ from nifty_scalper_bot.data.source import DataIntegrityError, MarketDataSource
 class _StubKite:
     def __init__(self) -> None:
         self.ltp_payload = {101: {"last_price": 100.5}}
+        self.bulk_calls: list[list[int]] = []
         self.ltp_calls: list[list[str]] = []
         self.rows = [
             {
@@ -24,6 +25,7 @@ class _StubKite:
         ]
 
     def get_ltp_bulk(self, tokens: list[int]) -> dict[int, dict[str, float]]:
+        self.bulk_calls.append(list(tokens))
         return {int(token): self.ltp_payload.get(int(token), {}) for token in tokens}
 
     def ltp(self, symbols: list[str]) -> dict[str, dict[str, float]]:
@@ -86,6 +88,19 @@ def test_integer_token_polling_uses_bulk_without_nfo_token_ltp_key() -> None:
     prices = source.get_ltp_poll([101])
 
     assert prices == {101: pytest.approx(100.5)}
+    assert kite.bulk_calls == [[101]]
+    assert kite.ltp_calls == []
+
+
+def test_polling_skips_invalid_empty_and_non_positive_tokens() -> None:
+    state = MarketState()
+    kite = _StubKite()
+    source = MarketDataSource(kite, state)
+
+    prices = source.get_ltp_poll([101, None, "", "bad", -1])  # type: ignore[list-item]
+
+    assert prices == {101: pytest.approx(100.5)}
+    assert kite.bulk_calls == [[101]]
     assert kite.ltp_calls == []
 
 
@@ -104,6 +119,6 @@ def test_raw_ltp_fallback_requires_token_symbol_mapping() -> None:
     source = MarketDataSource(kite, state)
     assert source.get_ltp_poll([101]) == {}
 
-    kite.token_to_symbol = {101: "NFO:NIFTY26JUN25000CE"}
+    kite.token_to_symbol = {101: "NIFTY26JUN25000CE"}
     assert source.get_ltp_poll([101]) == {101: pytest.approx(123.0)}
     assert kite.ltp_calls == [["NFO:NIFTY26JUN25000CE"]]
