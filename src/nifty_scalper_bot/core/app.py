@@ -221,7 +221,15 @@ async def _polling_failover_supervisor_iteration(
         degraded_since = degraded_since or now_mono
         running = bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False))
         if now_mono - degraded_since >= activate_after and not running:
-            if spot_age_ms is not None and float(spot_age_ms) <= float(quote_stale_ms) and ws_ok:
+            if (
+                spot_age_ms is not None
+                and float(spot_age_ms) <= float(quote_stale_ms)
+                and ws_ok
+                and spot_fresh
+                and futures_fresh
+                and options_fresh
+                and not lagging
+            ):
                 log_throttled(
                     LOGGER,
                     f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",

@@ -144,6 +144,7 @@ async def test_spot_ws_timeout_uses_rest_fallback_for_basket_build(monkeypatch: 
 
     assert ctx.active_contract_basket["selected_ce"] == "NFO:NIFTY26JUN25000CE"
     assert ctx.live_orders_armed is False
+    assert ctx.execution_armed is False
     assert ctx.live_block_reason is not None
     assert "STARTUP_SPOT_REST_FALLBACK_USED" in caplog.text
 
