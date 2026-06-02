@@ -200,7 +200,8 @@ async def test_instrument_manager_not_ready_defers_then_retries(monkeypatch: pyt
 
     assert ctx.active_contract_basket["selected_ce"] == "NFO:NIFTY26JUN25000CE"
     assert "LIVE_BASKET_BUILD_DEFERRED" in caplog.text
-    assert "DEFERRED_BASKET_RETRY_SUCCESS" in caplog.text
+    assert "DEFERRED_BASKET_RETRY_FAILED attempt=1/1 reason=data_not_ready" in caplog.text
+    assert "DEFERRED_BASKET_RETRY_SUCCESS" not in caplog.text
     for coro in scheduled:
         coro.close()
 

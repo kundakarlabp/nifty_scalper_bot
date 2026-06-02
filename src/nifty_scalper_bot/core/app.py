@@ -2456,9 +2456,15 @@ class BotContext:
     data_observation_ready: bool = False
     data_pipeline_ready: bool = False
     data_hard_ready: bool = False
+    data_ready: bool = False
     mdm_strict_hard_ready: bool = False
     spot_ready: bool = False
     evaluation_ready: bool = False
+    strategy_evaluation_ready: bool = False
+    trading_signal_ready: bool = False
+    execution_armed: bool = False
+    execution_block_reason: str | None = None
+    market_open: bool = False
     execution_ready_by_symbol: dict[str, bool] = field(default_factory=dict)
     selected_ce_exec_ready: bool = False
     selected_pe_exec_ready: bool = False
@@ -8397,6 +8403,20 @@ async def _deferred_basket_hydration_retry(
             await _recompute_and_push_runtime_readiness(
                 ctx, reason="deferred_basket_hydration_success"
             )
+            if not bool(getattr(ctx, "data_ready", False)):
+                LOGGER.info(
+                    "DEFERRED_BASKET_RETRY_FAILED attempt=%d/%d reason=%s",
+                    attempt,
+                    max_attempts,
+                    "data_not_ready",
+                    extra={
+                        "event": "DEFERRED_BASKET_RETRY_FAILED",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "reason": "data_not_ready",
+                    },
+                )
+                continue
             LOGGER.info(
                 "DEFERRED_BASKET_RETRY_SUCCESS attempt=%d spot_ltp=%.2f",
                 attempt,
