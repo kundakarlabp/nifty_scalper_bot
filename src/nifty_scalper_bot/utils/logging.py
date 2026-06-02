@@ -13,6 +13,7 @@ import contextlib
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from typing import Any, Optional
@@ -153,6 +154,28 @@ class LogThrottle:
 # =============================================================================
 # 3. FORMATTERS & FILTERS
 # =============================================================================
+
+
+class _MaxLevelFilter(logging.Filter):
+    """Allow records below or equal to a maximum level."""
+
+    def __init__(self, max_level: int) -> None:
+        super().__init__()
+        self._max_level = int(max_level)
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401 - override
+        return int(record.levelno) <= self._max_level
+
+
+class _MinLevelFilter(logging.Filter):
+    """Allow records at or above a minimum level."""
+
+    def __init__(self, min_level: int) -> None:
+        super().__init__()
+        self._min_level = int(min_level)
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401 - override
+        return int(record.levelno) >= self._min_level
 
 
 class EventEnricher(logging.Filter):
@@ -445,34 +468,39 @@ def setup_logging(level: str = "INFO") -> None:
     try:
         resolved_level_name = os.getenv("LOG_LEVEL", level)
         numeric_level = getattr(logging, resolved_level_name.upper(), logging.INFO)
-        handler = logging.StreamHandler()
-        handler.addFilter(EventEnricher())
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stdout_handler.addFilter(_MaxLevelFilter(logging.WARNING))
+        stderr_handler.addFilter(_MinLevelFilter(logging.ERROR))
+        handlers = [stdout_handler, stderr_handler]
+        for handler in handlers:
+            handler.addFilter(EventEnricher())
 
-        # Note: We add filters here for the new handler, but _install_filters_once
-        # attaches them to existing handlers on the root logger later as well.
-        if _resolve_bool("LOG_DEDUP_ENABLED", True):
-            handler.addFilter(_DedupFilter(_resolve_float("LOG_DEDUP_WINDOW_SEC", 2.0)))
+            # Note: We add filters here for the new handlers, but _install_filters_once
+            # attaches them to existing handlers on the root logger later as well.
+            if _resolve_bool("LOG_DEDUP_ENABLED", True):
+                handler.addFilter(_DedupFilter(_resolve_float("LOG_DEDUP_WINDOW_SEC", 2.0)))
 
-        # Standard format vs JSON format
-        if os.getenv("LOG_FORMAT", "").strip().lower() == "json":
-            handler.setFormatter(
-                logging.Formatter(
-                    '{"ts":"%(asctime)s","lvl":"%(levelname)s","logger":"%(name)s",'
-                    '"msg":"%(message)s","event":"%(event)s"}',
-                    datefmt="%Y-%m-%dT%H:%M:%S%z",
+            # Standard format vs JSON format
+            if os.getenv("LOG_FORMAT", "").strip().lower() == "json":
+                handler.setFormatter(
+                    logging.Formatter(
+                        '{"ts":"%(asctime)s","lvl":"%(levelname)s","logger":"%(name)s",'
+                        '"msg":"%(message)s","event":"%(event)s"}',
+                        datefmt="%Y-%m-%dT%H:%M:%S%z",
+                    )
                 )
-            )
-        else:
-            handler.setFormatter(
-                KeyValueFormatter(
-                    fmt=(
-                        "%(asctime)s %(levelname)s %(name)s "
-                        "event=%(event)s %(message)s"
-                    ),
-                    datefmt="%Y-%m-%dT%H:%M:%S%z",
+            else:
+                handler.setFormatter(
+                    KeyValueFormatter(
+                        fmt=(
+                            "%(asctime)s %(levelname)s %(name)s "
+                            "event=%(event)s %(message)s"
+                        ),
+                        datefmt="%Y-%m-%dT%H:%M:%S%z",
+                    )
                 )
-            )
-        logging.basicConfig(handlers=[handler], level=numeric_level, force=True)
+        logging.basicConfig(handlers=handlers, level=numeric_level, force=True)
         LOGGER.info(
             "Condition met: logging_initialized",
             extra={

@@ -180,3 +180,131 @@ def test_hydration_uses_hydration_min_bars_not_execution_min_bars(monkeypatch):
     assert report["hydration_min_bars_required"] == 5
     assert report["symbols"][b.selected_ce]["bars_count"] == 5
     assert report["hard_ready"] is True
+
+
+def test_incomplete_basket_does_not_clear_desired_tokens_or_set_active() -> None:
+    ws = WS()
+    mdm = MarketDataManager(websocket=ws)
+    b = basket()
+    mdm.set_active_contract_basket(b)
+    before = set(mdm._desired_tokens)  # noqa: SLF001
+    active_before = mdm.get_active_contract_basket()
+
+    mdm.set_active_contract_basket({"spot_symbol": "NSE:NIFTY", "spot_token": 256265, "all_tokens": []})
+
+    assert mdm._desired_tokens == before  # noqa: SLF001
+    assert mdm.get_active_contract_basket() is active_before
+
+
+def test_active_basket_resolves_selected_tokens_from_alias_keys() -> None:
+    ws = WS()
+    mdm = MarketDataManager(websocket=ws)
+    payload = {
+        "spot_symbol": "NSE:NIFTY",
+        "spot_token": 256265,
+        "selected_ce": "NFO:NIFTY26JUN25000CE",
+        "selected_pe": "NFO:NIFTY26JUN25000PE",
+        "option_symbols": ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"],
+        "option_tokens": [11, 12],
+        "all_symbols": ["NSE:NIFTY", "NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"],
+        "all_tokens": [256265, 11, 12],
+        "token_by_symbol": {"NSE:NIFTY": 256265, "NIFTY26JUN25000CE": 11, "NFO:NIFTY26JUN25000PE": 12},
+        "symbol_by_token": {256265: "NSE:NIFTY", 11: "NFO:NIFTY26JUN25000CE", 12: "NFO:NIFTY26JUN25000PE"},
+        "atm_strike": 25000,
+    }
+
+    mdm.set_active_contract_basket(payload)
+
+    assert mdm.get_active_contract_basket() is payload
+    assert set(ws.tokens) == {256265, 11, 12}
+
+
+def test_subscription_reconciliation_snapshot_tuple_is_non_blocking() -> None:
+    class TupleSnapshotWS(WS):
+        tokens_snapshot = (256265, 11, 12)
+
+    ws = TupleSnapshotWS()
+    mdm = MarketDataManager(websocket=ws)
+
+    mdm.set_active_contract_basket(basket())
+
+    assert set(ws.tokens) == {256265, 11, 12}
+
+
+@pytest.mark.asyncio
+async def test_deferred_reseed_deduplicates_inflight_and_clears(monkeypatch) -> None:
+    import asyncio
+
+    mdm = MarketDataManager(websocket=WS())
+    b = basket()
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "3")
+    mdm.set_active_contract_basket(b)
+    quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
+    monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_quote", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_ohlc_bars", lambda sym: [])
+    release = asyncio.Event()
+    attempts: list[str] = []
+
+    async def hydrate_symbol_history(symbol, **kwargs):
+        attempts.append(symbol)
+        await release.wait()
+        return []
+
+    monkeypatch.setattr(mdm, "hydrate_symbol_history", hydrate_symbol_history)
+
+    first = mdm.hydrate_active_contract_basket(b)
+    await asyncio.sleep(0)
+    second = mdm.hydrate_active_contract_basket(b)
+
+    assert first["retry_scheduled"] is True
+    assert second["retry_scheduled"] is True
+    assert attempts == [b.selected_ce, b.selected_pe]
+    assert set(mdm._active_basket_reseed_inflight) == {b.selected_ce, b.selected_pe}  # noqa: SLF001
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert mdm._active_basket_reseed_inflight == set()  # noqa: SLF001
+
+
+def test_active_basket_validation_uses_canonical_fallback_without_private_missing_method(monkeypatch) -> None:
+    ws = WS()
+    mdm = MarketDataManager(websocket=ws)
+    assert not hasattr(mdm, "_canonical_symbol") or callable(getattr(mdm, "_canonical_symbol"))
+
+    def _missing_private_canonical_symbol(_symbol: str) -> str:
+        raise AttributeError("_canonical_symbol unavailable")
+
+    monkeypatch.setattr(mdm, "_canonical_symbol", _missing_private_canonical_symbol)
+    selected_ce = "NFO:NIFTY26JUN25000CE"
+    selected_pe = "NFO:NIFTY26JUN25000PE"
+    bare_ce = selected_ce.split(":", 1)[-1]
+    bare_pe = selected_pe.split(":", 1)[-1]
+    payload = {
+        "spot_symbol": "NSE:NIFTY",
+        "spot_token": 256265,
+        "selected_ce": selected_ce,
+        "selected_pe": selected_pe,
+        "option_symbols": [selected_ce, selected_pe],
+        "option_tokens": [11, 12],
+        "all_symbols": ["NSE:NIFTY", selected_ce, selected_pe],
+        "all_tokens": [256265, 11, 12],
+        "token_by_symbol": {
+            "nse:nifty": 256265,
+            selected_ce.lower(): 11,
+            selected_pe.lower(): 12,
+        },
+        "symbol_by_token": {256265: "NSE:NIFTY", 11: selected_ce, 12: selected_pe},
+        "atm_strike": 25000,
+    }
+    assert selected_ce not in payload["token_by_symbol"]
+    assert selected_pe not in payload["token_by_symbol"]
+    assert bare_ce not in payload["token_by_symbol"]
+    assert bare_pe not in payload["token_by_symbol"]
+
+    mdm.set_active_contract_basket(payload)
+
+    assert mdm.get_active_contract_basket() is payload
+    assert set(ws.tokens) == {256265, 11, 12}
