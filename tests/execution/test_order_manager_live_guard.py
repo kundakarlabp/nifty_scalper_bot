@@ -62,3 +62,40 @@ def test_live_guard_blocks_live_without_any_live_flag(monkeypatch):
 def test_live_guard_blocks_disconnected_broker(monkeypatch):
     om = _manager(monkeypatch, mode="LIVE", enable_live_trading="true", connected=False)
     assert om._validate_live_execution_safety() is False
+
+
+def test_live_selected_option_ltp_only_rejected_before_broker(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    broker = _Broker(connected=True)
+    broker.calls = 0
+
+    def _place_order(**_kwargs):
+        broker.calls += 1
+        return {"order_id": "OID"}
+
+    broker.place_order = _place_order
+    om = OrderManager(broker, _Positions(), _Limiter())
+    monkeypatch.setattr(om, "_validate_live_execution_safety", lambda: True)
+    selected = "NFO:NIFTY26MAY23750CE"
+    om._market_data = type(
+        "MDM",
+        (),
+        {
+            "get_active_contract_basket": lambda self: {"selected_ce": selected, "selected_pe": "NFO:NIFTY26MAY23750PE"},
+            "get_quote": lambda self, symbol: {"ltp": 100.0, "last_price": 100.0},
+        },
+    )()
+
+    result = om.place_order(
+        selected,
+        "BUY",
+        1,
+        stop_loss=90.0,
+        take_profit=120.0,
+    )
+
+    assert result is None
+    assert broker.calls == 0
+    assert om.get_last_skip_reason() == "selected_option_bid_ask_missing"
+    assert om._last_order_decision["block_reason"] == "selected_option_bid_ask_missing"
