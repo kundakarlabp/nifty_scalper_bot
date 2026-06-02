@@ -128,26 +128,89 @@ class MarketDataSource:
         self._state = market_state
 
     def get_ltp_poll(self, tokens: Sequence[int]) -> dict[int, float]:
-        """Fetch LTP by polling API. Args: tokens. Returns: token->price. Raises: none."""
+        """Fetch LTP by polling API. Args: tokens. Returns: token->price. Raises: DataIntegrityError."""
 
-        if not tokens:
+        normalized_tokens = [int(token) for token in tokens]
+        if not normalized_tokens:
             return {}
-        query = [f'NFO:{int(token)}' for token in tokens]
         try:
-            payload = self._kite.ltp(query)
+            if hasattr(self._kite, "get_ltp_bulk"):
+                payload = self._kite.get_ltp_bulk(normalized_tokens)
+                return self._extract_token_ltps(payload, normalized_tokens)
+            if hasattr(self._kite, "get_quote_bulk"):
+                payload = self._kite.get_quote_bulk(normalized_tokens)
+                return self._extract_token_ltps(payload, normalized_tokens)
+            if hasattr(self._kite, "quote_any"):
+                payload = self._kite.quote_any(normalized_tokens)
+                return self._extract_token_ltps(payload, normalized_tokens)
+
+            token_to_symbol = self._token_symbol_lookup(normalized_tokens)
+            if token_to_symbol and hasattr(self._kite, "ltp"):
+                query = [token_to_symbol[token] for token in normalized_tokens if token in token_to_symbol]
+                if not query:
+                    return {}
+                payload = self._kite.ltp(query)
+                return self._extract_token_ltps(payload, normalized_tokens, token_to_symbol=token_to_symbol)
         except Exception as e:
-            raise DataIntegrityError(f'Polling LTP failed: {e}') from e
+            raise DataIntegrityError(f"Polling LTP failed: {e}") from e
+        return {}
+
+    def _extract_token_ltps(
+        self,
+        payload: Any,
+        tokens: Sequence[int],
+        *,
+        token_to_symbol: Mapping[int, str] | None = None,
+    ) -> dict[int, float]:
+        """Extract token-keyed LTPs from broker bulk payloads."""
+
+        if not isinstance(payload, Mapping):
+            return {}
         parsed: dict[int, float] = {}
-        for token in tokens:
-            key = f'NFO:{int(token)}'
-            entry = payload.get(key) if isinstance(payload, Mapping) else None
-            if not isinstance(entry, Mapping):
+        symbol_to_token = {str(symbol): int(token) for token, symbol in (token_to_symbol or {}).items()}
+        wanted = {int(token) for token in tokens}
+        for raw_key, raw_entry in payload.items():
+            token: int | None = None
+            if isinstance(raw_key, int) or (isinstance(raw_key, str) and raw_key.isdigit()):
+                token = int(raw_key)
+            elif str(raw_key) in symbol_to_token:
+                token = symbol_to_token[str(raw_key)]
+            if isinstance(raw_entry, (int, float)):
+                if token is not None and token in wanted and float(raw_entry) > 0:
+                    parsed[int(token)] = float(raw_entry)
                 continue
-            ltp = entry.get('last_price')
+            entry = raw_entry if isinstance(raw_entry, Mapping) else {}
+            if token is None:
+                entry_token = entry.get("instrument_token") or entry.get("token")
+                try:
+                    token = int(entry_token) if entry_token is not None else None
+                except (TypeError, ValueError):
+                    token = None
+            if token is None or token not in wanted:
+                continue
+            ltp = entry.get("last_price") or entry.get("ltp")
             if ltp is None:
                 continue
             parsed[int(token)] = float(ltp)
         return parsed
+
+    def _token_symbol_lookup(self, tokens: Sequence[int]) -> dict[int, str]:
+        """Return broker tradingsymbol lookup for raw kite.ltp fallback only."""
+
+        wanted = {int(token) for token in tokens}
+        lookup: dict[int, str] = {}
+        for attr in ("token_to_symbol", "symbol_by_token", "_token_to_symbol", "_symbol_by_token"):
+            mapping = getattr(self._kite, attr, None) or getattr(self._state, attr, None)
+            if not isinstance(mapping, Mapping):
+                continue
+            for raw_token, raw_symbol in mapping.items():
+                try:
+                    token = int(raw_token)
+                except (TypeError, ValueError):
+                    continue
+                if token in wanted and raw_symbol:
+                    lookup[token] = str(raw_symbol)
+        return lookup
 
     def get_ltp(self, tokens: Sequence[int], *, stale_after_seconds: int = 5) -> dict[int, float]:
         """Get token LTPs using WS first and polling fallback. Args: tokens/stale_after_seconds. Returns: token->price. Raises: none."""
@@ -165,8 +228,15 @@ class MarketDataSource:
         merged.update(polled)
         return merged
 
-    def get_ohlc(self, token: int, interval: str, ttl: int = 60) -> list[dict[str, Any]]:
-        """Get token OHLC with TTL cache. Args: token/interval/ttl. Returns: rows. Raises: DataIntegrityError."""
+    def get_ohlc(
+        self,
+        token: int,
+        interval: str,
+        ttl: int = 60,
+        *,
+        min_required_bars: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Get token OHLC with TTL cache. Args: token/interval/ttl/min_required_bars. Returns: rows. Raises: DataIntegrityError."""
 
         cached = self._state.get_ohlc_cache(token, interval, ttl=ttl)
         if cached is not None:
@@ -180,8 +250,11 @@ class MarketDataSource:
             )
         except Exception as e:
             raise DataIntegrityError(f'OHLC fetch failed for token {token}: {e}') from e
-        if len(rows) < 30:
-            raise DataIntegrityError(f'Insufficient OHLC candles for token {token}: {len(rows)}')
+        required = max(1, int(min_required_bars))
+        if len(rows) < required:
+            raise DataIntegrityError(
+                f"Insufficient OHLC candles for token {token}: {len(rows)}/{required}"
+            )
         normalized = [dict(row) for row in rows]
         self._state.set_ohlc_cache(int(token), interval, normalized)
         return normalized

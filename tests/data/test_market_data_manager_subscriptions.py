@@ -447,3 +447,12 @@ def test_websocket_replay_after_purge_has_no_may() -> None:
     assert 111 not in mdm.desired_tokens_snapshot()
     assert 111 not in ws.tokens_snapshot()
     assert fake.subscribed == [222]
+
+
+def test_subscribe_initializes_subscription_metric_and_does_not_raise() -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    received: list[dict[str, object]] = []
+
+    mdm.subscribe('NSE:NIFTY', lambda tick: received.append(tick))
+
+    assert 'NSE:NIFTY' in mdm._subscribers  # noqa: SLF001

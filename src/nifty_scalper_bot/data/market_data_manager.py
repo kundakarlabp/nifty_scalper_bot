@@ -528,6 +528,7 @@ class MarketDataManager:
         # for the callback slot here — process_ticks is the single
         # ingress for WS ticks.
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
+        self._m_subs = Counter("mdm_subscriptions_total", "Market data subscriptions registered")
         self._last_balance_log_time = 0.0
         self._started = False
         if self._ws is not None and hasattr(self._ws, "on_tick"):
@@ -894,11 +895,27 @@ class MarketDataManager:
             if not option_contracts and hasattr(self._broker, "instruments"):
                 self._logger.info(f"Resolver failed. Fetching NIFTY chain directly from broker for {expiry}")
                 all_nfo = self._broker.instruments("NFO")
+                target_expiry = _select_expiry(expiry, sorted({
+                    parsed
+                    for ins in all_nfo
+                    if isinstance(ins, Mapping)
+                    and str(ins.get("name") or normalized_underlying).upper() == normalized_underlying
+                    and str(ins.get("instrument_type") or ins.get("option_type") or ins.get("type") or "").upper() in {"CE", "PE"}
+                    for parsed in [_parse_instrument_expiry(ins.get("expiry"))]
+                    if parsed is not None
+                }), datetime.now(timezone.utc))
                 option_contracts = [
-                    ins for ins in all_nfo 
-                    if ins["name"] == normalized_underlying 
-                    and ins["instrument_type"] in ("CE", "PE")
-                    and str(ins["expiry"]) == expiry
+                    ins for ins in all_nfo
+                    if isinstance(ins, Mapping)
+                    and str(ins.get("name") or normalized_underlying).upper() == normalized_underlying
+                    and str(ins.get("instrument_type") or ins.get("option_type") or ins.get("type") or "").upper() in {"CE", "PE"}
+                    and (
+                        target_expiry is None
+                        or (
+                            (parsed_expiry := _parse_instrument_expiry(ins.get("expiry"))) is not None
+                            and parsed_expiry.date() == target_expiry.date()
+                        )
+                    )
                 ]
         except Exception as exc:
             self._logger.error(f"Option chain recovery failed: {exc}")
@@ -918,7 +935,9 @@ class MarketDataManager:
                 token = int(instrument_token)  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 continue
-            option_type = str(contract.get("option_type") or "").upper()
+            option_type = str(
+                contract.get("option_type") or contract.get("instrument_type") or contract.get("type") or ""
+            ).upper()
             if option_type not in {"CE", "PE"}:
                 continue
             tradingsymbol = str(
@@ -1762,7 +1781,7 @@ class MarketDataManager:
         symbols = list(self._basket_value(basket, "all_symbols", None) or self._basket_value(basket, "symbols", None) or [])
         if not symbols:
             symbols = [self._basket_value(basket, "spot_symbol", "NSE:NIFTY"), *list(self._basket_value(basket, "option_symbols", []) or [])]
-        min_bars = int(os.getenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "0") or 0) or int(getattr(self, "_min_required_bars", 20) or 20)
+        min_bars = int(os.getenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "0") or 0) or int(getattr(self, "_selected_option_min_bars", 5) or 5)
         report: dict[str, Any] = {"hard_ready": True, "missing": [], "symbols": {}, "hydration_min_bars_required": min_bars, "retry_scheduled": False}
         for raw_sym in symbols:
             sym = str(raw_sym or "")
@@ -1775,7 +1794,7 @@ class MarketDataManager:
             if is_future and raw_sym != self._basket_value(basket, "futures_symbol", None):
                 self._logger.warning("MDM_BASKET_ROLE_INCONSISTENCY symbol=%s role=%s", canonical, role, extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": canonical, "role": role})
             token = token_map.get(sym) or token_map.get(sym.upper()) or token_map.get(canonical) or token_map.get(canonical.split(":", 1)[-1] if ":" in canonical else canonical)
-            entry = {"role": role, "token": token, "quote_ready": False, "ohlc_ready": True, "bars_count": 0, "oi_ready": False}
+            entry = {"role": role, "token": token, "quote_ready": False, "ohlc_ready": True, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
             if is_option and token is None:
                 report["missing"].append(f"{sym}:token_missing")
                 report["hard_ready"] = False
@@ -1809,6 +1828,8 @@ class MarketDataManager:
                     entry["ohlc_ready"] = False
                     report["missing"].append(f"{sym}:ohlc_insufficient")
                     report["hard_ready"] = False
+                elif 0 < entry["bars_count"] < int(getattr(self, "_min_required_bars", 20) or 20):
+                    entry["ohlc_provisional"] = True
             report["symbols"][sym] = entry
         return report
 

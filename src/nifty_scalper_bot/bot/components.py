@@ -1,4 +1,8 @@
-"""Core runtime components for the trading bot."""
+"""Legacy/testing-only bot components.
+
+Production startup uses core.app and data.rest.zerodha_client for the real broker;
+classes in this module are lightweight test/demo placeholders only.
+"""
 
 from __future__ import annotations
 
@@ -30,8 +34,8 @@ class TradeSignal:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class ZerodhaKiteClient(DummyBrokerClient):
-    """Lightweight Zerodha client placeholder backed by the dummy broker."""
+class LegacyDummyZerodhaKiteClient(DummyBrokerClient):
+    """Legacy/testing-only Zerodha placeholder backed by the dummy broker."""
 
     def __init__(
         self,
@@ -138,7 +142,7 @@ class MarketDataManager:
 
     def __init__(
         self,
-        broker_client: ZerodhaKiteClient,
+        broker_client: LegacyDummyZerodhaKiteClient,
         websocket_client: ZerodhaKiteWebSocket,
     ) -> None:
         self._broker = broker_client
@@ -361,7 +365,7 @@ class OrderManager:
     def __init__(
         self,
         *,
-        broker_client: ZerodhaKiteClient,
+        broker_client: LegacyDummyZerodhaKiteClient,
         position_manager: PositionManager,
         rate_limiter: Any,
     ) -> None:
@@ -1038,6 +1042,6 @@ __all__ = [
     "StrategyRunner",
     "StrategyRunnerConfig",
     "TradeSignal",
-    "ZerodhaKiteClient",
+    "LegacyDummyZerodhaKiteClient",
     "ZerodhaKiteWebSocket",
 ]

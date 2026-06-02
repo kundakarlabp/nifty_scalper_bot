@@ -179,3 +179,61 @@ def test_option_chain_handles_expiry_with_time_component() -> None:
     assert chain is not None
     assert {row["instrument_token"] for row in chain} == {701, 702}
     assert all(row["expiry"].date() == base.date() for row in chain)
+
+
+def test_option_chain_falls_back_to_raw_zerodha_nfo_instruments() -> None:
+    expiry_dt = (datetime.now(timezone.utc) + timedelta(days=3)).date()
+
+    class EmptyResolver:
+        def option_contracts(self, underlying: str, *, force_refresh: bool = False) -> list[dict[str, Any]]:
+            return []
+
+    class RawBroker(_StubBroker):
+        def instruments(self, exchange: str) -> list[dict[str, Any]]:
+            assert exchange == "NFO"
+            return [
+                {
+                    "name": "NIFTY",
+                    "instrument_type": "CE",
+                    "tradingsymbol": "NIFTY26JUN25000CE",
+                    "instrument_token": 901,
+                    "expiry": datetime.combine(expiry_dt, datetime.min.time()),
+                    "strike": 25000,
+                    "lot_size": 25,
+                    "tick_size": 0.05,
+                },
+                {
+                    "name": "NIFTY",
+                    "instrument_type": "PE",
+                    "tradingsymbol": "NIFTY26JUN25000PE",
+                    "instrument_token": 902,
+                    "expiry": expiry_dt.isoformat(),
+                    "strike": 25000,
+                    "lot_size": 25,
+                    "tick_size": 0.05,
+                },
+                {
+                    "name": "NIFTY",
+                    "instrument_type": "FUT",
+                    "tradingsymbol": "NIFTY26JUNFUT",
+                    "instrument_token": 903,
+                    "expiry": expiry_dt.isoformat(),
+                    "strike": 0,
+                },
+            ]
+
+    broker = RawBroker(
+        {
+            901: {"last_price": 110.0, "depth": {"buy": [{"price": 109.5}], "sell": [{"price": 110.5}]}},
+            902: {"last_price": 111.0, "depth": {"buy": [{"price": 110.5}], "sell": [{"price": 111.5}]}},
+        },
+        underlying_price=25010.0,
+    )
+    manager = MarketDataManager(broker, None, resolver=EmptyResolver())
+
+    chain = manager.get_option_chain(expiry_dt.isoformat())
+
+    assert chain is not None
+    assert {row["instrument_token"] for row in chain} == {901, 902}
+    assert {row["option_type"] for row in chain} == {"CE", "PE"}
+    assert all(row["expiry"].date() == expiry_dt for row in chain)
