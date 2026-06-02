@@ -6059,6 +6059,44 @@ class MarketDataManager:
                 canonical_symbol = normalize_symbol(str(symbol))
                 token = self._token_by_symbol.get(canonical_symbol)
                 if not token:
+                    self._logger.info(
+                        "WARMUP_TOKEN_CACHE_MISS symbol=%s reason=attempting_resolver_broker_fallback",
+                        canonical_symbol,
+                        extra={
+                            "event": "warmup_token_cache_miss",
+                            "symbol": canonical_symbol,
+                            "reason": "attempting_resolver_broker_fallback",
+                        },
+                    )
+                    resolver = getattr(self, "_resolver", None)
+                    if resolver is not None:
+                        try:
+                            if hasattr(resolver, "resolve"):
+                                resolved = resolver.resolve(canonical_symbol)
+                                if resolved:
+                                    token = int(resolved)
+                            if not token and hasattr(resolver, "get_token"):
+                                resolved = resolver.get_token(canonical_symbol)
+                                if resolved:
+                                    token = int(resolved)
+                        except Exception:
+                            self._logger.exception("Unhandled exception", exc_info=True)
+                            raise
+                    if (
+                        not token
+                        and self._broker
+                        and hasattr(self._broker, "get_instrument_token")
+                    ):
+                        try:
+                            resolved = self._broker.get_instrument_token(canonical_symbol)
+                            if resolved:
+                                token = int(resolved)
+                        except Exception:
+                            self._logger.exception("Unhandled exception", exc_info=True)
+                            raise
+                    if token:
+                        self.register_symbol(canonical_symbol, int(token))
+                if not token:
                     # BUG-β FIX: Never raise — skip and warn so remaining
                     # symbols are still warmed and callers don't abort.
                     self._logger.warning(

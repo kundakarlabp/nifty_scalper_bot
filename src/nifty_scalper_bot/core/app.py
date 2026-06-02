@@ -7729,6 +7729,8 @@ def _commit_active_dynamic_basket(
     requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
     requested_selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
     requested_selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
+    if not hasattr(ctx, "active_symbol_tokens") or getattr(ctx, "active_symbol_tokens", None) is None:
+        ctx.active_symbol_tokens = {}
     active_futures_symbol = canonical_nifty_future_symbol(requested_futures_symbol) or _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
@@ -7914,6 +7916,25 @@ def _commit_active_dynamic_basket(
         )
     ctx.active_symbol_tokens = token_map
     committed["token_by_symbol"] = token_map
+    if mdm is not None and token_map:
+        register_symbol = getattr(mdm, "register_symbol", None)
+        if callable(register_symbol):
+            for sym, tok in token_map.items():
+                try:
+                    register_symbol(str(sym), int(tok))
+                except (TypeError, ValueError) as exc:
+                    LOGGER.warning(
+                        "ACTIVE_BASKET_TOKEN_REGISTER_SKIPPED symbol=%s token=%s reason=%s",
+                        sym,
+                        tok,
+                        type(exc).__name__,
+                        extra={
+                            "event": "ACTIVE_BASKET_TOKEN_REGISTER_SKIPPED",
+                            "symbol": str(sym),
+                            "token": tok,
+                            "reason": type(exc).__name__,
+                        },
+                    )
     LOGGER.info(
         "ACTIVE_CONTRACT_BASKET_COMMITTED selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s symbol_count=%d",
         selected_ce,
@@ -7955,6 +7976,7 @@ def _commit_active_dynamic_basket(
     # universe and call reconcile_active_subscriptions() which does a clean
     # set-difference: subscribe new tokens, unsubscribe stale ones.
     # This replaces the old futures-specific purge path.
+    basket_tokens: set[int] = set()
     reconcile_fn = getattr(mdm, "reconcile_active_subscriptions", None)
     if callable(reconcile_fn):
         _im = getattr(ctx, "instrument_manager", None)
@@ -7965,6 +7987,13 @@ def _commit_active_dynamic_basket(
                     basket_tokens.add(tok)
             except Exception:
                 pass
+        for tok in token_map.values():
+            try:
+                token_int = int(tok)
+            except (TypeError, ValueError):
+                continue
+            if token_int > 0:
+                basket_tokens.add(token_int)
         # Always include raw tokens stored directly in basket
         for key in ("spot_token", "futures_token"):
             raw_tok = committed.get(key)
