@@ -181,3 +181,77 @@ def test_runner_emergency_backfill_disabled_by_default(monkeypatch) -> None:
         assert r._backfill_task_started is False
     finally:
         r._main_loop.close()
+
+from datetime import timedelta
+
+from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+
+
+def _bars(count: int, *, start_close: float = 100.0) -> list[dict]:
+    base = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
+    return [
+        {
+            "timestamp": base + timedelta(minutes=i),
+            "open": start_close + i,
+            "high": start_close + i + 1,
+            "low": start_close + i - 1,
+            "close": start_close + i + 0.5,
+            "volume": 100 + i,
+        }
+        for i in range(count)
+    ]
+
+
+def test_datahub_context_bars_sync_into_indicator_engine() -> None:
+    r = _runner()
+    r._indicator_engine = IndicatorEngine()
+    r._market_data = None
+    r._data_hub = SimpleNamespace(
+        get_ohlc_bars=lambda symbol, limit=None: _bars(50, start_close=200.0 if symbol == "NFO:NIFTY26JUNFUT" else 100.0)[-(limit or 50):]
+    )
+    r._symbol_history = {}
+    r._context_required_bars = 50
+    r._option_required_bars = 5
+    r._active_symbols = {"NSE:NIFTY", "NFO:NIFTY26JUNFUT"}
+    r._active_futures_symbol = "NFO:NIFTY26JUNFUT"
+    r._tracked_symbols = set()
+    r._data_phase = {}
+    r._last_bar_ts = {}
+    r._symbol_states = {}
+    r._hydration_attempted_symbols = set()
+    r._last_hydration_reason_by_symbol = {}
+    r._set_symbol_hydration_state = lambda _s, st: st
+    r._seed_pipeline_store = lambda _s: None
+    r._seed_candle_engine_from_history = lambda _s: None
+
+    r._sync_context_history_if_cold(source="test_context_sync")
+
+    assert len(r._indicator_engine.get_history("NSE:NIFTY")) >= 50
+    assert len(r._indicator_engine.get_history("NFO:NIFTY26JUNFUT")) >= 50
+
+
+def test_selected_option_prewarm_reseeds_indicator_from_datahub_result(monkeypatch) -> None:
+    r = _runner()
+    r._indicator_engine = IndicatorEngine()
+    r._symbol_history = {}
+    r._tracked_symbols = set()
+    r._data_phase = {}
+    r._last_bar_ts = {}
+    r._symbol_states = {}
+    r._set_symbol_hydration_state = lambda _s, st: st
+    r._seed_pipeline_store = lambda _s: None
+    r._seed_candle_engine_from_history = lambda _s: None
+    r._selected_option_prewarm_last = {}
+    r._selected_option_prewarm_inflight = set()
+    r._selected_option_prewarm_cooldown_s = 0.0
+    symbol = "NFO:NIFTY26JUN24000CE"
+
+    async def hydrate(_symbol: str, **_kwargs):
+        return _bars(5, start_close=50.0)
+
+    r._data_hub = SimpleNamespace(hydrate_symbol_history=hydrate)
+    monkeypatch.setattr("threading.Thread", lambda target, **_kwargs: SimpleNamespace(start=target))
+
+    r._request_selected_option_history_prewarm(symbol, bars_before=0, required_bars=5)
+
+    assert len(r._indicator_engine.get_history(symbol)) >= 5

@@ -7119,6 +7119,77 @@ def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str
     return pick_atm_option_symbols_from_basket(basket)
 
 
+async def _ensure_context_history_hydrated(
+    ctx: BotContext, spot_symbol: str | None, futures_symbol: str | None, required_bars: int, reason: str
+) -> dict[str, dict[str, int | bool]]:
+    """Ensure spot/futures history is visible to MDM and runner IndicatorEngine."""
+    mdm = getattr(ctx, "market_data_manager", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    result: dict[str, dict[str, int | bool]] = {}
+    if mdm is None:
+        return result
+    symbols = [sym for sym in (spot_symbol or "NSE:NIFTY", futures_symbol) if sym]
+    for sym in symbols:
+        before_mdm = len(mdm.get_ohlc_bars(sym) or [])
+        before_runner = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
+        if before_mdm < required_bars:
+            hydrate_fn = getattr(mdm, "hydrate_symbol_history", None)
+            if callable(hydrate_fn):
+                try:
+                    await hydrate_fn(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_context_force_hydration")
+                except Exception as exc:  # noqa: BLE001 - readiness remains blocked and logged
+                    LOGGER.warning(
+                        "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
+                        sym,
+                        f"{reason}_context_force_hydration",
+                        exc,
+                        extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": sym, "source": f"{reason}_context_force_hydration", "error": str(exc)},
+                    )
+        try:
+            bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
+        except TypeError:
+            bars = mdm.get_ohlc_bars(sym) or []
+        ingested = 0
+        if runner is not None and hasattr(runner, "reseed_history_from_bars") and bars:
+            try:
+                ingested = int(
+                    runner.reseed_history_from_bars(
+                        sym,
+                        bars,
+                        source=f"{reason}_context_reseed",
+                        min_bars=required_bars,
+                    )
+                    or 0
+                )
+            except Exception as exc:  # noqa: BLE001 - readiness remains blocked and logged
+                LOGGER.warning(
+                    "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
+                    sym,
+                    f"{reason}_context_reseed",
+                    exc,
+                    extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": sym, "source": f"{reason}_context_reseed", "error": str(exc)},
+                )
+        after_mdm = len(mdm.get_ohlc_bars(sym) or [])
+        after_runner = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
+        LOGGER.info(
+            "HISTORY_HYDRATION_TRACE symbol=%s source=%s fetched_bars=%d ingested_bars=%d indicator_history_count=%d",
+            sym,
+            f"{reason}_context",
+            len(bars),
+            ingested,
+            after_runner,
+            extra={"event": "HISTORY_HYDRATION_TRACE", "symbol": sym, "source": f"{reason}_context", "fetched_bars": len(bars), "ingested_bars": ingested, "indicator_history_count": after_runner},
+        )
+        result[sym] = {
+            "before_mdm_bars": before_mdm,
+            "after_mdm_bars": after_mdm,
+            "before_runner_bars": before_runner,
+            "after_runner_bars": after_runner,
+            "ready": bool(after_mdm >= required_bars and after_runner >= required_bars),
+        }
+    return result
+
+
 async def _ensure_selected_options_hydrated(
     ctx: BotContext, selected_ce: str | None, selected_pe: str | None, required_bars: int, reason: str
 ) -> dict[str, dict[str, int | bool]]:
@@ -7143,7 +7214,7 @@ async def _ensure_selected_options_hydrated(
             }
             continue
         hydrate_fn = getattr(mdm, "hydrate_symbol_history", None)
-        if callable(hydrate_fn):
+        if before_mdm_bars < required_bars and callable(hydrate_fn):
             await hydrate_fn(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_selected_option_force_hydration")
         try:
             bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
@@ -7180,6 +7251,14 @@ async def _ensure_selected_options_hydrated(
                 LOGGER.info(
                     "SELECTED_OPTION_RUNNER_RESEED_DONE symbol=%s reseeded_count=%s required_bars=%d reason=%s",
                     sym,
+                    reseeded_count,
+                    required_bars,
+                    reason,
+                )
+                LOGGER.info(
+                    "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM symbol=%s mdm_bars=%d runner_bars=%s required_bars=%d reason=%s",
+                    sym,
+                    len(normalized_bars),
                     reseeded_count,
                     required_bars,
                     reason,
@@ -7365,9 +7444,38 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
     option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
     context_execution_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
+    futures_symbol = str(basket.get("futures_symbol") or "")
+    _ = await _ensure_context_history_hydrated(
+        ctx, spot_symbol, futures_symbol, context_execution_min_bars, reason
+    )
     _ = await _ensure_selected_options_hydrated(
         ctx, selected_ce, selected_pe, option_execution_min_bars, reason
     )
+    basket_hard_ready = True
+    basket_missing: list[str] = []
+    hydrate_basket = getattr(mdm, "hydrate_active_contract_basket", None) if mdm is not None else None
+    if callable(hydrate_basket):
+        try:
+            hydration_status = hydrate_basket(basket)
+            if isinstance(hydration_status, Mapping):
+                basket_hard_ready = bool(hydration_status.get("hard_ready", True))
+                basket_missing = [str(item) for item in hydration_status.get("missing", []) or []]
+        except Exception as exc:  # noqa: BLE001 - readiness remains blocked by explicit diagnostic
+            basket_hard_ready = False
+            basket_missing = [f"active_basket_hydration_failed:{type(exc).__name__}"]
+            LOGGER.warning(
+                "ACTIVE_BASKET_HYDRATION_STATUS_FAILED reason=%s",
+                exc,
+                extra={"event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED", "error": str(exc)},
+            )
+    elif str(os.getenv("ALLOW_MISSING_HYDRATION_GATE", "false") or "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        basket_hard_ready = False
+        basket_missing = ["hydrate_active_contract_basket_missing"]
+        LOGGER.warning(
+            "ACTIVE_BASKET_HYDRATION_METHOD_MISSING hard_ready=False",
+            extra={"event": "ACTIVE_BASKET_HYDRATION_METHOD_MISSING", "missing": list(basket_missing)},
+        )
+    ctx.active_basket_hydration = {"hard_ready": bool(basket_hard_ready), "missing": list(basket_missing)}
     ce_bars, ce_mdm_bars, ce_runner_bars = _readiness_bars(selected_ce)
     pe_bars, pe_mdm_bars, pe_runner_bars = _readiness_bars(selected_pe)
     ce_quote_fresh=_fresh_ltp(selected_ce); pe_quote_fresh=_fresh_ltp(selected_pe)
@@ -7376,9 +7484,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ce_eval_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_eval_min_live_bars
     pe_eval_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_eval_min_live_bars
     spot_ready=_fresh_ltp(spot_symbol) or _bars(spot_symbol)>=1
-    futures_symbol = str(basket.get("futures_symbol") or "")
     context_exec_ready = _bars(spot_symbol)>=context_execution_min_bars or (_fresh_ltp(spot_symbol) and _bars(futures_symbol)>=context_execution_min_bars)
-    data_hard_ready=bool(spot_ready and ce_eval_ready and pe_eval_ready)
+    data_hard_ready=bool(basket_hard_ready and spot_ready and ce_eval_ready and pe_eval_ready)
     runner_running=_runner_is_running(getattr(ctx,'strategy_runner',None))
     evaluation_ready=bool(data_hard_ready and runner_running)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
@@ -7395,6 +7502,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     if not selected_ce: missing.append('selected_ce_missing')
     if not selected_pe: missing.append('selected_pe_missing')
     if not spot_ready: missing.append('spot_not_ready')
+    if not basket_hard_ready: missing.extend(basket_missing or ['active_basket_hydration_not_ready'])
     if not evaluation_ready: missing.append('eval_not_ready')
     if ce_runner_bars < option_eval_min_live_bars: missing.append('ce_eval_bars_missing')
     if pe_runner_bars < option_eval_min_live_bars: missing.append('pe_eval_bars_missing')
@@ -7411,7 +7519,12 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not pe_exec_ready: missing.append('pe_exec_quote_or_history_not_ready')
         if not context_exec_ready: missing.append('context_exec_not_ready')
         if not broker_ready: missing.append('broker_not_ready')
-    block_reason=None if live_orders_armed else f"execution_not_armed:{','.join(dict.fromkeys(missing))}"
+    if live_orders_armed:
+        block_reason = None
+    elif not basket_hard_ready:
+        block_reason = f"ACTIVE_BASKET_HYDRATION_NOT_READY:{','.join(dict.fromkeys(missing))}"
+    else:
+        block_reason = f"execution_not_armed:{','.join(dict.fromkeys(missing))}"
     ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=evaluation_ready; ctx.live_block_reason=block_reason
     ctx.execution_ready_by_symbol = execution_ready_by_symbol
     ctx.selected_ce_exec_ready = bool(ce_exec_ready)
@@ -7433,7 +7546,7 @@ def _commit_active_dynamic_basket(
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
     requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
-    active_futures_symbol = _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
+    active_futures_symbol = canonical_nifty_future_symbol(requested_futures_symbol) or _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
     basket = normalize_active_basket_schema(basket_copy)
@@ -7698,6 +7811,20 @@ async def _deferred_basket_hydration_retry(
             await _recompute_and_push_runtime_readiness(
                 ctx, reason="deferred_basket_hydration_success"
             )
+            data_ready = bool(getattr(ctx, "data_ready", getattr(ctx, "evaluation_ready", False)))
+            if not data_ready:
+                LOGGER.info(
+                    "DEFERRED_BASKET_RETRY_WAITING attempt=%d/%d reason=data_not_ready",
+                    attempt,
+                    max_attempts,
+                    extra={
+                        "event": "DEFERRED_BASKET_RETRY_WAITING",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "reason": "data_not_ready",
+                    },
+                )
+                continue
             LOGGER.info(
                 "DEFERRED_BASKET_RETRY_SUCCESS attempt=%d spot_ltp=%.2f",
                 attempt,
