@@ -2302,6 +2302,35 @@ class OrderManager:
         normalized_symbol = normalize_symbol(symbol)
         if not is_strategy_instrument(normalized_symbol):
             raise RuntimeError("Blocked non-NIFTY instrument")
+        if (
+            self._execution_mode_env() == "LIVE"
+            and self._is_selected_option_for_live_execution(normalized_symbol)
+        ):
+            quote = self._get_latest_quote_safe(normalized_symbol) or {}
+            quote_diag = self._extract_quote_diagnostics(quote)
+            if float(quote_diag.get("bid") or 0.0) <= 0 or float(quote_diag.get("ask") or 0.0) <= 0:
+                self.set_last_skip_reason("selected_option_bid_ask_missing")
+                self._logger.warning(
+                    "ORDER_BLOCKED: selected_option_bid_ask_missing symbol=%s bid=%s ask=%s ltp=%s",
+                    normalized_symbol,
+                    quote_diag.get("bid"),
+                    quote_diag.get("ask"),
+                    quote_diag.get("ltp"),
+                    extra={
+                        "event": "ORDER_BLOCKED",
+                        "block_reason": "selected_option_bid_ask_missing",
+                        "symbol": normalized_symbol,
+                        "bid": quote_diag.get("bid"),
+                        "ask": quote_diag.get("ask"),
+                        "ltp": quote_diag.get("ltp"),
+                    },
+                )
+                _log_order_decision(
+                    allowed=False,
+                    block_reason="selected_option_bid_ask_missing",
+                    details={"quote": quote_diag},
+                )
+                return None
         try:
             lot_size = self._lot_size_for_symbol(normalized_symbol)
         except OrderPlacementError as exc:
@@ -3125,6 +3154,54 @@ class OrderManager:
                 except Exception:
                     pass
         return None
+
+    def _selected_option_symbols_for_execution(self) -> set[str]:
+        """Return selected CE/PE symbols from the attached active basket context."""
+
+        selected: set[str] = set()
+        providers = (
+            getattr(self, "_market_data", None),
+            getattr(self, "_data_hub", None),
+            getattr(self, "market_data_manager", None),
+            getattr(self, "data_hub", None),
+        )
+        for provider in providers:
+            if provider is None:
+                continue
+            baskets: list[Any] = []
+            getter = getattr(provider, "get_active_contract_basket", None)
+            if callable(getter):
+                try:
+                    baskets.append(getter())
+                except Exception as exc:  # noqa: BLE001 - provider diagnostics only
+                    self._logger.debug(
+                        "selected_option_basket_lookup_failed",
+                        extra={"event": "selected_option_basket_lookup_failed", "error": str(exc)},
+                    )
+            baskets.append(getattr(provider, "active_trading_universe", None))
+            baskets.append(getattr(provider, "active_contract_basket", None))
+            for basket in baskets:
+                for key in ("selected_ce", "selected_pe", "atm_ce", "atm_pe"):
+                    value = None
+                    if isinstance(basket, Mapping):
+                        value = basket.get(key)
+                    elif basket is not None:
+                        value = getattr(basket, key, None)
+                    if value:
+                        normalized = normalize_symbol(str(value))
+                        if normalized:
+                            selected.add(normalized)
+            for attr in ("selected_ce", "selected_pe", "atm_ce_symbol", "atm_pe_symbol"):
+                value = getattr(provider, attr, None)
+                if value:
+                    normalized = normalize_symbol(str(value))
+                    if normalized:
+                        selected.add(normalized)
+        return selected
+
+    def _is_selected_option_for_live_execution(self, symbol: str) -> bool:
+        normalized = normalize_symbol(symbol)
+        return bool(normalized and normalized in self._selected_option_symbols_for_execution())
 
     def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
         def _safe_float(value: object, default: float = 0.0) -> float:

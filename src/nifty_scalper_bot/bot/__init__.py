@@ -12,7 +12,7 @@ from nifty_scalper_bot.bot.components import (
     StrategyRunner,
     StrategyRunnerConfig,
     TradeSignal,
-    ZerodhaKiteClient,
+    LegacyDummyZerodhaKiteClient,
     ZerodhaKiteWebSocket,
 )
 
@@ -28,6 +28,6 @@ __all__ = [
     "StrategyRunner",
     "StrategyRunnerConfig",
     "TradeSignal",
-    "ZerodhaKiteClient",
+    "LegacyDummyZerodhaKiteClient",
     "ZerodhaKiteWebSocket",
 ]

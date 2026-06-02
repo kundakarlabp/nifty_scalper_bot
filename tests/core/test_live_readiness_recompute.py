@@ -135,3 +135,39 @@ async def test_dynamic_basket_commit_sets_selected_symbols_and_readiness() -> No
     assert ctx.selected_pe == 'NFO:NIFTY24600PE'
     assert ctx.data_hard_ready is True
     assert ctx.evaluation_ready is True
+
+
+@pytest.mark.asyncio
+async def test_selected_option_ltp_only_blocks_live_execution_bid_ask_missing(monkeypatch) -> None:
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
+
+    class _Snap:
+        ltp = 100.0
+        tick_age_s = 1.0
+        bid = None
+        ask = None
+        tradable_quote = False
+        depth_available = False
+
+    mdm = SimpleNamespace(
+        get_ohlc_bars=lambda s, limit=None: list(range(40)),
+        get_symbol_snapshot=lambda s: _Snap(),
+        hydrate_active_contract_basket=lambda basket=None: {"hard_ready": True, "missing": [], "symbols": {}},
+    )
+    ctx = _ctx(mdm)
+    ctx.active_trading_universe = {
+        'spot_symbol': 'NSE:NIFTY',
+        'selected_ce': 'NFO:NIFTY24600CE',
+        'selected_pe': 'NFO:NIFTY24600PE',
+        'option_symbols': ['NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'],
+    }
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason='test')
+
+    assert ctx.evaluation_ready is True
+    assert ctx.live_orders_armed is False
+    assert ctx.execution_ready_by_symbol == {
+        'NFO:NIFTY24600CE': False,
+        'NFO:NIFTY24600PE': False,
+    }
+    assert 'selected_option_bid_ask_missing' in str(ctx.live_block_reason)
