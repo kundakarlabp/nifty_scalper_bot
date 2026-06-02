@@ -2658,6 +2658,9 @@ class StrategyManager(_BaseStrategyManager):
         )
         score_map = self._recompute_scores()
         indicators = dict(indicators)
+        indicators.setdefault("ltp", current_price)
+        indicators.setdefault("price", current_price)
+        indicators.setdefault("close", current_price)
         indicators["symbol_role"] = symbol_role
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)

@@ -6455,8 +6455,8 @@ class StrategyRunner:
         except (TypeError, ValueError):
             fut_token_int = None
         fut_sub = bool(fut_symbol and (fut_symbol in active_subs or (fut_token_int is not None and fut_token_int in desired_tokens)))
-        ce_depth = bool(ce_symbol and self._is_symbol_execution_ready(ce_symbol))
-        pe_depth = bool(pe_symbol and self._is_symbol_execution_ready(pe_symbol))
+        ce_depth = bool(ce_symbol and self._selected_option_has_real_depth(ce_symbol))
+        pe_depth = bool(pe_symbol and self._selected_option_has_real_depth(pe_symbol))
         ce_hist = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
         pe_hist = len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
         min_bars = int(self._required_bars_for_symbol(ce_symbol or pe_symbol or symbol))
@@ -6472,6 +6472,133 @@ class StrategyRunner:
         ready = reason is None
         self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
         return ready, reason
+
+
+    def _selected_option_has_real_depth(self, symbol: str | None) -> bool:
+        """Return true only when selected option has real bid/ask/depth proof."""
+        if not symbol:
+            return False
+        mdm = getattr(self, "_market_data", None)
+        candidates = [symbol, normalize_symbol(symbol)]
+        runtime_key = self._runtime_ready_key(symbol)
+        if runtime_key:
+            candidates.append(runtime_key)
+        seen: set[str] = set()
+        candidates = [item for item in candidates if item and not (item in seen or seen.add(item))]
+        proof = getattr(mdm, "has_ws_tradable_quote", None)
+        if callable(proof):
+            try:
+                if bool(proof(candidates)):
+                    return True
+            except TypeError:
+                if any(bool(proof(item)) for item in candidates):
+                    return True
+            except Exception as exc:  # noqa: BLE001 - depth proof lookup is diagnostic; fall back to cached quote
+                log_throttled(
+                    self._logger,
+                    f"selected_option_depth_proof_failed:{symbol}",
+                    "SELECTED_OPTION_DEPTH_PROOF_FAILED symbol=%s error_type=%s",
+                    symbol,
+                    type(exc).__name__,
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                    extra={"event": "SELECTED_OPTION_DEPTH_PROOF_FAILED", "symbol": symbol, "error_type": type(exc).__name__},
+                )
+        for item in candidates:
+            quote = self.get_quote(item) if hasattr(self, "get_quote") else None
+            if not isinstance(quote, Mapping):
+                continue
+            if not self._tick_has_quote_update(quote):
+                continue
+            bid = _extract_float(quote, "bid", "best_bid", "buy_price")
+            ask = _extract_float(quote, "ask", "best_ask", "sell_price")
+            if bid is not None and ask is not None and bid > 0 and ask > bid:
+                return True
+        return False
+
+
+    def _underlying_context_from_strategy_manager(self) -> dict[str, Any]:
+        """Return freshest spot/futures direction context cached by StrategyManager."""
+        manager = getattr(self, "_strategy_manager", None)
+        snapshots = getattr(manager, "_latest_context_snapshots", {}) if manager is not None else {}
+        if not isinstance(snapshots, Mapping):
+            return {}
+        now = time.time()
+        max_age = 60.0
+        live_age = getattr(manager, "_live_context_max_age_seconds", None)
+        if callable(live_age):
+            try:
+                max_age = float(live_age())
+            except (TypeError, ValueError):
+                max_age = 60.0
+        output: dict[str, Any] = {}
+        best: tuple[float, Mapping[str, Any]] | None = None
+        for key, fresh_key in (("spot_context", "spot_fresh"), ("futures_context", "futures_fresh")):
+            ctx = snapshots.get(key)
+            if not isinstance(ctx, Mapping):
+                continue
+            try:
+                ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
+            except (TypeError, ValueError):
+                ts = 0.0
+            age = max(0.0, now - ts) if ts > 0 else max_age + 1.0
+            fresh = bool(ts > 0 and age <= max_age)
+            output[key] = dict(ctx)
+            output[fresh_key] = fresh
+            bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
+            if fresh and bias in {"CE", "PE"} and (best is None or age < best[0]):
+                best = (age, ctx)
+        if best is not None:
+            age, ctx = best
+            bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
+            output["direction_bias"] = bias
+            output["underlying_direction_bias"] = bias
+            output["underlying_direction_confidence"] = ctx.get("underlying_direction_confidence")
+            output["context_age_seconds"] = age
+            output["context_fresh"] = True
+            output["direction_context_source"] = ctx.get("role") or ctx.get("context_kind")
+            output["direction_context_reasons"] = ctx.get("direction_context_reasons")
+        return output
+
+    def _refresh_underlying_context_snapshots(self, *, trace_id: str | None = None) -> None:
+        """Update StrategyManager context snapshots before selected option evaluation."""
+        manager = getattr(self, "_strategy_manager", None)
+        if manager is None or not hasattr(manager, "generate_signal"):
+            return
+        context_symbols = [
+            sym for sym in sorted(getattr(self, "_active_symbols", set()) or set())
+            if self._is_context_symbol(sym) and not self._is_context_symbol_suspended(sym)
+        ]
+        if "NSE:NIFTY" not in context_symbols:
+            context_symbols.insert(0, "NSE:NIFTY")
+        for ctx_symbol in context_symbols:
+            quote = self.get_quote(ctx_symbol) if hasattr(self, "get_quote") else None
+            if not isinstance(quote, Mapping):
+                continue
+            price = _extract_float(quote, "ltp", "last_price", "price", "close")
+            if price is None or price <= 0:
+                continue
+            try:
+                manager.generate_signal(ctx_symbol, float(price), trace_id=trace_id)
+            except TypeError:
+                manager.generate_signal(ctx_symbol, float(price))
+            except Exception as exc:  # noqa: BLE001 - context refresh failure is logged, not hidden
+                log_throttled(
+                    self._logger,
+                    f"context_snapshot_refresh_failed:{ctx_symbol}",
+                    "CONTEXT_SNAPSHOT_REFRESH_FAILED symbol=%s error_type=%s error=%s",
+                    ctx_symbol,
+                    type(exc).__name__,
+                    str(exc),
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "CONTEXT_SNAPSHOT_REFRESH_FAILED",
+                        "symbol": ctx_symbol,
+                        "error_type": type(exc).__name__,
+                        "reason": "pre_option_context_refresh",
+                    },
+                )
 
     def _request_selected_option_history_prewarm(
         self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None
@@ -7170,17 +7297,18 @@ class StrategyRunner:
                 self._logger.info(
                     "RUNNER_GLOBAL_READINESS_DECISION symbol=%s allowed=%s reason=%s",
                     symbol,
-                    False,
-                    "context_symbol_not_strategy_candidate",
+                    True,
+                    "context_symbol_snapshot_update",
                     extra={
                         "event": "RUNNER_GLOBAL_READINESS_DECISION",
                         "symbol": symbol,
                         "stage": "phase9",
-                        "allowed": False,
-                        "reason": "context_symbol_not_strategy_candidate",
+                        "allowed": True,
+                        "reason": "context_symbol_snapshot_update",
+                        "trade_candidate": False,
                     },
                 )
-                return False
+                return True
             if symbol not in self._active_symbols:
                 self._emit_no_trade_decision(
                     symbol=symbol,
@@ -8843,6 +8971,8 @@ class StrategyRunner:
                 if should_evaluate:
                     if not self._strategy_evaluation_allowed(symbol, trace_id):
                         return
+                    if self._is_tradable_symbol(symbol):
+                        self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     log_throttled(
                         self._logger,
                         f"strategy_evaluation_triggered:{symbol}",
@@ -8978,13 +9108,19 @@ class StrategyRunner:
                         if option_side:
                             runtime_ctx.setdefault("contract_side", option_side)
                             runtime_ctx.setdefault("option_contract_side", option_side)
+                        context_ctx = self._underlying_context_from_strategy_manager()
+                        if context_ctx:
+                            runtime_ctx.update(context_ctx)
                         existing_bias = (
-                            indicators_ctx.get("direction_bias")
+                            runtime_ctx.get("direction_bias")
+                            or runtime_ctx.get("underlying_direction_bias")
+                            or indicators_ctx.get("direction_bias")
                             or indicators_ctx.get("underlying_direction_bias")
                             or getattr(self, "_latest_direction_bias", None)
                         )
                         if str(existing_bias or "").upper() in {"CE", "PE"}:
                             runtime_ctx["direction_bias"] = str(existing_bias).upper()
+                            runtime_ctx["underlying_direction_bias"] = str(existing_bias).upper()
                         if symbol_strike is not None and atm_strike is not None:
                             runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
                         runtime_ctx["active_selected_ce"] = selected_ce
@@ -9048,6 +9184,7 @@ class StrategyRunner:
                             "data_age_seconds": quote_map.get("data_age_seconds") or tick_map.get("data_age_seconds"),
                             "quote_age_s": quote_map.get("quote_age_s") or quote_map.get("data_age_seconds") or tick_map.get("data_age_seconds"),
                         })
+                        indicators_ctx.update(runtime_ctx)
                         if hasattr(self._indicator_engine, "set_runtime_context"):
                             self._indicator_engine.set_runtime_context(symbol, runtime_ctx)
                         elif self._should_log_throttled(
@@ -9144,14 +9281,22 @@ class StrategyRunner:
                         }
                         self._last_direction_context = runtime_indicators[symbol]
                         spot_fresh = bool(indicators_ctx.get("spot_fresh"))
-                        if spot_fresh and not direction_bias and not underlying_bias:
-                            self._logger.warning(
-                                "TRIGGER_EVAL_SKIPPED symbol=%s reason=direction_context_not_ready spot_fresh=%s",
+                        fut_fresh = bool(indicators_ctx.get("futures_fresh") or indicators_ctx.get("fut_fresh"))
+                        context_fresh = bool(indicators_ctx.get("context_fresh") or spot_fresh or fut_fresh)
+                        live_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE"
+                        if live_mode and (resolved_bias not in {"CE", "PE"} or not context_fresh):
+                            log_throttled(
+                                self._logger,
+                                f"direction_context_missing_live:{symbol}",
+                                "TRIGGER_EVAL_SKIPPED symbol=%s reason=direction_context_missing_live spot_fresh=%s fut_fresh=%s",
                                 symbol,
                                 spot_fresh,
-                                extra={"event": "trigger_eval_skipped", "reason": "direction_context_not_ready", "symbol": symbol, "spot_fresh": spot_fresh},
+                                fut_fresh,
+                                interval_sec=30.0,
+                                level=logging.WARNING,
+                                extra={"event": "trigger_eval_skipped", "reason": "direction_context_missing_live", "symbol": symbol, "spot_fresh": spot_fresh, "fut_fresh": fut_fresh},
                             )
-                            self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="direction_context_not_ready", allowed=False, trace_id=trace_id)
+                            self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="direction_context_missing_live", allowed=False, trace_id=trace_id)
                             return
                         if getattr(self, "_orchestrator", None) is not None and hasattr(self._orchestrator, "reconcile_direction_bias"):
                             self._orchestrator.reconcile_direction_bias(
