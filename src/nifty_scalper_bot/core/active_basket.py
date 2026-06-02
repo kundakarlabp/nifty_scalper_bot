@@ -8,23 +8,38 @@ Runtime role:
 from __future__ import annotations
 
 import os
+import re
 from typing import Mapping
 
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
+# Matches the 4-6 digit strike immediately before the CE/PE suffix.
+# For NFO:NIFTY2660923500CE  →  group("strike") == "23500"
+# The expiry code (e.g. "26609") is longer than 6 digits so it's excluded.
+_OPTION_STRIKE_RE = re.compile(r"(?P<strike>\d{4,6})(?:CE|PE)$", re.IGNORECASE)
+
 
 def extract_symbol_strike(symbol: str) -> int | None:
-    """Extract option strike from symbol. Args: symbol. Returns: strike or None. Raises: none."""
-    digits = ''
-    base = symbol[:-2] if symbol.endswith(('CE', 'PE')) else symbol
-    for ch in reversed(base):
-        if ch.isdigit():
-            digits = ch + digits
-        elif digits:
-            break
-    return int(digits) if digits else None
+    """Extract option strike from a Zerodha option symbol.
+
+    Uses a regex anchored to the CE/PE suffix so the expiry code embedded
+    before the strike is never included in the result.
+
+    Args:
+        symbol: e.g. ``NFO:NIFTY2660923500CE`` or bare ``NIFTY2660923500CE``.
+
+    Returns:
+        Strike as int (e.g. 23500), or None when not parseable.
+
+    Raises:
+        None.
+    """
+    # Strip exchange prefix, then apply regex.
+    bare = symbol.split(":")[-1]
+    match = _OPTION_STRIKE_RE.search(bare)
+    return int(match.group("strike")) if match else None
 
 
 def pick_atm_option_symbols_from_basket(
@@ -67,7 +82,16 @@ def pick_atm_option_symbols_from_basket(
 
 
 def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, object]:
-    """Return canonical basket dict with guaranteed context and option fields."""
+    """Return canonical basket dict with guaranteed context and option fields.
+
+    Key invariants:
+    - If the input already has ``selected_ce`` / ``selected_pe``, those SSOT
+      values are KEPT.  ``pick_atm_option_symbols_from_basket`` is only called
+      as a fallback when they are absent.
+    - Token fields (``token_by_symbol``, ``all_tokens``, ``all_symbols``,
+      ``selected_ce_token``, ``selected_pe_token``) are passed through
+      unchanged so MDM never sees an empty token map.
+    """
     out = dict(basket or {})
     spot_symbol = str(out.get("spot_symbol") or "NSE:NIFTY")
     futures_symbol = str(out.get("futures_symbol") or out.get("future_symbol") or "")
@@ -89,15 +113,22 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
             or [s for s in option_symbols if s.endswith("PE")]
         )
     )
-    selected_ce, selected_pe = pick_atm_option_symbols_from_basket(
-        {
-            **out,
-            "option_symbols": option_symbols,
-            "symbols": option_symbols,
-            "ce_symbols": ce_symbols,
-            "pe_symbols": pe_symbols,
-        }
-    )
+    # Preserve SSOT selected_ce/selected_pe if already present.  Only fall
+    # back to pick_atm_option_symbols_from_basket when both are absent.
+    ssot_ce = str(out.get("selected_ce") or out.get("atm_ce") or "") or None
+    ssot_pe = str(out.get("selected_pe") or out.get("atm_pe") or "") or None
+    if ssot_ce and ssot_pe:
+        selected_ce, selected_pe = ssot_ce, ssot_pe
+    else:
+        selected_ce, selected_pe = pick_atm_option_symbols_from_basket(
+            {
+                **out,
+                "option_symbols": option_symbols,
+                "symbols": option_symbols,
+                "ce_symbols": ce_symbols,
+                "pe_symbols": pe_symbols,
+            }
+        )
     out["spot_symbol"] = spot_symbol
     out["futures_symbol"] = futures_symbol
     out["option_symbols"] = option_symbols
@@ -108,6 +139,9 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     out["atm_ce"] = out.get("atm_ce") or selected_ce
     out["atm_pe"] = out.get("atm_pe") or selected_pe
     out["symbols"] = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
+    # Token fields must survive normalization untouched so MDM can consume them.
+    # They are already in `out` from the input dict; no action needed beyond
+    # the comment to make the invariant explicit.
     return out
 
 

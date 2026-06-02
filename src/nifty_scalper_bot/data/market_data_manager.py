@@ -1747,12 +1747,57 @@ class MarketDataManager:
         """Commit active basket tokens/subscriptions without clearing on incomplete payloads."""
         tokens = [int(tok) for tok in (self._basket_value(basket, "all_tokens", []) or []) if tok]
         if not tokens:
+            # all_tokens absent — reconstruct from token_by_symbol if available.
+            token_map_raw = self._basket_value(basket, "token_by_symbol", {}) or {}
+            if isinstance(token_map_raw, Mapping):
+                tokens = list(dict.fromkeys(
+                    int(t) for t in token_map_raw.values()
+                    if t and int(t) > 0
+                ))
+        if not tokens:
+            selected_ce = str(self._basket_value(basket, "selected_ce", "") or "")
+            selected_pe = str(self._basket_value(basket, "selected_pe", "") or "")
             self._logger.warning(
-                "MDM_ACTIVE_BASKET_IGNORED reason=missing_tokens",
-                extra={"event": "MDM_ACTIVE_BASKET_IGNORED", "reason": "missing_tokens"},
+                "MDM_ACTIVE_BASKET_IGNORED reason=missing_tokens selected_ce=%s selected_pe=%s",
+                selected_ce,
+                selected_pe,
+                extra={
+                    "event": "MDM_ACTIVE_BASKET_IGNORED",
+                    "reason": "missing_tokens",
+                    "selected_ce": selected_ce,
+                    "selected_pe": selected_pe,
+                },
             )
             return
         token_map = self._basket_token_map(basket)
+        selected_ce = str(self._basket_value(basket, "selected_ce", "") or "")
+        selected_pe = str(self._basket_value(basket, "selected_pe", "") or "")
+        selected_ce_token = (
+            self._basket_value(basket, "selected_ce_token", None)
+            or token_map.get(selected_ce)
+            or token_map.get(selected_ce.split(":", 1)[-1] if ":" in selected_ce else selected_ce)
+        )
+        selected_pe_token = (
+            self._basket_value(basket, "selected_pe_token", None)
+            or token_map.get(selected_pe)
+            or token_map.get(selected_pe.split(":", 1)[-1] if ":" in selected_pe else selected_pe)
+        )
+        self._logger.info(
+            "MDM_ACTIVE_BASKET_ACCEPTED token_count=%d selected_ce=%s selected_ce_token=%s selected_pe=%s selected_pe_token=%s",
+            len(tokens),
+            selected_ce,
+            selected_ce_token,
+            selected_pe,
+            selected_pe_token,
+            extra={
+                "event": "MDM_ACTIVE_BASKET_ACCEPTED",
+                "token_count": len(tokens),
+                "selected_ce": selected_ce,
+                "selected_ce_token": selected_ce_token,
+                "selected_pe": selected_pe,
+                "selected_pe_token": selected_pe_token,
+            },
+        )
         with self._lock:
             self._active_contract_basket = basket
             self._desired_tokens.update(tokens)

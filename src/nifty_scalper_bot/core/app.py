@@ -308,6 +308,8 @@ def select_active_option_symbols(
 ) -> list[str]:
     """Select balanced CE/PE symbols near ATM. Args: option_symbols/atm/max_active. Returns: selected symbols. Raises: none."""
 
+    from nifty_scalper_bot.core.active_basket import extract_symbol_strike  # avoid circular import at module level
+
     safe_limit = max(1, int(max_active or 1))
     unique_symbols = [str(sym) for sym in dict.fromkeys(option_symbols or ()) if sym]
     if not unique_symbols:
@@ -322,22 +324,14 @@ def select_active_option_symbols(
     fallback: list[str] = []
     for rank, symbol in enumerate(unique_symbols):
         try:
-            head, tail = symbol.rsplit(":", 1)
-            _ = head
-            side = "CE" if tail.endswith("CE") else "PE" if tail.endswith("PE") else ""
+            side = "CE" if symbol.upper().endswith("CE") else "PE" if symbol.upper().endswith("PE") else ""
             if not side:
                 fallback.append(symbol)
                 continue
-            strike_digits = ""
-            for char in reversed(tail[:-2]):
-                if char.isdigit():
-                    strike_digits = char + strike_digits
-                elif strike_digits:
-                    break
-            if not strike_digits:
+            strike = extract_symbol_strike(symbol)
+            if strike is None:
                 fallback.append(symbol)
                 continue
-            strike = int(strike_digits)
             distance = abs(strike - atm_value) if atm_value is not None else 0
             parsed.append((distance, rank, side, symbol))
         except Exception:
@@ -3325,7 +3319,7 @@ def _build_canonical_active_basket(
     """Build canonical live basket (spot + futures + ATM±N CE/PE).
 
     Args: instrument_manager, spot_ltp, futures_symbol, strike_step, strikes_around_atm.
-    Returns: basket dict.
+    Returns: basket dict with token_by_symbol / all_tokens / all_symbols populated.
     Raises: RuntimeError.
     """
     spot_symbol = "NSE:NIFTY"
@@ -3368,32 +3362,49 @@ def _build_canonical_active_basket(
         spot_token = well_known_spot_tokens.get(spot_symbol)
     if spot_token is None:
         raise RuntimeError(f"failed to resolve spot token for {spot_symbol}")
+
+    # Use the canonical strike extractor (regex-based, 4-6 digits only).
+    from nifty_scalper_bot.core.active_basket import extract_symbol_strike  # local to avoid circular import at module level
+
     def _nearest_side(candidates: list[str], side: str) -> str | None:
         parsed: list[tuple[int, str]] = []
         for candidate in candidates:
             if not candidate.endswith(side):
                 continue
-            strike_digits = ""
-            for char in reversed(candidate[:-2]):
-                if char.isdigit():
-                    strike_digits = char + strike_digits
-                elif strike_digits:
-                    break
-            if not strike_digits:
+            strike = extract_symbol_strike(candidate)
+            if strike is None:
                 continue
-            parsed.append((abs(int(strike_digits) - int(atm)), candidate))
+            parsed.append((abs(strike - int(atm)), candidate))
         if not parsed:
             return None
         parsed.sort(key=lambda item: (item[0], item[1]))
         return parsed[0][1]
+
     atm_ce = _nearest_side(ce_symbols, "CE")
     atm_pe = _nearest_side(pe_symbols, "PE")
+
+    # Build a complete token map so downstream MDM never receives a basket
+    # with missing_tokens.  Spot always has a well-known token; options are
+    # resolved from the instrument manager.
+    token_by_symbol: dict[str, int] = {spot_symbol: int(spot_token)}
+    if futures_token is not None:
+        token_by_symbol[futures_symbol] = int(futures_token)
+    for opt_sym in option_symbols:
+        try:
+            tok = int(instrument_manager.get_token(opt_sym))
+            token_by_symbol[opt_sym] = tok
+        except Exception:  # noqa: BLE001
+            pass
+
+    all_symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
+    all_tokens = [token_by_symbol[s] for s in all_symbols if s in token_by_symbol]
+
     symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
     return {
         "spot_symbol": spot_symbol,
         "spot_token": int(spot_token),
         "futures_symbol": futures_symbol,
-        "futures_token": int(futures_token),
+        "futures_token": int(futures_token) if futures_token is not None else None,
         "atm_strike": atm,
         "ce_symbols": ce_symbols,
         "pe_symbols": pe_symbols,
@@ -3403,6 +3414,10 @@ def _build_canonical_active_basket(
         "selected_ce": atm_ce,
         "selected_pe": atm_pe,
         "symbols": symbols,
+        # Token fields required by MDM.set_active_contract_basket():
+        "token_by_symbol": token_by_symbol,
+        "all_symbols": all_symbols,
+        "all_tokens": all_tokens,
     }
 
 
@@ -7672,8 +7687,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ce_quote_fresh=_fresh_ltp(selected_ce); pe_quote_fresh=_fresh_ltp(selected_pe)
     ce_bid_ask_complete = _selected_option_bid_ask_complete(selected_ce)
     pe_bid_ask_complete = _selected_option_bid_ask_complete(selected_pe)
-    ce_exec_ready = bool(selected_ce) and ce_quote_fresh and ce_bid_ask_complete and _tradable_quote(selected_ce) and ce_bars >= option_execution_min_bars
-    pe_exec_ready = bool(selected_pe) and pe_quote_fresh and pe_bid_ask_complete and _tradable_quote(selected_pe) and pe_bars >= option_execution_min_bars
+    ce_exec_ready = bool(selected_ce) and basket_hard_ready and ce_quote_fresh and ce_bid_ask_complete and _tradable_quote(selected_ce) and ce_bars >= option_execution_min_bars
+    pe_exec_ready = bool(selected_pe) and basket_hard_ready and pe_quote_fresh and pe_bid_ask_complete and _tradable_quote(selected_pe) and pe_bars >= option_execution_min_bars
     ce_eval_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_eval_min_live_bars
     pe_eval_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_eval_min_live_bars
     spot_ready=_fresh_ltp(spot_symbol) or _bars(spot_symbol)>=1
