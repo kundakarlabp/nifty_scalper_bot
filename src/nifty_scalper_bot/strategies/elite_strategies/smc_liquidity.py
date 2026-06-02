@@ -68,11 +68,15 @@ class SMCStrategy(EliteStrategy):
             effective_direction = underlying_direction or direction
             if str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper() == 'LIVE' and not effective_direction:
                 self._no_vote("direction_context_not_ready")
-                LOGGER.warning(
+                log_throttled(
+                    LOGGER,
+                    f"smc_direction_context_not_ready:{symbol}",
                     "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=direction_context_not_ready direction_bias=%s underlying_direction_bias=%s",
                     symbol,
                     direction,
                     underlying_direction,
+                    interval_sec=float(os.getenv("SMC_DIRECTION_CONTEXT_NO_VOTE_LOG_THROTTLE_SECONDS", "45") or "45"),
+                    level=30,
                     extra={"event": "STRATEGY_NO_VOTE", "strategy": "SMC", "symbol": symbol, "reason": "direction_context_not_ready"},
                 )
                 return None
