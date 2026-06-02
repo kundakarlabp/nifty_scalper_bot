@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core import app
@@ -141,6 +142,99 @@ def test_app_active_basket_uses_requested_future_not_mdm_fallback() -> None:
     assert "NFO:NIFTY26MAYFUT" in committed["symbols"]
     assert mdm.purged == [("NFO:NIFTY26MAYFUT", "active_dynamic_basket_commit")]
     assert mdm.rotated[0] == "NFO:NIFTY26MAYFUT"
+
+
+def test_commit_active_dynamic_basket_reconciles_without_name_error() -> None:
+    class _Mdm:
+        def __init__(self) -> None:
+            self.reconciled: set[int] | None = None
+
+        def register_symbol(self, symbol: str, token: int) -> None:
+            return None
+
+        def set_active_contract_basket(self, basket):
+            return None
+
+        def reconcile_active_subscriptions(self, tokens):
+            self.reconciled = set(tokens)
+
+    mdm = _Mdm()
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe={},
+        strategy_runner=None,
+        market_data_manager=mdm,
+        strategy_manager=None,
+        basket_build_lock=asyncio.Lock(),
+    )
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={
+            "spot_symbol": "NSE:NIFTY",
+            "spot_token": 256265,
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "futures_token": 222,
+            "token_by_symbol": {"NSE:NIFTY": 256265, "NFO:NIFTY26JUNFUT": 222, ce: 11, pe: 12},
+        },
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", "NFO:NIFTY26JUNFUT", ce, pe],
+        atm_strike=23900,
+    )
+
+    assert mdm.reconciled == {256265, 222, 11, 12}
+
+
+def test_commit_active_dynamic_basket_exposes_active_symbol_tokens_and_registers_futures() -> None:
+    class _Mdm:
+        def __init__(self) -> None:
+            self.registered: dict[str, int] = {}
+
+        def register_symbol(self, symbol: str, token: int) -> None:
+            self.registered[symbol] = int(token)
+
+        def set_active_contract_basket(self, basket):
+            return None
+
+    mdm = _Mdm()
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe={},
+        strategy_runner=None,
+        market_data_manager=mdm,
+        strategy_manager=None,
+        basket_build_lock=asyncio.Lock(),
+    )
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={
+            "spot_symbol": "NSE:NIFTY",
+            "spot_token": 256265,
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "futures_token": 222,
+            "token_by_symbol": {"NSE:NIFTY": 256265, "NFO:NIFTY26JUNFUT": 222, ce: 11, pe: 12},
+        },
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", "NFO:NIFTY26JUNFUT", ce, pe],
+        atm_strike=23900,
+    )
+
+    assert ctx.active_symbol_tokens["NFO:NIFTY26JUNFUT"] == 222
+    assert mdm.registered["NSE:NIFTY"] == 256265
+    assert mdm.registered["NFO:NIFTY26JUNFUT"] == 222
+    assert mdm.registered[ce] == 11
+    assert mdm.registered[pe] == 12
 
 
 def test_resolve_active_futures_for_basket_no_calendar_fallback(monkeypatch) -> None:

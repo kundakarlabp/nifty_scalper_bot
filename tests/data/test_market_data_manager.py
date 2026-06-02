@@ -1197,6 +1197,53 @@ async def test_warmup_history_primes_cache_without_emitting_callbacks(
     assert bars
 
 
+@pytest.mark.asyncio
+async def test_warmup_history_resolves_missing_token_with_resolver_broker_fallback(
+    ws: DummyWebSocket,
+) -> None:
+    class ResolverMiss:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def resolve(self, symbol: str):
+            self.calls.append(symbol)
+            return None
+
+    class BrokerFallback:
+        def __init__(self) -> None:
+            self.token_calls: list[str] = []
+            self.history_tokens: list[int] = []
+
+        def get_instrument_token(self, symbol: str) -> int:
+            self.token_calls.append(symbol)
+            return 222
+
+        async def get_historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
+            self.history_tokens.append(int(kwargs["instrument_token"]))
+            return [
+                {
+                    "date": datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 10,
+                }
+            ]
+
+    resolver = ResolverMiss()
+    broker = BrokerFallback()
+    manager = MarketDataManager(broker, ws, resolver=resolver)
+
+    await manager.warmup_history(["NFO:NIFTY26JUNFUT"], lookback_minutes=30)
+
+    assert resolver.calls == ["NFO:NIFTY26JUNFUT"]
+    assert broker.token_calls == ["NFO:NIFTY26JUNFUT"]
+    assert broker.history_tokens == [222]
+    assert manager._token_by_symbol["NFO:NIFTY26JUNFUT"] == 222  # noqa: SLF001
+    assert manager.get_ohlc_bars("NFO:NIFTY26JUNFUT")
+
+
 def test_out_of_order_tick_is_discarded(
     monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
