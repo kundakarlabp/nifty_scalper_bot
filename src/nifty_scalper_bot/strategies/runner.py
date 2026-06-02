@@ -1382,23 +1382,41 @@ class StrategyRunner:
         source: str,
         fetched_bars: int,
         ingested_bars: int,
+        indicator_before: int | None = None,
     ) -> None:
-        """Emit concise hydration trace. Args: symbol/source/counts. Returns: None. Raises: None."""
+        """Emit concise hydration trace with no-op/rejection reason. Args: symbol/source/counts. Returns: None. Raises: None."""
         indicator_count = self._history_count_for_symbol(symbol)
+        before = int(indicator_before if indicator_before is not None else max(0, indicator_count - int(ingested_bars)))
+        new_ingested_bars = max(0, int(indicator_count) - before)
+        duplicate_bars = max(0, int(fetched_bars) - new_ingested_bars) if int(fetched_bars) > 0 else 0
+        if int(fetched_bars) <= 0:
+            rejection_reason = "provider_empty"
+        elif new_ingested_bars == 0 and int(indicator_count) >= before and int(indicator_count) > 0:
+            rejection_reason = "duplicate_noop"
+        elif int(indicator_count) == 0:
+            rejection_reason = "validation_rejected"
+        else:
+            rejection_reason = "none"
         self._logger.info(
-            "HISTORY_HYDRATION_TRACE symbol=%s source=%s fetched_bars=%d ingested_bars=%d indicator_history_count=%d",
+            "HISTORY_HYDRATION_TRACE symbol=%s source=%s fetched_bars=%d new_ingested_bars=%d duplicate_bars=%d final_indicator_history_count=%d rejection_reason=%s",
             symbol,
             source,
             int(fetched_bars),
-            int(ingested_bars),
+            new_ingested_bars,
+            duplicate_bars,
             int(indicator_count),
+            rejection_reason,
             extra={
                 "event": "HISTORY_HYDRATION_TRACE",
                 "symbol": symbol,
                 "source": source,
                 "fetched_bars": int(fetched_bars),
                 "ingested_bars": int(ingested_bars),
+                "new_ingested_bars": new_ingested_bars,
+                "duplicate_bars": duplicate_bars,
                 "indicator_history_count": int(indicator_count),
+                "final_indicator_history_count": int(indicator_count),
+                "rejection_reason": rejection_reason,
             },
         )
 
@@ -5609,20 +5627,21 @@ class StrategyRunner:
             trace_id = tick.get("trace_id") or f"{normalized_symbol}-{time_module.monotonic_ns()}"
             if self._is_context_symbol(normalized_symbol):
                 self._logger.info(
-                    "RUNNER_GLOBAL_READINESS_DECISION symbol=%s allowed=%s reason=%s",
+                    "RUNNER_GLOBAL_READINESS_DECISION symbol=%s allowed=%s reason=%s trade_candidate=%s",
                     normalized_symbol,
+                    True,
+                    "context_symbol_snapshot_update",
                     False,
-                    "context_symbol_not_strategy_candidate",
                     extra={
                         "event": "RUNNER_GLOBAL_READINESS_DECISION",
                         "symbol": normalized_symbol,
                         "trace_id": trace_id,
                         "stage": "tick_ingress",
-                        "allowed": False,
-                        "reason": "context_symbol_not_strategy_candidate",
+                        "allowed": True,
+                        "reason": "context_symbol_snapshot_update",
+                        "trade_candidate": False,
                     },
                 )
-                return
             # RUNNER_TICK_CONSUMED: the tick has been pulled off the event bus
             # and accepted by the runner's evaluation entry point.  This is the
             # canonical observability breakpoint between publication and

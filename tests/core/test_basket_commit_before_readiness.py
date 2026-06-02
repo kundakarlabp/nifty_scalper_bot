@@ -356,3 +356,97 @@ async def test_readiness_syncs_selected_option_runner_history_from_mdm_and_desir
     assert "pe_eval_bars_missing" not in str(ctx.live_block_reason)
     assert "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM" in caplog.text
     assert "SELECTED_OPTION_RESEED_FAILED" not in caplog.text
+
+@pytest.mark.asyncio
+async def test_live_basket_build_logs_committed_ssot_selected_pair(monkeypatch, caplog):
+    basket = {
+        'selected_ce': 'NFO:NIFTY2660223400CE',
+        'selected_pe': 'NFO:NIFTY2660223400PE',
+        'atm_strike': 23500,
+        'symbols': ['NSE:NIFTY', 'NFO:NIFTY26JUNFUT', 'NFO:NIFTY2660223500CE', 'NFO:NIFTY2660223500PE'],
+        'option_symbols': ['NFO:NIFTY2660223500CE', 'NFO:NIFTY2660223500PE'],
+        'futures_symbol': 'NFO:NIFTY26JUNFUT',
+    }
+    monkeypatch.setattr(app, '_build_canonical_active_basket', lambda **kwargs: basket)
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.CLOSED)
+    ctx = SimpleNamespace(
+        instrument_manager=_IM(),
+        market_data_manager=_MDM(),
+        broker_client=_Broker(),
+        settings=SimpleNamespace(option_universe=SimpleNamespace(strike_step=50), execution_mode='LIVE'),
+        strategy_runner=SimpleNamespace(
+            _indicator_engine=SimpleNamespace(get_history=lambda s: [1] * 30),
+            set_active_trading_universe=lambda universe: setattr(ctx, 'runner_universe', universe),
+        ),
+        strategy_manager=SimpleNamespace(set_active_futures_symbol=lambda *a, **k: None),
+        order_manager=object(),
+        active_trading_universe={'selected_ce': 'NFO:NIFTY2660223400CE', 'selected_pe': 'NFO:NIFTY2660223400PE'},
+        selected_ce='NFO:NIFTY2660223400CE',
+        selected_pe='NFO:NIFTY2660223400PE',
+    )
+    with caplog.at_level('INFO', logger=app.LOGGER.name):
+        out = await app._build_and_hydrate_live_basket_from_spot(ctx, spot_ltp=23501.0, configured_mode='LIVE')
+
+    assert out['selected_ce'] == 'NFO:NIFTY2660223500CE'
+    assert out['selected_pe'] == 'NFO:NIFTY2660223500PE'
+    assert ctx.selected_ce == 'NFO:NIFTY2660223500CE'
+    assert ctx.selected_pe == 'NFO:NIFTY2660223500PE'
+    assert ctx.runner_universe['selected_ce'] == 'NFO:NIFTY2660223500CE'
+    assert 'LIVE_BASKET_BUILD_COMPLETE selected_ce=NFO:NIFTY2660223500CE selected_pe=NFO:NIFTY2660223500PE' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_context_hydration_uses_runner_required_bars(monkeypatch, caplog):
+    from datetime import datetime, timedelta, timezone
+    from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+
+    base = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
+    bars = [
+        {'timestamp': base + timedelta(minutes=i), 'open': 100+i, 'high': 101+i, 'low': 99+i, 'close': 100.5+i, 'volume': 1000+i}
+        for i in range(50)
+    ]
+    requested: list[tuple[str, int]] = []
+
+    class MDM(_MDM):
+        def __init__(self):
+            self.store = {'NSE:NIFTY': list(bars[:20]), 'NFO:NIFTY26JUNFUT': list(bars[:20])}
+        def get_ohlc_bars(self, symbol, limit=None):
+            data = self.store.get(symbol, [])
+            return data[-limit:] if limit else data
+        async def hydrate_symbol_history(self, symbol, **kwargs):
+            requested.append((symbol, kwargs['max_bars']))
+            self.store[symbol] = list(bars)
+            return self.store.get(symbol, [])
+        def hydrate_active_contract_basket(self, basket):
+            return {'hard_ready': True, 'missing': []}
+
+    engine = IndicatorEngine()
+    runner = SimpleNamespace(
+        _context_required_bars=50,
+        _indicator_engine=engine,
+        reseed_history_from_bars=lambda symbol, rows, **kwargs: len(rows) if engine.replace_history(symbol, rows, **kwargs) else 0,
+        set_runtime_readiness=lambda **kwargs: None,
+        is_running=True,
+    )
+    ctx = SimpleNamespace(
+        active_trading_universe={
+            'selected_ce': 'NFO:NIFTY26JUN23700CE', 'selected_pe': 'NFO:NIFTY26JUN23700PE',
+            'option_symbols': ['NFO:NIFTY26JUN23700CE', 'NFO:NIFTY26JUN23700PE'],
+            'symbols': ['NSE:NIFTY', 'NFO:NIFTY26JUNFUT', 'NFO:NIFTY26JUN23700CE', 'NFO:NIFTY26JUN23700PE'],
+            'futures_symbol': 'NFO:NIFTY26JUNFUT', 'atm_strike': 23700,
+        },
+        market_data_manager=MDM(),
+        settings=SimpleNamespace(execution_mode='SHADOW'),
+        strategy_runner=runner,
+        order_manager=object(), broker_client=object(), selected_ce=None, selected_pe=None,
+    )
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.CLOSED)
+    with caplog.at_level('INFO', logger=app.LOGGER.name):
+        await app._recompute_and_push_runtime_readiness(ctx, reason='test')
+
+    assert ('NSE:NIFTY', 50) in requested
+    assert ('NFO:NIFTY26JUNFUT', 50) in requested
+    assert len(engine.get_history('NSE:NIFTY')) >= 50
+    assert len(engine.get_history('NFO:NIFTY26JUNFUT')) >= 50
+    assert 'CONTEXT_HISTORY_HYDRATION_TRACE symbol=NSE:NIFTY' in caplog.text
+    assert 'requested_bars=50' in caplog.text

@@ -19,6 +19,8 @@ def test_botcontext_has_startup_spot_fields() -> None:
     assert 'selected_pe_exec_ready' in names
     assert 'context_exec_ready' in names
     assert 'broker_ready' in names
+    assert 'active_contract_basket' in names
+    assert 'active_basket_hydration' in names
 
 
 def test_assigning_startup_fields_does_not_raise() -> None:
@@ -32,7 +34,9 @@ def test_assigning_startup_fields_does_not_raise() -> None:
     ctx.execution_ready_by_symbol = {}
     ctx.selected_ce_exec_ready = True
     ctx.selected_pe_exec_ready = False
+    ctx.active_basket_hydration = {'hard_ready': False, 'missing': ['hydrator_missing']}
     assert ctx.data_ready is False
     assert ctx.execution_block_reason == 'data_not_ready'
     assert isinstance(ctx.execution_ready_by_symbol, dict)
     assert ctx.selected_ce_exec_ready is True
+    assert ctx.active_basket_hydration['missing'] == ['hydrator_missing']
