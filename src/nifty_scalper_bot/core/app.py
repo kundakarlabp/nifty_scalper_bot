@@ -7749,6 +7749,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)
     any_selected_option_exec_ready = bool(ce_exec_ready or pe_exec_ready)
     live_orders_armed=bool(live_mode and market_open and evaluation_ready and context_exec_ready and broker_ready and any_selected_option_exec_ready)
+    data_ready = bool(data_hard_ready)
+    strategy_evaluation_ready = bool(evaluation_ready)
+    trading_signal_ready = bool(data_ready and strategy_evaluation_ready)
     missing=[]
     if not selected_ce: missing.append('selected_ce_missing')
     if not selected_pe: missing.append('selected_pe_missing')
@@ -7777,13 +7780,14 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         block_reason = f"ACTIVE_BASKET_HYDRATION_NOT_READY:{','.join(hydration_blockers)}"
     else:
         block_reason=None if live_orders_armed else f"execution_not_armed:{','.join(dict.fromkeys(missing))}"
-    ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=evaluation_ready; ctx.live_block_reason=block_reason
+    execution_block_reason = None if live_orders_armed else ("market_closed" if live_mode and not market_open else str(block_reason or "execution_not_armed"))
+    ctx.data_hard_ready=data_hard_ready; ctx.data_ready=data_ready; ctx.evaluation_ready=evaluation_ready; ctx.strategy_evaluation_ready=strategy_evaluation_ready; ctx.trading_signal_ready=trading_signal_ready; ctx.execution_armed=live_orders_armed; ctx.execution_block_reason=execution_block_reason; ctx.market_open=market_open; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=trading_signal_ready; ctx.live_block_reason=block_reason
     ctx.execution_ready_by_symbol = execution_ready_by_symbol
     ctx.selected_ce_exec_ready = bool(ce_exec_ready)
     ctx.selected_pe_exec_ready = bool(pe_exec_ready)
     ctx.context_exec_ready = bool(context_exec_ready)
     ctx.broker_ready = bool(broker_ready)
-    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s trading_ready=%s live_orders_armed=%s ce_quote_ready=%s pe_quote_ready=%s ce_exec_ready=%s pe_exec_ready=%s direction_context_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, bool(ctx.trading_ready), live_orders_armed, ce_quote_fresh, pe_quote_fresh, ce_exec_ready, pe_exec_ready, bool(context_exec_ready), execution_ready_by_symbol, block_reason)
+    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s data_ready=%s strategy_evaluation_ready=%s trading_signal_ready=%s execution_armed=%s execution_block_reason=%s market_open=%s live_orders_armed=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s trading_ready=%s ce_quote_ready=%s pe_quote_ready=%s ce_exec_ready=%s pe_exec_ready=%s direction_context_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, data_ready, strategy_evaluation_ready, trading_signal_ready, live_orders_armed, execution_block_reason, market_open, live_orders_armed, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, bool(ctx.trading_ready), ce_quote_fresh, pe_quote_fresh, ce_exec_ready, pe_exec_ready, bool(context_exec_ready), execution_ready_by_symbol, block_reason)
     if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
         ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}))
 
@@ -7951,6 +7955,46 @@ def _resolve_committed_symbol_token(
                 return token
     return None
 
+def _is_trade_complete_active_basket(basket: Mapping[str, object]) -> tuple[bool, list[str]]:
+    """Return whether a basket is complete enough to become active trading state."""
+    missing: list[str] = []
+    token_by_symbol = dict(basket.get("token_by_symbol") or {})
+    spot_symbol = str(basket.get("spot_symbol") or "NSE:NIFTY")
+    selected_ce = basket.get("selected_ce") or basket.get("atm_ce")
+    selected_pe = basket.get("selected_pe") or basket.get("atm_pe")
+    option_symbols = [s for s in (basket.get("option_symbols") or []) if s]
+    option_tokens = [_coerce_positive_token(t) for t in (basket.get("option_tokens") or [])]
+    all_tokens = [_coerce_positive_token(t) for t in (basket.get("all_tokens") or [])]
+
+    def _token_for(symbol: object, explicit_key: str) -> int | None:
+        if not symbol:
+            return None
+        sym = str(symbol)
+        bare = _bare_trading_symbol(sym)
+        return _coerce_positive_token(basket.get(explicit_key)) or _coerce_positive_token(token_by_symbol.get(sym)) or _coerce_positive_token(token_by_symbol.get(bare))
+
+    if not spot_symbol:
+        missing.append("spot_symbol")
+    if _coerce_positive_token(basket.get("spot_token")) is None and _coerce_positive_token(token_by_symbol.get(spot_symbol)) is None and spot_symbol != "NSE:NIFTY":
+        missing.append("spot_token")
+    if not selected_ce:
+        missing.append("selected_ce")
+    if not selected_pe:
+        missing.append("selected_pe")
+    if selected_ce and _token_for(selected_ce, "selected_ce_token") is None:
+        missing.append("selected_ce_token")
+    if selected_pe and _token_for(selected_pe, "selected_pe_token") is None:
+        missing.append("selected_pe_token")
+    if not option_symbols:
+        missing.append("option_symbols")
+    if not [t for t in option_tokens if t is not None]:
+        missing.append("option_tokens")
+    if not [t for t in all_tokens if t is not None]:
+        missing.append("all_tokens")
+    # Futures context is optional for trading readiness; do not reject an otherwise complete option basket here.
+    return not missing, list(dict.fromkeys(missing))
+
+
 def _commit_active_dynamic_basket(
     ctx: BotContext,
     *,
@@ -7967,10 +8011,6 @@ def _commit_active_dynamic_basket(
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
     basket = normalize_active_basket_schema(basket_copy)
-    mdm_for_purge = getattr(ctx, "market_data_manager", None)
-    purge_stale_futures = getattr(mdm_for_purge, "purge_stale_nifty_futures", None)
-    if callable(purge_stale_futures):
-        purge_stale_futures(active_futures_symbol, reason="active_dynamic_basket_commit")
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
     current_symbols = [str(sym) for sym in symbols if sym]
     local_basket = dict(basket or {})
@@ -8117,10 +8157,7 @@ def _commit_active_dynamic_basket(
     committed["all_tokens"] = list(dict.fromkeys(all_tokens))
     committed["token_by_symbol"] = token_by_symbol
     committed["symbol_by_token"] = symbol_by_token
-    ctx.active_trading_universe = committed
-    ctx.active_contract_basket = committed
     active_symbol_tokens = _ensure_active_symbol_tokens(ctx)
-    active_symbol_tokens.update(dict(committed.get("token_by_symbol") or {}))
     selected_ce_token = _resolve_committed_symbol_token(ctx, committed, selected_ce, "selected_ce_token")
     selected_pe_token = _resolve_committed_symbol_token(ctx, committed, selected_pe, "selected_pe_token")
     for selected_symbol, selected_token, token_key in (
@@ -8147,6 +8184,19 @@ def _commit_active_dynamic_basket(
     committed["symbol_by_token"] = symbol_by_token
     committed["all_tokens"] = list(dict.fromkeys(coerced for raw in (committed.get("all_tokens") or []) if (coerced := _coerce_positive_token(raw)) is not None))
     committed["option_tokens"] = list(dict.fromkeys(coerced for raw in (committed.get("option_tokens") or []) if (coerced := _coerce_positive_token(raw)) is not None))
+    complete, missing = _is_trade_complete_active_basket(committed)
+    if not complete:
+        ctx.pending_contract_basket = committed
+        LOGGER.warning(
+            "ACTIVE_BASKET_COMMIT_DEFERRED reason=incomplete_basket missing=%s selected_ce=%s selected_pe=%s option_count=%d token_count=%d",
+            missing, selected_ce, selected_pe, len(current_options), len(committed.get("all_tokens") or []),
+            extra={"event": "ACTIVE_BASKET_COMMIT_DEFERRED", "reason": "incomplete_basket", "missing": missing, "selected_ce": selected_ce, "selected_pe": selected_pe, "option_count": len(current_options), "token_count": len(committed.get("all_tokens") or [])},
+        )
+        return cast(str | None, old_ce), cast(str | None, old_pe)
+    ctx.active_trading_universe = committed
+    ctx.active_contract_basket = committed
+    active_symbol_tokens = _ensure_active_symbol_tokens(ctx)
+    active_symbol_tokens.update(dict(committed.get("token_by_symbol") or {}))
     if getattr(ctx, "option_universe", None) is not None and hasattr(ctx.option_universe, "set_active_contract_basket"):
         ctx.option_universe.set_active_contract_basket(committed)
     mdm = getattr(ctx, "market_data_manager", None)
@@ -9384,13 +9434,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                         records = list(records)[-hydration_max_bars:]
                 record_count = len(records or [])
                 if record_count == 0:
-                    LOGGER.error(
-                        "hydration_zero_bars: %s returned 0 bars — "
-                        "Zerodha historical API returned empty data. "
-                        "Extending lookback or check broker auth.",
-                        symbol,
-                        extra={"event": "hydration_zero_bars", "symbol": symbol},
-                    )
+                    if str(symbol) == "NSE:NIFTY":
+                        LOGGER.info(
+                            "SPOT_INDEX_HISTORY_UNAVAILABLE_SOFT symbol=%s reason=zero_historical_bars",
+                            symbol,
+                            extra={"event": "SPOT_INDEX_HISTORY_UNAVAILABLE_SOFT", "symbol": symbol, "reason": "zero_historical_bars"},
+                        )
+                    else:
+                        LOGGER.error(
+                            "hydration_zero_bars: %s returned 0 bars — "
+                            "Zerodha historical API returned empty data. "
+                            "Extending lookback or check broker auth.",
+                            symbol,
+                            extra={"event": "hydration_zero_bars", "symbol": symbol},
+                        )
                 elif record_count < hydration_min_bars:
                     LOGGER.info(
                         "insufficient_bars_for_strategy: %s returned only %d bars (need ≥%d) — "
@@ -11227,11 +11284,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     },
                                 )
                             LOGGER.info(
-                                "Startup | configured_mode=%s | effective_mode=%s | live_orders_armed=%s | trading_ready=%s",
+                                "Startup | configured_mode=%s | effective_mode=%s | data_ready=%s | strategy_evaluation_ready=%s | execution_armed=%s | execution_block_reason=%s",
                                 configured_runtime_mode,
-                                ctx.readiness_mode,
+                                "EVALUATION_READY" if bool(getattr(ctx, "trading_ready", False)) and not bool(getattr(ctx, "live_orders_armed", False)) else ctx.readiness_mode,
+                                bool(getattr(ctx, "data_ready", getattr(ctx, "data_hard_ready", False))),
+                                bool(getattr(ctx, "strategy_evaluation_ready", getattr(ctx, "evaluation_ready", False))),
                                 bool(getattr(ctx, "live_orders_armed", False)),
-                                bool(getattr(ctx, "trading_ready", False)),
+                                getattr(ctx, "execution_block_reason", getattr(ctx, "live_block_reason", None)),
                             )
                         except Exception as ready_exc:
                             LOGGER.critical(

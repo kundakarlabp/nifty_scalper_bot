@@ -1607,6 +1607,50 @@ class MarketDataManager:
             return basket.get(key, default)
         return getattr(basket, key, default)
 
+
+    def _validate_trade_complete_active_basket(self, basket: ActiveContractBasket | Mapping[str, Any]) -> tuple[bool, list[str]]:
+        """Validate that a basket is complete enough to become active trading state."""
+        missing: list[str] = []
+        token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
+        all_symbols = tuple(str(x) for x in (self._basket_get(basket, "all_symbols", None) or self._basket_get(basket, "symbols", ()) or ()) if x)
+        all_tokens = tuple(int(t) for t in (self._basket_get(basket, "all_tokens", ()) or ()) if t)
+        option_symbols = tuple(str(x) for x in (self._basket_get(basket, "option_symbols", ()) or ()) if x)
+        option_tokens = tuple(int(t) for t in (self._basket_get(basket, "option_tokens", ()) or ()) if t)
+        spot_symbol = str(self._basket_get(basket, "spot_symbol", "NSE:NIFTY") or "")
+        spot_token = self._basket_get(basket, "spot_token", None) or token_by_symbol.get(spot_symbol) or token_by_symbol.get(self._canonical_symbol(spot_symbol))
+        selected_ce = self._basket_get(basket, "selected_ce", None)
+        selected_pe = self._basket_get(basket, "selected_pe", None)
+
+        def _token_for(symbol: Any, explicit_key: str) -> Any:
+            if not symbol:
+                return None
+            sym = str(symbol)
+            bare = sym.split(":", 1)[-1]
+            return self._basket_get(basket, explicit_key, None) or token_by_symbol.get(sym) or token_by_symbol.get(bare) or token_by_symbol.get(self._canonical_symbol(sym))
+
+        if not spot_symbol:
+            missing.append("spot_symbol")
+        if spot_token in (None, "", 0) and spot_symbol != "NSE:NIFTY":
+            missing.append("spot_token")
+        if not selected_ce:
+            missing.append("selected_ce")
+        if not selected_pe:
+            missing.append("selected_pe")
+        if selected_ce and _token_for(selected_ce, "selected_ce_token") in (None, "", 0):
+            missing.append("selected_ce_token")
+        if selected_pe and _token_for(selected_pe, "selected_pe_token") in (None, "", 0):
+            missing.append("selected_pe_token")
+        if not option_symbols:
+            missing.append("option_symbols")
+        if not option_tokens:
+            missing.append("option_tokens")
+        if not all_tokens:
+            missing.append("all_tokens")
+        future_symbol = self._basket_get(basket, "futures_symbol", None)
+        future_token = self._basket_get(basket, "futures_token", None) or (token_by_symbol.get(str(future_symbol)) if future_symbol else None)
+        # Futures context is optional; missing future token is logged elsewhere and must not downgrade an option basket to context-only.
+        return not missing, list(dict.fromkeys(missing))
+
     def set_active_contract_basket(self, basket: ActiveContractBasket | Mapping[str, Any]) -> None:
         """Store active SSOT basket, register mappings, and reconcile subscriptions."""
         if basket is None:
@@ -1630,6 +1674,28 @@ class MarketDataManager:
             symbol_by_token = {int(tok): str(sym) for sym, tok in token_by_symbol.items()}
         if not all_tokens:
             all_tokens = tuple(token_by_symbol[s] for s in all_symbols if s in token_by_symbol)
+
+        complete, missing = self._validate_trade_complete_active_basket({
+            **(dict(basket) if isinstance(basket, Mapping) else {}),
+            "spot_symbol": spot_symbol,
+            "spot_token": self._basket_get(basket, "spot_token", None),
+            "futures_symbol": future_symbol,
+            "futures_token": future_token,
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "option_symbols": option_symbols,
+            "option_tokens": option_tokens,
+            "all_symbols": all_symbols,
+            "all_tokens": all_tokens,
+            "token_by_symbol": token_by_symbol,
+        })
+        if not complete:
+            self._logger.warning(
+                "MDM_ACTIVE_BASKET_REJECTED reason=incomplete_basket missing=%s selected_ce=%s selected_pe=%s option_count=%d token_count=%d",
+                missing, selected_ce, selected_pe, len(option_symbols), len(all_tokens),
+                extra={"event": "MDM_ACTIVE_BASKET_REJECTED", "reason": "incomplete_basket", "missing": missing, "selected_ce": selected_ce, "selected_pe": selected_pe, "option_count": len(option_symbols), "token_count": len(all_tokens)},
+            )
+            return
 
         roles: dict[str, str] = {spot_symbol: "spot_context"}
         if future_symbol:
@@ -1675,10 +1741,41 @@ class MarketDataManager:
             self._active_nifty_future_cache_until_mono = time.monotonic() + 3600.0
         self.purge_stale_nifty_futures(str(future_symbol) if future_symbol else None, reason="active_contract_basket_set")
         self._reconcile_ws_subscriptions()
+        self._log_active_basket_subscription_reconciliation(basket)
         self._logger.info(
             "MDM_ACTIVE_BASKET_SET selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s option_count=%d token_count=%d",
             selected_ce, selected_pe, future_symbol, self._basket_get(basket, "atm_strike", None), len(option_symbols), len(self._desired_tokens),
             extra={"event": "MDM_ACTIVE_BASKET_SET", "selected_ce": selected_ce, "selected_pe": selected_pe, "futures_symbol": future_symbol, "atm_strike": self._basket_get(basket, "atm_strike", None), "option_count": len(option_symbols), "token_count": len(self._desired_tokens)},
+        )
+
+
+    def _log_active_basket_subscription_reconciliation(self, basket: ActiveContractBasket | Mapping[str, Any]) -> None:
+        """Log role-aware subscription reconciliation state for the active basket."""
+        token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
+        spot_token = self._basket_get(basket, "spot_token", None) or token_by_symbol.get(str(self._basket_get(basket, "spot_symbol", "NSE:NIFTY") or "NSE:NIFTY"))
+        futures_token = self._basket_get(basket, "futures_token", None)
+        selected_ce = self._basket_get(basket, "selected_ce", None)
+        selected_pe = self._basket_get(basket, "selected_pe", None)
+        selected_ce_token = self._basket_get(basket, "selected_ce_token", None) or (token_by_symbol.get(str(selected_ce)) if selected_ce else None)
+        selected_pe_token = self._basket_get(basket, "selected_pe_token", None) or (token_by_symbol.get(str(selected_pe)) if selected_pe else None)
+        option_tokens = {int(t) for t in (self._basket_get(basket, "option_tokens", ()) or ()) if t}
+        selected_tokens = {int(t) for t in (selected_ce_token, selected_pe_token) if t}
+        nearby_options = option_tokens - selected_tokens
+        desired = set(int(t) for t in self._desired_tokens if int(t) > 0)
+        ws_tokens = set(int(t) for t in (getattr(self._ws, "tokens_snapshot", lambda: getattr(self._ws, "_tokens", set()) if self._ws is not None else set())() if self._ws is not None else set()))
+        protected = {int(t) for t in (spot_token, futures_token, selected_ce_token, selected_pe_token) if t}
+        protected.update(option_tokens)
+        missing_tokens = sorted(desired - ws_tokens)
+        extra_tokens = sorted(ws_tokens - desired)
+        self._logger.info(
+            "SUBSCRIPTION_ROLE_SUMMARY spot=%d future=%d selected_options=%d nearby_options=%d context_only=%d desired_total=%d",
+            1 if spot_token else 0, 1 if futures_token else 0, len(selected_tokens), len(nearby_options), 0, len(desired),
+            extra={"event": "SUBSCRIPTION_ROLE_SUMMARY", "spot": 1 if spot_token else 0, "future": 1 if futures_token else 0, "selected_options": len(selected_tokens), "nearby_options": len(nearby_options), "context_only": 0, "desired_total": len(desired)},
+        )
+        self._logger.info(
+            "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED desired_total=%d ws_total=%d missing_tokens=%s extra_tokens=%s selected_ce_token=%s selected_pe_token=%s",
+            len(desired), len(ws_tokens), missing_tokens, extra_tokens, selected_ce_token, selected_pe_token,
+            extra={"event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED", "spot_token": spot_token, "futures_token": futures_token, "selected_ce_token": selected_ce_token, "selected_pe_token": selected_pe_token, "nearby_option_token_count": len(nearby_options), "diagnostic_token_count": 0, "desired_total": len(desired), "ws_total": len(ws_tokens), "missing_tokens": missing_tokens, "extra_tokens": extra_tokens, "protected_tokens": sorted(protected)},
         )
 
     def get_active_contract_basket(self) -> ActiveContractBasket | Mapping[str, Any] | None:
@@ -1745,8 +1842,20 @@ class MarketDataManager:
                 except RuntimeError:
                     asyncio.run(result)
                 else:
-                    loop.create_task(result)
+                    task = loop.create_task(result)
                     status["deferred"] = True
+                    def _done(done: asyncio.Task[Any]) -> None:
+                        try:
+                            done.result()
+                        except Exception as exc:  # noqa: BLE001
+                            self._logger.warning("MDM_BASKET_HYDRATION_RESEED_FAILED symbol=%s error=%s", symbol, exc, extra={"event": "MDM_BASKET_HYDRATION_RESEED_FAILED", "symbol": symbol, "error": str(exc)})
+                            return
+                        self._logger.info("MDM_BASKET_HYDRATION_RESEED_COMPLETED symbol=%s", symbol, extra={"event": "MDM_BASKET_HYDRATION_RESEED_COMPLETED", "symbol": symbol})
+                        active = self._active_contract_basket
+                        if active is not None:
+                            self.hydrate_active_contract_basket(active)
+                            self._logger.info("ACTIVE_BASKET_HYDRATION_RETRY_READY symbol=%s", symbol, extra={"event": "ACTIVE_BASKET_HYDRATION_RETRY_READY", "symbol": symbol})
+                    task.add_done_callback(_done)
                     self._logger.info(
                         "MDM_BASKET_HYDRATION_RESEED_DEFERRED symbol=%s reason=running_event_loop",
                         symbol,
@@ -1777,7 +1886,7 @@ class MarketDataManager:
         token_by_canonical = {self._canonical_active_symbol(sym): tok for sym, tok in token_by_symbol.items()}
         selected_canonical = {self._canonical_active_symbol(s) for s in (self._basket_get(active, "selected_ce", None), self._basket_get(active, "selected_pe", None)) if s}
         future_symbol = self._basket_get(active, "futures_symbol", None)
-        report: dict[str, Any] = {"hard_ready": True, "min_bars_required": hydration_min_bars, "hydration_min_bars_required": hydration_min_bars, "symbols": {}, "missing": []}
+        report: dict[str, Any] = {"hard_ready": True, "min_bars_required": hydration_min_bars, "hydration_min_bars_required": hydration_min_bars, "symbols": {}, "missing": [], "retry_scheduled": False}
         for sym in all_symbols:
             canonical_sym = self._canonical_active_symbol(sym)
             is_selected = canonical_sym in selected_canonical
@@ -1829,6 +1938,8 @@ class MarketDataManager:
                     last_error = f"bars_malformed_after_reseed:{type(exc).__name__}"
                 if not ohlc_ready and reseed_status.get("deferred"):
                     last_error = "reseed_deferred"
+                    report["retry_scheduled"] = True
+                    report["missing"].append(f"{sym}:reseed_deferred")
                 elif reseed_status.get("failed"):
                     last_error = str(reseed_status.get("error") or "reseed_failed")
             if role in {"spot_context", "futures_context"}:
@@ -5317,7 +5428,8 @@ class MarketDataManager:
         elif cumulative >= previous:
             delta = cumulative - previous
         else:
-            delta = 0.0
+            max_reset_delta = float(os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000") or "1000000")
+            delta = cumulative if 0 <= cumulative <= max_reset_delta else 0.0
         symbol_upper = str(symbol or "").upper()
         is_option_symbol = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
         if is_option_symbol:
@@ -5340,6 +5452,7 @@ class MarketDataManager:
                     },
                 )
                 delta = 0.0
+        self._logger.debug("OPTION_VOLUME_DELTA_NORMALIZED symbol=%s cumulative=%s previous=%s delta=%s", symbol, cumulative, previous, delta, extra={"event": "OPTION_VOLUME_DELTA_NORMALIZED", "symbol": symbol, "cumulative": cumulative, "previous": previous, "delta": delta})
         self._last_cumulative_volume_by_symbol[key] = cumulative
         payload["volume_cumulative"] = cumulative
         payload["volume_delta"] = delta
@@ -7311,7 +7424,7 @@ class MarketDataManager:
         return is_nifty_future_expired(canonical, now=now)
 
     def purge_stale_nifty_futures(self, active_symbol: str | None = None, *, reason: str = "active_future_rotation") -> list[int]:
-        """Purge stale NIFTY futures symbols/tokens from runtime subscription state."""
+        """Purge only positively identified stale NIFTY futures from runtime subscription state."""
         active = canonical_nifty_future_symbol(active_symbol) or canonical_nifty_future_symbol(
             self.get_active_nifty_future_symbol_cached()
         )
@@ -7319,49 +7432,88 @@ class MarketDataManager:
             return []
 
         stale_symbols: set[str] = set()
-        stale_tokens: set[int] = set()
+        candidate_tokens: set[int] = set()
+        purged_tokens: set[int] = set()
+        skipped_protected_tokens: set[int] = set()
+        unknown_tokens: set[int] = set()
+        protected_tokens: set[int] = {NIFTY_SPOT_TOKEN}
+        protected_symbols: set[str] = {"NSE:NIFTY", active}
 
-        def _mark_symbol(value: Any) -> None:
-            canonical = canonical_nifty_future_symbol(value)
-            if canonical and canonical != active:
-                stale_symbols.add(canonical)
-
-        def _mark_token(value: Any) -> None:
+        def _as_token(value: Any) -> int | None:
             try:
-                token_int = int(value)
+                token = int(value)
             except (TypeError, ValueError):
+                return None
+            return token if token > 0 else None
+
+        def _protect_symbol(symbol: Any) -> None:
+            if not symbol:
                 return
-            if token_int > 0:
-                stale_tokens.add(token_int)
+            text = str(symbol)
+            protected_symbols.add(text)
+            canonical = canonical_nifty_future_symbol(text)
+            if canonical:
+                protected_symbols.add(canonical)
 
         with self._lock:
+            active_basket = self._active_contract_basket
+            if active_basket is not None:
+                for key in ("spot_symbol", "futures_symbol", "selected_ce", "selected_pe"):
+                    _protect_symbol(self._basket_get(active_basket, key, None))
+                for key in ("spot_token", "futures_token", "selected_ce_token", "selected_pe_token"):
+                    token = _as_token(self._basket_get(active_basket, key, None))
+                    if token is not None:
+                        protected_tokens.add(token)
+                for symbol in self._basket_get(active_basket, "all_symbols", ()) or self._basket_get(active_basket, "symbols", ()) or ():
+                    _protect_symbol(symbol)
+                for symbol in self._basket_get(active_basket, "option_symbols", ()) or ():
+                    _protect_symbol(symbol)
+                for token in self._basket_get(active_basket, "all_tokens", ()) or ():
+                    token_int = _as_token(token)
+                    if token_int is not None:
+                        protected_tokens.add(token_int)
+                for token in self._basket_get(active_basket, "option_tokens", ()) or ():
+                    token_int = _as_token(token)
+                    if token_int is not None:
+                        protected_tokens.add(token_int)
+            protected_tokens.update(int(t) for t in getattr(self, "_active_option_tokens", set()) or set() if _as_token(t) is not None)
+            for symbol in getattr(self, "_active_option_symbols", ()) or ():
+                _protect_symbol(symbol)
+
+            def _consider_symbol(symbol: Any, token: Any = None) -> None:
+                canonical = canonical_nifty_future_symbol(symbol)
+                token_int = _as_token(token)
+                if token_int is not None and token_int in protected_tokens:
+                    skipped_protected_tokens.add(token_int)
+                    return
+                if canonical and canonical != active and canonical not in protected_symbols and str(symbol) not in protected_symbols:
+                    stale_symbols.add(canonical)
+                    if token_int is not None:
+                        candidate_tokens.add(token_int)
+                elif token_int is not None and canonical is None:
+                    unknown_tokens.add(token_int)
+
             for symbol in list(self._tracked_symbols) + list(self._active_subscribed_symbols):
-                _mark_symbol(symbol)
+                _consider_symbol(symbol)
             for mapping_name in ("_token_by_symbol", "_symbol_to_token"):
                 mapping = getattr(self, mapping_name, {})
                 if isinstance(mapping, dict):
                     for symbol, token in list(mapping.items()):
-                        canonical = canonical_nifty_future_symbol(symbol)
-                        if canonical and canonical != active:
-                            stale_symbols.add(canonical)
-                            _mark_token(token)
+                        _consider_symbol(symbol, token)
             for mapping_name in ("_symbol_by_token", "_token_to_symbol"):
                 mapping = getattr(self, mapping_name, {})
                 if isinstance(mapping, dict):
                     for token, symbol in list(mapping.items()):
-                        canonical = canonical_nifty_future_symbol(symbol)
-                        if canonical and canonical != active:
-                            stale_symbols.add(canonical)
-                            _mark_token(token)
+                        _consider_symbol(symbol, token)
             for cache_name in ("_latest_ticks", "_tick_cache", "_last_tick_snapshot", "_history", "_poll_bar_state", "_last_poll_bucket"):
                 cache = getattr(self, cache_name, {})
                 if isinstance(cache, dict):
                     for symbol in list(cache.keys()):
-                        _mark_symbol(symbol)
+                        _consider_symbol(symbol)
             reqs = dict(getattr(self, "_readiness_requirements", {}) or {})
             for key, value in list(reqs.items()):
                 canonical = canonical_nifty_future_symbol(value)
-                if canonical and canonical != active:
+                if canonical and canonical != active and canonical not in protected_symbols:
                     stale_symbols.add(canonical)
                     if key == "futures":
                         reqs[key] = active
@@ -7370,10 +7522,13 @@ class MarketDataManager:
             reqs["futures"] = active
             self._readiness_requirements = reqs
 
-            for symbol in list(stale_symbols):
-                token = self._token_by_symbol.get(symbol) or self._symbol_to_token.get(symbol)
+            for symbol in sorted(stale_symbols):
+                token = _as_token(self._token_by_symbol.get(symbol) or self._symbol_to_token.get(symbol))
                 if token is not None:
-                    _mark_token(token)
+                    if token in protected_tokens:
+                        skipped_protected_tokens.add(token)
+                        continue
+                    candidate_tokens.add(token)
                 self._tracked_symbols.discard(symbol)
                 self._active_subscribed_symbols.discard(symbol)
                 self._subscribers.pop(symbol, None)
@@ -7397,79 +7552,57 @@ class MarketDataManager:
                 self._quote_direct_miss_count.pop(symbol, None)
                 self._quote_direct_miss_until.pop(symbol, None)
                 self._quote_direct_miss_reason.pop(symbol, None)
-                mapped_token = self._token_by_symbol.pop(symbol, None)
-                if mapped_token is not None:
-                    _mark_token(mapped_token)
-                mapped_token = self._symbol_to_token.pop(symbol, None)
-                if mapped_token is not None:
-                    _mark_token(mapped_token)
+                self._token_by_symbol.pop(symbol, None)
+                self._symbol_to_token.pop(symbol, None)
                 self._suspended_context_symbols.add(symbol)
                 self._suspended_context_symbol_until[symbol] = time.monotonic() + (48.0 * 3600.0)
 
-            for token in list(stale_tokens):
+            for token in sorted(candidate_tokens):
                 mapped_symbol = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
                 canonical = canonical_nifty_future_symbol(mapped_symbol)
-                if canonical == active:
-                    stale_tokens.discard(token)
+                if token in protected_tokens or canonical == active or (mapped_symbol and str(mapped_symbol) in protected_symbols):
+                    skipped_protected_tokens.add(token)
                     continue
-                self._symbol_by_token.pop(token, None)
-                self._token_to_symbol.pop(token, None)
-                self._desired_tokens.discard(token)
-                self._pending_subscription_tokens.discard(token)
-                self._pending_subscriptions.discard(token)
-                self._dispatched_subscriptions.discard(token)
-                self._confirmed_subscriptions.discard(token)
+                if canonical and canonical != active:
+                    purged_tokens.add(token)
+                    self._symbol_by_token.pop(token, None)
+                    self._token_to_symbol.pop(token, None)
+                    self._desired_tokens.discard(token)
+                    self._pending_subscription_tokens.discard(token)
+                    self._pending_subscriptions.discard(token)
+                    self._dispatched_subscriptions.discard(token)
+                    self._confirmed_subscriptions.discard(token)
+                elif mapped_symbol is None:
+                    unknown_tokens.add(token)
+                    self._logger.info("FUTURES_PURGE_UNKNOWN_TOKEN_SKIPPED token=%s reason=symbol_unknown", token, extra={"event": "FUTURES_PURGE_UNKNOWN_TOKEN_SKIPPED", "token": token, "reason": "symbol_unknown"})
 
         ws_tokens: list[int] = []
         ws = self._ws
         if ws is not None:
             snapshot = getattr(ws, "tokens_snapshot", None)
-            if callable(snapshot):
-                try:
-                    ws_tokens = [int(token) for token in snapshot()]
-                except Exception:
-                    ws_tokens = []
-            else:
-                raw_tokens = getattr(ws, "_tokens", set()) or set()
-                ws_tokens = sorted(int(token) for token in raw_tokens)
-        for token in list(ws_tokens):
-            if token not in self._desired_tokens:
-                stale_tokens.add(token)
-        unknown_tokens: list[int] = []
-        for token in sorted(self._desired_tokens):
-            if self._resolve_symbol_for_token(int(token)) is None:
-                unknown_tokens.append(int(token))
-                self._logger.warning(
-                    "UNKNOWN_TOKEN_IN_DESIRED_SUBSCRIPTIONS token=%s",
-                    int(token),
-                    extra={"event": "UNKNOWN_TOKEN_IN_DESIRED_SUBSCRIPTIONS", "token": int(token)},
-                )
-        purged_tokens = sorted(stale_tokens)
-        if purged_tokens or any(token not in self._desired_tokens for token in ws_tokens):
+            try:
+                ws_tokens = [int(token) for token in (snapshot() if callable(snapshot) else (getattr(ws, "_tokens", set()) or set()))]
+            except Exception:
+                ws_tokens = []
+        extras = [token for token in ws_tokens if token not in self._desired_tokens and token not in protected_tokens]
+        if purged_tokens or extras:
             self._reconcile_ws_subscriptions()
         self._logger.info(
-            "FUTURES_PURGE_STATE active=%s desired_tokens=%d ws_tokens=%d purged_tokens=%s unknown_tokens=%s",
-            active,
-            len(self._desired_tokens),
-            len(ws_tokens),
-            purged_tokens,
-            unknown_tokens,
-            extra={"event": "FUTURES_PURGE_STATE", "active_symbol": active, "desired_tokens": len(self._desired_tokens), "ws_tokens": len(ws_tokens), "purged_tokens": purged_tokens, "unknown_tokens": unknown_tokens},
+            "FUTURES_PURGE_STATE active=%s protected_tokens_count=%d candidate_tokens=%s purged_tokens=%s skipped_protected_tokens=%s unknown_tokens=%s",
+            active, len(protected_tokens), sorted(candidate_tokens), sorted(purged_tokens), sorted(skipped_protected_tokens), sorted(unknown_tokens),
+            extra={"event": "FUTURES_PURGE_STATE", "active_symbol": active, "protected_tokens_count": len(protected_tokens), "candidate_tokens": sorted(candidate_tokens), "purged_tokens": sorted(purged_tokens), "skipped_protected_tokens": sorted(skipped_protected_tokens), "unknown_tokens": sorted(unknown_tokens), "desired_tokens": len(self._desired_tokens), "ws_tokens": len(ws_tokens)},
         )
         hub = getattr(self, "data_hub", None) or getattr(self, "_data_hub", None)
         purge_hub = getattr(hub, "purge_symbol_aliases", None)
         if callable(purge_hub):
-            purge_hub(symbols=sorted(stale_symbols), tokens=purged_tokens)
+            purge_hub(symbols=sorted(stale_symbols), tokens=sorted(purged_tokens))
         if stale_symbols or purged_tokens:
             self._logger.warning(
                 "FUTURES_STALE_SUBSCRIPTION_PURGED active=%s purged_symbols=%s purged_tokens=%s reason=%s",
-                active,
-                sorted(stale_symbols),
-                purged_tokens,
-                reason,
-                extra={"event": "FUTURES_STALE_SUBSCRIPTION_PURGED", "active_symbol": active, "purged_symbols": sorted(stale_symbols), "purged_tokens": purged_tokens, "reason": reason},
+                active, sorted(stale_symbols), sorted(purged_tokens), reason,
+                extra={"event": "FUTURES_STALE_SUBSCRIPTION_PURGED", "active_symbol": active, "purged_symbols": sorted(stale_symbols), "purged_tokens": sorted(purged_tokens), "reason": reason},
             )
-        return purged_tokens
+        return sorted(purged_tokens)
 
     def rotate_active_nifty_future_context(
         self,
@@ -8784,14 +8917,9 @@ class MarketDataManager:
         if broker_timestamp is not None:
             normalized["broker_timestamp"] = broker_timestamp
 
-        # 5. Volume Handling
-        volume = self._coerce_float(
-            tick,
-            "volume_traded_today",
-            "volume",
-            "volume_traded",
-            "total_traded_volume",
-        )
+        # 5. Volume Handling: broker volume is cumulative, expose per-tick delta.
+        volume_payload = self._normalise_tick_volume_delta(symbol, dict(tick))
+        volume = self._coerce_float(volume_payload, "volume_delta", "volume")
         if volume is None and previous:
             prev_vol = previous.get("volume")
             if isinstance(prev_vol, (int, float)):
@@ -8799,6 +8927,9 @@ class MarketDataManager:
 
         if volume is not None:
             normalized["volume"] = float(volume)
+            normalized["volume_delta"] = float(volume)
+        if volume_payload.get("volume_cumulative") is not None:
+            normalized["volume_cumulative"] = volume_payload.get("volume_cumulative")
 
         instrument_token = tick.get("instrument_token") or tick.get("token")
         if instrument_token is not None:

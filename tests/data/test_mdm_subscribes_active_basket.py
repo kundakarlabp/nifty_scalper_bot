@@ -180,3 +180,17 @@ def test_hydration_uses_hydration_min_bars_not_execution_min_bars(monkeypatch):
     assert report["hydration_min_bars_required"] == 5
     assert report["symbols"][b.selected_ce]["bars_count"] == 5
     assert report["hard_ready"] is True
+
+
+def test_incomplete_basket_does_not_clear_desired_tokens_or_set_active() -> None:
+    ws = WS()
+    mdm = MarketDataManager(websocket=ws)
+    b = basket()
+    mdm.set_active_contract_basket(b)
+    before = set(mdm._desired_tokens)  # noqa: SLF001
+    active_before = mdm.get_active_contract_basket()
+
+    mdm.set_active_contract_basket({"spot_symbol": "NSE:NIFTY", "spot_token": 256265, "all_tokens": []})
+
+    assert mdm._desired_tokens == before  # noqa: SLF001
+    assert mdm.get_active_contract_basket() is active_before

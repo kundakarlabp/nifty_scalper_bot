@@ -246,3 +246,37 @@ def test_real_botcontext_active_symbol_tokens_and_selected_subscription_aliases(
     assert ctx.active_symbol_tokens[pe] == 12
     assert ctx.active_symbol_tokens["NIFTY26JUN23900PE"] == 12
     assert {11, 12}.issubset(set(mdm.desired_tokens_snapshot()))
+
+
+def test_incomplete_basket_not_committed_and_does_not_call_mdm() -> None:
+    class _Mdm:
+        def __init__(self) -> None:
+            self.called = False
+            self.purged = False
+        def set_active_contract_basket(self, basket):
+            self.called = True
+        def purge_stale_nifty_futures(self, active_symbol, *, reason):
+            self.purged = True
+            return []
+
+    old = {"selected_ce": "OLDCE"}
+    mdm = _Mdm()
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe=old,
+        active_contract_basket=old,
+        strategy_runner=None,
+        market_data_manager=mdm,
+        strategy_manager=None,
+    )
+
+    app._commit_active_dynamic_basket(ctx, basket={"spot_symbol": "NSE:NIFTY"}, option_symbols=[], symbols=["NSE:NIFTY"], atm_strike=None)
+
+    assert ctx.active_contract_basket is old
+    assert ctx.active_trading_universe is old
+    assert hasattr(ctx, "pending_contract_basket")
+    assert mdm.called is False
+    assert mdm.purged is False
