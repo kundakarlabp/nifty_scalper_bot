@@ -137,6 +137,37 @@ async def test_polling_failover_supervisor_handles_tuple_market_open_fn(caplog, 
 
 
 @pytest.mark.asyncio
+async def test_polling_failover_does_not_skip_when_options_or_futures_stale(caplog, monkeypatch):
+    monkeypatch.setattr(app, "is_market_open_now", lambda: True)
+    ctx = _supervisor_ctx(
+        is_connected=lambda: True,
+        data_age_ms=100,
+        feed_health={
+            "futures_fresh": False,
+            "options_fresh": True,
+            "spot_fresh": True,
+            "spot_symbol": "NSE:NIFTY",
+            "spot_age_ms": 100,
+        },
+    )
+    fallback = _Fallback()
+
+    with caplog.at_level(logging.INFO, logger="nifty_scalper_bot.core.app"):
+        await app._polling_failover_supervisor_iteration(
+            ctx,
+            fallback,
+            quote_stale_ms=1000,
+            degraded_since=0.0,
+            recovered_since=None,
+            activate_after=0.0,
+        )
+
+    assert "within_spot_stale_threshold" not in caplog.text
+    fallback.set_websocket_mode.assert_called_once_with(False)
+    fallback.start.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_polling_failover_supervisor_offmarket_no_activation(monkeypatch):
     monkeypatch.setattr(app, "is_market_open_now", lambda: False)
     ctx = _supervisor_ctx(is_connected=False)
