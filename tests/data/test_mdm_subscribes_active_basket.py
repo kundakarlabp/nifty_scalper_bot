@@ -194,3 +194,76 @@ def test_incomplete_basket_does_not_clear_desired_tokens_or_set_active() -> None
 
     assert mdm._desired_tokens == before  # noqa: SLF001
     assert mdm.get_active_contract_basket() is active_before
+
+
+def test_active_basket_resolves_selected_tokens_from_alias_keys() -> None:
+    ws = WS()
+    mdm = MarketDataManager(websocket=ws)
+    payload = {
+        "spot_symbol": "NSE:NIFTY",
+        "spot_token": 256265,
+        "selected_ce": "NFO:NIFTY26JUN25000CE",
+        "selected_pe": "NFO:NIFTY26JUN25000PE",
+        "option_symbols": ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"],
+        "option_tokens": [11, 12],
+        "all_symbols": ["NSE:NIFTY", "NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"],
+        "all_tokens": [256265, 11, 12],
+        "token_by_symbol": {"NSE:NIFTY": 256265, "NIFTY26JUN25000CE": 11, "NFO:NIFTY26JUN25000PE": 12},
+        "symbol_by_token": {256265: "NSE:NIFTY", 11: "NFO:NIFTY26JUN25000CE", 12: "NFO:NIFTY26JUN25000PE"},
+        "atm_strike": 25000,
+    }
+
+    mdm.set_active_contract_basket(payload)
+
+    assert mdm.get_active_contract_basket() is payload
+    assert set(ws.tokens) == {256265, 11, 12}
+
+
+def test_subscription_reconciliation_snapshot_tuple_is_non_blocking() -> None:
+    class TupleSnapshotWS(WS):
+        tokens_snapshot = (256265, 11, 12)
+
+    ws = TupleSnapshotWS()
+    mdm = MarketDataManager(websocket=ws)
+
+    mdm.set_active_contract_basket(basket())
+
+    assert set(ws.tokens) == {256265, 11, 12}
+
+
+@pytest.mark.asyncio
+async def test_deferred_reseed_deduplicates_inflight_and_clears(monkeypatch) -> None:
+    import asyncio
+
+    mdm = MarketDataManager(websocket=WS())
+    b = basket()
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "3")
+    mdm.set_active_contract_basket(b)
+    quotes = {sym: {"ltp": 100.0, "bid": 99.0, "ask": 101.0, "source": "test"} for sym in b.all_symbols}
+    monkeypatch.setattr(mdm, "get_latest_tick", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_quote", lambda sym: quotes.get(sym))
+    monkeypatch.setattr(mdm, "get_ohlc_bars", lambda sym: [])
+    release = asyncio.Event()
+    attempts: list[str] = []
+
+    async def hydrate_symbol_history(symbol, **kwargs):
+        attempts.append(symbol)
+        await release.wait()
+        return []
+
+    monkeypatch.setattr(mdm, "hydrate_symbol_history", hydrate_symbol_history)
+
+    first = mdm.hydrate_active_contract_basket(b)
+    await asyncio.sleep(0)
+    second = mdm.hydrate_active_contract_basket(b)
+
+    assert first["retry_scheduled"] is True
+    assert second["retry_scheduled"] is True
+    assert attempts == [b.selected_ce, b.selected_pe]
+    assert set(mdm._active_basket_reseed_inflight) == {b.selected_ce, b.selected_pe}  # noqa: SLF001
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert mdm._active_basket_reseed_inflight == set()  # noqa: SLF001

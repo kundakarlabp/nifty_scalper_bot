@@ -291,6 +291,8 @@ class MarketDataManager:
         self._event_loop_lag_seconds: float = 0.0
         self._hydration_status: dict[str, str] = {}
         self._hydration_log_ts: dict[str, float] = {}
+        self._active_basket_reseed_inflight: set[str] = set()
+        self._active_basket_reseed_last: dict[str, float] = {}
         self._last_hb_mono: float | None = None
         self._heartbeat_callbacks: list[Callable[[float], None]] = []
         self._fallback_enabled = False
@@ -1749,6 +1751,40 @@ class MarketDataManager:
         )
 
 
+    def _safe_ws_tokens_snapshot(self) -> set[int]:
+        """Return websocket tokens for diagnostics without blocking basket commits."""
+        ws = self._ws
+        if ws is None:
+            return set()
+        snapshot = getattr(ws, "tokens_snapshot", None)
+        raw_tokens: Any
+        if callable(snapshot):
+            try:
+                raw_tokens = snapshot()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "WS_TOKENS_SNAPSHOT_SKIPPED reason=tokens_snapshot_failed error=%s",
+                    exc,
+                    extra={"event": "WS_TOKENS_SNAPSHOT_SKIPPED", "reason": "tokens_snapshot_failed", "error": str(exc)},
+                )
+                return set()
+        else:
+            raw_tokens = snapshot if snapshot is not None else getattr(ws, "_tokens", set())
+        tokens: set[int] = set()
+        for raw in raw_tokens or ():
+            try:
+                token = int(raw)
+            except (TypeError, ValueError):
+                self._logger.debug(
+                    "WS_TOKENS_SNAPSHOT_TOKEN_SKIPPED token=%s reason=invalid_token",
+                    raw,
+                    extra={"event": "WS_TOKENS_SNAPSHOT_TOKEN_SKIPPED", "token": str(raw), "reason": "invalid_token"},
+                )
+                continue
+            if token > 0:
+                tokens.add(token)
+        return tokens
+
     def _log_active_basket_subscription_reconciliation(self, basket: ActiveContractBasket | Mapping[str, Any]) -> None:
         """Log role-aware subscription reconciliation state for the active basket."""
         token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
@@ -1762,7 +1798,7 @@ class MarketDataManager:
         selected_tokens = {int(t) for t in (selected_ce_token, selected_pe_token) if t}
         nearby_options = option_tokens - selected_tokens
         desired = set(int(t) for t in self._desired_tokens if int(t) > 0)
-        ws_tokens = set(int(t) for t in (getattr(self._ws, "tokens_snapshot", lambda: getattr(self._ws, "_tokens", set()) if self._ws is not None else set())() if self._ws is not None else set()))
+        ws_tokens = self._safe_ws_tokens_snapshot()
         protected = {int(t) for t in (spot_token, futures_token, selected_ce_token, selected_pe_token) if t}
         protected.update(option_tokens)
         missing_tokens = sorted(desired - ws_tokens)
@@ -1823,10 +1859,24 @@ class MarketDataManager:
 
     def _reseed_active_basket_symbol_bars(self, symbol: str, min_bars: int) -> dict[str, Any]:
         """Best-effort selected-option history reseed through the existing hydration path."""
-        status: dict[str, Any] = {"attempted": False, "deferred": False, "failed": False, "error": None}
+        status: dict[str, Any] = {"attempted": False, "deferred": False, "failed": False, "error": None, "reason": None}
         hydrate_fn = getattr(self, "hydrate_symbol_history", None)
         if not callable(hydrate_fn):
             return status
+        key = self._canonical_active_symbol(symbol)
+        now_mono = time.monotonic()
+        try:
+            cooldown_s = float(os.getenv("MDM_ACTIVE_BASKET_RESEED_COOLDOWN_SECONDS", "30") or "30")
+        except (TypeError, ValueError):
+            cooldown_s = 30.0
+        with self._lock:
+            if key in self._active_basket_reseed_inflight:
+                status.update({"attempted": True, "deferred": True, "reason": "reseed_already_inflight"})
+                return status
+            last = self._active_basket_reseed_last.get(key, 0.0)
+            if last > 0 and (now_mono - last) < max(0.0, cooldown_s):
+                status.update({"attempted": True, "deferred": True, "reason": "reseed_cooldown"})
+                return status
         status["attempted"] = True
         try:
             result = hydrate_fn(
@@ -1841,20 +1891,44 @@ class MarketDataManager:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     asyncio.run(result)
+                    with self._lock:
+                        self._active_basket_reseed_last[key] = time.monotonic()
                 else:
+                    with self._lock:
+                        if key in self._active_basket_reseed_inflight:
+                            status.update({"deferred": True, "reason": "reseed_already_inflight"})
+                            return status
+                        self._active_basket_reseed_inflight.add(key)
                     task = loop.create_task(result)
-                    status["deferred"] = True
+                    status.update({"deferred": True, "reason": "running_event_loop"})
+
                     def _done(done: asyncio.Task[Any]) -> None:
+                        with self._lock:
+                            self._active_basket_reseed_inflight.discard(key)
+                            self._active_basket_reseed_last[key] = time.monotonic()
                         try:
                             done.result()
                         except Exception as exc:  # noqa: BLE001
-                            self._logger.warning("MDM_BASKET_HYDRATION_RESEED_FAILED symbol=%s error=%s", symbol, exc, extra={"event": "MDM_BASKET_HYDRATION_RESEED_FAILED", "symbol": symbol, "error": str(exc)})
+                            self._logger.warning(
+                                "MDM_BASKET_HYDRATION_RESEED_FAILED symbol=%s error=%s",
+                                symbol,
+                                exc,
+                                extra={"event": "MDM_BASKET_HYDRATION_RESEED_FAILED", "symbol": symbol, "error": str(exc)},
+                            )
                             return
-                        self._logger.info("MDM_BASKET_HYDRATION_RESEED_COMPLETED symbol=%s", symbol, extra={"event": "MDM_BASKET_HYDRATION_RESEED_COMPLETED", "symbol": symbol})
+                        self._logger.info(
+                            "MDM_BASKET_HYDRATION_RESEED_COMPLETED symbol=%s",
+                            symbol,
+                            extra={"event": "MDM_BASKET_HYDRATION_RESEED_COMPLETED", "symbol": symbol},
+                        )
                         active = self._active_contract_basket
                         if active is not None:
                             self.hydrate_active_contract_basket(active)
-                            self._logger.info("ACTIVE_BASKET_HYDRATION_RETRY_READY symbol=%s", symbol, extra={"event": "ACTIVE_BASKET_HYDRATION_RETRY_READY", "symbol": symbol})
+                            self._logger.info(
+                                "ACTIVE_BASKET_HYDRATION_RETRY_READY symbol=%s",
+                                symbol,
+                                extra={"event": "ACTIVE_BASKET_HYDRATION_RETRY_READY", "symbol": symbol},
+                            )
                     task.add_done_callback(_done)
                     self._logger.info(
                         "MDM_BASKET_HYDRATION_RESEED_DEFERRED symbol=%s reason=running_event_loop",
