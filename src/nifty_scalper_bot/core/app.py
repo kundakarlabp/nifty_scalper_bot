@@ -137,6 +137,129 @@ def _polling_fallback_degraded(
     return False
 
 
+
+
+def _safe_supervisor_call(name: str, fn: Any, *args: Any, default: Any = None, **kwargs: Any) -> Any:
+    """Call a polling-supervisor dependency only when callable; log controlled diagnostics otherwise."""
+
+    if not callable(fn):
+        LOGGER.warning(
+            "POLLING_SUPERVISOR_NONCALLABLE name=%s type=%s",
+            name,
+            type(fn).__name__,
+            extra={"event": "POLLING_SUPERVISOR_NONCALLABLE", "dependency": name, "type": type(fn).__name__},
+        )
+        return default
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - supervisor must keep retrying safely
+        LOGGER.warning(
+            "POLLING_SUPERVISOR_CALL_FAILED name=%s error=%s",
+            name,
+            exc,
+            extra={"event": "POLLING_SUPERVISOR_CALL_FAILED", "dependency": name, "error": str(exc)},
+        )
+        return default
+
+
+async def _polling_failover_supervisor_iteration(
+    ctx: Any,
+    polling_fallback: Any,
+    *,
+    quote_stale_ms: int,
+    degraded_since: float | None,
+    recovered_since: float | None,
+    activate_after: float,
+    recover_cooldown: float = 10.0,
+) -> tuple[float | None, float | None]:
+    """Run one polling failover supervisor iteration. Returns updated hysteresis timestamps."""
+
+    market_open = bool(_safe_supervisor_call("is_market_open_now", is_market_open_now, default=False))
+    now_mono = time_module.monotonic()
+    if not market_open:
+        log_throttled(
+            LOGGER,
+            "polling_fallback_skipped:NSE:NIFTY:market_closed",
+            "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s" % None,
+            interval_sec=60.0,
+            level=logging.DEBUG,
+            extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "market_closed", "age_ms": None},
+        )
+        if bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False)):
+            _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), True)
+            _safe_supervisor_call("polling_fallback.stop", getattr(polling_fallback, "stop", None))
+        return None, recovered_since
+
+    ws_ok = bool(_safe_supervisor_call("websocket_manager.is_connected", getattr(getattr(ctx, "websocket_manager", None), "is_connected", None), default=False))
+    mdm = getattr(ctx, "market_data_manager", None)
+    feed_health = _safe_supervisor_call(
+        "market_data_manager.trading_feed_health",
+        getattr(mdm, "trading_feed_health", None),
+        max_age_ms=quote_stale_ms,
+        default={},
+    )
+    if not isinstance(feed_health, Mapping):
+        feed_health = {}
+    futures_fresh = bool(feed_health.get("futures_fresh"))
+    options_fresh = bool(feed_health.get("options_fresh"))
+    spot_fresh = bool(feed_health.get("spot_fresh"))
+    spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
+    spot_age_ms = feed_health.get("spot_age_ms")
+    auth_tick_age_ms = _safe_supervisor_call("market_data_manager.data_age_ms", getattr(mdm, "data_age_ms", None), default=quote_stale_ms + 1)
+    try:
+        lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
+    except (TypeError, ValueError):
+        lagging = True
+    degraded = _polling_fallback_degraded(
+        ws_ok=ws_ok,
+        lagging=lagging,
+        futures_fresh=futures_fresh,
+        options_fresh=options_fresh,
+    )
+    if degraded:
+        recovered_since = None
+        degraded_since = degraded_since or now_mono
+        running = bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False))
+        if now_mono - degraded_since >= activate_after and not running:
+            if spot_age_ms is not None and float(spot_age_ms) <= float(quote_stale_ms) and ws_ok:
+                log_throttled(
+                    LOGGER,
+                    f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",
+                    "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s" % (spot_age_ms, quote_stale_ms, ws_ok),
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                    extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "within_spot_stale_threshold", "age_ms": spot_age_ms, "threshold_ms": quote_stale_ms, "ws_ok": ws_ok},
+                )
+                return degraded_since, recovered_since
+            LOGGER.warning(
+                "POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s",
+                spot_age_ms,
+                quote_stale_ms,
+                ws_ok,
+                lagging,
+                extra={"event": "poll_fallback_activate", "reason": "ws_disconnected" if not ws_ok else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale", "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
+            )
+            _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), False)
+            _safe_supervisor_call("polling_fallback.start", getattr(polling_fallback, "start", None))
+        return degraded_since, recovered_since
+
+    if not spot_fresh:
+        _safe_supervisor_call(
+            "market_data_manager.ensure_spot_reference_fresh",
+            getattr(mdm, "ensure_spot_reference_fresh", None),
+            symbol=spot_symbol,
+            stale_after_ms=quote_stale_ms,
+        )
+        LOGGER.info("poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s", spot_symbol, spot_age_ms)
+    degraded_since = None
+    recovered_since = recovered_since or now_mono
+    if now_mono - recovered_since >= recover_cooldown and bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False)):
+        LOGGER.info("Polling fallback deactivate (supervisor) after ws recovery cooldown", extra={"event": "polling_fallback_deactivated"})
+        _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), True)
+        _safe_supervisor_call("polling_fallback.stop", getattr(polling_fallback, "stop", None))
+    return degraded_since, recovered_since
+
+
 def _run_sync_locked(operation: Callable[[], Any]) -> Any:
     """Run synchronization-critical broker operations under a process-wide lock."""
     with SYNC_LOCK:
@@ -6430,19 +6553,39 @@ async def _wait_for_live_spot_or_raise(
             else 0.0
         )
         if rest_probe > 0:
+            with suppress(AttributeError):
+                ctx.live_orders_armed = False
+                ctx.execution_armed = False
+                ctx.live_block_reason = "live_requires_ws_spot_rest_fallback_only"
             LOGGER.info(
-                "SPOT_REST_AVAILABLE_BUT_WS_REQUIRED rest_ltp=%.2f reason=live_requires_ws",
+                "STARTUP_SPOT_REST_FALLBACK_USED symbol=%s price=%.2f reason=live_requires_ws_spot_basket_only",
+                policy.nifty_internal_symbol,
                 rest_probe,
                 extra={
-                    "event": "SPOT_REST_AVAILABLE_BUT_WS_REQUIRED",
-                    "rest_ltp": rest_probe,
-                    "reason": "live_requires_ws",
+                    "event": "STARTUP_SPOT_REST_FALLBACK_USED",
+                    "symbol": policy.nifty_internal_symbol,
+                    "price": rest_probe,
+                    "reason": "live_requires_ws_spot_basket_only",
                 },
             )
-        raise RuntimeError(
-            "fresh NIFTY WebSocket spot tick unavailable; "
-            "cannot build live option universe"
+            LOGGER.info(
+                "STARTUP_SPOT_REST_FALLBACK_READY symbol=%s price=%.2f live_orders_armed=False",
+                policy.nifty_internal_symbol,
+                rest_probe,
+                extra={
+                    "event": "STARTUP_SPOT_REST_FALLBACK_READY",
+                    "symbol": policy.nifty_internal_symbol,
+                    "price": rest_probe,
+                    "live_orders_armed": False,
+                },
+            )
+            return float(rest_probe)
+        LOGGER.info(
+            "STARTUP_SPOT_PROOF_TIMEOUT symbol=%s reason=spot_ltp_unavailable",
+            policy.nifty_internal_symbol,
+            extra={"event": "STARTUP_SPOT_PROOF_TIMEOUT", "symbol": policy.nifty_internal_symbol, "reason": "spot_ltp_unavailable"},
         )
+        raise RuntimeError("spot_ltp_unavailable:fresh_ws_spot_missing")
 
     if live_mode and allow_rest_live:
         LOGGER.error(
@@ -7496,8 +7639,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         basket_hard_ready = False
         basket_missing = ["hydrate_active_contract_basket_missing"]
         LOGGER.warning(
-            "ACTIVE_BASKET_HYDRATION_METHOD_MISSING hard_ready=False",
-            extra={"event": "ACTIVE_BASKET_HYDRATION_METHOD_MISSING", "missing": list(basket_missing)},
+            "ACTIVE_BASKET_HYDRATION_METHOD_MISSING hard_ready=False reason=hydrator_missing",
+            extra={"event": "ACTIVE_BASKET_HYDRATION_METHOD_MISSING", "missing": list(basket_missing), "reason": "hydrator_missing"},
         )
     ctx.active_basket_hydration = {"hard_ready": bool(basket_hard_ready), "missing": list(basket_missing)}
     ce_bars, ce_mdm_bars, ce_runner_bars = _readiness_bars(selected_ce)
@@ -7554,7 +7697,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.strategy_evaluation_ready = bool(evaluation_ready)
     ctx.trading_signal_ready = bool(evaluation_ready)
     ctx.execution_armed = bool(live_orders_armed)
-    ctx.execution_block_reason = block_reason
+    ctx.execution_block_reason = "market_closed" if (live_mode and not market_open and evaluation_ready) else block_reason
     ctx.market_open = bool(market_open)
     ctx.execution_ready_by_symbol = execution_ready_by_symbol
     ctx.selected_ce_exec_ready = bool(ce_exec_ready)
@@ -7576,6 +7719,8 @@ def _commit_active_dynamic_basket(
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
     requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
+    requested_selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
+    requested_selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
     active_futures_symbol = canonical_nifty_future_symbol(requested_futures_symbol) or _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
@@ -7593,8 +7738,30 @@ def _commit_active_dynamic_basket(
     if atm_strike is not None:
         local_basket["atm_strike"] = atm_strike
     picked_ce, picked_pe = pick_atm_option_symbols_from_basket(local_basket)
-    selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or picked_ce or "") or None
-    selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or picked_pe or "") or None
+    raw_selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
+    raw_selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
+    for side, requested_selected, normalized_selected in (
+        ("CE", requested_selected_ce, raw_selected_ce),
+        ("PE", requested_selected_pe, raw_selected_pe),
+    ):
+        if requested_selected and normalized_selected and requested_selected != normalized_selected:
+            LOGGER.warning(
+                "BASKET_SELECTED_PAIR_REPAIRED side=%s previous_selected=%s repaired_selected=%s atm_strike=%s reason=ssot_normalize_selected_pair",
+                side,
+                requested_selected,
+                normalized_selected,
+                atm_strike,
+                extra={
+                    "event": "BASKET_SELECTED_PAIR_REPAIRED",
+                    "side": side,
+                    "previous_selected": requested_selected,
+                    "repaired_selected": normalized_selected,
+                    "atm_strike": atm_strike,
+                    "reason": "ssot_normalize_selected_pair",
+                },
+            )
+    selected_ce = str(raw_selected_ce or picked_ce or "") or None
+    selected_pe = str(raw_selected_pe or picked_pe or "") or None
     active_set = set(current_options) | set(current_symbols)
     def _nearest_for_side(side: str) -> str | None:
         candidates: list[tuple[float, str]] = []
@@ -7620,9 +7787,41 @@ def _commit_active_dynamic_basket(
         candidates.sort(key=lambda item: (item[0], item[1]))
         return candidates[0][1]
     if not (selected_ce and selected_ce.endswith("CE") and selected_ce in active_set):
-        selected_ce = _nearest_for_side("CE")
+        repaired_ce = _nearest_for_side("CE")
+        if selected_ce and repaired_ce and selected_ce != repaired_ce:
+            LOGGER.warning(
+                "BASKET_SELECTED_PAIR_REPAIRED side=CE previous_selected=%s repaired_selected=%s atm_strike=%s reason=selected_pair_not_in_option_symbols",
+                selected_ce,
+                repaired_ce,
+                atm_strike,
+                extra={
+                    "event": "BASKET_SELECTED_PAIR_REPAIRED",
+                    "side": "CE",
+                    "previous_selected": selected_ce,
+                    "repaired_selected": repaired_ce,
+                    "atm_strike": atm_strike,
+                    "reason": "selected_pair_not_in_option_symbols",
+                },
+            )
+        selected_ce = repaired_ce
     if not (selected_pe and selected_pe.endswith("PE") and selected_pe in active_set):
-        selected_pe = _nearest_for_side("PE")
+        repaired_pe = _nearest_for_side("PE")
+        if selected_pe and repaired_pe and selected_pe != repaired_pe:
+            LOGGER.warning(
+                "BASKET_SELECTED_PAIR_REPAIRED side=PE previous_selected=%s repaired_selected=%s atm_strike=%s reason=selected_pair_not_in_option_symbols",
+                selected_pe,
+                repaired_pe,
+                atm_strike,
+                extra={
+                    "event": "BASKET_SELECTED_PAIR_REPAIRED",
+                    "side": "PE",
+                    "previous_selected": selected_pe,
+                    "repaired_selected": repaired_pe,
+                    "atm_strike": atm_strike,
+                    "reason": "selected_pair_not_in_option_symbols",
+                },
+            )
+        selected_pe = repaired_pe
     old_ce = getattr(ctx, "selected_ce", None)
     old_pe = getattr(ctx, "selected_pe", None)
     if not selected_ce and old_ce in active_set and str(old_ce).endswith("CE"):
@@ -7695,6 +7894,53 @@ def _commit_active_dynamic_basket(
     if callable(set_fut):
         set_fut(active_futures_symbol, source="active_dynamic_basket_commit")
     mdm = getattr(ctx, "market_data_manager", None)
+    token_map = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
+    if not token_map:
+        token_map = resolve_active_basket_tokens(ctx, [str(sym) for sym in committed.get("symbols", []) if sym], selected_ce, selected_pe)
+    else:
+        LOGGER.info(
+            "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
+            len(token_map),
+            token_map.get(selected_ce or ""),
+            token_map.get(selected_pe or ""),
+        )
+    ctx.active_symbol_tokens = token_map
+    committed["token_by_symbol"] = token_map
+    LOGGER.info(
+        "ACTIVE_CONTRACT_BASKET_COMMITTED selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s symbol_count=%d",
+        selected_ce,
+        selected_pe,
+        active_futures_symbol,
+        atm_strike,
+        len(committed.get("symbols", []) or []),
+        extra={
+            "event": "ACTIVE_CONTRACT_BASKET_COMMITTED",
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "futures_symbol": active_futures_symbol,
+            "atm_strike": atm_strike,
+            "symbol_count": len(committed.get("symbols", []) or []),
+        },
+    )
+    if mdm is not None:
+        set_basket = getattr(mdm, "set_active_contract_basket", None)
+        if callable(set_basket):
+            try:
+                set_basket(committed)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("ACTIVE_BASKET_SET_FAILED error=%s", exc, extra={"event": "ACTIVE_BASKET_SET_FAILED", "error": str(exc)})
+        hydrate_basket = getattr(mdm, "hydrate_active_contract_basket", None)
+        if callable(hydrate_basket):
+            try:
+                hydration_status = hydrate_basket(committed)
+                if isinstance(hydration_status, Mapping):
+                    ctx.active_basket_hydration = {
+                        "hard_ready": bool(hydration_status.get("hard_ready", True)),
+                        "missing": [str(item) for item in hydration_status.get("missing", []) or []],
+                    }
+            except Exception as exc:  # noqa: BLE001
+                ctx.active_basket_hydration = {"hard_ready": False, "missing": [f"active_basket_hydration_failed:{type(exc).__name__}"]}
+                LOGGER.warning("ACTIVE_BASKET_HYDRATION_STATUS_FAILED reason=%s", exc, extra={"event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED", "error": str(exc)})
 
     # ── Reconcile WebSocket subscriptions to match committed basket ──────────
     # After every basket commit, resolve the desired token set from the new
@@ -7703,7 +7949,6 @@ def _commit_active_dynamic_basket(
     # This replaces the old futures-specific purge path.
     reconcile_fn = getattr(mdm, "reconcile_active_subscriptions", None)
     if callable(reconcile_fn):
-        basket_tokens: set[int] = set()
         _im = getattr(ctx, "instrument_manager", None)
         for sym in [s for s in committed.get("symbols", []) if s]:
             try:
@@ -7725,6 +7970,24 @@ def _commit_active_dynamic_basket(
                 reconcile_fn(basket_tokens)
             except Exception as rec_exc:
                 LOGGER.warning("basket_reconcile_failed error=%s", rec_exc)
+    elif mdm is not None:
+        requested_tokens: set[int] = set()
+        request_one = getattr(mdm, "request_token_subscription", None)
+        if callable(request_one):
+            for sym, tok in token_map.items():
+                try:
+                    if request_one(int(tok), symbol=str(sym)):
+                        requested_tokens.add(int(tok))
+                except TypeError:
+                    if request_one(int(tok)):
+                        requested_tokens.add(int(tok))
+                except Exception:
+                    continue
+        LOGGER.info(
+            "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED desired_token_count=%d",
+            len(requested_tokens or set(int(tok) for tok in token_map.values() if tok)),
+            extra={"event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED", "desired_token_count": len(requested_tokens or set(int(tok) for tok in token_map.values() if tok))},
+        )
     # ────────────────────────────────────────────────────────────────────────
 
     rotate_result = getattr(mdm, "maybe_rotate_nifty_futures_context_result", None)
@@ -7850,6 +8113,17 @@ async def _deferred_basket_hydration_retry(
                     max_attempts,
                     extra={
                         "event": "DEFERRED_BASKET_RETRY_WAITING",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "reason": "data_not_ready",
+                    },
+                )
+                LOGGER.info(
+                    "DEFERRED_BASKET_RETRY_FAILED attempt=%d/%d reason=data_not_ready",
+                    attempt,
+                    max_attempts,
+                    extra={
+                        "event": "DEFERRED_BASKET_RETRY_FAILED",
                         "attempt": attempt,
                         "max_attempts": max_attempts,
                         "reason": "data_not_ready",
@@ -8062,7 +8336,7 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, re
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP"
     ctx.effective_mode = ctx.readiness_mode
-    ctx.live_block_reason = "fresh_ws_spot_unavailable"
+    ctx.live_block_reason = reason if reason and reason != "market_closed_or_spot_not_ready" else "fresh_ws_spot_unavailable"
     if bool(getattr(ctx, "deferred_basket_retry_started", False)):
         LOGGER.info("DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s already_scheduled=%s", reason, spot_ltp, True)
         return
@@ -9641,125 +9915,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                         quote_stale_ms = int(fallback_stale_sec * 1000.0)
                         while True:
                             try:
-                                market_open = is_market_open_now()
-                                ws_ok = bool(ctx.websocket_manager.is_connected())
-                                feed_health = ctx.market_data_manager.trading_feed_health(
-                                    max_age_ms=quote_stale_ms
+                                degraded_since, recovered_since = await _polling_failover_supervisor_iteration(
+                                    ctx,
+                                    polling_fallback,
+                                    quote_stale_ms=quote_stale_ms,
+                                    degraded_since=degraded_since,
+                                    recovered_since=recovered_since,
+                                    activate_after=activate_after,
+                                    recover_cooldown=recover_cooldown,
                                 )
-                                futures_fresh = bool(feed_health.get("futures_fresh"))
-                                options_fresh = bool(feed_health.get("options_fresh"))
-                                spot_fresh = bool(feed_health.get("spot_fresh"))
-                                spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
-                                spot_age_ms = feed_health.get("spot_age_ms")
-                                auth_tick_age_ms = ctx.market_data_manager.data_age_ms()
-                                lagging = auth_tick_age_ms > quote_stale_ms
-                                degraded = _polling_fallback_degraded(
-                                    ws_ok=ws_ok,
-                                    lagging=lagging,
-                                    futures_fresh=futures_fresh,
-                                    options_fresh=options_fresh,
-                                )
-                                now_mono = time_module.monotonic()
-                                if not market_open:
-                                    # Off-market: never aggressively activate
-                                    # the REST polling fallback just because the
-                                    # last quote crossed the open-market threshold.
-                                    log_throttled(
-                                        LOGGER,
-                                        f"polling_fallback_skipped:{spot_symbol}:market_closed",
-                                        "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s"
-                                        % spot_age_ms,
-                                        interval_sec=60.0,
-                                        level=logging.DEBUG,
-                                        extra={
-                                            "event": "POLLING_FALLBACK_SKIPPED",
-                                            "reason": "market_closed",
-                                            "age_ms": spot_age_ms,
-                                        },
-                                    )
-                                    degraded_since = None
-                                    if polling_fallback.is_running():
-                                        polling_fallback.set_websocket_mode(True)
-                                        polling_fallback.stop()
-                                    await asyncio.sleep(1.0)
-                                    continue
-                                if degraded:
-                                    recovered_since = None
-                                    degraded_since = degraded_since or now_mono
-                                    if (
-                                        now_mono - degraded_since >= activate_after
-                                        and not polling_fallback.is_running()
-                                    ):
-                                        if (
-                                            spot_age_ms is not None
-                                            and float(spot_age_ms) <= float(quote_stale_ms)
-                                            and ws_ok
-                                        ):
-                                            log_throttled(
-                                                LOGGER,
-                                                f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",
-                                                "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s"
-                                                % (spot_age_ms, quote_stale_ms, ws_ok),
-                                                interval_sec=60.0,
-                                                level=logging.INFO,
-                                                extra={
-                                                    "event": "POLLING_FALLBACK_SKIPPED",
-                                                    "reason": "within_spot_stale_threshold",
-                                                    "age_ms": spot_age_ms,
-                                                    "threshold_ms": quote_stale_ms,
-                                                    "ws_ok": ws_ok,
-                                                },
-                                            )
-                                            await asyncio.sleep(1.0)
-                                            continue
-                                        LOGGER.warning(
-                                            "POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s",
-                                            spot_age_ms,
-                                            quote_stale_ms,
-                                            ws_ok,
-                                            lagging,
-                                            extra={
-                                                "event": "poll_fallback_activate",
-                                                "reason": (
-                                                    "ws_disconnected"
-                                                    if not ws_ok
-                                                    else "tick_lag"
-                                                    if lagging
-                                                    else "futures_stale"
-                                                    if not futures_fresh
-                                                    else "options_stale"
-                                                ),
-                                                "lagging": lagging,
-                                                "futures_fresh": futures_fresh,
-                                                "options_fresh": options_fresh,
-                                                "authoritative_age_ms": auth_tick_age_ms,
-                                            },
-                                        )
-                                        polling_fallback.set_websocket_mode(False)
-                                        polling_fallback.start()
-                                else:
-                                    if not spot_fresh:
-                                        ctx.market_data_manager.ensure_spot_reference_fresh(
-                                            symbol=spot_symbol,
-                                            stale_after_ms=quote_stale_ms,
-                                        )
-                                        LOGGER.info(
-                                            "poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s",
-                                            spot_symbol,
-                                            spot_age_ms,
-                                        )
-                                    degraded_since = None
-                                    recovered_since = recovered_since or now_mono
-                                    if (
-                                        now_mono - recovered_since >= recover_cooldown
-                                        and polling_fallback.is_running()
-                                    ):
-                                        LOGGER.info(
-                                            "Polling fallback deactivate (supervisor) after ws recovery cooldown",
-                                            extra={"event": "polling_fallback_deactivated"},
-                                        )
-                                        polling_fallback.set_websocket_mode(True)
-                                        polling_fallback.stop()
                             except Exception as failover_exc:  # noqa: BLE001
                                 LOGGER.error(
                                     "Failure in polling failover supervisor: %s",

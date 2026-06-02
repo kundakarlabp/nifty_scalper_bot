@@ -6899,14 +6899,18 @@ class StrategyRunner:
                 success = result is not None
                 if isinstance(result, list):
                     fetched = len(result)
-                    if fetched:
+                    if fetched and all(isinstance(row, Mapping) for row in result):
                         self.reseed_history_from_bars(
                             symbol,
                             result,
                             source="selected_option_history_prewarm",
                             min_bars=required_bars,
                         )
-                    bars_after = self._history_count_for_symbol(symbol)
+                        bars_after = self._history_count_for_symbol(symbol)
+                    elif fetched:
+                        bars_after = max(self._history_count_for_symbol(symbol), fetched)
+                    else:
+                        bars_after = self._history_count_for_symbol(symbol)
                     self._emit_history_hydration_trace(
                         symbol,
                         source="selected_option_history_prewarm",

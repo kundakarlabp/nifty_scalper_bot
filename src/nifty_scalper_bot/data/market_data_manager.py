@@ -336,6 +336,8 @@ class MarketDataManager:
         self._suspended_context_symbols: set[str] = set()
         self._suspended_context_symbol_until: dict[str, float] = {}
         self._active_subscribed_symbols: set[str] = set()
+        self._active_contract_basket: Any | None = None
+        self._active_basket_reseed_inflight: set[str] = set()
         self._symbols_with_tick: set[str] = set()
         self._ticks_received_per_symbol: dict[str, int] = defaultdict(int)
         self._tick_stats: dict[str, int] = defaultdict(int)
@@ -1676,6 +1678,139 @@ class MarketDataManager:
         canonical = canonical_nifty_future_symbol(symbol)
         active = canonical_nifty_future_symbol(active_future)
         return bool(canonical and active and canonical != active)
+
+
+    def _basket_value(self, basket: Any, key: str, default: Any = None) -> Any:
+        if isinstance(basket, Mapping):
+            return basket.get(key, default)
+        return getattr(basket, key, default)
+
+    def _safe_canonical_for_basket(self, symbol: Any) -> str:
+        text = str(symbol or "").strip()
+        if not text:
+            return ""
+        try:
+            return self._canonical_symbol(text)
+        except Exception:
+            return enforce_canonical(normalize_symbol(text))
+
+    def _basket_token_map(self, basket: Any) -> dict[str, int]:
+        token_map: dict[str, int] = {}
+        raw_map = self._basket_value(basket, "token_by_symbol", {}) or {}
+        if isinstance(raw_map, Mapping):
+            for sym, tok in raw_map.items():
+                try:
+                    token = int(tok)
+                except Exception:
+                    continue
+                if token <= 0:
+                    continue
+                text = str(sym or "").strip()
+                canonical = self._safe_canonical_for_basket(text)
+                for key in {text, text.upper(), canonical, canonical.split(":", 1)[-1] if ":" in canonical else canonical}:
+                    if key:
+                        token_map[key] = token
+        symbols = list(self._basket_value(basket, "all_symbols", None) or self._basket_value(basket, "symbols", []) or [])
+        tokens = list(self._basket_value(basket, "all_tokens", []) or [])
+        for sym, tok in zip(symbols, tokens, strict=False):
+            try:
+                token = int(tok)
+            except Exception:
+                continue
+            text = str(sym or "").strip()
+            canonical = self._safe_canonical_for_basket(text)
+            for key in {text, text.upper(), canonical, canonical.split(":", 1)[-1] if ":" in canonical else canonical}:
+                if key:
+                    token_map.setdefault(key, token)
+        return token_map
+
+    def set_active_contract_basket(self, basket: Any) -> None:
+        """Commit active basket tokens/subscriptions without clearing on incomplete payloads."""
+        tokens = [int(tok) for tok in (self._basket_value(basket, "all_tokens", []) or []) if tok]
+        if not tokens:
+            self._logger.warning(
+                "MDM_ACTIVE_BASKET_IGNORED reason=missing_tokens",
+                extra={"event": "MDM_ACTIVE_BASKET_IGNORED", "reason": "missing_tokens"},
+            )
+            return
+        token_map = self._basket_token_map(basket)
+        with self._lock:
+            self._active_contract_basket = basket
+            self._desired_tokens.update(tokens)
+            for sym, tok in token_map.items():
+                canonical = self._safe_canonical_for_basket(sym)
+                if canonical:
+                    self._symbol_to_token[canonical] = int(tok)
+                    self._token_to_symbol[int(tok)] = canonical
+                    self._token_by_symbol[canonical] = int(tok)
+                    self._symbol_by_token[int(tok)] = canonical
+        ws = self._ws
+        if ws is not None and hasattr(ws, "set_tokens"):
+            try:
+                ws.set_tokens(sorted(set(tokens)))
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning("MDM_ACTIVE_BASKET_WS_SET_FAILED error=%s", exc)
+
+    def get_active_contract_basket(self) -> Any | None:
+        return self._active_contract_basket
+
+    def hydrate_active_contract_basket(self, basket: Any | None = None) -> dict[str, Any]:
+        """Validate quote/OHLC hydration for the active basket with explicit blockers."""
+        basket = basket if basket is not None else self._active_contract_basket
+        token_map = self._basket_token_map(basket)
+        selected = {str(self._basket_value(basket, "selected_ce", "") or ""), str(self._basket_value(basket, "selected_pe", "") or "")}
+        symbols = list(self._basket_value(basket, "all_symbols", None) or self._basket_value(basket, "symbols", None) or [])
+        if not symbols:
+            symbols = [self._basket_value(basket, "spot_symbol", "NSE:NIFTY"), *list(self._basket_value(basket, "option_symbols", []) or [])]
+        min_bars = int(os.getenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "0") or 0) or int(getattr(self, "_min_required_bars", 20) or 20)
+        report: dict[str, Any] = {"hard_ready": True, "missing": [], "symbols": {}, "hydration_min_bars_required": min_bars, "retry_scheduled": False}
+        for raw_sym in symbols:
+            sym = str(raw_sym or "")
+            if not sym:
+                continue
+            canonical = self._safe_canonical_for_basket(sym)
+            is_option = canonical.startswith("NFO:NIFTY") and (canonical.endswith("CE") or canonical.endswith("PE"))
+            is_future = canonical.startswith("NFO:NIFTY") and canonical.endswith("FUT")
+            role = "tradable_option" if is_option else "futures_context" if is_future else "spot_context"
+            if is_future and raw_sym != self._basket_value(basket, "futures_symbol", None):
+                self._logger.warning("MDM_BASKET_ROLE_INCONSISTENCY symbol=%s role=%s", canonical, role, extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": canonical, "role": role})
+            token = token_map.get(sym) or token_map.get(sym.upper()) or token_map.get(canonical) or token_map.get(canonical.split(":", 1)[-1] if ":" in canonical else canonical)
+            entry = {"role": role, "token": token, "quote_ready": False, "ohlc_ready": True, "bars_count": 0, "oi_ready": False}
+            if is_option and token is None:
+                report["missing"].append(f"{sym}:token_missing")
+                report["hard_ready"] = False
+            quote = self.get_latest_tick(sym) or self.get_latest_tick(canonical) or self.get_quote(sym) or self.get_quote(canonical)
+            entry["quote_ready"] = bool(quote and float((quote or {}).get("ltp") or (quote or {}).get("last_price") or 0.0) > 0)
+            if is_option and not entry["quote_ready"]:
+                report["missing"].append(f"{sym}:quote_missing")
+                report["hard_ready"] = False
+            bars = self.get_ohlc_bars(sym) or self.get_ohlc_bars(canonical) or []
+            entry["bars_count"] = len(bars)
+            if is_option and sym in selected and len(bars) < min_bars:
+                hydrate = getattr(self, "hydrate_symbol_history", None)
+                if callable(hydrate):
+                    result = hydrate(sym, interval="minute", max_bars=min_bars, reason="active_basket_hydration")
+                    if inspect.isawaitable(result):
+                        entry["reseed_deferred"] = True
+                        entry["last_error"] = "reseed_deferred"
+                        report["retry_scheduled"] = True
+                        if sym not in self._active_basket_reseed_inflight:
+                            self._active_basket_reseed_inflight.add(sym)
+                            try:
+                                loop = asyncio.get_running_loop()
+                                task = loop.create_task(result)
+                                task.add_done_callback(lambda _task, _sym=sym: self._active_basket_reseed_inflight.discard(_sym))
+                            except RuntimeError:
+                                self._active_basket_reseed_inflight.discard(sym)
+                    elif isinstance(result, list) and result:
+                        bars = result
+                        entry["bars_count"] = len(bars)
+                if entry["bars_count"] < min_bars:
+                    entry["ohlc_ready"] = False
+                    report["missing"].append(f"{sym}:ohlc_insufficient")
+                    report["hard_ready"] = False
+            report["symbols"][sym] = entry
+        return report
 
     def request_token_subscription(
         self,

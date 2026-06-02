@@ -33,9 +33,19 @@ async def test_build_commits_selected_before_readiness(monkeypatch):
     }
     monkeypatch.setattr(app, '_build_canonical_active_basket', lambda **kwargs: basket)
     monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.CLOSED)
+    class MDM(_MDM):
+        def __init__(self):
+            self.registered = []
+        def register_symbol(self, symbol, token):
+            self.registered.append(symbol)
+        def request_token_subscription(self, token, symbol=None):
+            self.registered.append(symbol)
+            return True
+
+    mdm = MDM()
     ctx = SimpleNamespace(
         instrument_manager=_IM(),
-        market_data_manager=_MDM(),
+        market_data_manager=mdm,
         broker_client=_Broker(),
         settings=SimpleNamespace(option_universe=SimpleNamespace(strike_step=50), execution_mode='LIVE'),
         strategy_runner=SimpleNamespace(_indicator_engine=SimpleNamespace(get_history=lambda s: [1] * 30)),
@@ -358,10 +368,10 @@ async def test_readiness_syncs_selected_option_runner_history_from_mdm_and_desir
     assert "SELECTED_OPTION_RESEED_FAILED" not in caplog.text
 
 @pytest.mark.asyncio
-async def test_live_basket_build_logs_committed_ssot_selected_pair(monkeypatch, caplog):
+async def test_live_basket_build_uses_new_ssot_selected_pair_over_stale_ctx(monkeypatch, caplog):
     basket = {
-        'selected_ce': 'NFO:NIFTY2660223400CE',
-        'selected_pe': 'NFO:NIFTY2660223400PE',
+        'selected_ce': 'NFO:NIFTY2660223500CE',
+        'selected_pe': 'NFO:NIFTY2660223500PE',
         'atm_strike': 23500,
         'symbols': ['NSE:NIFTY', 'NFO:NIFTY26JUNFUT', 'NFO:NIFTY2660223500CE', 'NFO:NIFTY2660223500PE'],
         'option_symbols': ['NFO:NIFTY2660223500CE', 'NFO:NIFTY2660223500PE'],
@@ -369,9 +379,20 @@ async def test_live_basket_build_logs_committed_ssot_selected_pair(monkeypatch, 
     }
     monkeypatch.setattr(app, '_build_canonical_active_basket', lambda **kwargs: basket)
     monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.CLOSED)
+
+    class MDM(_MDM):
+        def __init__(self):
+            self.registered = []
+        def register_symbol(self, symbol, token):
+            self.registered.append(symbol)
+        def request_token_subscription(self, token, symbol=None):
+            self.registered.append(symbol)
+            return True
+
+    mdm = MDM()
     ctx = SimpleNamespace(
         instrument_manager=_IM(),
-        market_data_manager=_MDM(),
+        market_data_manager=mdm,
         broker_client=_Broker(),
         settings=SimpleNamespace(option_universe=SimpleNamespace(strike_step=50), execution_mode='LIVE'),
         strategy_runner=SimpleNamespace(
@@ -392,7 +413,47 @@ async def test_live_basket_build_logs_committed_ssot_selected_pair(monkeypatch, 
     assert ctx.selected_ce == 'NFO:NIFTY2660223500CE'
     assert ctx.selected_pe == 'NFO:NIFTY2660223500PE'
     assert ctx.runner_universe['selected_ce'] == 'NFO:NIFTY2660223500CE'
+    assert 'NFO:NIFTY2660223500CE' in mdm.registered
+    assert 'NFO:NIFTY2660223500PE' in mdm.registered
     assert 'LIVE_BASKET_BUILD_COMPLETE selected_ce=NFO:NIFTY2660223500CE selected_pe=NFO:NIFTY2660223500PE' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_commit_repairs_contradictory_selected_pair_with_log(caplog):
+    basket = {
+        'selected_ce': 'NFO:NIFTY2660223400CE',
+        'selected_pe': 'NFO:NIFTY2660223400PE',
+        'atm_strike': 23500,
+        'symbols': ['NSE:NIFTY', 'NFO:NIFTY26JUNFUT', 'NFO:NIFTY2660223500CE', 'NFO:NIFTY2660223500PE'],
+        'option_symbols': ['NFO:NIFTY2660223500CE', 'NFO:NIFTY2660223500PE'],
+        'futures_symbol': 'NFO:NIFTY26JUNFUT',
+    }
+    ctx = SimpleNamespace(
+        market_data_manager=SimpleNamespace(),
+        instrument_manager=None,
+        strategy_runner=SimpleNamespace(set_active_trading_universe=lambda universe: setattr(ctx, 'runner_universe', universe)),
+        strategy_manager=SimpleNamespace(set_active_futures_symbol=lambda *a, **k: None),
+        active_trading_universe={},
+        selected_ce='NFO:NIFTY2660223400CE',
+        selected_pe='NFO:NIFTY2660223400PE',
+    )
+
+    with caplog.at_level('WARNING', logger=app.LOGGER.name):
+        selected_ce, selected_pe = app._commit_active_dynamic_basket(
+            ctx,
+            basket=basket,
+            option_symbols=basket['option_symbols'],
+            symbols=basket['symbols'],
+            atm_strike=basket['atm_strike'],
+        )
+
+    assert selected_ce == 'NFO:NIFTY2660223500CE'
+    assert selected_pe == 'NFO:NIFTY2660223500PE'
+    assert ctx.selected_ce == 'NFO:NIFTY2660223500CE'
+    assert ctx.selected_pe == 'NFO:NIFTY2660223500PE'
+    assert ctx.runner_universe['selected_ce'] == 'NFO:NIFTY2660223500CE'
+    assert 'BASKET_SELECTED_PAIR_REPAIRED side=CE' in caplog.text
+    assert 'BASKET_SELECTED_PAIR_REPAIRED side=PE' in caplog.text
 
 
 @pytest.mark.asyncio
