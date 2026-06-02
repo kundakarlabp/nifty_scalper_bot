@@ -21,6 +21,14 @@ def test_botcontext_has_startup_spot_fields() -> None:
     assert 'broker_ready' in names
     assert 'active_contract_basket' in names
     assert 'active_basket_hydration' in names
+    # Basket token map and degraded-mode flag must be declared fields because
+    # BotContext uses slots=True — undeclared dynamic assignments raise AttributeError.
+    assert 'active_symbol_tokens' in names, (
+        "active_symbol_tokens must be a declared BotContext field (slots=True forbids dynamic attrs)"
+    )
+    assert 'degraded_mode' in names, (
+        "degraded_mode must be a declared BotContext field (slots=True forbids dynamic attrs)"
+    )
 
 
 def test_assigning_startup_fields_does_not_raise() -> None:
@@ -40,3 +48,15 @@ def test_assigning_startup_fields_does_not_raise() -> None:
     assert isinstance(ctx.execution_ready_by_symbol, dict)
     assert ctx.selected_ce_exec_ready is True
     assert ctx.active_basket_hydration['missing'] == ['hydrator_missing']
+
+
+def test_active_symbol_tokens_and_degraded_mode_assignable() -> None:
+    """Regression: slots=True raised AttributeError on dynamic ctx.active_symbol_tokens = {...}."""
+    ctx = object.__new__(BotContext)
+    # Must not raise AttributeError — these are now declared slots fields.
+    ctx.active_symbol_tokens = {'NSE:NIFTY': 256265, 'NFO:NIFTY2660923500CE': 12345678}
+    ctx.degraded_mode = True
+    assert isinstance(ctx.active_symbol_tokens, dict)
+    assert len(ctx.active_symbol_tokens) == 2
+    assert ctx.degraded_mode is True
+

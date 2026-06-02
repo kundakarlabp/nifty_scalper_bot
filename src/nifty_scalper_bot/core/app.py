@@ -2434,6 +2434,12 @@ class BotContext:
     startup_failed: bool = False
     startup_failure_reason: str | None = None
     startup_failure_exception: str | None = None
+    # Token map for the active basket: symbol -> Zerodha instrument token.
+    # Must be declared here (not set dynamically) because BotContext uses
+    # slots=True which forbids any attribute that is not listed as a field.
+    active_symbol_tokens: dict[str, int] = field(default_factory=dict)
+    # Set True when startup pipeline fails but bot continues in degraded mode.
+    degraded_mode: bool = False
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -7742,8 +7748,7 @@ def _commit_active_dynamic_basket(
     requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
     requested_selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
     requested_selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
-    if not hasattr(ctx, "active_symbol_tokens") or getattr(ctx, "active_symbol_tokens", None) is None:
-        ctx.active_symbol_tokens = {}
+    # active_symbol_tokens is a declared BotContext field (default={}) — no guard needed.
     active_futures_symbol = canonical_nifty_future_symbol(requested_futures_symbol) or _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
