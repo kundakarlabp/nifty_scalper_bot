@@ -1614,12 +1614,18 @@ class MarketDataManager:
         """Validate that a basket is complete enough to become active trading state."""
         missing: list[str] = []
         token_by_symbol = dict(self._basket_get(basket, "token_by_symbol", {}) or {})
+        token_by_canonical_symbol = {self._canonical_active_symbol(sym): token for sym, token in token_by_symbol.items() if sym}
         all_symbols = tuple(str(x) for x in (self._basket_get(basket, "all_symbols", None) or self._basket_get(basket, "symbols", ()) or ()) if x)
         all_tokens = tuple(int(t) for t in (self._basket_get(basket, "all_tokens", ()) or ()) if t)
         option_symbols = tuple(str(x) for x in (self._basket_get(basket, "option_symbols", ()) or ()) if x)
         option_tokens = tuple(int(t) for t in (self._basket_get(basket, "option_tokens", ()) or ()) if t)
         spot_symbol = str(self._basket_get(basket, "spot_symbol", "NSE:NIFTY") or "")
-        spot_token = self._basket_get(basket, "spot_token", None) or token_by_symbol.get(spot_symbol) or token_by_symbol.get(self._canonical_symbol(spot_symbol))
+        spot_token = (
+            self._basket_get(basket, "spot_token", None)
+            or token_by_symbol.get(spot_symbol)
+            or token_by_symbol.get(self._canonical_active_symbol(spot_symbol))
+            or token_by_canonical_symbol.get(self._canonical_active_symbol(spot_symbol))
+        )
         selected_ce = self._basket_get(basket, "selected_ce", None)
         selected_pe = self._basket_get(basket, "selected_pe", None)
 
@@ -1628,7 +1634,14 @@ class MarketDataManager:
                 return None
             sym = str(symbol)
             bare = sym.split(":", 1)[-1]
-            return self._basket_get(basket, explicit_key, None) or token_by_symbol.get(sym) or token_by_symbol.get(bare) or token_by_symbol.get(self._canonical_symbol(sym))
+            canonical_sym = self._canonical_active_symbol(sym)
+            return (
+                self._basket_get(basket, explicit_key, None)
+                or token_by_symbol.get(sym)
+                or token_by_symbol.get(bare)
+                or token_by_symbol.get(canonical_sym)
+                or token_by_canonical_symbol.get(canonical_sym)
+            )
 
         if not spot_symbol:
             missing.append("spot_symbol")

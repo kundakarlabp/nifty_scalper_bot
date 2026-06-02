@@ -267,3 +267,44 @@ async def test_deferred_reseed_deduplicates_inflight_and_clears(monkeypatch) -> 
     await asyncio.sleep(0)
 
     assert mdm._active_basket_reseed_inflight == set()  # noqa: SLF001
+
+
+def test_active_basket_validation_uses_canonical_fallback_without_private_missing_method(monkeypatch) -> None:
+    ws = WS()
+    mdm = MarketDataManager(websocket=ws)
+    assert not hasattr(mdm, "_canonical_symbol") or callable(getattr(mdm, "_canonical_symbol"))
+
+    def _missing_private_canonical_symbol(_symbol: str) -> str:
+        raise AttributeError("_canonical_symbol unavailable")
+
+    monkeypatch.setattr(mdm, "_canonical_symbol", _missing_private_canonical_symbol)
+    selected_ce = "NFO:NIFTY26JUN25000CE"
+    selected_pe = "NFO:NIFTY26JUN25000PE"
+    bare_ce = selected_ce.split(":", 1)[-1]
+    bare_pe = selected_pe.split(":", 1)[-1]
+    payload = {
+        "spot_symbol": "NSE:NIFTY",
+        "spot_token": 256265,
+        "selected_ce": selected_ce,
+        "selected_pe": selected_pe,
+        "option_symbols": [selected_ce, selected_pe],
+        "option_tokens": [11, 12],
+        "all_symbols": ["NSE:NIFTY", selected_ce, selected_pe],
+        "all_tokens": [256265, 11, 12],
+        "token_by_symbol": {
+            "nse:nifty": 256265,
+            selected_ce.lower(): 11,
+            selected_pe.lower(): 12,
+        },
+        "symbol_by_token": {256265: "NSE:NIFTY", 11: selected_ce, 12: selected_pe},
+        "atm_strike": 25000,
+    }
+    assert selected_ce not in payload["token_by_symbol"]
+    assert selected_pe not in payload["token_by_symbol"]
+    assert bare_ce not in payload["token_by_symbol"]
+    assert bare_pe not in payload["token_by_symbol"]
+
+    mdm.set_active_contract_basket(payload)
+
+    assert mdm.get_active_contract_basket() is payload
+    assert set(ws.tokens) == {256265, 11, 12}
