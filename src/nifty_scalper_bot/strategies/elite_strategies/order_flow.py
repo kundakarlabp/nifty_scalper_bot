@@ -188,7 +188,30 @@ class OrderFlowStrategy(EliteStrategy):
                 return None
 
             side_aligns = direction in {'CE', 'PE'} and direction == side
-            side_alignment_ok = direction not in {'CE', 'PE'} or side_aligns
+            # A directional context bias (CE/PE) normally gates the opposite side.
+            # But an intraday reversal makes that bias stale: the slower VWAP/EMA
+            # context still leans one way while live microstructure has already
+            # flipped. When the order book in front of us independently and freshly
+            # confirms the *opposite* side, the stale bias should not veto it.
+            # Confirmation = candidate-side tick support + meaningful same-side depth
+            # imbalance. This is the live-microstructure-beats-stale-lean rule a
+            # scalper applies by hand; it needs no score inflation or near-ATM meta.
+            bias_conflict = direction in {'CE', 'PE'} and not side_aligns
+            min_reversal_imbalance = safe_float_env('ORDERFLOW_REVERSAL_MIN_IMBALANCE', 0.20)
+            # In premium domain, depth_imbalance is on the option's OWN book, so
+            # positive imbalance (more buyers of this option) always confirms the
+            # candidate side. Outside premium domain it is underlying-directional,
+            # so CE wants positive and PE wants negative imbalance.
+            if option_premium_domain:
+                imbalance_confirms = depth_imbalance >= min_reversal_imbalance
+            else:
+                imbalance_confirms = (
+                    (side == 'CE' and depth_imbalance >= min_reversal_imbalance)
+                    or (side == 'PE' and depth_imbalance <= -min_reversal_imbalance)
+                )
+            microstructure_confirms_side = bool(tick_supports and depth_available and imbalance_confirms)
+            bias_invalidated_by_microstructure = bool(bias_conflict and microstructure_confirms_side)
+            side_alignment_ok = (direction not in {'CE', 'PE'}) or side_aligns or bias_invalidated_by_microstructure
             tick_direction_missing = tick_direction not in {'UP', 'DOWN', 'BUY', 'SELL'}
             direction_context_missing = direction not in {'CE', 'PE'}
             allow_without_direction_live = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_WITHOUT_DIRECTION_LIVE', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -199,6 +222,40 @@ class OrderFlowStrategy(EliteStrategy):
                 context_age_ok = age_raw is not None and float(age_raw) <= max_context_age
             except (TypeError, ValueError):
                 context_age_ok = False
+            if bias_invalidated_by_microstructure:
+                LOGGER.info(
+                    'ORDERFLOW_STALE_BIAS_INVALIDATED symbol=%s side=%s stale_bias=%s '
+                    'depth_imbalance=%.3f tick_direction=%s score=%.2f',
+                    symbol, side, direction, depth_imbalance, tick_direction, strategy_score,
+                    extra={
+                        'event': 'ORDERFLOW_STALE_BIAS_INVALIDATED',
+                        'symbol': symbol, 'side': side, 'stale_bias': direction,
+                        'depth_imbalance': round(depth_imbalance, 4),
+                        'tick_direction': tick_direction, 'score': strategy_score,
+                    },
+                )
+            near_atm_threshold = safe_float_env('STRATEGY_NEAR_ATM_THRESHOLD_POINTS', 50.0)
+            selected_meta_available = any(indicators.get(name) is not None for name in ('is_selected_option', 'strike_distance_from_atm', 'selected_ce', 'selected_pe'))
+            selected_or_near_atm = bool(indicators.get('is_selected_option'))
+            if not selected_or_near_atm and indicators.get('strike_distance_from_atm') is not None:
+                try:
+                    selected_or_near_atm = float(indicators.get('strike_distance_from_atm')) <= near_atm_threshold
+                except (TypeError, ValueError):
+                    selected_or_near_atm = False
+            if is_live_mode and not selected_meta_available:
+                selected_or_near_atm = False
+            if bias_invalidated_by_microstructure:
+                LOGGER.info(
+                    'ORDERFLOW_STALE_BIAS_INVALIDATED symbol=%s side=%s stale_bias=%s '
+                    'depth_imbalance=%.3f tick_direction=%s score=%.2f',
+                    symbol, side, direction, depth_imbalance, tick_direction, strategy_score,
+                    extra={
+                        'event': 'ORDERFLOW_STALE_BIAS_INVALIDATED',
+                        'symbol': symbol, 'side': side, 'stale_bias': direction,
+                        'depth_imbalance': round(depth_imbalance, 4),
+                        'tick_direction': tick_direction, 'score': strategy_score,
+                    },
+                )
             trigger_conditions_met = bool(
                 allow_orderflow_trigger
                 and quote_depth_valid
@@ -214,16 +271,6 @@ class OrderFlowStrategy(EliteStrategy):
                 and tick_supports
                 and tick_age_ms <= max_tick_age_ms
             )
-            near_atm_threshold = safe_float_env('STRATEGY_NEAR_ATM_THRESHOLD_POINTS', 50.0)
-            selected_meta_available = any(indicators.get(name) is not None for name in ('is_selected_option', 'strike_distance_from_atm', 'selected_ce', 'selected_pe'))
-            selected_or_near_atm = bool(indicators.get('is_selected_option'))
-            if not selected_or_near_atm and indicators.get('strike_distance_from_atm') is not None:
-                try:
-                    selected_or_near_atm = float(indicators.get('strike_distance_from_atm')) <= near_atm_threshold
-                except (TypeError, ValueError):
-                    selected_or_near_atm = False
-            if is_live_mode and not selected_meta_available:
-                selected_or_near_atm = False
             conflict_override_requested = bool(
                 not side_alignment_ok
                 and strategy_score >= float(os.getenv('ORDERFLOW_CONFLICT_OVERRIDE_MIN_SCORE', '9.0') or '9.0')
@@ -309,6 +356,9 @@ class OrderFlowStrategy(EliteStrategy):
                 'tick_age_ms': tick_age_ms,
                 'quote_update_version': indicators.get('quote_update_version'),
                 'selected_or_near_atm': selected_or_near_atm,
+                'bias_invalidated_by_microstructure': bias_invalidated_by_microstructure,
+                'microstructure_confirms_side': microstructure_confirms_side,
+                'raw_direction_bias': direction if direction in {'CE', 'PE'} else None,
                 'orderflow_conflict_override_requested': conflict_override_requested,
                 'orderflow_conflict_override_applied': conflict_override_applied,
                 'orderflow_conflict_override': conflict_override_applied,

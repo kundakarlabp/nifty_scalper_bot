@@ -1,65 +1,88 @@
+"""OrderFlow adaptive direction-conflict tests.
+
+A stale directional bias must not veto a fresh signal when live microstructure
+(tick + same-side depth imbalance) independently confirms the candidate side.
+"""
+import os
+import pytest
 from nifty_scalper_bot.strategies.elite_strategies.config_models import OrderFlowStrategyConfig
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
 
 
-def _ind(score_high: bool):
-    buy_qty = 300 if score_high else 180
-    sell_qty = 100
-    return {
-        "bid": 100.0,
-        "ask": 100.5,
-        "spread_pct": 0.5,
-        "depth": {"buy": [{"quantity": buy_qty}], "sell": [{"quantity": sell_qty}]},
-        "tick_direction": "UP",
-        "direction_bias": "PE",
-        "atr": 2.0,
-        "data_age_seconds": 0.1,
-        "context_age_seconds": 1.0,
-        "tick_age_ms": 100,
-        "quote_depth_valid": True,
-        "tradable_quote": True,
-        "is_selected_option": True,
-        "strike_distance_from_atm": 0,
+def _ind(bias, tick, buy, sell, **kw):
+    d = {
+        "bid": 100.0, "ask": 100.25, "spread_pct": 0.24,
+        "depth": {"buy": [{"quantity": buy}], "sell": [{"quantity": sell}]},
+        "tick_direction": tick, "direction_bias": bias, "atr": 2.0,
+        "data_age_seconds": 0.1, "context_age_seconds": 1.0, "tick_age_ms": 100,
+        "quote_depth_valid": True, "tradable_quote": True,
+        "is_selected_option": True, "strike_distance_from_atm": 0,
     }
+    d.update(kw)
+    return d
 
 
-def test_orderflow_direction_conflict_score_eight_remains_blocked(monkeypatch):
+@pytest.fixture
+def strat():
+    return OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
+
+
+def _eval(strat, sym, ind):
+    return strat._evaluate_signal(sym, ind, current_price=100.1)
+
+
+# A. Stale PE bias + CE candidate WITHOUT confirming microstructure -> blocked
+def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
-
-    signal = strategy._evaluate_signal("NFO:NIFTY26MAY24000CE", _ind(score_high=False), current_price=100.2)
-
-    assert signal is not None
-    assert signal.metadata["trigger_conditions_met"] is False
-    assert signal.metadata["trigger_block_reason"] == "direction_bias_conflict"
-    assert signal.metadata["strategy_score"] == 8.0
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=150, sell=140))
+    assert sig.metadata["trigger_conditions_met"] is False
+    assert sig.metadata["trigger_block_reason"] == "direction_bias_conflict"
+    assert sig.metadata["bias_invalidated_by_microstructure"] is False
 
 
-def test_orderflow_high_conviction_conflict_override_requires_depth_tick_and_near_atm(monkeypatch):
+# B. Stale PE bias + CE candidate WITH confirming microstructure -> allowed
+def test_stale_pe_strong_micro_ce_allowed(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
-
-    signal = strategy._evaluate_signal("NFO:NIFTY26MAY24000CE", _ind(score_high=True), current_price=100.2)
-
-    assert signal is not None
-    assert signal.metadata["strategy_score"] >= 9.0
-    assert signal.metadata["trigger_conditions_met"] is True
-    assert signal.metadata["orderflow_conflict_override"] is True
-    assert signal.metadata["conflict_override_reason"] == "high_conviction_depth_spread_tick_near_atm"
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=400, sell=80))
+    assert sig.metadata["trigger_conditions_met"] is True
+    assert sig.metadata["bias_invalidated_by_microstructure"] is True
 
 
-def test_orderflow_override_requested_vs_applied(monkeypatch):
+# C. Reversal down: stale CE bias + PE candidate with confirming PE demand -> allowed
+def test_stale_ce_strong_micro_pe_allowed(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
-    indicators = _ind(score_high=True)
-    indicators["tradable_quote"] = False
+    sig = _eval(strat, "NFO:NIFTY26MAY24000PE", _ind("CE", "UP", buy=400, sell=80))
+    assert sig.metadata["trigger_conditions_met"] is True
+    assert sig.metadata["bias_invalidated_by_microstructure"] is True
 
-    signal = strategy._evaluate_signal("NFO:NIFTY26MAY24000CE", indicators, current_price=100.2)
 
-    assert signal is not None
-    assert signal.metadata["orderflow_conflict_override_requested"] is True
-    assert signal.metadata["orderflow_conflict_override_applied"] is False
-    assert signal.metadata["orderflow_conflict_override"] is False
-    assert signal.metadata["conflict_override_reason"] == ""
-    assert signal.metadata["trigger_conditions_met"] is False
-    assert signal.metadata["trigger_block_reason"] == "tradable_quote_false"
+# D. Tick contradicts candidate side -> not invalidated -> blocked
+def test_tick_contradicts_blocked(monkeypatch, strat):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "DOWN", buy=400, sell=80))
+    assert sig.metadata["trigger_conditions_met"] is False
+    assert sig.metadata["bias_invalidated_by_microstructure"] is False
+
+
+# E. Aligned bias (CE bias, CE candidate) -> allowed normally, not via invalidation
+def test_aligned_bias_allowed_normally(monkeypatch, strat):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80))
+    assert sig.metadata["trigger_conditions_met"] is True
+    assert sig.metadata["bias_invalidated_by_microstructure"] is False
+
+
+# F. Below default imbalance threshold -> not confirmed -> blocked
+def test_below_imbalance_threshold_blocked(monkeypatch, strat):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # imbalance (210-180)/390 = 0.077 < 0.20 default -> not confirmed
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=210, sell=180))
+    assert sig.metadata["bias_invalidated_by_microstructure"] is False
+    assert sig.metadata["trigger_conditions_met"] is False
+
+
+# G. No directional bias at all -> not gated by conflict
+def test_no_bias_not_conflict_gated(monkeypatch, strat):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
+    assert sig.metadata["trigger_block_reason"] != "direction_bias_conflict"
