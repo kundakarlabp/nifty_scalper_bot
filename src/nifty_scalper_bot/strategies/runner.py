@@ -1578,13 +1578,38 @@ class StrategyRunner:
                     source=source,
                 )
                 if after < self._context_required_bars:
-                    self._logger.warning(
-                        "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
-                        ctx_symbol,
-                        source,
-                        "insufficient_cached_bars",
-                        extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": ctx_symbol, "source": source, "error": "insufficient_cached_bars", "indicator_history_count": after, "required_bars": self._context_required_bars},
-                    )
+                    # _sync_history_from_mdm_cache already dispatched an async REST
+                    # hydration request. On the first few cold passes that fetch is
+                    # simply still in flight — not a failure. Track consecutive cold
+                    # passes per symbol and only escalate to a warning once the
+                    # hydration has had time to land; otherwise log a quiet pending.
+                    cold_passes = getattr(self, "_context_cold_passes", None)
+                    if cold_passes is None:
+                        cold_passes = {}
+                        self._context_cold_passes = cold_passes
+                    cold_passes[ctx_symbol] = cold_passes.get(ctx_symbol, 0) + 1
+                    grace = safe_positive_int_env("CONTEXT_HISTORY_COLD_GRACE_PASSES", 3, minimum=1)
+                    if cold_passes[ctx_symbol] <= grace:
+                        log_throttled(
+                            self._logger,
+                            f"context_history_pending:{ctx_symbol}",
+                            "CONTEXT_HISTORY_HYDRATION_PENDING symbol=%s source=%s have=%d need=%d pass=%d",
+                            ctx_symbol, source, after, self._context_required_bars, cold_passes[ctx_symbol],
+                            interval_sec=10.0,
+                            extra={"event": "CONTEXT_HISTORY_HYDRATION_PENDING", "symbol": ctx_symbol, "source": source, "indicator_history_count": after, "required_bars": self._context_required_bars, "cold_pass": cold_passes[ctx_symbol]},
+                        )
+                    else:
+                        self._logger.warning(
+                            "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
+                            ctx_symbol,
+                            source,
+                            "insufficient_cached_bars",
+                            extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": ctx_symbol, "source": source, "error": "insufficient_cached_bars", "indicator_history_count": after, "required_bars": self._context_required_bars, "cold_pass": cold_passes[ctx_symbol]},
+                        )
+                else:
+                    cold_passes = getattr(self, "_context_cold_passes", None)
+                    if cold_passes is not None:
+                        cold_passes.pop(ctx_symbol, None)
             except Exception as exc:  # noqa: BLE001 - keep evaluation safely blocked with diagnostics
                 self._logger.warning(
                     "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
