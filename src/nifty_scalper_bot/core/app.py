@@ -7807,24 +7807,20 @@ def _commit_active_dynamic_basket(
     selected_pe = str(raw_selected_pe or picked_pe or "") or None
     active_set = set(current_options) | set(current_symbols)
     def _nearest_for_side(side: str) -> str | None:
+        from nifty_scalper_bot.core.active_basket import extract_symbol_strike
         candidates: list[tuple[float, str]] = []
         fallback: list[str] = []
         for sym in current_options:
             if not sym.endswith(side):
                 continue
-            strike_digits = ""
-            for char in reversed(sym[:-2]):
-                if char.isdigit():
-                    strike_digits = char + strike_digits
-                elif strike_digits:
-                    break
-            if not strike_digits:
+            strike = extract_symbol_strike(sym)
+            if strike is None:
                 fallback.append(sym)
                 continue
             if atm_strike is None:
                 candidates.append((0.0, sym))
             else:
-                candidates.append((abs(float(strike_digits) - float(atm_strike)), sym))
+                candidates.append((abs(float(strike) - float(atm_strike)), sym))
         if not candidates:
             return sorted(fallback)[0] if fallback else None
         candidates.sort(key=lambda item: (item[0], item[1]))
@@ -7927,6 +7923,14 @@ def _commit_active_dynamic_basket(
             "committed_at": datetime.now(timezone.utc).isoformat(),
         }
     )
+    # Carry token fields from the incoming basket (built by _build_canonical_active_basket
+    # which now populates token_by_symbol / all_tokens / all_symbols).  These must
+    # survive the update so the token-map resolution step below finds them.
+    for _token_key in ("token_by_symbol", "all_tokens", "all_symbols",
+                       "selected_ce_token", "selected_pe_token", "option_tokens"):
+        _val = basket.get(_token_key)
+        if _val is not None:
+            committed[_token_key] = _val
     ctx.active_trading_universe = committed
     ctx.active_contract_basket = committed
     runner = getattr(ctx, "strategy_runner", None)
@@ -7939,14 +7943,17 @@ def _commit_active_dynamic_basket(
     mdm = getattr(ctx, "market_data_manager", None)
     token_map = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
     if not token_map:
-        token_map = resolve_active_basket_tokens(ctx, [str(sym) for sym in committed.get("symbols", []) if sym], selected_ce, selected_pe)
-    else:
-        LOGGER.info(
-            "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
-            len(token_map),
-            token_map.get(selected_ce or ""),
-            token_map.get(selected_pe or ""),
+        LOGGER.warning(
+            "ACTIVE_BASKET_TOKEN_MAP_FALLBACK reason=token_by_symbol_missing_in_basket resolving_via_instrument_manager",
+            extra={"event": "ACTIVE_BASKET_TOKEN_MAP_FALLBACK", "reason": "token_by_symbol_missing_in_basket"},
         )
+        token_map = resolve_active_basket_tokens(ctx, [str(sym) for sym in committed.get("symbols", []) if sym], selected_ce, selected_pe)
+    LOGGER.info(
+        "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
+        len(token_map),
+        token_map.get(selected_ce or ""),
+        token_map.get(selected_pe or ""),
+    )
     ctx.active_symbol_tokens = token_map
     committed["token_by_symbol"] = token_map
     if mdm is not None and token_map:

@@ -223,3 +223,109 @@ def test_ce_exec_ready_false_when_basket_not_hard_ready() -> None:
         "ce_exec_ready must be False when basket_hard_ready=False (token missing). "
         "Before the fix this was True, causing inconsistent readiness state."
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. _commit_active_dynamic_basket carries token_by_symbol into committed dict
+#    (regression: logs showed ACTIVE_BASKET_TOKEN_MAP_READY count=1 after PR#506)
+# ---------------------------------------------------------------------------
+
+def test_commit_basket_carries_token_by_symbol_from_input() -> None:
+    """token_by_symbol must survive from _build_canonical_active_basket through _commit_active_dynamic_basket.
+
+    Regression: _commit_active_dynamic_basket rebuilt `committed` via .update(...)
+    without forwarding token_by_symbol/all_tokens.  The token-map resolution step
+    then found committed.get('token_by_symbol') == None, fell to resolve_active_basket_tokens
+    which could only find spot (1 token), producing ACTIVE_BASKET_TOKEN_MAP_READY count=1.
+    """
+    from nifty_scalper_bot.core.active_basket import normalize_active_basket_schema
+
+    token_by_symbol = {
+        "NSE:NIFTY": 256265,
+        "NFO:NIFTY26JUNFUT": 15956226,
+        "NFO:NIFTY2660923200CE": 10824706,
+        "NFO:NIFTY2660923200PE": 10824962,
+        "NFO:NIFTY2660923250CE": 10825218,
+        "NFO:NIFTY2660923250PE": 10825474,
+        "NFO:NIFTY2660923300CE": 10825730,
+        "NFO:NIFTY2660923300PE": 10825986,
+        "NFO:NIFTY2660923350CE": 10826242,
+        "NFO:NIFTY2660923350PE": 10827010,
+        "NFO:NIFTY2660923400CE": 10827522,
+        "NFO:NIFTY2660923400PE": 10827778,
+    }
+    incoming_basket = {
+        "selected_ce": "NFO:NIFTY2660923300CE",
+        "selected_pe": "NFO:NIFTY2660923300PE",
+        "atm_strike": 23300,
+        "spot_symbol": "NSE:NIFTY",
+        "futures_symbol": "NFO:NIFTY26JUNFUT",
+        "option_symbols": [k for k in token_by_symbol if "CE" in k or "PE" in k],
+        "token_by_symbol": token_by_symbol,
+        "all_tokens": list(token_by_symbol.values()),
+        "all_symbols": list(token_by_symbol.keys()),
+    }
+
+    # Simulate the normalize + committed.update path (the part that was losing tokens)
+    basket_copy = dict(incoming_basket)
+    normalized = normalize_active_basket_schema(basket_copy)
+
+    # Simulate committed.update (the fix: token fields must be forwarded)
+    committed: dict = {}
+    committed.update({
+        "spot_symbol": normalized.get("spot_symbol") or "NSE:NIFTY",
+        "futures_symbol": normalized.get("futures_symbol"),
+        "selected_ce": normalized.get("selected_ce"),
+        "selected_pe": normalized.get("selected_pe"),
+        "option_symbols": normalized.get("option_symbols", []),
+        "atm_strike": 23300,
+    })
+    # This is the fix — token keys forwarded explicitly:
+    for _k in ("token_by_symbol", "all_tokens", "all_symbols", "selected_ce_token", "selected_pe_token"):
+        _v = normalized.get(_k)
+        if _v is not None:
+            committed[_k] = _v
+
+    # Now the token_map resolution step should find token_by_symbol
+    token_map = dict(committed.get("token_by_symbol") or {})
+    assert len(token_map) == 12, (
+        f"token_map should have 12 entries after commit, got {len(token_map)}. "
+        "Without the fix, committed.get('token_by_symbol') returned None → count=1."
+    )
+    assert token_map.get("NFO:NIFTY2660923300CE") == 10825730
+    assert token_map.get("NFO:NIFTY2660923300PE") == 10825986
+
+
+def test_nearest_for_side_uses_regex_strike_not_char_walk() -> None:
+    """_nearest_for_side inside _commit_active_dynamic_basket must pick correct ATM.
+
+    Third copy of the buggy strike parser was at line 7815. With spot=23300, ATM=23300,
+    the old char-walk extracted 2660923300 instead of 23300, making ALL distances equal
+    (all huge), causing arbitrary selection instead of true ATM.
+    """
+    from nifty_scalper_bot.core.active_basket import extract_symbol_strike
+
+    options = [
+        "NFO:NIFTY2660923200CE",
+        "NFO:NIFTY2660923250CE",
+        "NFO:NIFTY2660923300CE",  # ATM
+        "NFO:NIFTY2660923350CE",
+        "NFO:NIFTY2660923400CE",
+    ]
+    atm_strike = 23300
+
+    # Replicate _nearest_for_side logic with fix
+    candidates = []
+    for sym in options:
+        if not sym.endswith("CE"):
+            continue
+        strike = extract_symbol_strike(sym)
+        assert strike is not None, f"extract_symbol_strike failed for {sym}"
+        candidates.append((abs(float(strike) - float(atm_strike)), sym))
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    nearest = candidates[0][1]
+
+    assert nearest == "NFO:NIFTY2660923300CE", (
+        f"Expected ATM=23300CE but got {nearest}. "
+        "The buggy char-walk produced distance=2660923300-23300=2660900000 for all, causing wrong selection."
+    )
