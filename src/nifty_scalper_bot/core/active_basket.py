@@ -22,24 +22,39 @@ _OPTION_STRIKE_RE = re.compile(r"(?P<strike>\d{4,6})(?:CE|PE)$", re.IGNORECASE)
 
 
 def extract_symbol_strike(symbol: str) -> int | None:
-    """Extract option strike from a Zerodha option symbol.
+    """Extract option strike from Zerodha NIFTY option symbols.
 
-    Uses a regex anchored to the CE/PE suffix so the expiry code embedded
-    before the strike is never included in the result.
-
-    Args:
-        symbol: e.g. ``NFO:NIFTY2660923500CE`` or bare ``NIFTY2660923500CE``.
-
-    Returns:
-        Strike as int (e.g. 23500), or None when not parseable.
-
-    Raises:
-        None.
+    Examples:
+    - NFO:NIFTY2660923450CE -> 23450
+    - NFO:NIFTY2660923500PE -> 23500
+    - NFO:NIFTY26JUN23950CE -> 23950
     """
-    # Strip exchange prefix, then apply regex.
-    bare = symbol.split(":")[-1]
-    match = _OPTION_STRIKE_RE.search(bare)
-    return int(match.group("strike")) if match else None
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return None
+
+    bare = raw.split(":")[-1]
+    if not (bare.endswith("CE") or bare.endswith("PE")):
+        return None
+
+    body = bare[:-2]
+    match = re.search(r"(\d+)$", body)
+    if not match:
+        return None
+
+    digits = match.group(1)
+
+    if len(digits) >= 5:
+        strike = int(digits[-5:])
+        if 10000 <= strike <= 50000 and strike % 50 == 0:
+            return strike
+
+    if len(digits) >= 4:
+        strike = int(digits[-4:])
+        if 1000 <= strike <= 9999 and strike % 50 == 0:
+            return strike
+
+    return None
 
 
 def pick_atm_option_symbols_from_basket(
