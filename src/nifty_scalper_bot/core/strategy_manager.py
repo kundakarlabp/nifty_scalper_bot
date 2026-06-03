@@ -3911,9 +3911,19 @@ class StrategyManager(_BaseStrategyManager):
             metadata["selected_ok_reason"] = selected_ok_reason
             threshold_passed = bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed)
             high_conviction_allowed = bool(raw_trigger_score >= single_high and selected_ok and not vetoed)
-            scalp_fallback_allowed = bool(allow_scalp_single and threshold_passed)
+            # A single trigger on the actually-SELECTED ATM option that already
+            # cleared score/confidence/veto gates is the core scalp this platform
+            # exists to take. Allow it without the global scalp flag, since
+            # selected_option is a stronger guarantee than mere near_atm.
+            selected_option_scalp_allowed = bool(threshold_passed and selected_option)
+            scalp_fallback_allowed = bool((allow_scalp_single and threshold_passed) or selected_option_scalp_allowed)
             final_allowed = bool(high_conviction_allowed or scalp_fallback_allowed)
-            approval_path_single = "single_vote_high_conviction" if high_conviction_allowed else "single_vote_fallback" if scalp_fallback_allowed else None
+            approval_path_single = (
+                "single_vote_high_conviction" if high_conviction_allowed
+                else "single_vote_selected_option" if selected_option_scalp_allowed
+                else "single_vote_fallback" if scalp_fallback_allowed
+                else None
+            )
             blocked_reason = None
             if not final_allowed:
                 if threshold_passed and not allow_scalp_single:
