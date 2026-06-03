@@ -7493,7 +7493,18 @@ class StrategyRunner:
         details["direction_bias"] = direction_bias
         details["underlying_direction_bias"] = ctx.get("underlying_direction_bias")
         if direction_bias in {"CE", "PE"} and contract_side in {"CE", "PE"} and direction_bias != contract_side:
-            return False, "context_direction_conflict", details
+            # A stale directional bias must not hard-block an entry when the
+            # OrderFlow signal already cleared its own (microstructure-aware) gate.
+            # OrderFlow sets trigger_conditions_met=True only after confirming the
+            # candidate side via live tick + depth, so trust that here.
+            meta = (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+            orderflow_confirmed = bool(
+                meta.get("trigger_conditions_met")
+                or meta.get("bias_invalidated_by_microstructure")
+            )
+            if not orderflow_confirmed:
+                return False, "context_direction_conflict", details
+            details["context_direction_conflict_overridden"] = True
         required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
         history_count = len(self._indicator_engine.get_history(symbol) or [])
         details["history_count"] = history_count
