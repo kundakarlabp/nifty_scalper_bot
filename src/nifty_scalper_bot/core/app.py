@@ -3208,15 +3208,9 @@ def _get_symbols(
         return []
 
     global _LATEST_CTX
-    universe = option_universe
-    if universe is None:
-        settings = getattr(_LATEST_CTX, "settings", None)
-        universe_config = getattr(settings, "option_universe", {})
-        universe = OptionUniverseManager(universe_config)
-
-    universe.update_underlying(float(ltp))
-    final_symbols = universe.get_filtered_universe(float(ltp))
-
+    # Options are resolved directly from the InstrumentManager (SSOT) below.
+    # The legacy OptionUniverseManager build is disabled in live mode (raises by
+    # design) and its result was overwritten here anyway, so it is removed.
     if resolver is None:
         LOGGER.error("Strategy skipped — instrument resolver unavailable")
         return []
