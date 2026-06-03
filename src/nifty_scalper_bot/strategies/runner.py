@@ -43,6 +43,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.core.active_basket import extract_symbol_strike
 from nifty_scalper_bot.core.event_bus import EventBus
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
@@ -757,6 +758,8 @@ class StrategyRunner:
         self._selected_pe_symbol: str | None = None
         self._active_atm_strike: int | None = None
         self._active_option_symbols: set[str] = set()
+        self._active_basket_all_symbols: set[str] = set()
+        self._active_basket_token_by_symbol: dict[str, int] = {}
         self._selected_option_prewarm_inflight: set[str] = set()
         self._selected_option_prewarm_last: dict[str, float] = {}
         self._selected_option_prewarm_cooldown_s = max(1.0, float(os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS", "45") or 45))
@@ -2537,6 +2540,16 @@ class StrategyRunner:
             normalized = normalize_symbol(str(sym))
             if normalized.endswith(("CE", "PE")):
                 option_symbols.append(normalized)
+        all_symbols_raw = basket.get("all_symbols") or basket.get("symbols") or raw_symbols
+        self._active_basket_all_symbols = {
+            normalize_symbol(str(sym)) for sym in (all_symbols_raw or []) if sym
+        }
+        token_map = basket.get("token_by_symbol") or {}
+        self._active_basket_token_by_symbol = {
+            normalize_symbol(str(sym)): int(token)
+            for sym, token in dict(token_map).items()
+            if sym and token not in (None, "")
+        }
         futures_symbol = normalize_symbol(str(basket.get("futures_symbol") or ""))
         previous_futures = normalize_symbol(str(getattr(self, "_active_futures_symbol", "") or ""))
         self._active_futures_symbol = futures_symbol or None
@@ -7332,6 +7345,87 @@ class StrategyRunner:
             },
         )
 
+    def _live_entry_candidate_eligibility(
+        self,
+        symbol: str,
+        *,
+        direction_bias: str | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Return executable-candidate eligibility for selected or near-ATM active-basket options."""
+        symbol_norm = normalize_symbol(symbol)
+        selected_ce = normalize_symbol(str(getattr(self, "_active_selected_ce", "") or ""))
+        selected_pe = normalize_symbol(str(getattr(self, "_active_selected_pe", "") or ""))
+        selected_set = {item for item in (selected_ce, selected_pe) if item}
+        is_selected_option = symbol_norm in selected_set
+        active_option_symbols = {
+            normalize_symbol(str(item))
+            for item in (getattr(self, "_active_option_symbols", set()) or set())
+            if item
+        }
+        all_symbols = {
+            normalize_symbol(str(item))
+            for item in (getattr(self, "_active_basket_all_symbols", set()) or set())
+            if item
+        }
+        token_symbols = set(getattr(self, "_active_basket_token_by_symbol", {}) or {})
+        in_active_basket = symbol_norm in active_option_symbols or symbol_norm in all_symbols or symbol_norm in token_symbols
+        candidate_strike = self._extract_strike_from_symbol(symbol_norm)
+        active_atm = getattr(self, "_active_atm_strike", None)
+        try:
+            atm_strike = int(float(active_atm)) if active_atm not in (None, "") else None
+        except (TypeError, ValueError):
+            atm_strike = None
+        max_allowed_distance = safe_positive_float_env(
+            "LIVE_ENTRY_MAX_NEAR_ATM_DISTANCE",
+            safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 50.0, minimum=0.0),
+            minimum=0.0,
+        )
+        strike_distance = None
+        if candidate_strike is not None and atm_strike is not None:
+            strike_distance = abs(float(candidate_strike) - float(atm_strike))
+        near_atm = strike_distance is not None and strike_distance <= max_allowed_distance
+        contract_side = self._contract_side_from_symbol(symbol_norm)
+        bias = str(direction_bias or "").upper()
+        details: dict[str, Any] = {
+            "candidate_symbol": symbol_norm,
+            "candidate_strike": candidate_strike,
+            "atm_strike": atm_strike,
+            "active_atm_strike": atm_strike,
+            "strike_distance": strike_distance,
+            "distance_from_atm": strike_distance,
+            "max_allowed_distance": max_allowed_distance,
+            "allowed_distance": max_allowed_distance,
+            "in_active_basket": in_active_basket,
+            "is_selected_option": is_selected_option,
+            "selected_option": is_selected_option,
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "eligibility_source": None,
+            "near_atm": near_atm,
+            "contract_side": contract_side,
+            "direction_bias": bias,
+            "strike_step": 50,
+        }
+        if bias in {"CE", "PE"} and contract_side in {"CE", "PE"} and bias != contract_side:
+            return False, "context_direction_conflict", details
+        if is_selected_option:
+            details["eligibility_source"] = "selected_option"
+            return True, "candidate_selected_option", details
+        if _env_flag("LIVE_ENTRY_SELECTED_ONLY", False):
+            details["eligibility_source"] = "selected_only_policy"
+            return False, "non_executable_candidate", details
+        if not in_active_basket:
+            details["eligibility_source"] = "active_basket_missing"
+            return False, "candidate_not_in_active_basket", details
+        if candidate_strike is None or atm_strike is None:
+            details["eligibility_source"] = "distance_unknown"
+            return False, "candidate_distance_unknown", details
+        if near_atm:
+            details["eligibility_source"] = "active_basket_near_atm"
+            return True, "candidate_active_basket_near_atm", details
+        details["eligibility_source"] = "outside_near_atm_window"
+        return False, "candidate_not_selected_or_near_atm", details
+
     def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
         def _resolve_live_entry_atm_reference(context: Mapping[str, Any]) -> int | None:
             active = getattr(self, "_active_atm_strike", None)
@@ -7416,33 +7510,12 @@ class StrategyRunner:
         if ctx_age is not None and ctx_age > max_context_age:
             return False, "context_stale", details
         symbol_norm = normalize_symbol(symbol)
-        strike = self._extract_strike_from_symbol(symbol_norm)
-        details["strike"] = strike
-        selected_set = {normalize_symbol(str(self._active_selected_ce or "")), normalize_symbol(str(self._active_selected_pe or ""))}
-        selected_set.discard("")
-        selected_option = symbol_norm in selected_set
-        near_atm = False
-        near_atm_threshold = safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 50.0, minimum=0.0)
-        details["near_atm_threshold"] = near_atm_threshold
-        active_atm_strike = getattr(self, "_active_atm_strike", None)
-        details["active_atm_strike"] = active_atm_strike
-        if strike is not None and active_atm_strike is not None:
-            try:
-                near_atm = abs(float(strike) - float(active_atm_strike)) <= near_atm_threshold
-            except (TypeError, ValueError):
-                near_atm = False
-        details["selected_option"] = selected_option
-        details["near_atm"] = near_atm
-        details["candidate_symbol"] = symbol_norm
-        details["selected_ce"] = normalize_symbol(str(self._active_selected_ce or ""))
-        details["selected_pe"] = normalize_symbol(str(self._active_selected_pe or ""))
-        details["candidate_strike"] = strike
-        details["distance_from_atm"] = abs(float(strike) - float(active_atm_strike)) if strike is not None and active_atm_strike is not None else None
-        details["allowed_distance"] = near_atm_threshold
-        if strike is None and not selected_option:
-            self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_distance_unknown", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_distance_unknown", **details})
-            return False, "candidate_distance_unknown", details
-        if not (selected_option or near_atm):
+        eligible, eligibility_reason, eligibility_details = self._live_entry_candidate_eligibility(
+            symbol_norm,
+            direction_bias=direction_bias,
+        )
+        details.update(eligibility_details)
+        if not eligible and eligibility_reason in {"candidate_not_selected_or_near_atm", "candidate_distance_unknown", "candidate_not_in_active_basket"}:
             metadata = (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
             trigger_evidence = bool(
                 metadata.get("trigger_conditions_met")
@@ -7458,20 +7531,33 @@ class StrategyRunner:
                 details["candidate_refresh_attempted"] = True
                 details["candidate_refresh_succeeded"] = refreshed
                 if refreshed:
-                    selected_set = {normalize_symbol(str(self._active_selected_ce or "")), normalize_symbol(str(self._active_selected_pe or ""))}
-                    selected_set.discard("")
-                    selected_option = symbol_norm in selected_set
-                    active_atm_strike = getattr(self, "_active_atm_strike", None)
-                    if strike is not None and active_atm_strike is not None:
-                        try:
-                            near_atm = abs(float(strike) - float(active_atm_strike)) <= near_atm_threshold
-                        except (TypeError, ValueError):
-                            near_atm = False
-                    details["selected_option"] = selected_option
-                    details["near_atm"] = near_atm
-            if not (selected_option or near_atm):
-                self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_not_selected_or_near_atm", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_not_selected_or_near_atm", **details})
-                return False, "candidate_not_selected_or_near_atm", details
+                    eligible, eligibility_reason, eligibility_details = self._live_entry_candidate_eligibility(
+                        symbol_norm,
+                        direction_bias=direction_bias,
+                    )
+                    details.update(eligibility_details)
+        if not eligible:
+            if eligibility_reason == "candidate_not_selected_or_near_atm":
+                self._logger.info(
+                    "LIVE_ENTRY_CANDIDATE_REJECTED reason=%s candidate_strike=%s atm_strike=%s strike_distance=%s max_allowed_distance=%s in_active_basket=%s is_selected_option=%s",
+                    eligibility_reason,
+                    details.get("candidate_strike"),
+                    details.get("atm_strike"),
+                    details.get("strike_distance"),
+                    details.get("max_allowed_distance"),
+                    details.get("in_active_basket"),
+                    details.get("is_selected_option"),
+                    extra={"event": "LIVE_ENTRY_CANDIDATE_REJECTED", "reason": eligibility_reason, **details},
+                )
+            else:
+                self._logger.info(
+                    "CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s",
+                    symbol,
+                    False,
+                    eligibility_reason,
+                    extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": eligibility_reason, **details},
+                )
+            return False, eligibility_reason, details
         quote = self._get_cached_quote_for_live_entry(symbol_norm)
         if not quote:
             details["tradable_quote"] = False
@@ -9366,6 +9452,32 @@ class StrategyRunner:
                     if not self._strategy_evaluation_allowed(symbol, trace_id):
                         return
                     if self._is_tradable_symbol(symbol):
+                        selected_only_bias = str(
+                            (getattr(self, "_runtime_indicators", {}) or {}).get(symbol, {}).get("underlying_direction_bias")
+                            or (getattr(self, "_runtime_indicators", {}) or {}).get(symbol, {}).get("direction_bias")
+                            or ""
+                        ).upper()
+                        selected_only_ok, selected_only_reason, selected_only_details = self._live_entry_candidate_eligibility(
+                            symbol,
+                            direction_bias=selected_only_bias,
+                        )
+                        if _env_flag("LIVE_ENTRY_SELECTED_ONLY", False) and not selected_only_ok:
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason=selected_only_reason,
+                                allowed=False,
+                                trace_id=trace_id,
+                                **selected_only_details,
+                            )
+                            self._logger.info(
+                                "RUNNER_EVAL_SKIPPED_NON_EXECUTABLE_CANDIDATE symbol=%s reason=%s trace_id=%s",
+                                symbol,
+                                selected_only_reason,
+                                trace_id,
+                                extra={"event": "RUNNER_EVAL_SKIPPED_NON_EXECUTABLE_CANDIDATE", "symbol": symbol, "reason": selected_only_reason, "trace_id": trace_id, **selected_only_details},
+                            )
+                            return
                         self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     log_throttled(
                         self._logger,
@@ -12701,20 +12813,8 @@ class StrategyRunner:
 
     @staticmethod
     def _extract_strike_from_symbol(symbol: str) -> int | None:
-        """Extract option strike. Args: symbol. Returns: strike or None. Raises: none."""
-        raw = str(symbol or "").strip().upper()
-        if not raw:
-            return None
-        if ":" in raw:
-            raw = raw.split(":", 1)[1]
-        raw = raw.replace("_", "").replace("-", "").replace(" ", "")
-        match = re.search(r"(\d{4,6})(CE|PE)$", raw)
-        if not match:
-            return None
-        try:
-            return int(match.group(1))
-        except ValueError:
-            return None
+        """Extract option strike via active-basket SSOT parser."""
+        return extract_symbol_strike(str(symbol or ""))
 
     def _stale_tick_threshold_for_symbol(self, symbol: str) -> float:
         """Return configured stale threshold for symbol type."""

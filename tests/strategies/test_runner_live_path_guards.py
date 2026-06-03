@@ -281,7 +281,7 @@ def test_phase10_no_runtime_indicators_attribute_logs_clean_block_not_runner_err
     if hasattr(runner, "_runtime_indicators"):
         delattr(runner, "_runtime_indicators")
     with caplog.at_level(logging.INFO):
-        ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", trace_id="phase10-guard")
+        ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23850PE", trace_id="phase10-guard")
         runner._reject_signal_execution(
             symbol="NFO:NIFTY26JUN23800PE",
             trace_id="phase10-guard",
@@ -295,6 +295,138 @@ def test_phase10_no_runtime_indicators_attribute_logs_clean_block_not_runner_err
     assert "SIGNAL_EXECUTION_RESULT" in events
 
 
+def _prime_live_entry_runner(runner: StrategyRunner, *, symbol: str, side: str = "CE") -> None:
+    runner._runtime_live_orders_armed = True
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._required_bars_for_symbol = lambda _s: 1
+    runner._indicator_engine.get_history = lambda _s: [1, 2, 3, 4, 5]
+    runner._is_option_symbol_tick_fresh = lambda *_a, **_k: True
+    runner._runtime_indicators = {symbol: {"direction_bias": side, "context_age_seconds": 1.0}}
+    runner._get_cached_quote_for_live_entry = lambda _s: {
+        "tradable_quote": True,
+        "depth_available": True,
+        "bid": 100.0,
+        "ask": 100.2,
+    }
+
+
+def test_selected_ce_passes_live_entry_eligibility(monkeypatch) -> None:
+    monkeypatch.delenv("LIVE_ENTRY_SELECTED_ONLY", raising=False)
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
+    runner._active_atm_strike = 23900
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="selected-ce")
+
+    assert ready is True
+    assert reason == "symbol_live_ready"
+    assert details["is_selected_option"] is True
+    assert details["eligibility_source"] == "selected_option"
+
+
+def test_selected_pe_passes_live_entry_eligibility(monkeypatch) -> None:
+    monkeypatch.delenv("LIVE_ENTRY_SELECTED_ONLY", raising=False)
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900PE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="PE")
+    runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
+    runner._active_selected_pe = symbol
+    runner._active_option_symbols = {"NFO:NIFTY26JUN23900CE", symbol}
+    runner._active_atm_strike = 23900
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="selected-pe")
+
+    assert ready is True
+    assert reason == "symbol_live_ready"
+    assert details["is_selected_option"] is True
+    assert details["eligibility_source"] == "selected_option"
+
+
+def test_active_basket_one_strike_near_atm_passes_live_entry_eligibility(monkeypatch) -> None:
+    monkeypatch.delenv("LIVE_ENTRY_SELECTED_ONLY", raising=False)
+    monkeypatch.setenv("LIVE_ENTRY_MAX_NEAR_ATM_DISTANCE", "50")
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23950CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {"NFO:NIFTY26JUN23900CE", "NFO:NIFTY26JUN23900PE", symbol}
+    runner._active_atm_strike = 23900
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="near-atm-active")
+
+    assert ready is True
+    assert reason == "symbol_live_ready"
+    assert details["in_active_basket"] is True
+    assert details["is_selected_option"] is False
+    assert details["candidate_strike"] == 23950
+    assert details["atm_strike"] == 23900
+    assert details["strike_distance"] == 50.0
+    assert details["max_allowed_distance"] == 50.0
+    assert details["eligibility_source"] == "active_basket_near_atm"
+
+
+def test_active_basket_outside_near_atm_fails_live_entry_eligibility(monkeypatch) -> None:
+    monkeypatch.delenv("LIVE_ENTRY_SELECTED_ONLY", raising=False)
+    monkeypatch.setenv("LIVE_ENTRY_MAX_NEAR_ATM_DISTANCE", "50")
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {"NFO:NIFTY26JUN23900CE", "NFO:NIFTY26JUN23900PE", symbol}
+    runner._active_atm_strike = 23900
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="outside-near-atm")
+
+    assert ready is False
+    assert reason == "candidate_not_selected_or_near_atm"
+    assert details["in_active_basket"] is True
+    assert details["strike_distance"] == 100.0
+    assert details["max_allowed_distance"] == 50.0
+
+
+def test_candidate_not_in_active_basket_fails_live_entry_eligibility(monkeypatch) -> None:
+    monkeypatch.delenv("LIVE_ENTRY_SELECTED_ONLY", raising=False)
+    monkeypatch.setenv("LIVE_ENTRY_MAX_NEAR_ATM_DISTANCE", "50")
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23950CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {"NFO:NIFTY26JUN23900CE", "NFO:NIFTY26JUN23900PE"}
+    runner._active_atm_strike = 23900
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="not-in-active")
+
+    assert ready is False
+    assert reason == "candidate_not_in_active_basket"
+    assert details["in_active_basket"] is False
+
+
+def test_selected_only_mode_marks_non_selected_active_basket_candidate_non_executable(monkeypatch) -> None:
+    monkeypatch.setenv("LIVE_ENTRY_SELECTED_ONLY", "true")
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23950CE"
+    runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {"NFO:NIFTY26JUN23900CE", "NFO:NIFTY26JUN23900PE", symbol}
+    runner._active_atm_strike = 23900
+
+    eligible, reason, details = runner._live_entry_candidate_eligibility(symbol, direction_bias="CE")
+
+    assert eligible is False
+    assert reason == "non_executable_candidate"
+    assert details["eligibility_source"] == "selected_only_policy"
+    assert details["in_active_basket"] is True
+    assert details["is_selected_option"] is False
+
+
 def test_symbol_live_entry_ready_refreshes_stale_candidate_for_trigger_signal() -> None:
     runner = _build_runner()
     runner._runtime_live_orders_armed = True
@@ -303,10 +435,10 @@ def test_symbol_live_entry_ready_refreshes_stale_candidate_for_trigger_signal() 
     runner._required_bars_for_symbol = lambda _s: 1
     runner._indicator_engine.get_history = lambda _s: [1, 2, 3, 4, 5]
     runner._is_option_symbol_tick_fresh = lambda *_a, **_k: True
-    runner._runtime_indicators = {"NFO:NIFTY26JUN23800PE": {"direction_bias": "PE", "context_age_seconds": 1.0}}
+    runner._runtime_indicators = {"NFO:NIFTY26JUN23850PE": {"direction_bias": "PE", "context_age_seconds": 1.0}}
     runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
     runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
-    runner._active_option_symbols = ["NFO:NIFTY26JUN23800PE", "NFO:NIFTY26JUN23900PE"]
+    runner._active_option_symbols = ["NFO:NIFTY26JUN23900CE", "NFO:NIFTY26JUN23900PE"]
     runner._active_atm_strike = 23900
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
     runner._build_candidate_snapshots_sync_safe = lambda **_k: (  # type: ignore[method-assign]
@@ -318,8 +450,8 @@ def test_symbol_live_entry_ready_refreshes_stale_candidate_for_trigger_signal() 
         False,
         "test",
     )
-    signal = Signal(action="BUY", symbol="NFO:NIFTY26JUN23800PE", quantity=1, confidence=0.8, reason="OrderFlow", metadata={"trigger_conditions_met": True})
-    ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", signal=signal, trace_id="refresh-candidate")
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26JUN23850PE", quantity=1, confidence=0.8, reason="OrderFlow", metadata={"trigger_conditions_met": True})
+    ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23850PE", signal=signal, trace_id="refresh-candidate")
     assert ready is True
     assert reason == "symbol_live_ready"
     assert details.get("candidate_refresh_attempted") is True
