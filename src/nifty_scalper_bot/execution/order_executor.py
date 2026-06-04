@@ -1,7 +1,21 @@
-"""Order execution with risk checks."""
+"""Order execution with risk checks.
+
+NOT THE LIVE ORDER PATH. The single production order path is
+StrategyRunner -> OrderManager (wrapped by SafeOrderManager) -> broker,
+wired in core/app.py. OrderManager enforces idempotency, the trading-window
+gate, the circuit breaker, risk gating, and bracket/OCO coordination.
+
+OrderExecutor is a lighter, self-contained executor retained for unit tests
+and simulation only. It deliberately does NOT replicate OrderManager's full
+gate stack, so routing live orders through it would bypass those protections.
+To prevent that, it refuses to submit to a live broker unless the caller sets
+allow_live=True explicitly (used only by tests/sims). This keeps exactly one
+live order path in production.
+"""
 
 from __future__ import annotations
 
+import os
 from itertools import count
 import math
 import time
@@ -46,10 +60,17 @@ class OrderExecutor:
         broker_client: Any,
         risk_config: RiskConfig,
         mdm: Any,
+        *,
+        allow_live: bool = False,
     ) -> None:
         self._broker = broker_client
         self._risk = risk_config
         self._mdm = mdm
+        # Guard: OrderExecutor is not the live path (see module docstring).
+        # It only submits against a live broker when explicitly permitted
+        # (tests/sims). In production EXECUTION_MODE=LIVE without allow_live,
+        # this raises so the sole live path stays OrderManager.
+        self._allow_live = bool(allow_live)
         self._logger = get_logger(__name__)
         self._daily_trade_count = 0
         self._period_start = time.time()
@@ -191,6 +212,14 @@ class OrderExecutor:
     def _submit_broker_order(
         self, payload: dict[str, object], *, legacy_payload: dict[str, object] | None = None
     ) -> dict[str, object]:
+        # Enforce single live order path: OrderExecutor must not submit live
+        # orders in production (that path is OrderManager). Allowed only when
+        # explicitly permitted (tests/sims) or outside LIVE mode.
+        if not self._allow_live and str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE":
+            raise ExecutionError(
+                "OrderExecutor is not the live order path; use OrderManager "
+                "(set allow_live=True only in tests/sims)"
+            )
         try:
             response = self._broker.place_order(**payload)
         except TypeError as exc:
