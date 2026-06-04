@@ -19,10 +19,9 @@ Your Lightsail static IP: **15.206.3.6** (this is what Zerodha must allowlist.)
 ## STEP 2 — Open the firewall for the dashboard (in Lightsail website)
 
 1. Lightsail → your instance **Ubuntu-2** → **Networking** tab.
-2. Under **IPv4 Firewall**, click **Add rule**:
-   - Application: **Custom**
-   - Protocol: **TCP**
-   - Port: **8080**
+2. Under **IPv4 Firewall**, click **Add rule** and add BOTH:
+   - **HTTPS:** Custom / TCP / Port **443**  (secure dashboard — recommended)
+   - **Dashboard:** Custom / TCP / Port **8080**  (plain fallback)
 3. Save.
 
 ---
@@ -30,8 +29,8 @@ Your Lightsail static IP: **15.206.3.6** (this is what Zerodha must allowlist.)
 ## STEP 3 — One-time install (paste ONCE into the Lightsail terminal)
 
 Open the instance terminal ("Connect using SSH" button) and paste this whole block.
-It installs Python, downloads the bot, sets up the dashboard, and starts it as a
-background service that auto-restarts and survives reboots.
+It installs Python, downloads the bot, sets up the dashboard, adds HTTPS, and starts
+it as a background service that auto-restarts and survives reboots.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kundakarlabp/nifty_scalper_bot/main/deploy/lightsail_setup.sh | bash
@@ -43,11 +42,20 @@ When it finishes it prints your dashboard URL and admin password.
 
 ## STEP 4 — Use the dashboard (browser, no terminal ever again)
 
-Open: **http://15.206.3.6:8080/admin**
+Open the **secure** link the script printed: **https://15.206.3.6/admin**
+(A one-time browser warning appears because it is your own server's certificate —
+click **Advanced → Proceed**. Plain fallback: http://15.206.3.6:8080/admin)
 
 - Sign in with the admin password the script printed.
 - Enter your Zerodha API key, API secret, access token, Telegram details. Save.
 - Click **Restart Bot**.
+
+### Turning live trading ON/OFF (one click)
+At the top of the dashboard there is a **Live Trading** banner:
+- **OFF (SHADOW)** = analysing only, no real orders. You start here.
+- Click **Turn ON Live Trading** (it asks you to confirm) to place real orders.
+- Click **Switch to SHADOW** anytime to stop real trading instantly.
+The toggle sets both required settings together and restarts the bot for you.
 
 ### Every morning
 - Generate your fresh Zerodha access token (as you do now).

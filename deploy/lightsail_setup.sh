@@ -87,15 +87,43 @@ sudo systemctl daemon-reload
 sudo systemctl enable --quiet ${SERVICE}
 sudo systemctl restart ${SERVICE}
 
+# --- HTTPS via Caddy reverse proxy (encrypts password/token in transit) ---
+# Caddy serves HTTPS on 443 with a self-signed local certificate and forwards
+# to the bot on 127.0.0.1:$PORT. Your browser will show a one-time "not trusted"
+# warning (expected for an IP-only self-signed cert) — click Advanced -> Proceed.
+echo "==> Installing Caddy for HTTPS..."
+if ! command -v caddy >/dev/null 2>&1; then
+  sudo apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+  sudo apt-get update -y -qq
+  sudo apt-get install -y -qq caddy
+fi
+
+PUB_IP="$(curl -fsSL https://checkip.amazonaws.com 2>/dev/null || echo '')"
+sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
+{
+  auto_https disable_redirects
+}
+:443 {
+  tls internal
+  reverse_proxy 127.0.0.1:${PORT}
+}
+EOF
+sudo systemctl restart caddy || echo "   (Caddy restart issue — HTTP on ${PORT} still works)"
+
 IP="$(curl -fsSL https://checkip.amazonaws.com 2>/dev/null || echo 'YOUR_STATIC_IP')"
 echo ""
 echo "============================================================"
 echo " ✅ Setup complete."
-echo " Dashboard:  http://${IP}:${PORT}/admin"
-echo " Password :  ${ADMIN_PW}"
 echo ""
-echo " Next: open the dashboard, enter your Zerodha + Telegram"
-echo " details, Save, then Restart Bot. Update the access token"
-echo " each morning from the dashboard."
+echo " Secure dashboard (recommended):  https://${IP}/admin"
+echo "   (one-time browser warning -> Advanced -> Proceed; it is your own server)"
+echo " Plain dashboard (fallback):       http://${IP}:${PORT}/admin"
+echo " Password:                         ${ADMIN_PW}"
+echo ""
+echo " Firewall: allow TCP 443 (for HTTPS) and TCP ${PORT} in Lightsail Networking."
+echo " Next: open the dashboard, enter Zerodha + Telegram details, Save,"
+echo " check logs look healthy in SHADOW, then use the Live Trading toggle."
 echo " Reminder: add ${IP} to Zerodha Allowed IPs (developers.kite.trade)."
 echo "============================================================"

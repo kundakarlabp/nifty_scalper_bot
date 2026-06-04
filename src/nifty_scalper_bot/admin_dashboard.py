@@ -135,6 +135,28 @@ def login(password: str = Form(...)) -> RedirectResponse:
 def dashboard(request: Request) -> HTMLResponse:
     _check_auth(request)
     env = _read_env()
+    # Live-trading status: LIVE only when both flags agree.
+    live_on = env.get("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"} \
+        and env.get("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
+    if live_on:
+        status_html = (
+            '<div class=card style="border-color:#3fb950">'
+            '<h2>Live Trading: <span class=ok>ON</span> 🟢</h2>'
+            '<p style="font-size:13px;color:#9da7b3">The bot will place REAL orders with REAL money. '
+            'Switch to SHADOW to stop placing real orders (it keeps analysing safely).</p>'
+            '<form method=post action="/admin/mode"><input type=hidden name=mode value=shadow>'
+            '<button class=warn type=submit>Switch to SHADOW (stop real trading)</button></form></div>'
+        )
+    else:
+        status_html = (
+            '<div class=card style="border-color:#9e6a03">'
+            '<h2>Live Trading: <span style="color:#d29922">OFF (SHADOW)</span> ⚪</h2>'
+            '<p style="font-size:13px;color:#9da7b3">The bot is analysing but NOT placing real orders. '
+            'Only turn this ON after you have entered credentials and checked the logs look healthy.</p>'
+            '<form method=post action="/admin/mode" onsubmit="return confirm(\'Turn ON live trading with REAL money?\')">'
+            '<input type=hidden name=mode value=live>'
+            '<button type=submit>Turn ON Live Trading (real money)</button></form></div>'
+        )
     rows = ""
     for label, key, is_secret in FIELDS:
         val = env.get(key, "")
@@ -142,6 +164,7 @@ def dashboard(request: Request) -> HTMLResponse:
         rows += f"<label>{label} <span class=badge>{key}</span></label>"
         rows += f'<input name="{key}" value="{shown}" placeholder="(unchanged)" {"type=text" if not is_secret else ""}>'
     body = f"""
+    {status_html}
     <div class=card><h2>Credentials & Settings</h2>
     <p style="font-size:13px;color:#9da7b3">Leave a secret field showing dots to keep it unchanged. Type a new value to replace it. Save, then Restart Bot.</p>
     <form method=post action="/admin/save">{rows}<button type=submit>Save settings</button></form></div>
@@ -158,6 +181,18 @@ def dashboard(request: Request) -> HTMLResponse:
     <form method=get action="/health"><button type=submit>Health</button></form>
     </div></div>"""
     return HTMLResponse(_PAGE.format(body=body))
+
+
+@router.post("/admin/mode")
+def set_mode(request: Request, mode: str = Form(...)) -> RedirectResponse:
+    """One-click Live/Shadow switch. Keeps ENABLE_LIVE and EXECUTION_MODE in sync."""
+    _check_auth(request)
+    if mode.strip().lower() == "live":
+        _write_env({"ENABLE_LIVE": "true", "EXECUTION_MODE": "LIVE"})
+    else:
+        _write_env({"ENABLE_LIVE": "false", "EXECUTION_MODE": "SHADOW"})
+    _restart_service()
+    return RedirectResponse("/admin?mode=1", status_code=303)
 
 
 async def _collect_form(request: Request) -> dict[str, str]:
