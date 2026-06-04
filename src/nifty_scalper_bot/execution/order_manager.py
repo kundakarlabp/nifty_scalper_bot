@@ -1188,6 +1188,41 @@ class OrderManager:
         self._broker = broker_client
         self._broker_circuit = CircuitBreaker()
         self._refresh_margin_engine()
+        # Proactively warm the margin snapshot so the broker-health gate has a
+        # fresh balance before the first signal. Without this, balance_stale
+        # stays True (margin is otherwise only fetched during place_order, which
+        # the gate blocks) — a deadlock that prevented the first live trade.
+        self.prime_margin(reason="set_broker_client")
+
+    def prime_margin(self, *, reason: str = "manual") -> bool:
+        """Fetch the available margin once to refresh broker-health freshness.
+
+        Safe to call repeatedly. Records success/failure on the broker-health
+        snapshot. Returns True when a fresh balance was obtained.
+
+        Args:
+            reason: Diagnostic tag for the log line.
+
+        Returns:
+            bool: True if margin was refreshed successfully.
+        """
+        try:
+            available, source = self._resolve_available_margin_raw()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                "MARGIN_PRIME_FAILED reason=%s error_type=%s",
+                reason, type(exc).__name__,
+                extra={"event": "MARGIN_PRIME_FAILED", "reason": reason, "error_type": type(exc).__name__},
+            )
+            return False
+        ok = bool(available is not None and available > 0 and source in {"mdm", "margin_cache_used"})
+        self._logger.info(
+            "MARGIN_PRIMED reason=%s ok=%s source=%s available=%s",
+            reason, ok, source, available,
+            extra={"event": "MARGIN_PRIMED", "reason": reason, "ok": ok, "source": source, "available": available},
+        )
+        self._emit_broker_health_status(force=True)
+        return ok
 
     def set_instrument_resolver(self, resolver: Any | None) -> None:
         """Store resolver used for lot-size lookups."""
