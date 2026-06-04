@@ -169,6 +169,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Browser admin dashboard (credentials, logs, daily token, restart) for
+# non-technical operation on a plain VM. Routes are password-protected.
+try:
+    from nifty_scalper_bot.admin_dashboard import router as _admin_router
+    app.include_router(_admin_router)
+except Exception as _admin_exc:  # noqa: BLE001
+    import logging as _logging
+    _logging.getLogger(__name__).warning("admin dashboard not mounted: %s", _admin_exc)
+
 
 @app.get("/")
 def root():

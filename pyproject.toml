@@ -18,6 +18,7 @@ dependencies = [
     "tenacity>=8.2,<10",
     "uvicorn>=0.29,<1",
     "fastapi>=0.111,<1",
+    "python-multipart>=0.0.9",
     "python-dotenv>=1.0",
     "pydantic-settings>=2.2,<3",
     "pydantic>=2.7,<3",
