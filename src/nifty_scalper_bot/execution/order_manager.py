@@ -3046,6 +3046,11 @@ class OrderManager:
                 failure_class = "unexpected_exception"
                 if "rate" in msg and "limit" in msg:
                     failure_class = "transient_api_error"
+                elif any(x in msg for x in ["no ips configured", "allowed ips", "ip configured", "403", "access denied", "forbidden", "ip not whitelisted"]):
+                    # Broker-side account/config problem (Kite static-IP allowlist).
+                    # Non-retryable and NOT a trading failure — must not count toward
+                    # the kill switch, otherwise a fixable config issue latches the bot.
+                    failure_class = "broker_config_error"
                 elif "auth" in msg or "token" in msg or "unauthor" in msg:
                     failure_class = "broker_rejected"
                 elif "timeout" in msg:
@@ -3060,6 +3065,14 @@ class OrderManager:
                     failure_class = "invalid_quantity"
                 elif any(x in msg for x in ["invalid", "bad request", "payload", "400"]):
                     failure_class = "broker_rejected"
+
+                if failure_class == "broker_config_error":
+                    self._logger.error(
+                        "ORDER_BROKER_CONFIG_ERROR non_retryable=True reason=ip_allowlist_or_access_denied "
+                        "symbol=%s trace_id=%s detail=%s",
+                        normalized_symbol, trace_id, self._sanitize_broker_error(e),
+                        extra={"event": "ORDER_BROKER_CONFIG_ERROR", "non_retryable": True, "symbol": normalized_symbol, "trace_id": trace_id, "failure_class": failure_class},
+                    )
 
                 countable_failures = {
                     "transient_api_error",
@@ -3123,7 +3136,7 @@ class OrderManager:
                     self._log_kill_switch_status()
 
                 # Fail Fast logic
-                if any(
+                if failure_class == "broker_config_error" or any(
                     x in msg
                     for x in [
                         "400",
