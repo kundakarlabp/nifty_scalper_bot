@@ -6,6 +6,7 @@ classes in this module are lightweight test/demo placeholders only.
 
 from __future__ import annotations
 
+import os
 import json
 import threading
 import time
@@ -383,6 +384,14 @@ class OrderManager:
         LOGGER.info("Order monitoring stopped")
 
     def submit_order(self, signal: TradeSignal, price: float) -> str:
+        # Single live order path: production routes through
+        # execution/order_manager.OrderManager. This legacy/test-only manager
+        # must never submit live orders.
+        if str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE":
+            raise RuntimeError(
+                "components.OrderManager is legacy/test-only; live orders must "
+                "route through execution.order_manager.OrderManager"
+            )
         payload = {
             "symbol": signal.symbol,
             "side": signal.side,
