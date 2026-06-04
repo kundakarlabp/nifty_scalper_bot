@@ -3022,7 +3022,7 @@ class StrategyRunner:
                 strike_distance = abs(float(strike) - float(atm_strike)) if strike and atm_strike else None
             except (TypeError, ValueError):
                 strike_distance = None
-            near_threshold = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
+            near_threshold = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "100") or "100")
             candidate_selected = bool(
                 metadata.get("candidate_selected")
                 or metadata.get("is_selected_option")
@@ -7424,7 +7424,7 @@ class StrategyRunner:
             atm_strike = None
         max_allowed_distance = safe_positive_float_env(
             "LIVE_ENTRY_MAX_NEAR_ATM_DISTANCE",
-            safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 50.0, minimum=0.0),
+            safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 100.0, minimum=0.0),
             minimum=0.0,
         )
         strike_distance = None

@@ -231,7 +231,13 @@ class SMCStrategy(EliteStrategy):
                 "bullish_reversal": {"missing": indicators.get("bullish_reversal") is None, "source": "reversal_detector", "required_inputs": ["open", "close", "high", "low", "atr"], "context_age_seconds": indicators.get("context_age_seconds")},
             }
             feature_ready = feature_completeness >= feature_threshold
-            LOGGER.info("SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s missing_feature_sources=%s live_enabled=%s vote_allowed=%s hard_veto=%s", symbol, feature_completeness, ",".join(missing_features), missing_feature_sources, is_live, feature_ready, False, extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})
+            log_throttled(
+                LOGGER,
+                f"smc_feature_readiness:{symbol}",
+                "SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s missing_feature_sources=%s live_enabled=%s vote_allowed=%s hard_veto=%s",
+                symbol, feature_completeness, ",".join(missing_features), missing_feature_sources, is_live, feature_ready, False,
+                interval_sec=30.0,
+                extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})
             if option_premium_domain:
                 premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))
                 structure_flip = bool(indicators.get('choch_confirmed') or indicators.get('bos_confirmed'))
