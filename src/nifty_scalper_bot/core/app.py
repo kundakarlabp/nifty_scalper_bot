@@ -5403,7 +5403,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         while True:
             try:
                 await asyncio.sleep(3600)
-                removed = bracket_manager.cleanup_stale_brackets(
+                mgr = bracket_manager or getattr(
+                    getattr(ctx_ref.get("ctx", None), "strategy_runner", None),
+                    "_bracket_manager",
+                    None,
+                )
+                if mgr is None or not hasattr(mgr, "cleanup_stale_brackets"):
+                    # Bracket manager not enabled/wired — nothing to clean.
+                    continue
+                removed = mgr.cleanup_stale_brackets(
                     max_age_seconds=settings.execution.bracket_stale_cleanup_seconds,
                 )
                 if removed > 0:
