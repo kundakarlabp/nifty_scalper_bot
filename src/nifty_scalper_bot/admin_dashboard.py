@@ -106,6 +106,8 @@ button{{margin-top:14px;padding:11px 16px;border:0;border-radius:8px;background:
 button.alt{{background:#1f6feb}} button.warn{{background:#9e6a03}}
 a{{color:#58a6ff}} pre{{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:12px;max-height:480px;overflow:auto;font-size:12px;white-space:pre-wrap}}
 .row{{display:flex;gap:10px;flex-wrap:wrap}} .row form{{flex:1}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;align-items:end}}
+.btnlink{{display:inline-block;margin-top:6px;padding:9px 14px;border-radius:8px;background:#1f6feb;color:#fff;text-decoration:none;font-size:14px;font-weight:600}}
 .ok{{color:#3fb950}} .badge{{display:inline-block;padding:2px 8px;border-radius:12px;font-size:12px}}
 </style></head><body>{body}</body></html>"""
 
@@ -177,7 +179,7 @@ def dashboard(request: Request) -> HTMLResponse:
 
     <div class=card><h2>Controls</h2><div class=row>
     <form method=post action="/admin/restart"><button class=warn type=submit>Restart Bot</button></form>
-    <form method=get action="/admin/logs"><button class=alt type=submit>View Logs</button></form>
+    <form method=get action="/admin/logs"><button class=alt type=submit>View / Download Logs</button></form>
     <form method=get action="/health"><button type=submit>Health</button></form>
     </div></div>"""
     return HTMLResponse(_PAGE.format(body=body))
@@ -237,27 +239,103 @@ def restart(request: Request) -> RedirectResponse:
     return RedirectResponse("/admin?restart=1", status_code=303)
 
 
-@router.get("/admin/logs", response_class=PlainTextResponse)
-def logs(request: Request, lines: int = 400) -> PlainTextResponse:
-    _check_auth(request)
-    lines = max(50, min(int(lines or 400), 5000))
-    # Prefer journald (systemd); fall back to a log file.
+def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "") -> str:
+    """Collect log text from journald (preferred) or the log file, then filter.
+
+    Args:
+        lines: max trailing lines to fetch (50..20000).
+        since/until: optional journalctl time windows, e.g. "2026-06-04 09:15:00"
+                     or relative like "today", "1 hour ago".
+        contains: case-insensitive substring filter applied to each line.
+    """
+    lines = max(50, min(int(lines or 400), 20000))
+    text = ""
     try:
-        out = subprocess.run(
-            ["journalctl", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager"],
-            capture_output=True, text=True, timeout=10,
-        )
+        cmd = ["journalctl", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager", "-o", "short-iso"]
+        if since:
+            cmd += ["--since", since]
+        if until:
+            cmd += ["--until", until]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if out.returncode == 0 and out.stdout.strip():
-            return PlainTextResponse(out.stdout)
+            text = out.stdout
     except Exception:
-        pass
-    if LOG_PATH.exists():
+        text = ""
+    if not text and LOG_PATH.exists():
         try:
-            content = LOG_PATH.read_text(errors="replace").splitlines()[-lines:]
-            return PlainTextResponse("\n".join(content))
+            text = "\n".join(LOG_PATH.read_text(errors="replace").splitlines()[-lines:])
         except Exception as exc:  # noqa: BLE001
-            return PlainTextResponse(f"log read error: {exc}")
-    return PlainTextResponse("no logs found yet")
+            text = f"log read error: {exc}"
+    if not text:
+        text = "no logs found yet"
+    if contains:
+        needle = contains.lower()
+        text = "\n".join(ln for ln in text.splitlines() if needle in ln.lower())
+    return text
+
+
+@router.get("/admin/logs", response_class=HTMLResponse)
+def logs_page(
+    request: Request,
+    lines: int = 400,
+    contains: str = "",
+    since: str = "",
+    until: str = "",
+) -> HTMLResponse:
+    _check_auth(request)
+    text = _gather_logs(lines, since=since, until=until, contains=contains)
+    safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    qs = f"lines={lines}&contains={contains}&since={since}&until={until}"
+    body = f"""
+    <div class=card><h2>Logs</h2>
+    <form method=get action="/admin/logs" class=grid>
+      <div><label>Lines (max 20000)</label><input name=lines value="{lines}"></div>
+      <div><label>Filter contains</label><input name=contains value="{contains}" placeholder="e.g. ORDER_SENT"></div>
+      <div><label>Since</label><input name=since value="{since}" placeholder="today / 2026-06-04 09:15"></div>
+      <div><label>Until</label><input name=until value="{until}" placeholder="2026-06-04 15:30 (optional)"></div>
+      <button type=submit>Apply</button>
+    </form>
+    <div class=row style="margin-top:10px">
+      <a class=btnlink href="/admin/logs/download?fmt=txt&{qs}">Download .txt</a>
+      <a class=btnlink href="/admin/logs/download?fmt=json&{qs}">Download .json</a>
+      <a class=btnlink href="/admin/logs/download?fmt=csv&{qs}">Download .csv</a>
+      <a class=btnlink href="/admin/logs?{qs}">Refresh</a>
+      <a class=btnlink href="/admin">&larr; Back</a>
+    </div>
+    <pre>{safe}</pre></div>"""
+    return HTMLResponse(_PAGE.format(body=body))
+
+
+@router.get("/admin/logs/download")
+def logs_download(
+    request: Request,
+    fmt: str = "txt",
+    lines: int = 2000,
+    contains: str = "",
+    since: str = "",
+    until: str = "",
+):
+    _check_auth(request)
+    text = _gather_logs(lines, since=since, until=until, contains=contains)
+    rows = text.splitlines()
+    ts = __import__("time").strftime("%Y%m%d-%H%M%S")
+    if fmt == "json":
+        import json as _json
+        payload = _json.dumps([{"line": i + 1, "text": r} for i, r in enumerate(rows)], indent=2)
+        media, ext = "application/json", "json"
+        data = payload
+    elif fmt == "csv":
+        import csv as _csv, io as _io
+        buf = _io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["line", "text"])
+        for i, r in enumerate(rows):
+            w.writerow([i + 1, r])
+        data, media, ext = buf.getvalue(), "text/csv", "csv"
+    else:
+        data, media, ext = text, "text/plain", "txt"
+    headers = {"Content-Disposition": f'attachment; filename="niftybot-logs-{ts}.{ext}"'}
+    return PlainTextResponse(data, media_type=media, headers=headers)
 
 
 def _restart_service() -> None:
