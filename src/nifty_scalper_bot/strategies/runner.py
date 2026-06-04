@@ -3212,6 +3212,28 @@ class StrategyRunner:
         self, *, side: str, target_strikes: set[int]
     ) -> list[tuple[str, int]]:
         """Args: side and strikes. Returns: symbol/strike list. Raises: none."""
+        # SSOT first: the active contract basket already holds the exact
+        # selected/near-ATM CE/PE symbols (with tokens) that we subscribe and
+        # trade. Resolving from it directly avoids the resolver_empty path when
+        # the external contract sources are unpopulated.
+        active_syms = getattr(self, "_active_option_symbols", set()) or set()
+        if active_syms:
+            basket_selected: list[tuple[str, int]] = []
+            for sym in active_syms:
+                norm = enforce_canonical(normalize_symbol(str(sym)))
+                if not norm.endswith(side):
+                    continue
+                strike = extract_symbol_strike(norm)
+                if strike is None or strike not in target_strikes:
+                    continue
+                basket_selected.append((norm, int(strike)))
+            if basket_selected:
+                self._logger.info(
+                    "CANDIDATE_RESOLVER_USED source=active_contract_basket count=%s",
+                    len(basket_selected),
+                    extra={"event": "CANDIDATE_RESOLVER_USED", "source": "active_contract_basket", "count": len(basket_selected)},
+                )
+                return basket_selected
         sources = [
             ("OptionsContractStore", getattr(self, "_options_contract_store", None) or getattr(self, "_contract_store", None)),
             ("InstrumentManager", getattr(self, "_instrument_manager", None)),
