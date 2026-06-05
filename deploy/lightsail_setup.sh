@@ -39,6 +39,7 @@ ADMIN_PASSWORD=$ADMIN_PW
 PORT=$PORT
 BOT_ENV_FILE=$ENV_FILE
 BOT_SERVICE_NAME=$SERVICE
+BOT_APP_DIR=$APP_DIR
 # Trading off until you enter credentials and turn it on in the dashboard:
 ENABLE_LIVE=false
 EXECUTION_MODE=SHADOW
@@ -85,6 +86,49 @@ sudo chmod 440 /etc/sudoers.d/niftybot
 
 sudo systemctl daemon-reload
 sudo systemctl enable --quiet ${SERVICE}
+
+# --- Auto-deploy: pull from GitHub every 2 min; restart only if code changed ---
+echo "==> Installing GitHub auto-deploy timer..."
+sudo tee /usr/local/bin/niftybot-autodeploy.sh >/dev/null <<EOF
+#!/usr/bin/env bash
+set -e
+cd $APP_DIR
+BEFORE=\$(git rev-parse HEAD 2>/dev/null || echo none)
+git fetch --quiet origin main || exit 0
+AFTER=\$(git rev-parse origin/main 2>/dev/null || echo none)
+if [ "\$BEFORE" != "\$AFTER" ]; then
+  git reset --hard --quiet origin/main
+  $APP_DIR/.venv/bin/pip install --quiet -e . || true
+  sudo systemctl restart ${SERVICE}
+  logger -t niftybot-autodeploy "updated \$BEFORE -> \$AFTER and restarted"
+fi
+EOF
+sudo chmod +x /usr/local/bin/niftybot-autodeploy.sh
+# allow the deploy script (run as ubuntu) to restart the service without password
+echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}" | \
+  sudo tee /etc/sudoers.d/niftybot >/dev/null
+sudo chmod 440 /etc/sudoers.d/niftybot
+
+sudo tee /etc/systemd/system/niftybot-autodeploy.service >/dev/null <<EOF
+[Unit]
+Description=Nifty Bot auto-deploy from GitHub
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/niftybot-autodeploy.sh
+EOF
+sudo tee /etc/systemd/system/niftybot-autodeploy.timer >/dev/null <<EOF
+[Unit]
+Description=Run Nifty Bot auto-deploy every 2 minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --quiet --now niftybot-autodeploy.timer
+
 sudo systemctl restart ${SERVICE}
 
 # --- HTTPS via Caddy reverse proxy (encrypts password/token in transit) ---
