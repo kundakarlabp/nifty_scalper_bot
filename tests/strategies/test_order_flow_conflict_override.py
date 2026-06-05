@@ -32,12 +32,20 @@ def _eval(strat, sym, ind):
 
 
 # A. Stale PE bias + CE candidate WITHOUT confirming microstructure -> blocked
-def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat):
+def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat, caplog):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    caplog.set_level("INFO")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=150, sell=140))
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["trigger_block_reason"] == "direction_bias_conflict"
     assert sig.metadata["bias_invalidated_by_microstructure"] is False
+    rec = next(r for r in caplog.records if getattr(r, "event", None) == "ORDERFLOW_DIRECTION_BIAS_CONFLICT")
+    assert rec.underlying_direction == "PE"
+    assert rec.contract_side == "CE"
+    assert rec.tick_direction == "UP"
+    assert rec.side_alignment_ok is False
+    assert rec.microstructure_confirms_side is False
+    assert rec.bias_invalidated_by_microstructure is False
 
 
 # B. Stale PE bias + CE candidate WITH confirming microstructure -> allowed

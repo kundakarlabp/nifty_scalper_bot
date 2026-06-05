@@ -319,6 +319,28 @@ class OrderFlowStrategy(EliteStrategy):
                 trigger_block_reason = 'context_stale'
             elif not side_alignment_ok and not conflict_override_applied:
                 trigger_block_reason = 'direction_bias_conflict'
+                LOGGER.info(
+                    'ORDERFLOW_DIRECTION_BIAS_CONFLICT symbol=%s underlying_direction=%s contract_side=%s depth_imbalance=%.4f tick_direction=%s side_alignment_ok=%s microstructure_confirms_side=%s bias_invalidated_by_microstructure=%s',
+                    symbol,
+                    direction if direction in {'CE', 'PE'} else None,
+                    side,
+                    depth_imbalance,
+                    tick_direction,
+                    side_alignment_ok,
+                    microstructure_confirms_side,
+                    bias_invalidated_by_microstructure,
+                    extra={
+                        'event': 'ORDERFLOW_DIRECTION_BIAS_CONFLICT',
+                        'symbol': symbol,
+                        'underlying_direction': direction if direction in {'CE', 'PE'} else None,
+                        'contract_side': side,
+                        'depth_imbalance': round(depth_imbalance, 4),
+                        'tick_direction': tick_direction,
+                        'side_alignment_ok': side_alignment_ok,
+                        'microstructure_confirms_side': microstructure_confirms_side,
+                        'bias_invalidated_by_microstructure': bias_invalidated_by_microstructure,
+                    },
+                )
             elif spread_pct > trigger_max_spread_pct:
                 trigger_block_reason = 'spread_too_wide'
             elif strategy_score < trigger_min_score:

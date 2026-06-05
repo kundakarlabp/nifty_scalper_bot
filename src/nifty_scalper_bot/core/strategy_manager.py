@@ -3377,6 +3377,15 @@ class StrategyManager(_BaseStrategyManager):
                     "symbol_role": symbol_role,
                 },
             )
+            blocker_reason = "strategy_no_vote_present:" + ",".join(sorted(str(k) for k in no_vote_reason_counts))
+            self._log_strategy_combiner_blocker(
+                symbol=symbol,
+                signal_votes=signal_votes,
+                indicators=indicators,
+                combined=None,
+                blocked_reason=blocker_reason,
+                no_vote_reason_counts=no_vote_reason_counts,
+            )
             no_signal_reasons.append("no_strategy_signal")
             _emit_strategy_exit()
             return None
@@ -3387,6 +3396,17 @@ class StrategyManager(_BaseStrategyManager):
             indicators=indicators,
             no_vote_reason_counts=no_vote_reason_counts,
         )
+        if combined is None or not bool(getattr(combined, "metadata", {}).get("is_approved")):
+            decision = self.get_last_no_signal_decision(symbol)
+            blocked_reason = str(getattr(decision, "reason", "") or "") or ("combined_none" if combined is None else "combined_not_approved")
+            self._log_strategy_combiner_blocker(
+                symbol=symbol,
+                signal_votes=signal_votes,
+                indicators=indicators,
+                combined=combined,
+                blocked_reason=blocked_reason,
+                no_vote_reason_counts=no_vote_reason_counts,
+            )
         if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
             exit_result = "signal"
             signal_action = combined.action
@@ -3642,6 +3662,86 @@ class StrategyManager(_BaseStrategyManager):
             near_atm = False
         selected_ok = selected_option or near_atm
         return selected_ok, {"selected_ce": selected_ce, "selected_pe": selected_pe, "strike_distance_from_atm": strike_distance, "near_atm_threshold": near_atm_threshold, "is_selected_option": selected_option, "selected_ok_reason": "selected_option" if selected_option else "near_atm" if near_atm else "not_selected_or_near_atm", "near_atm": near_atm}
+
+
+    def _log_strategy_combiner_blocker(
+        self,
+        *,
+        symbol: str,
+        signal_votes: list[tuple[Signal, StrategyVote]],
+        indicators: t.Mapping[str, t.Any],
+        combined: Signal | None,
+        blocked_reason: str | None,
+        no_vote_reason_counts: t.Mapping[str, int] | None = None,
+    ) -> None:
+        """Log exact strategy combiner blocker details without changing vote outcomes."""
+        indicator_map = dict(indicators or {})
+        trigger_votes: list[StrategyVote] = []
+        context_votes: list[StrategyVote] = []
+        for _signal, vote in signal_votes:
+            role = str((vote.metadata or {}).get("role") or "trigger").lower()
+            if role == "context":
+                context_votes.append(vote)
+            else:
+                trigger_votes.append(vote)
+        all_votes = trigger_votes + context_votes
+        best_vote = max(all_votes, key=self._extract_raw_score) if all_votes else None
+        combined_md = dict(getattr(combined, "metadata", {}) or {}) if combined is not None else {}
+        final_trade_score = combined_md.get("final_trade_score")
+        if final_trade_score is None and best_vote is not None:
+            final_trade_score = self._extract_raw_score(best_vote)
+        try:
+            final_trade_threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
+        except (TypeError, ValueError):
+            final_trade_threshold = 4.5
+        mode_profile = self.get_strategy_mode_profile()
+        selected_ok = bool(
+            indicator_map.get("is_selected_option")
+            or str(symbol or "").strip().upper()
+            in {
+                str(indicator_map.get("selected_ce") or "").strip().upper(),
+                str(indicator_map.get("selected_pe") or "").strip().upper(),
+            }
+        )
+        selected_ok_reason = "selected_option" if selected_ok else "not_selected_or_near_atm"
+        if combined_md.get("selected_ok_reason"):
+            selected_ok_reason = str(combined_md.get("selected_ok_reason"))
+            selected_ok = selected_ok_reason != "not_selected_or_near_atm"
+        log.info(
+            "STRATEGY_COMBINER_BLOCKER symbol=%s strategy_vote_count=%s trigger_vote_count=%s context_vote_count=%s best_strategy=%s best_score=%s best_confidence=%s single_vote_allowed=%s selected_ok=%s selected_ok_reason=%s final_trade_score=%s final_trade_threshold=%s blocked_reason=%s",
+            symbol,
+            len(signal_votes),
+            len(trigger_votes),
+            len(context_votes),
+            best_vote.strategy if best_vote else None,
+            self._extract_raw_score(best_vote) if best_vote else None,
+            float(best_vote.confidence) if best_vote else None,
+            bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"},
+            selected_ok,
+            selected_ok_reason,
+            final_trade_score,
+            final_trade_threshold,
+            blocked_reason or combined_md.get("blocked_reason") or "combined_not_approved",
+            extra={
+                "event": "STRATEGY_COMBINER_BLOCKER",
+                "symbol": symbol,
+                "strategy_vote_count": len(signal_votes),
+                "trigger_vote_count": len(trigger_votes),
+                "context_vote_count": len(context_votes),
+                "best_strategy": best_vote.strategy if best_vote else None,
+                "best_score": self._extract_raw_score(best_vote) if best_vote else None,
+                "best_confidence": float(best_vote.confidence) if best_vote else None,
+                "single_vote_allowed": bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"},
+                "selected_ok": selected_ok,
+                "selected_ok_reason": selected_ok_reason,
+                "final_trade_score": final_trade_score,
+                "final_trade_threshold": final_trade_threshold,
+                "blocked_reason": blocked_reason or combined_md.get("blocked_reason") or "combined_not_approved",
+                "no_vote_reason_counts": dict(no_vote_reason_counts or {}),
+                "combined_present": combined is not None,
+                "combined_is_approved": bool(combined_md.get("is_approved")),
+            },
+        )
 
     def _combine_strategy_votes(
         self,
