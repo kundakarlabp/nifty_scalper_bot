@@ -17,6 +17,7 @@ from threading import RLock
 from typing import Any, Iterable, Mapping
 
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -123,7 +124,7 @@ class StrategyOrchestrator:
     def reconcile_direction_bias(self, *, resolved_bias: str | None, confidence: float | None, symbol: str | None = None, position_manager: Any | None = None) -> None:
         bias = str(resolved_bias or "").upper()
         conf = float(confidence or 0.0)
-        threshold = float(os.getenv("DIRECTION_LOCK_FLIP_CONFIDENCE", "0.90"))
+        threshold = parse_float_env(os.getenv("DIRECTION_LOCK_FLIP_CONFIDENCE"), 0.90)
         if bias not in {"CE", "PE"} or conf < threshold or not self._active_direction:
             return
         if bias == self._active_direction:
@@ -274,7 +275,7 @@ class StrategyOrchestrator:
             import time as _t
 
             _direction = self._infer_option_direction(symbol)
-            _dir_cooldown = float(os.getenv("DIRECTION_LOCK_SECONDS", "10"))
+            _dir_cooldown = parse_float_env(os.getenv("DIRECTION_LOCK_SECONDS"), 10.0)
 
             if self._active_direction and not self._has_open_position_for_locked_symbol(position_manager):
                 self.clear_direction_lock(reason="stale_lock_no_open_position", symbol=symbol)
@@ -317,7 +318,7 @@ class StrategyOrchestrator:
         # ✅ CHANGED: Default reduced from 5.0 to 2.0 seconds
         # ✅ CHANGED: Log level from DEBUG to INFO
         # ═══════════════════════════════════════════════════════════
-        signal_cooldown = float(os.getenv("SIGNAL_COOLDOWN_S", "0.5"))
+        signal_cooldown = parse_float_env(os.getenv("SIGNAL_COOLDOWN_S"), 0.5)
         now = time.time()
 
         if (
@@ -348,8 +349,8 @@ class StrategyOrchestrator:
         # ═══════════════════════════════════════════════════════════
         underlying = self._normalize_underlying(symbol)
 
-        pending_cooldown = float(
-            os.getenv("UNDERLYING_SIGNAL_COOLDOWN", "10.0")
+        pending_cooldown = parse_float_env(
+            os.getenv("UNDERLYING_SIGNAL_COOLDOWN"), 10.0
         )  # ✅ Reduced
         last_underlying_signal = self._pending_underlyings.get(underlying, 0.0)
 

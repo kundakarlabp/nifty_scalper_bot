@@ -2,7 +2,84 @@
 
 from __future__ import annotations
 
+import logging
 import os
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _strip_inline_comment(text: str) -> str:
+    """Remove an inline ``# comment`` and surrounding whitespace.
+
+    Env files sometimes contain ``KEY=30.0   # note`` and the value read back
+    includes the comment, which breaks ``float()``/``int()``.
+    """
+    # Only treat ``#`` as a comment when it is clearly trailing (preceded by a
+    # space) or starts the value; this avoids mangling values that legitimately
+    # contain ``#``. For numeric config this is safe.
+    if "#" in text:
+        text = text.split("#", 1)[0]
+    return text.strip().strip('"').strip("'").strip()
+
+
+def parse_float_env(value: object, default: float) -> float:
+    """Safely parse a float from a config/env value.
+
+    Accepts an int/float directly, or a string that may contain surrounding
+    whitespace, quotes, or an inline ``# comment``. Returns *default* for
+    None/blank/invalid input (logging a warning on invalid), never raising.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):  # guard: bool is a subclass of int
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = _strip_inline_comment(str(value))
+    if cleaned == "":
+        return default
+    try:
+        return float(cleaned)
+    except (TypeError, ValueError):
+        LOGGER.warning("parse_float_env: invalid value %r, using default %s", value, default)
+        return default
+
+
+def parse_int_env(value: object, default: int) -> int:
+    """Safely parse an int (via float to tolerate '30.0'). See parse_float_env."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    cleaned = _strip_inline_comment(str(value))
+    if cleaned == "":
+        return default
+    try:
+        return int(float(cleaned))
+    except (TypeError, ValueError):
+        LOGGER.warning("parse_int_env: invalid value %r, using default %s", value, default)
+        return default
+
+
+def parse_bool_env(value: object, default: bool = False) -> bool:
+    """Safely parse a bool from a config/env value (inline comments stripped)."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    cleaned = _strip_inline_comment(str(value)).lower()
+    if cleaned == "":
+        return default
+    if cleaned in {"1", "true", "yes", "on"}:
+        return True
+    if cleaned in {"0", "false", "no", "off"}:
+        return False
+    LOGGER.warning("parse_bool_env: invalid value %r, using default %s", value, default)
+    return default
 
 
 def truthy(value: str | None) -> bool:
