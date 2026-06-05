@@ -7354,6 +7354,7 @@ class StrategyRunner:
         details: dict[str, Any] = {
             "order_manager_present": om is not None,
             "order_manager_live_mode": None,
+            "order_manager_live_mode_unknown": False,
             "order_manager_kill_switch_active": False,
             "broker_health_available": False,
             "broker_health_effect": None,
@@ -7369,16 +7370,23 @@ class StrategyRunner:
 
         live_mode: bool | None = None
         live_fn = getattr(om, "is_live_mode", None)
+        live_mode_check_failed = False
         if callable(live_fn):
             try:
                 live_mode = bool(live_fn())
             except Exception as exc:
-                live_mode = False
+                live_mode_check_failed = True
+                details["order_manager_live_mode_unknown"] = True
                 details["order_manager_live_mode_error_type"] = type(exc).__name__
                 details["order_manager_live_mode_error"] = str(exc)
         elif isinstance(live_fn, bool):
             live_mode = bool(live_fn)
+        else:
+            details["order_manager_live_mode_unknown"] = True
         details["order_manager_live_mode"] = live_mode
+        if live_mode_check_failed and str(os.getenv("EXECUTION_MODE", "")).strip().upper() == "LIVE":
+            details["broker_health_block_reason"] = "order_manager_not_live"
+            return False, "order_manager_not_live", details
         if live_mode is False:
             details["broker_health_block_reason"] = "order_manager_not_live"
             return False, "order_manager_not_live", details
@@ -7659,6 +7667,7 @@ class StrategyRunner:
         broker_health_details: dict[str, Any] = {
             "order_manager_present": getattr(self, "_order_manager", None) is not None,
             "order_manager_live_mode": mode_snapshot.order_manager_live,
+            "order_manager_live_mode_unknown": mode_snapshot.order_manager_live is None,
             "order_manager_kill_switch_active": False,
             "broker_health_available": False,
             "broker_health_effect": None,
@@ -7703,6 +7712,7 @@ class StrategyRunner:
             "order_manager_live": mode_snapshot.order_manager_live,
             "order_manager_present": broker_health_details.get("order_manager_present"),
             "order_manager_live_mode": broker_health_details.get("order_manager_live_mode"),
+            "order_manager_live_mode_unknown": broker_health_details.get("order_manager_live_mode_unknown"),
             "order_manager_kill_switch_active": broker_health_details.get("order_manager_kill_switch_active"),
             "is_live_mode": mode_snapshot.is_live_mode,
             "broker_health_effect": broker_health_details.get("broker_health_effect"),
@@ -7851,11 +7861,10 @@ class StrategyRunner:
         details["candidate_token_valid"] = candidate_token_valid
         details["candidate_lot_size"] = candidate_lot_size
         details["candidate_orderable"] = candidate_orderable
-        if not is_selected_symbol:
-            if not candidate_token_valid:
-                return _finish(False, "option_token_missing")
-            if not candidate_orderable:
-                return _finish(False, "lot_size_unresolved")
+        if not candidate_token_valid:
+            return _finish(False, "option_token_missing")
+        if not candidate_orderable:
+            return _finish(False, "lot_size_unresolved")
         if not quote:
             details["tradable_quote"] = False
             details["depth_available"] = False

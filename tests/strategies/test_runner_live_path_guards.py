@@ -430,6 +430,68 @@ def test_selected_only_mode_marks_non_selected_active_basket_candidate_non_execu
 
 
 
+
+def test_selected_option_missing_token_blocks_live_entry() -> None:
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
+    runner._active_basket_token_by_symbol = {}
+    runner._active_atm_strike = 23900
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="selected-missing-token")
+
+    assert ready is False
+    assert reason == "option_token_missing"
+    assert details["is_selected_symbol"] is True
+    assert details["candidate_token_valid"] is False
+
+
+def test_selected_option_unresolved_lot_size_blocks_live_entry() -> None:
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
+    runner._active_atm_strike = 23900
+    runner._order_manager.resolve_lot_size = lambda _s: 0  # type: ignore[attr-defined]
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="selected-missing-lot")
+
+    assert ready is False
+    assert reason == "lot_size_unresolved"
+    assert details["is_selected_symbol"] is True
+    assert details["candidate_token_valid"] is True
+    assert details["candidate_orderable"] is False
+
+
+def test_order_manager_live_mode_exception_blocks_only_in_live_env(monkeypatch) -> None:
+    runner = _build_runner()
+
+    def _raises() -> bool:
+        raise RuntimeError("live mode unavailable")
+
+    runner._order_manager.is_live_mode = _raises  # type: ignore[attr-defined]
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    allowed, reason, details = runner._resolve_order_manager_health_for_entry()
+
+    assert allowed is False
+    assert reason == "order_manager_not_live"
+    assert details["order_manager_live_mode_unknown"] is True
+    assert details["order_manager_live_mode_error_type"] == "RuntimeError"
+    assert details["order_manager_live_mode_error"] == "live mode unavailable"
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    allowed, reason, details = runner._resolve_order_manager_health_for_entry()
+
+    assert allowed is True
+    assert reason == "broker_health_unknown_assumed_ready"
+    assert details["order_manager_live_mode_unknown"] is True
+    assert details["broker_ready_assumed"] is True
+
 def test_symbol_live_entry_ready_missing_broker_health_assumes_ready(monkeypatch) -> None:
     monkeypatch.delenv("LIVE_ENTRY_SELECTED_ONLY", raising=False)
     runner = _build_runner()
@@ -439,6 +501,7 @@ def test_symbol_live_entry_ready_missing_broker_health_assumes_ready(monkeypatch
     runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
     runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
     runner._active_atm_strike = 23900
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
     assert not hasattr(runner._order_manager, "get_broker_health_snapshot")
 
     ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="health-unknown")
