@@ -7347,6 +7347,109 @@ class StrategyRunner:
         except Exception as exc:
             return True, {"active": True, "kill_reason": "kill_switch_status_check_failed", "last_exception_type": type(exc).__name__, "last_exception_message": str(exc)}
 
+
+    def _resolve_order_manager_health_for_entry(self) -> tuple[bool, str, dict[str, Any]]:
+        """Resolve broker/order-manager health for live entry without blocking on unknown health APIs."""
+        om = getattr(self, "_order_manager", None)
+        details: dict[str, Any] = {
+            "order_manager_present": om is not None,
+            "order_manager_live_mode": None,
+            "order_manager_kill_switch_active": False,
+            "broker_health_available": False,
+            "broker_health_effect": None,
+            "broker_health_block_reason": None,
+            "broker_ready": False,
+            "broker_ready_assumed": False,
+            "last_broker_error": None,
+            "last_order_error": None,
+        }
+        if om is None:
+            details["broker_health_block_reason"] = "order_manager_missing"
+            return False, "order_manager_missing", details
+
+        live_mode: bool | None = None
+        live_fn = getattr(om, "is_live_mode", None)
+        if callable(live_fn):
+            try:
+                live_mode = bool(live_fn())
+            except Exception as exc:
+                live_mode = False
+                details["order_manager_live_mode_error_type"] = type(exc).__name__
+                details["order_manager_live_mode_error"] = str(exc)
+        elif isinstance(live_fn, bool):
+            live_mode = bool(live_fn)
+        details["order_manager_live_mode"] = live_mode
+        if live_mode is False:
+            details["broker_health_block_reason"] = "order_manager_not_live"
+            return False, "order_manager_not_live", details
+
+        ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
+        details["order_manager_kill_switch_active"] = bool(ks_active)
+        details["kill_switch_status"] = ks_status
+        if ks_active:
+            details["broker_health_block_reason"] = "order_manager_kill_switch_active"
+            return False, "order_manager_kill_switch_active", details
+
+        health_fn = getattr(om, "get_broker_health_snapshot", None)
+        health_source = "get_broker_health_snapshot"
+        if not callable(health_fn):
+            health_fn = getattr(om, "get_health", None)
+            health_source = "get_health"
+        if not callable(health_fn):
+            health_attr = getattr(om, "health", None)
+            if callable(health_attr):
+                health_fn = health_attr
+                health_source = "health"
+            elif isinstance(health_attr, Mapping):
+                health_fn = lambda: health_attr
+                health_source = "health"
+        if not callable(health_fn):
+            details["broker_ready"] = True
+            details["broker_ready_assumed"] = True
+            return True, "broker_health_unknown_assumed_ready", details
+
+        try:
+            raw_health = health_fn()
+        except Exception as exc:
+            details["broker_health_source"] = health_source
+            details["broker_health_error_type"] = type(exc).__name__
+            details["broker_health_error"] = str(exc)
+            details["broker_ready"] = True
+            details["broker_ready_assumed"] = True
+            return True, "broker_health_unknown_assumed_ready", details
+        if not isinstance(raw_health, Mapping):
+            details["broker_health_source"] = health_source
+            details["broker_ready"] = True
+            details["broker_ready_assumed"] = True
+            return True, "broker_health_unknown_assumed_ready", details
+
+        health = dict(raw_health)
+        details["broker_health_source"] = health_source
+        details["broker_health_available"] = True
+        effect = health.get("trading_allowed_effect") or health.get("effect")
+        details["broker_health_effect"] = effect
+        details["broker_health_ready"] = health.get("ready")
+        details["broker_order_api_ready"] = health.get("order_api_ready", health.get("order_api_available"))
+        details["broker_connected"] = health.get("broker_connected")
+        details["last_broker_error"] = health.get("last_broker_error") or health.get("last_margin_error")
+        details["last_order_error"] = health.get("last_order_error") or health.get("last_order_api_error")
+        details["last_order_error_type"] = health.get("last_order_error_type") or health.get("last_order_api_error_type")
+        if effect == "live_orders_blocked":
+            details["broker_health_block_reason"] = "trading_allowed_effect_live_orders_blocked"
+            return False, "broker_health_live_orders_blocked", details
+        for key, reason in (
+            ("ready", "broker_ready_false"),
+            ("order_api_ready", "order_api_ready_false"),
+            ("order_api_available", "order_api_available_false"),
+            ("broker_connected", "broker_connected_false"),
+        ):
+            if key in health and health.get(key) is False:
+                details["broker_health_block_reason"] = reason
+                return False, "broker_health_live_orders_blocked", details
+        details["broker_ready"] = True
+        details["broker_ready_assumed"] = False
+        return True, "broker_health_ready", details
+
     def _strategy_decision_is_current(self, decision: Any, *, symbol: str, trace_id: str | None, max_age_s: float = 3.0) -> bool:
         if decision is None:
             return False
@@ -7508,12 +7611,28 @@ class StrategyRunner:
             selected_ce = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("CE")), None)
             selected_pe = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("PE")), None)
             option_symbols = [normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if s.get("symbol")]
+            token_updates: dict[str, int] = {}
+            for snap in snapshots:
+                snap_symbol = normalize_symbol(str(snap.get("symbol") or ""))
+                raw_token = snap.get("instrument_token") or snap.get("token")
+                if not snap_symbol or raw_token in (None, ""):
+                    continue
+                try:
+                    token_updates[snap_symbol] = int(raw_token)
+                except (TypeError, ValueError):
+                    continue
             self.set_active_option_context(
                 selected_ce=selected_ce,
                 selected_pe=selected_pe,
                 atm_strike=int(atm_reference),
                 option_symbols=option_symbols,
             )
+            if token_updates:
+                existing_tokens = getattr(self, "_active_basket_token_by_symbol", {}) or {}
+                if isinstance(existing_tokens, Mapping):
+                    merged_tokens = {normalize_symbol(str(k)): int(v) for k, v in dict(existing_tokens).items() if k and v not in (None, "")}
+                    merged_tokens.update(token_updates)
+                    self._active_basket_token_by_symbol = merged_tokens
             return bool(option_symbols)
 
         symbol_norm = normalize_symbol(symbol)
@@ -7535,15 +7654,20 @@ class StrategyRunner:
             ) or bool(quote.get("tradable_quote"))
             depth_available = bool(quote.get("depth_available") or quote.get("depth"))
         risk_kill_switch = self._risk_kill_switch_triggered()
-        broker_health_effect = None
-        broker_health_available = False
-        om = getattr(self, "_order_manager", None)
-        health_fn = getattr(om, "get_broker_health_snapshot", None)
-        if callable(health_fn):
-            health_snapshot = health_fn()
-            broker_health_available = health_snapshot is not None
-            health = dict(health_snapshot or {})
-            broker_health_effect = health.get("trading_allowed_effect")
+        broker_health_allowed = True
+        broker_health_reason = "broker_health_not_checked"
+        broker_health_details: dict[str, Any] = {
+            "order_manager_present": getattr(self, "_order_manager", None) is not None,
+            "order_manager_live_mode": mode_snapshot.order_manager_live,
+            "order_manager_kill_switch_active": False,
+            "broker_health_available": False,
+            "broker_health_effect": None,
+            "broker_ready": True,
+            "broker_ready_assumed": True,
+            "last_broker_error": None,
+            "last_order_error": None,
+            "broker_health_block_reason": None,
+        }
         selected_ce_norm = normalize_symbol(str(self._active_selected_ce or ""))
         selected_pe_norm = normalize_symbol(str(self._active_selected_pe or ""))
         is_selected_symbol = symbol_norm in {selected_ce_norm, selected_pe_norm}
@@ -7557,9 +7681,9 @@ class StrategyRunner:
             "enable_live_trading": bool(mode_snapshot.env_live_enabled),
             "paper_mode": bool(mode_snapshot.paper_enabled),
             "shadow_mode": bool(mode_snapshot.shadow_mode_enabled),
-            "broker_ready": bool(broker_health_effect != "live_orders_blocked" and not ks_active),
-            "broker_health_available": broker_health_available,
-            "broker_ready_assumed": not broker_health_available,
+            "broker_ready": bool(broker_health_details.get("broker_ready", True) and not ks_active),
+            "broker_health_available": bool(broker_health_details.get("broker_health_available", False)),
+            "broker_ready_assumed": bool(broker_health_details.get("broker_ready_assumed", True)),
             "risk_ready": bool(not risk_kill_switch),
             "data_hard_ready": bool(self._runtime_data_hard_ready),
             "kill_switch": bool(ks_active or risk_kill_switch),
@@ -7574,9 +7698,22 @@ class StrategyRunner:
             "approval_path": signal_metadata.get("approval_path"),
             "final_ready": False,
             "runtime_readiness_reason": self._runtime_readiness_reason,
+            "runtime_data_hard_ready": bool(self._runtime_data_hard_ready),
+            "runtime_evaluation_ready": bool(self._runtime_evaluation_ready),
             "order_manager_live": mode_snapshot.order_manager_live,
+            "order_manager_present": broker_health_details.get("order_manager_present"),
+            "order_manager_live_mode": broker_health_details.get("order_manager_live_mode"),
+            "order_manager_kill_switch_active": broker_health_details.get("order_manager_kill_switch_active"),
             "is_live_mode": mode_snapshot.is_live_mode,
-            "broker_health_effect": broker_health_effect,
+            "broker_health_effect": broker_health_details.get("broker_health_effect"),
+            "broker_health_block_reason": broker_health_details.get("broker_health_block_reason"),
+            "last_broker_error": broker_health_details.get("last_broker_error"),
+            "last_order_error": broker_health_details.get("last_order_error"),
+            "candidate_quote_ready": bool(tradable_quote),
+            "candidate_history_ready": False,
+            "candidate_token_valid": False,
+            "candidate_orderable": False,
+            "candidate_lot_size": 0,
             "tradable_quote": tradable_quote,
             "depth_available": depth_available,
             "spread_pct": spread_pct,
@@ -7584,12 +7721,25 @@ class StrategyRunner:
             "ask": ask,
             "bid_ask_source": bid_ask_source,
         }
+
+        def _finish(final_ready: bool, reason: str) -> tuple[bool, str, dict[str, Any]]:
+            details["final_ready"] = bool(final_ready)
+            self._logger.info(
+                "SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s",
+                symbol,
+                bool(final_ready),
+                reason,
+                trace_id,
+                extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": bool(final_ready), "reason": reason, "trace_id": trace_id, **details},
+            )
+            return final_ready, reason, details
+
         if not bool(self._runtime_live_orders_armed):
-            return False, "execution_not_armed", details
+            return _finish(False, "execution_not_armed")
         if not self._is_tradable_symbol(symbol):
-            return False, "non_tradable_symbol", details
+            return _finish(False, "non_tradable_symbol")
         if ks_active:
-            return False, "order_manager_kill_switch_active", details
+            return _finish(False, "order_manager_kill_switch_active")
         contract_side = self._contract_side_from_symbol(symbol)
         direction_bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
         details["contract_side"] = contract_side
@@ -7606,23 +7756,24 @@ class StrategyRunner:
                 or meta.get("bias_invalidated_by_microstructure")
             )
             if not orderflow_confirmed:
-                return False, "context_direction_conflict", details
+                return _finish(False, "context_direction_conflict")
             details["context_direction_conflict_overridden"] = True
         required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
         history_count = len(self._indicator_engine.get_history(symbol) or [])
         details["history_count"] = history_count
         details["required_bars"] = required_bars
+        details["candidate_history_ready"] = history_count >= required_bars
         if history_count < required_bars:
-            return False, "insufficient_indicator_bar_count", details
+            return _finish(False, "insufficient_indicator_bar_count")
         quote_fresh = self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0)
         details["quote_fresh"] = quote_fresh
         if not quote_fresh:
-            return False, "option_tick_stale", details
+            return _finish(False, "option_tick_stale")
         max_context_age = safe_positive_float_env("MAX_CONTEXT_AGE_SECONDS", 5.0, minimum=0.1)
         ctx_age = _extract_float(ctx, "context_age_seconds")
         details["context_age_seconds"] = ctx_age
         if ctx_age is not None and ctx_age > max_context_age:
-            return False, "context_stale", details
+            return _finish(False, "context_stale")
         eligible, eligibility_reason, eligibility_details = self._live_entry_candidate_eligibility(
             symbol_norm,
             direction_bias=direction_bias,
@@ -7670,7 +7821,41 @@ class StrategyRunner:
                     eligibility_reason,
                     extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": eligibility_reason, **details},
                 )
-            return False, eligibility_reason, details
+            return _finish(False, eligibility_reason)
+
+        token_map_raw = getattr(self, "_active_basket_token_by_symbol", {}) or {}
+        token_map = {normalize_symbol(str(k)): v for k, v in dict(token_map_raw).items()} if isinstance(token_map_raw, Mapping) else {}
+        candidate_token = token_map.get(symbol_norm) or token_map.get(symbol_norm.split(":", 1)[-1])
+        try:
+            candidate_token_valid = int(candidate_token or 0) > 0
+        except (TypeError, ValueError):
+            candidate_token_valid = False
+        candidate_lot_size = 0
+        om_for_lot = getattr(self, "_order_manager", None)
+        lot_fn = getattr(om_for_lot, "resolve_lot_size", None)
+        if callable(lot_fn):
+            for lot_key in (symbol, symbol_norm, symbol_norm.split(":", 1)[-1]):
+                try:
+                    candidate_lot_size = int(lot_fn(lot_key) or 0)
+                except Exception:
+                    candidate_lot_size = 0
+                if candidate_lot_size > 0:
+                    break
+        if candidate_lot_size <= 0:
+            try:
+                candidate_lot_size = int(signal_metadata.get("lot_size") or 0)
+            except (TypeError, ValueError):
+                candidate_lot_size = 0
+        candidate_orderable = bool(candidate_token_valid and candidate_lot_size > 0)
+        details["candidate_token"] = candidate_token
+        details["candidate_token_valid"] = candidate_token_valid
+        details["candidate_lot_size"] = candidate_lot_size
+        details["candidate_orderable"] = candidate_orderable
+        if not is_selected_symbol:
+            if not candidate_token_valid:
+                return _finish(False, "option_token_missing")
+            if not candidate_orderable:
+                return _finish(False, "lot_size_unresolved")
         if not quote:
             details["tradable_quote"] = False
             details["depth_available"] = False
@@ -7679,7 +7864,7 @@ class StrategyRunner:
             details["ask"] = None
             details["bid_ask_source"] = "missing"
             details["selected_option_bid_ask_ready"] = False
-            return False, "quote_missing", details
+            return _finish(False, "quote_missing")
         # Use the canonical helper to resolve bid/ask/spread from ALL possible field
         # layouts (top-level bid/ask, best_bid/best_ask, depth.buy[0]/sell[0]).
         # This mirrors how OrderFlow resolves spread_pct in order_flow.py line 64.
@@ -7694,26 +7879,30 @@ class StrategyRunner:
         details["candidate_bid_ask_ready"] = bool(tradable_quote)
         details["selected_option_bid_ask_ready"] = bool(is_selected_symbol and tradable_quote)
         if not tradable_quote:
-            return False, "quote_not_tradable", details
+            return _finish(False, "quote_not_tradable")
         if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
-            return False, "quote_depth_unavailable", details
+            return _finish(False, "quote_depth_unavailable")
         max_spread_pct = safe_positive_float_env("LIVE_MAX_SPREAD_PCT", 0.75, minimum=0.01)
         require_spread = _env_bool("LIVE_REQUIRE_SPREAD_PCT", True)
         if require_spread and spread_pct is None:
             # bid/ask were resolved but spread couldn't be derived — report precise reason
             if bid is None or ask is None:
-                return False, "bid_ask_missing", details
+                return _finish(False, "bid_ask_missing")
             if bid <= 0 or ask <= 0:
-                return False, "invalid_bid_ask", details
-            return False, "spread_unknown", details
+                return _finish(False, "invalid_bid_ask")
+            return _finish(False, "spread_unknown")
         if spread_pct is not None and spread_pct > max_spread_pct:
-            return False, "spread_too_wide", details
-        if details["broker_health_effect"] == "live_orders_blocked":
-            return False, "broker_health_live_orders_blocked", details
+            return _finish(False, "spread_too_wide")
+        broker_health_allowed, broker_health_reason, broker_health_details = self._resolve_order_manager_health_for_entry()
+        details.update(broker_health_details)
+        details["broker_ready"] = bool(broker_health_details.get("broker_ready", False))
+        details["broker_ready_assumed"] = bool(broker_health_details.get("broker_ready_assumed", False))
+        if not broker_health_allowed:
+            return _finish(False, broker_health_reason)
+        details["broker_health_reason"] = broker_health_reason
         details["final_ready"] = True
         self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, True, "ok", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": True, "block_reason": "ok", **details})
-        self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, True, "symbol_live_ready", trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": True, "reason": "symbol_live_ready", "trace_id": trace_id, **details})
-        return True, "symbol_live_ready", details
+        return _finish(True, "symbol_live_ready")
 
     def _classify_no_trade_decision(
         self,
