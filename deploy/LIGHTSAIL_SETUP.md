@@ -57,14 +57,22 @@ At the top of the dashboard there is a **Live Trading** banner:
 - Click **Switch to SHADOW** anytime to stop real trading instantly.
 The toggle sets both required settings together and restarts the bot for you.
 
-### Every morning
-- Generate your fresh Zerodha access token (as you do now).
-- Open the dashboard → **Daily Access Token** box → paste → **Update token & restart**.
-- Done.
+### Every morning (one step, in the browser)
+- Log in to Kite and copy the **request token** from the redirect URL
+  (the `request_token=...` part after you authorize).
+- Open the dashboard → **Daily Token** → paste it into **Request Token** →
+  **Update token & restart**. The bot fetches the access token automatically.
+  (If you already have an access token, paste that in the second box instead.)
 
-### Anytime
-- **View Logs** — see live activity (like Railway logs).
-- **Restart Bot** — one click.
+### Automatic updates (no terminal ever)
+- Any change pushed to the GitHub repo is pulled to the server and the bot is
+  restarted **automatically within ~2 minutes** (a background timer does this).
+- You can also force it instantly: dashboard → **Update from GitHub**.
+
+### Logs
+- The **Logs** page auto-refreshes (every 5s by default; selectable 3/5/10s or off).
+- Shows clean IST time + message only (host name, PID and UTC line removed).
+- Filter by text, choose line count, and Download as .txt/.json/.csv.
 
 ---
 
