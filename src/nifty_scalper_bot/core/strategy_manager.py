@@ -3577,10 +3577,8 @@ class StrategyManager(_BaseStrategyManager):
 
     def _env_float(self, name: str, default: float) -> float:
         """Args: env key/default. Returns: parsed float. Raises: none."""
-        try:
-            return float(os.getenv(name, str(default)) or default)
-        except (TypeError, ValueError):
-            return float(default)
+        from nifty_scalper_bot.config.env_utils import parse_float_env
+        return parse_float_env(os.getenv(name), default)
 
 
     def _live_context_max_age_seconds(self) -> float:

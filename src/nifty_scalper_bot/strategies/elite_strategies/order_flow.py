@@ -12,10 +12,8 @@ LOGGER = get_logger(__name__)
 
 
 def safe_float_env(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)) or default)
-    except (TypeError, ValueError):
-        return float(default)
+    from nifty_scalper_bot.config.env_utils import parse_float_env
+    return parse_float_env(os.getenv(name), default)
 
 
 class OrderFlowStrategy(EliteStrategy):

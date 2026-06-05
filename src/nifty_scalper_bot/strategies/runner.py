@@ -19,6 +19,7 @@ import json
 import inspect
 import logging
 import os
+from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from pathlib import Path
 import re
 import threading
@@ -174,21 +175,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _safe_positive_float(value: object, fallback: float, *, minimum: float = 0.0) -> float:
     fallback_value = max(float(fallback), float(minimum))
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return fallback_value
+    parsed = parse_float_env(value, fallback_value)  # strips inline comments/whitespace
     if parsed <= 0:
         return fallback_value
     return max(parsed, float(minimum))
 
 
 def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
-    raw = os.getenv(name, str(default))
-    try:
-        parsed = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return max(int(default), int(minimum))
+    parsed = parse_int_env(os.getenv(name), default)
     return max(parsed, int(minimum))
 
 
