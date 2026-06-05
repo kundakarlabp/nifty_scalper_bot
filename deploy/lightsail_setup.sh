@@ -80,7 +80,7 @@ WantedBy=multi-user.target
 EOF
 
 # Allow the dashboard's restart button to run systemctl without a password.
-echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}" | \
+echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}, /bin/systemctl restart --no-block ${SERVICE}, /usr/bin/systemctl restart --no-block ${SERVICE}" | \
   sudo tee /etc/sudoers.d/niftybot >/dev/null
 sudo chmod 440 /etc/sudoers.d/niftybot
 
@@ -105,7 +105,7 @@ fi
 EOF
 sudo chmod +x /usr/local/bin/niftybot-autodeploy.sh
 # allow the deploy script (run as ubuntu) to restart the service without password
-echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}" | \
+echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}, /bin/systemctl restart --no-block ${SERVICE}, /usr/bin/systemctl restart --no-block ${SERVICE}" | \
   sudo tee /etc/sudoers.d/niftybot >/dev/null
 sudo chmod 440 /etc/sudoers.d/niftybot
 

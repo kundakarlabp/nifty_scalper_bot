@@ -161,9 +161,21 @@ def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "
 
 
 def _restart_service() -> None:
+    """Schedule a service restart without blocking/killing the current request.
+
+    The dashboard runs *inside* the bot process, so a synchronous
+    `systemctl restart` would terminate this worker mid-command and could leave
+    the unit stopped. We use --no-block (systemd performs stop+start on its own)
+    and detach, so the HTTP response can complete first.
+    """
     try:
-        subprocess.run(["sudo", "systemctl", "restart", SERVICE_NAME], timeout=20, check=False)
+        subprocess.Popen(
+            ["sudo", "systemctl", "restart", "--no-block", SERVICE_NAME],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     except Exception:
+        # Last resort: exit so systemd's Restart=always relaunches us.
         os._exit(0)
 
 
@@ -196,6 +208,7 @@ padding:12px 18px;display:flex;align-items:center;gap:14px;z-index:5}
 .pill.on{background:#0c2a16;color:#3fb950;border:1px solid #1c5c30}
 .pill.off{background:#2a210c;color:#d29922;border:1px solid #5c4a1c}
 .wrap{max-width:900px;margin:18px auto;padding:0 16px}
+.wrap.wide{max-width:1400px}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px;margin-bottom:16px}
 .card h2{margin:0 0 4px;font-size:15px} .card p{margin:4px 0 14px;font-size:13px;color:var(--mut)}
 label{display:block;font-size:12px;color:var(--mut);margin:12px 0 5px}
@@ -206,8 +219,8 @@ button,.btn{margin-top:14px;padding:11px 16px;border:0;border-radius:9px;backgro
 button.blu,.btn.blu{background:var(--blu)} button.amb,.btn.amb{background:var(--amb)} button.red,.btn.red{background:var(--red)}
 button.gray,.btn.gray{background:#30363d}
 .row{display:flex;gap:10px;flex-wrap:wrap} .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;align-items:end}
-pre{background:#05080d;border:1px solid var(--bd);border-radius:9px;padding:12px;height:62vh;overflow:auto;
-font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;margin:0}
+pre{background:#05080d;border:1px solid var(--bd);border-radius:9px;padding:14px;height:74vh;overflow:auto;
+font:12.5px/1.6 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;margin:0}
 .lg-ok{color:#3fb950}.lg-warn{color:#d29922}.lg-err{color:#f85149}
 .muted{font-size:12px;color:var(--mut)} .flash{padding:10px 12px;border-radius:9px;margin-bottom:14px;font-size:13px}
 .flash.ok{background:#0c2a16;color:#3fb950}.flash.err{background:#2a0c0c;color:#f85149}
@@ -374,7 +387,7 @@ def update_from_github(request: Request) -> RedirectResponse:
 def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLResponse:
     _check_auth(request)
     qs = urllib.parse.urlencode({"lines": lines, "contains": contains})
-    body = f"""{_topbar(False)}<div class=wrap>
+    body = f"""{_topbar(False)}<div class="wrap wide">
     <div class=card><h2>Logs <span class=muted id=stamp></span></h2>
     <div class=grid>
       <div><label>Lines</label><input id=lines value="{lines}"></div>
