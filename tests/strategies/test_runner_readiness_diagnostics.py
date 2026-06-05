@@ -32,6 +32,7 @@ def _make_runner() -> StrategyRunner:
     runner._quote_update_versions = {}
     runner._live_bar_seen = set()
     runner._runtime_execution_ready_by_symbol = {"NFO:CE": False, "NFO:PE": False}
+    runner._runtime_data_hard_ready = False
     runner._runtime_evaluation_ready = False
     runner._runtime_live_orders_armed = False
     runner._runtime_readiness_reason = "execution_not_armed:ce_depth_not_tradable"
@@ -46,7 +47,62 @@ def _make_runner() -> StrategyRunner:
     runner._is_option_symbol_tick_fresh = lambda _sym, max_age_s=60.0: True
     runner._is_symbol_execution_ready = lambda _sym: False
     runner._runtime_indicators = {}
+    runner._order_manager = SimpleNamespace(is_live_mode=lambda: False)
+    runner.metrics = SimpleNamespace(daily_pnl=0.0, consecutive_losses=0)
+    runner._settings = SimpleNamespace(max_daily_loss=0.0, max_consecutive_losses=0)
     return runner
+
+
+
+
+def test_symbol_live_entry_ready_execution_not_armed_has_reason_chain(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.delenv("PAPER_MODE", raising=False)
+    monkeypatch.delenv("PAPER__ENABLED", raising=False)
+    monkeypatch.delenv("SHADOW_MODE", raising=False)
+    runner = _make_runner()
+    runner._runtime_live_orders_armed = False
+    runner._runtime_data_hard_ready = True
+    runner._active_selected_ce = "NFO:NIFTY26JUN23800CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner._order_manager = SimpleNamespace(is_live_mode=lambda: True)
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._get_cached_quote_for_live_entry = lambda _s: {
+        "bid": 100.0,
+        "ask": 100.5,
+        "depth_available": True,
+        "tradable_quote": True,
+    }
+    signal = SimpleNamespace(metadata={"approval_path": "single_vote_high_conviction"})
+
+    ready, reason, details = runner._symbol_live_entry_ready(
+        "NFO:NIFTY26JUN23850CE",
+        signal=signal,
+        trace_id="not-armed-chain",
+    )
+
+    assert ready is False
+    assert reason == "execution_not_armed"
+    assert details["final_ready"] is False
+    assert details["execution_mode"] == "LIVE"
+    assert details["live_orders_armed"] is False
+    assert details["enable_live_trading"] is True
+    assert details["paper_mode"] is False
+    assert details["shadow_mode"] is False
+    assert details["broker_ready"] is True
+    assert details["broker_health_available"] is False
+    assert details["broker_ready_assumed"] is True
+    assert details["risk_ready"] is True
+    assert details["data_hard_ready"] is True
+    assert details["kill_switch"] is False
+    assert details["daily_loss_lock"] is False
+    assert details["selected_symbol"] is None
+    assert details["is_selected_symbol"] is False
+    assert details["candidate_bid_ask_ready"] is True
+    assert details["selected_option_bid_ask_ready"] is False
+    assert details["combined_signal_present"] is True
+    assert details["approval_path"] == "single_vote_high_conviction"
 
 
 def test_runtime_indicators_initialized_in_constructor() -> None:

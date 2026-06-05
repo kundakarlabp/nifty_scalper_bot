@@ -7536,11 +7536,18 @@ class StrategyRunner:
             depth_available = bool(quote.get("depth_available") or quote.get("depth"))
         risk_kill_switch = self._risk_kill_switch_triggered()
         broker_health_effect = None
+        broker_health_available = False
         om = getattr(self, "_order_manager", None)
         health_fn = getattr(om, "get_broker_health_snapshot", None)
         if callable(health_fn):
-            health = dict(health_fn() or {})
+            health_snapshot = health_fn()
+            broker_health_available = health_snapshot is not None
+            health = dict(health_snapshot or {})
             broker_health_effect = health.get("trading_allowed_effect")
+        selected_ce_norm = normalize_symbol(str(self._active_selected_ce or ""))
+        selected_pe_norm = normalize_symbol(str(self._active_selected_pe or ""))
+        is_selected_symbol = symbol_norm in {selected_ce_norm, selected_pe_norm}
+        candidate_bid_ask_ready = bool(tradable_quote)
         signal_metadata = dict(getattr(signal, "metadata", {}) or {}) if signal is not None else {}
         details: dict[str, Any] = {
             "symbol": symbol,
@@ -7551,14 +7558,18 @@ class StrategyRunner:
             "paper_mode": bool(mode_snapshot.paper_enabled),
             "shadow_mode": bool(mode_snapshot.shadow_mode_enabled),
             "broker_ready": bool(broker_health_effect != "live_orders_blocked" and not ks_active),
+            "broker_health_available": broker_health_available,
+            "broker_ready_assumed": not broker_health_available,
             "risk_ready": bool(not risk_kill_switch),
             "data_hard_ready": bool(self._runtime_data_hard_ready),
             "kill_switch": bool(ks_active or risk_kill_switch),
             "kill_switch_active": ks_active,
             "kill_switch_status": ks_status,
             "daily_loss_lock": bool(risk_kill_switch),
-            "selected_symbol": symbol_norm if symbol_norm in {normalize_symbol(str(self._active_selected_ce or "")), normalize_symbol(str(self._active_selected_pe or ""))} else None,
-            "selected_option_bid_ask_ready": bool(tradable_quote),
+            "selected_symbol": symbol_norm if is_selected_symbol else None,
+            "is_selected_symbol": is_selected_symbol,
+            "candidate_bid_ask_ready": candidate_bid_ask_ready,
+            "selected_option_bid_ask_ready": bool(is_selected_symbol and tradable_quote),
             "combined_signal_present": signal is not None,
             "approval_path": signal_metadata.get("approval_path"),
             "final_ready": False,
@@ -7680,7 +7691,8 @@ class StrategyRunner:
         details["bid"] = bid
         details["ask"] = ask
         details["bid_ask_source"] = bid_ask_source
-        details["selected_option_bid_ask_ready"] = bool(tradable_quote)
+        details["candidate_bid_ask_ready"] = bool(tradable_quote)
+        details["selected_option_bid_ask_ready"] = bool(is_selected_symbol and tradable_quote)
         if not tradable_quote:
             return False, "quote_not_tradable", details
         if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
