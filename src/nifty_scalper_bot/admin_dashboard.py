@@ -270,6 +270,7 @@ def _flash(request: Request) -> str:
     if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
     if q.get("token") == "ok": return '<div class="flash ok">Access token updated and bot restarted.</div>'
     if q.get("token") == "err": return f'<div class="flash err">Token exchange failed: {q.get("msg","")}</div>'
+    if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first (Save them below), then toggle.</div>'
     if q.get("mode"): return '<div class="flash ok">Mode changed and bot restarted.</div>'
     if q.get("restart"): return '<div class="flash ok">Bot restarting…</div>'
     if q.get("upd") == "ok": return '<div class="flash ok">Updated from GitHub and restarted.</div>'
@@ -321,6 +322,13 @@ def dashboard(request: Request) -> HTMLResponse:
 def set_mode(request: Request, mode: str = Form(...)) -> RedirectResponse:
     _check_auth(request)
     if mode.strip().lower() == "live":
+        env = _read_env()
+        has_key = any(env.get(k, "").strip() for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY"))
+        has_secret = any(env.get(k, "").strip() for k in ("KITE_API_SECRET", "ZERODHA_API_SECRET", "BROKER_API_SECRET"))
+        has_token = any(env.get(k, "").strip() for k in ("KITE_ACCESS_TOKEN", "ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN"))
+        if not (has_key and has_secret and has_token):
+            # Don't enable LIVE without credentials — that crash-loops the engine.
+            return RedirectResponse("/admin?mode=err", status_code=303)
         _write_env({"ENABLE_LIVE": "true", "EXECUTION_MODE": "LIVE"})
     else:
         _write_env({"ENABLE_LIVE": "false", "EXECUTION_MODE": "SHADOW"})
@@ -340,6 +348,13 @@ async def save(request: Request) -> RedirectResponse:
         if val == "" or (sec and set(val) <= {"•"}):
             continue
         updates[key] = val
+    # Mirror Zerodha credentials to all alias names the config layer accepts
+    # (BROKER_*/ZERODHA_*/KITE_*), so a saved key/secret is always found and the
+    # bot can't crash with 'Missing required env' due to a name mismatch.
+    if "KITE_API_KEY" in updates:
+        updates["ZERODHA_API_KEY"] = updates["BROKER_API_KEY"] = updates["KITE_API_KEY"]
+    if "KITE_API_SECRET" in updates:
+        updates["ZERODHA_API_SECRET"] = updates["BROKER_API_SECRET"] = updates["KITE_API_SECRET"]
     if updates:
         _write_env(updates)
     return RedirectResponse("/admin?saved=1", status_code=303)
