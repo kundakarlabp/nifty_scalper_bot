@@ -7516,18 +7516,80 @@ class StrategyRunner:
             )
             return bool(option_symbols)
 
-        details: dict[str, Any] = {"symbol": symbol, "trace_id": trace_id, "live_orders_armed": bool(self._runtime_live_orders_armed)}
+        symbol_norm = normalize_symbol(symbol)
+        runtime_indicators = getattr(self, "_runtime_indicators", {}) or {}
+        ctx = runtime_indicators.get(symbol, {}) or runtime_indicators.get(symbol_norm, {}) or {}
+        mode_snapshot = self._resolve_execution_mode_snapshot()
+        ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
+        quote = self._get_cached_quote_for_live_entry(symbol_norm)
+        bid: float | None = None
+        ask: float | None = None
+        spread_pct: float | None = None
+        bid_ask_source: str | None = None
+        tradable_quote = False
+        depth_available = False
+        if quote:
+            bid, ask, spread_pct, bid_ask_source = _resolve_quote_bid_ask_spread(quote)
+            tradable_quote = bool(
+                bid is not None and ask is not None and bid > 0 and ask > bid
+            ) or bool(quote.get("tradable_quote"))
+            depth_available = bool(quote.get("depth_available") or quote.get("depth"))
+        risk_kill_switch = self._risk_kill_switch_triggered()
+        broker_health_effect = None
+        broker_health_available = False
+        om = getattr(self, "_order_manager", None)
+        health_fn = getattr(om, "get_broker_health_snapshot", None)
+        if callable(health_fn):
+            health_snapshot = health_fn()
+            broker_health_available = health_snapshot is not None
+            health = dict(health_snapshot or {})
+            broker_health_effect = health.get("trading_allowed_effect")
+        selected_ce_norm = normalize_symbol(str(self._active_selected_ce or ""))
+        selected_pe_norm = normalize_symbol(str(self._active_selected_pe or ""))
+        is_selected_symbol = symbol_norm in {selected_ce_norm, selected_pe_norm}
+        candidate_bid_ask_ready = bool(tradable_quote)
+        signal_metadata = dict(getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+        details: dict[str, Any] = {
+            "symbol": symbol,
+            "trace_id": trace_id,
+            "execution_mode": mode_snapshot.execution_mode,
+            "live_orders_armed": bool(self._runtime_live_orders_armed),
+            "enable_live_trading": bool(mode_snapshot.env_live_enabled),
+            "paper_mode": bool(mode_snapshot.paper_enabled),
+            "shadow_mode": bool(mode_snapshot.shadow_mode_enabled),
+            "broker_ready": bool(broker_health_effect != "live_orders_blocked" and not ks_active),
+            "broker_health_available": broker_health_available,
+            "broker_ready_assumed": not broker_health_available,
+            "risk_ready": bool(not risk_kill_switch),
+            "data_hard_ready": bool(self._runtime_data_hard_ready),
+            "kill_switch": bool(ks_active or risk_kill_switch),
+            "kill_switch_active": ks_active,
+            "kill_switch_status": ks_status,
+            "daily_loss_lock": bool(risk_kill_switch),
+            "selected_symbol": symbol_norm if is_selected_symbol else None,
+            "is_selected_symbol": is_selected_symbol,
+            "candidate_bid_ask_ready": candidate_bid_ask_ready,
+            "selected_option_bid_ask_ready": bool(is_selected_symbol and tradable_quote),
+            "combined_signal_present": signal is not None,
+            "approval_path": signal_metadata.get("approval_path"),
+            "final_ready": False,
+            "runtime_readiness_reason": self._runtime_readiness_reason,
+            "order_manager_live": mode_snapshot.order_manager_live,
+            "is_live_mode": mode_snapshot.is_live_mode,
+            "broker_health_effect": broker_health_effect,
+            "tradable_quote": tradable_quote,
+            "depth_available": depth_available,
+            "spread_pct": spread_pct,
+            "bid": bid,
+            "ask": ask,
+            "bid_ask_source": bid_ask_source,
+        }
         if not bool(self._runtime_live_orders_armed):
             return False, "execution_not_armed", details
         if not self._is_tradable_symbol(symbol):
             return False, "non_tradable_symbol", details
-        ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
-        details["kill_switch_active"] = ks_active
-        details["kill_switch_status"] = ks_status
         if ks_active:
             return False, "order_manager_kill_switch_active", details
-        runtime_indicators = getattr(self, "_runtime_indicators", {}) or {}
-        ctx = runtime_indicators.get(symbol, {}) or {}
         contract_side = self._contract_side_from_symbol(symbol)
         direction_bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
         details["contract_side"] = contract_side
@@ -7561,7 +7623,6 @@ class StrategyRunner:
         details["context_age_seconds"] = ctx_age
         if ctx_age is not None and ctx_age > max_context_age:
             return False, "context_stale", details
-        symbol_norm = normalize_symbol(symbol)
         eligible, eligibility_reason, eligibility_details = self._live_entry_candidate_eligibility(
             symbol_norm,
             direction_bias=direction_bias,
@@ -7610,7 +7671,6 @@ class StrategyRunner:
                     extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": eligibility_reason, **details},
                 )
             return False, eligibility_reason, details
-        quote = self._get_cached_quote_for_live_entry(symbol_norm)
         if not quote:
             details["tradable_quote"] = False
             details["depth_available"] = False
@@ -7618,23 +7678,21 @@ class StrategyRunner:
             details["bid"] = None
             details["ask"] = None
             details["bid_ask_source"] = "missing"
+            details["selected_option_bid_ask_ready"] = False
             return False, "quote_missing", details
         # Use the canonical helper to resolve bid/ask/spread from ALL possible field
         # layouts (top-level bid/ask, best_bid/best_ask, depth.buy[0]/sell[0]).
         # This mirrors how OrderFlow resolves spread_pct in order_flow.py line 64.
         # Without this, quotes that carry depth but NOT a pre-computed "spread_pct"
         # key triggered "spread_unknown" even when a valid spread was derivable.
-        bid, ask, spread_pct, bid_ask_source = _resolve_quote_bid_ask_spread(quote)
-        tradable_quote = bool(
-            bid is not None and ask is not None and bid > 0 and ask > bid
-        ) or bool(quote.get("tradable_quote"))
-        depth_available = bool(quote.get("depth_available") or quote.get("depth"))
         details["tradable_quote"] = tradable_quote
         details["depth_available"] = depth_available
         details["spread_pct"] = spread_pct
         details["bid"] = bid
         details["ask"] = ask
         details["bid_ask_source"] = bid_ask_source
+        details["candidate_bid_ask_ready"] = bool(tradable_quote)
+        details["selected_option_bid_ask_ready"] = bool(is_selected_symbol and tradable_quote)
         if not tradable_quote:
             return False, "quote_not_tradable", details
         if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
@@ -7650,13 +7708,9 @@ class StrategyRunner:
             return False, "spread_unknown", details
         if spread_pct is not None and spread_pct > max_spread_pct:
             return False, "spread_too_wide", details
-        om = getattr(self, "_order_manager", None)
-        health_fn = getattr(om, "get_broker_health_snapshot", None)
-        if callable(health_fn):
-            health = dict(health_fn() or {})
-            details["broker_health_effect"] = health.get("trading_allowed_effect")
         if details["broker_health_effect"] == "live_orders_blocked":
             return False, "broker_health_live_orders_blocked", details
+        details["final_ready"] = True
         self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, True, "ok", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": True, "block_reason": "ok", **details})
         self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, True, "symbol_live_ready", trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": True, "reason": "symbol_live_ready", "trace_id": trace_id, **details})
         return True, "symbol_live_ready", details

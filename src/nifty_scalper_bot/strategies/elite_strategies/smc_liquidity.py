@@ -497,6 +497,32 @@ class SMCStrategy(EliteStrategy):
                         "context_age_seconds": context_age_seconds,
                     },
                 )
+                LOGGER.info(
+                    "SMC_SCORE_BREAKDOWN symbol=%s raw_score=%.2f min_score=%.2f bos_confirmed=%s choch_confirmed=%s retest_confirmed=%s premium_reclaim=%s bullish_reversal=%s bearish_reversal=%s history_count=%s",
+                    symbol,
+                    strategy_score,
+                    min_score,
+                    bos_confirmed,
+                    choch_confirmed,
+                    retest_confirmed,
+                    premium_reclaim,
+                    bool(indicators.get("bullish_reversal")),
+                    bool(indicators.get("bearish_reversal")),
+                    indicators.get("history_count") or indicators.get("indicator_history_count"),
+                    extra={
+                        "event": "SMC_SCORE_BREAKDOWN",
+                        "symbol": symbol,
+                        "raw_score": strategy_score,
+                        "min_score": min_score,
+                        "bos_confirmed": bos_confirmed,
+                        "choch_confirmed": choch_confirmed,
+                        "retest_confirmed": retest_confirmed,
+                        "premium_reclaim": premium_reclaim,
+                        "bullish_reversal": bool(indicators.get("bullish_reversal")),
+                        "bearish_reversal": bool(indicators.get("bearish_reversal")),
+                        "history_count": indicators.get("history_count") or indicators.get("indicator_history_count"),
+                    },
+                )
                 return None
 
             metadata = {
