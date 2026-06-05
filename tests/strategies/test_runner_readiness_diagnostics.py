@@ -55,6 +55,18 @@ def _make_runner() -> StrategyRunner:
 
 
 
+def _arm_live_entry_ready_runner(runner: StrategyRunner, *, symbol: str = "NFO:NIFTY26JUN23800PE") -> None:
+    runner._runtime_live_orders_armed = True
+    runner._runtime_data_hard_ready = True
+    runner._runtime_evaluation_ready = True
+    runner._order_manager = SimpleNamespace(
+        is_live_mode=lambda: True,
+        resolve_lot_size=lambda _s: 65,
+    )
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._active_basket_token_by_symbol = {symbol: 123456}
+
+
 def test_symbol_live_entry_ready_execution_not_armed_has_reason_chain(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
@@ -115,18 +127,20 @@ def test_symbol_live_entry_ready_no_runtime_indicators_attribute_does_not_crash(
     runner = _make_runner()
     if hasattr(runner, "_runtime_indicators"):
         delattr(runner, "_runtime_indicators")
-    runner._runtime_live_orders_armed = True
+    _arm_live_entry_ready_runner(runner)
     runner._is_tradable_symbol = lambda _s: True
-    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
     runner._contract_side_from_symbol = lambda _s: "PE"
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.1}
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
     runner._active_atm_strike = 23800
     runner._extract_strike_from_symbol = lambda _s: 23800
     runner._indicator_engine = _DummyIndicator({"NFO:NIFTY26JUN23800PE": [1, 2, 3, 4, 5, 6]})
     runner._required_bars_for_symbol = lambda _s: 1
-    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", trace_id="t-no-attr")
-    assert reason in {"symbol_live_ready", "quote_depth_unavailable", "spread_unknown", "spread_too_wide", "broker_health_live_orders_blocked"}
-    assert isinstance(ready, bool)
+    ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", trace_id="t-no-attr")
+    assert ready is True
+    assert reason == "symbol_live_ready"
+    assert details["candidate_token_valid"] is True
+    assert details["candidate_orderable"] is True
 
 
 def test_live_trading_readiness_snapshot_emitted(caplog) -> None:
@@ -418,8 +432,8 @@ def test_ce_signal_blocked_when_direction_bias_pe() -> None:
 
 def test_pe_signal_allowed_when_direction_bias_pe_and_other_gates_pass() -> None:
     runner = _make_runner()
+    _arm_live_entry_ready_runner(runner)
     runner._is_tradable_symbol = lambda _s: True
-    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
     runner._runtime_indicators = {"NFO:NIFTY26JUN23800PE": {"direction_bias": "PE"}}
     runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
@@ -440,8 +454,8 @@ def test_symbol_live_entry_ready_does_not_crash_when_active_atm_strike_missing()
     runner = _make_runner()
     if hasattr(runner, "_active_atm_strike"):
         delattr(runner, "_active_atm_strike")
+    _arm_live_entry_ready_runner(runner)
     runner._is_tradable_symbol = lambda _s: True
-    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
     runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
     ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
@@ -451,8 +465,8 @@ def test_symbol_live_entry_ready_does_not_crash_when_active_atm_strike_missing()
 
 def test_symbol_live_entry_ready_false_when_quote_missing() -> None:
     runner = _make_runner()
+    _arm_live_entry_ready_runner(runner)
     runner._is_tradable_symbol = lambda _s: True
-    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
     runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
     runner._get_cached_quote_for_live_entry = lambda _s: {}
     ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
@@ -487,8 +501,8 @@ def test_runner_ignores_strategy_decision_for_wrong_trace_id() -> None:
 
 def test_symbol_live_entry_ready_false_when_depth_missing() -> None:
     runner = _make_runner()
+    _arm_live_entry_ready_runner(runner)
     runner._is_tradable_symbol = lambda _s: True
-    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
     runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": False, "spread_pct": 0.2}
     ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
@@ -498,8 +512,8 @@ def test_symbol_live_entry_ready_false_when_depth_missing() -> None:
 
 def test_symbol_live_entry_ready_false_when_spread_unknown_by_default() -> None:
     runner = _make_runner()
+    _arm_live_entry_ready_runner(runner)
     runner._is_tradable_symbol = lambda _s: True
-    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
     runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True}
     ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")

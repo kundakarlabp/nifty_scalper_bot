@@ -303,6 +303,7 @@ def _prime_live_entry_runner(runner: StrategyRunner, *, symbol: str, side: str =
     runner._indicator_engine.get_history = lambda _s: [1, 2, 3, 4, 5]
     runner._is_option_symbol_tick_fresh = lambda *_a, **_k: True
     runner._runtime_indicators = {symbol: {"direction_bias": side, "context_age_seconds": 1.0}}
+    runner._active_basket_token_by_symbol = {symbol: 123456}
     runner._get_cached_quote_for_live_entry = lambda _s: {
         "tradable_quote": True,
         "depth_available": True,
@@ -427,6 +428,147 @@ def test_selected_only_mode_marks_non_selected_active_basket_candidate_non_execu
     assert details["is_selected_option"] is False
 
 
+
+
+
+def test_selected_option_missing_token_blocks_live_entry() -> None:
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
+    runner._active_basket_token_by_symbol = {}
+    runner._active_atm_strike = 23900
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="selected-missing-token")
+
+    assert ready is False
+    assert reason == "option_token_missing"
+    assert details["is_selected_symbol"] is True
+    assert details["candidate_token_valid"] is False
+
+
+def test_selected_option_unresolved_lot_size_blocks_live_entry() -> None:
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
+    runner._active_atm_strike = 23900
+    runner._order_manager.resolve_lot_size = lambda _s: 0  # type: ignore[attr-defined]
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="selected-missing-lot")
+
+    assert ready is False
+    assert reason == "lot_size_unresolved"
+    assert details["is_selected_symbol"] is True
+    assert details["candidate_token_valid"] is True
+    assert details["candidate_orderable"] is False
+
+
+def test_order_manager_live_mode_exception_blocks_only_in_live_env(monkeypatch) -> None:
+    runner = _build_runner()
+
+    def _raises() -> bool:
+        raise RuntimeError("live mode unavailable")
+
+    runner._order_manager.is_live_mode = _raises  # type: ignore[attr-defined]
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    allowed, reason, details = runner._resolve_order_manager_health_for_entry()
+
+    assert allowed is False
+    assert reason == "order_manager_not_live"
+    assert details["order_manager_live_mode_unknown"] is True
+    assert details["order_manager_live_mode_error_type"] == "RuntimeError"
+    assert details["order_manager_live_mode_error"] == "live mode unavailable"
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    allowed, reason, details = runner._resolve_order_manager_health_for_entry()
+
+    assert allowed is True
+    assert reason == "broker_health_unknown_assumed_ready"
+    assert details["order_manager_live_mode_unknown"] is True
+    assert details["broker_ready_assumed"] is True
+
+def test_symbol_live_entry_ready_missing_broker_health_assumes_ready(monkeypatch) -> None:
+    monkeypatch.delenv("LIVE_ENTRY_SELECTED_ONLY", raising=False)
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
+    runner._active_atm_strike = 23900
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    assert not hasattr(runner._order_manager, "get_broker_health_snapshot")
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="health-unknown")
+
+    assert ready is True
+    assert reason == "symbol_live_ready"
+    assert details["broker_health_available"] is False
+    assert details["broker_ready_assumed"] is True
+    assert details["broker_health_reason"] == "broker_health_unknown_assumed_ready"
+
+
+def test_symbol_live_entry_ready_explicit_broker_health_blocks() -> None:
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23900CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {symbol, "NFO:NIFTY26JUN23900PE"}
+    runner._active_atm_strike = 23900
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._order_manager.get_broker_health_snapshot = lambda: {  # type: ignore[attr-defined]
+        "trading_allowed_effect": "live_orders_blocked",
+        "ready": True,
+        "order_api_ready": True,
+        "broker_connected": True,
+        "last_broker_error": "margin stale",
+        "last_order_error": "previous order api error",
+    }
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="health-blocked")
+
+    assert ready is False
+    assert reason == "broker_health_live_orders_blocked"
+    assert details["broker_health_available"] is True
+    assert details["broker_health_effect"] == "live_orders_blocked"
+    assert details["broker_health_block_reason"] == "trading_allowed_effect_live_orders_blocked"
+    assert details["broker_ready_assumed"] is False
+    assert details["last_broker_error"] == "margin stale"
+    assert details["last_order_error"] == "previous order api error"
+
+
+def test_symbol_live_entry_ready_selected_only_blocks_candidate_before_broker_health(monkeypatch) -> None:
+    monkeypatch.setenv("LIVE_ENTRY_SELECTED_ONLY", "true")
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26JUN23950CE"
+    _prime_live_entry_runner(runner, symbol=symbol, side="CE")
+    runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = {"NFO:NIFTY26JUN23900CE", "NFO:NIFTY26JUN23900PE", symbol}
+    runner._active_atm_strike = 23900
+    called = {"health": False}
+
+    def _health() -> dict[str, object]:
+        called["health"] = True
+        return {"trading_allowed_effect": "live_orders_blocked"}
+
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._order_manager.get_broker_health_snapshot = _health  # type: ignore[attr-defined]
+
+    ready, reason, details = runner._symbol_live_entry_ready(symbol, trace_id="selected-only")
+
+    assert ready is False
+    assert reason == "non_executable_candidate"
+    assert called["health"] is False
+    assert details["is_selected_symbol"] is False
+    assert details["broker_health_available"] is False
+
 def test_symbol_live_entry_ready_refreshes_stale_candidate_for_trigger_signal() -> None:
     runner = _build_runner()
     runner._runtime_live_orders_armed = True
@@ -445,7 +587,7 @@ def test_symbol_live_entry_ready_refreshes_stale_candidate_for_trigger_signal() 
         [
             {"symbol": "NFO:NIFTY26JUN23900CE"},
             {"symbol": "NFO:NIFTY26JUN23900PE"},
-            {"symbol": "NFO:NIFTY26JUN23850PE"},
+            {"symbol": "NFO:NIFTY26JUN23850PE", "instrument_token": 23850},
         ],
         False,
         "test",
@@ -500,7 +642,7 @@ def test_symbol_live_entry_ready_refresh_uses_context_spot_when_active_atm_missi
     runner._active_option_symbols = []
     runner._active_atm_strike = None
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
-    runner._build_candidate_snapshots_sync_safe = lambda **_k: ([{"symbol": "NFO:NIFTY26JUN23800PE"}], False, "test")  # type: ignore[method-assign]
+    runner._build_candidate_snapshots_sync_safe = lambda **_k: ([{"symbol": "NFO:NIFTY26JUN23800PE", "instrument_token": 23800}], False, "test")  # type: ignore[method-assign]
     signal = Signal(action="BUY", symbol="NFO:NIFTY26JUN23800PE", quantity=1, confidence=0.8, reason="OrderFlow", metadata={"trigger_conditions_met": True})
     ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", signal=signal, trace_id="refresh-no-active-atm")
     assert ready is True
@@ -522,7 +664,7 @@ def test_symbol_live_entry_ready_refresh_uses_context_atm_when_active_atm_stale(
     runner._active_option_symbols = ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"]
     runner._active_atm_strike = None
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
-    runner._build_candidate_snapshots_sync_safe = lambda **_k: ([{"symbol": "NFO:NIFTY26JUN23800PE"}], False, "test")  # type: ignore[method-assign]
+    runner._build_candidate_snapshots_sync_safe = lambda **_k: ([{"symbol": "NFO:NIFTY26JUN23800PE", "instrument_token": 23800}], False, "test")  # type: ignore[method-assign]
     signal = Signal(action="BUY", symbol="NFO:NIFTY26JUN23800PE", quantity=1, confidence=0.8, reason="OrderFlow", metadata={"trigger_conditions_met": True})
     ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", signal=signal, trace_id="refresh-stale-atm")
     assert ready is True
