@@ -403,7 +403,7 @@ def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLRes
     _check_auth(request)
     qs = urllib.parse.urlencode({"lines": lines, "contains": contains})
     body = f"""{_topbar(False)}<div class="wrap wide">
-    <div class=card><h2>Logs <span class=muted id=stamp></span></h2>
+    <div class=card><h2>Logs <span class=muted id=stamp></span> <span id=botstat class=badge style="margin-left:8px">checking…</span> <span id=cnt class=badge></span></h2>
     <div class=grid>
       <div><label>Lines</label><input id=lines value="{lines}"></div>
       <div><label>Filter contains</label><input id=contains value="{contains}" placeholder="e.g. ORDER_SENT"></div>
@@ -414,27 +414,40 @@ def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLRes
       <button class=blu onclick="load()">Apply</button>
     </div>
     <div class=row style="margin-top:10px">
+      <button class=gray onclick="toggleScroll()" id=scrollbtn>Auto-scroll: ON</button>
+      <button class=gray onclick="box.scrollTop=box.scrollHeight">Jump to latest ↓</button>
       <a class="btn gray" href="/admin/logs/download?fmt=txt&{qs}">Download .txt</a>
       <a class="btn gray" href="/admin/logs/download?fmt=json&{qs}">Download .json</a>
       <a class="btn gray" href="/admin/logs/download?fmt=csv&{qs}">Download .csv</a>
     </div>
     <pre id=box>Loading…</pre></div></div>
     <script>
-    const box=document.getElementById('box'),stamp=document.getElementById('stamp');
-    let timer=null;
+    const box=document.getElementById('box'),stamp=document.getElementById('stamp'),
+          botstat=document.getElementById('botstat'),cnt=document.getElementById('cnt');
+    let timer=null, autoscroll=true;
+    function toggleScroll(){{autoscroll=!autoscroll;
+      document.getElementById('scrollbtn').textContent='Auto-scroll: '+(autoscroll?'ON':'OFF');}}
     function colorize(t){{return t.split('\\n').map(function(l){{
-      var c=l.indexOf('❌')>=0||l.indexOf('Failure')>=0||l.indexOf('error')>=0?'lg-err':
+      var c=l.indexOf('❌')>=0||l.indexOf('Failure')>=0||l.indexOf('ERROR')>=0?'lg-err':
             (l.indexOf('⚠')>=0||l.indexOf('WARN')>=0?'lg-warn':'lg-ok');
       return '<span class="'+c+'">'+l.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span>';
     }}).join('\\n');}}
+    async function status(){{
+      try{{const r=await fetch('/admin/status.json');const j=await r.json();
+        botstat.textContent=j.label; botstat.style.background=j.color+'22';
+        botstat.style.color=j.color; botstat.style.border='1px solid '+j.color+'66';
+      }}catch(e){{botstat.textContent='status?';}}
+    }}
     async function load(){{
       const ln=document.getElementById('lines').value, ct=document.getElementById('contains').value;
       try{{const r=await fetch('/admin/logs.json?lines='+ln+'&contains='+encodeURIComponent(ct));
         const j=await r.json(); const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
-        box.innerHTML=colorize(j.text); if(atBottom)box.scrollTop=box.scrollHeight;
+        box.innerHTML=colorize(j.text);
+        cnt.textContent=(j.text.split('\\n').length)+' lines';
+        if(autoscroll&&atBottom)box.scrollTop=box.scrollHeight;
         stamp.textContent='· updated '+new Date().toLocaleTimeString();
       }}catch(e){{stamp.textContent='· refresh error';}}
-      schedule();
+      status(); schedule();
     }}
     function schedule(){{if(timer)clearTimeout(timer);
       const s=parseInt(document.getElementById('auto').value||'0',10);
@@ -443,6 +456,31 @@ def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLRes
     load();
     </script>"""
     return HTMLResponse(_page(body))
+
+
+@router.get("/admin/status.json")
+def status_json(request: Request) -> JSONResponse:
+    _check_auth(request)
+    # Lightweight health: is the trading engine up, or degraded/stopped?
+    label, color = "running", "#3fb950"
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-active", SERVICE_NAME],
+            capture_output=True, text=True, timeout=5,
+        )
+        active = out.stdout.strip()
+        if active != "active":
+            label, color = active or "stopped", "#f85149"
+        else:
+            # Look for a recent degraded/crash marker in the tail.
+            tail = _gather_logs(60, clean=True)
+            if "degraded mode" in tail or "Missing required env" in tail:
+                label, color = "degraded", "#d29922"
+            elif "Bot fully operational" in tail or "fully operational" in tail:
+                label, color = "operational", "#3fb950"
+    except Exception:
+        label, color = "unknown", "#8b97a6"
+    return JSONResponse({"label": label, "color": color})
 
 
 @router.get("/admin/logs.json")

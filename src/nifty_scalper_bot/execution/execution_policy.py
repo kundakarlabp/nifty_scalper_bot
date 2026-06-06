@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from nifty_scalper_bot.config.env_utils import parse_float_env
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from nifty_scalper_bot.data.data_hub import DataHub
@@ -141,10 +142,10 @@ class ExecutionPolicy:
         if not is_option:
             return base
         try:
-            atm_limit = float(os.getenv("OPTION_EXEC_MAX_SPREAD_ATM_PCT", "0.03") or "0.03")
-            low_premium_limit = float(os.getenv("OPTION_EXEC_MAX_SPREAD_LOW_PREMIUM_PCT", "0.06") or "0.06")
-            hard_cap = float(os.getenv("OPTION_EXEC_MAX_SPREAD_HARD_CAP_PCT", "0.10") or "0.10")
-            low_premium_cutoff = float(os.getenv("OPTION_LOW_PREMIUM_CUTOFF", "50") or "50")
+            atm_limit = parse_float_env(os.getenv("OPTION_EXEC_MAX_SPREAD_ATM_PCT"), 0.03)
+            low_premium_limit = parse_float_env(os.getenv("OPTION_EXEC_MAX_SPREAD_LOW_PREMIUM_PCT"), 0.06)
+            hard_cap = parse_float_env(os.getenv("OPTION_EXEC_MAX_SPREAD_HARD_CAP_PCT"), 0.10)
+            low_premium_cutoff = parse_float_env(os.getenv("OPTION_LOW_PREMIUM_CUTOFF"), 50.0)
         except ValueError:
             atm_limit = 0.03
             low_premium_limit = 0.06

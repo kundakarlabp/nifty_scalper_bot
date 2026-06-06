@@ -162,7 +162,9 @@ class OptionUniverseManager:
     def _runtime_blocked_universe(self, method: str) -> list[str]:
         if self._runtime_mode_is_live():
             if not self._runtime_call_blocked_logged:
-                LOGGER.warning(
+                # Expected during startup/off-market before the active basket is
+                # built; the caller falls back cleanly. Informational, not an error.
+                LOGGER.info(
                     "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED method=%s reason=active_contract_basket_missing",
                     method,
                     extra={
