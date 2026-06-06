@@ -10,6 +10,7 @@ from threading import RLock
 import time
 import json
 import os
+from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from datetime import datetime, timezone 
 import math 
 from pathlib import Path
@@ -280,15 +281,15 @@ class BracketManager:
         self._auto_reduce_sl = True
         self._pending_entry_reconcile_after_sec = max(
             1.0,
-            float(os.getenv("BRACKET_PENDING_ENTRY_RECONCILE_AFTER_SEC", "5") or "5"),
+            parse_float_env(os.getenv("BRACKET_PENDING_ENTRY_RECONCILE_AFTER_SEC"), 5.0),
         )
         self._stale_cleanup_age = 86400  # 24 hours
         # Cache tiered-trailing thresholds once at startup — avoids os.getenv()
         # on every tick (100-300 ticks/sec × N active brackets = hot path).
-        self._trail_tier1_pct = float(os.getenv("TRAIL_TIER1_PCT", "1.0"))
-        self._trail_tier2_pct = float(os.getenv("TRAIL_TIER2_PCT", "2.0"))
-        self._trail_tier3_pct = float(os.getenv("TRAIL_TIER3_PCT", "4.0"))
-        self._trail_tier4_pct = float(os.getenv("TRAIL_TIER4_PCT", "6.0"))
+        self._trail_tier1_pct = parse_float_env(os.getenv("TRAIL_TIER1_PCT"), 1.0)
+        self._trail_tier2_pct = parse_float_env(os.getenv("TRAIL_TIER2_PCT"), 2.0)
+        self._trail_tier3_pct = parse_float_env(os.getenv("TRAIL_TIER3_PCT"), 4.0)
+        self._trail_tier4_pct = parse_float_env(os.getenv("TRAIL_TIER4_PCT"), 6.0)
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
             name='bracket-watchdog',
@@ -537,8 +538,8 @@ class BracketManager:
             last_sl = self._trail_notify_sl.get(entry_id, old_sl)
             price_delta = abs(new_sl - last_sl)
             pct_delta = (price_delta / last_sl * 100.0) if last_sl > 0 else 100.0
-            min_seconds = float(os.getenv('TRAIL_NOTIFY_COOLDOWN_SEC', '60'))
-            min_pct = float(os.getenv('TRAIL_NOTIFY_MIN_PCT', '0.5'))
+            min_seconds = parse_float_env(os.getenv('TRAIL_NOTIFY_COOLDOWN_SEC'), 60)
+            min_pct = parse_float_env(os.getenv('TRAIL_NOTIFY_MIN_PCT'), 0.5)
             if (now - last_ts) >= min_seconds or pct_delta >= min_pct:
                 self._trail_notify_at[entry_id] = now
                 self._trail_notify_sl[entry_id] = new_sl
@@ -1884,7 +1885,7 @@ class BracketManager:
         with self._lock:
             # 🛑 1. COOLDOWN CHECK (Prevent Rapid Firing)
             last_attempt = self._exit_cooldowns.get(bracket.entry_order_id, 0)
-            cooldown_seconds = float(os.getenv("EXIT_COOLDOWN_SECONDS", "5.0"))
+            cooldown_seconds = parse_float_env(os.getenv("EXIT_COOLDOWN_SECONDS"), 5.0)
             
             if now - last_attempt < cooldown_seconds:
                 LOGGER.debug(f"⏳ Exit Cooldown Active for {bracket.symbol}. Skipping.")
@@ -1918,7 +1919,7 @@ class BracketManager:
             current_ltp = bracket.entry_price
         
         # Calculate LIMIT price with slippage buffer
-        max_slippage_pct = float(os.getenv("EXIT_MAX_SLIPPAGE_PCT", "2.0"))
+        max_slippage_pct = parse_float_env(os.getenv("EXIT_MAX_SLIPPAGE_PCT"), 2.0)
         
         if exit_side == "SELL":
             # SELL exit: Accept price up to 2% BELOW current
