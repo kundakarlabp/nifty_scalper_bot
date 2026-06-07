@@ -2205,15 +2205,40 @@ class OrderManager:
                     ).strip().upper()
                 except Exception:  # noqa: BLE001
                     broker_mode = None
+            # State snapshot — the fields that most often cause *silent* blocking.
+            # Captured here so every decision line shows WHY, not just THAT.
+            try:
+                import time as _t
+                _now = _t.time()
+                _margin_ts = self._last_margin_success_ts
+                _margin_age = (round(_now - _margin_ts, 1) if _margin_ts else None)
+                _state = {
+                    "execution_mode": broker_mode,
+                    "live_enabled": bool(self.is_live_mode()),
+                    "shadow_mode": bool(self._shadow_mode_enabled()),
+                    "kill_switch_active": bool(self.is_kill_switch_active()),
+                    "consecutive_failures": int(self._consecutive_failures),
+                    "margin_available": self._last_margin_available_balance,
+                    "margin_age_s": _margin_age,
+                    "margin_stale": bool(_margin_ts is None),
+                    "allow_entry_with_stale_margin": bool(self._allow_entry_with_stale_margin),
+                    "qty": quantity,
+                }
+            except Exception:  # noqa: BLE001
+                _state = {}
+            merged_details = {**_state, **(details or {})}
             self._last_order_decision = {
                 "allowed": allowed,
                 "block_reason": block_reason,
-                "details": details or {},
+                "details": merged_details,
                 "trace_id": trace_id,
                 "broker_attempted": broker_attempted,
             }
             self._logger.info(
-                "ORDER_MANAGER_DECISION",
+                "ORDER_MANAGER_DECISION allowed=%s block_reason=%s symbol=%s mode=%s live=%s shadow=%s kill=%s margin_stale=%s broker_attempted=%s",
+                allowed, block_reason, symbol, broker_mode,
+                _state.get("live_enabled"), _state.get("shadow_mode"),
+                _state.get("kill_switch_active"), _state.get("margin_stale"), broker_attempted,
                 extra={
                     "event": "ORDER_MANAGER_DECISION",
                     "symbol": symbol,
@@ -2228,7 +2253,7 @@ class OrderManager:
                     "order_id": order_id,
                     "trace_id": trace_id,
                     "broker_mode": broker_mode,
-                    "details": details or {},
+                    "details": merged_details,
                     "broker_attempted": broker_attempted,
                 },
             )
