@@ -2415,6 +2415,10 @@ class BotContext:
     active_trading_universe: dict[str, Any] = field(default_factory=dict)
     active_contract_basket: Any | None = None
     active_basket_hydration: Any | None = None
+    hydration_status_by_symbol: dict[str, dict[str, object]] = field(
+        default_factory=dict
+    )
+    last_hydration_status_at: datetime | None = None
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     execution_locked_symbols: set[str] = field(default_factory=set)
@@ -7574,9 +7578,14 @@ def _hydration_status_map(ctx: BotContext, *, required_option_bars: int, require
     for sym, role in role_by_symbol.items():
         if not sym:
             continue
-        required = required_context_bars if role in {"spot", "futures_context"} else required_option_bars
+        required = (
+            required_context_bars
+            if role in {"spot", "futures_context"}
+            else required_option_bars
+        )
         statuses[sym] = build_symbol_hydration_status(ctx, sym, role, required)
     ctx.hydration_status_by_symbol = {sym: status.to_dict() for sym, status in statuses.items()}
+    ctx.last_hydration_status_at = datetime.now(timezone.utc)
     return statuses
 
 
