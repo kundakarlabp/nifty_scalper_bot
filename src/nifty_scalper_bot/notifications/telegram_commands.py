@@ -647,71 +647,13 @@ def _command_exists(application: TelegramApplication, command: str) -> bool:
 
 
 def register_telegram_commands(bot: Any, application: TelegramApplication, services: Services) -> bool:
-    """Register production commands with security wrapping."""
-    command_handler_cls = _load_command_handler()
-    if command_handler_cls is None:
-        return False
+    """Deprecated compatibility hook; active commands are registered by operator_telegram.
 
-    # 1. Inject correct chat ID from the bot instance if not already set
-    if hasattr(bot, "deps") and hasattr(bot.deps, "chat_id"):
-        # We modify the services instance in-place to carry the auth ID
-        object.__setattr__(services, "allowed_chat_id", int(bot.deps.chat_id))
+    The Telegram runtime now has exactly one active registration path:
+    :func:`nifty_scalper_bot.notifications.operator_telegram.register_operator_commands`.
+    This legacy hook intentionally does not add aliases or duplicate commands.
+    """
 
-    # 2. Register aliases from the main bot controller
-    aliases: dict[str, Callable] = {}
-    if hasattr(bot, "cmd_positions"): aliases["pos"] = bot.cmd_positions
-    if hasattr(bot, "cmd_trades"): aliases["fills"] = bot.cmd_trades
-    if hasattr(bot, "cmd_tail"): aliases["logs"] = bot.cmd_tail
-    if hasattr(bot, "cmd_debug_on"): aliases["trace"] = bot.cmd_debug_on
-    if hasattr(bot, "cmd_kpi"): aliases["perf"] = bot.cmd_kpi
-
-    for name, handler in aliases.items():
-        if not _command_exists(application, name):
-            application.add_handler(command_handler_cls(name, handler))
-
-    # 3. Register local commands with security wrapper
-    new_commands: dict[str, CommandFunc] = {
-        "mode": cmd_mode,
-        "live": cmd_live,
-        "flat": cmd_flat,
-        "brk": cmd_brk,
-        "entry": cmd_entry,
-        "exit": cmd_exit,
-        "dryrun": cmd_dryrun,
-        "diag": cmd_diag,
-        "uptime": cmd_uptime,
-        "limits": cmd_limits,
-        "net": cmd_net,
-        "save": cmd_save,
-        "book": cmd_book,
-        "ohlc": cmd_ohlc,
-        "chain": cmd_chain,
-        "atm": cmd_atm,
-        "spot": cmd_spot,
-        "greeks": cmd_greeks,
-        "iv": cmd_iv,
-        "prevclose": cmd_prevclose,
-        "session": cmd_session,
-        "holiday": cmd_holiday,
-        "sig": cmd_sig,
-        "state": cmd_state,
-        "score": cmd_score,
-        "regime": cmd_regime,
-        "gate_why": cmd_gate_why,
-        "size": cmd_size,
-        "trail": cmd_trail,
-        "riskstate": cmd_riskstate,
-        "journal": cmd_journal_read,
-        "execstate": cmd_execstate,
-        "execqueue": cmd_execqueue,
-        "execlast": cmd_execlast,
-        "execwhy": cmd_execwhy,
-        "emergencystop": cmd_emergencystop,
-    }
-
-    for name, func in new_commands.items():
-        if not _command_exists(application, name):
-            application.add_handler(
-                command_handler_cls(name, _wrap_command(services, func, name))
-            )
+    del bot, application, services
+    LOG.info("TELEGRAM_LEGACY_COMMAND_REGISTRATION_SKIPPED reason=operator_registry_active")
     return True

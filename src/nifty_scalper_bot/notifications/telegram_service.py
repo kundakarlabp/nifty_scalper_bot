@@ -12,6 +12,7 @@ from telegram.error import Conflict, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 from nifty_scalper_bot.utils.async_helpers import safe_task
+from nifty_scalper_bot.notifications.operator_telegram import register_operator_commands
 
 _LOG = logging.getLogger("nifty_scalper_bot.telegram")
 
@@ -477,28 +478,7 @@ class TelegramService:
             .build()
         )
         app.add_error_handler(self._on_error)
-        _LOG.info(
-            "telegram.cmd.inventory.initial",
-            extra={"commands": _list_existing_commands(app)},
-        )
-        command_specs: tuple[tuple[str, CommandCallback, tuple[str, ...]], ...] = (
-            ("help", self._cmd_help_admin, ("opshelp", "help_admin")),
-            ("status", self._cmd_status, ("session",)),
-            ("statusv", self._cmd_status_verbose, ()),
-            ("health", self._cmd_selftest, ("selftest", "diag")),
-            ("ping", self._cmd_ping, ("net",)),
-            ("start", self._cmd_start, ()),
-            ("ws_status", self._cmd_ws, ("ws",)),
-            ("emergency", self._cmd_emergency, ()),
-        )
-        for primary, handler, aliases in command_specs:
-            safe_add(app, primary, handler)
-            for alias in aliases:
-                safe_add(app, alias, handler)
-        _LOG.info(
-            "telegram.cmd.inventory.final",
-            extra={"commands": _list_existing_commands(app)},
-        )
+        register_operator_commands(app, self)
         return app
 
     async def _start_polling(self) -> None:
