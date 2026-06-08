@@ -7304,6 +7304,17 @@ class OrderManager:
         now = time.time()
         last_margin_success_age_s = max(now - self._last_margin_success_ts, 0.0) if self._last_margin_success_ts is not None else None
         balance_stale = last_margin_success_age_s is None or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
+        # Self-heal: if the only problem is a stale margin cache (not an auth or
+        # API failure), try one fresh fetch before declaring live orders blocked.
+        # This fixes the false stale-block without bypassing any broker safety —
+        # a genuine fetch failure leaves balance_stale True and still blocks.
+        if balance_stale and self._last_margin_error_type is None and not self._margin_circuit_open:
+            try:
+                self._resolve_available_margin_raw()
+            except Exception:  # noqa: BLE001
+                pass
+            last_margin_success_age_s = max(now - self._last_margin_success_ts, 0.0) if self._last_margin_success_ts is not None else None
+            balance_stale = last_margin_success_age_s is None or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
         trading_allowed_effect = "none"
         if self._margin_circuit_open or self._last_margin_error_type:
             trading_allowed_effect = "position_sizing_degraded"
@@ -7314,6 +7325,21 @@ class OrderManager:
             broker_connected = bool(connected_attr() if callable(connected_attr) else connected_attr)
         except Exception:
             broker_connected = False
+        # Classify WHY live orders are blocked, so the caller (and logs) can tell
+        # a stale cache apart from auth/config/API failures.
+        order_err = (self._last_order_api_error or "").lower()
+        auth_invalid = any(t in order_err for t in ("token", "api_key", "access_token", "unauthor", "forbidden", "403"))
+        if trading_allowed_effect == "live_orders_blocked":
+            if not broker_connected:
+                block_class = "broker_health_failed"
+            elif auth_invalid:
+                block_class = "broker_auth_invalid"
+            elif self._last_margin_error_type or self._margin_circuit_open:
+                block_class = "broker_health_failed"
+            else:
+                block_class = "broker_health_stale"
+        else:
+            block_class = "none"
         return {
             "broker_connected": broker_connected,
             "margin_api_available": self._last_margin_error_type is None,
@@ -7327,6 +7353,7 @@ class OrderManager:
             "available_balance": self._last_margin_available_balance,
             "balance_source": self._last_margin_balance_source or "unknown",
             "trading_allowed_effect": trading_allowed_effect,
+            "block_class": block_class,
             "order_api_available": self._last_order_api_error_type is None,
             "last_order_api_error_type": self._last_order_api_error_type,
             "last_order_api_error": self._last_order_api_error,
