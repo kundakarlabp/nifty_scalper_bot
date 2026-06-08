@@ -7589,49 +7589,6 @@ def _hydration_status_map(ctx: BotContext, *, required_option_bars: int, require
     return statuses
 
 
-def _hydration_snapshot_all_required_ready(snapshot: object) -> bool:
-    """Return True when all captured HydrationStatus payloads are ready."""
-    if not isinstance(snapshot, Mapping) or not snapshot:
-        return False
-    has_required_status = False
-    for raw_status in snapshot.values():
-        if not isinstance(raw_status, Mapping):
-            return False
-        role = str(raw_status.get("role") or "")
-        if not role:
-            return False
-        has_required_status = True
-        blockers = raw_status.get("blocker_reasons") or raw_status.get("blockers") or []
-        if blockers:
-            return False
-        if not bool(raw_status.get("ready_for_evaluation")):
-            return False
-        if role in {"selected_ce", "selected_pe"} and not bool(
-            raw_status.get("ready_for_execution")
-        ):
-            return False
-    return has_required_status
-
-
-def _mark_hydration_data_ready_if_complete(ctx: BotContext) -> bool:
-    """Mark startup/data readiness complete once required hydration statuses are ready."""
-    if not _hydration_snapshot_all_required_ready(
-        getattr(ctx, "hydration_status_by_symbol", None)
-    ):
-        return False
-    ctx.data_observation_ready = True
-    ctx.data_pipeline_ready = True
-    ctx.data_hard_ready = True
-    ctx.data_ready = True
-    ctx.strategy_evaluation_ready = True
-    ctx.trading_signal_ready = True
-    ctx.evaluation_ready = True
-    ctx.trading_ready = True
-    if getattr(ctx, "startup_phase", None) not in {"startup_complete", "running"}:
-        ctx.startup_phase = "data_ready"
-    return True
-
-
 def _status_for_role(statuses: Mapping[str, HydrationStatus], role: str) -> HydrationStatus | None:
     for status in statuses.values():
         if status.role == role:
@@ -8580,11 +8537,7 @@ async def _deferred_basket_hydration_retry(
             await _recompute_and_push_runtime_readiness(
                 ctx, reason="deferred_basket_hydration_success"
             )
-            hydration_ready = _mark_hydration_data_ready_if_complete(ctx)
-            data_ready = bool(
-                hydration_ready
-                or getattr(ctx, "data_ready", getattr(ctx, "evaluation_ready", False))
-            )
+            data_ready = bool(getattr(ctx, "data_ready", getattr(ctx, "evaluation_ready", False)))
             if not data_ready:
                 LOGGER.info(
                     "DEFERRED_BASKET_RETRY_WAITING attempt=%d/%d reason=data_not_ready",
