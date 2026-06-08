@@ -781,19 +781,50 @@ class MarketDataManager:
     def ingest_historical_ohlc(
         self, symbol: str, bars: Sequence[Mapping[str, Any]]
     ) -> int:
-        """Ingest historical OHLC bars into MDM and return accepted count.
-
-        Args: symbol, bars.
-        Returns: accepted bar count.
-        Raises: None.
-        """
+        """Ingest sorted UTC historical OHLC bars and return newly accepted rows."""
         accepted = 0
+        normalized_symbol = self._canonical_symbol(symbol) if hasattr(self, "_canonical_symbol") else str(symbol)
         try:
-            for row in bars:
-                data = dict(row)
-                data["symbol"] = symbol
-                self.ingest_historical_bar(data)
+            normalized_rows: dict[datetime, dict[str, Any]] = {}
+            for row in bars or ():
+                normalized = self.normalize_history_row(normalized_symbol, row, source="historical")
+                if normalized is None:
+                    continue
+                ts = normalized.get("timestamp")
+                if not isinstance(ts, datetime):
+                    continue
+                normalized["timestamp"] = ts.astimezone(timezone.utc).replace(microsecond=0)
+                normalized["symbol"] = normalized_symbol
+                normalized_rows[normalized["timestamp"]] = normalized
+            sorted_rows = [normalized_rows[ts] for ts in sorted(normalized_rows)]
+            key = self._bar_symbol_key(normalized_symbol) if hasattr(self, "_bar_symbol_key") else normalized_symbol
+            existing = list(getattr(self, "_ohlc", {}).get(key, []) or [])
+            existing_ts: set[datetime] = set()
+            for existing_row in existing:
+                ts = existing_row.get("timestamp") if isinstance(existing_row, Mapping) else None
+                if isinstance(ts, str):
+                    try:
+                        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    existing_ts.add(parsed.astimezone(timezone.utc).replace(microsecond=0))
+                elif isinstance(ts, datetime):
+                    existing_ts.add(ts.astimezone(timezone.utc).replace(microsecond=0))
+            for row in sorted_rows:
+                ts = row["timestamp"]
+                if ts in existing_ts:
+                    continue
+                self.ingest_historical_bar(row)
+                existing_ts.add(ts)
                 accepted += 1
+            final_count = len(self.get_ohlc_bars(normalized_symbol)) if hasattr(self, "get_ohlc_bars") else accepted
+            self._logger.info(
+                "HYDRATION_INGEST_RESULT symbol=%s returned_rows=%s accepted_rows=%s final_mdm_bars=%s first_ts=%s last_ts=%s",
+                normalized_symbol, len(bars or ()), accepted, final_count,
+                sorted_rows[0]["timestamp"].isoformat() if sorted_rows else None,
+                sorted_rows[-1]["timestamp"].isoformat() if sorted_rows else None,
+                extra={"event": "HYDRATION_INGEST_RESULT", "symbol": normalized_symbol, "returned_rows": len(bars or ()), "accepted_rows": accepted, "final_mdm_bars": final_count},
+            )
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Failure in ingest_historical_ohlc: %s", exc, exc_info=exc)
         return accepted
@@ -8917,149 +8948,133 @@ class MarketDataManager:
     async def fetch_history(
         self, symbol: str, interval: str, days: int = 3
     ) -> list[dict]:
-        """
-        Fetch historical data with Aggressive Fetcher Detection & Auto-Token Resolution.
-        """
-        # 1. Normalize Symbol
-        symbol = symbol.strip().upper()
-
-        # 2. Resolve Token (Try Cache -> Resolver -> Broker)
+        """Fetch historical data with token, tradingsymbol, wider-window, and spot fallbacks."""
+        symbol = self._canonical_symbol(symbol.strip().upper()) if hasattr(self, "_canonical_symbol") else symbol.strip().upper()
+        exchange = symbol.split(":", 1)[0] if ":" in symbol else ""
+        tradingsymbol = symbol.split(":", 1)[1] if ":" in symbol else symbol
         token = getattr(self, "_token_by_symbol", {}).get(symbol)
 
-        if not token:
-            self._logger.info(
-                f"🔎 History: Cache miss for {symbol}. Attempting force resolution..."
-            )
+        if not token and symbol in {"NSE:NIFTY", "NSE:NIFTY 50", "NIFTY", "NIFTY 50"}:
+            for spot_key in ("NSE:NIFTY", "NSE:NIFTY 50", "NIFTY", "NIFTY 50"):
+                token = getattr(self, "_token_by_symbol", {}).get(spot_key)
+                if token:
+                    break
+            token = token or 256265
 
-            # Try Resolver
+        if not token:
             resolver = getattr(self, "_resolver", None)
             if resolver:
                 try:
-                    # Try resolve() method
-                    if hasattr(resolver, "resolve"):
-                        t = resolver.resolve(symbol)
-                        if t:
-                            token = int(t)
-                    # Try get_token() method (Fallback)
-                    if not token and hasattr(resolver, "get_token"):
-                        t = resolver.get_token(symbol)
-                        if t:
-                            token = int(t)
-                except Exception as e:
-                    self._logger.exception("Unhandled exception", exc_info=True)
-                    raise
-
-            # Try Broker Instrument Lookup (Final Fallback)
-            if (
-                not token
-                and self._broker
-                and hasattr(self._broker, "get_instrument_token")
-            ):
+                    for method in ("resolve", "get_token"):
+                        fn = getattr(resolver, method, None)
+                        if callable(fn):
+                            resolved = fn(symbol)
+                            if resolved:
+                                token = int(resolved)
+                                break
+                except (TypeError, ValueError) as exc:
+                    self._logger.warning(
+                        "HYDRATION_FETCH_RESOLVE_FAILED symbol=%s exception_type=%s exception_message=%s",
+                        symbol, type(exc).__name__, str(exc),
+                        extra={"event": "HYDRATION_FETCH_RESOLVE_FAILED", "symbol": symbol, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    )
+            if not token and self._broker and hasattr(self._broker, "get_instrument_token"):
                 try:
-                    t = self._broker.get_instrument_token(symbol)
-                    if t:
-                        token = int(t)
-                except Exception as e:
-                    self._logger.exception("Unhandled exception", exc_info=True)
-                    raise
+                    resolved = self._broker.get_instrument_token(symbol)
+                    if resolved:
+                        token = int(resolved)
+                except (TypeError, ValueError) as exc:
+                    self._logger.warning(
+                        "HYDRATION_FETCH_RESOLVE_FAILED symbol=%s exception_type=%s exception_message=%s",
+                        symbol, type(exc).__name__, str(exc),
+                        extra={"event": "HYDRATION_FETCH_RESOLVE_FAILED", "symbol": symbol, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    )
 
-        if not token:
-            self._logger.warning(
-                f"❌ History Aborted: Could not resolve token for {symbol}"
-            )
-            return []
-
-        # 3. Calculate Dates
-        to_date = datetime.now(timezone.utc)
-        from_date = to_date - timedelta(days=days)
-
-        # 4. Fetch Data (ROBUST SEARCH)
         if not self._broker:
-            self._logger.error("❌ Broker instance is None.")
+            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s returned_rows=0 error=broker_unavailable", symbol, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "returned_rows": 0, "error": "broker_unavailable"})
             return []
 
-        try:
-            fetcher = None
-
-            # List of method names to hunt for
-            candidates = [
-                "historical_data",
-                "get_historical_data",
-                "history",
-                "get_history",
-            ]
-
-            # A. Check Broker Direct
+        candidates = ["historical_data", "get_historical_data", "history", "get_history"]
+        fetcher = None
+        for owner in (self._broker, getattr(self._broker, "kite", None), getattr(self._broker, "client", None)):
+            if owner is None:
+                continue
             for method in candidates:
-                f = getattr(self._broker, method, None)
-                if callable(f):
-                    fetcher = f
+                fn = getattr(owner, method, None)
+                if callable(fn):
+                    fetcher = fn
                     break
+            if fetcher:
+                break
+        if not callable(fetcher):
+            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s returned_rows=0 error=history_capability_missing", symbol, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "returned_rows": 0, "error": "history_capability_missing"})
+            return []
 
-            # B. Check Inner Client (kite/client)
-            if not fetcher:
-                client = getattr(
-                    self._broker, "kite", getattr(self._broker, "client", None)
-                )
-                if client:
-                    for method in candidates:
-                        f = getattr(client, method, None)
-                        if callable(f):
-                            fetcher = f
-                            break
+        now = datetime.now(timezone.utc)
+        attempt_specs: list[tuple[str, object, int]] = []
+        if token:
+            attempt_specs.append(("token", int(token), int(days)))
+        if exchange and tradingsymbol:
+            attempt_specs.append(("exchange_tradingsymbol", f"{exchange}:{tradingsymbol}", int(days)))
+        if token:
+            attempt_specs.append(("token_wide", int(token), max(int(days), 5)))
+        if exchange and tradingsymbol:
+            attempt_specs.append(("exchange_tradingsymbol_wide", f"{exchange}:{tradingsymbol}", max(int(days), 5)))
+        if token:
+            attempt_specs.append(("token_previous_day", int(token), 1))
 
-            if callable(fetcher):
+        last_error: str | None = None
+        for attempt_name, instrument_key, lookback_days in attempt_specs:
+            to_date = now
+            from_date = to_date - timedelta(days=max(1, int(lookback_days)))
+            self._logger.info(
+                "HYDRATION_FETCH_ATTEMPT symbol=%s token=%s tradingsymbol=%s exchange=%s from_dt=%s to_dt=%s interval=%s required_bars=%s attempt=%s",
+                symbol, token, tradingsymbol, exchange, from_date.isoformat(), to_date.isoformat(), interval, None, attempt_name,
+                extra={"event": "HYDRATION_FETCH_ATTEMPT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "interval": interval, "attempt": attempt_name},
+            )
+            try:
                 async with self._history_lock:
                     now_mono = time.monotonic()
-                    wait = self._history_min_interval_sec - (
-                        now_mono - self._last_history_request_ts
-                    )
+                    wait = self._history_min_interval_sec - (now_mono - self._last_history_request_ts)
                     if wait > 0:
                         await asyncio.sleep(wait)
                     self._last_history_request_ts = time.monotonic()
                     try:
-                        data = await asyncio.to_thread(
-                            fetcher, token, from_date, to_date, interval
-                        )
-                    except Exception as exc:
-                        err = str(exc)
-                        if "Rate limit exceeded" in err or "zerodha.historical" in err:
-                            self._logger.warning(
-                                "HISTORY_RATE_LIMIT_BACKOFF symbol=%s sleep=2.5",
-                                symbol,
-                                extra={"event": "HISTORY_RATE_LIMIT_BACKOFF", "symbol": symbol},
-                            )
+                        raw_rows = await asyncio.to_thread(fetcher, instrument_key, from_date, to_date, interval)
+                    except Exception as exc:  # noqa: BLE001 - broker boundary with retry diagnostics
+                        if "Rate limit exceeded" in str(exc) or "zerodha.historical" in str(exc):
                             await asyncio.sleep(2.5)
                             self._last_history_request_ts = time.monotonic()
-                            data = await asyncio.to_thread(
-                                fetcher, token, from_date, to_date, interval
-                            )
+                            raw_rows = await asyncio.to_thread(fetcher, instrument_key, from_date, to_date, interval)
                         else:
                             raise
-                raw_rows = data or []
-                normalized = [
-                    bar
-                    for bar in (
-                        self.normalize_history_row(symbol, row, source="historical")
-                        for row in raw_rows
-                    )
-                    if bar is not None
-                ]
-
-                return normalized
-
-            # Debugging Dump if failure persists
-            self._logger.error(
-                f"⚠️ Broker {type(self._broker).__name__} missing history capability. "
-                f"Checked: {candidates}"
-            )
-            return []
-
-        except Exception as e:
-            self._logger.error(
-                f"History fetch crashed for {symbol}: {e}", exc_info=True
-            )
-            return []
+                rows = list(raw_rows or [])
+                normalized = [bar for bar in (self.normalize_history_row(symbol, row, source="historical") for row in rows) if bar is not None]
+                normalized.sort(key=lambda item: item["timestamp"])
+                deduped = list({row["timestamp"].astimezone(timezone.utc).replace(microsecond=0): row for row in normalized}.values())
+                deduped.sort(key=lambda item: item["timestamp"])
+                self._logger.info(
+                    "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=%s accepted_rows=%s first_ts=%s last_ts=%s exception_type=%s exception_message=%s",
+                    symbol, token, tradingsymbol, exchange, interval, attempt_name, len(rows), len(deduped),
+                    deduped[0]["timestamp"].isoformat() if deduped else None,
+                    deduped[-1]["timestamp"].isoformat() if deduped else None, None, None,
+                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "returned_rows": len(rows), "accepted_rows": len(deduped)},
+                )
+                if deduped:
+                    return deduped
+            except Exception as exc:  # noqa: BLE001 - broker boundary with structured failure
+                last_error = str(exc)
+                self._logger.warning(
+                    "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=0 accepted_rows=0 exception_type=%s exception_message=%s",
+                    symbol, token, tradingsymbol, exchange, interval, attempt_name, type(exc).__name__, str(exc),
+                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "returned_rows": 0, "accepted_rows": 0, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                )
+        self._logger.error(
+            "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s returned_rows=0 accepted_rows=0 exception_message=%s",
+            symbol, token, tradingsymbol, exchange, interval, last_error,
+            extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "exception_message": last_error},
+        )
+        return []
 
 
 def _compose_chain_entry(

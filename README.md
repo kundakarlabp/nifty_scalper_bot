@@ -633,3 +633,34 @@ STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
 ```
 
 Live defaults remain stricter (`STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false`, `STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.8`).
+
+## Startup Hydration Sequence
+
+The live startup gate uses one hydration contract (`HydrationStatus`) so every
+layer reports the same symbol, role, token, quote, depth, and bar-count state.
+Startup must not arm live orders until the selected CE/PE have both evaluation
+and execution history.
+
+```text
+InstrumentManager resolves NIFTY spot, active future, selected CE/PE, nearby options
+→ MarketDataManager registers symbol/token maps and subscribes WebSocket tokens
+→ MarketDataManager fetches historical OHLC outside the tick path
+→ MarketDataManager ingests sorted UTC bars and merges live candles on top
+→ DataHub reads the MDM OHLC/quote cache
+→ StrategyRunner reseeds runner history from DataHub/MDM bars
+→ IndicatorEngine receives the same reseeded bars
+→ execution readiness checks quote/depth/spread + required execution bars
+→ live_orders_armed=true only after broker health + hydration + risk gates pass
+```
+
+Expected concise log sequence:
+
+```text
+ACTIVE_BASKET_INITIAL_HYDRATION_PENDING pending_ce=NFO:...CE pending_pe=NFO:...PE ce_bars=1 pe_bars=1 required=30
+HYDRATION_FETCH_ATTEMPT symbol=NFO:...CE token=... tradingsymbol=... interval=minute attempt=token
+HYDRATION_FETCH_RESULT symbol=NFO:...CE returned_rows=30 accepted_rows=30 first_ts=... last_ts=...
+HYDRATION_INGEST_RESULT symbol=NFO:...CE returned_rows=30 accepted_rows=29 final_mdm_bars=30
+RUNNER_HISTORY_RESEEDED symbol=NFO:...CE runner_bars=30 indicator_bars=30 min_bars=30 source=selected_option_history_prewarm
+ACTIVE_BASKET_PROMOTED selected_ce=NFO:...CE selected_pe=NFO:...PE ce_bars=30 pe_bars=30 required=30
+READINESS_BLOCKER_SUMMARY blockers=[] data_hard_ready=True evaluation_ready=True execution_ready=True live_orders_armed=True
+```

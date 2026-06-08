@@ -6,9 +6,10 @@ consistently from app startup, health endpoints, and supervisor checks.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 import os
 import logging
+from datetime import datetime, timezone
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +48,47 @@ def _safe_non_negative_int(value: object, fallback: int = 0) -> int:
     except (TypeError, ValueError):
         return max(int(fallback), 0)
     return max(parsed, 0)
+
+
+@dataclass(slots=True)
+class HydrationStatus:
+    """Canonical full-path hydration contract for startup/readiness gates."""
+
+    symbol: str
+    role: str
+    token: int | None = None
+    tradingsymbol: str | None = None
+    exchange: str | None = None
+    required_bars: int = 0
+    historical_rows_returned: int = 0
+    historical_rows_accepted: int = 0
+    mdm_bars: int = 0
+    datahub_bars: int = 0
+    runner_bars: int = 0
+    indicator_bars: int = 0
+    live_tick_fresh: bool = False
+    tradable_quote: bool = False
+    depth_available: bool = False
+    bid: float | None = None
+    ask: float | None = None
+    spread_pct: float | None = None
+    ready_for_evaluation: bool = False
+    ready_for_execution: bool = False
+    blocker_reasons: list[str] = field(default_factory=list)
+    last_historical_fetch_error: str | None = None
+    last_historical_fetch_at: datetime | None = None
+    first_bar_ts: datetime | None = None
+    last_bar_ts: datetime | None = None
+    live_merge_applied: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-friendly hydration snapshot."""
+        payload = asdict(self)
+        for key in ("last_historical_fetch_at", "first_bar_ts", "last_bar_ts"):
+            value = payload.get(key)
+            if isinstance(value, datetime):
+                payload[key] = value.astimezone(timezone.utc).isoformat()
+        return payload
 
 
 @dataclass(frozen=True)
