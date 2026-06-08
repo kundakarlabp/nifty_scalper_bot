@@ -150,7 +150,7 @@ async def test_live_readiness_treats_depth_only_quote_as_tradable(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_insufficient_futures_context_is_soft_when_spot_and_options_ready(monkeypatch) -> None:
+async def test_insufficient_futures_context_blocks_when_full_hydration_required(monkeypatch) -> None:
     monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
     snaps = {
         'NSE:NIFTY': Snap(25000, 2),
@@ -176,5 +176,6 @@ async def test_insufficient_futures_context_is_soft_when_spot_and_options_ready(
 
     await app._recompute_and_push_runtime_readiness(ctx, reason='futures-soft-test')
 
-    assert ctx.context_exec_ready is True
-    assert ctx.live_orders_armed is True
+    assert ctx.context_exec_ready is False
+    assert ctx.live_orders_armed is False
+    assert 'futures_history_missing' in str(ctx.live_block_reason)

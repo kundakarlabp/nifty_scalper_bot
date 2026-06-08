@@ -681,6 +681,10 @@ class StrategyRunner:
         self._selected_option_prewarm_inflight: set[str] = set()
         self._selected_option_prewarm_last: dict[str, float] = {}
         self._selected_option_prewarm_cooldown_s = max(1.0, float(os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS", "45") or 45))
+        self._pending_selected_ce: str | None = None
+        self._pending_selected_pe: str | None = None
+        self._pending_atm_strike: int | None = None
+
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
@@ -2442,6 +2446,33 @@ class StrategyRunner:
         task.add_done_callback(_on_done)
         return True, "signal_preparation_scheduled"
 
+    def _maybe_promote_pending_active_basket(self, *, source: str = "hydration") -> bool:
+        """Promote pending CE/PE only after both have execution bars."""
+        pending_ce = getattr(self, "_pending_selected_ce", None)
+        pending_pe = getattr(self, "_pending_selected_pe", None)
+        if not (pending_ce and pending_pe):
+            return False
+        required = int(getattr(self, "_option_required_bars", 1) or 1)
+        ce_bars = self._history_count_for_symbol(pending_ce)
+        pe_bars = self._history_count_for_symbol(pending_pe)
+        if ce_bars < required or pe_bars < required:
+            return False
+        self._active_selected_ce = pending_ce
+        self._active_selected_pe = pending_pe
+        self._active_atm_strike = getattr(self, "_pending_atm_strike", None)
+        active = set(getattr(self, "_active_option_symbols", set()) or set())
+        active.update({pending_ce, pending_pe})
+        self._active_option_symbols = active
+        self._pending_selected_ce = None
+        self._pending_selected_pe = None
+        self._pending_atm_strike = None
+        self._logger.info(
+            "ACTIVE_BASKET_PROMOTED selected_ce=%s selected_pe=%s ce_bars=%s pe_bars=%s required=%s source=%s",
+            pending_ce, pending_pe, ce_bars, pe_bars, required, source,
+            extra={"event": "ACTIVE_BASKET_PROMOTED", "selected_ce": pending_ce, "selected_pe": pending_pe, "ce_bars": ce_bars, "pe_bars": pe_bars, "required_bars": required, "source": source},
+        )
+        return True
+
     def set_active_option_context(
         self,
         *,
@@ -2450,7 +2481,7 @@ class StrategyRunner:
         atm_strike: int | float | str | None = None,
         option_symbols: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> None:
-        """Set active option context. Args: selected_ce/selected_pe/atm_strike/option_symbols. Returns: none. Raises: none."""
+        """Set active option context without promoting cold selected options."""
         selected_ce_norm = normalize_symbol(str(selected_ce)) if selected_ce else None
         selected_pe_norm = normalize_symbol(str(selected_pe)) if selected_pe else None
         atm_value = None
@@ -2459,11 +2490,7 @@ class StrategyRunner:
                 atm_value = int(float(atm_strike))
             except (TypeError, ValueError):
                 atm_value = None
-        # Dynamic-basket switch guard: do not abandon a ready selected CE/PE for
-        # a freshly-rotated pair until BOTH new options have enough execution
-        # bars hydrated. Otherwise the new basket isn't execution-ready and we'd
-        # block trades during the warm-up. We still widen option_symbols so the
-        # new strikes hydrate; only the *selected* pair is held back until ready.
+
         def _exec_ready(sym: str | None) -> bool:
             if not sym:
                 return False
@@ -2472,37 +2499,73 @@ class StrategyRunner:
             except Exception:  # noqa: BLE001
                 return False
 
-        prev_ce, prev_pe = self._active_selected_ce, self._active_selected_pe
+        candidate_symbols = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
+        for sym in (selected_ce_norm, selected_pe_norm):
+            if sym:
+                candidate_symbols.add(sym)
+        prev_ce = getattr(self, "_active_selected_ce", None)
+        prev_pe = getattr(self, "_active_selected_pe", None)
+        pair_requested = bool(selected_ce_norm and selected_pe_norm)
+        pair_ready = _exec_ready(selected_ce_norm) and _exec_ready(selected_pe_norm) if pair_requested else False
         switching = (
             (selected_ce_norm and selected_ce_norm != prev_ce)
             or (selected_pe_norm and selected_pe_norm != prev_pe)
         )
-        if switching and prev_ce and prev_pe:
-            new_ready = _exec_ready(selected_ce_norm) and _exec_ready(selected_pe_norm)
-            if not new_ready:
-                # Keep the previous ready selection; log and skip the swap.
-                self._logger.info(
-                    "ACTIVE_BASKET_SWITCH_DEFERRED keep_ce=%s keep_pe=%s new_ce=%s new_pe=%s "
-                    "new_ce_bars=%s new_pe_bars=%s required=%s",
-                    prev_ce, prev_pe, selected_ce_norm, selected_pe_norm,
-                    self._history_count_for_symbol(selected_ce_norm) if selected_ce_norm else None,
-                    self._history_count_for_symbol(selected_pe_norm) if selected_pe_norm else None,
-                    self._option_required_bars,
-                    extra={"event": "ACTIVE_BASKET_SWITCH_DEFERRED", "keep_ce": prev_ce, "keep_pe": prev_pe,
-                           "new_ce": selected_ce_norm, "new_pe": selected_pe_norm, "required_bars": self._option_required_bars},
-                )
-                # Still hydrate the wider universe (new strikes warm up for next time).
-                merged = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
-                merged.update(s for s in (prev_ce, prev_pe) if s)
-                self._active_option_symbols = merged or self._active_option_symbols
-                return
 
+        if pair_requested and switching and not pair_ready:
+            self._pending_selected_ce = selected_ce_norm
+            self._pending_selected_pe = selected_pe_norm
+            self._pending_atm_strike = atm_value
+            if prev_ce and prev_pe:
+                candidate_symbols.update(s for s in (prev_ce, prev_pe) if s)
+            self._active_option_symbols = candidate_symbols or getattr(self, "_active_option_symbols", set())
+            event = "ACTIVE_BASKET_SWITCH_DEFERRED" if prev_ce and prev_pe else "ACTIVE_BASKET_INITIAL_HYDRATION_PENDING"
+            message = (
+                "ACTIVE_BASKET_SWITCH_DEFERRED keep_ce=%s keep_pe=%s new_ce=%s new_pe=%s new_ce_bars=%s new_pe_bars=%s required=%s"
+                if prev_ce and prev_pe
+                else "ACTIVE_BASKET_INITIAL_HYDRATION_PENDING pending_ce=%s pending_pe=%s ce_bars=%s pe_bars=%s required=%s"
+            )
+            args = (
+                (prev_ce, prev_pe, selected_ce_norm, selected_pe_norm, self._history_count_for_symbol(selected_ce_norm), self._history_count_for_symbol(selected_pe_norm), self._option_required_bars)
+                if prev_ce and prev_pe
+                else (selected_ce_norm, selected_pe_norm, self._history_count_for_symbol(selected_ce_norm), self._history_count_for_symbol(selected_pe_norm), self._option_required_bars)
+            )
+            self._logger.info(
+                message,
+                *args,
+                extra={
+                    "event": event,
+                    "keep_ce": prev_ce,
+                    "keep_pe": prev_pe,
+                    "pending_ce": selected_ce_norm,
+                    "pending_pe": selected_pe_norm,
+                    "required_bars": self._option_required_bars,
+                    "reason": "pending_initial_hydration" if not (prev_ce and prev_pe) else "pending_basket_promotion",
+                },
+            )
+            self._prewarm_active_option_history(source="active_option_context_pending")
+            return
+
+        promoted_from_pending = bool(
+            pair_ready
+            and selected_ce_norm == getattr(self, "_pending_selected_ce", None)
+            and selected_pe_norm == getattr(self, "_pending_selected_pe", None)
+        )
         if selected_ce_norm:
             self._active_selected_ce = selected_ce_norm
         if selected_pe_norm:
             self._active_selected_pe = selected_pe_norm
         self._active_atm_strike = atm_value
-        self._active_option_symbols = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
+        self._active_option_symbols = candidate_symbols
+        if promoted_from_pending:
+            self._pending_selected_ce = None
+            self._pending_selected_pe = None
+            self._pending_atm_strike = None
+            self._logger.info(
+                "ACTIVE_BASKET_PROMOTED selected_ce=%s selected_pe=%s required=%s",
+                self._active_selected_ce, self._active_selected_pe, self._option_required_bars,
+                extra={"event": "ACTIVE_BASKET_PROMOTED", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "required_bars": self._option_required_bars},
+            )
         self._logger.info(
             "RUNNER_ACTIVE_OPTION_CONTEXT selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d",
             self._active_selected_ce,
@@ -3787,6 +3850,7 @@ class StrategyRunner:
                 target_min_bars,
                 source,
             )
+            self._maybe_promote_pending_active_basket(source=source)
             return min(runner_count, int(indicator_count or 0))
         except Exception as e:
             self._logger.exception(
@@ -7041,6 +7105,10 @@ class StrategyRunner:
                 reason = type(exc).__name__
             finally:
                 self._selected_option_prewarm_inflight.discard(symbol)
+                success = bool(success and bars_after >= required_bars)
+                if not success and bars_after < required_bars and reason == "scheduled":
+                    reason = "insufficient_bars"
+                self._maybe_promote_pending_active_basket(source="selected_option_history_prewarm")
                 self._logger.info(
                     "SELECTED_OPTION_HISTORY_PREWARM_RESULT symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
                     symbol, bars_before, bars_after, required_bars, success,
