@@ -64,15 +64,16 @@ def _expected_chat_id(service: Any) -> int | None:
     return None
 
 
-async def require_authorized_chat(update: Update, service: Any) -> bool:
+async def require_authorized_chat(update: Update, service: Any, *, command: str = "unknown") -> bool:
     """Return whether the update is from the configured operator chat."""
 
     received = _chat_id(update)
     expected = _expected_chat_id(service)
     if expected is None or received == expected:
+        LOG.info("TELEGRAM_COMMAND_AUTHORIZED command=%s", command)
         return True
     LOG.warning(
-        "TELEGRAM_UNAUTHORIZED_CHAT received_chat_id=%s expected_chat_id=%s",
+        "TELEGRAM_COMMAND_REJECTED_UNAUTHORIZED received_chat_id=%s expected_chat_id=%s",
         received,
         expected,
     )
@@ -181,15 +182,39 @@ def _lines(title: str, items: Mapping[str, Any]) -> str:
     return "\n".join(body)
 
 
+def _command_name_from_update(update: Update) -> str:
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    text = str(getattr(message, "text", "") or "").strip()
+    if not text.startswith("/"):
+        return "unknown"
+    command = text.split()[0].lstrip("/").split("@", 1)[0].strip().lower()
+    return command or "unknown"
+
+
 def _make_bound_handler(service: Any, func: Handler) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
     async def _bound(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await require_authorized_chat(update, service):
+        command = _command_name_from_update(update)
+        LOG.info(
+            "TELEGRAM_COMMAND_RECEIVED command=%s chat_id=%s",
+            command,
+            _chat_id(update),
+        )
+        if not await require_authorized_chat(update, service, command=command):
             return
+        LOG.info("TELEGRAM_COMMAND_HANDLER_STARTED command=%s", command)
         try:
             await func(update, context, service)  # type: ignore[arg-type]
-        except Exception as exc:  # noqa: BLE001 - Telegram boundary must reply
-            LOG.error("TELEGRAM_COMMAND_FAILED command=%s error=%s", getattr(func, "__name__", "unknown"), exc, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - Telegram command boundary must log and reply
+            LOG.error(
+                "TELEGRAM_COMMAND_HANDLER_ERROR command=%s error_type=%s error=%s",
+                command,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             await safe_reply(update, f"ERROR: {type(exc).__name__}: {exc}")
+            return
+        LOG.info("TELEGRAM_COMMAND_HANDLER_DONE command=%s", command)
 
     return _bound
 
@@ -199,6 +224,7 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) 
     await safe_reply(
         update,
         "✅ Nifty Scalper Bot online\n"
+        f"chat_id: {_value(_chat_id(update))}\n"
         f"mode: {_value(snap.get('effective_mode') or snap.get('mode'))}\n"
         f"market: {_value(snap.get('market_state'))}\n"
         f"live_orders_armed: {_bool(snap.get('live_orders_armed'))}\n"
