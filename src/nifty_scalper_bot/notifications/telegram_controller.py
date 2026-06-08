@@ -96,6 +96,7 @@ from nifty_scalper_bot.infra.diagnostics import LOG_TAP
 from nifty_scalper_bot.infra.metrics import METRICS, MetricsCollector
 from nifty_scalper_bot.infra.ws_diag import WsDiag, run_diag
 from nifty_scalper_bot.notifications.safe_messenger import SafeMessenger
+from nifty_scalper_bot.notifications.operator_telegram import register_operator_commands
 from nifty_scalper_bot.utils.alerts import (
     AggregatedAlert,
     AlertDeduplicator,
@@ -705,13 +706,10 @@ class TelegramBot:
             await self._safe_send("💓 Bot alive")
 
     def _register_handlers(self) -> None:
-        """Register core handlers once; Args: none. Returns: None. Raises: None."""
+        """Register the single active operator command set once."""
         if self._handlers_registered:
             return
-        self.application.add_handler(CommandHandler("start", self._cmd_start))
-        self.application.add_handler(CommandHandler("stop", self._cmd_stop))
-        self.application.add_handler(CommandHandler("status", self._cmd_status))
-        self.application.add_handler(CommandHandler("summary", self._cmd_summary))
+        register_operator_commands(self.application, self)
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
         )
@@ -4225,22 +4223,11 @@ class TelegramBot:
     # Command wiring
     # --------------
     def _wire_handlers(self, app: Application) -> None:
+        """Wire the single active production-operator command registry."""
+
         async def _debug_message(
             update: Update, context: ContextTypes.DEFAULT_TYPE
         ) -> None:
-            """Log every incoming Telegram message for diagnostics.
-
-            Args:
-                update: Telegram update payload.
-                context: Callback context from python-telegram-bot.
-
-            Returns:
-                None.
-
-            Raises:
-                None.
-            """
-
             del context
             message = getattr(update, "message", None)
             text = getattr(message, "text", None)
@@ -4249,220 +4236,7 @@ class TelegramBot:
         if not self._message_debug_handler_registered:
             app.add_handler(MessageHandler(filters.ALL, _debug_message))
             self._message_debug_handler_registered = True
-
-        def register(
-            cmd: str,
-            handler: t.Callable[[Update, t.Any], t.Coroutine[t.Any, t.Any, t.Any]],
-        ) -> None:
-            if self._command_registered(app, cmd):
-                return
-            app.add_handler(CommandHandler(cmd, handler))
-            self._register_command_doc(cmd, handler)
-
-        def register_with_aliases(
-            primary: str,
-            handler: t.Callable[[Update, t.Any], t.Coroutine[t.Any, t.Any, t.Any]],
-            aliases: tuple[str, ...] = (),
-        ) -> None:
-            register(primary, handler)
-            for alias in aliases:
-                register(alias, handler)
-
-        CommandHandlerType = t.Callable[
-            [Update, t.Any],
-            t.Coroutine[t.Any, t.Any, t.Any],
-        ]
-        CommandEntry = tuple[str, CommandHandlerType, tuple[str, ...]]
-        CommandGroup = tuple[str, tuple[CommandEntry, ...]]
-
-        command_groups: tuple[CommandGroup, ...] = (
-            (
-                "top_level_diagnostics",
-                (
-                    ("help", self.cmd_help, ()),
-                    ("status", self.cmd_status, ()),
-                    ("session", self.cmd_session, ()),
-                    ("quick", self.cmd_quick, ()),
-                    ("health", self.cmd_health, ()),
-                    ("version", self.cmd_version, ()),
-                    ("whoami", self.cmd_whoami, ()),
-                ),
-            ),
-            (
-                "core_functionality_state",
-                (
-                    ("start", self.cmd_start, ()),
-                    ("stop", self.cmd_stop, ()),
-                    ("mode", self.cmd_shadow, ("shadow",)),
-                    ("plan", self.cmd_plan, ()),
-                    ("limits", self.cmd_gate, ("gate",)),
-                    ("save", self.cmd_dump_logs, ()),
-                    ("reload", self.cmd_reload, ()),
-                ),
-            ),
-            (
-                "market_data_connectivity",
-                (
-                    ("mdm", self.cmd_mdm, ()),
-                    ("ws_status", self.cmd_ws_status, ("ws",)),
-                    ("ws_diag", self.cmd_ws_diag, ()),
-                    ("ws_reconnect", self.cmd_ws_reconnect, ()),
-                    ("poll_status", self.cmd_poll_status, ()),
-                    ("subscribe", self.cmd_subscribe, ("sub",)),
-                    ("unsubscribe", self.cmd_unsubscribe, ("unsub",)),
-                    ("watch", self.cmd_watch, ()),
-                    ("unwatch", self.cmd_unwatch, ()),
-                    ("tracking", self.cmd_tracking, ()),
-                    ("iv", self.cmd_iv, ()),
-                    ("greeks", self.cmd_greeks, ()),
-                    (
-                        "quote",
-                        self.cmd_quote,
-                        ("book", "ohlc", "chain", "atm", "spot"),
-                    ),
-                    ("tick", self.cmd_tick, ()),
-                    ("diag_price", self.cmd_diag_price, ()),
-                    ("fresh", self.cmd_fresh, ()),
-                    ("transport", self.cmd_transport, ()),
-                    ("resolve", self.cmd_resolve, ()),
-                    ("broker_quote", self.cmd_broker_quote, ()),
-                    ("qprobe", self.cmd_qprobe, ()),
-                    ("ingestprobe", self.cmd_ingestprobe, ("iprobe", "pipe")),
-                    ("quote_probe", self.cmd_quote_probe, ()),
-                    ("probe", self.cmd_probe, ()),
-                ),
-            ),
-            (
-                "unified_manager",
-                (
-                    ("um", self.cmd_um, ()),
-                    ("umlearn", self.cmd_umlearn, ()),
-                    ("umprobe", self.cmd_umprobe, ()),
-                    ("umtransport", self.cmd_umtransport, ()),
-                    ("umplan", self.cmd_umplan, ()),
-                    ("umwatch", self.cmd_umwatch, ()),
-                    ("uminstruments", self.cmd_uminstruments, ()),
-                    ("umwarm", self.cmd_umwarm, ()),
-                    ("umstats", self.cmd_umstats, ()),
-                ),
-            ),
-            (
-                "orders_positions_trades",
-                (
-                    ("positions", self.cmd_positions, ()),
-                    ("orders", self.cmd_orders, ()),
-                    ("trades", self.cmd_trades, ("fills",)),
-                    ("buy", self.cmd_buy, ("entry",)),
-                    ("sell", self.cmd_sell, ("exit",)),
-                    ("cancel", self.cmd_cancel, ("flat",)),
-                    ("net", self.cmd_ping, ("ping",)),
-                ),
-            ),
-            (
-                "risk_performance_regimes",
-                (
-                    ("risk", self.cmd_risk, ("riskstate",)),
-                    ("diag_risk", self.cmd_diag_risk, ()),
-                    ("regime", self.cmd_regime, ()),
-                    ("diag", self.cmd_diag, ()),
-                    ("balance", self.cmd_balance, ()),
-                    ("balance_probe", self.cmd_balance_probe, ()),
-                    ("margin", self.cmd_margin, ()),
-                    ("pnl", self.cmd_pnl, ()),
-                    ("heatmap", self.cmd_heatmap, ("metrics_heatmap",)),
-                    ("report", self.cmd_report, ()),
-                    ("kpi", self.cmd_kpi, ("score",)),
-                    ("trail", self.cmd_guard, ()),
-                    ("size", self.cmd_plan, ()),
-                    ("journal", self.cmd_issues, ()),
-                ),
-            ),
-            (
-                "strategy_execution_management",
-                (
-                    ("strategies", self.cmd_strategies, ("sig",)),
-                    ("signals", self.cmd_signals, ()),
-                    (
-                        "strategy_scores",
-                        self.cmd_strategy_scores,
-                        ("scores",),
-                    ),
-                    (
-                        "strategy_allocate",
-                        self.cmd_strategy_allocate,
-                        ("strategy_alloc",),
-                    ),
-                    ("score", self.cmd_score, ()),
-                    ("alloc", self.cmd_allocations, ()),
-                    (
-                        "strategy_disable",
-                        self.cmd_strategy_disable,
-                        ("strategy_off",),
-                    ),
-                    (
-                        "strategy_enable",
-                        self.cmd_strategy_enable,
-                        ("strategy_on",),
-                    ),
-                    ("regime_bypass", self.cmd_regime_bypass, ()),
-                    ("guard", self.cmd_guard, ()),
-                    ("selftest", self.cmd_selftest, ()),
-                    ("assess", self.cmd_assess, ()),
-                    ("reset_kill", self.cmd_reset_kill, ("riskreset", "reset_kill_switch")),
-                    ("killstatus", self.cmd_killstatus, ("kill_status",)),
-                    ("cooldown", self.cmd_cooldown, ()),
-                    ("pause", self.cmd_pause, ()),
-                    ("resume", self.cmd_resume, ()),
-                    ("test_trade", self.cmd_test_trade, ()),
-                    ("engine_test", self.cmd_engine_test, ()),
-                    ("test_flow", self.cmd_test_flow, ()),
-                    ("paper", self.cmd_paper, ()),
-                    ("paper_on", self.cmd_paper_on, ()),
-                    ("paper_off", self.cmd_paper_off, ()),
-                    ("shadow_on", self.cmd_shadow_on, ()),
-                    ("shadow_off", self.cmd_shadow_off, ()),
-                ),
-            ),
-            (
-                "logging_error_reporting",
-                (
-                    ("logs", self.cmd_tail, ("tail",)),
-                    ("dumpLogs", self.cmd_dump_logs, ()),
-                    ("errors", self.cmd_errors, ()),
-                    ("issues", self.cmd_issues, ()),
-                    ("stderror", self.cmd_stderr, ()),
-                    ("check", self.cmd_check, ()),
-                    ("check_core", self.cmd_check_core, ()),
-                    ("check_market", self.cmd_check_market, ()),
-                    ("check_execution", self.cmd_check_execution, ()),
-                    ("check_connectivity", self.cmd_check_connectivity, ()),
-                    ("why", self.cmd_why, ()),
-                    ("preflight", self.cmd_preflight, ()),
-                    ("flow", self.cmd_flow, ()),
-                    ("profile", self.cmd_profile, ()),
-                    ("metrics", self.cmd_metrics, ()),
-                    ("config", self.cmd_config, ()),
-                    ("env", self.cmd_env, ()),
-                    ("gc", self.cmd_gc, ()),
-                ),
-            ),
-            (
-                "advanced_administrative",
-                (
-                    ("opshelp", self.cmd_opshelp, ()),
-                    ("confirm", self.cmd_confirm, ()),
-                    ("debug_on", self.cmd_debug_on, ()),
-                    ("debug_off", self.cmd_debug_off, ()),
-                    ("replay", self.cmd_replay, ("replay_day",)),
-                    ("backtest", self.cmd_backtest, ()),
-                    ("go_flat", self.cmd_go_flat, ()),
-                ),
-            ),
-        )
-
-        for _, entries in command_groups:
-            for primary, handler, aliases in entries:
-                register_with_aliases(primary, handler, aliases)
+        register_operator_commands(app, self)
 
     # ------------------
     # Helper pretty print
