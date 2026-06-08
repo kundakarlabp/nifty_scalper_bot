@@ -2459,6 +2459,44 @@ class StrategyRunner:
                 atm_value = int(float(atm_strike))
             except (TypeError, ValueError):
                 atm_value = None
+        # Dynamic-basket switch guard: do not abandon a ready selected CE/PE for
+        # a freshly-rotated pair until BOTH new options have enough execution
+        # bars hydrated. Otherwise the new basket isn't execution-ready and we'd
+        # block trades during the warm-up. We still widen option_symbols so the
+        # new strikes hydrate; only the *selected* pair is held back until ready.
+        def _exec_ready(sym: str | None) -> bool:
+            if not sym:
+                return False
+            try:
+                return self._history_count_for_symbol(sym) >= int(self._option_required_bars)
+            except Exception:  # noqa: BLE001
+                return False
+
+        prev_ce, prev_pe = self._active_selected_ce, self._active_selected_pe
+        switching = (
+            (selected_ce_norm and selected_ce_norm != prev_ce)
+            or (selected_pe_norm and selected_pe_norm != prev_pe)
+        )
+        if switching and prev_ce and prev_pe:
+            new_ready = _exec_ready(selected_ce_norm) and _exec_ready(selected_pe_norm)
+            if not new_ready:
+                # Keep the previous ready selection; log and skip the swap.
+                self._logger.info(
+                    "ACTIVE_BASKET_SWITCH_DEFERRED keep_ce=%s keep_pe=%s new_ce=%s new_pe=%s "
+                    "new_ce_bars=%s new_pe_bars=%s required=%s",
+                    prev_ce, prev_pe, selected_ce_norm, selected_pe_norm,
+                    self._history_count_for_symbol(selected_ce_norm) if selected_ce_norm else None,
+                    self._history_count_for_symbol(selected_pe_norm) if selected_pe_norm else None,
+                    self._option_required_bars,
+                    extra={"event": "ACTIVE_BASKET_SWITCH_DEFERRED", "keep_ce": prev_ce, "keep_pe": prev_pe,
+                           "new_ce": selected_ce_norm, "new_pe": selected_pe_norm, "required_bars": self._option_required_bars},
+                )
+                # Still hydrate the wider universe (new strikes warm up for next time).
+                merged = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
+                merged.update(s for s in (prev_ce, prev_pe) if s)
+                self._active_option_symbols = merged or self._active_option_symbols
+                return
+
         if selected_ce_norm:
             self._active_selected_ce = selected_ce_norm
         if selected_pe_norm:
@@ -7367,7 +7405,27 @@ class StrategyRunner:
         details["last_order_error"] = health.get("last_order_error") or health.get("last_order_api_error")
         details["last_order_error_type"] = health.get("last_order_error_type") or health.get("last_order_api_error_type")
         if effect == "live_orders_blocked":
+            block_class = health.get("block_class") or "broker_health_unknown"
             details["broker_health_block_reason"] = "trading_allowed_effect_live_orders_blocked"
+            details["broker_health_block_class"] = block_class
+            details["balance_stale"] = health.get("balance_stale")
+            details["last_margin_success_age_s"] = health.get("last_margin_success_age_s")
+            details["margin_api_available"] = health.get("margin_api_available")
+            details["order_api_available"] = health.get("order_api_available")
+            details["available_balance"] = health.get("available_balance")
+            self._logger.warning(
+                "BROKER_HEALTH_LIVE_ORDERS_BLOCKED class=%s broker_connected=%s margin_api_available=%s "
+                "order_api_available=%s balance_stale=%s margin_age_s=%s last_broker_error=%s last_order_error=%s",
+                block_class,
+                details.get("broker_connected"),
+                health.get("margin_api_available"),
+                health.get("order_api_available"),
+                health.get("balance_stale"),
+                health.get("last_margin_success_age_s"),
+                details.get("last_broker_error"),
+                details.get("last_order_error"),
+                extra={"event": "BROKER_HEALTH_LIVE_ORDERS_BLOCKED", "block_class": block_class, "health": health},
+            )
             return False, "broker_health_live_orders_blocked", details
         for key, reason in (
             ("ready", "broker_ready_false"),
