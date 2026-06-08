@@ -572,3 +572,26 @@ def test_datahub_purge_removes_prefixed_and_unprefixed_aliases() -> None:
     assert token not in hub._symbol_by_token  # noqa: SLF001
     assert token not in hub._token_quotes  # noqa: SLF001
     assert token not in hub._ticks  # noqa: SLF001
+
+
+def test_datahub_preserves_depth_quote_quality_and_update_version(hub: DataHub) -> None:
+    symbol = 'NFO:NIFTY26JUN23850PE'
+    hub.ingest_tick_sync({
+        'symbol': symbol,
+        'instrument_token': 23850,
+        'ltp': 100.0,
+        'last_price': 100.0,
+        'source': 'ws',
+        'depth': {'buy': [{'price': 99.95, 'quantity': 100}], 'sell': [{'price': 100.05, 'quantity': 100}]},
+    })
+
+    quote = hub.get_quote(symbol, allow_pull=False)
+
+    assert quote is not None
+    assert quote['bid'] == 99.95
+    assert quote['ask'] == 100.05
+    assert quote['depth_available'] is True
+    assert quote['tradable_quote'] is True
+    assert quote['quote_source'] == 'ws'
+    assert quote['quote_update_version'] == 1
+    assert hub.quote_update_version(symbol) == 1

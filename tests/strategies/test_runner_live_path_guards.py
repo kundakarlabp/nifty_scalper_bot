@@ -2919,3 +2919,41 @@ def test_on_tick_event_context_symbols_emit_global_readiness_not_eval_decision(c
     assert "context_symbol_not_strategy_candidate" not in caplog.text
     assert "RUNNER_EVAL_DECISION symbol=NSE:NIFTY" not in caplog.text
     assert "RUNNER_EVAL_DECISION symbol=NFO:NIFTY26JUNFUT" not in caplog.text
+
+
+def test_symbol_live_entry_ready_allows_near_atm_candidate_when_global_pair_not_armed(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true')
+    monkeypatch.delenv('PAPER_MODE', raising=False)
+    monkeypatch.delenv('PAPER__ENABLED', raising=False)
+    monkeypatch.delenv('SHADOW_MODE', raising=False)
+    runner = _build_runner()
+    runner._runtime_live_orders_armed = False
+    runner._runtime_readiness_reason = 'execution_not_armed:ce_exec_quote_or_history_not_ready,pe_exec_quote_or_history_not_ready'
+    runner._runtime_indicators = {'NFO:NIFTY26JUN23850PE': {'direction_bias': 'PE', 'context_age_seconds': 1.0, 'atm_strike': 23900}}
+    runner._active_selected_ce = 'NFO:NIFTY26JUN23900CE'
+    runner._active_selected_pe = 'NFO:NIFTY26JUN23900PE'
+    runner._active_option_symbols = ['NFO:NIFTY26JUN23850PE', 'NFO:NIFTY26JUN23900PE', 'NFO:NIFTY26JUN23900CE']
+    runner._active_atm_strike = 23900
+    runner._active_basket_token_by_symbol = {'NFO:NIFTY26JUN23850PE': 23850}
+    runner._indicator_engine = SimpleNamespace(get_history=lambda _s: [object()] * 40)
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._risk_kill_switch_triggered = lambda: False
+    runner._required_bars_for_symbol = lambda _s: 5
+    runner._is_option_symbol_tick_fresh = lambda *_a, **_k: True
+    runner._get_cached_quote_for_live_entry = lambda _s: {
+        'ltp': 100,
+        'depth': {'buy': [{'price': 99.95}], 'sell': [{'price': 100.05}]},
+        'depth_available': True,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    }
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26JUN23850PE', quantity=1, confidence=0.8, reason='OrderFlow', metadata={'trigger_conditions_met': True, 'lot_size': 65})
+    ready, reason, details = runner._symbol_live_entry_ready('NFO:NIFTY26JUN23850PE', signal=signal, trace_id='near-atm-global-stale')
+
+    assert ready is True
+    assert reason == 'symbol_live_ready'
+    assert details['candidate_specific_readiness_override'] is True
+    assert details['tradable_quote'] is True

@@ -44,6 +44,7 @@ from nifty_scalper_bot.streaming.websocket_manager import (
     ConnectionState,
     WebSocketManager,
 )
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
@@ -7505,12 +7506,7 @@ class MarketDataManager:
         canonical = self._canonical_symbol(symbol)
         tick = self.get_latest_tick(canonical) or {}
         ltp = _coerce_float(tick.get("ltp") or tick.get("last_price"))
-        bid = _coerce_float(tick.get("bid") or tick.get("best_bid") or tick.get("best_bid_price"))
-        ask = _coerce_float(tick.get("ask") or tick.get("best_ask") or tick.get("best_ask_price"))
-        if (bid is None or ask is None) and isinstance(tick.get("depth"), Mapping):
-            quote_fields = self._extract_depth_quote_fields(cast(Mapping[str, Any], tick))
-            bid = bid if bid is not None else _coerce_float(quote_fields.get("bid"))
-            ask = ask if ask is not None else _coerce_float(quote_fields.get("ask"))
+        bid, ask, _spread_pct, resolved_bid_ask_source = resolve_quote_bid_ask_spread(tick)
         mid = None
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             mid = (float(bid) + float(ask)) / 2.0
@@ -7556,9 +7552,9 @@ class MarketDataManager:
         bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
         ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
         bid_ask_source = str(
-            tick.get("bid_ask_source") or ("market_depth" if depth_available else "missing")
+            tick.get("bid_ask_source") or resolved_bid_ask_source or ("market_depth" if depth_available else "missing")
         ).lower()
-        source_ok = bid_ask_source in {"market_depth", "quote", "rest_quote", "ws_full"}
+        source_ok = bid_ask_source in {"market_depth", "quote", "rest_quote", "ws_full", "depth", "top_level", "best_bid_ask"}
         quote_source = str(tick.get("source") or "").lower()
         rest_quote_source = quote_source in {"rest", "rest_quote", "quote"}
         tradable_quote = (

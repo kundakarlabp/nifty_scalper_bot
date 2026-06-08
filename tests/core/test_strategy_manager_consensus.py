@@ -471,3 +471,36 @@ def test_aligned_two_trigger_allows_strategy_feature_unavailable_neutral() -> No
     v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={'strategy_score':8.2})
     out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True}, no_vote_reason_counts={'strategy_feature_unavailable':1})
     assert out is not None
+
+
+def test_consensus_approved_signal_does_not_emit_combined_not_approved_blocker(caplog) -> None:
+    manager = _manager_stub()
+    signal = _make_signal()
+    vote1 = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.85, reasons=[], metadata={'role': 'trigger', 'raw_setup_score': 9.0})
+    vote2 = StrategyVote(strategy='VWAPPro', side='CE', score=8.0, confidence=0.75, reasons=[], metadata={'role': 'trigger', 'raw_setup_score': 8.0})
+    caplog.set_level('INFO')
+
+    combined = manager._combine_strategy_votes(
+        symbol='NFO:NIFTY25000CE',
+        signals=[(signal, vote1), (signal, vote2)],
+        indicators={
+            'direction_bias': 'CE',
+            'underlying_direction_bias': 'CE',
+            'context_age_seconds': 1,
+            'spread_pct': 0.2,
+            'tradable_quote': True,
+            'quote_depth_valid': True,
+            'selected_ce': 'NFO:NIFTY25000CE',
+            'atm_strike': 25000,
+            'strike_distance_from_atm': 0,
+        },
+    )
+
+    assert combined is not None
+    assert combined.metadata['is_approved'] is True
+    assert any(getattr(rec, 'event', None) == 'CONSENSUS_SIGNAL_APPROVED' for rec in caplog.records)
+    assert not any(
+        getattr(rec, 'event', None) == 'STRATEGY_COMBINER_BLOCKER'
+        and getattr(rec, 'blocked_reason', None) == 'combined_not_approved'
+        for rec in caplog.records
+    )

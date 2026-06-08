@@ -74,7 +74,7 @@ from nifty_scalper_bot.data.source import (
 )
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
-from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy, resolve_quote_bid_ask_spread
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
     OrderStateMachine,
@@ -455,84 +455,8 @@ def _extract_float(payload: Mapping[str, Any], *keys: str) -> float | None:
 
 
 def _resolve_quote_bid_ask_spread(quote: Mapping[str, Any]) -> tuple[float | None, float | None, float | None, str]:
-    """Resolve bid, ask and spread_pct from a quote/tick dict using every known field layout.
-
-    Tries in priority order:
-    1. Top-level ``bid``/``ask`` keys.
-    2. ``best_bid``/``best_ask`` keys.
-    3. ``depth.buy[0].price`` / ``depth.sell[0].price`` (Zerodha WS full-quote depth).
-    4. Derives ``spread_pct`` from resolved bid/ask when the key is absent.
-    5. Falls back to a pre-computed ``spread_pct`` key **only** when fresh bid/ask
-       proof also exists (so a stale derived indicator never masquerades as live).
-
-    Returns:
-        (bid, ask, spread_pct, bid_ask_source)
-        bid/ask are None when not resolved.
-        spread_pct is None when bid/ask are both missing or invalid.
-        bid_ask_source is one of: "top_level", "best_bid_ask", "depth", "derived_only", "missing".
-
-    This is the single source of truth for live-entry spread validation.
-    OrderFlow resolves spread_pct the same way at line 64 of order_flow.py:
-        spread_pct = float(indicators.get('spread_pct') or (((ask-bid)/mid)*100))
-    This helper mirrors that logic so the live-entry gate never disagrees.
-    """
-    bid: float | None = None
-    ask: float | None = None
-    bid_ask_source = "missing"
-
-    # 1. Top-level bid/ask
-    raw_bid = _extract_float(quote, "bid", "bid_price")
-    raw_ask = _extract_float(quote, "ask", "ask_price")
-    if raw_bid is not None and raw_bid > 0 and raw_ask is not None and raw_ask > raw_bid:
-        bid, ask, bid_ask_source = raw_bid, raw_ask, "top_level"
-
-    # 2. best_bid / best_ask
-    if bid is None:
-        raw_bid2 = _extract_float(quote, "best_bid", "best_bid_price")
-        raw_ask2 = _extract_float(quote, "best_ask", "best_ask_price")
-        if raw_bid2 is not None and raw_bid2 > 0 and raw_ask2 is not None and raw_ask2 > raw_bid2:
-            bid, ask, bid_ask_source = raw_bid2, raw_ask2, "best_bid_ask"
-
-    # 3. Depth best levels (Zerodha WS full-quote format: depth.buy[0] / depth.sell[0])
-    if bid is None:
-        depth = quote.get("depth")
-        if isinstance(depth, Mapping):
-            buy_levels = depth.get("buy") or []
-            sell_levels = depth.get("sell") or []
-        elif isinstance(depth, dict):
-            buy_levels = depth.get("buy") or []
-            sell_levels = depth.get("sell") or []
-        else:
-            buy_levels = sell_levels = []
-        buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
-        sell_top = sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
-        depth_bid = _extract_float(buy_top, "price") if buy_top else None
-        depth_ask = _extract_float(sell_top, "price") if sell_top else None
-        if depth_bid is not None and depth_bid > 0 and depth_ask is not None and depth_ask > depth_bid:
-            bid, ask, bid_ask_source = depth_bid, depth_ask, "depth"
-
-    # Derive spread_pct from resolved bid/ask (mirrors OrderFlow line 64)
-    spread_pct: float | None = None
-    if bid is not None and ask is not None and bid > 0 and ask > bid:
-        mid = (bid + ask) / 2.0
-        spread_pct = ((ask - bid) / mid) * 100.0
-
-    # If bid/ask not resolved, check for a pre-computed spread_pct key —
-    # but only trust it when there is accompanying fresh quote evidence
-    # (tradable_quote or depth_available) to avoid accepting a stale indicator value.
-    if spread_pct is None:
-        pre_computed = _extract_float(quote, "spread_pct")
-        has_quote_proof = bool(
-            quote.get("tradable_quote")
-            or quote.get("depth_available")
-            or quote.get("depth")
-        )
-        if pre_computed is not None and pre_computed > 0 and has_quote_proof:
-            spread_pct = pre_computed
-            if bid_ask_source == "missing":
-                bid_ask_source = "derived_only"
-
-    return bid, ask, spread_pct, bid_ask_source
+    """Resolve bid/ask/spread via the shared execution-readiness quote helper."""
+    return resolve_quote_bid_ask_spread(dict(quote or {}))
 
 
 def _extract_int(payload: Mapping[str, Any], *keys: str) -> int:
@@ -7745,7 +7669,18 @@ class StrategyRunner:
             return final_ready, reason, details
 
         if not bool(self._runtime_live_orders_armed):
-            return _finish(False, "execution_not_armed")
+            hard_runtime_reason = str(self._runtime_readiness_reason or "")
+            runtime_hard_blockers = (
+                "market_closed",
+                "broker_not_ready",
+                "runner_not_running",
+                "eval_not_ready",
+                "not_live_mode",
+            )
+            if (not mode_snapshot.is_live_mode) or any(item in hard_runtime_reason for item in runtime_hard_blockers):
+                return _finish(False, "execution_not_armed")
+            details["global_live_orders_armed"] = False
+            details["candidate_specific_readiness_override"] = True
         if not self._is_tradable_symbol(symbol):
             return _finish(False, "non_tradable_symbol")
         if ks_active:
