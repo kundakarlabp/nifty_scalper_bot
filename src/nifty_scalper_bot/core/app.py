@@ -2415,6 +2415,10 @@ class BotContext:
     active_trading_universe: dict[str, Any] = field(default_factory=dict)
     active_contract_basket: Any | None = None
     active_basket_hydration: Any | None = None
+    hydration_status_by_symbol: dict[str, dict[str, object]] = field(
+        default_factory=dict
+    )
+    last_hydration_status_at: datetime | None = None
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     execution_locked_symbols: set[str] = field(default_factory=set)
@@ -7574,10 +7578,58 @@ def _hydration_status_map(ctx: BotContext, *, required_option_bars: int, require
     for sym, role in role_by_symbol.items():
         if not sym:
             continue
-        required = required_context_bars if role in {"spot", "futures_context"} else required_option_bars
+        required = (
+            required_context_bars
+            if role in {"spot", "futures_context"}
+            else required_option_bars
+        )
         statuses[sym] = build_symbol_hydration_status(ctx, sym, role, required)
     ctx.hydration_status_by_symbol = {sym: status.to_dict() for sym, status in statuses.items()}
+    ctx.last_hydration_status_at = datetime.now(timezone.utc)
     return statuses
+
+
+def _hydration_snapshot_all_required_ready(snapshot: object) -> bool:
+    """Return True when all captured HydrationStatus payloads are ready."""
+    if not isinstance(snapshot, Mapping) or not snapshot:
+        return False
+    has_required_status = False
+    for raw_status in snapshot.values():
+        if not isinstance(raw_status, Mapping):
+            return False
+        role = str(raw_status.get("role") or "")
+        if not role:
+            return False
+        has_required_status = True
+        blockers = raw_status.get("blocker_reasons") or raw_status.get("blockers") or []
+        if blockers:
+            return False
+        if not bool(raw_status.get("ready_for_evaluation")):
+            return False
+        if role in {"selected_ce", "selected_pe"} and not bool(
+            raw_status.get("ready_for_execution")
+        ):
+            return False
+    return has_required_status
+
+
+def _mark_hydration_data_ready_if_complete(ctx: BotContext) -> bool:
+    """Mark startup/data readiness complete once required hydration statuses are ready."""
+    if not _hydration_snapshot_all_required_ready(
+        getattr(ctx, "hydration_status_by_symbol", None)
+    ):
+        return False
+    ctx.data_observation_ready = True
+    ctx.data_pipeline_ready = True
+    ctx.data_hard_ready = True
+    ctx.data_ready = True
+    ctx.strategy_evaluation_ready = True
+    ctx.trading_signal_ready = True
+    ctx.evaluation_ready = True
+    ctx.trading_ready = True
+    if getattr(ctx, "startup_phase", None) not in {"startup_complete", "running"}:
+        ctx.startup_phase = "data_ready"
+    return True
 
 
 def _status_for_role(statuses: Mapping[str, HydrationStatus], role: str) -> HydrationStatus | None:
@@ -8528,7 +8580,11 @@ async def _deferred_basket_hydration_retry(
             await _recompute_and_push_runtime_readiness(
                 ctx, reason="deferred_basket_hydration_success"
             )
-            data_ready = bool(getattr(ctx, "data_ready", getattr(ctx, "evaluation_ready", False)))
+            hydration_ready = _mark_hydration_data_ready_if_complete(ctx)
+            data_ready = bool(
+                hydration_ready
+                or getattr(ctx, "data_ready", getattr(ctx, "evaluation_ready", False))
+            )
             if not data_ready:
                 LOGGER.info(
                     "DEFERRED_BASKET_RETRY_WAITING attempt=%d/%d reason=data_not_ready",
