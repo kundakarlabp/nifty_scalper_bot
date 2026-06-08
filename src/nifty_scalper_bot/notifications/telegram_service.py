@@ -13,6 +13,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.notifications.operator_telegram import register_operator_commands
+from nifty_scalper_bot.notifications.telegram_runtime_registry import claim_polling_owner, release_polling_owner
 
 _LOG = logging.getLogger("nifty_scalper_bot.telegram")
 
@@ -536,6 +537,8 @@ class TelegramService:
     async def start(self, ready_evt: asyncio.Event) -> None:
         """Start polling once *ready_evt* has been triggered."""
 
+        if not claim_polling_owner(token=self.token, owner=type(self).__name__):
+            return
         self._app = self._build_application()
         self._app_initialized = False
         await self._app.initialize()
@@ -579,6 +582,7 @@ class TelegramService:
             self._task = None
         if self._app and self._app_initialized:
             await self._stop_polling()
+        release_polling_owner(token=self.token, owner=type(self).__name__)
         self._app = None
 
 

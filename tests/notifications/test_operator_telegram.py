@@ -8,6 +8,7 @@ from telegram.ext import CommandHandler
 
 from nifty_scalper_bot.notifications.operator_telegram import (
     OPERATOR_COMMAND_NAMES,
+    _make_bound_handler,
     register_operator_commands,
     registered_command_names,
 )
@@ -31,10 +32,11 @@ class DummyMessage:
 
 
 class DummyUpdate:
-    def __init__(self, chat_id: int = 12345) -> None:
+    def __init__(self, chat_id: int = 12345, text: str = "/ping") -> None:
         self.effective_chat = SimpleNamespace(id=chat_id)
         self.effective_message = DummyMessage()
         self.effective_message.chat = self.effective_chat
+        self.effective_message.text = text
         self.message = self.effective_message
 
 
@@ -80,15 +82,20 @@ async def test_help_lists_exactly_kept_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ping_replies_pong_with_missing_subsystems() -> None:
+async def test_ping_replies_pong_with_missing_subsystems(caplog: pytest.LogCaptureFixture) -> None:
     app = FakeApp()
     service = SimpleNamespace(chat_id=12345)
     register_operator_commands(app, service)  # type: ignore[arg-type]
-    update = DummyUpdate()
+    update = DummyUpdate(text="/ping")
 
-    await _handler(app, "ping").callback(update, DummyContext())  # type: ignore[arg-type]
+    with caplog.at_level("INFO"):
+        await _handler(app, "ping").callback(update, DummyContext())  # type: ignore[arg-type]
 
     assert update.effective_message.replies == ["pong"]
+    assert "TELEGRAM_COMMAND_RECEIVED command=ping chat_id=12345" in caplog.text
+    assert "TELEGRAM_COMMAND_AUTHORIZED command=ping" in caplog.text
+    assert "TELEGRAM_COMMAND_HANDLER_STARTED command=ping" in caplog.text
+    assert "TELEGRAM_COMMAND_HANDLER_DONE command=ping" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -163,3 +170,20 @@ async def test_emergency_reports_unwired_without_side_effect() -> None:
     await _handler(app, "emergency").callback(update, DummyContext())  # type: ignore[arg-type]
 
     assert update.effective_message.replies == ["Emergency handler not wired."]
+
+
+@pytest.mark.asyncio
+async def test_handler_exception_logs_structured_error(caplog: pytest.LogCaptureFixture) -> None:
+    async def failing_handler(update: Any, context: Any, service: Any) -> None:
+        del update, context, service
+        raise RuntimeError("boom")
+
+    service = SimpleNamespace(chat_id=12345)
+    update = DummyUpdate(text="/boom")
+    bound = _make_bound_handler(service, failing_handler)
+
+    with caplog.at_level("ERROR"):
+        await bound(update, DummyContext())  # type: ignore[arg-type]
+
+    assert update.effective_message.replies == ["ERROR: RuntimeError: boom"]
+    assert "TELEGRAM_COMMAND_HANDLER_ERROR command=boom error_type=RuntimeError error=boom" in caplog.text

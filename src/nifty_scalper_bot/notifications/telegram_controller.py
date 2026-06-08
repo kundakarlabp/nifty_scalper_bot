@@ -96,7 +96,8 @@ from nifty_scalper_bot.infra.diagnostics import LOG_TAP
 from nifty_scalper_bot.infra.metrics import METRICS, MetricsCollector
 from nifty_scalper_bot.infra.ws_diag import WsDiag, run_diag
 from nifty_scalper_bot.notifications.safe_messenger import SafeMessenger
-from nifty_scalper_bot.notifications.operator_telegram import register_operator_commands
+from nifty_scalper_bot.notifications.operator_telegram import register_operator_commands, registered_command_names
+from nifty_scalper_bot.notifications.telegram_runtime_registry import claim_polling_owner, release_polling_owner
 from nifty_scalper_bot.utils.alerts import (
     AggregatedAlert,
     AlertDeduplicator,
@@ -608,20 +609,26 @@ class TelegramBot:
         self._running = True
 
         try:
+            if not claim_polling_owner(token=self.deps.token, owner=type(self).__name__):
+                self._started = False
+                self._running = False
+                return
             log.info("Telegram bot startup initiated", extra={"event": "telegram_start_enter"})
             self._register_handlers()
+            command_count = len(registered_command_names(self.application))
+            log.info(
+                "TELEGRAM_RUNTIME_CONFIG bot_token_present=%s chat_id_configured=%s command_count=%s polling_mode=%s",
+                bool(self.deps.token),
+                self.deps.chat_id is not None,
+                command_count,
+                self.mode == "polling",
+            )
             await self.application.initialize()
             await self.application.start()
             if self.application.updater is not None:
-                log.info(
-                    "Telegram updater polling start requested",
-                    extra={"event": "telegram_updater_start_polling"},
-                )
+                log.info("TELEGRAM_POLLING_START_REQUESTED")
                 await self.application.updater.start_polling()
-                log.info(
-                    "Telegram updater polling started",
-                    extra={"event": "telegram_updater_polling_started"},
-                )
+                log.info("TELEGRAM_POLLING_STARTED")
             await self._safe_send("🤖 Telegram bot started")
             log.info("Telegram bot started")
             self._ensure_alert_worker()
@@ -633,6 +640,7 @@ class TelegramBot:
                 log.info("telegram_heartbeat_task_started")
 
         except Exception as exc:  # noqa: BLE001
+            release_polling_owner(token=self.deps.token, owner=type(self).__name__)
             self._started = False
             self._running = False
             log.error(
@@ -674,6 +682,7 @@ class TelegramBot:
             
             # 2. Call internal shutdown for other tasks (loops, workers)
             await self.shutdown()
+            release_polling_owner(token=self.deps.token, owner=type(self).__name__)
             self._started = False
             log.info("✅ Telegram Bot: Shutdown complete.")
         except Exception as exc:
