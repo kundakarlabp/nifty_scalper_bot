@@ -25,6 +25,7 @@ from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
 from nifty_scalper_bot.data.normalizers import normalize_history_row
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 from nifty_scalper_bot.utils.symbols import canonical
 from nifty_scalper_bot.utils.serialization import to_json_safe
 
@@ -652,6 +653,25 @@ class DataHub:
             received_at = float(tick.get("received_at") or time.time())
         except Exception:
             received_at = time.time()
+        bid, ask, spread_pct, bid_ask_source = resolve_quote_bid_ask_spread(tick)
+        if bid is not None and ask is not None:
+            tick.setdefault("bid", bid)
+            tick.setdefault("ask", ask)
+            tick.setdefault("best_bid", bid)
+            tick.setdefault("best_ask", ask)
+        if spread_pct is not None:
+            tick.setdefault("spread_pct", spread_pct)
+        if bid_ask_source != "missing":
+            tick.setdefault("bid_ask_source", bid_ask_source)
+        if tick.get("depth"):
+            tick["depth_available"] = True
+        else:
+            tick.setdefault("depth_available", False)
+        if bid is not None and ask is not None and bid > 0 and ask > bid:
+            tick["tradable_quote"] = True
+        else:
+            tick.setdefault("tradable_quote", False)
+        tick.setdefault("quote_source", tick.get("source"))
         tick.update(
             {
                 "symbol": symbol,
@@ -875,6 +895,7 @@ class DataHub:
                 self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
             self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
+            canonical_tick["quote_update_version"] = int(self._quote_update_versions[symbol])
             token_value = canonical_tick.get("instrument_token") or canonical_tick.get("token")
             token_int = None
             try:

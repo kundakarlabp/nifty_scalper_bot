@@ -4255,6 +4255,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata["consensus_stage"] = metadata_stage
         metadata["manager_score_source"] = "strategy_score_plus_context_arbitration"
         metadata["approval_path"] = approval_path
+        metadata["is_approved"] = True
         log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
         self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)
         return Signal(

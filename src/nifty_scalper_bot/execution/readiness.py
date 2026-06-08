@@ -70,6 +70,79 @@ class HistoryReadinessPolicy:
         )
 
 
+def _quote_float(payload: dict | object, *keys: str) -> float | None:
+    """Return first positive-compatible float field from a quote-like mapping."""
+    getter = payload.get if isinstance(payload, dict) else lambda key, default=None: getattr(payload, key, default)
+    for key in keys:
+        value = getter(key, None)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number == number:
+            return number
+    return None
+
+
+def resolve_quote_bid_ask_spread(quote: dict | object) -> tuple[float | None, float | None, float | None, str]:
+    """Resolve bid/ask/spread from top-level fields or Zerodha depth.
+
+    Fresh WebSocket FULL quotes are tradable when either top-level bid/ask or
+    depth.buy[0]/depth.sell[0] contains a valid crossed-safe best bid/ask.
+    """
+    if quote is None:
+        return None, None, None, "missing"
+    getter = quote.get if isinstance(quote, dict) else lambda key, default=None: getattr(quote, key, default)
+    bid: float | None = None
+    ask: float | None = None
+    source = "missing"
+
+    raw_bid = _quote_float(quote, "bid", "bid_price")
+    raw_ask = _quote_float(quote, "ask", "ask_price")
+    if raw_bid is not None and raw_bid > 0 and raw_ask is not None and raw_ask > raw_bid:
+        bid, ask, source = raw_bid, raw_ask, "top_level"
+
+    if bid is None:
+        raw_bid = _quote_float(quote, "best_bid", "best_bid_price")
+        raw_ask = _quote_float(quote, "best_ask", "best_ask_price")
+        if raw_bid is not None and raw_bid > 0 and raw_ask is not None and raw_ask > raw_bid:
+            bid, ask, source = raw_bid, raw_ask, "best_bid_ask"
+
+    if bid is None:
+        depth = getter("depth", None)
+        buy_levels = sell_levels = []
+        if isinstance(depth, dict):
+            buy_levels = depth.get("buy") or []
+            sell_levels = depth.get("sell") or []
+        buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
+        sell_top = sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+        raw_bid = _quote_float(buy_top, "price") if isinstance(buy_top, dict) else None
+        raw_ask = _quote_float(sell_top, "price") if isinstance(sell_top, dict) else None
+        if raw_bid is not None and raw_bid > 0 and raw_ask is not None and raw_ask > raw_bid:
+            bid, ask, source = raw_bid, raw_ask, "depth"
+
+    spread_pct: float | None = None
+    if bid is not None and ask is not None and bid > 0 and ask > bid:
+        mid = (bid + ask) / 2.0
+        spread_pct = ((ask - bid) / mid) * 100.0
+    else:
+        precomputed = _quote_float(quote, "spread_pct")
+        has_quote_proof = bool(getter("tradable_quote", False) or getter("depth_available", False) or getter("depth", None))
+        if precomputed is not None and precomputed > 0 and has_quote_proof:
+            spread_pct = precomputed
+            if source == "missing":
+                source = "derived_only"
+    return bid, ask, spread_pct, source
+
+
+def quote_has_tradable_bid_ask(quote: dict | object) -> bool:
+    """Return True when quote has valid top-level/depth bid-ask proof."""
+    bid, ask, _spread, _source = resolve_quote_bid_ask_spread(quote)
+    return bool(bid is not None and ask is not None and bid > 0 and ask > bid)
+
+
 def compute_live_readiness(
     *,
     live_mode: bool,

@@ -996,7 +996,7 @@ from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
 from nifty_scalper_bot.execution.post_fill_monitor import PostFillMonitor
-from nifty_scalper_bot.execution.readiness import compute_live_readiness
+from nifty_scalper_bot.execution.readiness import compute_live_readiness, quote_has_tradable_bid_ask
 from nifty_scalper_bot.execution.safe_order_manager import SafeOrderManager
 from nifty_scalper_bot.execution.state_tracker import StateTracker
 from nifty_scalper_bot.infra.cron_refresh import schedule_instrument_refresh
@@ -7591,21 +7591,21 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     def _selected_option_bid_ask_complete(sym:str|None)->bool:
         snap=_snapshot(sym)
         if snap is None: return False
-        bid=float(_snapshot_value(snap,'bid',0.0) or 0.0)
-        ask=float(_snapshot_value(snap,'ask',0.0) or 0.0)
-        return bid>0 and ask>bid
+        return bool(quote_has_tradable_bid_ask(snap))
     def _tradable_quote(sym:str|None)->bool:
         if not sym or mdm is None: return False
-        if not _selected_option_bid_ask_complete(sym): return False
+        snap=_snapshot(sym)
+        snap_has_bid_ask = bool(quote_has_tradable_bid_ask(snap)) if snap is not None else False
         h=getattr(mdm,'has_ws_tradable_quote',None)
         if callable(h):
-            try: return bool(h([sym]))
+            try:
+                if bool(h([sym])) and (snap_has_bid_ask or bool(_snapshot_value(snap,'tradable_quote',False))): return True
             except TypeError:
-                return bool(h(sym))
+                if bool(h(sym)) and (snap_has_bid_ask or bool(_snapshot_value(snap,'tradable_quote',False))): return True
             except Exception:
                 pass
-        snap=_snapshot(sym)
         if snap is None: return False
+        if snap_has_bid_ask: return True
         return bool(_snapshot_value(snap,'tradable_quote',False))
     def _live_tick_seen(sym:str|None)->bool:
         if _fresh_ltp(sym): return True
@@ -7694,7 +7694,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ce_eval_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_eval_min_live_bars
     pe_eval_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_eval_min_live_bars
     spot_ready=_fresh_ltp(spot_symbol) or _bars(spot_symbol)>=1
-    context_exec_ready = _bars(spot_symbol)>=context_execution_min_bars or (_fresh_ltp(spot_symbol) and _bars(futures_symbol)>=context_execution_min_bars)
+    context_exec_ready = _bars(spot_symbol)>=context_execution_min_bars or _fresh_ltp(spot_symbol)
     data_hard_ready=bool(basket_hard_ready and spot_ready and ce_eval_ready and pe_eval_ready)
     runner_running=_runner_is_running(getattr(ctx,'strategy_runner',None))
     evaluation_ready=bool(data_hard_ready and runner_running)

@@ -117,3 +117,64 @@ async def test_ensure_selected_options_hydrated_handles_runner_reseed_failure() 
 
     result = await app._ensure_selected_options_hydrated(ctx, symbol, None, 2, 'test')
     assert result[symbol]['ready'] is False
+
+@pytest.mark.asyncio
+async def test_live_readiness_treats_depth_only_quote_as_tradable(monkeypatch) -> None:
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
+
+    class DepthSnap(Snap):
+        def __init__(self, ltp: float, age: float, bid: float, ask: float):
+            super().__init__(ltp, age, False, None, None, True)
+            self.depth = {'buy': [{'price': bid, 'quantity': 100}], 'sell': [{'price': ask, 'quantity': 100}]}
+
+    snaps = {
+        'NSE:NIFTY': Snap(25000, 2),
+        'NFO:CE': DepthSnap(100, 2, 99.95, 100.05),
+        'NFO:PE': DepthSnap(110, 2, 109.95, 110.05),
+    }
+    mdm = SimpleNamespace(
+        get_symbol_snapshot=lambda s: snaps.get(s),
+        get_ohlc_bars=lambda s, **k: list(range(60)),
+        has_ws_tradable_quote=lambda symbols: True,
+        _confirmed_subscriptions={1, 2},
+        _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2},
+        _last_tick_ts=_fresh_tick_ts(),
+    )
+    ctx = make_ctx(mdm)
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason='depth-only-test')
+
+    assert ctx.live_orders_armed is True
+    assert ctx.selected_ce_exec_ready is True
+    assert ctx.selected_pe_exec_ready is True
+
+
+@pytest.mark.asyncio
+async def test_insufficient_futures_context_is_soft_when_spot_and_options_ready(monkeypatch) -> None:
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
+    snaps = {
+        'NSE:NIFTY': Snap(25000, 2),
+        'NFO:CE': Snap(100, 2, True, 99.95, 100.05, True),
+        'NFO:PE': Snap(110, 2, True, 109.95, 110.05, True),
+    }
+
+    def bars(symbol: str, **_kwargs):
+        if symbol == 'NFO:NIFTY26JUNFUT':
+            return []
+        return list(range(60))
+
+    mdm = SimpleNamespace(
+        get_symbol_snapshot=lambda s: snaps.get(s),
+        get_ohlc_bars=bars,
+        has_ws_tradable_quote=lambda symbols: True,
+        _confirmed_subscriptions={1, 2},
+        _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2},
+        _last_tick_ts=_fresh_tick_ts(),
+    )
+    ctx = make_ctx(mdm)
+    ctx.active_trading_universe['futures_symbol'] = 'NFO:NIFTY26JUNFUT'
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason='futures-soft-test')
+
+    assert ctx.context_exec_ready is True
+    assert ctx.live_orders_armed is True
