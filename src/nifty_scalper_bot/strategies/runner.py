@@ -190,6 +190,29 @@ def safe_positive_float_env(name: str, default: float, *, minimum: float = 0.0) 
     return _safe_positive_float(os.getenv(name, default), default, minimum=minimum)
 
 
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    return _safe_positive_float(os.getenv(name, default), default, minimum=minimum)
+
+
+def _env_optional_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "INVALID_ENV_FLOAT name=%s value=%r default=None",
+            name,
+            raw,
+            extra={"event": "INVALID_ENV_FLOAT", "env_name": name, "value": raw, "default": None},
+        )
+        return None
+    if value != value or value < 0:
+        return None
+    return value
+
+
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -367,6 +390,30 @@ class StrategyRunnerConfig:
     signal_cooldown_seconds: float = 3.0
     trade_cooldown_seconds: float = 10.0
 
+    # Lightweight pre-strategy evaluation gates. Env overrides use the same
+    # names as the fields to keep runtime tuning explicit and centralized.
+    same_bar_periodic_eval_seconds: float = field(
+        default_factory=lambda: _env_float("RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS", 5.0, minimum=0.0)
+    )
+    min_option_premium: float = field(
+        default_factory=lambda: _env_float("MIN_OPTION_PREMIUM", 20.0, minimum=0.0)
+    )
+    max_option_spread_pct_for_eval: float = field(
+        default_factory=lambda: _env_float("MAX_OPTION_SPREAD_PCT_FOR_EVAL", 1.5, minimum=0.0)
+    )
+    max_option_spread_abs_for_eval: float | None = field(
+        default_factory=lambda: _env_optional_float("MAX_OPTION_SPREAD_ABS_FOR_EVAL")
+    )
+    require_bid_ask_for_option_eval: bool = field(
+        default_factory=lambda: _env_bool("REQUIRE_BID_ASK_FOR_OPTION_EVAL", True)
+    )
+    skip_low_premium_option_eval: bool = field(
+        default_factory=lambda: _env_bool("SKIP_LOW_PREMIUM_OPTION_EVAL", True)
+    )
+    skip_wide_spread_option_eval: bool = field(
+        default_factory=lambda: _env_bool("SKIP_WIDE_SPREAD_OPTION_EVAL", True)
+    )
+
     def __post_init__(self) -> None:
         if self.min_indicator_bars < 0:
             raise ValueError("min_indicator_bars must be non-negative")
@@ -380,6 +427,18 @@ class StrategyRunnerConfig:
 
         if self.trade_cooldown_seconds < 0:
             raise ValueError("trade_cooldown_seconds must be >= 0")
+
+        if self.same_bar_periodic_eval_seconds < 0:
+            raise ValueError("same_bar_periodic_eval_seconds must be >= 0")
+        if self.min_option_premium < 0:
+            raise ValueError("min_option_premium must be >= 0")
+        if self.max_option_spread_pct_for_eval < 0:
+            raise ValueError("max_option_spread_pct_for_eval must be >= 0")
+        if (
+            self.max_option_spread_abs_for_eval is not None
+            and self.max_option_spread_abs_for_eval < 0
+        ):
+            raise ValueError("max_option_spread_abs_for_eval must be >= 0")
 
 
 class RunnerState(Enum):
@@ -588,6 +647,9 @@ class StrategyRunner:
             float(os.getenv("RUNNER_EVAL_WITHOUT_NEW_BAR_SECONDS", "15")),
         )
         self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
+        self._last_periodic_eval_at_by_symbol: dict[str, float] = {}
+        self._last_eval_bar_key_by_symbol: dict[str, Any] = {}
+        self._last_pregate_log_at_by_symbol_reason: dict[tuple[str, str], float] = {}
         self._last_eval_price_by_symbol: dict[str, float] = {}
         self._last_same_bar_eval_block_reason_by_symbol: dict[str, str] = {}
         self._last_same_bar_eval_block_detail_by_symbol: dict[str, dict[str, Any]] = {}
@@ -6605,6 +6667,11 @@ class StrategyRunner:
                 "order_forwarding_allowed": bool(context.pop("order_forwarding_allowed", allowed)),
                 "stage": stage,
                 "reason": reason,
+                "pregate_reason": context.get("pregate_reason"),
+                "eval_throttle_elapsed_s": context.get("eval_throttle_elapsed_s"),
+                "premium_ok": context.get("premium_ok"),
+                "quote_ok": context.get("quote_ok"),
+                "spread_ok": context.get("spread_ok"),
                 "active_symbol": symbol in self._active_symbols,
                 "symbol_state": sym_state_val,
                 "state_active": state_active,
@@ -7287,6 +7354,193 @@ class StrategyRunner:
                 if ltp is not None and ltp > 0:
                     return payload
         return None
+
+    def _get_eval_quote_snapshot(self, symbol: str, tick: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Return quote snapshot for pre-strategy eval gates without pulling broker data."""
+        symbol_norm = normalize_symbol(symbol)
+        for source_name, source in (("datahub", getattr(self, "_data_hub", None)), ("mdm", getattr(self, "_market_data", None))):
+            if source is None:
+                continue
+            for method_name in ("get_quote", "get_symbol_snapshot", "get_latest_tick", "get_cached_quote"):
+                fn = getattr(source, method_name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    try:
+                        raw = fn(symbol_norm, allow_pull=False) if method_name == "get_quote" else fn(symbol_norm)
+                    except TypeError:
+                        raw = fn(symbol_norm)
+                except Exception:
+                    continue
+                if raw is None:
+                    continue
+                payload = dict(raw) if isinstance(raw, Mapping) else {
+                    "ltp": getattr(raw, "ltp", None) or getattr(raw, "last_price", None) or getattr(raw, "price", None),
+                    "bid": getattr(raw, "bid", None) or getattr(raw, "best_bid", None),
+                    "ask": getattr(raw, "ask", None) or getattr(raw, "best_ask", None),
+                    "depth": getattr(raw, "depth", None),
+                    "depth_available": getattr(raw, "depth_available", None),
+                    "quote_update_version": getattr(raw, "quote_update_version", None),
+                    "source": getattr(raw, "source", None),
+                }
+                payload.setdefault("quote_source", payload.get("source") or source_name)
+                if payload:
+                    return payload
+        last_tick = (getattr(self, "_last_tick", {}) or {}).get(symbol_norm) or (getattr(self, "_last_tick", {}) or {}).get(symbol)
+        if isinstance(last_tick, Mapping) and last_tick:
+            payload = dict(last_tick)
+            payload.setdefault("quote_source", payload.get("source") or "runner_last_tick")
+            return payload
+        if tick:
+            payload = dict(tick)
+            payload.setdefault("quote_source", payload.get("source") or "incoming_tick")
+            return payload
+        return {}
+
+    def _current_eval_bar_key(self, symbol: str, tick: Mapping[str, Any] | None = None) -> Any:
+        """Return the current evaluation bar identity for same-bar throttling."""
+        symbol_norm = normalize_symbol(symbol)
+        version = int((getattr(self, "_candle_versions", {}) or {}).get(symbol_norm, 0) or 0)
+        if version > 0:
+            return ("version", version)
+        if tick:
+            for key in ("bar_key", "candle_key", "bar_ts", "candle_ts", "timestamp", "ts"):
+                value = tick.get(key)
+                if value not in (None, ""):
+                    return (key, str(value))
+        last_bar = (getattr(self, "_last_bar_ts", {}) or {}).get(symbol_norm)
+        if last_bar is not None:
+            return ("last_bar_ts", last_bar.isoformat() if hasattr(last_bar, "isoformat") else str(last_bar))
+        return ("symbol", symbol_norm)
+
+    def _is_option_symbol(self, symbol: str) -> bool:
+        """Return True only for NIFTY option symbols evaluated by strategy gates."""
+        return self._is_tradable_symbol(symbol)
+
+    def _should_skip_symbol_eval(
+        self,
+        symbol: str,
+        tick: Mapping[str, Any] | None = None,
+        *,
+        bar_key: Any | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Decide whether to skip expensive strategy evaluation for one symbol."""
+        cfg = getattr(self, "_config", StrategyRunnerConfig())
+        symbol_norm = normalize_symbol(symbol)
+        now_mono = time.monotonic()
+        current_bar_key = bar_key if bar_key is not None else self._current_eval_bar_key(symbol_norm, tick)
+        last_bar_key = (getattr(self, "_last_eval_bar_key_by_symbol", {}) or {}).get(symbol_norm)
+        last_eval_at = float((getattr(self, "_last_periodic_eval_at_by_symbol", {}) or {}).get(symbol_norm, 0.0) or 0.0)
+        interval = max(float(getattr(cfg, "same_bar_periodic_eval_seconds", 5.0) or 5.0), 3.0)
+        elapsed = (now_mono - last_eval_at) if last_eval_at > 0 else None
+        details: dict[str, Any] = {
+            "bar_key": current_bar_key,
+            "same_bar_elapsed_s": round(elapsed, 3) if elapsed is not None else None,
+            "same_bar_interval_s": interval,
+            "pregate_reason": "ok",
+            "eval_throttle_elapsed_s": round(elapsed, 3) if elapsed is not None else None,
+            "premium_ok": True,
+            "quote_ok": True,
+            "spread_ok": True,
+            "data_phase": (getattr(self, "_data_phase", {}) or {}).get(symbol_norm),
+        }
+        if last_bar_key == current_bar_key and last_eval_at > 0 and elapsed is not None and elapsed < interval:
+            details.update({"pregate_reason": "same_bar_periodic_eval_throttled"})
+            return True, "same_bar_periodic_eval_throttled", details
+
+        if not self._is_option_symbol(symbol_norm):
+            return False, "ok", details
+
+        quote = self._get_eval_quote_snapshot(symbol_norm, tick)
+        ltp = _extract_float(quote, "ltp", "last_price", "price", "close")
+        bid, ask, spread_pct, quote_source = _resolve_quote_bid_ask_spread(quote)
+        if bid is None or ask is None:
+            raw_bid = _extract_float(quote, "bid", "best_bid", "bid_price", "best_bid_price")
+            raw_ask = _extract_float(quote, "ask", "best_ask", "ask_price", "best_ask_price")
+            if raw_bid is not None and raw_ask is not None and raw_bid > 0 and raw_ask > 0:
+                bid, ask = raw_bid, raw_ask
+                quote_source = quote_source if quote_source != "missing" else "top_level_raw"
+                if raw_ask >= raw_bid:
+                    mid = (raw_bid + raw_ask) / 2.0
+                    spread_pct = ((raw_ask - raw_bid) / mid) * 100.0 if mid > 0 else None
+        spread_abs = (ask - bid) if bid is not None and ask is not None else None
+        depth_available = bool(quote.get("depth_available") or quote.get("depth"))
+        quote_update_version = quote.get("quote_update_version") or quote.get("update_version") or (getattr(self, "_quote_update_versions", {}) or {}).get(symbol_norm)
+        details.update({
+            "ltp": ltp,
+            "bid": bid,
+            "ask": ask,
+            "spread_abs": spread_abs,
+            "spread_pct": spread_pct,
+            "min_premium": float(getattr(cfg, "min_option_premium", 20.0) or 0.0),
+            "max_spread_pct": float(getattr(cfg, "max_option_spread_pct_for_eval", 1.5) or 0.0),
+            "max_spread_abs": getattr(cfg, "max_option_spread_abs_for_eval", None),
+            "depth_available": depth_available,
+            "quote_source": quote.get("quote_source") or quote.get("source") or quote_source,
+            "quote_update_version": quote_update_version,
+        })
+
+        if bool(getattr(cfg, "skip_low_premium_option_eval", True)):
+            min_premium = float(getattr(cfg, "min_option_premium", 20.0) or 0.0)
+            if ltp is None or ltp <= 0 or ltp < min_premium:
+                details.update({"premium_ok": False, "pregate_reason": "option_premium_below_min"})
+                return True, "option_premium_below_min", details
+
+        quote_ok = bool(bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid)
+        if bool(getattr(cfg, "require_bid_ask_for_option_eval", True)) and not quote_ok:
+            details.update({"quote_ok": False, "pregate_reason": "option_bid_ask_missing_or_invalid"})
+            return True, "option_bid_ask_missing_or_invalid", details
+
+        if bool(getattr(cfg, "skip_wide_spread_option_eval", True)) and quote_ok:
+            max_pct = float(getattr(cfg, "max_option_spread_pct_for_eval", 1.5) or 0.0)
+            if spread_pct is not None and max_pct > 0 and spread_pct > max_pct:
+                details.update({"spread_ok": False, "pregate_reason": "option_spread_too_wide"})
+                return True, "option_spread_too_wide", details
+            max_abs = getattr(cfg, "max_option_spread_abs_for_eval", None)
+            if max_abs is not None and spread_abs is not None and spread_abs > float(max_abs):
+                details.update({"spread_ok": False, "pregate_reason": "option_spread_abs_too_wide"})
+                return True, "option_spread_abs_too_wide", details
+
+        return False, "ok", details
+
+    def _mark_symbol_eval_allowed(self, symbol: str, *, bar_key: Any | None = None, tick: Mapping[str, Any] | None = None) -> None:
+        """Record a permitted strategy evaluation for future same-bar throttling."""
+        symbol_norm = normalize_symbol(symbol)
+        if not hasattr(self, "_last_periodic_eval_at_by_symbol"):
+            self._last_periodic_eval_at_by_symbol = {}
+        if not hasattr(self, "_last_eval_bar_key_by_symbol"):
+            self._last_eval_bar_key_by_symbol = {}
+        self._last_periodic_eval_at_by_symbol[symbol_norm] = time.monotonic()
+        self._last_eval_bar_key_by_symbol[symbol_norm] = bar_key if bar_key is not None else self._current_eval_bar_key(symbol_norm, tick)
+
+    def _log_eval_pregate_skip(self, symbol: str, reason: str, details: Mapping[str, Any]) -> None:
+        """Emit throttled structured pregate skip diagnostics."""
+        if not hasattr(self, "_last_pregate_log_at_by_symbol_reason"):
+            self._last_pregate_log_at_by_symbol_reason = {}
+        key = (normalize_symbol(symbol), reason)
+        now_mono = time.monotonic()
+        interval = float(os.getenv("RUNNER_EVAL_PREGATE_SKIP_LOG_SECONDS", "10") or "10")
+        last = float(self._last_pregate_log_at_by_symbol_reason.get(key, 0.0) or 0.0)
+        if last and now_mono - last < interval:
+            return
+        self._last_pregate_log_at_by_symbol_reason[key] = now_mono
+        payload = {
+            "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+            "symbol": normalize_symbol(symbol),
+            "reason": reason,
+            **dict(details),
+        }
+        self._logger.info(
+            "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=%s ltp=%s bid=%s ask=%s spread_abs=%s spread_pct=%s",
+            payload["symbol"],
+            reason,
+            payload.get("ltp"),
+            payload.get("bid"),
+            payload.get("ask"),
+            payload.get("spread_abs"),
+            payload.get("spread_pct"),
+            extra=payload,
+        )
 
     def _get_cached_quote_for_live_entry(self, symbol: str) -> dict[str, Any]:
         symbol_norm = normalize_symbol(symbol)
@@ -9814,8 +10068,29 @@ class StrategyRunner:
                         should_evaluate = True
 
                 if should_evaluate:
+                    pregate_skip, pregate_reason, pregate_details = self._should_skip_symbol_eval(
+                        symbol,
+                        tick,
+                        bar_key=pending_eval_bar_ts or self._current_eval_bar_key(symbol, tick),
+                    )
+                    if pregate_skip:
+                        self._log_eval_pregate_skip(symbol, pregate_reason, pregate_details)
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage="phase9",
+                            reason=pregate_reason,
+                            allowed=False,
+                            trace_id=trace_id,
+                            **pregate_details,
+                        )
+                        return
                     if not self._strategy_evaluation_allowed(symbol, trace_id):
                         return
+                    self._mark_symbol_eval_allowed(
+                        symbol,
+                        bar_key=pregate_details.get("bar_key") if isinstance(pregate_details, Mapping) else None,
+                        tick=tick,
+                    )
                     if self._is_tradable_symbol(symbol):
                         selected_only_bias = str(
                             (getattr(self, "_runtime_indicators", {}) or {}).get(symbol, {}).get("underlying_direction_bias")
