@@ -44,7 +44,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.core.active_basket import extract_symbol_strike
+from nifty_scalper_bot.core.active_basket import ActiveContractSelection, active_contract_selection_from_basket, extract_symbol_strike
 from nifty_scalper_bot.core.event_bus import EventBus
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
@@ -108,6 +108,8 @@ from nifty_scalper_bot.utils.market_hours import (
     allow_offhours_testing_safe,
     get_market_session_state,
     get_market_state,
+    get_runtime_market_mode,
+    post_market_suppress_candle_gap_warnings,
     is_market_hours_cached,
     is_market_open_now,
     stale_threshold_for_symbol,
@@ -687,6 +689,9 @@ class StrategyRunner:
         self._active_option_symbols: set[str] = set()
         self._active_basket_all_symbols: set[str] = set()
         self._active_basket_token_by_symbol: dict[str, int] = {}
+        self._active_contract_basket: Mapping[str, Any] | None = None
+        self._active_selection_sync_log_key: tuple[str, str, str | None] | None = None
+        self._active_selection_drift_log_key: tuple[str | None, str | None, str | None, str | None, str | None] | None = None
         self._selected_option_prewarm_inflight: set[str] = set()
         self._selected_option_prewarm_last: dict[str, float] = {}
         self._selected_option_prewarm_cooldown_s = max(1.0, float(os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS", "45") or 45))
@@ -2477,6 +2482,60 @@ class StrategyRunner:
         )
         return True
 
+
+    def _current_active_contract_selection(self) -> ActiveContractSelection:
+        """Return selected-contract SSOT snapshot from active_contract_basket."""
+        basket = getattr(self, "_active_contract_basket", None)
+        if basket is None:
+            mdm = getattr(self, "_market_data", None)
+            getter = getattr(mdm, "get_active_contract_basket", None) if mdm is not None else None
+            if callable(getter):
+                basket = getter()
+        selection = active_contract_selection_from_basket(basket)
+        self._sync_active_selection_from_basket(selection)
+        return selection
+
+    def get_active_contract_selection(self) -> dict[str, Any]:
+        """Public read-only selected-contract snapshot for diagnostics/tests."""
+        return self._current_active_contract_selection().to_dict()
+
+    def _sync_active_selection_from_basket(self, selection: ActiveContractSelection) -> None:
+        """Synchronize legacy runner selected fields only from active basket SSOT."""
+        new_ce = normalize_symbol(str(selection.selected_ce or "")) or None
+        new_pe = normalize_symbol(str(selection.selected_pe or "")) or None
+        if not (new_ce or new_pe):
+            return
+        old_ce = getattr(self, "_active_selected_ce", None)
+        old_pe = getattr(self, "_active_selected_pe", None)
+        drift = bool((old_ce and new_ce and old_ce != new_ce) or (old_pe and new_pe and old_pe != new_pe))
+        drift_key = (old_ce, old_pe, new_ce, new_pe, selection.basket_version or selection.selected_at)
+        if drift and getattr(self, "_active_selection_drift_log_key", None) != drift_key:
+            self._active_selection_drift_log_key = drift_key
+            self._logger.warning(
+                "ACTIVE_SELECTION_DRIFT_CORRECTED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=active_contract_basket",
+                old_ce, old_pe, new_ce, new_pe,
+                extra={"event": "ACTIVE_SELECTION_DRIFT_CORRECTED", "old_ce": old_ce, "old_pe": old_pe, "new_ce": new_ce, "new_pe": new_pe, "source": selection.source},
+            )
+        self._active_selected_ce = new_ce
+        self._active_selected_pe = new_pe
+        self._selected_ce_symbol = new_ce
+        self._selected_pe_symbol = new_pe
+        if selection.atm_strike not in (None, ""):
+            try:
+                self._active_atm_strike = int(float(selection.atm_strike))
+            except (TypeError, ValueError):
+                pass
+        if selection.option_symbols:
+            self._active_option_symbols = {normalize_symbol(str(sym)) for sym in selection.option_symbols if sym}
+        sync_key = (str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
+        if getattr(self, "_active_selection_sync_log_key", None) != sync_key:
+            self._active_selection_sync_log_key = sync_key
+            self._logger.info(
+                "ACTIVE_SELECTION_SYNCED selected_ce=%s selected_pe=%s basket_version=%s",
+                new_ce, new_pe, selection.basket_version or selection.selected_at,
+                extra={"event": "ACTIVE_SELECTION_SYNCED", "selected_ce": new_ce, "selected_pe": new_pe, "basket_version": selection.basket_version, "selected_at": selection.selected_at},
+            )
+
     def set_active_option_context(
         self,
         *,
@@ -2582,6 +2641,7 @@ class StrategyRunner:
 
     def set_active_trading_universe(self, basket: Mapping[str, Any]) -> None:
         """Set active trading universe snapshot. Args: basket. Returns: none. Raises: none."""
+        self._active_contract_basket = basket
         raw_symbols = basket.get("option_symbols") or basket.get("symbols") or []
         option_symbols: list[str] = []
         for sym in raw_symbols:
@@ -2617,12 +2677,7 @@ class StrategyRunner:
                 futures_symbol,
                 extra={"event": "RUNNER_FUTURES_CONTEXT_ROTATED", "old_symbol": previous_futures, "new_symbol": futures_symbol, "source": "active_trading_universe"},
             )
-        self.set_active_option_context(
-            selected_ce=cast(str | None, basket.get("selected_ce") or basket.get("atm_ce")),
-            selected_pe=cast(str | None, basket.get("selected_pe") or basket.get("atm_pe")),
-            atm_strike=cast(int | float | str | None, basket.get("atm_strike")),
-            option_symbols=cast(list[str] | tuple[str, ...] | set[str], option_symbols),
-        )
+        self._sync_active_selection_from_basket(active_contract_selection_from_basket(basket))
         self._logger.info(
             "RUNNER_ACTIVE_BASKET_UPDATED selected_ce=%s selected_pe=%s futures_symbol=%s option_count=%d",
             self._active_selected_ce,
@@ -4402,6 +4457,14 @@ class StrategyRunner:
 
         if self._has_session_candle_gaps(symbol):
             gap_count = int(self._session_gap_count.get(symbol, 0))
+            if post_market_suppress_candle_gap_warnings() and get_runtime_market_mode() in {"POST_MARKET", "HOLIDAY"}:
+                if self._should_log_throttled(f"postmarket_candle_gap_suppressed:{symbol}", float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60")):
+                    self._logger.info(
+                        "SOFT_DATA_ISSUE_SUPPRESSED symbol=%s reason=post_market_quiet_mode gaps=%s",
+                        symbol, gap_count,
+                        extra={"event": "SOFT_DATA_ISSUE_SUPPRESSED", "symbol": symbol, "reason": "post_market_quiet_mode", "gaps": gap_count, "market_mode": get_runtime_market_mode()},
+                    )
+                return self._set_symbol_hydration_state(symbol, SymbolState.READY)
             is_option = symbol.startswith("NFO:") and symbol.endswith(("CE", "PE"))
             last_tick_ts = float(self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0)
             recent_tick = last_tick_ts > 0 and (time.time() - last_tick_ts) <= 120.0
@@ -6743,8 +6806,9 @@ class StrategyRunner:
 
 
     def _emit_live_universe_bootstrap_status(self, *, symbol: str) -> tuple[bool, str | None]:
-        ce_symbol = self._selected_option_symbol_for_side("CE", {}) or getattr(self, "_active_selected_ce", None)
-        pe_symbol = self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
+        selection = self._current_active_contract_selection()
+        ce_symbol = selection.selected_ce or self._selected_option_symbol_for_side("CE", {}) or getattr(self, "_active_selected_ce", None)
+        pe_symbol = selection.selected_pe or self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
         fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
         mdm = getattr(self, "_market_data", None)
         token_by_symbol = getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
@@ -6780,11 +6844,15 @@ class StrategyRunner:
             subscribed = bool(token_int is not None and token_int in _int_set(subscribed_tokens))
             confirmed = bool(token_int is not None and token_int in _int_set(confirmed_tokens))
             active_symbol = bool(sym and sym in active_subs)
-            self._logger.info(
-                "SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s",
-                sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, None,
-                extra={"event": "SELECTED_OPTION_SUBSCRIPTION_STATE", "symbol": sym, "token": token_int, "desired": desired, "subscribed": subscribed or active_symbol or confirmed, "fresh_tick": fresh_tick, "tick_age_s": None},
-            )
+            selected_pair = (getattr(self, "_active_selected_ce", None), getattr(self, "_active_selected_pe", None))
+            state_key = (sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, selected_pair, get_runtime_market_mode())
+            if getattr(self, "_last_selected_subscription_state_key", None) != state_key or self._should_log_throttled(f"selected_subscription_summary:{sym}", float(os.getenv("RUNNER_BOOTSTRAP_LOG_INTERVAL_SECONDS", "60") or "60")):
+                self._last_selected_subscription_state_key = state_key
+                self._logger.info(
+                    "SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s",
+                    sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, None,
+                    extra={"event": "SELECTED_OPTION_SUBSCRIPTION_STATE", "symbol": sym, "token": token_int, "desired": desired, "subscribed": subscribed or active_symbol or confirmed, "fresh_tick": fresh_tick, "tick_age_s": None, "selected_ce": selected_pair[0], "selected_pe": selected_pair[1], "market_mode": get_runtime_market_mode()},
+                )
             return bool(active_symbol or desired or subscribed or confirmed or fresh_tick)
         ce_sub = _sub_state(ce_symbol, ce_token, ce_quote)
         pe_sub = _sub_state(pe_symbol, pe_token, pe_quote)
@@ -10238,9 +10306,10 @@ class StrategyRunner:
                     )
                     try:
                         indicators_ctx = self._indicator_engine.get_indicators(symbol)
-                        selected_ce = getattr(self, "_active_selected_ce", None)
-                        selected_pe = getattr(self, "_active_selected_pe", None)
-                        atm_strike = getattr(self, "_active_atm_strike", None)
+                        selection = self._current_active_contract_selection()
+                        selected_ce = selection.selected_ce or getattr(self, "_active_selected_ce", None)
+                        selected_pe = selection.selected_pe or getattr(self, "_active_selected_pe", None)
+                        atm_strike = selection.atm_strike or getattr(self, "_active_atm_strike", None)
                         symbol_strike = self._extract_strike_from_symbol(symbol)
                         normalized_symbol = normalize_symbol(symbol)
                         selected_set = {normalize_symbol(item) for item in [selected_ce, selected_pe] if item}

@@ -170,4 +170,4 @@ async def test_selected_option_ltp_only_blocks_live_execution_bid_ask_missing(mo
         'NFO:NIFTY24600CE': False,
         'NFO:NIFTY24600PE': False,
     }
-    assert 'selected_option_bid_ask_missing' in str(ctx.live_block_reason)
+    assert ctx.live_block_reason == 'execution_not_armed:selected_option_quote_missing'
