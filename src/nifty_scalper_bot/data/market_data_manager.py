@@ -5396,23 +5396,50 @@ class MarketDataManager:
             return
         self._ingest_normalized_tick(normalized_live)
         if bool(normalized_live.get("tradable_quote")):
-            log_throttled_live(
-                self._logger,
-                logging.INFO,
-                "WS_FULL_QUOTE_PROOF",
-                f"WS_FULL_QUOTE_PROOF:{symbol}",
-                float(os.getenv("LOG_THROTTLE_WS_PROOF_SECONDS", "60") or "60"),
-                "WS_FULL_QUOTE_PROOF symbol=%s token=%s ltp=%s bid=%s ask=%s spread=%s depth_available=%s tradable_quote=%s",
-                symbol,
-                token_value,
-                normalized_live.get("ltp"),
-                normalized_live.get("bid"),
-                normalized_live.get("ask"),
-                normalized_live.get("spread"),
-                normalized_live.get("depth_available"),
-                normalized_live.get("tradable_quote"),
-                extra={"event": "WS_FULL_QUOTE_PROOF", "symbol": symbol},
-            )
+            # Log only on first quote, state transitions, or periodic debug interval.
+            # Routine per-tick proof logs are suppressed to avoid high-frequency spam.
+            _proof_state = getattr(self, "_ws_quote_proof_state", None)
+            if _proof_state is None:
+                self._ws_quote_proof_state: dict[str, dict] = {}
+                _proof_state = self._ws_quote_proof_state
+            _prev = _proof_state.get(symbol, {})
+            _cur_tradable = bool(normalized_live.get("tradable_quote"))
+            _cur_depth = bool(normalized_live.get("depth_available"))
+            _is_first = not _prev
+            _tradable_transition = _cur_tradable and not _prev.get("tradable_quote", False)
+            _depth_transition = _cur_depth and not _prev.get("depth_available", False)
+            _proof_state[symbol] = {"tradable_quote": _cur_tradable, "depth_available": _cur_depth}
+            _should_emit_proof = _is_first or _tradable_transition or _depth_transition
+            if not _should_emit_proof and str(os.getenv("LOG_QUOTE_PROOF_DEBUG", "false")).lower() in {"1", "true", "yes"}:
+                _proof_interval = float(os.getenv("LOG_QUOTE_PROOF_EVERY_SECONDS", "60") or "60")
+                _proof_throttle = getattr(self, "_ws_proof_throttle", None)
+                if _proof_throttle is None:
+                    self._ws_proof_throttle: dict[str, float] = {}
+                    _proof_throttle = self._ws_proof_throttle
+                import time as _t
+                _now_mono = _t.monotonic()
+                _last_proof = float(_proof_throttle.get(symbol, 0.0))
+                if _now_mono - _last_proof >= _proof_interval:
+                    _proof_throttle[symbol] = _now_mono
+                    _should_emit_proof = True
+            if _should_emit_proof:
+                log_throttled_live(
+                    self._logger,
+                    logging.INFO,
+                    "WS_FULL_QUOTE_PROOF",
+                    f"WS_FULL_QUOTE_PROOF:{symbol}",
+                    float(os.getenv("LOG_THROTTLE_WS_PROOF_SECONDS", "60") or "60"),
+                    "WS_FULL_QUOTE_PROOF symbol=%s token=%s ltp=%s bid=%s ask=%s spread=%s depth_available=%s tradable_quote=%s",
+                    symbol,
+                    token_value,
+                    normalized_live.get("ltp"),
+                    normalized_live.get("bid"),
+                    normalized_live.get("ask"),
+                    normalized_live.get("spread"),
+                    normalized_live.get("depth_available"),
+                    normalized_live.get("tradable_quote"),
+                    extra={"event": "WS_FULL_QUOTE_PROOF", "symbol": symbol},
+                )
         if candle:
             bar = {
                 "symbol": symbol,
@@ -5637,21 +5664,40 @@ class MarketDataManager:
                 try:
                     fut.result()
                 except Exception as exc:
+                    _bp_sym = tick.get("symbol") or "UNKNOWN"
+                    _bp_counts = getattr(self, "_bus_backpressure_counts", None)
+                    if _bp_counts is None:
+                        self._bus_backpressure_counts: dict[str, int] = {}
+                        _bp_counts = self._bus_backpressure_counts
+                    _bp_counts[_bp_sym] = _bp_counts.get(_bp_sym, 0) + 1
                     log_throttled(
                         self._logger,
                         "mdm_bus_publish_failed",
                         "MDM_BUS_PUBLISH_FAILED symbol=%s error=%r"
-                        % (tick.get("symbol"), exc),
+                        % (_bp_sym, exc),
                         interval_sec=10.0,
                         level=logging.ERROR,
                     )
+                    # Emit per-symbol backpressure once; then summarize every 30s.
                     log_throttled(
                         self._logger,
-                        "mdm_bus_backpressure",
-                        "MDM_BUS_BACKPRESSURE symbol=%s dropped_ticks=%s coalesced_ticks=%s latest_cache_updated=True" % (tick.get("symbol"), 1, 1),
-                        interval_sec=10.0,
+                        f"mdm_bus_backpressure:{_bp_sym}",
+                        "MDM_BUS_BACKPRESSURE symbol=%s dropped_ticks=1 coalesced_ticks=1 latest_cache_updated=True" % _bp_sym,
+                        interval_sec=30.0,
                         level=logging.WARNING,
                     )
+                    # Manual 30s window so counts reset after each summary — the
+                    # summary reports the active window, not cumulative-since-startup.
+                    _now_bp = time.monotonic()
+                    _last_bp_summary = getattr(self, "_last_bus_bp_summary_ts", 0.0)
+                    if _now_bp - _last_bp_summary >= 30.0:
+                        self._last_bus_bp_summary_ts = _now_bp
+                        self._logger.warning(
+                            "MDM_BUS_BACKPRESSURE_SUMMARY dropped_ticks=%d symbols=%d",
+                            sum(_bp_counts.values()),
+                            len(_bp_counts),
+                        )
+                        _bp_counts.clear()
 
             future.add_done_callback(_done)
         except Exception as exc:

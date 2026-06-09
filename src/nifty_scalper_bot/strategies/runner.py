@@ -190,29 +190,6 @@ def safe_positive_float_env(name: str, default: float, *, minimum: float = 0.0) 
     return _safe_positive_float(os.getenv(name, default), default, minimum=minimum)
 
 
-def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
-    return _safe_positive_float(os.getenv(name, default), default, minimum=minimum)
-
-
-def _env_optional_float(name: str) -> float | None:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return None
-    try:
-        value = float(str(raw).strip())
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "INVALID_ENV_FLOAT name=%s value=%r default=None",
-            name,
-            raw,
-            extra={"event": "INVALID_ENV_FLOAT", "env_name": name, "value": raw, "default": None},
-        )
-        return None
-    if value != value or value < 0:
-        return None
-    return value
-
-
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -390,30 +367,10 @@ class StrategyRunnerConfig:
     signal_cooldown_seconds: float = 3.0
     trade_cooldown_seconds: float = 10.0
 
-    # Lightweight pre-strategy evaluation gates. Env overrides use the same
-    # names as the fields to keep runtime tuning explicit and centralized.
+    # Lightweight pre-strategy same-bar throttle. Env override keeps runtime tuning explicit.
     same_bar_periodic_eval_seconds: float = field(
-        default_factory=lambda: _env_float("RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS", 5.0, minimum=0.0)
+        default_factory=lambda: safe_positive_float_env("RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS", 5.0, minimum=0.0)
     )
-    min_option_premium: float = field(
-        default_factory=lambda: _env_float("MIN_OPTION_PREMIUM", 20.0, minimum=0.0)
-    )
-    max_option_spread_pct_for_eval: float = field(
-        default_factory=lambda: _env_float("MAX_OPTION_SPREAD_PCT_FOR_EVAL", 1.5, minimum=0.0)
-    )
-    max_option_spread_abs_for_eval: float | None = field(
-        default_factory=lambda: _env_optional_float("MAX_OPTION_SPREAD_ABS_FOR_EVAL")
-    )
-    require_bid_ask_for_option_eval: bool = field(
-        default_factory=lambda: _env_bool("REQUIRE_BID_ASK_FOR_OPTION_EVAL", True)
-    )
-    skip_low_premium_option_eval: bool = field(
-        default_factory=lambda: _env_bool("SKIP_LOW_PREMIUM_OPTION_EVAL", True)
-    )
-    skip_wide_spread_option_eval: bool = field(
-        default_factory=lambda: _env_bool("SKIP_WIDE_SPREAD_OPTION_EVAL", True)
-    )
-
     def __post_init__(self) -> None:
         if self.min_indicator_bars < 0:
             raise ValueError("min_indicator_bars must be non-negative")
@@ -430,16 +387,6 @@ class StrategyRunnerConfig:
 
         if self.same_bar_periodic_eval_seconds < 0:
             raise ValueError("same_bar_periodic_eval_seconds must be >= 0")
-        if self.min_option_premium < 0:
-            raise ValueError("min_option_premium must be >= 0")
-        if self.max_option_spread_pct_for_eval < 0:
-            raise ValueError("max_option_spread_pct_for_eval must be >= 0")
-        if (
-            self.max_option_spread_abs_for_eval is not None
-            and self.max_option_spread_abs_for_eval < 0
-        ):
-            raise ValueError("max_option_spread_abs_for_eval must be >= 0")
-
 
 class RunnerState(Enum):
     """State machine for strategy runner lifecycle."""
@@ -1548,12 +1495,7 @@ class StrategyRunner:
         for ctx_symbol in self._active_context_symbols_for_history():
             count = self._history_count_for_symbol(ctx_symbol)
             if count >= self._context_required_bars:
-                self._emit_history_hydration_trace(
-                    ctx_symbol,
-                    source=source,
-                    fetched_bars=0,
-                    ingested_bars=0,
-                )
+                # Already warm — skip sync and suppress duplicate_noop trace.
                 continue
             try:
                 after = self._sync_history_from_mdm_cache(
@@ -6667,11 +6609,6 @@ class StrategyRunner:
                 "order_forwarding_allowed": bool(context.pop("order_forwarding_allowed", allowed)),
                 "stage": stage,
                 "reason": reason,
-                "pregate_reason": context.get("pregate_reason"),
-                "eval_throttle_elapsed_s": context.get("eval_throttle_elapsed_s"),
-                "premium_ok": context.get("premium_ok"),
-                "quote_ok": context.get("quote_ok"),
-                "spread_ok": context.get("spread_ok"),
                 "active_symbol": symbol in self._active_symbols,
                 "symbol_state": sym_state_val,
                 "state_active": state_active,
@@ -6784,7 +6721,11 @@ class StrategyRunner:
                 "live_universe_ready": universe_ready,
                 "order_manager_block_reason": order_manager_block_reason,
             }
-            self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), self._runtime_readiness_reason, extra=payload)
+            _snap_reason = str(self._runtime_readiness_reason or "")
+            _snap_key = f"readiness_snap:{symbol}:{_snap_reason}"
+            _snap_interval = float(os.getenv("RUNNER_READINESS_SNAP_INTERVAL_SECONDS", "60") or "60")
+            if self._should_log_throttled(_snap_key, _snap_interval):
+                self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), _snap_reason, extra=payload)
         except Exception as exc:
             self._logger.warning(
                 "LIVE_TRADING_READINESS_SNAPSHOT_FAILED symbol=%s error_type=%s error=%s",
@@ -6867,7 +6808,10 @@ class StrategyRunner:
         elif ce_hist < min_bars or pe_hist < min_bars:
             reason = "selected_option_history_cold"
         ready = reason is None
-        self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
+        _boot_key = f"bootstrap:{symbol}:{ready}:{reason}"
+        _boot_interval = float(os.getenv("RUNNER_BOOTSTRAP_LOG_INTERVAL_SECONDS", "60") or "60")
+        if self._should_log_throttled(_boot_key, _boot_interval):
+            self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
         return ready, reason
 
 
@@ -7355,48 +7299,6 @@ class StrategyRunner:
                     return payload
         return None
 
-    def _get_eval_quote_snapshot(self, symbol: str, tick: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """Return quote snapshot for pre-strategy eval gates without pulling broker data."""
-        symbol_norm = normalize_symbol(symbol)
-        for source_name, source in (("datahub", getattr(self, "_data_hub", None)), ("mdm", getattr(self, "_market_data", None))):
-            if source is None:
-                continue
-            for method_name in ("get_quote", "get_symbol_snapshot", "get_latest_tick", "get_cached_quote"):
-                fn = getattr(source, method_name, None)
-                if not callable(fn):
-                    continue
-                try:
-                    try:
-                        raw = fn(symbol_norm, allow_pull=False) if method_name == "get_quote" else fn(symbol_norm)
-                    except TypeError:
-                        raw = fn(symbol_norm)
-                except Exception:
-                    continue
-                if raw is None:
-                    continue
-                payload = dict(raw) if isinstance(raw, Mapping) else {
-                    "ltp": getattr(raw, "ltp", None) or getattr(raw, "last_price", None) or getattr(raw, "price", None),
-                    "bid": getattr(raw, "bid", None) or getattr(raw, "best_bid", None),
-                    "ask": getattr(raw, "ask", None) or getattr(raw, "best_ask", None),
-                    "depth": getattr(raw, "depth", None),
-                    "depth_available": getattr(raw, "depth_available", None),
-                    "quote_update_version": getattr(raw, "quote_update_version", None),
-                    "source": getattr(raw, "source", None),
-                }
-                payload.setdefault("quote_source", payload.get("source") or source_name)
-                if payload:
-                    return payload
-        last_tick = (getattr(self, "_last_tick", {}) or {}).get(symbol_norm) or (getattr(self, "_last_tick", {}) or {}).get(symbol)
-        if isinstance(last_tick, Mapping) and last_tick:
-            payload = dict(last_tick)
-            payload.setdefault("quote_source", payload.get("source") or "runner_last_tick")
-            return payload
-        if tick:
-            payload = dict(tick)
-            payload.setdefault("quote_source", payload.get("source") or "incoming_tick")
-            return payload
-        return {}
-
     def _current_eval_bar_key(self, symbol: str, tick: Mapping[str, Any] | None = None) -> Any:
         """Return the current evaluation bar identity for same-bar throttling."""
         symbol_norm = normalize_symbol(symbol)
@@ -7413,9 +7315,28 @@ class StrategyRunner:
             return ("last_bar_ts", last_bar.isoformat() if hasattr(last_bar, "isoformat") else str(last_bar))
         return ("symbol", symbol_norm)
 
-    def _is_option_symbol(self, symbol: str) -> bool:
-        """Return True only for NIFTY option symbols evaluated by strategy gates."""
-        return self._is_tradable_symbol(symbol)
+    def _quote_update_version_for_eval(self, symbol: str) -> int | None:
+        """Return quote update version for pregate diagnostics when available."""
+        symbol_norm = normalize_symbol(symbol)
+        try:
+            value = (getattr(self, "_quote_update_versions", {}) or {}).get(symbol_norm)
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+        for source in (getattr(self, "_data_hub", None), getattr(self, "_market_data", None)):
+            fn = getattr(source, "quote_update_version", None)
+            if not callable(fn):
+                continue
+            try:
+                value = fn(symbol_norm)
+            except Exception:
+                continue
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def _should_skip_symbol_eval(
         self,
@@ -7424,7 +7345,7 @@ class StrategyRunner:
         *,
         bar_key: Any | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
-        """Decide whether to skip expensive strategy evaluation for one symbol."""
+        """Apply only the same-bar periodic evaluation throttle."""
         cfg = getattr(self, "_config", StrategyRunnerConfig())
         symbol_norm = normalize_symbol(symbol)
         now_mono = time.monotonic()
@@ -7439,68 +7360,12 @@ class StrategyRunner:
             "same_bar_interval_s": interval,
             "pregate_reason": "ok",
             "eval_throttle_elapsed_s": round(elapsed, 3) if elapsed is not None else None,
-            "premium_ok": True,
-            "quote_ok": True,
-            "spread_ok": True,
+            "quote_update_version": self._quote_update_version_for_eval(symbol_norm),
             "data_phase": (getattr(self, "_data_phase", {}) or {}).get(symbol_norm),
         }
         if last_bar_key == current_bar_key and last_eval_at > 0 and elapsed is not None and elapsed < interval:
-            details.update({"pregate_reason": "same_bar_periodic_eval_throttled"})
+            details["pregate_reason"] = "same_bar_periodic_eval_throttled"
             return True, "same_bar_periodic_eval_throttled", details
-
-        if not self._is_option_symbol(symbol_norm):
-            return False, "ok", details
-
-        quote = self._get_eval_quote_snapshot(symbol_norm, tick)
-        ltp = _extract_float(quote, "ltp", "last_price", "price", "close")
-        bid, ask, spread_pct, quote_source = _resolve_quote_bid_ask_spread(quote)
-        if bid is None or ask is None:
-            raw_bid = _extract_float(quote, "bid", "best_bid", "bid_price", "best_bid_price")
-            raw_ask = _extract_float(quote, "ask", "best_ask", "ask_price", "best_ask_price")
-            if raw_bid is not None and raw_ask is not None and raw_bid > 0 and raw_ask > 0:
-                bid, ask = raw_bid, raw_ask
-                quote_source = quote_source if quote_source != "missing" else "top_level_raw"
-                if raw_ask >= raw_bid:
-                    mid = (raw_bid + raw_ask) / 2.0
-                    spread_pct = ((raw_ask - raw_bid) / mid) * 100.0 if mid > 0 else None
-        spread_abs = (ask - bid) if bid is not None and ask is not None else None
-        depth_available = bool(quote.get("depth_available") or quote.get("depth"))
-        quote_update_version = quote.get("quote_update_version") or quote.get("update_version") or (getattr(self, "_quote_update_versions", {}) or {}).get(symbol_norm)
-        details.update({
-            "ltp": ltp,
-            "bid": bid,
-            "ask": ask,
-            "spread_abs": spread_abs,
-            "spread_pct": spread_pct,
-            "min_premium": float(getattr(cfg, "min_option_premium", 20.0) or 0.0),
-            "max_spread_pct": float(getattr(cfg, "max_option_spread_pct_for_eval", 1.5) or 0.0),
-            "max_spread_abs": getattr(cfg, "max_option_spread_abs_for_eval", None),
-            "depth_available": depth_available,
-            "quote_source": quote.get("quote_source") or quote.get("source") or quote_source,
-            "quote_update_version": quote_update_version,
-        })
-
-        if bool(getattr(cfg, "skip_low_premium_option_eval", True)):
-            min_premium = float(getattr(cfg, "min_option_premium", 20.0) or 0.0)
-            if ltp is None or ltp <= 0 or ltp < min_premium:
-                details.update({"premium_ok": False, "pregate_reason": "option_premium_below_min"})
-                return True, "option_premium_below_min", details
-
-        quote_ok = bool(bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid)
-        if bool(getattr(cfg, "require_bid_ask_for_option_eval", True)) and not quote_ok:
-            details.update({"quote_ok": False, "pregate_reason": "option_bid_ask_missing_or_invalid"})
-            return True, "option_bid_ask_missing_or_invalid", details
-
-        if bool(getattr(cfg, "skip_wide_spread_option_eval", True)) and quote_ok:
-            max_pct = float(getattr(cfg, "max_option_spread_pct_for_eval", 1.5) or 0.0)
-            if spread_pct is not None and max_pct > 0 and spread_pct > max_pct:
-                details.update({"spread_ok": False, "pregate_reason": "option_spread_too_wide"})
-                return True, "option_spread_too_wide", details
-            max_abs = getattr(cfg, "max_option_spread_abs_for_eval", None)
-            if max_abs is not None and spread_abs is not None and spread_abs > float(max_abs):
-                details.update({"spread_ok": False, "pregate_reason": "option_spread_abs_too_wide"})
-                return True, "option_spread_abs_too_wide", details
-
         return False, "ok", details
 
     def _mark_symbol_eval_allowed(self, symbol: str, *, bar_key: Any | None = None, tick: Mapping[str, Any] | None = None) -> None:
@@ -7514,12 +7379,12 @@ class StrategyRunner:
         self._last_eval_bar_key_by_symbol[symbol_norm] = bar_key if bar_key is not None else self._current_eval_bar_key(symbol_norm, tick)
 
     def _log_eval_pregate_skip(self, symbol: str, reason: str, details: Mapping[str, Any]) -> None:
-        """Emit throttled structured pregate skip diagnostics."""
+        """Emit throttled structured same-bar pregate skip diagnostics."""
         if not hasattr(self, "_last_pregate_log_at_by_symbol_reason"):
             self._last_pregate_log_at_by_symbol_reason = {}
         key = (normalize_symbol(symbol), reason)
         now_mono = time.monotonic()
-        interval = float(os.getenv("RUNNER_EVAL_PREGATE_SKIP_LOG_SECONDS", "10") or "10")
+        interval = float(os.getenv("RUNNER_EVAL_PREGATE_SKIP_LOG_SECONDS", "30") or "30")
         last = float(self._last_pregate_log_at_by_symbol_reason.get(key, 0.0) or 0.0)
         if last and now_mono - last < interval:
             return
@@ -7531,14 +7396,13 @@ class StrategyRunner:
             **dict(details),
         }
         self._logger.info(
-            "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=%s ltp=%s bid=%s ask=%s spread_abs=%s spread_pct=%s",
+            "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=%s bar_key=%s same_bar_elapsed_s=%s same_bar_interval_s=%s quote_update_version=%s",
             payload["symbol"],
             reason,
-            payload.get("ltp"),
-            payload.get("bid"),
-            payload.get("ask"),
-            payload.get("spread_abs"),
-            payload.get("spread_pct"),
+            payload.get("bar_key"),
+            payload.get("same_bar_elapsed_s"),
+            payload.get("same_bar_interval_s"),
+            payload.get("quote_update_version"),
             extra=payload,
         )
 
@@ -8421,12 +8285,19 @@ class StrategyRunner:
             if self._is_tradable_symbol(symbol):
                 option_execution_min_bars = safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1)
                 required_bars = max(required_bars, option_execution_min_bars)
+                # Context (spot/futures) sync must run independently of the option's
+                # own bar count — option eval depends on warm context. The call is
+                # self-guarding and no longer emits duplicate_noop traces when warm.
                 self._sync_context_history_if_cold(source="pre_option_eval_context_sync")
-                self._sync_history_from_mdm_cache(
-                    symbol,
-                    required_bars=required_bars,
-                    source="pre_option_eval_option_sync",
-                )
+                _indicator_count_pre = len(self._indicator_engine.get_history(symbol) or [])
+                if _indicator_count_pre < required_bars:
+                    # Only sync option history when we still need bars; avoids
+                    # duplicate_noop trace spam during normal warm operation.
+                    self._sync_history_from_mdm_cache(
+                        symbol,
+                        required_bars=required_bars,
+                        source="pre_option_eval_option_sync",
+                    )
             history_count = len(self._indicator_engine.get_history(symbol) or [])
             restored_from_cache = symbol in self._restored_from_cache_symbols
             if restored_from_cache and history_count >= required_bars:
@@ -10068,29 +9939,8 @@ class StrategyRunner:
                         should_evaluate = True
 
                 if should_evaluate:
-                    pregate_skip, pregate_reason, pregate_details = self._should_skip_symbol_eval(
-                        symbol,
-                        tick,
-                        bar_key=pending_eval_bar_ts or self._current_eval_bar_key(symbol, tick),
-                    )
-                    if pregate_skip:
-                        self._log_eval_pregate_skip(symbol, pregate_reason, pregate_details)
-                        self._emit_runner_eval_decision(
-                            symbol=symbol,
-                            stage="phase9",
-                            reason=pregate_reason,
-                            allowed=False,
-                            trace_id=trace_id,
-                            **pregate_details,
-                        )
-                        return
                     if not self._strategy_evaluation_allowed(symbol, trace_id):
                         return
-                    self._mark_symbol_eval_allowed(
-                        symbol,
-                        bar_key=pregate_details.get("bar_key") if isinstance(pregate_details, Mapping) else None,
-                        tick=tick,
-                    )
                     if self._is_tradable_symbol(symbol):
                         selected_only_bias = str(
                             (getattr(self, "_runtime_indicators", {}) or {}).get(symbol, {}).get("underlying_direction_bias")
@@ -10213,6 +10063,161 @@ class StrategyRunner:
                                 stale_tick_threshold_s=_stale_thresh,
                             )
                             return
+                    # ── EARLY MARKET-CLOSED PRE-GATE ──────────────────────────────
+                    # Check market state BEFORE logging evaluation_entered so we never
+                    # emit allowed=True followed immediately by allowed=False reason=market_closed.
+                    _pregate_symbol_role = self._symbol_role_for_runner(symbol)
+                    _pregate_market_open = True
+                    try:
+                        _pregate_market_open = get_market_state() == MarketState.OPEN
+                    except Exception:
+                        _pregate_market_open = True
+                    if not _pregate_market_open:
+                        if _pregate_symbol_role in {"spot_context", "futures_context"} and not _env_bool("ALLOW_OFFMARKET_CONTEXT_DIAGNOSTICS", False):
+                            if self._should_log_throttled(f"pregate_market_closed:{symbol}:context", 60.0):
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9_pregate",
+                                    reason="context_diagnostic_only_market_closed",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                    symbol_role=_pregate_symbol_role,
+                                )
+                            return
+                        if _pregate_symbol_role == "tradable_option":
+                            if self._should_log_throttled(f"pregate_market_closed:{symbol}", 60.0):
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9_pregate",
+                                    reason="market_closed",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
+                            # Periodic summary: count suppressed per-symbol market_closed skips.
+                            _mc_counts = getattr(self, "_market_closed_skip_counts", None)
+                            if _mc_counts is None:
+                                self._market_closed_skip_counts: dict[str, int] = {}
+                                _mc_counts = self._market_closed_skip_counts
+                            _mc_counts[symbol] = _mc_counts.get(symbol, 0) + 1
+                            if self._should_log_throttled("market_closed_skip_summary", 60.0):
+                                total = sum(_mc_counts.values())
+                                self._logger.info(
+                                    "RUNNER_EVAL_SKIP_SUMMARY reason=market_closed symbols=%d suppressed=%d",
+                                    len(_mc_counts),
+                                    total,
+                                    extra={
+                                        "event": "RUNNER_EVAL_SKIP_SUMMARY",
+                                        "reason": "market_closed",
+                                        "symbols": len(_mc_counts),
+                                        "suppressed": total,
+                                    },
+                                )
+                                _mc_counts.clear()
+                            return
+                    _same_bar_pregate_skip, _same_bar_pregate_reason, _same_bar_pregate_details = self._should_skip_symbol_eval(
+                        symbol,
+                        tick,
+                        bar_key=pending_eval_bar_ts or self._current_eval_bar_key(symbol, tick),
+                    )
+                    if _same_bar_pregate_skip:
+                        self._log_eval_pregate_skip(symbol, _same_bar_pregate_reason, _same_bar_pregate_details)
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage="phase9_pregate",
+                            reason=_same_bar_pregate_reason,
+                            allowed=False,
+                            trace_id=trace_id,
+                            **_same_bar_pregate_details,
+                        )
+                        return
+                    # ── OPTION PRE-GATES ───────────────────────────────────────────
+                    # For option symbols, validate quote quality before calling strategy
+                    # evaluator. These gates only skip evaluation — they do NOT affect
+                    # subscriptions, hydration, DataHub updates, or the active basket.
+                    _is_option_pregate = _pregate_symbol_role == "tradable_option"
+                    if _is_option_pregate and _env_bool("SKIP_LOW_PREMIUM_OPTION_EVAL", True):
+                        # Guard: price may be None, non-numeric, or <=0 — never raise from pregate.
+                        _pregate_ltp: float | None = None
+                        try:
+                            _pregate_ltp = float(price) if price is not None else None
+                        except (TypeError, ValueError):
+                            _pregate_ltp = None
+                        if _pregate_ltp is None or _pregate_ltp <= 0:
+                            if self._should_log_throttled(f"pregate_missing_price:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_premium_missing_or_invalid ltp=%s",
+                                    symbol, price,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_premium_missing_or_invalid", "ltp": price},
+                                )
+                            return
+                        _min_premium = float(os.getenv("MIN_OPTION_PREMIUM", "20") or "20")
+                        if _pregate_ltp < _min_premium:
+                            if self._should_log_throttled(f"pregate_low_premium:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_premium_below_min ltp=%s min_premium=%s",
+                                    symbol, _pregate_ltp, _min_premium,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_premium_below_min", "ltp": _pregate_ltp, "min_premium": _min_premium},
+                                )
+                            return
+                    if _is_option_pregate and _env_bool("REQUIRE_BID_ASK_FOR_OPTION_EVAL", True):
+                        # Use the canonical execution-readiness quote resolver for consistency with
+                        # live readiness checks — same source, same bid/ask/spread extraction.
+                        _pregate_quote = self._get_cached_quote_for_live_entry(symbol)
+                        _pg_bid, _pg_ask, _, _ = _resolve_quote_bid_ask_spread(_pregate_quote) if _pregate_quote else (None, None, None, "missing")
+                        if _pg_bid is None or _pg_ask is None or _pg_bid <= 0 or _pg_ask <= 0:
+                            if self._should_log_throttled(f"pregate_no_bid_ask:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_bid_ask_missing_or_invalid bid=%s ask=%s",
+                                    symbol, _pg_bid, _pg_ask,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_bid_ask_missing_or_invalid", "bid": _pg_bid, "ask": _pg_ask},
+                                )
+                            return
+                        if _pg_ask < _pg_bid:
+                            if self._should_log_throttled(f"pregate_inverted_spread:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_bid_ask_missing_or_invalid bid=%s ask=%s",
+                                    symbol, _pg_bid, _pg_ask,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_bid_ask_missing_or_invalid", "bid": _pg_bid, "ask": _pg_ask},
+                                )
+                            return
+                        if _env_bool("SKIP_WIDE_SPREAD_OPTION_EVAL", True):
+                            _pg_spread = _pg_ask - _pg_bid
+                            _pg_mid = (_pg_bid + _pg_ask) / 2.0
+                            _max_spread_pct = float(os.getenv("MAX_OPTION_SPREAD_PCT_FOR_EVAL", "1.5") or "1.5")
+                            if _pg_mid > 0 and (_pg_spread / _pg_mid) * 100.0 > _max_spread_pct:
+                                if self._should_log_throttled(f"pregate_wide_spread:{symbol}", 60.0):
+                                    self._logger.info(
+                                        "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_spread_too_wide spread_pct=%.2f max_pct=%s",
+                                        symbol, (_pg_spread / _pg_mid) * 100.0, _max_spread_pct,
+                                        extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                               "reason": "option_spread_too_wide",
+                                               "spread_pct": round((_pg_spread / _pg_mid) * 100.0, 2),
+                                               "max_spread_pct": _max_spread_pct},
+                                    )
+                                return
+                            _max_spread_abs = os.getenv("MAX_OPTION_SPREAD_ABS_FOR_EVAL")
+                            if _max_spread_abs:
+                                _max_spread_abs_f = float(_max_spread_abs)
+                                if _max_spread_abs_f > 0 and _pg_spread > _max_spread_abs_f:
+                                    if self._should_log_throttled(f"pregate_wide_spread_abs:{symbol}", 60.0):
+                                        self._logger.info(
+                                            "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_spread_abs_too_wide spread=%s max=%s",
+                                            symbol, _pg_spread, _max_spread_abs_f,
+                                            extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                                   "reason": "option_spread_abs_too_wide",
+                                                   "spread": _pg_spread, "max_spread_abs": _max_spread_abs_f},
+                                        )
+                                    return
+                    self._mark_symbol_eval_allowed(
+                        symbol,
+                        bar_key=_same_bar_pregate_details.get("bar_key") if isinstance(_same_bar_pregate_details, Mapping) else None,
+                        tick=tick,
+                    )
+                    # ── END PRE-GATES ──────────────────────────────────────────────
                     self._last_global_eval_ts = time.monotonic()
                     self._logger.debug(
                         "strategy_evaluation_start",

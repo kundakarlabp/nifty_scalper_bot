@@ -665,19 +665,14 @@ ACTIVE_BASKET_PROMOTED selected_ce=NFO:...CE selected_pe=NFO:...PE ce_bars=30 pe
 READINESS_BLOCKER_SUMMARY blockers=[] data_hard_ready=True evaluation_ready=True execution_ready=True live_orders_armed=True
 ```
 
-## StrategyRunner pre-evaluation gate tuning
+## StrategyRunner same-bar evaluation throttle
 
-StrategyRunner skips expensive option strategy computation when an option is still
-on the same bar throttle window or has weak quote quality. These gates are
-pre-strategy only; execution readiness, order-manager risk checks, active basket
-selection, hydration, and WebSocket subscriptions remain independently enforced.
+StrategyRunner can skip repeated same-bar strategy computation while still
+letting hydration, DataHub updates, active basket selection, subscriptions, and
+readiness state proceed normally. New bars evaluate immediately; same-bar
+periodic re-evaluation is allowed after this interval, with a runtime lower bound
+of 3 seconds.
 
 ```env
 RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS=5
-MIN_OPTION_PREMIUM=20
-MAX_OPTION_SPREAD_PCT_FOR_EVAL=1.5
-MAX_OPTION_SPREAD_ABS_FOR_EVAL=
-REQUIRE_BID_ASK_FOR_OPTION_EVAL=true
-SKIP_LOW_PREMIUM_OPTION_EVAL=true
-SKIP_WIDE_SPREAD_OPTION_EVAL=true
 ```
