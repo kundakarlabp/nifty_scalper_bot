@@ -9,11 +9,86 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Mapping
+from dataclasses import asdict, dataclass
+from typing import Any, Mapping
 
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+@dataclass(frozen=True, slots=True)
+class ActiveContractSelection:
+    """Read-only selected-contract snapshot derived from ActiveContractBasket."""
+
+    selected_ce: str | None = None
+    selected_pe: str | None = None
+    futures_symbol: str | None = None
+    atm_strike: int | float | str | None = None
+    selected_ce_token: int | None = None
+    selected_pe_token: int | None = None
+    futures_token: int | None = None
+    option_symbols: tuple[str, ...] = ()
+    token_by_symbol: Mapping[str, int] | None = None
+    basket_version: str | None = None
+    selected_at: str | None = None
+    source: str = "active_contract_basket"
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["option_symbols"] = list(self.option_symbols)
+        payload["token_by_symbol"] = dict(self.token_by_symbol or {})
+        return payload
+
+
+def _basket_get(basket: Mapping[str, object] | object | None, key: str, default: Any = None) -> Any:
+    if basket is None:
+        return default
+    if isinstance(basket, Mapping):
+        return basket.get(key, default)
+    return getattr(basket, key, default)
+
+
+def active_contract_selection_from_basket(
+    basket: Mapping[str, object] | object | None,
+) -> ActiveContractSelection:
+    """Build canonical read-only selected-contract snapshot from active basket."""
+
+    if basket is None:
+        return ActiveContractSelection(token_by_symbol={})
+    token_by_symbol = dict(_basket_get(basket, "token_by_symbol", {}) or {})
+    option_symbols = tuple(
+        str(sym)
+        for sym in dict.fromkeys(_basket_get(basket, "option_symbols", None) or _basket_get(basket, "symbols", ()) or ())
+        if str(sym).endswith(("CE", "PE"))
+    )
+
+    def _token_for(symbol: Any, explicit_key: str) -> int | None:
+        raw = _basket_get(basket, explicit_key, None)
+        if raw is None and symbol:
+            raw = token_by_symbol.get(str(symbol)) or token_by_symbol.get(str(symbol).split(":", 1)[-1])
+        try:
+            return int(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    selected_ce = str(_basket_get(basket, "selected_ce", None) or _basket_get(basket, "atm_ce", None) or "") or None
+    selected_pe = str(_basket_get(basket, "selected_pe", None) or _basket_get(basket, "atm_pe", None) or "") or None
+    futures_symbol = str(_basket_get(basket, "futures_symbol", None) or _basket_get(basket, "future_symbol", None) or "") or None
+    return ActiveContractSelection(
+        selected_ce=selected_ce,
+        selected_pe=selected_pe,
+        futures_symbol=futures_symbol,
+        atm_strike=_basket_get(basket, "atm_strike", None),
+        selected_ce_token=_token_for(selected_ce, "selected_ce_token"),
+        selected_pe_token=_token_for(selected_pe, "selected_pe_token"),
+        futures_token=_token_for(futures_symbol, "futures_token"),
+        option_symbols=option_symbols,
+        token_by_symbol=token_by_symbol,
+        basket_version=str(_basket_get(basket, "basket_version", None) or _basket_get(basket, "version", None) or "") or None,
+        selected_at=str(_basket_get(basket, "selected_at", None) or _basket_get(basket, "committed_at", None) or "") or None,
+        source="active_contract_basket",
+    )
+
 
 # Matches the 4-6 digit strike immediately before the CE/PE suffix.
 # For NFO:NIFTY2660923500CE  →  group("strike") == "23500"
@@ -187,4 +262,4 @@ def build_active_trading_basket_symbols(ctx: object, basket: Mapping[str, object
     return out
 
 
-__all__ = ['build_active_trading_basket_symbols', 'pick_atm_option_symbols_from_basket', 'extract_symbol_strike', 'normalize_active_basket_schema']
+__all__ = ['ActiveContractSelection', 'active_contract_selection_from_basket', 'build_active_trading_basket_symbols', 'pick_atm_option_symbols_from_basket', 'extract_symbol_strike', 'normalize_active_basket_schema']

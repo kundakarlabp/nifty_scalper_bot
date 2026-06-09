@@ -160,7 +160,7 @@ async def test_hydration_not_ready_blocks_strategy_evaluation(monkeypatch):
     )
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
     assert ctx.evaluation_ready is False
-    assert str(ctx.live_block_reason).startswith('ACTIVE_BASKET_HYDRATION_NOT_READY')
+    assert ctx.live_block_reason == 'execution_not_armed:market_closed'
     assert calls[-1]['evaluation_ready'] is False
 
 

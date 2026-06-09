@@ -16,7 +16,7 @@ import os
 from datetime import datetime, time as dtime
 from enum import Enum
 from functools import lru_cache
-from typing import Tuple
+from typing import Literal, Tuple
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -106,6 +106,54 @@ def get_market_state() -> MarketState:
     if MARKET_CLOSE < current <= dtime(16, 0):
         return MarketState.POSTMARKET
     return MarketState.CLOSED
+
+
+
+def get_runtime_market_mode() -> Literal["PRE_MARKET", "OPEN", "POST_MARKET", "HOLIDAY", "UNKNOWN"]:
+    """Return operator-facing runtime market mode from canonical market hours state."""
+    try:
+        if _override_enabled():
+            return "OPEN"
+        now = _now_ist()
+        if now.weekday() >= 5:
+            return "HOLIDAY"
+        state = get_market_state()
+        if state == MarketState.OPEN:
+            return "OPEN"
+        if state == MarketState.PREOPEN:
+            return "PRE_MARKET"
+        if state == MarketState.POSTMARKET:
+            return "POST_MARKET"
+        current = now.time()
+        if current < MARKET_OPEN:
+            return "PRE_MARKET"
+        if current > MARKET_CLOSE:
+            return "POST_MARKET"
+        return "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+
+def post_market_quiet_mode_enabled() -> bool:
+    return os.getenv("POST_MARKET_QUIET_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def post_market_basket_refresh_seconds() -> float:
+    try:
+        return max(60.0, float(os.getenv("POST_MARKET_BASKET_REFRESH_SECONDS", "900") or 900))
+    except (TypeError, ValueError):
+        return 900.0
+
+
+def post_market_market_data_summary_seconds() -> float:
+    try:
+        return max(60.0, float(os.getenv("POST_MARKET_MARKET_DATA_SUMMARY_SECONDS", "300") or 300))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def post_market_suppress_candle_gap_warnings() -> bool:
+    return os.getenv("POST_MARKET_SUPPRESS_CANDLE_GAP_WARNINGS", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_market_open_session(allow_override: bool = True) -> bool:

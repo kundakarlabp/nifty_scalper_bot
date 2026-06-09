@@ -45,6 +45,8 @@ from nifty_scalper_bot.journal.trade_journal import TradeJournal
 
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.active_basket import (
+    ActiveContractSelection,
+    active_contract_selection_from_basket,
     normalize_active_basket_schema,
     pick_atm_option_symbols_from_basket,
 )
@@ -55,10 +57,94 @@ from nifty_scalper_bot.data.robust_provider import (
 )
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
+from nifty_scalper_bot.execution.readiness import normalize_readiness_blockers
+from nifty_scalper_bot.utils.market_hours import (
+    get_runtime_market_mode,
+    post_market_basket_refresh_seconds,
+    post_market_quiet_mode_enabled,
+)
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
 instrument_cache_ready = threading.Event()
+
+
+def _basket_attr(basket: Mapping[str, object] | object | None, key: str, default: Any = None) -> Any:
+    if basket is None:
+        return default
+    if isinstance(basket, Mapping):
+        return basket.get(key, default)
+    return getattr(basket, key, default)
+
+
+def get_active_contract_selection(ctx: Any) -> ActiveContractSelection:
+    """Return canonical selected-contract snapshot from active_contract_basket SSOT."""
+    basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
+    mdm = getattr(ctx, "market_data_manager", None)
+    if basket is None and mdm is not None:
+        getter = getattr(mdm, "get_active_contract_basket", None)
+        if callable(getter):
+            basket = getter()
+    selection = active_contract_selection_from_basket(basket)
+    _sync_active_selection_from_basket(ctx, selection)
+    return selection
+
+
+def _sync_active_selection_from_basket(ctx: Any, selection: ActiveContractSelection) -> None:
+    """Synchronize legacy selected CE/PE fields from active basket only."""
+    new_ce, new_pe = selection.selected_ce, selection.selected_pe
+    if not (new_ce or new_pe):
+        return
+    old_ce = getattr(ctx, "selected_ce", None)
+    old_pe = getattr(ctx, "selected_pe", None)
+    drift = bool((old_ce and new_ce and str(old_ce) != str(new_ce)) or (old_pe and new_pe and str(old_pe) != str(new_pe)))
+    drift_key = (str(old_ce), str(old_pe), str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
+    if drift and getattr(ctx, "_active_selection_drift_log_key", None) != drift_key:
+        ctx._active_selection_drift_log_key = drift_key
+        LOGGER.warning(
+            "ACTIVE_SELECTION_DRIFT_CORRECTED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=active_contract_basket",
+            old_ce, old_pe, new_ce, new_pe,
+            extra={"event": "ACTIVE_SELECTION_DRIFT_CORRECTED", "old_ce": old_ce, "old_pe": old_pe, "new_ce": new_ce, "new_pe": new_pe, "source": selection.source},
+        )
+    ctx.selected_ce = new_ce
+    ctx.selected_pe = new_pe
+    ctx.atm_ce_symbol = new_ce
+    ctx.atm_pe_symbol = new_pe
+    sync_key = (str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
+    if getattr(ctx, "_active_selection_sync_log_key", None) != sync_key:
+        ctx._active_selection_sync_log_key = sync_key
+        LOGGER.info(
+            "ACTIVE_SELECTION_SYNCED selected_ce=%s selected_pe=%s basket_version=%s",
+            new_ce, new_pe, selection.basket_version or selection.selected_at,
+            extra={"event": "ACTIVE_SELECTION_SYNCED", "selected_ce": new_ce, "selected_pe": new_pe, "basket_version": selection.basket_version, "selected_at": selection.selected_at},
+        )
+
+
+def _should_skip_post_market_basket_refresh(ctx: Any, *, force: bool = False) -> tuple[bool, float]:
+    if force or not post_market_quiet_mode_enabled():
+        return False, 0.0
+    mode = get_runtime_market_mode()
+    if mode not in {"POST_MARKET", "HOLIDAY"}:
+        return False, 0.0
+    if not getattr(ctx, "active_contract_basket", None):
+        return False, 0.0
+    interval = post_market_basket_refresh_seconds()
+    now = time_module.monotonic()
+    last = float(getattr(ctx, "basket_build_last_completed_mono", 0.0) or 0.0)
+    elapsed = now - last if last > 0 else interval
+    remaining = max(0.0, interval - elapsed)
+    if remaining <= 0:
+        return False, 0.0
+    key = (mode, int(remaining // 60))
+    if getattr(ctx, "_post_market_basket_skip_log_key", None) != key:
+        ctx._post_market_basket_skip_log_key = key
+        LOGGER.info(
+            "ACTIVE_BASKET_REFRESH_SKIPPED reason=post_market_quiet_mode next_refresh_in_s=%d",
+            int(remaining),
+            extra={"event": "ACTIVE_BASKET_REFRESH_SKIPPED", "reason": "post_market_quiet_mode", "next_refresh_in_s": int(remaining), "market_mode": mode},
+        )
+        LOGGER.info("POST_MARKET_QUIET_MODE_ACTIVE market_state=CLOSED", extra={"event": "POST_MARKET_QUIET_MODE_ACTIVE", "market_state": "CLOSED", "market_mode": mode})
+    return True, remaining
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -7818,30 +7904,17 @@ async def _ensure_selected_options_hydrated(
 
 async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
-    basket = normalize_active_basket_schema(
-        cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
-    )
+    source_basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", {}) or {}
+    basket = normalize_active_basket_schema(cast(dict[str, object], dict(source_basket) if isinstance(source_basket, Mapping) else {}))
     mdm = getattr(ctx, "market_data_manager", None)
-    old_ce = getattr(ctx, "selected_ce", None)
-    old_pe = getattr(ctx, "selected_pe", None)
     option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if s]
-    picked_ce, picked_pe = pick_atm_option_symbols_from_basket(basket)
-    selected_ce = cast(
-        str | None,
-        basket.get("selected_ce")
-        or basket.get("atm_ce")
-        or picked_ce,
-    )
-    selected_pe = cast(
-        str | None,
-        basket.get("selected_pe")
-        or basket.get("atm_pe")
-        or picked_pe,
-    )
-    if not selected_ce and old_ce in option_symbols:
-        selected_ce = old_ce
-    if not selected_pe and old_pe in option_symbols:
-        selected_pe = old_pe
+    selection = get_active_contract_selection(ctx)
+    selected_ce = selection.selected_ce
+    selected_pe = selection.selected_pe
+    if not (selected_ce and selected_pe):
+        picked_ce, picked_pe = pick_atm_option_symbols_from_basket(basket)
+        selected_ce = selected_ce or picked_ce
+        selected_pe = selected_pe or picked_pe
     basket.update(
         {
             "selected_ce": selected_ce,
@@ -7861,16 +7934,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         }
     )
     ctx.active_trading_universe = basket
-    if selected_ce:
-        ctx.selected_ce = str(selected_ce)
-    else:
-        ctx.selected_ce = None
-    if selected_pe:
-        ctx.selected_pe = str(selected_pe)
-    else:
-        ctx.selected_pe = None
-    ctx.atm_ce_symbol = selected_ce
-    ctx.atm_pe_symbol = selected_pe
+    ctx.active_contract_basket = getattr(ctx, "active_contract_basket", None) or basket
+    _sync_active_selection_from_basket(ctx, active_contract_selection_from_basket(ctx.active_contract_basket))
     def _snapshot(sym:str|None)->Any:
         if not sym or mdm is None: return None
         try: return mdm.get_symbol_snapshot(sym)
@@ -8067,12 +8132,27 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not pe_exec_ready: missing.append('pe_exec_quote_or_history_not_ready')
         if not context_exec_ready: missing.append('context_exec_not_ready')
         if not broker_ready: missing.append('broker_not_ready')
-    if live_orders_armed:
-        block_reason = None
-    elif not basket_hard_ready:
-        block_reason = f"ACTIVE_BASKET_HYDRATION_NOT_READY:{','.join(dict.fromkeys(missing))}"
-    else:
-        block_reason = f"execution_not_armed:{','.join(dict.fromkeys(missing))}"
+    normalized_decision = normalize_readiness_blockers(
+        list(dict.fromkeys(missing)),
+        get_market_state(),
+        emergency_state={
+            "emergency_stop_active": bool(getattr(ctx, "emergency_stop_active", False)),
+            "kill_switch_active": bool(getattr(ctx, "kill_switch_active", False)),
+        },
+        broker_state={
+            "broker_auth_invalid": bool(getattr(ctx, "broker_auth_invalid", False)),
+            "broker_session_invalid": bool(getattr(ctx, "broker_session_invalid", False)),
+        },
+        risk_state={
+            "risk_halt": bool(getattr(ctx, "risk_halt", False)),
+            "daily_loss_limit": bool(getattr(ctx, "daily_loss_limit_hit", False)),
+        },
+        live_mode=live_mode,
+        evaluation_ready=evaluation_ready,
+        execution_ready=all_selected_options_exec_ready and context_exec_ready and broker_ready,
+    )
+    live_orders_armed = bool(live_mode and normalized_decision.live_orders_armed)
+    block_reason = None if live_orders_armed else f"execution_not_armed:{normalized_decision.primary_blocker or 'unknown'}"
     ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=evaluation_ready; ctx.live_block_reason=block_reason
     ctx.data_ready = bool(data_hard_ready)
     ctx.strategy_evaluation_ready = bool(evaluation_ready)
@@ -8086,22 +8166,30 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.context_exec_ready = bool(context_exec_ready)
     ctx.broker_ready = bool(broker_ready)
     LOGGER.info(
-        "READINESS_BLOCKER_SUMMARY blockers=%s data_hard_ready=%s evaluation_ready=%s execution_ready=%s live_orders_armed=%s",
-        list(dict.fromkeys(missing)),
+        "READINESS_BLOCKER_SUMMARY primary_blocker=%s blockers=%s secondary_blockers=%s data_hard_ready=%s evaluation_ready=%s execution_ready=%s live_orders_armed=%s",
+        normalized_decision.primary_blocker,
+        normalized_decision.blocker_list,
+        normalized_decision.secondary_blockers,
         bool(data_hard_ready),
         bool(evaluation_ready),
         bool(all_selected_options_exec_ready),
         bool(live_orders_armed),
         extra={
             "event": "READINESS_BLOCKER_SUMMARY",
-            "blockers": list(dict.fromkeys(missing)),
+            "primary_blocker": normalized_decision.primary_blocker,
+            "blockers": normalized_decision.blocker_list,
+            "secondary_blockers": normalized_decision.secondary_blockers,
+            "raw_blockers": list(dict.fromkeys(missing)),
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "market_mode": get_runtime_market_mode(),
             "data_hard_ready": bool(data_hard_ready),
             "evaluation_ready": bool(evaluation_ready),
             "execution_ready": bool(all_selected_options_exec_ready),
             "live_orders_armed": bool(live_orders_armed),
         },
     )
-    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, ce_exec_ready, pe_exec_ready, execution_ready_by_symbol, block_reason)
+    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, ce_exec_ready, pe_exec_ready, execution_ready_by_symbol, block_reason, extra={"event":"LIVE_READINESS_COMPUTED","selected_ce":selected_ce,"selected_pe":selected_pe,"live_block_reason":block_reason,"primary_blocker":normalized_decision.primary_blocker,"secondary_blockers":normalized_decision.secondary_blockers,"market_mode":get_runtime_market_mode()})
     if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
         ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}))
 
@@ -8288,6 +8376,8 @@ def _commit_active_dynamic_basket(
             committed[_token_key] = _val
     ctx.active_trading_universe = committed
     ctx.active_contract_basket = committed
+    selection = active_contract_selection_from_basket(committed)
+    _sync_active_selection_from_basket(ctx, selection)
     runner = getattr(ctx, "strategy_runner", None)
     if runner is not None and hasattr(runner, "set_active_trading_universe"):
         runner.set_active_trading_universe(committed)
@@ -8612,6 +8702,10 @@ async def _build_and_hydrate_live_basket_from_spot(
             bool(hydrate),
         )
         return {'deferred': True, 'reason': 'already_running'}
+
+    skip_refresh, _remaining = _should_skip_post_market_basket_refresh(ctx)
+    if skip_refresh:
+        return dict(getattr(ctx, "active_trading_universe", {}) or getattr(ctx, "active_contract_basket", {}) or {"deferred": True, "reason": "post_market_quiet_mode"})
 
     async with lock:
         start = time_module.monotonic()

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, asdict
 import os
 import logging
 from datetime import datetime, timezone
+from typing import Mapping
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +49,150 @@ def _safe_non_negative_int(value: object, fallback: int = 0) -> int:
     except (TypeError, ValueError):
         return max(int(fallback), 0)
     return max(parsed, 0)
+
+
+_READINESS_PRIORITY = [
+    "emergency_stop_active",
+    "kill_switch_active",
+    "broker_auth_invalid",
+    "broker_session_invalid",
+    "market_closed",
+    "exchange_holiday",
+    "outside_session",
+    "risk_halt",
+    "daily_loss_limit",
+    "broker_health_block",
+    "futures_history_missing",
+    "context_exec_not_ready",
+    "selected_contract_missing",
+    "selected_option_subscription_missing",
+    "selected_option_quote_missing",
+    "selected_option_depth_missing",
+    "selected_option_history_cold",
+    "strategy_not_ready",
+    "order_manager_not_ready",
+]
+
+_BLOCKER_ALIASES = {
+    "selected_ce_missing": "selected_contract_missing",
+    "selected_pe_missing": "selected_contract_missing",
+    "selected_options_missing": "selected_contract_missing",
+    "selected_ce_quote_missing": "selected_option_quote_missing",
+    "selected_pe_quote_missing": "selected_option_quote_missing",
+    "selected_option_bid_ask_missing": "selected_option_quote_missing",
+    "selected_ce_depth_missing": "selected_option_depth_missing",
+    "selected_pe_depth_missing": "selected_option_depth_missing",
+    "selected_ce_history_insufficient": "selected_option_history_cold",
+    "selected_pe_history_insufficient": "selected_option_history_cold",
+    "ce_eval_bars_missing": "selected_option_history_cold",
+    "pe_eval_bars_missing": "selected_option_history_cold",
+    "ce_exec_bars_missing": "selected_option_history_cold",
+    "pe_exec_bars_missing": "selected_option_history_cold",
+    "ce_exec_quote_or_history_not_ready": "selected_option_history_cold",
+    "pe_exec_quote_or_history_not_ready": "selected_option_history_cold",
+    "runner_not_running": "strategy_not_ready",
+    "strategy_runner_not_running": "strategy_not_ready",
+    "eval_not_ready": "strategy_not_ready",
+    "broker_not_ready": "broker_health_block",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ReadinessDecision:
+    primary_blocker: str | None
+    blocker_list: list[str]
+    live_orders_armed: bool
+    evaluation_ready: bool
+    execution_ready: bool
+    human_reason: str
+    secondary_blockers: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _normalize_market_state_name(market_state: object) -> str:
+    value = getattr(market_state, "value", market_state)
+    return str(value or "").strip().lower()
+
+
+def _canonical_blocker(reason: object) -> str:
+    text = str(reason or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        text = text.split(":", 1)[-1]
+    return _BLOCKER_ALIASES.get(text, text)
+
+
+def normalize_readiness_blockers(
+    blockers: list[str] | tuple[str, ...] | set[str],
+    market_state: object = None,
+    emergency_state: Mapping[str, object] | None = None,
+    broker_state: Mapping[str, object] | None = None,
+    risk_state: Mapping[str, object] | None = None,
+    *,
+    live_mode: bool = True,
+    evaluation_ready: bool = False,
+    execution_ready: bool = False,
+) -> ReadinessDecision:
+    """Apply deterministic readiness blocker priority and closed-market dominance."""
+
+    canonical = [b for b in (_canonical_blocker(item) for item in blockers or []) if b]
+    market_name = _normalize_market_state_name(market_state)
+    emergency_state = emergency_state or {}
+    broker_state = broker_state or {}
+    risk_state = risk_state or {}
+    if emergency_state.get("emergency_stop_active"):
+        canonical.append("emergency_stop_active")
+    if emergency_state.get("kill_switch_active"):
+        canonical.append("kill_switch_active")
+    if broker_state.get("broker_auth_invalid"):
+        canonical.append("broker_auth_invalid")
+    if broker_state.get("broker_session_invalid"):
+        canonical.append("broker_session_invalid")
+    if risk_state.get("risk_halt"):
+        canonical.append("risk_halt")
+    if risk_state.get("daily_loss_limit"):
+        canonical.append("daily_loss_limit")
+    if live_mode and market_name and market_name not in {"open", "marketstate.open"}:
+        if market_name in {"holiday", "closed_holiday"}:
+            canonical.append("exchange_holiday")
+        elif market_name in {"preopen", "pre_market", "premarket"}:
+            canonical.append("outside_session")
+        else:
+            canonical.append("market_closed")
+    canonical = list(dict.fromkeys(canonical))
+
+    high_priority = {"emergency_stop_active", "kill_switch_active", "broker_auth_invalid", "broker_session_invalid"}
+    has_high_priority = any(item in canonical for item in high_priority)
+    market_blocker = "exchange_holiday" if "exchange_holiday" in canonical else "outside_session" if "outside_session" in canonical else "market_closed" if "market_closed" in canonical else None
+    secondary: list[str] = []
+    visible = canonical
+    if market_blocker and not has_high_priority:
+        secondary = [item for item in canonical if item != market_blocker]
+        visible = [market_blocker]
+
+    def _rank(item: str) -> int:
+        try:
+            return _READINESS_PRIORITY.index(item)
+        except ValueError:
+            return len(_READINESS_PRIORITY)
+
+    ordered_visible = sorted(list(dict.fromkeys(visible)), key=_rank)
+    ordered_secondary = sorted(list(dict.fromkeys(secondary)), key=_rank)
+    primary = ordered_visible[0] if ordered_visible else None
+    armed = bool(live_mode and not primary and evaluation_ready and execution_ready)
+    human = "ready" if primary is None else primary
+    return ReadinessDecision(
+        primary_blocker=primary,
+        blocker_list=ordered_visible,
+        secondary_blockers=ordered_secondary,
+        live_orders_armed=armed,
+        evaluation_ready=bool(evaluation_ready and not primary),
+        execution_ready=bool(execution_ready and not primary),
+        human_reason=human,
+    )
 
 
 @dataclass(slots=True)

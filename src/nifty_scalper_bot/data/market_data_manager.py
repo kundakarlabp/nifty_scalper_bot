@@ -52,6 +52,9 @@ from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_t
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     get_market_state,
+    get_runtime_market_mode,
+    post_market_market_data_summary_seconds,
+    post_market_quiet_mode_enabled,
     stale_threshold_for_symbol,
 )
 from nifty_scalper_bot.utils.metrics import Counter
@@ -6026,13 +6029,18 @@ class MarketDataManager:
                     sym: int(max(0.0, (now_epoch - float(self._last_tick_time.get(sym, 0.0) or 0.0)) * 1000.0))
                     for sym in stale_symbols_list
                 }
+                active_basket = getattr(self, "_active_contract_basket", None)
                 selected_ce_symbol = str(
-                    getattr(self, "_selected_ce_symbol", None)
+                    self._basket_value(active_basket, "selected_ce", None)
+                    or self._basket_value(active_basket, "atm_ce", None)
+                    or getattr(self, "_selected_ce_symbol", None)
                     or getattr(self, "selected_ce_symbol", None)
                     or ""
                 ) or None
                 selected_pe_symbol = str(
-                    getattr(self, "_selected_pe_symbol", None)
+                    self._basket_value(active_basket, "selected_pe", None)
+                    or self._basket_value(active_basket, "atm_pe", None)
+                    or getattr(self, "_selected_pe_symbol", None)
                     or getattr(self, "selected_pe_symbol", None)
                     or ""
                 ) or None
@@ -6046,31 +6054,53 @@ class MarketDataManager:
                     impact_on_trading = "live_orders_disarmed"
                 elif selected_ce_stale or selected_pe_stale:
                     impact_on_trading = "none"
-                self._last_stale_detail_emit_epoch = now_epoch
-                self._logger.info(
-                    "MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s",
-                    len(stale_symbols_list),
-                    len(fresh_symbols),
-                    self._is_ws_connected(),
-                    extra={
-                        "event": "MARKET_DATA_STALE_SYMBOLS_DETAIL",
-                        "total_symbols": subscribed,
-                        "stale_count": len(stale_symbols_list),
-                        "fresh_count": len(fresh_symbols),
-                        "stale_symbols": sorted(stale_symbols_list),
-                        "stale_age_ms_by_symbol": stale_age_map,
-                        "fresh_symbols": fresh_symbols,
-                        "selected_ce_symbol": selected_ce_symbol,
-                        "selected_pe_symbol": selected_pe_symbol,
-                        "selected_ce_stale": selected_ce_stale,
-                        "selected_pe_stale": selected_pe_stale,
-                        "selected_ce_age_ms": selected_ce_age_ms,
-                        "selected_pe_age_ms": selected_pe_age_ms,
-                        "ws_connected": self._is_ws_connected(),
-                        "subscribed_count": subscribed,
-                        "impact_on_trading": impact_on_trading,
-                    },
-                )
+                market_mode = get_runtime_market_mode()
+                postmarket_quiet = post_market_quiet_mode_enabled() and market_mode in {"POST_MARKET", "HOLIDAY"}
+                if postmarket_quiet:
+                    summary_interval = post_market_market_data_summary_seconds()
+                    if (now_epoch - last_detail_emit) >= summary_interval:
+                        self._last_stale_detail_emit_epoch = now_epoch
+                        self._logger.info(
+                            "MARKET_DATA_POSTMARKET_SUMMARY stale_symbols=%d subscribed=%d ws_connected=%s",
+                            len(stale_symbols_list),
+                            subscribed,
+                            self._is_ws_connected(),
+                            extra={
+                                "event": "MARKET_DATA_POSTMARKET_SUMMARY",
+                                "stale_symbols": len(stale_symbols_list),
+                                "subscribed": subscribed,
+                                "ws_connected": self._is_ws_connected(),
+                                "market_mode": market_mode,
+                                "selected_ce_symbol": selected_ce_symbol,
+                                "selected_pe_symbol": selected_pe_symbol,
+                            },
+                        )
+                if not postmarket_quiet:
+                    self._last_stale_detail_emit_epoch = now_epoch
+                    self._logger.info(
+                        "MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s",
+                        len(stale_symbols_list),
+                        len(fresh_symbols),
+                        self._is_ws_connected(),
+                        extra={
+                            "event": "MARKET_DATA_STALE_SYMBOLS_DETAIL",
+                            "total_symbols": subscribed,
+                            "stale_count": len(stale_symbols_list),
+                            "fresh_count": len(fresh_symbols),
+                            "stale_symbols": sorted(stale_symbols_list),
+                            "stale_age_ms_by_symbol": stale_age_map,
+                            "fresh_symbols": fresh_symbols,
+                            "selected_ce_symbol": selected_ce_symbol,
+                            "selected_pe_symbol": selected_pe_symbol,
+                            "selected_ce_stale": selected_ce_stale,
+                            "selected_pe_stale": selected_pe_stale,
+                            "selected_ce_age_ms": selected_ce_age_ms,
+                            "selected_pe_age_ms": selected_pe_age_ms,
+                            "ws_connected": self._is_ws_connected(),
+                            "subscribed_count": subscribed,
+                            "impact_on_trading": impact_on_trading,
+                        },
+                    )
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
