@@ -2274,6 +2274,48 @@ class OrderManager:
             x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
         )
 
+        if not is_system_exit and self._bracket_manager is not None:
+            has_unresolved_exit = getattr(self._bracket_manager, "has_unresolved_exit", None)
+            if callable(has_unresolved_exit) and bool(has_unresolved_exit()):
+                active_bracket_id = None
+                getter = getattr(self._bracket_manager, "get_first_unresolved_exit_bracket_id", None)
+                if callable(getter):
+                    active_bracket_id = getter()
+                self._logger.critical(
+                    "NEW_ENTRY_BLOCKED reason=exit_unresolved active_bracket_id=%s symbol=%s side=%s qty=%s",
+                    active_bracket_id,
+                    normalized_symbol,
+                    normalized_side,
+                    quantity,
+                    extra={
+                        "event": "NEW_ENTRY_BLOCKED",
+                        "reason": "exit_unresolved",
+                        "active_bracket_id": active_bracket_id,
+                        "symbol": normalized_symbol,
+                        "side": normalized_side,
+                        "quantity": quantity,
+                    },
+                )
+                notify = getattr(self, "_notify_bracket_event", None)
+                if callable(notify):
+                    try:
+                        notify(
+                            "NEW_ENTRY_BLOCKED",
+                            {
+                                "reason": "exit_unresolved",
+                                "active_bracket_id": active_bracket_id,
+                                "message": "⚠️ Exit unresolved. New entries frozen.",
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001 - alert best-effort only
+                        self._logger.debug("NEW_ENTRY_BLOCK_ALERT_FAILED error=%s", exc)
+                _log_order_decision(
+                    allowed=False,
+                    block_reason="exit_unresolved",
+                    details={"active_bracket_id": active_bracket_id},
+                )
+                return None
+
         if not is_system_exit and self.is_kill_switch_active():
             kill_state = self.get_kill_switch_status()
             last_failure = kill_state.get("last_failure") or {}
