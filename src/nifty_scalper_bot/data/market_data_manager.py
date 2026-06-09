@@ -5686,14 +5686,18 @@ class MarketDataManager:
                         interval_sec=30.0,
                         level=logging.WARNING,
                     )
-                    log_throttled(
-                        self._logger,
-                        "mdm_bus_backpressure_summary",
-                        "MDM_BUS_BACKPRESSURE_SUMMARY dropped_ticks=%d symbols=%d"
-                        % (sum(_bp_counts.values()), len(_bp_counts)),
-                        interval_sec=30.0,
-                        level=logging.WARNING,
-                    )
+                    # Manual 30s window so counts reset after each summary — the
+                    # summary reports the active window, not cumulative-since-startup.
+                    _now_bp = time.monotonic()
+                    _last_bp_summary = getattr(self, "_last_bus_bp_summary_ts", 0.0)
+                    if _now_bp - _last_bp_summary >= 30.0:
+                        self._last_bus_bp_summary_ts = _now_bp
+                        self._logger.warning(
+                            "MDM_BUS_BACKPRESSURE_SUMMARY dropped_ticks=%d symbols=%d",
+                            sum(_bp_counts.values()),
+                            len(_bp_counts),
+                        )
+                        _bp_counts.clear()
 
             future.add_done_callback(_done)
         except Exception as exc:

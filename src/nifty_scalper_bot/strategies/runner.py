@@ -8169,10 +8169,14 @@ class StrategyRunner:
             if self._is_tradable_symbol(symbol):
                 option_execution_min_bars = safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1)
                 required_bars = max(required_bars, option_execution_min_bars)
+                # Context (spot/futures) sync must run independently of the option's
+                # own bar count — option eval depends on warm context. The call is
+                # self-guarding and no longer emits duplicate_noop traces when warm.
+                self._sync_context_history_if_cold(source="pre_option_eval_context_sync")
                 _indicator_count_pre = len(self._indicator_engine.get_history(symbol) or [])
                 if _indicator_count_pre < required_bars:
-                    # Only sync when we still need bars; avoids duplicate_noop trace spam.
-                    self._sync_context_history_if_cold(source="pre_option_eval_context_sync")
+                    # Only sync option history when we still need bars; avoids
+                    # duplicate_noop trace spam during normal warm operation.
                     self._sync_history_from_mdm_cache(
                         symbol,
                         required_bars=required_bars,
