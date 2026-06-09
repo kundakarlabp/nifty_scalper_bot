@@ -10004,9 +10004,23 @@ class StrategyRunner:
                     # subscriptions, hydration, DataHub updates, or the active basket.
                     _is_option_pregate = _pregate_symbol_role == "tradable_option"
                     if _is_option_pregate and _env_bool("SKIP_LOW_PREMIUM_OPTION_EVAL", True):
-                        _pregate_ltp = float(price)
+                        # Guard: price may be None, non-numeric, or <=0 — never raise from pregate.
+                        _pregate_ltp: float | None = None
+                        try:
+                            _pregate_ltp = float(price) if price is not None else None
+                        except (TypeError, ValueError):
+                            _pregate_ltp = None
+                        if _pregate_ltp is None or _pregate_ltp <= 0:
+                            if self._should_log_throttled(f"pregate_missing_price:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_premium_missing_or_invalid ltp=%s",
+                                    symbol, price,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_premium_missing_or_invalid", "ltp": price},
+                                )
+                            return
                         _min_premium = float(os.getenv("MIN_OPTION_PREMIUM", "20") or "20")
-                        if _pregate_ltp > 0 and _pregate_ltp < _min_premium:
+                        if _pregate_ltp < _min_premium:
                             if self._should_log_throttled(f"pregate_low_premium:{symbol}", 60.0):
                                 self._logger.info(
                                     "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_premium_below_min ltp=%s min_premium=%s",
@@ -10016,9 +10030,10 @@ class StrategyRunner:
                                 )
                             return
                     if _is_option_pregate and _env_bool("REQUIRE_BID_ASK_FOR_OPTION_EVAL", True):
-                        _pregate_quote = self.get_quote(symbol) if hasattr(self, "get_quote") else {}
-                        _pg_bid = _extract_float(_pregate_quote, "bid", "best_bid") if isinstance(_pregate_quote, dict) else None
-                        _pg_ask = _extract_float(_pregate_quote, "ask", "best_ask") if isinstance(_pregate_quote, dict) else None
+                        # Use the canonical execution-readiness quote resolver for consistency with
+                        # live readiness checks — same source, same bid/ask/spread extraction.
+                        _pregate_quote = self._get_cached_quote_for_live_entry(symbol)
+                        _pg_bid, _pg_ask, _, _ = _resolve_quote_bid_ask_spread(_pregate_quote) if _pregate_quote else (None, None, None, "missing")
                         if _pg_bid is None or _pg_ask is None or _pg_bid <= 0 or _pg_ask <= 0:
                             if self._should_log_throttled(f"pregate_no_bid_ask:{symbol}", 60.0):
                                 self._logger.info(

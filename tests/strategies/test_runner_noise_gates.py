@@ -80,10 +80,46 @@ def test_option_pregate_low_premium_skips_evaluation() -> None:
     assert "RUNNER_EVAL_PREGATE_SKIPPED" in source
 
 
+def test_option_pregate_price_none_or_invalid_no_exception() -> None:
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
+    # Must guard price before float() cast — no bare float(price) in the pregate block.
+    pregate_block = source[
+        source.index("EARLY MARKET-CLOSED PRE-GATE"):
+        source.index("END PRE-GATES")
+    ]
+    # The old bare cast was `float(price)` on its own line; the safe version
+    # always guarded by `if price is not None` and wrapped in try/except.
+    assert "option_premium_missing_or_invalid" in pregate_block, (
+        "Missing price must emit option_premium_missing_or_invalid, not raise"
+    )
+    assert "float(price) if price is not None else None" in pregate_block, (
+        "price cast must guard None before calling float()"
+    )
+    assert "except (TypeError, ValueError)" in pregate_block, (
+        "price cast must be wrapped in try/except to survive non-numeric input"
+    )
+
+
 def test_option_pregate_missing_bid_ask_skips() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
     assert "option_bid_ask_missing_or_invalid" in source
     assert "REQUIRE_BID_ASK_FOR_OPTION_EVAL" in source
+
+
+def test_option_pregate_uses_canonical_quote_resolver() -> None:
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
+    pregate_block = source[
+        source.index("EARLY MARKET-CLOSED PRE-GATE"):
+        source.index("END PRE-GATES")
+    ]
+    # Bid/ask pregate must use _get_cached_quote_for_live_entry (canonical execution path)
+    # and _resolve_quote_bid_ask_spread (same extractor as live readiness), not bare get_quote.
+    assert "_get_cached_quote_for_live_entry" in pregate_block, (
+        "Pregate must use canonical quote resolver, not self.get_quote"
+    )
+    assert "_resolve_quote_bid_ask_spread" in pregate_block, (
+        "Pregate must use _resolve_quote_bid_ask_spread to match execution-readiness path"
+    )
 
 
 def test_option_pregate_inverted_spread_skips() -> None:
@@ -196,3 +232,14 @@ def test_backpressure_summary_added() -> None:
     source = Path("src/nifty_scalper_bot/data/market_data_manager.py").read_text(encoding="utf-8")
     assert "MDM_BUS_BACKPRESSURE_SUMMARY" in source
     assert "_bus_backpressure_counts" in source
+
+
+def test_backpressure_counts_cleared_after_summary() -> None:
+    source = Path("src/nifty_scalper_bot/data/market_data_manager.py").read_text(encoding="utf-8")
+    # After emitting the summary, counts must be cleared so the next window starts fresh.
+    assert "_bp_counts.clear()" in source, (
+        "Backpressure counts must be cleared after each summary to report active-window drops"
+    )
+    assert "_last_bus_bp_summary_ts" in source, (
+        "Manual timestamp check must gate the 30s summary window"
+    )
