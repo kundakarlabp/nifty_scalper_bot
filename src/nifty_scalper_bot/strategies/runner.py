@@ -1486,12 +1486,7 @@ class StrategyRunner:
         for ctx_symbol in self._active_context_symbols_for_history():
             count = self._history_count_for_symbol(ctx_symbol)
             if count >= self._context_required_bars:
-                self._emit_history_hydration_trace(
-                    ctx_symbol,
-                    source=source,
-                    fetched_bars=0,
-                    ingested_bars=0,
-                )
+                # Already warm — skip sync and suppress duplicate_noop trace.
                 continue
             try:
                 after = self._sync_history_from_mdm_cache(
@@ -6717,7 +6712,11 @@ class StrategyRunner:
                 "live_universe_ready": universe_ready,
                 "order_manager_block_reason": order_manager_block_reason,
             }
-            self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), self._runtime_readiness_reason, extra=payload)
+            _snap_reason = str(self._runtime_readiness_reason or "")
+            _snap_key = f"readiness_snap:{symbol}:{_snap_reason}"
+            _snap_interval = float(os.getenv("RUNNER_READINESS_SNAP_INTERVAL_SECONDS", "60") or "60")
+            if self._should_log_throttled(_snap_key, _snap_interval):
+                self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), _snap_reason, extra=payload)
         except Exception as exc:
             self._logger.warning(
                 "LIVE_TRADING_READINESS_SNAPSHOT_FAILED symbol=%s error_type=%s error=%s",
@@ -6800,7 +6799,10 @@ class StrategyRunner:
         elif ce_hist < min_bars or pe_hist < min_bars:
             reason = "selected_option_history_cold"
         ready = reason is None
-        self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
+        _boot_key = f"bootstrap:{symbol}:{ready}:{reason}"
+        _boot_interval = float(os.getenv("RUNNER_BOOTSTRAP_LOG_INTERVAL_SECONDS", "60") or "60")
+        if self._should_log_throttled(_boot_key, _boot_interval):
+            self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
         return ready, reason
 
 
@@ -8167,12 +8169,15 @@ class StrategyRunner:
             if self._is_tradable_symbol(symbol):
                 option_execution_min_bars = safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1)
                 required_bars = max(required_bars, option_execution_min_bars)
-                self._sync_context_history_if_cold(source="pre_option_eval_context_sync")
-                self._sync_history_from_mdm_cache(
-                    symbol,
-                    required_bars=required_bars,
-                    source="pre_option_eval_option_sync",
-                )
+                _indicator_count_pre = len(self._indicator_engine.get_history(symbol) or [])
+                if _indicator_count_pre < required_bars:
+                    # Only sync when we still need bars; avoids duplicate_noop trace spam.
+                    self._sync_context_history_if_cold(source="pre_option_eval_context_sync")
+                    self._sync_history_from_mdm_cache(
+                        symbol,
+                        required_bars=required_bars,
+                        source="pre_option_eval_option_sync",
+                    )
             history_count = len(self._indicator_engine.get_history(symbol) or [])
             restored_from_cache = symbol in self._restored_from_cache_symbols
             if restored_from_cache and history_count >= required_bars:
@@ -9938,6 +9943,125 @@ class StrategyRunner:
                                 stale_tick_threshold_s=_stale_thresh,
                             )
                             return
+                    # ── EARLY MARKET-CLOSED PRE-GATE ──────────────────────────────
+                    # Check market state BEFORE logging evaluation_entered so we never
+                    # emit allowed=True followed immediately by allowed=False reason=market_closed.
+                    _pregate_symbol_role = self._symbol_role_for_runner(symbol)
+                    _pregate_market_open = True
+                    try:
+                        _pregate_market_open = get_market_state() == MarketState.OPEN
+                    except Exception:
+                        _pregate_market_open = True
+                    if not _pregate_market_open:
+                        if _pregate_symbol_role in {"spot_context", "futures_context"} and not _env_bool("ALLOW_OFFMARKET_CONTEXT_DIAGNOSTICS", False):
+                            if self._should_log_throttled(f"pregate_market_closed:{symbol}:context", 60.0):
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9_pregate",
+                                    reason="context_diagnostic_only_market_closed",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                    symbol_role=_pregate_symbol_role,
+                                )
+                            return
+                        if _pregate_symbol_role == "tradable_option":
+                            if self._should_log_throttled(f"pregate_market_closed:{symbol}", 60.0):
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9_pregate",
+                                    reason="market_closed",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
+                            # Periodic summary: count suppressed per-symbol market_closed skips.
+                            _mc_counts = getattr(self, "_market_closed_skip_counts", None)
+                            if _mc_counts is None:
+                                self._market_closed_skip_counts: dict[str, int] = {}
+                                _mc_counts = self._market_closed_skip_counts
+                            _mc_counts[symbol] = _mc_counts.get(symbol, 0) + 1
+                            if self._should_log_throttled("market_closed_skip_summary", 60.0):
+                                total = sum(_mc_counts.values())
+                                self._logger.info(
+                                    "RUNNER_EVAL_SKIP_SUMMARY reason=market_closed symbols=%d suppressed=%d",
+                                    len(_mc_counts),
+                                    total,
+                                    extra={
+                                        "event": "RUNNER_EVAL_SKIP_SUMMARY",
+                                        "reason": "market_closed",
+                                        "symbols": len(_mc_counts),
+                                        "suppressed": total,
+                                    },
+                                )
+                                _mc_counts.clear()
+                            return
+                    # ── OPTION PRE-GATES ───────────────────────────────────────────
+                    # For option symbols, validate quote quality before calling strategy
+                    # evaluator. These gates only skip evaluation — they do NOT affect
+                    # subscriptions, hydration, DataHub updates, or the active basket.
+                    _is_option_pregate = _pregate_symbol_role == "tradable_option"
+                    if _is_option_pregate and _env_bool("SKIP_LOW_PREMIUM_OPTION_EVAL", True):
+                        _pregate_ltp = float(price)
+                        _min_premium = float(os.getenv("MIN_OPTION_PREMIUM", "20") or "20")
+                        if _pregate_ltp > 0 and _pregate_ltp < _min_premium:
+                            if self._should_log_throttled(f"pregate_low_premium:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_premium_below_min ltp=%s min_premium=%s",
+                                    symbol, _pregate_ltp, _min_premium,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_premium_below_min", "ltp": _pregate_ltp, "min_premium": _min_premium},
+                                )
+                            return
+                    if _is_option_pregate and _env_bool("REQUIRE_BID_ASK_FOR_OPTION_EVAL", True):
+                        _pregate_quote = self.get_quote(symbol) if hasattr(self, "get_quote") else {}
+                        _pg_bid = _extract_float(_pregate_quote, "bid", "best_bid") if isinstance(_pregate_quote, dict) else None
+                        _pg_ask = _extract_float(_pregate_quote, "ask", "best_ask") if isinstance(_pregate_quote, dict) else None
+                        if _pg_bid is None or _pg_ask is None or _pg_bid <= 0 or _pg_ask <= 0:
+                            if self._should_log_throttled(f"pregate_no_bid_ask:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_bid_ask_missing_or_invalid bid=%s ask=%s",
+                                    symbol, _pg_bid, _pg_ask,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_bid_ask_missing_or_invalid", "bid": _pg_bid, "ask": _pg_ask},
+                                )
+                            return
+                        if _pg_ask < _pg_bid:
+                            if self._should_log_throttled(f"pregate_inverted_spread:{symbol}", 60.0):
+                                self._logger.info(
+                                    "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_bid_ask_missing_or_invalid bid=%s ask=%s",
+                                    symbol, _pg_bid, _pg_ask,
+                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                           "reason": "option_bid_ask_missing_or_invalid", "bid": _pg_bid, "ask": _pg_ask},
+                                )
+                            return
+                        if _env_bool("SKIP_WIDE_SPREAD_OPTION_EVAL", True):
+                            _pg_spread = _pg_ask - _pg_bid
+                            _pg_mid = (_pg_bid + _pg_ask) / 2.0
+                            _max_spread_pct = float(os.getenv("MAX_OPTION_SPREAD_PCT_FOR_EVAL", "1.5") or "1.5")
+                            if _pg_mid > 0 and (_pg_spread / _pg_mid) * 100.0 > _max_spread_pct:
+                                if self._should_log_throttled(f"pregate_wide_spread:{symbol}", 60.0):
+                                    self._logger.info(
+                                        "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_spread_too_wide spread_pct=%.2f max_pct=%s",
+                                        symbol, (_pg_spread / _pg_mid) * 100.0, _max_spread_pct,
+                                        extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                               "reason": "option_spread_too_wide",
+                                               "spread_pct": round((_pg_spread / _pg_mid) * 100.0, 2),
+                                               "max_spread_pct": _max_spread_pct},
+                                    )
+                                return
+                            _max_spread_abs = os.getenv("MAX_OPTION_SPREAD_ABS_FOR_EVAL")
+                            if _max_spread_abs:
+                                _max_spread_abs_f = float(_max_spread_abs)
+                                if _max_spread_abs_f > 0 and _pg_spread > _max_spread_abs_f:
+                                    if self._should_log_throttled(f"pregate_wide_spread_abs:{symbol}", 60.0):
+                                        self._logger.info(
+                                            "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_spread_abs_too_wide spread=%s max=%s",
+                                            symbol, _pg_spread, _max_spread_abs_f,
+                                            extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
+                                                   "reason": "option_spread_abs_too_wide",
+                                                   "spread": _pg_spread, "max_spread_abs": _max_spread_abs_f},
+                                        )
+                                    return
+                    # ── END PRE-GATES ──────────────────────────────────────────────
                     self._last_global_eval_ts = time.monotonic()
                     self._logger.debug(
                         "strategy_evaluation_start",
