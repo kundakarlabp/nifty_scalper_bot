@@ -367,6 +367,10 @@ class StrategyRunnerConfig:
     signal_cooldown_seconds: float = 3.0
     trade_cooldown_seconds: float = 10.0
 
+    # Lightweight pre-strategy same-bar throttle. Env override keeps runtime tuning explicit.
+    same_bar_periodic_eval_seconds: float = field(
+        default_factory=lambda: safe_positive_float_env("RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS", 5.0, minimum=0.0)
+    )
     def __post_init__(self) -> None:
         if self.min_indicator_bars < 0:
             raise ValueError("min_indicator_bars must be non-negative")
@@ -381,6 +385,8 @@ class StrategyRunnerConfig:
         if self.trade_cooldown_seconds < 0:
             raise ValueError("trade_cooldown_seconds must be >= 0")
 
+        if self.same_bar_periodic_eval_seconds < 0:
+            raise ValueError("same_bar_periodic_eval_seconds must be >= 0")
 
 class RunnerState(Enum):
     """State machine for strategy runner lifecycle."""
@@ -588,6 +594,9 @@ class StrategyRunner:
             float(os.getenv("RUNNER_EVAL_WITHOUT_NEW_BAR_SECONDS", "15")),
         )
         self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
+        self._last_periodic_eval_at_by_symbol: dict[str, float] = {}
+        self._last_eval_bar_key_by_symbol: dict[str, Any] = {}
+        self._last_pregate_log_at_by_symbol_reason: dict[tuple[str, str], float] = {}
         self._last_eval_price_by_symbol: dict[str, float] = {}
         self._last_same_bar_eval_block_reason_by_symbol: dict[str, str] = {}
         self._last_same_bar_eval_block_detail_by_symbol: dict[str, dict[str, Any]] = {}
@@ -7290,6 +7299,113 @@ class StrategyRunner:
                     return payload
         return None
 
+    def _current_eval_bar_key(self, symbol: str, tick: Mapping[str, Any] | None = None) -> Any:
+        """Return the current evaluation bar identity for same-bar throttling."""
+        symbol_norm = normalize_symbol(symbol)
+        version = int((getattr(self, "_candle_versions", {}) or {}).get(symbol_norm, 0) or 0)
+        if version > 0:
+            return ("version", version)
+        if tick:
+            for key in ("bar_key", "candle_key", "bar_ts", "candle_ts", "timestamp", "ts"):
+                value = tick.get(key)
+                if value not in (None, ""):
+                    return (key, str(value))
+        last_bar = (getattr(self, "_last_bar_ts", {}) or {}).get(symbol_norm)
+        if last_bar is not None:
+            return ("last_bar_ts", last_bar.isoformat() if hasattr(last_bar, "isoformat") else str(last_bar))
+        return ("symbol", symbol_norm)
+
+    def _quote_update_version_for_eval(self, symbol: str) -> int | None:
+        """Return quote update version for pregate diagnostics when available."""
+        symbol_norm = normalize_symbol(symbol)
+        try:
+            value = (getattr(self, "_quote_update_versions", {}) or {}).get(symbol_norm)
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+        for source in (getattr(self, "_data_hub", None), getattr(self, "_market_data", None)):
+            fn = getattr(source, "quote_update_version", None)
+            if not callable(fn):
+                continue
+            try:
+                value = fn(symbol_norm)
+            except Exception:
+                continue
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _should_skip_symbol_eval(
+        self,
+        symbol: str,
+        tick: Mapping[str, Any] | None = None,
+        *,
+        bar_key: Any | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Apply only the same-bar periodic evaluation throttle."""
+        cfg = getattr(self, "_config", StrategyRunnerConfig())
+        symbol_norm = normalize_symbol(symbol)
+        now_mono = time.monotonic()
+        current_bar_key = bar_key if bar_key is not None else self._current_eval_bar_key(symbol_norm, tick)
+        last_bar_key = (getattr(self, "_last_eval_bar_key_by_symbol", {}) or {}).get(symbol_norm)
+        last_eval_at = float((getattr(self, "_last_periodic_eval_at_by_symbol", {}) or {}).get(symbol_norm, 0.0) or 0.0)
+        interval = max(float(getattr(cfg, "same_bar_periodic_eval_seconds", 5.0) or 5.0), 3.0)
+        elapsed = (now_mono - last_eval_at) if last_eval_at > 0 else None
+        details: dict[str, Any] = {
+            "bar_key": current_bar_key,
+            "same_bar_elapsed_s": round(elapsed, 3) if elapsed is not None else None,
+            "same_bar_interval_s": interval,
+            "pregate_reason": "ok",
+            "eval_throttle_elapsed_s": round(elapsed, 3) if elapsed is not None else None,
+            "quote_update_version": self._quote_update_version_for_eval(symbol_norm),
+            "data_phase": (getattr(self, "_data_phase", {}) or {}).get(symbol_norm),
+        }
+        if last_bar_key == current_bar_key and last_eval_at > 0 and elapsed is not None and elapsed < interval:
+            details["pregate_reason"] = "same_bar_periodic_eval_throttled"
+            return True, "same_bar_periodic_eval_throttled", details
+        return False, "ok", details
+
+    def _mark_symbol_eval_allowed(self, symbol: str, *, bar_key: Any | None = None, tick: Mapping[str, Any] | None = None) -> None:
+        """Record a permitted strategy evaluation for future same-bar throttling."""
+        symbol_norm = normalize_symbol(symbol)
+        if not hasattr(self, "_last_periodic_eval_at_by_symbol"):
+            self._last_periodic_eval_at_by_symbol = {}
+        if not hasattr(self, "_last_eval_bar_key_by_symbol"):
+            self._last_eval_bar_key_by_symbol = {}
+        self._last_periodic_eval_at_by_symbol[symbol_norm] = time.monotonic()
+        self._last_eval_bar_key_by_symbol[symbol_norm] = bar_key if bar_key is not None else self._current_eval_bar_key(symbol_norm, tick)
+
+    def _log_eval_pregate_skip(self, symbol: str, reason: str, details: Mapping[str, Any]) -> None:
+        """Emit throttled structured same-bar pregate skip diagnostics."""
+        if not hasattr(self, "_last_pregate_log_at_by_symbol_reason"):
+            self._last_pregate_log_at_by_symbol_reason = {}
+        key = (normalize_symbol(symbol), reason)
+        now_mono = time.monotonic()
+        interval = float(os.getenv("RUNNER_EVAL_PREGATE_SKIP_LOG_SECONDS", "30") or "30")
+        last = float(self._last_pregate_log_at_by_symbol_reason.get(key, 0.0) or 0.0)
+        if last and now_mono - last < interval:
+            return
+        self._last_pregate_log_at_by_symbol_reason[key] = now_mono
+        payload = {
+            "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+            "symbol": normalize_symbol(symbol),
+            "reason": reason,
+            **dict(details),
+        }
+        self._logger.info(
+            "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=%s bar_key=%s same_bar_elapsed_s=%s same_bar_interval_s=%s quote_update_version=%s",
+            payload["symbol"],
+            reason,
+            payload.get("bar_key"),
+            payload.get("same_bar_elapsed_s"),
+            payload.get("same_bar_interval_s"),
+            payload.get("quote_update_version"),
+            extra=payload,
+        )
+
     def _get_cached_quote_for_live_entry(self, symbol: str) -> dict[str, Any]:
         symbol_norm = normalize_symbol(symbol)
         hub = getattr(self, "_data_hub", None)
@@ -9998,6 +10114,22 @@ class StrategyRunner:
                                 )
                                 _mc_counts.clear()
                             return
+                    _same_bar_pregate_skip, _same_bar_pregate_reason, _same_bar_pregate_details = self._should_skip_symbol_eval(
+                        symbol,
+                        tick,
+                        bar_key=pending_eval_bar_ts or self._current_eval_bar_key(symbol, tick),
+                    )
+                    if _same_bar_pregate_skip:
+                        self._log_eval_pregate_skip(symbol, _same_bar_pregate_reason, _same_bar_pregate_details)
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage="phase9_pregate",
+                            reason=_same_bar_pregate_reason,
+                            allowed=False,
+                            trace_id=trace_id,
+                            **_same_bar_pregate_details,
+                        )
+                        return
                     # ── OPTION PRE-GATES ───────────────────────────────────────────
                     # For option symbols, validate quote quality before calling strategy
                     # evaluator. These gates only skip evaluation — they do NOT affect
@@ -10080,6 +10212,11 @@ class StrategyRunner:
                                                    "spread": _pg_spread, "max_spread_abs": _max_spread_abs_f},
                                         )
                                     return
+                    self._mark_symbol_eval_allowed(
+                        symbol,
+                        bar_key=_same_bar_pregate_details.get("bar_key") if isinstance(_same_bar_pregate_details, Mapping) else None,
+                        tick=tick,
+                    )
                     # ── END PRE-GATES ──────────────────────────────────────────────
                     self._last_global_eval_ts = time.monotonic()
                     self._logger.debug(

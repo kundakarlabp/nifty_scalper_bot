@@ -664,3 +664,15 @@ RUNNER_HISTORY_RESEEDED symbol=NFO:...CE runner_bars=30 indicator_bars=30 min_ba
 ACTIVE_BASKET_PROMOTED selected_ce=NFO:...CE selected_pe=NFO:...PE ce_bars=30 pe_bars=30 required=30
 READINESS_BLOCKER_SUMMARY blockers=[] data_hard_ready=True evaluation_ready=True execution_ready=True live_orders_armed=True
 ```
+
+## StrategyRunner same-bar evaluation throttle
+
+StrategyRunner can skip repeated same-bar strategy computation while still
+letting hydration, DataHub updates, active basket selection, subscriptions, and
+readiness state proceed normally. New bars evaluate immediately; same-bar
+periodic re-evaluation is allowed after this interval, with a runtime lower bound
+of 3 seconds.
+
+```env
+RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS=5
+```
