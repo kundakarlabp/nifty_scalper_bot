@@ -4743,6 +4743,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     position_state_path = Path(data_dir) / "positions.json"
     position_manager = PositionManager(state_file=str(position_state_path))
     position_manager.attach_persistent_state(persistent_state)
+    if hasattr(market_data_manager, "set_position_manager"):
+        market_data_manager.set_position_manager(position_manager)
 
     broker_sync_attempts = max(
         1,

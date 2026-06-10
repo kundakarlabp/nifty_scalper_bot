@@ -301,6 +301,8 @@ class MarketDataManager:
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._last_cumulative_volume_by_symbol: dict[str, float] = {}
+        self._volume_delta_clamp_stats: dict[str, dict[str, float]] = {}
+        self._last_volume_delta_clamp_summary_ts: dict[str, float] = {}
         self._last_tick_snapshot: dict[str, dict[str, Any]] = {}
         self._readiness_requirements: dict[str, Any] = {}
         self._last_readiness_state: dict[str, Any] = {
@@ -327,7 +329,18 @@ class MarketDataManager:
             maxsize=self._tick_queue_maxsize
         )
         self._tick_queue_dropped = 0
+        self._tick_queue_priority_drops: dict[str, int] = defaultdict(int)
+        self._tick_queue_priority_coalesced: dict[str, int] = defaultdict(int)
         self._last_tick_queue_full_log = 0.0
+        self._last_bus_priority_summary_ts = 0.0
+        self._bus_priority_counts: dict[str, int] = defaultdict(int)
+        self._bus_backpressure_counts: dict[str, int] = {}
+        self._bus_backpressure_drops_by_priority: dict[str, int] = defaultdict(int)
+        self._bus_backpressure_coalesced_by_priority: dict[str, int] = defaultdict(int)
+        self._bus_latest_coalesced_ticks: dict[str, dict[str, Any]] = {}
+        self._last_open_position_priority_log: dict[str, float] = {}
+        self._position_manager: Any | None = None
+        self._open_position_symbols: set[str] = set()
         self._tick_consumer_task: asyncio.Task[None] | None = None
         # Fallback worker thread for when no asyncio loop is registered
         # (e.g. early boot, polling-only mode).  Isolates the WS thread
@@ -4720,9 +4733,205 @@ class MarketDataManager:
         else:
             loop.call_soon_threadsafe(_start)
 
+
+    def set_position_manager(self, position_manager: Any | None) -> None:
+        """Attach position manager for tick-priority decisions only."""
+        self._position_manager = position_manager
+
+    def set_open_position_symbols(self, symbols: Iterable[str]) -> None:
+        """Set open-position symbols for tests/adapters. Args: symbols. Returns: None."""
+        self._open_position_symbols = {
+            self._canonical_symbol(str(symbol)) for symbol in symbols if str(symbol or "").strip()
+        }
+
+    def _open_position_symbol_set(self) -> set[str]:
+        """Return canonical symbols with open positions without changing execution state."""
+        symbols = set(getattr(self, "_open_position_symbols", set()) or set())
+        manager = getattr(self, "_position_manager", None)
+        getter = getattr(manager, "get_open_positions", None) if manager is not None else None
+        if callable(getter):
+            try:
+                for pos in getter() or []:
+                    raw_symbol = getattr(pos, "symbol", None)
+                    if raw_symbol is None and isinstance(pos, Mapping):
+                        raw_symbol = pos.get("symbol")
+                    if raw_symbol:
+                        symbols.add(self._canonical_symbol(str(raw_symbol)))
+            except Exception as exc:  # noqa: BLE001 - diagnostics only; never block ticks
+                log_throttled(
+                    self._logger,
+                    "mdm_open_position_priority_lookup_failed",
+                    "MDM_OPEN_POSITION_PRIORITY_LOOKUP_FAILED error=%s" % exc,
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                )
+        return symbols
+
+    def _selected_option_symbol_set(self) -> set[str]:
+        """Return selected CE/PE symbols from the active basket."""
+        basket = getattr(self, "_active_contract_basket", None)
+        symbols: set[str] = set()
+        for key in ("selected_ce", "selected_pe"):
+            raw = self._basket_value(basket, key, None) if basket is not None else None
+            if raw:
+                symbols.add(self._canonical_symbol(str(raw)))
+        for attr in ("_selected_ce_symbol", "_selected_pe_symbol", "selected_ce_symbol", "selected_pe_symbol"):
+            raw = getattr(self, attr, None)
+            if raw:
+                symbols.add(self._canonical_symbol(str(raw)))
+        return symbols
+
+    def _near_atm_symbol_set(self) -> set[str]:
+        """Return canonical active basket option symbols treated as near-ATM context."""
+        basket = getattr(self, "_active_contract_basket", None)
+        raw_symbols = []
+        if basket is not None:
+            raw_symbols = list(
+                self._basket_value(basket, "option_symbols", None)
+                or self._basket_value(basket, "all_symbols", None)
+                or self._basket_value(basket, "symbols", [])
+                or []
+            )
+        return {
+            self._canonical_symbol(str(symbol))
+            for symbol in raw_symbols
+            if str(symbol or "").strip().upper().endswith(("CE", "PE"))
+        }
+
+    def _resolve_tick_symbol_for_priority(self, tick: Mapping[str, Any]) -> str:
+        """Resolve canonical tick symbol for priority/coalescing."""
+        raw_symbol = str(tick.get("symbol") or "").strip()
+        if raw_symbol:
+            return self._canonical_symbol(raw_symbol)
+        token_raw = tick.get("instrument_token") or tick.get("token")
+        if token_raw is not None:
+            try:
+                token = int(token_raw)
+            except (TypeError, ValueError):
+                token = 0
+            if token > 0:
+                with self._lock:
+                    mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
+                if mapped:
+                    return self._canonical_symbol(str(mapped))
+        return "UNKNOWN"
+
+    def _tick_priority(self, symbol: str) -> tuple[int, str]:
+        """Return lower-is-higher priority for tick fan-out."""
+        canonical = self._canonical_symbol(symbol) if symbol and symbol != "UNKNOWN" else symbol
+        if canonical in self._open_position_symbol_set():
+            return 0, "open_position"
+        if canonical in self._selected_option_symbol_set():
+            return 1, "selected_option"
+        if canonical in self._near_atm_symbol_set():
+            return 2, "near_atm"
+        return 3, "context_or_far"
+
+    def _emit_priority_summaries_if_due(self) -> None:
+        """Emit throttled bus/tick priority and backpressure summaries."""
+        now = time.monotonic()
+        if now - float(getattr(self, "_last_bus_priority_summary_ts", 0.0) or 0.0) < 30.0:
+            return
+        self._last_bus_priority_summary_ts = now
+        priority_counts = dict(getattr(self, "_bus_priority_counts", {}) or {})
+        queue_drops = dict(getattr(self, "_tick_queue_priority_drops", {}) or {})
+        queue_coalesced = dict(getattr(self, "_tick_queue_priority_coalesced", {}) or {})
+        bp_drops = dict(getattr(self, "_bus_backpressure_drops_by_priority", {}) or {})
+        bp_coalesced = dict(getattr(self, "_bus_backpressure_coalesced_by_priority", {}) or {})
+        if priority_counts:
+            self._logger.info(
+                "MDM_BUS_PRIORITY_SUMMARY published=%s queue_drops=%s queue_coalesced=%s",
+                priority_counts,
+                queue_drops,
+                queue_coalesced,
+                extra={"event": "MDM_BUS_PRIORITY_SUMMARY", "published": priority_counts, "queue_drops": queue_drops, "queue_coalesced": queue_coalesced},
+            )
+            self._bus_priority_counts.clear()
+        if bp_drops or bp_coalesced:
+            self._logger.warning(
+                "MDM_BUS_BACKPRESSURE_SUMMARY dropped_by_priority=%s coalesced_by_priority=%s latest_cache_size=%d",
+                bp_drops,
+                bp_coalesced,
+                len(getattr(self, "_bus_latest_coalesced_ticks", {}) or {}),
+                extra={"event": "MDM_BUS_BACKPRESSURE_SUMMARY", "dropped_by_priority": bp_drops, "coalesced_by_priority": bp_coalesced},
+            )
+            self._bus_backpressure_drops_by_priority.clear()
+            self._bus_backpressure_coalesced_by_priority.clear()
+        self._tick_queue_priority_drops.clear()
+        self._tick_queue_priority_coalesced.clear()
+
+    def _log_open_position_priority_if_needed(self, symbol: str) -> None:
+        """Log once per minute when open-position priority is active."""
+        now = time.monotonic()
+        last = float(self._last_open_position_priority_log.get(symbol, 0.0) or 0.0)
+        if now - last < 60.0:
+            return
+        self._last_open_position_priority_log[symbol] = now
+        self._logger.info(
+            "OPEN_POSITION_TICK_PRIORITY_ACTIVE symbol=%s",
+            symbol,
+            extra={"event": "OPEN_POSITION_TICK_PRIORITY_ACTIVE", "symbol": symbol},
+        )
+
+    def _put_priority_tick_nowait(self, queue: asyncio.Queue, tick_payload: dict[str, Any]) -> bool:
+        """Insert tick into queue, evicting/coalescing lower priority first when full."""
+        symbol = self._resolve_tick_symbol_for_priority(tick_payload)
+        priority, bucket = self._tick_priority(symbol)
+        tick_payload["_mdm_priority"] = priority
+        tick_payload["_mdm_priority_bucket"] = bucket
+        if priority == 0:
+            self._log_open_position_priority_if_needed(symbol)
+        try:
+            queue.put_nowait(tick_payload)
+            self._bus_priority_counts[bucket] += 1
+            return True
+        except asyncio.QueueFull:
+            retained: list[dict[str, Any]] = []
+            dropped = False
+            try:
+                while True:
+                    existing = queue.get_nowait()
+                    existing_symbol = self._resolve_tick_symbol_for_priority(existing if isinstance(existing, Mapping) else {})
+                    existing_priority, existing_bucket = self._tick_priority(existing_symbol)
+                    if not dropped and existing_priority > priority:
+                        dropped = True
+                        self._tick_queue_priority_drops[existing_bucket] += 1
+                        continue
+                    if not dropped and existing_symbol == symbol and existing_priority >= priority:
+                        dropped = True
+                        self._tick_queue_priority_coalesced[existing_bucket] += 1
+                        continue
+                    retained.append(existing)
+            except asyncio.QueueEmpty:
+                pass
+            for item in retained:
+                try:
+                    queue.put_nowait(item)
+                except asyncio.QueueFull:
+                    break
+            if not dropped and priority >= 2:
+                self._tick_queue_priority_drops[bucket] += 1
+                return False
+            if not dropped:
+                try:
+                    _ = queue.get_nowait()
+                    self._tick_queue_priority_drops["forced_oldest"] += 1
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(tick_payload)
+                self._bus_priority_counts[bucket] += 1
+                return True
+            except asyncio.QueueFull:
+                self._tick_queue_priority_drops[bucket] += 1
+                return False
+
     async def push_tick(self, raw_tick: dict[str, Any]) -> None:
-        """Queue one raw websocket tick for deterministic consumption."""
-        await self._tick_queue.put(dict(raw_tick))
+        """Queue one raw websocket tick for deterministic consumption without blocking WS callbacks."""
+        payload = dict(raw_tick)
+        if not self._put_priority_tick_nowait(self._tick_queue, payload):
+            self._tick_queue_dropped += 1
+        self._emit_priority_summaries_if_due()
 
     def _enqueue_tick_threadsafe(self, tick: dict[str, Any]) -> None:
         """Enqueue websocket ticks from sync callbacks onto the async queue.
@@ -4752,25 +4961,16 @@ class MarketDataManager:
         # thread never performs processing work inline.
         self._ensure_tick_worker()
         try:
-            self._tick_queue.put_nowait(tick_payload)
-        except asyncio.QueueFull:
-            # Drop oldest to make room; throttle-log every 5 s.
-            self._tick_queue_dropped += 1
-            try:
-                _ = self._tick_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            try:
-                self._tick_queue.put_nowait(tick_payload)
-            except asyncio.QueueFull:  # pragma: no cover
-                pass
-            now = time.monotonic()
-            if now - self._last_tick_queue_full_log > 5.0:
-                self._last_tick_queue_full_log = now
-                self._logger.warning(
-                    "Tick queue full — dropped %d ticks so far",
-                    self._tick_queue_dropped,
-                )
+            if not self._put_priority_tick_nowait(self._tick_queue, tick_payload):
+                self._tick_queue_dropped += 1
+                now = time.monotonic()
+                if now - self._last_tick_queue_full_log > 5.0:
+                    self._last_tick_queue_full_log = now
+                    self._logger.warning(
+                        "Tick queue full — dropped %d ticks so far",
+                        self._tick_queue_dropped,
+                    )
+            self._emit_priority_summaries_if_due()
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
 
@@ -5234,30 +5434,44 @@ class MarketDataManager:
             delta = 0.0
         symbol_upper = str(symbol or "").upper()
         is_option_symbol = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
+        volume_delta_untrusted = False
+        if previous is not None and cumulative < previous:
+            payload["volume_delta_reset"] = True
         if is_option_symbol:
             max_delta = float(os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000") or "1000000")
             if delta > max_delta:
-                self._logger.warning(
-                    "OPTION_VOLUME_DELTA_CLAMPED symbol=%s cumulative=%s previous=%s delta=%s max_delta=%s",
-                    symbol,
-                    cumulative,
-                    previous,
-                    delta,
-                    max_delta,
-                    extra={
-                        "event": "OPTION_VOLUME_DELTA_CLAMPED",
-                        "symbol": symbol,
-                        "cumulative": cumulative,
-                        "previous": previous,
-                        "delta": delta,
-                        "max_delta": max_delta,
-                    },
+                volume_delta_untrusted = True
+                stats = self._volume_delta_clamp_stats.setdefault(
+                    key, {"count": 0.0, "max_delta": 0.0}
                 )
-                delta = 0.0
+                stats["count"] = float(stats.get("count", 0.0)) + 1.0
+                stats["max_delta"] = max(float(stats.get("max_delta", 0.0)), float(delta))
+                now_mono = time.monotonic()
+                last_summary = float(self._last_volume_delta_clamp_summary_ts.get(key, 0.0) or 0.0)
+                if now_mono - last_summary >= 60.0:
+                    self._last_volume_delta_clamp_summary_ts[key] = now_mono
+                    self._logger.warning(
+                        "OPTION_VOLUME_DELTA_CLAMP_SUMMARY symbol=%s count=%d max_delta=%s threshold=%s",
+                        symbol,
+                        int(stats.get("count", 0.0)),
+                        stats.get("max_delta", 0.0),
+                        max_delta,
+                        extra={
+                            "event": "OPTION_VOLUME_DELTA_CLAMP_SUMMARY",
+                            "symbol": symbol,
+                            "count": int(stats.get("count", 0.0)),
+                            "max_delta": stats.get("max_delta", 0.0),
+                            "threshold": max_delta,
+                        },
+                    )
+                    stats["count"] = 0.0
+                    stats["max_delta"] = 0.0
+                delta = max_delta
         self._last_cumulative_volume_by_symbol[key] = cumulative
         payload["volume_cumulative"] = cumulative
         payload["volume_delta"] = delta
         payload["volume"] = delta
+        payload["volume_delta_untrusted"] = volume_delta_untrusted
         return payload
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
@@ -5610,6 +5824,77 @@ class MarketDataManager:
                 },
             )
 
+
+    async def _publish_tick_message_with_priority(self, bus: Any, msg: Message, *, symbol: str, priority: int, bucket: str) -> None:
+        """Publish tick message while protecting high-priority symbols from queue pressure."""
+        queues = getattr(bus, "queues", None)
+        queue = queues.get(MessageType.TICK) if isinstance(queues, Mapping) else None
+        if queue is None:
+            await bus.publish(msg)
+            return
+        if priority == 0:
+            self._log_open_position_priority_if_needed(symbol)
+        try:
+            queue.put_nowait(msg)
+            self._bus_priority_counts[bucket] += 1
+            return
+        except asyncio.QueueFull:
+            pass
+
+        # Queue is full. Low-priority universe ticks are coalesced in the latest
+        # cache first; selected/open-position ticks try to evict lower priority
+        # messages already waiting in the bus queue.
+        if priority >= 2:
+            self._bus_latest_coalesced_ticks[symbol] = dict(msg.data or {})
+            self._bus_backpressure_coalesced_by_priority[bucket] += 1
+            self._bus_backpressure_drops_by_priority[bucket] += 1
+            self._emit_priority_summaries_if_due()
+            return
+
+        retained: list[Message] = []
+        evicted = False
+        try:
+            while True:
+                existing = queue.get_nowait()
+                existing_symbol = str((getattr(existing, "data", {}) or {}).get("symbol") or "UNKNOWN")
+                existing_priority, existing_bucket = self._tick_priority(existing_symbol)
+                if not evicted and existing_priority > priority:
+                    evicted = True
+                    self._bus_backpressure_drops_by_priority[existing_bucket] += 1
+                    continue
+                retained.append(existing)
+        except asyncio.QueueEmpty:
+            pass
+        for item in retained:
+            try:
+                queue.put_nowait(item)
+            except asyncio.QueueFull:
+                break
+        if not evicted and priority == 0:
+            try:
+                removed = queue.get_nowait()
+                removed_symbol = str((getattr(removed, "data", {}) or {}).get("symbol") or "UNKNOWN")
+                _, removed_bucket = self._tick_priority(removed_symbol)
+                self._bus_backpressure_drops_by_priority[removed_bucket] += 1
+                evicted = True
+            except asyncio.QueueEmpty:
+                evicted = False
+        if not evicted:
+            self._bus_latest_coalesced_ticks[symbol] = dict(msg.data or {})
+            self._bus_backpressure_coalesced_by_priority[bucket] += 1
+            self._bus_backpressure_drops_by_priority[bucket] += 1
+            self._emit_priority_summaries_if_due()
+            return
+        try:
+            queue.put_nowait(msg)
+            self._bus_priority_counts[bucket] += 1
+        except asyncio.QueueFull:
+            self._bus_latest_coalesced_ticks[symbol] = dict(msg.data or {})
+            self._bus_backpressure_coalesced_by_priority[bucket] += 1
+            self._bus_backpressure_drops_by_priority[bucket] += 1
+            self._emit_priority_summaries_if_due()
+            return
+
     def _publish_tick_to_bus_safe(self, tick: dict[str, Any]) -> None:
         """Publish a normalized tick to MessageBus without ever crashing MDM."""
         bus = getattr(self, "bus", None) or getattr(self, "_tick_bus", None)
@@ -5661,7 +5946,15 @@ class MarketDataManager:
                 source="market_data_manager",
                 timestamp=time.time(),
             )
-            future = asyncio.run_coroutine_threadsafe(bus.publish(msg), loop)
+            _symbol = str(payload.get("symbol") or tick.get("symbol") or "UNKNOWN")
+            _priority, _bucket = self._tick_priority(_symbol)
+            future = asyncio.run_coroutine_threadsafe(
+                self._publish_tick_message_with_priority(
+                    bus, msg, symbol=_symbol, priority=_priority, bucket=_bucket
+                ),
+                loop,
+            )
+            self._emit_priority_summaries_if_due()
 
             def _done(fut: Any) -> None:
                 try:
@@ -5673,6 +5966,8 @@ class MarketDataManager:
                         self._bus_backpressure_counts: dict[str, int] = {}
                         _bp_counts = self._bus_backpressure_counts
                     _bp_counts[_bp_sym] = _bp_counts.get(_bp_sym, 0) + 1
+                    _bp_priority, _bp_bucket = self._tick_priority(str(_bp_sym))
+                    self._bus_backpressure_drops_by_priority[_bp_bucket] += 1
                     log_throttled(
                         self._logger,
                         "mdm_bus_publish_failed",
@@ -8487,6 +8782,8 @@ class MarketDataManager:
                 "volume": volume_delta_value,
                 "volume_delta": volume_delta_value,
                 "volume_cumulative": volume_cumulative_value,
+                "volume_delta_untrusted": bool(raw.get("volume_delta_untrusted")),
+                "volume_delta_reset": bool(raw.get("volume_delta_reset")),
                 "oi": _coerce_int(raw.get("oi")),
                 "depth": depth_obj,
                 "depth_available": bool(depth_obj),
