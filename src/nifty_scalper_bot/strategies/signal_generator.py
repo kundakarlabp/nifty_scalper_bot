@@ -19,10 +19,16 @@ import math
 import os
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
+from nifty_scalper_bot.config.env_utils import parse_bool_env, parse_float_env
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
+
+# Strategy-name tags for ADX regime gating (mean-reversion off in trends,
+# trend-following off in ranges). Names match Strategy.name values.
+_MEAN_REVERSION_TAGS: tuple[str, ...] = ("Mean Reversion", "Bollinger")
+_TREND_TAGS: tuple[str, ...] = ("Crossover", "MACD", "Breakout", "ORB")
 
 logger = get_logger(__name__)
 
@@ -1440,6 +1446,11 @@ class StrategyManager:
         bar_count = int(float(indicators.get("bar_count", 0)))
         vix = float(indicators.get("vix") or 15.0)
         regime_factor = self._get_regime_modifier(vix)
+        regime_gate_enabled = parse_bool_env(os.getenv("REGIME_GATE_ENABLED"), True)
+        adx_raw = indicators.get("adx")
+        adx = float(adx_raw) if adx_raw is not None else None
+        adx_trend_min = parse_float_env(os.getenv("REGIME_ADX_TREND_MIN"), 25.0)
+        adx_range_max = parse_float_env(os.getenv("REGIME_ADX_RANGE_MAX"), 18.0)
         vwap = float(
             indicators.get("futures_vwap")
             or indicators.get("nifty_fut_vwap")
@@ -1499,6 +1510,27 @@ class StrategyManager:
                     )
                     skip_count += 1
                     continue
+
+                # Gating: ADX regime hard gate (trend vs range strategy classes)
+                if regime_gate_enabled and adx is not None:
+                    is_mean_rev = any(t in strategy.name for t in _MEAN_REVERSION_TAGS)
+                    is_trend = any(t in strategy.name for t in _TREND_TAGS)
+                    if adx >= adx_trend_min and is_mean_rev:
+                        logger.debug(
+                            "strategy_skip_regime",
+                            extra={"event": "strategy_skip_regime", "strategy": strategy.name,
+                                   "regime": "TREND", "adx": adx},
+                        )
+                        skip_count += 1
+                        continue
+                    if adx <= adx_range_max and is_trend:
+                        logger.debug(
+                            "strategy_skip_regime",
+                            extra={"event": "strategy_skip_regime", "strategy": strategy.name,
+                                   "regime": "RANGE", "adx": adx},
+                        )
+                        skip_count += 1
+                        continue
 
                 eval_count += 1
                 logger.debug(
