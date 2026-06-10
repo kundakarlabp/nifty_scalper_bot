@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
@@ -19,6 +20,8 @@ class ORBProStrategy(EliteStrategy):
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
+        # One breakout trade per direction per day: {(iso_date, 'CE'|'PE')}
+        self._fired_today: set[tuple[str, str]] = set()
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicators set. Raises: Exception."""
@@ -57,6 +60,12 @@ class ORBProStrategy(EliteStrategy):
             breakout_side = 'CE' if close > orb_high else 'PE' if close < orb_low else 'UNKNOWN'
             if breakout_side == 'UNKNOWN':
                 self._no_vote('no_breakout')
+                return None
+
+            day_key = (datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat(), breakout_side)
+            if day_key in self._fired_today:
+                self._no_vote('direction_already_traded_today')
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=direction_already_traded_today side=%s', breakout_side)
                 return None
 
             candle_range = max(abs(float(indicators.get('high') or close) - float(indicators.get('low') or close)), 1e-9)
@@ -108,6 +117,10 @@ class ORBProStrategy(EliteStrategy):
                 'invalidation_level': orb_low if breakout_side == 'CE' else orb_high,
             }
             LOGGER.info('STRATEGY_VOTE strategy=ORBPro side=%s score=%.2f', breakout_side, strategy_score)
+            self._fired_today.add(day_key)
+            if len(self._fired_today) > 8:
+                today = day_key[0]
+                self._fired_today = {k for k in self._fired_today if k[0] == today}
             return EliteSignal(
                 symbol=symbol,
                 signal='BUY',
