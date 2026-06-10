@@ -79,29 +79,40 @@ def _basket_attr(basket: Mapping[str, object] | object | None, key: str, default
 
 
 
+BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
+    "hydration_status_by_symbol": dict,
+    "last_hydration_status_at": None,
+    "_active_selection_sync_log_key": None,
+    "_active_selection_drift_log_key": None,
+    "last_active_selection_synced_at": None,
+    "last_active_selection_drift_at": None,
+    "_post_market_basket_skip_log_key": None,
+    "last_post_market_basket_skip_log_at": None,
+    "_deferred_basket_hydration_log_key": None,
+    "last_deferred_basket_hydration_log_at": None,
+    "_live_basket_build_log_key": None,
+    "last_live_basket_build_log_at": None,
+    "_hydration_tracking_log_key": None,
+    "last_hydration_tracking_log_at": None,
+    "_runtime_readiness_log_key": None,
+    "last_runtime_readiness_log_at": None,
+    "_bot_context_runtime_fields_patch_logged": False,
+}
+
+
 def ensure_bot_context_runtime_fields(ctx: Any) -> None:
-    """Initialize optional BotContext runtime fields that may be absent on legacy contexts."""
-    defaults: dict[str, Any] = {
-        "hydration_status_by_symbol": dict,
-        "last_hydration_status_at": None,
-        "_active_selection_sync_log_key": None,
-        "_active_selection_drift_log_key": None,
-        "last_active_selection_synced_at": None,
-        "last_active_selection_drift_at": None,
-        "_bot_context_runtime_fields_patch_logged": False,
-    }
+    """Initialize declared BotContext runtime scratchpad fields on legacy contexts."""
     missing: list[str] = []
-    for name, default in defaults.items():
+    for name, default in BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS.items():
         try:
             getattr(ctx, name)
             continue
         except AttributeError:
-            missing.append(name)
+            pass
         value = default() if callable(default) else default
         try:
             setattr(ctx, name, value)
         except AttributeError:
-            # Unknown/minimal slotted contexts cannot be repaired safely here.
             LOGGER.error(
                 "BOT_CONTEXT_ATTRIBUTE_MISSING attribute=%s component=runtime_field_initializer repairable=False",
                 name,
@@ -113,24 +124,17 @@ def ensure_bot_context_runtime_fields(ctx: Any) -> None:
                 },
             )
             raise
-    if missing:
-        try:
-            already_logged = bool(getattr(ctx, "_bot_context_runtime_fields_patch_logged", False))
-            if not already_logged:
-                LOGGER.warning(
-                    "BOT_CONTEXT_RUNTIME_FIELDS_INITIALIZED missing=%s",
-                    missing,
-                    extra={
-                        "event": "BOT_CONTEXT_RUNTIME_FIELDS_INITIALIZED",
-                        "missing": missing,
-                    },
-                )
-                try:
-                    setattr(ctx, "_bot_context_runtime_fields_patch_logged", True)
-                except AttributeError:
-                    pass
-        except AttributeError:
-            pass
+        missing.append(name)
+    if missing and not bool(getattr(ctx, "_bot_context_runtime_fields_patch_logged", False)):
+        LOGGER.warning(
+            "BOT_CONTEXT_RUNTIME_FIELDS_INITIALIZED missing=%s",
+            missing,
+            extra={
+                "event": "BOT_CONTEXT_RUNTIME_FIELDS_INITIALIZED",
+                "missing": missing,
+            },
+        )
+        setattr(ctx, "_bot_context_runtime_fields_patch_logged", True)
 
 
 def _log_bot_context_attribute_missing(exc: AttributeError, *, component: str) -> None:
@@ -195,6 +199,7 @@ def _sync_active_selection_from_basket(ctx: Any, selection: ActiveContractSelect
 
 
 def _should_skip_post_market_basket_refresh(ctx: Any, *, force: bool = False) -> tuple[bool, float]:
+    ensure_bot_context_runtime_fields(ctx)
     if force or not post_market_quiet_mode_enabled():
         return False, 0.0
     mode = get_runtime_market_mode()
@@ -211,7 +216,8 @@ def _should_skip_post_market_basket_refresh(ctx: Any, *, force: bool = False) ->
         return False, 0.0
     key = (mode, int(remaining // 60))
     if getattr(ctx, "_post_market_basket_skip_log_key", None) != key:
-        ctx._post_market_basket_skip_log_key = key
+        setattr(ctx, "_post_market_basket_skip_log_key", key)
+        setattr(ctx, "last_post_market_basket_skip_log_at", time_module.time())
         LOGGER.info(
             "ACTIVE_BASKET_REFRESH_SKIPPED reason=post_market_quiet_mode next_refresh_in_s=%d",
             int(remaining),
@@ -2583,6 +2589,16 @@ class BotContext:
     _active_selection_drift_log_key: object | None = None
     last_active_selection_synced_at: float | None = None
     last_active_selection_drift_at: float | None = None
+    _post_market_basket_skip_log_key: object | None = None
+    last_post_market_basket_skip_log_at: float | None = None
+    _deferred_basket_hydration_log_key: object | None = None
+    last_deferred_basket_hydration_log_at: float | None = None
+    _live_basket_build_log_key: object | None = None
+    last_live_basket_build_log_at: float | None = None
+    _hydration_tracking_log_key: object | None = None
+    last_hydration_tracking_log_at: float | None = None
+    _runtime_readiness_log_key: object | None = None
+    last_runtime_readiness_log_at: float | None = None
     _bot_context_runtime_fields_patch_logged: bool = False
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
@@ -5844,6 +5860,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_manager_data_hub_attached=risk_manager_data_hub_attached,
         bracket_manager_attached=bracket_manager_attached,
     )
+    ensure_bot_context_runtime_fields(ctx)
 
     # Wire InstrumentManager to MDM and UnifiedManager for symbol/token resolution
     if ctx.instrument_manager is not None:
@@ -8679,6 +8696,7 @@ async def _deferred_basket_hydration_retry(
 ) -> None:
     """Retry startup basket hydration until fresh WS spot arrives. Args: ctx/mode. Returns: none. Raises: none."""
 
+    ensure_bot_context_runtime_fields(ctx)
     if max_attempts is None:
         max_attempts = int(os.getenv("DEFERRED_BASKET_MAX_ATTEMPTS", "160") or "160")
     policy = MarketDataPolicy.from_env()
@@ -8793,6 +8811,7 @@ async def _build_and_hydrate_live_basket_from_spot(
 ) -> dict[str, Any]:
     """Build/register/hydrate live basket from a trusted spot. Args: ctx/spot/mode. Returns: basket. Raises: RuntimeError."""
 
+    ensure_bot_context_runtime_fields(ctx)
     del configured_mode
     lock = _get_basket_build_lock(ctx)
     if lock.locked():
@@ -8958,6 +8977,7 @@ def _get_basket_build_lock(ctx: BotContext) -> asyncio.Lock:
 def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, reason: str = "market_closed_or_spot_not_ready", spot_ltp: float | None = None) -> None:
     """Schedule one deferred basket retry task. Args: ctx/mode. Returns: none. Raises: none."""
 
+    ensure_bot_context_runtime_fields(ctx)
     ctx.live_orders_armed = False
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP"
@@ -9019,6 +9039,7 @@ def _resolve_quote_capability(ctx: BotContext) -> dict[str, Any]:
 
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
+    ensure_bot_context_runtime_fields(ctx)
     policy = MarketDataPolicy.from_env()
     _set_startup_phase(ctx, "create_context")
     configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
@@ -11099,6 +11120,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 startup_trade_ready = True
             else:
+                ensure_bot_context_runtime_fields(ctx)
                 if isinstance(e, AttributeError):
                     _log_bot_context_attribute_missing(e, component="hydration_tracking")
                 norm_basket = normalize_active_basket_schema(dict(getattr(ctx, "active_trading_universe", {}) or {}))
