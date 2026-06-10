@@ -9,6 +9,7 @@ from typing import Any
 
 from nifty_scalper_bot.config.env_utils import parse_int_env
 from nifty_scalper_bot.risk.cost_model import passes_cost_edge_gate
+from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
 LOGGER = get_logger(__name__)
@@ -81,6 +82,11 @@ class TradeCandidateSelector:
         return 5.0, 10.0, 1
 
     def select_ranked_candidates(self, *, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> list[TradeCandidate]:
+        blocked, gate_reason = expiry_theta_block()
+        if blocked:
+            self._last_rejects = {'expiry_theta_cutoff': len(snapshots)}
+            log_once_or_throttled(LOGGER, f'expiry_theta_cutoff:{direction_bias}', f'CANDIDATE_SELECTION_BLOCKED reason=expiry_theta_cutoff detail={gate_reason} direction={direction_bias} total={len(snapshots)}', interval_sec=60.0, level=logging.INFO, extra={'event': 'CANDIDATE_SELECTION_BLOCKED', 'reason': 'expiry_theta_cutoff', 'detail': gate_reason, 'direction': direction_bias, 'total': len(snapshots)})
+            return []
         max_spread, max_age, min_ticks = self._limits()
         if self.max_option_spread_pct is not None:
             max_spread = float(self.max_option_spread_pct)
