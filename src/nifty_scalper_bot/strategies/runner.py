@@ -4487,8 +4487,8 @@ class StrategyRunner:
                     last_bar_ts = float(pd.Timestamp(parsed_bar_ts).timestamp())
             except Exception:
                 last_bar_ts = 0.0
-            elapsed_since_close = (now_wall - last_bar_ts) if last_bar_ts > 0 else 0.0
-            no_candle_close_produced = bool(last_bar_ts <= 0 or elapsed_since_close > (candle_interval_s + gap_grace_s))
+            elapsed_since_last_bar_s = (now_wall - last_bar_ts) if last_bar_ts > 0 else 0.0
+            no_candle_close_produced = bool(last_bar_ts <= 0 or elapsed_since_last_bar_s > (candle_interval_s + gap_grace_s))
             if fresh_tick:
                 log_throttled_live(
                     self._logger,
@@ -4505,7 +4505,7 @@ class StrategyRunner:
                     gap_summary = {}
                     self._candle_gap_summary = gap_summary
                 gap_summary[symbol] = int(gap_summary.get(symbol, 0)) + 1
-            elif gap_count > 1 and elapsed_since_close > (candle_interval_s + gap_grace_s) and no_candle_close_produced and last_tick_ts <= 0:
+            elif last_tick_ts <= 0:
                 reason = "no_recent_tick_for_gap_assessment"
                 log_throttled_live(
                     self._logger,
@@ -4516,7 +4516,18 @@ class StrategyRunner:
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
                     extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
                 )
-            elif gap_count > 1 and elapsed_since_close > (candle_interval_s + gap_grace_s) and no_candle_close_produced:
+            elif gap_count > 1 and elapsed_since_last_bar_s <= (candle_interval_s + gap_grace_s):
+                reason = "stale_tick_for_gap_assessment"
+                log_throttled_live(
+                    self._logger,
+                    logging.INFO,
+                    "SOFT_DATA_ISSUE",
+                    f"SOFT_DATA_ISSUE:{symbol}:{reason}",
+                    float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
+                    f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
+                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
+                )
+            elif gap_count > 1 and no_candle_close_produced:
                 reason = "repeated_missing_candles"
                 log_level = logging.INFO if is_option else logging.WARNING
                 log_throttled_live(
@@ -4541,9 +4552,9 @@ class StrategyRunner:
                     "CANDLE_GAP_SUMMARY",
                     f"CANDLE_GAP_SUMMARY:{symbol}",
                     float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
-                    "CANDLE_GAP_SUMMARY symbol=%s suppressed=%s gaps=%s age_s=%s elapsed_since_close_s=%.2f",
-                    symbol, gap_summary.get(symbol, 0), gap_count, tick_age_s, elapsed_since_close,
-                    extra={"event": "CANDLE_GAP_SUMMARY", "symbol": symbol, "suppressed": gap_summary.get(symbol, 0), "gaps": gap_count, "age_s": tick_age_s, "elapsed_since_close_s": elapsed_since_close},
+                    "CANDLE_GAP_SUMMARY symbol=%s suppressed=%s gaps=%s age_s=%s elapsed_since_last_bar_s=%.2f",
+                    symbol, gap_summary.get(symbol, 0), gap_count, tick_age_s, elapsed_since_last_bar_s,
+                    extra={"event": "CANDLE_GAP_SUMMARY", "symbol": symbol, "suppressed": gap_summary.get(symbol, 0), "gaps": gap_count, "age_s": tick_age_s, "elapsed_since_last_bar_s": elapsed_since_last_bar_s},
                 )
 
         if valid_vwap and valid_volume:
@@ -6932,10 +6943,44 @@ class StrategyRunner:
             else:
                 reason = "context_symbol_not_tradable"
         ready = reason is None
+        try:
+            symbol_role = self._symbol_role_for_runner(normalized_boot_symbol)
+        except Exception:
+            symbol_role = "unknown"
         _boot_key = f"bootstrap:{symbol}:{ready}:{reason}"
         _boot_interval = float(os.getenv("RUNNER_BOOTSTRAP_LOG_INTERVAL_SECONDS", "60") or "60")
         if self._should_log_throttled(_boot_key, _boot_interval):
-            self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
+            self._logger.info(
+                "LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s",
+                symbol,
+                ready,
+                reason,
+                extra={
+                    "event": "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
+                    "symbol": symbol,
+                    "evaluated_symbol": normalized_boot_symbol,
+                    "selected_ce": ce_symbol,
+                    "selected_pe": pe_symbol,
+                    "selected_pair": [ce_symbol, pe_symbol],
+                    "symbol_role": symbol_role,
+                    "active_future": fut_symbol or None,
+                    "ce_token": ce_token,
+                    "pe_token": pe_token,
+                    "fut_token": fut_token,
+                    "ce_subscribed": ce_sub,
+                    "pe_subscribed": pe_sub,
+                    "fut_subscribed": fut_sub,
+                    "ce_quote_fresh": ce_quote,
+                    "pe_quote_fresh": pe_quote,
+                    "fut_quote_fresh": fut_quote,
+                    "ce_depth_available": ce_depth,
+                    "pe_depth_available": pe_depth,
+                    "ce_history_count": ce_hist,
+                    "pe_history_count": pe_hist,
+                    "ready": ready,
+                    "reason": reason,
+                },
+            )
         return ready, reason
 
 

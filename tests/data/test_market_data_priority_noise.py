@@ -159,7 +159,7 @@ def test_repeated_missing_candles_suppressed_if_fresh_tick_exists(caplog, monkey
     assert "repeated_missing_candles" not in text
 
 
-def test_selected_option_depth_missing_not_emitted_for_context_symbol() -> None:
+def test_selected_option_depth_missing_not_emitted_for_context_symbol(caplog) -> None:
     runner = _runner()
     runner._current_active_contract_selection = lambda: SimpleNamespace(
         selected_ce="NFO:NIFTY2660923250CE", selected_pe="NFO:NIFTY2660923250PE"
@@ -178,7 +178,194 @@ def test_selected_option_depth_missing_not_emitted_for_context_symbol() -> None:
         _ws=SimpleNamespace(_tokens={1, 2}),
     )
 
+    caplog.set_level(logging.INFO)
+
     ready, reason = runner._emit_live_universe_bootstrap_status(symbol="NSE:NIFTY")
 
     assert ready is False
     assert reason == "context_symbol_not_tradable"
+    record = next(record for record in caplog.records if record.getMessage().startswith("LIVE_UNIVERSE_BOOTSTRAP_STATUS"))
+    assert record.evaluated_symbol == "NSE:NIFTY"
+    assert record.selected_ce == "NFO:NIFTY2660923250CE"
+    assert record.selected_pe == "NFO:NIFTY2660923250PE"
+    assert record.selected_pair == ["NFO:NIFTY2660923250CE", "NFO:NIFTY2660923250PE"]
+    assert record.symbol_role == "spot_context"
+    assert record.reason == "context_symbol_not_tradable"
+    assert record.ready is False
+
+
+def _queued_symbols(manager: MarketDataManager) -> list[str]:
+    return [manager._tick_queue.get_nowait()["symbol"] for _ in range(manager._tick_queue.qsize())]
+
+
+def test_same_symbol_open_position_tick_is_coalesced() -> None:
+    manager = _mdm()
+    symbol = "NFO:NIFTY2660923250CE"
+    manager.set_open_position_symbols([symbol])
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": symbol, "ltp": 1})
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": "NFO:NIFTY2660923250PE", "ltp": 2})
+
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": symbol, "ltp": 3})
+
+    queued = _queued_symbols(manager)
+    assert queued.count(symbol) == 1
+    assert manager._tick_queue_priority_coalesced["open_position"] == 1
+
+
+def test_different_open_position_symbol_forced_drop_logs_critical(caplog) -> None:
+    manager = _mdm()
+    first = "NFO:NIFTY2660923250CE"
+    second = "NFO:NIFTY2660923250PE"
+    third = "NFO:NIFTY2660923300CE"
+    manager.set_open_position_symbols([first, second, third])
+    caplog.set_level(logging.CRITICAL)
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": first, "ltp": 1})
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": second, "ltp": 2})
+
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": third, "ltp": 3})
+
+    queued = _queued_symbols(manager)
+    assert third in queued
+    assert "MDM_OPEN_POSITION_TICK_FORCED_DROP" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_selected_option_displaces_context_or_far_tick() -> None:
+    manager = _mdm()
+    selected = "NFO:NIFTY2660923250PE"
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": "NFO:NIFTY2660923600CE", "ltp": 1})
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": "NSE:NIFTY", "ltp": 2})
+
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": selected, "ltp": 3})
+
+    queued = _queued_symbols(manager)
+    assert selected in queued
+    assert len(queued) == 2
+
+
+def test_context_tick_does_not_displace_selected_or_open_position_tick() -> None:
+    manager = _mdm()
+    open_symbol = "NFO:NIFTY2660923250CE"
+    selected = "NFO:NIFTY2660923250PE"
+    manager.set_open_position_symbols([open_symbol])
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": open_symbol, "ltp": 1})
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": selected, "ltp": 2})
+
+    assert not manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": "NFO:NIFTY2660923800CE", "ltp": 3})
+
+    queued = _queued_symbols(manager)
+    assert open_symbol in queued
+    assert selected in queued
+
+
+def test_position_manager_exception_does_not_block_tick_enqueue(caplog) -> None:
+    class BrokenPositionManager:
+        def get_open_positions(self):
+            raise RuntimeError("boom")
+
+        def place_order(self):  # must never be called
+            raise AssertionError("order placement must not be called")
+
+    manager = _mdm()
+    manager.set_position_manager(BrokenPositionManager())
+    caplog.set_level(logging.WARNING)
+
+    assert manager._put_priority_tick_nowait(manager._tick_queue, {"symbol": "NFO:NIFTY2660923250CE", "ltp": 1})
+    assert "MDM_OPEN_POSITION_PRIORITY_LOOKUP_FAILED" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_priority_lookup_never_calls_order_or_risk_mutation() -> None:
+    class ReadOnlyProbe:
+        def __init__(self) -> None:
+            self.get_open_positions_called = 0
+            self.place_order_called = 0
+            self.risk_mutation_called = 0
+
+        def get_open_positions(self):
+            self.get_open_positions_called += 1
+            return [SimpleNamespace(symbol="NFO:NIFTY2660923250CE")]
+
+        def place_order(self):
+            self.place_order_called += 1
+            raise AssertionError("must not place orders")
+
+        def update_risk(self):
+            self.risk_mutation_called += 1
+            raise AssertionError("must not mutate risk")
+
+    probe = ReadOnlyProbe()
+    manager = _mdm()
+    manager.set_position_manager(probe)
+
+    assert manager._tick_priority("NFO:NIFTY2660923250CE") == (0, "open_position")
+    assert probe.get_open_positions_called == 1
+    assert probe.place_order_called == 0
+    assert probe.risk_mutation_called == 0
+
+
+def test_set_position_manager_only_used_for_read_only_priority_lookup() -> None:
+    from pathlib import Path
+
+    source = Path("src/nifty_scalper_bot/data/market_data_manager.py").read_text(encoding="utf-8")
+    assert "get_open_positions" in source
+    assert "place_order(" not in source[source.index("def _open_position_symbol_set"):source.index("def _selected_option_symbol_set")]
+    assert "risk_manager" not in source[source.index("def _open_position_symbol_set"):source.index("def _selected_option_symbol_set")]
+
+
+def _exercise_gap_case(runner: StrategyRunner, symbol: str, *, tick_ts: float, last_bar_age_s: float, caplog, monkeypatch):
+    import time
+
+    runner._has_session_candle_gaps = lambda _symbol: True
+    runner._session_gap_count[symbol] = 3
+    if tick_ts > 0:
+        runner._last_tick_time_by_symbol[symbol] = tick_ts
+    caplog.set_level(logging.INFO)
+    monkeypatch.setenv("RUNNER_CANDLE_GAP_GRACE_SECONDS", "10")
+    monkeypatch.setenv("RUNNER_CANDLE_GAP_INTERVAL_SECONDS", "60")
+    bar = SimpleNamespace(timestamp=datetime.now(timezone.utc) - timedelta(seconds=last_bar_age_s))
+    return runner.update_symbol_hydration(symbol, [bar, bar], {symbol: {"vwap": 1.0, "cum_volume": 1.0}})
+
+
+def test_candle_gap_no_tick_reason(caplog, monkeypatch) -> None:
+    runner = _runner()
+    symbol = "NFO:NIFTY2660923300CE"
+
+    _exercise_gap_case(runner, symbol, tick_ts=0.0, last_bar_age_s=30.0, caplog=caplog, monkeypatch=monkeypatch)
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "reason=no_recent_tick_for_gap_assessment" in text
+
+
+def test_candle_gap_stale_tick_reason_before_bar_grace(caplog, monkeypatch) -> None:
+    import time
+
+    runner = _runner()
+    symbol = "NFO:NIFTY2660923350CE"
+
+    _exercise_gap_case(runner, symbol, tick_ts=time.time() - 30.0, last_bar_age_s=30.0, caplog=caplog, monkeypatch=monkeypatch)
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "reason=stale_tick_for_gap_assessment" in text
+
+
+def test_candle_gap_repeated_missing_after_grace_with_stale_tick(caplog, monkeypatch) -> None:
+    import time
+
+    runner = _runner()
+    symbol = "NFO:NIFTY2660923400CE"
+
+    state = _exercise_gap_case(runner, symbol, tick_ts=time.time() - 30.0, last_bar_age_s=90.0, caplog=caplog, monkeypatch=monkeypatch)
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "reason=repeated_missing_candles" in text
+    assert state == SymbolState.DEGRADED
+
+
+def test_open_position_add_remove_invalidates_priority_cache() -> None:
+    manager = _mdm()
+    symbol = "NFO:NIFTY2660923450CE"
+
+    assert manager._tick_priority(symbol) != (0, "open_position")
+    manager.add_open_position_symbol(symbol)
+    assert manager._tick_priority(symbol) == (0, "open_position")
+    manager.remove_open_position_symbol(symbol)
+    assert manager._tick_priority(symbol) != (0, "open_position")

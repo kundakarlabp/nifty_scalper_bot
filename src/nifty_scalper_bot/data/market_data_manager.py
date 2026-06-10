@@ -341,6 +341,13 @@ class MarketDataManager:
         self._last_open_position_priority_log: dict[str, float] = {}
         self._position_manager: Any | None = None
         self._open_position_symbols: set[str] = set()
+        self._priority_context_cached_at = 0.0
+        self._priority_context_ttl_s = self._parse_float_env(
+            "MDM_PRIORITY_CONTEXT_TTL_SECONDS", default=0.25, minimum=0.01
+        )
+        self._cached_open_position_symbols: set[str] = set()
+        self._cached_selected_option_symbols: set[str] = set()
+        self._cached_near_atm_symbols: set[str] = set()
         self._tick_consumer_task: asyncio.Task[None] | None = None
         # Fallback worker thread for when no asyncio loop is registered
         # (e.g. early boot, polling-only mode).  Isolates the WS thread
@@ -1848,6 +1855,7 @@ class MarketDataManager:
         )
         with self._lock:
             self._active_contract_basket = basket
+            self._invalidate_priority_context_cache()
             self._desired_tokens.update(tokens)
             for sym, tok in token_map.items():
                 canonical = self._safe_canonical_for_basket(sym)
@@ -4734,15 +4742,38 @@ class MarketDataManager:
             loop.call_soon_threadsafe(_start)
 
 
+    def _invalidate_priority_context_cache(self) -> None:
+        """Clear cached priority context sets. Args: none. Returns: None."""
+        self._priority_context_cached_at = 0.0
+        self._cached_open_position_symbols = set()
+        self._cached_selected_option_symbols = set()
+        self._cached_near_atm_symbols = set()
+
     def set_position_manager(self, position_manager: Any | None) -> None:
-        """Attach position manager for tick-priority decisions only."""
+        """Attach position manager for read-only tick-priority decisions only."""
         self._position_manager = position_manager
+        self._invalidate_priority_context_cache()
 
     def set_open_position_symbols(self, symbols: Iterable[str]) -> None:
         """Set open-position symbols for tests/adapters. Args: symbols. Returns: None."""
         self._open_position_symbols = {
             self._canonical_symbol(str(symbol)) for symbol in symbols if str(symbol or "").strip()
         }
+        self._invalidate_priority_context_cache()
+
+    def add_open_position_symbol(self, symbol: str) -> None:
+        """Add one open-position symbol for priority protection. Args: symbol. Returns: None."""
+        normalized = self._canonical_symbol(str(symbol)) if str(symbol or "").strip() else ""
+        if normalized:
+            self._open_position_symbols.add(normalized)
+            self._invalidate_priority_context_cache()
+
+    def remove_open_position_symbol(self, symbol: str) -> None:
+        """Remove one open-position symbol from priority protection. Args: symbol. Returns: None."""
+        normalized = self._canonical_symbol(str(symbol)) if str(symbol or "").strip() else ""
+        if normalized:
+            self._open_position_symbols.discard(normalized)
+            self._invalidate_priority_context_cache()
 
     def _open_position_symbol_set(self) -> set[str]:
         """Return canonical symbols with open positions without changing execution state."""
@@ -4816,14 +4847,34 @@ class MarketDataManager:
                     return self._canonical_symbol(str(mapped))
         return "UNKNOWN"
 
+    def _get_priority_context_sets(self) -> tuple[set[str], set[str], set[str]]:
+        """Return cached open/selected/near-ATM symbol sets for hot tick path."""
+        now = time.monotonic()
+        cached_at = float(getattr(self, "_priority_context_cached_at", 0.0) or 0.0)
+        if cached_at > 0.0 and (now - cached_at) <= float(getattr(self, "_priority_context_ttl_s", 0.25) or 0.25):
+            return (
+                set(getattr(self, "_cached_open_position_symbols", set()) or set()),
+                set(getattr(self, "_cached_selected_option_symbols", set()) or set()),
+                set(getattr(self, "_cached_near_atm_symbols", set()) or set()),
+            )
+        open_symbols = self._open_position_symbol_set()
+        selected_symbols = self._selected_option_symbol_set()
+        near_atm_symbols = self._near_atm_symbol_set()
+        self._cached_open_position_symbols = set(open_symbols)
+        self._cached_selected_option_symbols = set(selected_symbols)
+        self._cached_near_atm_symbols = set(near_atm_symbols)
+        self._priority_context_cached_at = now
+        return set(open_symbols), set(selected_symbols), set(near_atm_symbols)
+
     def _tick_priority(self, symbol: str) -> tuple[int, str]:
         """Return lower-is-higher priority for tick fan-out."""
         canonical = self._canonical_symbol(symbol) if symbol and symbol != "UNKNOWN" else symbol
-        if canonical in self._open_position_symbol_set():
+        open_symbols, selected_symbols, near_atm_symbols = self._get_priority_context_sets()
+        if canonical in open_symbols:
             return 0, "open_position"
-        if canonical in self._selected_option_symbol_set():
+        if canonical in selected_symbols:
             return 1, "selected_option"
-        if canonical in self._near_atm_symbol_set():
+        if canonical in near_atm_symbols:
             return 2, "near_atm"
         return 3, "context_or_far"
 
@@ -4873,8 +4924,24 @@ class MarketDataManager:
             extra={"event": "OPEN_POSITION_TICK_PRIORITY_ACTIVE", "symbol": symbol},
         )
 
+
+    @staticmethod
+    def _mark_queue_item_done(queue: asyncio.Queue) -> None:
+        """Balance unfinished task count when queue surgery permanently removes an item."""
+        try:
+            queue.task_done()
+        except ValueError:
+            # Tests and some fallback paths may remove items that were not tracked
+            # by join() callers. Never let accounting diagnostics block tick intake.
+            pass
+
     def _put_priority_tick_nowait(self, queue: asyncio.Queue, tick_payload: dict[str, Any]) -> bool:
-        """Insert tick into queue, evicting/coalescing lower priority first when full."""
+        """Insert tick, evicting/coalescing lower-value work when full.
+
+        This queue is consumed with task_done() in _consume_ticks(). Queue
+        surgery calls _mark_queue_item_done() exactly once for every get_nowait();
+        retained items are requeued as new unfinished tasks, preserving join counts.
+        """
         symbol = self._resolve_tick_symbol_for_priority(tick_payload)
         priority, bucket = self._tick_priority(symbol)
         tick_payload["_mdm_priority"] = priority
@@ -4887,19 +4954,28 @@ class MarketDataManager:
             return True
         except asyncio.QueueFull:
             retained: list[dict[str, Any]] = []
-            dropped = False
+            removed = False
+            removed_reason = ""
+            removed_bucket = ""
             try:
                 while True:
                     existing = queue.get_nowait()
+                    self._mark_queue_item_done(queue)
                     existing_symbol = self._resolve_tick_symbol_for_priority(existing if isinstance(existing, Mapping) else {})
                     existing_priority, existing_bucket = self._tick_priority(existing_symbol)
-                    if not dropped and existing_priority > priority:
-                        dropped = True
-                        self._tick_queue_priority_drops[existing_bucket] += 1
+                    if not removed and existing_priority > priority:
+                        removed = True
+                        removed_reason = "drop_lower_priority"
+                        removed_bucket = existing_bucket
                         continue
-                    if not dropped and existing_symbol == symbol and existing_priority >= priority:
-                        dropped = True
-                        self._tick_queue_priority_coalesced[existing_bucket] += 1
+                    if (
+                        not removed
+                        and existing_symbol == symbol
+                        and existing_priority >= priority
+                    ):
+                        removed = True
+                        removed_reason = "coalesce_same_symbol"
+                        removed_bucket = existing_bucket
                         continue
                     retained.append(existing)
             except asyncio.QueueEmpty:
@@ -4909,13 +4985,34 @@ class MarketDataManager:
                     queue.put_nowait(item)
                 except asyncio.QueueFull:
                     break
-            if not dropped and priority >= 2:
+            if removed:
+                if removed_reason == "coalesce_same_symbol":
+                    self._tick_queue_priority_coalesced[removed_bucket or bucket] += 1
+                else:
+                    self._tick_queue_priority_drops[removed_bucket or bucket] += 1
+            elif priority >= 1:
                 self._tick_queue_priority_drops[bucket] += 1
                 return False
-            if not dropped:
+            else:
+                # Queue contains only other priority-0 ticks. Do not silently
+                # discard another protected position tick; emit a critical log.
                 try:
-                    _ = queue.get_nowait()
-                    self._tick_queue_priority_drops["forced_oldest"] += 1
+                    removed_item = queue.get_nowait()
+                    self._mark_queue_item_done(queue)
+                    removed_symbol = self._resolve_tick_symbol_for_priority(
+                        removed_item if isinstance(removed_item, Mapping) else {}
+                    )
+                    self._tick_queue_priority_drops["open_position"] += 1
+                    self._logger.critical(
+                        "MDM_OPEN_POSITION_TICK_FORCED_DROP dropped_symbol=%s incoming_symbol=%s",
+                        removed_symbol,
+                        symbol,
+                        extra={
+                            "event": "MDM_OPEN_POSITION_TICK_FORCED_DROP",
+                            "dropped_symbol": removed_symbol,
+                            "incoming_symbol": symbol,
+                        },
+                    )
                 except asyncio.QueueEmpty:
                     pass
             try:
@@ -4925,6 +5022,7 @@ class MarketDataManager:
             except asyncio.QueueFull:
                 self._tick_queue_priority_drops[bucket] += 1
                 return False
+
 
     async def push_tick(self, raw_tick: dict[str, Any]) -> None:
         """Queue one raw websocket tick for deterministic consumption without blocking WS callbacks."""
@@ -5442,30 +5540,30 @@ class MarketDataManager:
             if delta > max_delta:
                 volume_delta_untrusted = True
                 stats = self._volume_delta_clamp_stats.setdefault(
-                    key, {"count": 0.0, "max_delta": 0.0}
+                    key, {"interval_count": 0.0, "interval_max_delta": 0.0}
                 )
-                stats["count"] = float(stats.get("count", 0.0)) + 1.0
-                stats["max_delta"] = max(float(stats.get("max_delta", 0.0)), float(delta))
+                stats["interval_count"] = float(stats.get("interval_count", 0.0)) + 1.0
+                stats["interval_max_delta"] = max(float(stats.get("interval_max_delta", 0.0)), float(delta))
                 now_mono = time.monotonic()
                 last_summary = float(self._last_volume_delta_clamp_summary_ts.get(key, 0.0) or 0.0)
                 if now_mono - last_summary >= 60.0:
                     self._last_volume_delta_clamp_summary_ts[key] = now_mono
                     self._logger.warning(
-                        "OPTION_VOLUME_DELTA_CLAMP_SUMMARY symbol=%s count=%d max_delta=%s threshold=%s",
+                        "OPTION_VOLUME_DELTA_CLAMP_SUMMARY symbol=%s interval_count=%d interval_max_delta=%s threshold=%s",
                         symbol,
-                        int(stats.get("count", 0.0)),
-                        stats.get("max_delta", 0.0),
+                        int(stats.get("interval_count", 0.0)),
+                        stats.get("interval_max_delta", 0.0),
                         max_delta,
                         extra={
                             "event": "OPTION_VOLUME_DELTA_CLAMP_SUMMARY",
                             "symbol": symbol,
-                            "count": int(stats.get("count", 0.0)),
-                            "max_delta": stats.get("max_delta", 0.0),
+                            "interval_count": int(stats.get("interval_count", 0.0)),
+                            "interval_max_delta": stats.get("interval_max_delta", 0.0),
                             "threshold": max_delta,
                         },
                     )
-                    stats["count"] = 0.0
-                    stats["max_delta"] = 0.0
+                    stats["interval_count"] = 0.0
+                    stats["interval_max_delta"] = 0.0
                 delta = max_delta
         self._last_cumulative_volume_by_symbol[key] = cumulative
         payload["volume_cumulative"] = cumulative
@@ -5841,9 +5939,6 @@ class MarketDataManager:
         except asyncio.QueueFull:
             pass
 
-        # Queue is full. Low-priority universe ticks are coalesced in the latest
-        # cache first; selected/open-position ticks try to evict lower priority
-        # messages already waiting in the bus queue.
         if priority >= 2:
             self._bus_latest_coalesced_ticks[symbol] = dict(msg.data or {})
             self._bus_backpressure_coalesced_by_priority[bucket] += 1
@@ -5852,15 +5947,27 @@ class MarketDataManager:
             return
 
         retained: list[Message] = []
-        evicted = False
+        removed = False
+        removed_reason = ""
+        removed_bucket = ""
+        removed_symbol = ""
         try:
             while True:
                 existing = queue.get_nowait()
+                self._mark_queue_item_done(queue)
                 existing_symbol = str((getattr(existing, "data", {}) or {}).get("symbol") or "UNKNOWN")
                 existing_priority, existing_bucket = self._tick_priority(existing_symbol)
-                if not evicted and existing_priority > priority:
-                    evicted = True
-                    self._bus_backpressure_drops_by_priority[existing_bucket] += 1
+                if not removed and existing_priority > priority:
+                    removed = True
+                    removed_reason = "drop_lower_priority"
+                    removed_bucket = existing_bucket
+                    removed_symbol = existing_symbol
+                    continue
+                if not removed and existing_symbol == symbol and existing_priority >= priority:
+                    removed = True
+                    removed_reason = "coalesce_same_symbol"
+                    removed_bucket = existing_bucket
+                    removed_symbol = existing_symbol
                     continue
                 retained.append(existing)
         except asyncio.QueueEmpty:
@@ -5870,16 +5977,30 @@ class MarketDataManager:
                 queue.put_nowait(item)
             except asyncio.QueueFull:
                 break
-        if not evicted and priority == 0:
+        if removed:
+            if removed_reason == "coalesce_same_symbol":
+                self._bus_backpressure_coalesced_by_priority[removed_bucket or bucket] += 1
+            else:
+                self._bus_backpressure_drops_by_priority[removed_bucket or bucket] += 1
+        elif priority == 0:
             try:
                 removed = queue.get_nowait()
+                self._mark_queue_item_done(queue)
                 removed_symbol = str((getattr(removed, "data", {}) or {}).get("symbol") or "UNKNOWN")
-                _, removed_bucket = self._tick_priority(removed_symbol)
-                self._bus_backpressure_drops_by_priority[removed_bucket] += 1
-                evicted = True
+                self._bus_backpressure_drops_by_priority["open_position"] += 1
+                self._logger.critical(
+                    "MDM_OPEN_POSITION_TICK_FORCED_DROP dropped_symbol=%s incoming_symbol=%s",
+                    removed_symbol,
+                    symbol,
+                    extra={
+                        "event": "MDM_OPEN_POSITION_TICK_FORCED_DROP",
+                        "dropped_symbol": removed_symbol,
+                        "incoming_symbol": symbol,
+                    },
+                )
             except asyncio.QueueEmpty:
-                evicted = False
-        if not evicted:
+                pass
+        else:
             self._bus_latest_coalesced_ticks[symbol] = dict(msg.data or {})
             self._bus_backpressure_coalesced_by_priority[bucket] += 1
             self._bus_backpressure_drops_by_priority[bucket] += 1
@@ -5892,8 +6013,8 @@ class MarketDataManager:
             self._bus_latest_coalesced_ticks[symbol] = dict(msg.data or {})
             self._bus_backpressure_coalesced_by_priority[bucket] += 1
             self._bus_backpressure_drops_by_priority[bucket] += 1
-            self._emit_priority_summaries_if_due()
-            return
+        self._emit_priority_summaries_if_due()
+
 
     def _publish_tick_to_bus_safe(self, tick: dict[str, Any]) -> None:
         """Publish a normalized tick to MessageBus without ever crashing MDM."""
