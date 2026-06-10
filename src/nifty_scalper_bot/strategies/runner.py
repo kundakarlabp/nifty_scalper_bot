@@ -1454,7 +1454,11 @@ class StrategyRunner:
             return 0
         target = max(1, int(required_bars or self._required_bars_for_symbol(normalized) or 1))
         indicator_before = self._history_count_for_symbol(normalized)
+        runner_bars = len(getattr(self, "_symbol_history", {}).get(normalized, []) or [])
         rows = self._get_mdm_bars(normalized, max(target, indicator_before))
+        mdm_bars = len(rows)
+        if mdm_bars >= target and runner_bars >= target and indicator_before >= target:
+            return indicator_before
         ingested = 0
         if rows and indicator_before < min(target, len(rows)):
             ingested = int(
@@ -4466,12 +4470,66 @@ class StrategyRunner:
                     )
                 return self._set_symbol_hydration_state(symbol, SymbolState.READY)
             is_option = symbol.startswith("NFO:") and symbol.endswith(("CE", "PE"))
+            now_wall = time.time()
+            candle_interval_s = float(os.getenv("RUNNER_CANDLE_GAP_INTERVAL_SECONDS", "60") or "60")
+            gap_grace_s = float(os.getenv("RUNNER_CANDLE_GAP_GRACE_SECONDS", "10") or "10")
             last_tick_ts = float(self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0)
-            recent_tick = last_tick_ts > 0 and (time.time() - last_tick_ts) <= 120.0
-            tick_age_s = round(time.time() - last_tick_ts, 2) if recent_tick else None
-            if gap_count > 1:
-                reason = "repeated_missing_candles" if recent_tick else "no_recent_tick_for_gap_assessment"
-                log_level = logging.INFO if is_option and recent_tick else logging.WARNING
+            tick_age_s = round(now_wall - last_tick_ts, 2) if last_tick_ts > 0 else None
+            fresh_tick = bool(tick_age_s is not None and tick_age_s < gap_grace_s)
+            last_bar_ts = 0.0
+            try:
+                last_bar = bars[-1] if bars else None
+                bar_ts = getattr(last_bar, "timestamp", None)
+                if isinstance(last_bar, Mapping):
+                    bar_ts = last_bar.get("timestamp")
+                parsed_bar_ts = pd.to_datetime(bar_ts, utc=True, errors="coerce")
+                if not pd.isna(parsed_bar_ts):
+                    last_bar_ts = float(pd.Timestamp(parsed_bar_ts).timestamp())
+            except Exception:
+                last_bar_ts = 0.0
+            elapsed_since_last_bar_s = (now_wall - last_bar_ts) if last_bar_ts > 0 else 0.0
+            no_candle_close_produced = bool(last_bar_ts <= 0 or elapsed_since_last_bar_s > (candle_interval_s + gap_grace_s))
+            if fresh_tick:
+                log_throttled_live(
+                    self._logger,
+                    logging.INFO,
+                    "CANDLE_GAP_SUPPRESSED_FRESH_TICK",
+                    f"CANDLE_GAP_SUPPRESSED_FRESH_TICK:{symbol}",
+                    float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
+                    "CANDLE_GAP_SUPPRESSED_FRESH_TICK symbol=%s gaps=%s age_s=%s grace_s=%s",
+                    symbol, gap_count, tick_age_s, gap_grace_s,
+                    extra={"event": "CANDLE_GAP_SUPPRESSED_FRESH_TICK", "symbol": symbol, "gaps": gap_count, "age_s": tick_age_s, "grace_s": gap_grace_s},
+                )
+                gap_summary = getattr(self, "_candle_gap_summary", None)
+                if gap_summary is None:
+                    gap_summary = {}
+                    self._candle_gap_summary = gap_summary
+                gap_summary[symbol] = int(gap_summary.get(symbol, 0)) + 1
+            elif last_tick_ts <= 0:
+                reason = "no_recent_tick_for_gap_assessment"
+                log_throttled_live(
+                    self._logger,
+                    logging.WARNING,
+                    "SOFT_DATA_ISSUE",
+                    f"SOFT_DATA_ISSUE:{symbol}:{reason}",
+                    float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
+                    f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
+                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
+                )
+            elif gap_count > 1 and elapsed_since_last_bar_s <= (candle_interval_s + gap_grace_s):
+                reason = "stale_tick_for_gap_assessment"
+                log_throttled_live(
+                    self._logger,
+                    logging.INFO,
+                    "SOFT_DATA_ISSUE",
+                    f"SOFT_DATA_ISSUE:{symbol}:{reason}",
+                    float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
+                    f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
+                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
+                )
+            elif gap_count > 1 and no_candle_close_produced:
+                reason = "repeated_missing_candles"
+                log_level = logging.INFO if is_option else logging.WARNING
                 log_throttled_live(
                     self._logger,
                     log_level,
@@ -4481,21 +4539,23 @@ class StrategyRunner:
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
                     extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
                 )
-                if gap_count > 1 and recent_tick:
-                    return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
+                return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
             else:
-                reason = "single_missing_candle" if recent_tick else "no_recent_tick_for_gap_assessment"
+                gap_summary = getattr(self, "_candle_gap_summary", None)
+                if gap_summary is None:
+                    gap_summary = {}
+                    self._candle_gap_summary = gap_summary
+                gap_summary[symbol] = int(gap_summary.get(symbol, 0)) + 1
                 log_throttled_live(
                     self._logger,
                     logging.INFO,
-                    "SOFT_DATA_ISSUE",
-                    f"SOFT_DATA_ISSUE:{symbol}:{reason}",
+                    "CANDLE_GAP_SUMMARY",
+                    f"CANDLE_GAP_SUMMARY:{symbol}",
                     float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
-                    f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
-                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}},
+                    "CANDLE_GAP_SUMMARY symbol=%s suppressed=%s gaps=%s age_s=%s elapsed_since_last_bar_s=%.2f",
+                    symbol, gap_summary.get(symbol, 0), gap_count, tick_age_s, elapsed_since_last_bar_s,
+                    extra={"event": "CANDLE_GAP_SUMMARY", "symbol": symbol, "suppressed": gap_summary.get(symbol, 0), "gaps": gap_count, "age_s": tick_age_s, "elapsed_since_last_bar_s": elapsed_since_last_bar_s},
                 )
-                if gap_count > 1 and recent_tick:
-                    return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
 
         if valid_vwap and valid_volume:
             self._hydration_ready_streak[symbol] = int(self._hydration_ready_streak.get(symbol, 0)) + 1
@@ -6875,11 +6935,52 @@ class StrategyRunner:
             reason = "selected_option_depth_missing"
         elif ce_hist < min_bars or pe_hist < min_bars:
             reason = "selected_option_history_cold"
+        normalized_boot_symbol = normalize_symbol(str(symbol or ""))
+        selected_boot_symbols = {normalize_symbol(str(item)) for item in (ce_symbol, pe_symbol) if item}
+        if reason == "selected_option_depth_missing" and normalized_boot_symbol not in selected_boot_symbols:
+            if normalized_boot_symbol.startswith("NFO:") and normalized_boot_symbol.endswith(("CE", "PE")):
+                reason = "option_context_depth_missing"
+            else:
+                reason = "context_symbol_not_tradable"
         ready = reason is None
+        try:
+            symbol_role = self._symbol_role_for_runner(normalized_boot_symbol)
+        except Exception:
+            symbol_role = "unknown"
         _boot_key = f"bootstrap:{symbol}:{ready}:{reason}"
         _boot_interval = float(os.getenv("RUNNER_BOOTSTRAP_LOG_INTERVAL_SECONDS", "60") or "60")
         if self._should_log_throttled(_boot_key, _boot_interval):
-            self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
+            self._logger.info(
+                "LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s",
+                symbol,
+                ready,
+                reason,
+                extra={
+                    "event": "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
+                    "symbol": symbol,
+                    "evaluated_symbol": normalized_boot_symbol,
+                    "selected_ce": ce_symbol,
+                    "selected_pe": pe_symbol,
+                    "selected_pair": [ce_symbol, pe_symbol],
+                    "symbol_role": symbol_role,
+                    "active_future": fut_symbol or None,
+                    "ce_token": ce_token,
+                    "pe_token": pe_token,
+                    "fut_token": fut_token,
+                    "ce_subscribed": ce_sub,
+                    "pe_subscribed": pe_sub,
+                    "fut_subscribed": fut_sub,
+                    "ce_quote_fresh": ce_quote,
+                    "pe_quote_fresh": pe_quote,
+                    "fut_quote_fresh": fut_quote,
+                    "ce_depth_available": ce_depth,
+                    "pe_depth_available": pe_depth,
+                    "ce_history_count": ce_hist,
+                    "pe_history_count": pe_hist,
+                    "ready": ready,
+                    "reason": reason,
+                },
+            )
         return ready, reason
 
 
@@ -8934,7 +9035,10 @@ class StrategyRunner:
                 return
 
             volume = 0
-            if has_explicit_delta:
+            volume_delta_untrusted = bool(tick.get("volume_delta_untrusted"))
+            if volume_delta_untrusted:
+                volume = 0
+            elif has_explicit_delta:
                 volume = max(int(raw_volume_delta), 0)
             elif has_explicit_volume:
                 if raw_volume_cumulative > 0 and raw_volume_delta == raw_volume_cumulative:
