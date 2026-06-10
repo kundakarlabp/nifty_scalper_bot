@@ -732,6 +732,7 @@ class RiskSettings:
     per_trade_risk_pct: float = 10.0
     per_trade_cap_pct: float = 25.0
     max_consecutive_losses: int = 3
+    max_trades_per_day: int = 6  # enforced by RiskManager failsafe; 0 = unlimited
     loss_cooldown_seconds: float = 90.0
     cooldown_on_reject_seconds: float = 30.0
     trading_day_reset_hour_utc: int = 3
@@ -1178,6 +1179,7 @@ def _build_risk_settings() -> RiskSettings:
     max_losses = _env_int(
         "RISK__MAX_CONSEC_LOSSES", "RISK_MAX_CONSEC_LOSSES", default=3, minimum=1
     )
+    max_trades_day = _env_int("MAX_TRADES_PER_DAY", default=6, minimum=0)
     cooldown_minutes_raw = os.getenv("RISK__COOLDOWN_MIN")
     if cooldown_minutes_raw is not None and cooldown_minutes_raw.strip():
         try:
@@ -1198,6 +1200,7 @@ def _build_risk_settings() -> RiskSettings:
     contract_lot_size = _env_int("NIFTY_LOT_SIZE", default=65, minimum=1)
     return RiskSettings(
         daily_loss_pct=daily_loss_pct,
+        max_trades_per_day=max_trades_day,
         daily_pnl_cap_pct=_env_float(
             "RISK_DAILY_PNL_CAP_PCT", default=daily_loss_pct, minimum=0.0
         ),

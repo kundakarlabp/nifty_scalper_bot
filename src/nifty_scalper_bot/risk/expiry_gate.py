@@ -46,3 +46,30 @@ def expiry_theta_block(now: datetime | None = None) -> tuple[bool, str]:
     if current.time() < cutoff:
         return False, "before_cutoff"
     return True, f"expiry_day_after_{cutoff.strftime('%H:%M')}_ist"
+
+
+def _env_hhmm(name: str, default: dtime) -> dtime:
+    raw = str(os.getenv(name) or "").strip()
+    try:
+        hh, mm = raw.split(":", 1)
+        return dtime(hour=max(0, min(23, int(hh))), minute=max(0, min(59, int(mm))))
+    except (ValueError, AttributeError):
+        return default
+
+
+def midday_pause_block(now: datetime | None = None) -> tuple[bool, str]:
+    """Args: optional now (tz-aware). Returns: (blocked, reason). Raises: none.
+
+    Blocks NEW option-buy entries during the low-volatility midday window
+    (default 11:30-13:15 IST) where chop feeds transaction costs. Exits
+    untouched. Env: MIDDAY_PAUSE_ENABLED (true), MIDDAY_PAUSE_START (11:30),
+    MIDDAY_PAUSE_END (13:15).
+    """
+    if not parse_bool_env(os.getenv("MIDDAY_PAUSE_ENABLED"), True):
+        return False, "pause_disabled"
+    current = (now.astimezone(IST) if now else datetime.now(IST)).time()
+    start = _env_hhmm("MIDDAY_PAUSE_START", dtime(11, 30))
+    end = _env_hhmm("MIDDAY_PAUSE_END", dtime(13, 15))
+    if start <= current < end:
+        return True, f"midday_pause_{start.strftime('%H:%M')}-{end.strftime('%H:%M')}_ist"
+    return False, "outside_pause"

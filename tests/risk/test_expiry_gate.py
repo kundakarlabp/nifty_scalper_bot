@@ -44,3 +44,24 @@ def test_bad_cutoff_falls_back(monkeypatch) -> None:
     monkeypatch.setenv("EXPIRY_ENTRY_CUTOFF_IST", "garbage")
     blocked, _ = expiry_theta_block(_ist(2026, 6, 9, 14, 0))
     assert blocked  # falls back to 13:30
+
+
+def test_midday_pause_blocks_within_window() -> None:
+    from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
+    blocked, reason = midday_pause_block(_ist(2026, 6, 10, 12, 0))
+    assert blocked and "midday_pause" in reason
+
+
+def test_midday_pause_allows_outside_window() -> None:
+    from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
+    blocked, _ = midday_pause_block(_ist(2026, 6, 10, 9, 45))
+    assert not blocked
+    blocked, _ = midday_pause_block(_ist(2026, 6, 10, 14, 0))
+    assert not blocked
+
+
+def test_midday_pause_disabled_via_env(monkeypatch) -> None:
+    from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
+    monkeypatch.setenv("MIDDAY_PAUSE_ENABLED", "false")
+    blocked, reason = midday_pause_block(_ist(2026, 6, 10, 12, 0))
+    assert not blocked and reason == "pause_disabled"
