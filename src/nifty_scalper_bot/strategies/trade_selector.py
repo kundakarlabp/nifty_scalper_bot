@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Any
 
+from nifty_scalper_bot.config.env_utils import parse_int_env
+from nifty_scalper_bot.risk.cost_model import passes_cost_edge_gate
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
 LOGGER = get_logger(__name__)
@@ -88,7 +90,7 @@ class TradeCandidateSelector:
             min_ticks = int(self.require_real_ticks_last_60s)
         allow_ltp_only = os.getenv('ALLOW_LTP_ONLY_CANDIDATE', 'false').lower() in {'1', 'true', 'yes', 'on'}
         ranked: list[TradeCandidate] = []
-        rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0}
+        rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0, 'cost_edge_insufficient': 0}
         ltp_only_used = 0
         for s in snapshots:
             side = str(s.get('side') or s.get('option_type') or '').upper()
@@ -185,6 +187,14 @@ class TradeCandidateSelector:
                 rejects['invalid_rr'] += 1
                 self._log_reject("invalid_rr", symbol, throttle_key_parts=("invalid_rr", symbol), entry=entry, stop_loss=sl, target=target, rr=rr, min_rr=1.5)
                 continue
+            half_spread = (((ask or 0.0) - (bid or 0.0)) / 2.0) if has_bid_ask else entry * 0.003
+            lot_size = parse_int_env(os.getenv('NIFTY_LOT_SIZE'), 65)
+            cost_ok, edge_multiple, cost = passes_cost_edge_gate(entry_price=entry, target_price=target, quantity=lot_size, half_spread=max(0.0, half_spread))
+            if not cost_ok:
+                rejects['cost_edge_insufficient'] += 1
+                self._log_reject("cost_edge_insufficient", symbol, throttle_key_parts=("cost_edge_insufficient", symbol), entry=entry, target=target, edge_multiple=round(edge_multiple, 2), round_trip_cost=round(cost.total, 2), cost_per_unit=round(cost.cost_per_unit, 3))
+                continue
+            reasons.append(f'cost_edge_{edge_multiple:.1f}x')
             liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct * 100.0)
             micro = min(10.0, real_ticks * 3.0)
             score = 6.0 + liquidity * 0.2 + micro * 0.2 - atm_distance * 0.5 - score_penalty
