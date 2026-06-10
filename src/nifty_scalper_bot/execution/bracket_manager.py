@@ -82,6 +82,20 @@ def _normalize_bracket_side(side: str) -> str:
 
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
+_PROTECTIVE_EXIT_REASON_TOKENS = (
+    "HARD_SL_BREACH",
+    "WATCHDOG_HARD_SL",
+    "FORCED_SL_EXIT",
+    "EOD_FLATTEN",
+    "EXIT_ESCALATED",
+)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # --------------------------------------------------------------------------
@@ -370,6 +384,8 @@ class BracketManager:
         self._trailing_controller_factory: Callable[[BracketState], Any] | None = None
         # FIX S10-2: hook fired when bracket fully closes — lets runner clear orchestrator direction lock
         self._on_exit_complete_hook: Callable[[str], None] | None = None
+        self._on_position_open_priority_hook: Callable[[str], None] | None = None
+        self._on_position_closed_priority_hook: Callable[[str], None] | None = None
     
         # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
@@ -409,6 +425,10 @@ class BracketManager:
         self._exit_flat_confirmation_required = os.getenv("EXIT_FLAT_CONFIRMATION_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "on"}
         self._exit_unresolved_escalation_seconds = max(1.0, parse_float_env(os.getenv("EXIT_UNRESOLVED_ESCALATION_SECONDS"), 15.0))
         self._exit_continue_retry_after_escalation = os.getenv("EXIT_CONTINUE_RETRY_AFTER_ESCALATION", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self._exit_protective_order_mode = str(os.getenv("EXIT_PROTECTIVE_ORDER_MODE", "MARKET") or "MARKET").strip().upper()
+        self._exit_marketable_limit_slippage_ticks = max(0, parse_int_env(os.getenv("EXIT_MARKETABLE_LIMIT_SLIPPAGE_TICKS"), 5))
+        self._exit_marketable_limit_max_slippage_pct = max(0.0, parse_float_env(os.getenv("EXIT_MARKETABLE_LIMIT_MAX_SLIPPAGE_PCT"), 2.0))
+        self._exit_fallback_to_market_on_quote_missing = _env_bool("EXIT_FALLBACK_TO_MARKET_ON_QUOTE_MISSING", True)
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
             name='bracket-watchdog',
@@ -460,6 +480,51 @@ class BracketManager:
     def attach_on_exit_complete(self, hook: Callable[[str], None] | None) -> None:
         """Attach callback fired with symbol when bracket fully closes. Lets runner clear orchestrator direction lock."""
         self._on_exit_complete_hook = hook
+
+    def attach_open_position_priority_hooks(
+        self,
+        on_position_open: Callable[[str], None] | None = None,
+        on_position_closed: Callable[[str], None] | None = None,
+    ) -> None:
+        """Attach MDM open-position priority hooks for immediate tick prioritization."""
+        self._on_position_open_priority_hook = on_position_open
+        self._on_position_closed_priority_hook = on_position_closed
+
+    def _notify_open_position_priority(self, action: str, symbol: str) -> None:
+        hook = (
+            self._on_position_open_priority_hook
+            if action == "open"
+            else self._on_position_closed_priority_hook
+        )
+        if hook is None:
+            return
+        try:
+            hook(symbol)
+            if action == "open":
+                LOGGER.info(
+                    "OPEN_POSITION_PRIORITY_REGISTERED symbol=%s",
+                    symbol,
+                    extra={"event": "OPEN_POSITION_PRIORITY_REGISTERED", "symbol": symbol},
+                )
+            else:
+                LOGGER.info(
+                    "OPEN_POSITION_PRIORITY_REMOVED symbol=%s",
+                    symbol,
+                    extra={"event": "OPEN_POSITION_PRIORITY_REMOVED", "symbol": symbol},
+                )
+        except Exception as exc:  # noqa: BLE001 - hook must not break bracket lifecycle
+            LOGGER.exception(
+                "OPEN_POSITION_PRIORITY_HOOK_FAILED action=%s symbol=%s error=%s",
+                action,
+                symbol,
+                exc,
+                extra={
+                    "event": "OPEN_POSITION_PRIORITY_HOOK_FAILED",
+                    "action": action,
+                    "symbol": symbol,
+                    "error": str(exc),
+                },
+            )
 
 
     def attach_trailing_controller_factory(
@@ -1044,6 +1109,7 @@ class BracketManager:
                     'tp': round(bracket.tp_trigger_price, 2),
                 },
             )
+            self._notify_open_position_priority("open", bracket.symbol)
             
             # Persist state
             try:
@@ -1581,49 +1647,6 @@ class BracketManager:
         except Exception as e:
             LOGGER.error("Failure in BracketManager.on_tick_event: %s", e)
 
-    def _execute_exit_order(
-        self, 
-        bracket: BracketState, 
-        qty: int, 
-        exit_side: str, 
-        reason: str,
-        is_partial: bool
-    ) -> None:
-        """
-        Execute the actual exit order with slippage protection.
-        Called outside the main lock for better concurrency.
-        """
-        # All protective exits are MARKET to guarantee deterministic execution.
-        _order_type = "MARKET"
-        _price = None
-        
-        # Place order via OrderManager
-        order_id = self.order_manager.place_order(
-            symbol=bracket.symbol,
-            side=exit_side,
-            quantity=qty,
-            order_type=_order_type,
-            price=_price,
-            tag=f"exit_{reason[:3]}_{bracket.tag[:3] if bracket.tag else 'auto'}",
-            check_risk=False,
-            product="MIS"
-        )
-        
-        if not order_id:
-            raise RuntimeError(
-                f"Exit order BLOCKED for {bracket.symbol} ({reason}). "
-                f"place_order returned None — bracket state must be reverted."
-            )
-        
-        LOGGER.info(
-                f"✅ Exit order placed: {bracket.symbol} | order_id={order_id} | "
-                f"type={_order_type} | reason={reason}"
-        )
-        
-        # Cleanup if full exit
-        if not is_partial and bracket.remaining_quantity <= 0:
-            self.unregister_bracket(bracket.entry_order_id)
-
     @property
     def active_brackets(self) -> Dict[str, BracketState]:
         """Return symbol-indexed active bracket map for recovery hooks."""
@@ -2104,6 +2127,93 @@ class BracketManager:
                     bracket.sl_trigger_price = bracket.entry_price
                     LOGGER.info(f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})")
 
+
+    def _extract_exit_quote(self, symbol: str) -> tuple[float | None, float | None, float | None]:
+        source = self._market_data
+        quote: Any = None
+        for name in ("get_quote", "get_latest_tick", "get_tick", "get_ltp_snapshot"):
+            getter = getattr(source, name, None) if source is not None else None
+            if not callable(getter):
+                continue
+            try:
+                quote = getter(symbol)
+                if quote:
+                    break
+            except TypeError:
+                try:
+                    quote = getter(symbol, allow_pull=False)
+                    if quote:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        if quote is None:
+            return None, None, None
+        if not isinstance(quote, Mapping):
+            quote = getattr(quote, "__dict__", {}) or {}
+        def _num(*keys: str) -> float | None:
+            for key in keys:
+                try:
+                    value = float(quote.get(key) or 0.0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if value > 0:
+                    return value
+            return None
+        return _num("bid", "best_bid"), _num("ask", "best_ask"), _num("ltp", "last_price", "last_traded_price")
+
+    def _is_protective_exit_reason(self, reason: str) -> bool:
+        upper = str(reason or "").upper()
+        return any(token in upper for token in _PROTECTIVE_EXIT_REASON_TOKENS)
+
+    def _price_exit_order(
+        self,
+        *,
+        bracket: BracketState | None,
+        symbol: str,
+        side: str,
+        reason: str,
+        preferred_order_type: str,
+        qty: int,
+    ) -> tuple[str, float | None, dict[str, Any]]:
+        mode = str(preferred_order_type or "LIMIT").upper()
+        protective = self._is_protective_exit_reason(reason)
+        bid: float | None = None
+        ask: float | None = None
+        ltp: float | None = None
+        fallback = False
+        if protective:
+            configured = self._exit_protective_order_mode
+            mode = "MARKET" if configured not in {"AGGRESSIVE_LIMIT", "LIMIT"} else "LIMIT"
+            if configured == "AGGRESSIVE_LIMIT":
+                bid, ask, ltp = self._extract_exit_quote(symbol)
+                tick_size = 0.05
+                reference = bid if side == "SELL" else ask
+                if reference is None and ltp is not None:
+                    reference = ltp
+                if reference is None:
+                    if self._exit_fallback_to_market_on_quote_missing:
+                        mode = "MARKET"
+                        fallback = True
+                    else:
+                        return "LIMIT", None, {"quote_missing": True, "mode": "AGGRESSIVE_LIMIT", "bid": bid, "ask": ask, "ltp": ltp, "fallback": False}
+                else:
+                    tick_buffer = self._exit_marketable_limit_slippage_ticks * tick_size
+                    pct_buffer = reference * (self._exit_marketable_limit_max_slippage_pct / 100.0)
+                    buffer = min(max(tick_buffer, tick_size), pct_buffer if pct_buffer > 0 else tick_buffer)
+                    raw = reference - buffer if side == "SELL" else reference + buffer
+                    return "LIMIT", _round_to_tick(max(raw, tick_size), tick_size=tick_size), {"mode": "AGGRESSIVE_LIMIT", "bid": bid, "ask": ask, "ltp": ltp, "fallback": False}
+        elif mode == "LIMIT" and bracket is not None:
+            current_ltp = float(bracket.last_ltp or bracket.entry_price or 0.0)
+            if current_ltp > 0:
+                max_slippage_pct = parse_float_env(os.getenv("EXIT_MAX_SLIPPAGE_PCT"), 2.0)
+                raw = current_ltp * (1 - max_slippage_pct / 100) if side == "SELL" else current_ltp * (1 + max_slippage_pct / 100)
+                return "LIMIT", _round_to_tick(max(raw, 0.05), tick_size=0.05), {"mode": "LIMIT", "bid": bid, "ask": ask, "ltp": current_ltp, "fallback": False}
+            mode = "MARKET"
+            fallback = True
+        return mode, None, {"mode": "MARKET" if mode == "MARKET" else mode, "bid": bid, "ask": ask, "ltp": ltp, "fallback": fallback}
+
     def submit_exit_order(
         self,
         symbol: str,
@@ -2116,16 +2226,26 @@ class BracketManager:
         normalized_symbol = normalize_symbol(symbol)
         bracket = self.get_bracket(bracket_id)
         side = "SELL" if (bracket and bracket.side == "BUY") else "BUY"
-        order_type = str(preferred_order_type or "LIMIT").upper()
-        price: float | None = None
-        if order_type == "LIMIT" and bracket is not None:
-            current_ltp = float(bracket.last_ltp or bracket.entry_price or 0.0)
-            if current_ltp > 0:
-                max_slippage_pct = parse_float_env(os.getenv("EXIT_MAX_SLIPPAGE_PCT"), 2.0)
-                raw = current_ltp * (1 - max_slippage_pct / 100) if side == "SELL" else current_ltp * (1 + max_slippage_pct / 100)
-                price = _round_to_tick(max(raw, 0.05), tick_size=0.05)
-            else:
-                order_type = "MARKET"
+        order_type, price, pricing_meta = self._price_exit_order(
+            bracket=bracket,
+            symbol=normalized_symbol,
+            side=side,
+            reason=reason,
+            preferred_order_type=preferred_order_type,
+            qty=qty,
+        )
+        if pricing_meta.get("quote_missing"):
+            LOGGER.warning(
+                "EXIT_ORDER_PRICING_DECISION bracket_id=%s reason=%s mode=aggressive_limit side=%s qty=%s bid=%s ask=%s ltp=%s price=%s fallback=%s",
+                bracket_id, reason, side, qty, pricing_meta.get("bid"), pricing_meta.get("ask"), pricing_meta.get("ltp"), price, pricing_meta.get("fallback"),
+                extra={"event": "EXIT_ORDER_PRICING_DECISION", "bracket_id": bracket_id, "reason": reason, "mode": "aggressive_limit", "side": side, "qty": qty, "bid": pricing_meta.get("bid"), "ask": pricing_meta.get("ask"), "ltp": pricing_meta.get("ltp"), "price": price, "fallback": pricing_meta.get("fallback")},
+            )
+            return SubmitExitOrderResult(False, None, "quote_missing", "quote_missing", "protective aggressive limit quote missing", True, {})
+        LOGGER.info(
+            "EXIT_ORDER_PRICING_DECISION bracket_id=%s reason=%s mode=%s side=%s qty=%s bid=%s ask=%s ltp=%s price=%s fallback=%s",
+            bracket_id, reason, str(pricing_meta.get("mode") or order_type).lower(), side, qty, pricing_meta.get("bid"), pricing_meta.get("ask"), pricing_meta.get("ltp"), price, pricing_meta.get("fallback"),
+            extra={"event": "EXIT_ORDER_PRICING_DECISION", "bracket_id": bracket_id, "reason": reason, "mode": str(pricing_meta.get("mode") or order_type).lower(), "side": side, "qty": qty, "bid": pricing_meta.get("bid"), "ask": pricing_meta.get("ask"), "ltp": pricing_meta.get("ltp"), "price": price, "fallback": pricing_meta.get("fallback")},
+        )
         try:
             kwargs: dict[str, Any] = {
                 "symbol": normalized_symbol,
@@ -2342,6 +2462,7 @@ class BracketManager:
             bracket,
             meta={"close_source": close_source, "exit_order_id": bracket.exit_order_id},
         )
+        self._notify_open_position_priority("close", bracket.symbol)
         hook = self._on_exit_complete_hook
         if hook is not None:
             try:
@@ -2607,6 +2728,8 @@ class BracketManager:
                 # ✅ NEW: Cleanup Exit Cooldown
                 if entry_id in self._exit_cooldowns:
                     del self._exit_cooldowns[entry_id]
+
+                self._notify_open_position_priority("close", symbol)
 
                 # ✅ FIX: Persist removal immediately
                 self.save_state()

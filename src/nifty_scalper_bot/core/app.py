@@ -77,8 +77,79 @@ def _basket_attr(basket: Mapping[str, object] | object | None, key: str, default
     return getattr(basket, key, default)
 
 
+
+
+def ensure_bot_context_runtime_fields(ctx: Any) -> None:
+    """Initialize optional BotContext runtime fields that may be absent on legacy contexts."""
+    defaults: dict[str, Any] = {
+        "hydration_status_by_symbol": dict,
+        "last_hydration_status_at": None,
+        "_active_selection_sync_log_key": None,
+        "_active_selection_drift_log_key": None,
+        "last_active_selection_synced_at": None,
+        "last_active_selection_drift_at": None,
+        "_bot_context_runtime_fields_patch_logged": False,
+    }
+    missing: list[str] = []
+    for name, default in defaults.items():
+        try:
+            getattr(ctx, name)
+            continue
+        except AttributeError:
+            missing.append(name)
+        value = default() if callable(default) else default
+        try:
+            setattr(ctx, name, value)
+        except AttributeError:
+            # Unknown/minimal slotted contexts cannot be repaired safely here.
+            LOGGER.error(
+                "BOT_CONTEXT_ATTRIBUTE_MISSING attribute=%s component=runtime_field_initializer repairable=False",
+                name,
+                extra={
+                    "event": "BOT_CONTEXT_ATTRIBUTE_MISSING",
+                    "attribute": name,
+                    "component": "runtime_field_initializer",
+                    "repairable": False,
+                },
+            )
+            raise
+    if missing:
+        try:
+            already_logged = bool(getattr(ctx, "_bot_context_runtime_fields_patch_logged", False))
+            if not already_logged:
+                LOGGER.warning(
+                    "BOT_CONTEXT_RUNTIME_FIELDS_INITIALIZED missing=%s",
+                    missing,
+                    extra={
+                        "event": "BOT_CONTEXT_RUNTIME_FIELDS_INITIALIZED",
+                        "missing": missing,
+                    },
+                )
+                try:
+                    setattr(ctx, "_bot_context_runtime_fields_patch_logged", True)
+                except AttributeError:
+                    pass
+        except AttributeError:
+            pass
+
+
+def _log_bot_context_attribute_missing(exc: AttributeError, *, component: str) -> None:
+    """Log BotContext AttributeError with the missing attribute when Python exposes it."""
+    attr = getattr(exc, "name", None) or str(exc)
+    LOGGER.error(
+        "BOT_CONTEXT_ATTRIBUTE_MISSING attribute=%s component=%s",
+        attr,
+        component,
+        extra={
+            "event": "BOT_CONTEXT_ATTRIBUTE_MISSING",
+            "attribute": attr,
+            "component": component,
+        },
+    )
+
 def get_active_contract_selection(ctx: Any) -> ActiveContractSelection:
     """Return canonical selected-contract snapshot from active_contract_basket SSOT."""
+    ensure_bot_context_runtime_fields(ctx)
     basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
     mdm = getattr(ctx, "market_data_manager", None)
     if basket is None and mdm is not None:
@@ -92,6 +163,7 @@ def get_active_contract_selection(ctx: Any) -> ActiveContractSelection:
 
 def _sync_active_selection_from_basket(ctx: Any, selection: ActiveContractSelection) -> None:
     """Synchronize legacy selected CE/PE fields from active basket only."""
+    ensure_bot_context_runtime_fields(ctx)
     new_ce, new_pe = selection.selected_ce, selection.selected_pe
     if not (new_ce or new_pe):
         return
@@ -100,7 +172,8 @@ def _sync_active_selection_from_basket(ctx: Any, selection: ActiveContractSelect
     drift = bool((old_ce and new_ce and str(old_ce) != str(new_ce)) or (old_pe and new_pe and str(old_pe) != str(new_pe)))
     drift_key = (str(old_ce), str(old_pe), str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
     if drift and getattr(ctx, "_active_selection_drift_log_key", None) != drift_key:
-        ctx._active_selection_drift_log_key = drift_key
+        setattr(ctx, "_active_selection_drift_log_key", drift_key)
+        setattr(ctx, "last_active_selection_drift_at", time_module.time())
         LOGGER.warning(
             "ACTIVE_SELECTION_DRIFT_CORRECTED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=active_contract_basket",
             old_ce, old_pe, new_ce, new_pe,
@@ -112,7 +185,8 @@ def _sync_active_selection_from_basket(ctx: Any, selection: ActiveContractSelect
     ctx.atm_pe_symbol = new_pe
     sync_key = (str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
     if getattr(ctx, "_active_selection_sync_log_key", None) != sync_key:
-        ctx._active_selection_sync_log_key = sync_key
+        setattr(ctx, "_active_selection_sync_log_key", sync_key)
+        setattr(ctx, "last_active_selection_synced_at", time_module.time())
         LOGGER.info(
             "ACTIVE_SELECTION_SYNCED selected_ce=%s selected_pe=%s basket_version=%s",
             new_ce, new_pe, selection.basket_version or selection.selected_at,
@@ -2505,6 +2579,11 @@ class BotContext:
         default_factory=dict
     )
     last_hydration_status_at: datetime | None = None
+    _active_selection_sync_log_key: object | None = None
+    _active_selection_drift_log_key: object | None = None
+    last_active_selection_synced_at: float | None = None
+    last_active_selection_drift_at: float | None = None
+    _bot_context_runtime_fields_patch_logged: bool = False
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     execution_locked_symbols: set[str] = field(default_factory=set)
@@ -4977,6 +5056,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             )
 
             # Attach once; duplicate attachment can duplicate bracket listeners.
+            if hasattr(bracket_manager, "attach_open_position_priority_hooks") and hasattr(market_data_manager, "add_open_position_symbol") and hasattr(market_data_manager, "remove_open_position_symbol"):
+                bracket_manager.attach_open_position_priority_hooks(
+                    on_position_open=market_data_manager.add_open_position_symbol,
+                    on_position_closed=market_data_manager.remove_open_position_symbol,
+                )
+
             if not bracket_manager_attached:
                 order_manager.set_bracket_manager(bracket_manager=bracket_manager)
                 bracket_manager_attached = True
@@ -6897,6 +6982,16 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
                                 symbols=basket.get("symbols") or [],
                                 atm_strike=basket.get("atm_strike"),
                             )
+                    except AttributeError as exc:
+                        _log_bot_context_attribute_missing(exc, component="live_basket_build")
+                        LOGGER.warning(
+                            "LIVE_BASKET_BUILD_FAILED reason=%s",
+                            exc,
+                            extra={
+                                "event": "LIVE_BASKET_BUILD_FAILED",
+                                "reason": str(exc),
+                            },
+                        )
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
                             "LIVE_BASKET_BUILD_FAILED reason=%s",
@@ -7646,6 +7741,7 @@ def build_symbol_hydration_status(
 
 def _hydration_status_map(ctx: BotContext, *, required_option_bars: int, required_context_bars: int) -> dict[str, HydrationStatus]:
     """Build hydration statuses for spot, future, selected/pending CE/PE, and nearby options."""
+    ensure_bot_context_runtime_fields(ctx)
     basket = cast(Mapping[str, Any], getattr(ctx, "active_trading_universe", {}) or {})
     runner = getattr(ctx, "strategy_runner", None)
     spot_symbol = str(basket.get("spot_symbol") or getattr(ctx, "nifty_symbol", None) or "NSE:NIFTY")
@@ -7906,6 +8002,7 @@ async def _ensure_selected_options_hydrated(
 
 async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
+    ensure_bot_context_runtime_fields(ctx)
     source_basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", {}) or {}
     basket = normalize_active_basket_schema(cast(dict[str, object], dict(source_basket) if isinstance(source_basket, Mapping) else {}))
     mdm = getattr(ctx, "market_data_manager", None)
@@ -8205,6 +8302,7 @@ def _commit_active_dynamic_basket(
     atm_strike: int | float | str | None,
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
+    ensure_bot_context_runtime_fields(ctx)
     requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
     requested_selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
     requested_selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
@@ -11001,6 +11099,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 startup_trade_ready = True
             else:
+                if isinstance(e, AttributeError):
+                    _log_bot_context_attribute_missing(e, component="hydration_tracking")
                 norm_basket = normalize_active_basket_schema(dict(getattr(ctx, "active_trading_universe", {}) or {}))
                 LOGGER.exception(
                     "HYDRATION_TRACKING_FAILED error_type=%s error=%s basket_keys=%s selected_ce=%s selected_pe=%s spot_symbol=%s futures_symbol=%s",
