@@ -187,3 +187,144 @@ async def test_handler_exception_logs_structured_error(caplog: pytest.LogCapture
 
     assert update.effective_message.replies == ["ERROR: RuntimeError: boom"]
     assert "TELEGRAM_COMMAND_HANDLER_ERROR command=boom error_type=RuntimeError error=boom" in caplog.text
+
+
+EXPECTED_OPERATOR_COMMANDS = (
+    "start",
+    "help",
+    "ping",
+    "status",
+    "health",
+    "diag",
+    "why",
+    "check",
+    "check_connectivity",
+    "check_market",
+    "check_core",
+    "check_execution",
+    "errors",
+    "stderror",
+    "selftest",
+    "emergency",
+)
+
+
+def test_registered_command_names_equal_expected_set() -> None:
+    assert OPERATOR_COMMAND_NAMES == EXPECTED_OPERATOR_COMMANDS
+    assert OPERATOR_COMMAND_NAMES.count("check_execution") == 1
+
+
+@pytest.mark.asyncio
+async def test_why_includes_diagnostic_sections() -> None:
+    app = FakeApp()
+    runner = SimpleNamespace(
+        _trade_candidate_selector=SimpleNamespace(_last_rejects={"cost_edge_insufficient": 2}),
+        last_signal_reason="adx_hard_gate",
+    )
+    risk = SimpleNamespace(_last_rejection="MAX_TRADES:3/3", settings=SimpleNamespace(max_trades_per_day=3))
+    order = SimpleNamespace(_last_skip_reason="order_preflight_rejected")
+    service = SimpleNamespace(
+        chat_id=12345,
+        deps=SimpleNamespace(
+            bot_context=SimpleNamespace(
+                market_open=True,
+                live_orders_armed=False,
+                live_block_reason="live_orders_not_armed",
+                selected_ce="NIFTY24JUN24000CE",
+                selected_pe="NIFTY24JUN24000PE",
+                data_hard_ready=True,
+                evaluation_ready=True,
+                selected_ce_exec_ready=False,
+                selected_pe_exec_ready=True,
+            ),
+            strategy_runner=runner,
+            risk_manager=risk,
+            order_manager=order,
+            broker_client=SimpleNamespace(is_connected=True),
+        ),
+    )
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+    update = DummyUpdate(text="/why")
+
+    await _handler(app, "why").callback(update, DummyContext())  # type: ignore[arg-type]
+
+    reply = update.effective_message.replies[-1]
+    assert "Why no trade?" in reply
+    assert "readiness:" in reply
+    assert "strategy:" in reply
+    assert "discipline:" in reply
+    assert "execution:" in reply
+    assert "final_reason: live_orders_not_armed" in reply
+    assert "candidate_rejects: cost_edge_insufficient=2" in reply
+
+
+@pytest.mark.asyncio
+async def test_check_execution_includes_readiness_blockers() -> None:
+    app = FakeApp()
+    service = SimpleNamespace(
+        chat_id=12345,
+        deps=SimpleNamespace(
+            bot_context=SimpleNamespace(
+                live_orders_armed=False,
+                live_block_reason="hydration_quote_depth_not_ready",
+                execution_block_reason="broker_unavailable",
+                selected_ce_exec_ready=False,
+                selected_pe_exec_ready=False,
+                broker_ready=False,
+            ),
+            order_manager=SimpleNamespace(_last_skip_reason="selected_option_bid_ask_missing"),
+            risk_manager=SimpleNamespace(_breaker_tripped=True, _last_rejection="BREAKER"),
+        ),
+    )
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+    update = DummyUpdate(text="/check_execution")
+
+    await _handler(app, "check_execution").callback(update, DummyContext())  # type: ignore[arg-type]
+
+    reply = update.effective_message.replies[-1]
+    assert "live_block_reason: hydration_quote_depth_not_ready" in reply
+    assert "execution_block_reason: broker_unavailable" in reply
+    assert "selected_ce_exec_ready: BLOCKED" in reply
+    assert "selected_pe_exec_ready: BLOCKED" in reply
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_handlers_do_not_crash_with_missing_dependencies() -> None:
+    app = FakeApp()
+    service = SimpleNamespace(chat_id=12345)
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+
+    for command in ("why", "check_execution", "check_market", "check_core"):
+        update = DummyUpdate(text=f"/{command}")
+        await _handler(app, command).callback(update, DummyContext())  # type: ignore[arg-type]
+        assert update.effective_message.replies
+        assert not update.effective_message.replies[-1].startswith("ERROR:")
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_handlers_remain_read_only() -> None:
+    app = FakeApp()
+
+    def forbidden(*_: Any, **__: Any) -> None:
+        raise AssertionError("mutating method must not be called")
+
+    order = SimpleNamespace(
+        consume_skip_reason=forbidden,
+        place_order=forbidden,
+        cancel_order=forbidden,
+        _last_skip_reason="preflight_block",
+    )
+    service = SimpleNamespace(
+        chat_id=12345,
+        deps=SimpleNamespace(
+            bot_context=SimpleNamespace(selected_ce="CE", selected_pe="PE"),
+            order_manager=order,
+            risk_manager=SimpleNamespace(_last_rejection="risk_block"),
+        ),
+    )
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+
+    for command in ("why", "check_execution"):
+        update = DummyUpdate(text=f"/{command}")
+        await _handler(app, command).callback(update, DummyContext())  # type: ignore[arg-type]
+        assert "preflight_block" in update.effective_message.replies[-1]
