@@ -240,6 +240,26 @@ _NIFTY_OPTION_SLIPPAGE_GAUGE = metrics.Gauge(
 
 
 @dataclass(slots=True)
+class TradeDecisionSnapshot:
+    """Latest read-only trade decision exposed to diagnostics."""
+
+    timestamp: str
+    symbol: str | None
+    direction: str | None
+    final_reason: str | None
+    live_orders_armed: bool
+    candidate_count: int | None = None
+    candidate_rejects: Mapping[str, Any] | None = None
+    selected_candidate: str | None = None
+    strategy_allowed: bool | None = None
+    risk_allowed: bool | None = None
+    order_submitted: bool = False
+
+
+LAST_TRADE_DECISION_SNAPSHOT: TradeDecisionSnapshot | None = None
+
+
+@dataclass(slots=True)
 class DeterministicExecutionPipeline:
     """Data->signal->validation->risk->execution pipeline."""
 
@@ -711,6 +731,7 @@ class StrategyRunner:
         self._runtime_execution_ready_by_symbol: dict[str, bool] = {}
         self._runtime_symbol_last_ready_at: dict[str, float] = {}
         self._runtime_readiness_reason: str | None = None
+        self._last_trade_decision: TradeDecisionSnapshot | None = None
         self._runtime_indicators: dict[str, dict[str, Any]] = {}
         self._last_direction_context: dict[str, Any] | None = None
         self._runtime_startup_ready = False
@@ -3222,6 +3243,46 @@ class StrategyRunner:
                 continue
         return []
 
+    def _record_trade_decision_snapshot(
+        self,
+        *,
+        symbol: str | None,
+        direction: str | None,
+        final_reason: str | None,
+        candidate_count: int | None = None,
+        candidate_rejects: Mapping[str, Any] | None = None,
+        selected_candidate: str | None = None,
+        strategy_allowed: bool | None = None,
+        risk_allowed: bool | None = None,
+        order_submitted: bool = False,
+    ) -> None:
+        """Update the diagnostic-only latest trade decision snapshot."""
+        try:
+            snapshot = TradeDecisionSnapshot(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                symbol=symbol,
+                direction=direction,
+                final_reason=final_reason,
+                live_orders_armed=bool(self._runtime_live_orders_armed),
+                candidate_count=candidate_count,
+                candidate_rejects=dict(candidate_rejects or {}),
+                selected_candidate=selected_candidate,
+                strategy_allowed=strategy_allowed,
+                risk_allowed=risk_allowed,
+                order_submitted=bool(order_submitted),
+            )
+            self._last_trade_decision = snapshot
+            globals()["LAST_TRADE_DECISION_SNAPSHOT"] = snapshot
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never block trading
+            self._logger.debug(
+                "TRADE_DECISION_SNAPSHOT_UPDATE_FAILED error_type=%s",
+                type(exc).__name__,
+            )
+
+    @property
+    def last_trade_decision(self) -> TradeDecisionSnapshot | None:
+        return self._last_trade_decision
+
     def _reject_signal_execution(
         self,
         *,
@@ -3245,6 +3306,17 @@ class StrategyRunner:
                 "trace_id": trace_id,
                 **payload,
             },
+        )
+        self._record_trade_decision_snapshot(
+            symbol=symbol,
+            direction=str(payload.get("direction") or payload.get("option_side") or "") or None,
+            final_reason=reason,
+            candidate_count=payload.get("candidate_total") if isinstance(payload.get("candidate_total"), int) else None,
+            candidate_rejects=payload.get("candidate_rejects") if isinstance(payload.get("candidate_rejects"), Mapping) else None,
+            selected_candidate=str(payload.get("selected_candidate") or "") or None,
+            strategy_allowed=False,
+            risk_allowed=None,
+            order_submitted=False,
         )
         if reason == "candidate_refresh_pending" and not bool(payload.get("event_loop_active", False)):
             self._logger.info(
@@ -13415,6 +13487,17 @@ class StrategyRunner:
                     )
                 except Exception as rec_exc:
                     self._logger.error("record_trade failed: %s", rec_exc)
+                self._record_trade_decision_snapshot(
+                    symbol=base_symbol,
+                    direction=option_side,
+                    final_reason="order_submitted",
+                    candidate_count=len(valid_snapshots) if "valid_snapshots" in locals() else None,
+                    candidate_rejects=getattr(self._trade_candidate_selector, "_last_rejects", {}),
+                    selected_candidate=base_symbol,
+                    strategy_allowed=True,
+                    risk_allowed=True,
+                    order_submitted=True,
+                )
                 return SignalExecutionResult(True, "order_submitted", order_id=order_id, details={"trace_id": trace_id})
             else:
                 deterministic_rejections = {
@@ -13469,6 +13552,17 @@ class StrategyRunner:
                 )
                 log_throttled(self._logger, f"runner_order_rejected_{base_symbol}", "ORDER_REJECTED by order_manager", interval_sec=300.0, level=logging.WARNING, extra={"event": "ORDER_REJECTED", "symbol": base_symbol})
                 self._reset_execution_state(base_symbol)
+                self._record_trade_decision_snapshot(
+                    symbol=base_symbol,
+                    direction=option_side,
+                    final_reason=submit_reason,
+                    candidate_count=len(valid_snapshots) if "valid_snapshots" in locals() else None,
+                    candidate_rejects=getattr(self._trade_candidate_selector, "_last_rejects", {}),
+                    selected_candidate=base_symbol,
+                    strategy_allowed=True,
+                    risk_allowed=False,
+                    order_submitted=False,
+                )
                 return SignalExecutionResult(False, submit_reason, details=submit_details)
 
         except Exception as exc:
