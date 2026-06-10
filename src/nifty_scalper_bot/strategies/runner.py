@@ -419,6 +419,9 @@ class SymbolRuntimeState:
     active: bool = True
     last_tick: dict[str, Any] | None = None
     last_signal_at: datetime | None = None
+    last_trade_at: float | None = None
+    last_order_id: str | None = None
+    last_trade_symbol: str | None = None
     strategy_data: dict[str, Any] = field(default_factory=dict)
     vwap: float | None = None
     session_vwap_volume: int = 0
@@ -429,16 +432,47 @@ class SymbolRuntimeState:
 
     def __post_init__(self) -> None:
         self.trade_history = deque(maxlen=self.history_limit)
+        self.last_trade_at = _coerce_epoch_seconds(self.last_trade_at)
+
+    def trade_cooldown_remaining(self, now: float, cooldown_seconds: float) -> float:
+        """Return remaining trade cooldown seconds without crashing on old state."""
+        last_trade_at = _coerce_epoch_seconds(getattr(self, "last_trade_at", None))
+        if last_trade_at is None or cooldown_seconds <= 0:
+            return 0.0
+
+        elapsed = max(0.0, float(now) - last_trade_at)
+        return max(0.0, float(cooldown_seconds) - elapsed)
 
     def snapshot(self) -> dict[str, Any]:
         """Return a serialisable snapshot of the symbol state."""
         return {
             "active": self.active,
             "last_signal_at": _format_dt(self.last_signal_at),
+            "last_trade_at": _coerce_epoch_seconds(getattr(self, "last_trade_at", None)),
+            "last_order_id": getattr(self, "last_order_id", None),
+            "last_trade_symbol": getattr(self, "last_trade_symbol", None),
             "trade_history": [record.to_dict() for record in self.trade_history],
             "strategy_data": dict(self.strategy_data),
         }
 
+
+def _coerce_epoch_seconds(value: float | int | str | datetime | None) -> float | None:
+    """Convert persisted runtime timestamps to epoch seconds for cooldown checks."""
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return float(normalized.timestamp())
+
+    try:
+        epoch_seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    if epoch_seconds != epoch_seconds or epoch_seconds < 0.0:
+        return None
+    return epoch_seconds
 
 def _format_dt(value: datetime | None) -> str | None:
     """Format datetime to UTC ISO format string."""
@@ -3487,7 +3521,9 @@ class StrategyRunner:
                     self._symbol_state[symbol] = state
 
                 state.trade_history.append(record)
-                state.last_trade_at = record.timestamp
+                state.last_trade_at = _coerce_epoch_seconds(record.timestamp)
+                state.last_order_id = record.order_id
+                state.last_trade_symbol = symbol
 
             restored += 1
 
@@ -13808,6 +13844,9 @@ class StrategyRunner:
                 return
 
             state.trade_history.append(record)
+            state.last_trade_at = _coerce_epoch_seconds(record.timestamp)
+            state.last_order_id = record.order_id
+            state.last_trade_symbol = symbol
 
         manager = self._persistent_state
         if manager is not None:
