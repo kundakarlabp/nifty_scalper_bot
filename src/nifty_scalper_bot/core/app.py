@@ -708,6 +708,27 @@ def get_runner_history_count(ctx: Any, symbol: str) -> int:
         return 0
 
 
+def classify_basket_commit(
+    *,
+    selected_ce: str | None,
+    selected_pe: str | None,
+    ce_token: int | None,
+    pe_token: int | None,
+    option_count: int,
+) -> tuple[str, bool]:
+    """Args: selected pair, their tokens, option count. Returns: (event_name,
+    context_only). A basket is tradable only with both selected symbols, both
+    tokens, and at least one option; anything less is context-only and must
+    never be announced as an active tradable basket. Raises: none.
+    """
+    tradable = bool(
+        selected_ce and selected_pe and ce_token and pe_token and option_count > 0
+    )
+    if tradable:
+        return "ACTIVE_CONTRACT_BASKET_COMMITTED", False
+    return "CONTEXT_ONLY_BASKET_COMMITTED", True
+
+
 def resolve_active_basket_tokens(
     ctx: Any,
     active_basket_symbols: Sequence[str],
@@ -729,7 +750,17 @@ def resolve_active_basket_tokens(
             token = None
         if token is None:
             fatal = symbol in {selected_ce, selected_pe}
-            LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=%s", symbol, fatal)
+            im_ready = bool(instrument_manager is not None and getattr(instrument_manager, "is_loaded", lambda: True)())
+            if not im_ready:
+                # Pre-InstrumentManager state: resolution is expected to
+                # succeed on the deferred retry once it loads. Not an error.
+                LOGGER.info(
+                    "ACTIVE_BASKET_TOKEN_PENDING symbol=%s fatal_for_live=%s reason=instrument_manager_not_ready",
+                    symbol, fatal,
+                    extra={"event": "ACTIVE_BASKET_TOKEN_PENDING", "symbol": str(symbol), "fatal_for_live": fatal},
+                )
+            else:
+                LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=%s", symbol, fatal)
             continue
         token_map[symbol] = int(token)
         LOGGER.info("ACTIVE_BASKET_TOKEN_RESOLVED symbol=%s token=%s", symbol, int(token))
@@ -8566,20 +8597,30 @@ def _commit_active_dynamic_basket(
                             "reason": type(exc).__name__,
                         },
                     )
+    event_name, context_only = classify_basket_commit(
+        selected_ce=selected_ce,
+        selected_pe=selected_pe,
+        ce_token=token_map.get(selected_ce or ""),
+        pe_token=token_map.get(selected_pe or ""),
+        option_count=sum(1 for s in (committed.get("symbols", []) or []) if str(s).endswith(("CE", "PE"))),
+    )
     LOGGER.info(
-        "ACTIVE_CONTRACT_BASKET_COMMITTED selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s symbol_count=%d",
+        "%s selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s symbol_count=%d context_only=%s",
+        event_name,
         selected_ce,
         selected_pe,
         active_futures_symbol,
         atm_strike,
         len(committed.get("symbols", []) or []),
+        context_only,
         extra={
-            "event": "ACTIVE_CONTRACT_BASKET_COMMITTED",
+            "event": event_name,
             "selected_ce": selected_ce,
             "selected_pe": selected_pe,
             "futures_symbol": active_futures_symbol,
             "atm_strike": atm_strike,
             "symbol_count": len(committed.get("symbols", []) or []),
+            "context_only": context_only,
         },
     )
     if mdm is not None:
@@ -8871,6 +8912,12 @@ async def _build_and_hydrate_live_basket_from_spot(
             )
             if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
                 duration_ms = int((time_module.monotonic() - start) * 1000)
+                ctx.basket_build_pending_spot_ltp = float(spot_ltp)
+                LOGGER.info(
+                    'BASKET_BUILD_PENDING reason=instrument_manager_not_ready spot_ltp=%.2f',
+                    float(spot_ltp),
+                    extra={'event': 'BASKET_BUILD_PENDING', 'reason': 'instrument_manager_not_ready', 'spot_ltp': float(spot_ltp)},
+                )
                 LOGGER.warning(
                     'LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready duration_ms=%d recoverable=True',
                     duration_ms,
