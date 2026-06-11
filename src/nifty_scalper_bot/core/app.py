@@ -7737,7 +7737,7 @@ def build_symbol_hydration_status(
         last_bar_ts=max(timestamps) if timestamps else None,
         live_merge_applied=bool(mdm_bars and datahub_bars and (mdm_bars == datahub_bars)),
     )
-    LOGGER.info(
+    LOGGER.debug(
         "HYDRATION_PROPAGATION_RESULT symbol=%s role=%s required_bars=%s mdm_bars=%s datahub_bars=%s runner_bars=%s indicator_bars=%s tradable_quote=%s depth_available=%s ready_for_evaluation=%s ready_for_execution=%s blockers=%s",
         status.symbol,
         status.role,

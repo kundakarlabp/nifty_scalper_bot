@@ -234,7 +234,8 @@ class SMCStrategy(EliteStrategy):
                 f"smc_feature_readiness:{symbol}",
                 "SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s missing_feature_sources=%s live_enabled=%s vote_allowed=%s hard_veto=%s",
                 symbol, feature_completeness, ",".join(missing_features), missing_feature_sources, is_live, feature_ready, False,
-                interval_sec=30.0,
+                interval_sec=60.0,
+                level=__import__("logging").DEBUG,
                 extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})
             if option_premium_domain:
                 premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))

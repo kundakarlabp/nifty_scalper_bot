@@ -82,6 +82,7 @@ from nifty_scalper_bot.execution.order_state_machine import (
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
+from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
 from nifty_scalper_bot.risk.position_sizing import (
     RiskManager as DeterministicRiskManager,
     RiskSnapshot,
@@ -749,7 +750,7 @@ class StrategyRunner:
         self._active_selection_drift_log_key: tuple[str | None, str | None, str | None, str | None, str | None] | None = None
         self._selected_option_prewarm_inflight: set[str] = set()
         self._selected_option_prewarm_last: dict[str, float] = {}
-        self._selected_option_prewarm_cooldown_s = max(1.0, float(os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS", "45") or 45))
+        self._selected_option_prewarm_cooldown_s = max(1.0, parse_float_env(os.getenv("HYDRATION_RETRY_COOLDOWN_SECONDS") or os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS"), 60.0))
         self._pending_selected_ce: str | None = None
         self._pending_selected_pe: str | None = None
         self._pending_atm_strike: int | None = None
@@ -2687,6 +2688,9 @@ class StrategyRunner:
             self._active_selected_pe = selected_pe_norm
         self._active_atm_strike = atm_value
         self._active_option_symbols = candidate_symbols
+        self._eval_option_whitelist = self._compute_eval_option_whitelist(
+            candidate_symbols, atm_value, selected_ce_norm or self._active_selected_ce, selected_pe_norm or self._active_selected_pe
+        )
         if promoted_from_pending:
             self._pending_selected_ce = None
             self._pending_selected_pe = None
@@ -6880,7 +6884,11 @@ class StrategyRunner:
             payload["trading_allowed"] = bool(payload.get("trading_allowed", allowed))
             payload["order_forwarding_allowed"] = bool(payload.get("order_forwarding_allowed", payload["trading_allowed"]))
             verbose_eval = str(os.getenv("LOG_VERBOSE_RUNNER_EVAL", "false")).strip().lower() in {"1", "true", "yes", "on"}
-            log_level = logging.DEBUG if ((not allowed) and reason_str == "strategy_eval_skipped_same_bar" and not verbose_eval) else logging.INFO
+            # CPU/log volume: routine eval decisions are DEBUG. INFO is reserved
+            # for actionable transitions (signal forwarded / blocked entry path).
+            _info_reasons = {"signal_forwarded", "evaluation_entered_first", "order_path_entered"}
+            verbose_all = str(os.getenv("RUNNER_EVAL_LOG_INFO", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+            log_level = logging.INFO if (verbose_all or reason_str in _info_reasons or stage == "signal_forward") else logging.DEBUG
             log_throttled_live(
                 self._logger,
                 log_level,
@@ -7638,6 +7646,9 @@ class StrategyRunner:
         last_bar_key = (getattr(self, "_last_eval_bar_key_by_symbol", {}) or {}).get(symbol_norm)
         last_eval_at = float((getattr(self, "_last_periodic_eval_at_by_symbol", {}) or {}).get(symbol_norm, 0.0) or 0.0)
         interval = max(float(getattr(cfg, "same_bar_periodic_eval_seconds", 5.0) or 5.0), 3.0)
+        env_min_ms = parse_float_env(os.getenv("RUNNER_EVAL_MIN_INTERVAL_MS"), 0.0)
+        if env_min_ms > 0:
+            interval = max(interval, env_min_ms / 1000.0)
         elapsed = (now_mono - last_eval_at) if last_eval_at > 0 else None
         details: dict[str, Any] = {
             "bar_key": current_bar_key,
@@ -7650,8 +7661,96 @@ class StrategyRunner:
         }
         if last_bar_key == current_bar_key and last_eval_at > 0 and elapsed is not None and elapsed < interval:
             details["pregate_reason"] = "same_bar_periodic_eval_throttled"
+            self._bump_cpu_metric("skipped_by_eval_throttle")
             return True, "same_bar_periodic_eval_throttled", details
+        # CPU shortcut: during the midday pause with no open positions there is
+        # nothing a full strategy evaluation could lead to (entries blocked),
+        # so skip it entirely. Exit management and data health are untouched.
+        if self._midday_idle_skip_active():
+            details["pregate_reason"] = "midday_pause_idle_skip"
+            self._bump_cpu_metric("skipped_by_midday_pause")
+            return True, "midday_pause_idle_skip", details
+        # CPU cap: only evaluate the selected pair plus the nearest strikes up
+        # to MAX_LIVE_OPTION_SYMBOLS. Far context strikes still stream data
+        # (OI/IV context) but do not pay full strategy-evaluation cost.
+        whitelist = getattr(self, "_eval_option_whitelist", None)
+        if whitelist and symbol_norm.endswith(("CE", "PE")) and symbol_norm not in whitelist:
+            details["pregate_reason"] = "eval_capped_far_strike"
+            self._bump_cpu_metric("skipped_by_option_cap")
+            return True, "eval_capped_far_strike", details
+        self._bump_cpu_metric("evaluated_symbols")
         return False, "ok", details
+
+    def _compute_eval_option_whitelist(
+        self,
+        option_symbols: set[str] | None,
+        atm_strike: int | None,
+        selected_ce: str | None,
+        selected_pe: str | None,
+    ) -> set[str]:
+        """Args: basket options, atm, selected pair. Returns: symbols allowed full
+        strategy evaluation, capped at MAX_LIVE_OPTION_SYMBOLS (default 8) and
+        ranked by strike distance from ATM. Selected CE/PE always included.
+        Raises: none.
+        """
+        cap = parse_int_env(os.getenv("MAX_LIVE_OPTION_SYMBOLS"), 8)
+        symbols = {normalize_symbol(str(s)) for s in (option_symbols or set()) if s}
+        for sel in (selected_ce, selected_pe):
+            if sel:
+                symbols.add(normalize_symbol(str(sel)))
+        if cap <= 0 or len(symbols) <= cap:
+            return symbols
+        selected = {normalize_symbol(str(s)) for s in (selected_ce, selected_pe) if s}
+
+        def _distance(sym: str) -> float:
+            strike = self._extract_strike_from_symbol(sym)
+            if strike is None or atm_strike is None:
+                return float("inf")
+            return abs(float(strike) - float(atm_strike))
+
+        ranked = sorted(symbols - selected, key=_distance)
+        whitelist = set(selected)
+        for sym in ranked:
+            if len(whitelist) >= cap:
+                break
+            whitelist.add(sym)
+        return whitelist
+
+    def _midday_idle_skip_active(self) -> bool:
+        """Args: none. Returns: True when midday pause is on and no positions are open. Raises: none."""
+        try:
+            blocked, _ = midday_pause_block()
+        except Exception:
+            return False
+        if not blocked:
+            return False
+        try:
+            manager = getattr(self, "_position_manager", None)
+            if manager is not None and manager.get_open_positions():
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _bump_cpu_metric(self, key: str) -> None:
+        """Args: metric key. Returns: None; emits CPU_OPTIMIZATION_SUMMARY every 60s. Raises: none."""
+        metrics = getattr(self, "_cpu_opt_metrics", None)
+        if metrics is None:
+            metrics = {}
+            self._cpu_opt_metrics = metrics
+        metrics[key] = int(metrics.get(key, 0)) + 1
+        if self._should_log_throttled("cpu_optimization_summary", 60.0):
+            whitelist = getattr(self, "_eval_option_whitelist", None) or set()
+            self._logger.info(
+                "CPU_OPTIMIZATION_SUMMARY evaluated_symbols_count=%s skipped_by_midday_pause=%s skipped_by_eval_throttle=%s skipped_by_option_cap=%s active_option_symbols_count=%s",
+                metrics.get("evaluated_symbols", 0),
+                metrics.get("skipped_by_midday_pause", 0),
+                metrics.get("skipped_by_eval_throttle", 0),
+                metrics.get("skipped_by_option_cap", 0),
+                len(whitelist),
+                extra={"event": "CPU_OPTIMIZATION_SUMMARY", **{k: int(v) for k, v in metrics.items()}, "active_option_symbols_count": len(whitelist)},
+            )
+            metrics.clear()
 
     def _mark_symbol_eval_allowed(self, symbol: str, *, bar_key: Any | None = None, tick: Mapping[str, Any] | None = None) -> None:
         """Record a permitted strategy evaluation for future same-bar throttling."""
