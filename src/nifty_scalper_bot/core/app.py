@@ -92,6 +92,7 @@ BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
     "_deferred_basket_hydration_log_key": None,
     "last_deferred_basket_hydration_log_at": None,
     "_live_basket_build_log_key": None,
+    "basket_build_pending_spot_ltp": None,
     "last_live_basket_build_log_at": None,
     "_hydration_tracking_log_key": None,
     "last_hydration_tracking_log_at": None,
@@ -2646,6 +2647,7 @@ class BotContext:
     basket_build_last_started_mono: float = 0.0
     basket_build_last_completed_mono: float = 0.0
     basket_build_last_error: str | None = None
+    basket_build_pending_spot_ltp: float | None = None
     startup_phase: str = "created"
     startup_failed: bool = False
     startup_failure_reason: str | None = None
@@ -7349,6 +7351,7 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
     if not hasattr(ctx, "effective_mode"):
         ctx.effective_mode = str(ctx.readiness_mode)
     LOGGER.info("LIVE_READINESS_REARM_LOOP_STARTED")
+    rearm_sleep_logged = False
     while True:
         try:
             await asyncio.sleep(interval_seconds)
@@ -7368,8 +7371,8 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                     float(interval_seconds),
                     parse_float_env(os.getenv("POST_MARKET_REARM_INTERVAL_SECONDS"), 300.0),
                 )
-                if not getattr(ctx, "_rearm_sleep_logged", False):
-                    ctx._rearm_sleep_logged = True
+                if not rearm_sleep_logged:
+                    rearm_sleep_logged = True
                     LOGGER.info(
                         "LIVE_READINESS_REARM_SLEEPING market_state=closed sleep_s=%d",
                         int(post_close),
@@ -7377,7 +7380,7 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                     )
                 await asyncio.sleep(max(0.0, post_close - float(interval_seconds)))
                 continue
-            ctx._rearm_sleep_logged = False
+            rearm_sleep_logged = False
             runner = getattr(ctx, "strategy_runner", None)
             active_symbols = len(getattr(runner, "_active_symbols", set()) or [])
             if active_symbols == 0:
