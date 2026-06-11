@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import math
 import os
+
+from nifty_scalper_bot.config.env_utils import parse_int_env
 import re
 from random import uniform
 import threading
@@ -1798,6 +1800,62 @@ class MarketDataManager:
                     token_map.setdefault(key, token)
         return token_map
 
+    def _clamp_option_tokens(
+        self,
+        tokens: list[int],
+        token_map: Mapping[str, int],
+        selected_ce: str,
+        selected_pe: str,
+    ) -> list[int]:
+        """Args: token list, symbol->token map, selected pair. Returns: tokens
+        with option tokens clamped to MAX_ACTIVE_OPTION_SYMBOLS (alias
+        MAX_LIVE_OPTION_SYMBOLS, default 8); selected CE/PE always kept; non
+        option tokens (spot/futures) never clamped. DIAGNOSTIC_FULL_UNIVERSE
+        bypasses. Raises: none.
+        """
+        max_options = parse_int_env(
+            os.getenv("MAX_ACTIVE_OPTION_SYMBOLS") or os.getenv("MAX_LIVE_OPTION_SYMBOLS"), 8
+        )
+        diagnostic = str(os.getenv("DIAGNOSTIC_FULL_UNIVERSE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+        if diagnostic or max_options <= 0:
+            return tokens
+        symbol_by_token: dict[int, str] = {}
+        for sym, tok in (token_map or {}).items():
+            try:
+                symbol_by_token.setdefault(int(tok), str(sym))
+            except (TypeError, ValueError):
+                continue
+
+        def _is_option(tok: int) -> bool:
+            sym = symbol_by_token.get(tok, "")
+            return sym.endswith(("CE", "PE"))
+
+        option_tokens = [t for t in tokens if _is_option(t)]
+        if len(option_tokens) <= max_options:
+            return tokens
+        priority: list[int] = []
+        for sel in (selected_ce, selected_pe):
+            tok = token_map.get(sel) or token_map.get(sel.split(":", 1)[-1] if ":" in sel else sel)
+            if tok:
+                try:
+                    priority.append(int(tok))
+                except (TypeError, ValueError):
+                    pass
+        kept: list[int] = list(dict.fromkeys(priority))
+        for tok in option_tokens:
+            if len(kept) >= max_options:
+                break
+            if tok not in kept:
+                kept.append(tok)
+        kept_set = set(kept)
+        clamped = [t for t in tokens if (not _is_option(t)) or t in kept_set]
+        self._logger.warning(
+            "MDM_OPTION_TOKENS_CLAMPED full_option_count=%d capped_option_count=%d max_options=%d",
+            len(option_tokens), len(kept), max_options,
+            extra={"event": "MDM_OPTION_TOKENS_CLAMPED", "full_option_count": len(option_tokens), "capped_option_count": len(kept), "max_options": max_options},
+        )
+        return clamped
+
     def set_active_contract_basket(self, basket: Any) -> None:
         """Commit active basket tokens/subscriptions without clearing on incomplete payloads."""
         tokens = [int(tok) for tok in (self._basket_value(basket, "all_tokens", []) or []) if tok]
@@ -1827,6 +1885,10 @@ class MarketDataManager:
         token_map = self._basket_token_map(basket)
         selected_ce = str(self._basket_value(basket, "selected_ce", "") or "")
         selected_pe = str(self._basket_value(basket, "selected_pe", "") or "")
+        # Hard fail-safe: regardless of which path built this basket (SSOT,
+        # dynamic refresh, legacy), the option token set is clamped to the
+        # canonical cap before any WS/MDM/polling subscription derives from it.
+        tokens = self._clamp_option_tokens(tokens, token_map, selected_ce, selected_pe)
         selected_ce_token = (
             self._basket_value(basket, "selected_ce_token", None)
             or token_map.get(selected_ce)
