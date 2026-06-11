@@ -72,8 +72,17 @@ class BBSqueezeStrategy(EliteStrategy):
             if momentum_confirmed:
                 score += 1.0
                 reasons.append('volume_confirmation')
-            score += 2.0
-            reasons.append('clean_rr')
+            # Tighter squeezes store more energy: grade by width vs threshold
+            effective_threshold = max(squeeze_threshold, 0.008)
+            tightness = bb_width / effective_threshold
+            if tightness <= 0.6:
+                score += 2.0
+                reasons.append('squeeze_very_tight')
+            elif tightness <= 0.85:
+                score += 1.0
+                reasons.append('squeeze_tight')
+            else:
+                reasons.append('squeeze_marginal')
 
             strategy_score = max(0.0, min(10.0, score))
             metadata = {

@@ -82,8 +82,16 @@ class RSIDivergenceStrategy(EliteStrategy):
             if direction in {'CE', 'PE'} and direction == side:
                 score += 1.0
                 reasons.append('direction_context')
-            score += 2.0
-            reasons.append('rr_viable')
+            # Grade by RSI displacement: bigger divergence = stronger reversal evidence
+            rsi_delta = abs(r2 - r1)
+            if rsi_delta >= 5.0:
+                score += 2.0
+                reasons.append(f'divergence_strong_{rsi_delta:.1f}')
+            elif rsi_delta >= 2.5:
+                score += 1.0
+                reasons.append(f'divergence_moderate_{rsi_delta:.1f}')
+            else:
+                reasons.append(f'divergence_weak_{rsi_delta:.1f}')
 
             strategy_score = max(0.0, min(10.0, score))
             if strategy_score < 3.5:
