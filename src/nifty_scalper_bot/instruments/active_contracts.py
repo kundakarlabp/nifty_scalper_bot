@@ -177,3 +177,40 @@ def resolve_active_nifty_future(
     if configured and not is_nifty_future_expired(configured, now=now):
         return ActiveFutureResolution(configured, "configured_symbol")
     return ActiveFutureResolution(None, "unresolved", reason="active_future_unresolved")
+
+
+def cap_option_universe(
+    option_items: list[tuple[str, int, float, str]],
+    *,
+    selected_ce: str,
+    selected_pe: str,
+    atm_strike: float,
+    max_options: int,
+) -> list[tuple[str, int, float, str]]:
+    """Args: (symbol, token, strike, side) items, selected pair, atm, cap.
+    Returns: capped list always containing selected CE/PE, remaining slots
+    filled by strikes nearest to ATM alternating CE/PE. Raises: none.
+
+    Single global cap for the active option universe. Applying it where the
+    basket is built means DataHub, MDM, WS subscriptions, runner registration,
+    hydration, and evaluation all inherit the same capped set.
+    """
+    if max_options <= 0 or len(option_items) <= max_options:
+        return list(option_items)
+    by_symbol = {item[0]: item for item in option_items}
+    capped: list[tuple[str, int, float, str]] = []
+    seen: set[str] = set()
+    for sel in (selected_ce, selected_pe):
+        item = by_symbol.get(sel)
+        if item and sel not in seen:
+            capped.append(item)
+            seen.add(sel)
+    remaining = [item for item in option_items if item[0] not in seen]
+    ce_ranked = sorted((i for i in remaining if i[3] == "CE"), key=lambda i: abs(i[2] - atm_strike))
+    pe_ranked = sorted((i for i in remaining if i[3] == "PE"), key=lambda i: abs(i[2] - atm_strike))
+    take_ce = True
+    while len(capped) < max_options and (ce_ranked or pe_ranked):
+        bucket = ce_ranked if (take_ce and ce_ranked) or not pe_ranked else pe_ranked
+        capped.append(bucket.pop(0))
+        take_ce = not take_ce
+    return capped
