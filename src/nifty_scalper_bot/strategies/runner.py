@@ -807,7 +807,9 @@ class StrategyRunner:
         self._execution_totals: Dict[str, Dict[str, int]] = defaultdict(
             lambda: {"success": 0, "error": 0}
         )
-        self._trade_candidate_selector = TradeCandidateSelector()
+        self._trade_candidate_selector = TradeCandidateSelector(
+            option_metrics_getter=getattr(self._data_hub, "get_option_metrics", None)
+        )
         self._trade_counter_by_symbol_candle: Dict[str, dict] = {}
         self._settings = get_settings()
         try:

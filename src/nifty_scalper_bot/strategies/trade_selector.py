@@ -10,6 +10,7 @@ from typing import Any
 from nifty_scalper_bot.config.env_utils import parse_int_env
 from nifty_scalper_bot.risk.cost_model import passes_cost_edge_gate
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
+from nifty_scalper_bot.strategies.option_signal import score_option_candidate
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
 LOGGER = get_logger(__name__)
@@ -43,8 +44,9 @@ class TradeCandidate:
 
 
 class TradeCandidateSelector:
-    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float | None = None, max_option_premium: float | None = None, max_tick_age_s: float | None = None, max_option_spread_pct: float | None = None, require_real_ticks_last_60s: int | None = None) -> None:
+    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float | None = None, max_option_premium: float | None = None, max_tick_age_s: float | None = None, max_option_spread_pct: float | None = None, require_real_ticks_last_60s: int | None = None, option_metrics_getter: Any | None = None) -> None:
         self.quality_mode = quality_mode
+        self.option_metrics_getter = option_metrics_getter if callable(option_metrics_getter) else None
         self.option_strike_window_each_side = option_strike_window_each_side
         self.min_option_premium = float(min_option_premium if min_option_premium is not None else os.getenv('MIN_OPTION_PREMIUM', '40'))
         self.max_option_premium = float(max_option_premium if max_option_premium is not None else os.getenv('MAX_OPTION_PREMIUM', '650'))
@@ -208,6 +210,14 @@ class TradeCandidateSelector:
             score = 6.0 + liquidity * 0.2 + micro * 0.2 - atm_distance * 0.5 - score_penalty
             dq = self.evaluate_data_quality(s)
             final = max(0.0, min(10.0, 0.7 * score + 0.3 * dq.score))
+            if self.option_metrics_getter is not None:
+                try:
+                    opt_delta, opt_reasons = score_option_candidate(symbol, self.option_metrics_getter(symbol))
+                except Exception:
+                    opt_delta, opt_reasons = 0.0, ['option_metrics_error']
+                if opt_delta:
+                    final = max(0.0, min(10.0, final + opt_delta))
+                reasons.extend(opt_reasons)
             ranked.append(TradeCandidate(symbol=symbol, side=side, score=final, reasons=reasons, spread_pct=spread_pct, tick_age_s=tick_age_s, premium=premium, atm_distance=atm_distance, data_quality_score=dq.score, entry_price=entry, stop_loss=sl, target=target, rr=rr, liquidity_score=liquidity, microstructure_score=micro, final_score=final))
         sorted_ranked = sorted(ranked, key=lambda c: c.final_score or 0.0, reverse=True)
         self._last_rejects = dict(rejects)
