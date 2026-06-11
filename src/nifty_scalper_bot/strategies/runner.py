@@ -2749,13 +2749,15 @@ class StrategyRunner:
                 extra={"event": "RUNNER_FUTURES_CONTEXT_ROTATED", "old_symbol": previous_futures, "new_symbol": futures_symbol, "source": "active_trading_universe"},
             )
         self._sync_active_selection_from_basket(active_contract_selection_from_basket(basket))
+        _context_only = not (self._active_selected_ce and self._active_selected_pe and self._active_option_symbols)
         self._logger.info(
-            "RUNNER_ACTIVE_BASKET_UPDATED selected_ce=%s selected_pe=%s futures_symbol=%s option_count=%d",
+            "RUNNER_ACTIVE_BASKET_UPDATED selected_ce=%s selected_pe=%s futures_symbol=%s option_count=%d context_only=%s",
             self._active_selected_ce,
             self._active_selected_pe,
             self._active_futures_symbol,
             len(self._active_option_symbols),
-            extra={"event": "RUNNER_ACTIVE_BASKET_UPDATED", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "futures_symbol": self._active_futures_symbol, "option_count": len(self._active_option_symbols)},
+            _context_only,
+            extra={"event": "RUNNER_ACTIVE_BASKET_UPDATED", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "futures_symbol": self._active_futures_symbol, "option_count": len(self._active_option_symbols), "context_only": _context_only},
         )
         self._sync_context_history_if_cold(source="active_basket_context_sync")
 

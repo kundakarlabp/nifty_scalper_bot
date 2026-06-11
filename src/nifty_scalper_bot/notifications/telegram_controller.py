@@ -3874,13 +3874,19 @@ class TelegramBot:
                 b = b.rate_limiter(limiter)
                 log.info("Telegram: AIORateLimiter enabled.")
             except Exception as exc:
-                log.warning(
-                    (
-                        "Telegram: AIORateLimiter not attached (%s). Continuing "
-                        "without it."
-                    ),
-                    exc,
-                )
+                if not getattr(self, "_rate_limiter_warned", False):
+                    self._rate_limiter_warned = True
+                    log.info(
+                        "TELEGRAM_RATE_LIMITER_UNAVAILABLE dependency_missing=true detail=%s",
+                        exc,
+                        extra={"event": "TELEGRAM_RATE_LIMITER_UNAVAILABLE", "dependency_missing": True},
+                    )
+        elif not getattr(self, "_rate_limiter_warned", False):
+            self._rate_limiter_warned = True
+            log.info(
+                "TELEGRAM_RATE_LIMITER_UNAVAILABLE dependency_missing=true detail=ptb_rate_limiter_extra_not_installed",
+                extra={"event": "TELEGRAM_RATE_LIMITER_UNAVAILABLE", "dependency_missing": True},
+            )
         return b
 
     def build_application(self, *, bot: Bot | None = None) -> Application:

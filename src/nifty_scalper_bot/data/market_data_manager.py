@@ -7920,15 +7920,21 @@ class MarketDataManager:
         if callable(purge_hub):
             purge_hub(symbols=sorted(stale_symbols), tokens=purged_tokens)
         if stale_symbols or purged_tokens:
-            self._logger.warning(
-                "FUTURES_STALE_SUBSCRIPTION_PURGED active=%s purged_symbols_count=%d purged_tokens_count=%d reason=%s",
+            purge_key = (active, tuple(sorted(purged_tokens)), tuple(sorted(stale_symbols)))
+            repeated = getattr(self, "_last_futures_purge_key", None) == purge_key
+            self._last_futures_purge_key = purge_key
+            self._logger.log(
+                logging.DEBUG if repeated else logging.WARNING,
+                "FUTURES_STALE_SUBSCRIPTION_PURGED active=%s purged_symbols_count=%d purged_tokens_count=%d reason=%s repeated=%s",
                 active,
                 len(stale_symbols),
                 len(purged_tokens),
                 reason,
+                repeated,
                 extra={
                     "event": "FUTURES_STALE_SUBSCRIPTION_PURGED",
                     "active_symbol": active,
+                    "repeated": repeated,
                     "purged_symbols_count": len(stale_symbols),
                     "purged_symbols_sample": sorted(stale_symbols)[:10],
                     "purged_tokens_count": len(purged_tokens),
