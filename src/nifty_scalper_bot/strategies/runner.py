@@ -1623,17 +1623,23 @@ class StrategyRunner:
                 symbols.append(normalized)
         required = max(self._option_required_bars, safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
         for option_symbol in symbols:
+            # Sync to the symbol's true readiness requirement, not just the
+            # execution minimum. With a 5-bar target the cache sync fetched 5
+            # bars from an MDM holding 50+, leaving dynamically added strikes
+            # permanently below the 30/50-bar readiness threshold (the rearm
+            # loop retried forever without ever closing the gap).
+            symbol_required = max(required, int(self._required_bars_for_symbol(option_symbol) or 0))
             before = self._sync_history_from_mdm_cache(
                 option_symbol,
-                required_bars=required,
+                required_bars=symbol_required,
                 source=f"{source}_option_cache_sync",
                 request_if_short=False,
             )
-            if before < required:
+            if before < symbol_required:
                 self._request_selected_option_history_prewarm(
                     option_symbol,
                     bars_before=before,
-                    required_bars=required,
+                    required_bars=symbol_required,
                     trace_id=trace_id,
                 )
 

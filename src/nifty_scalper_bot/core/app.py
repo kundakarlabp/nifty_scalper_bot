@@ -8182,7 +8182,28 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     futures_status = _status_for_role(statuses, "futures_context")
     ce_status = _status_for_role(statuses, "selected_ce")
     pe_status = _status_for_role(statuses, "selected_pe")
-    status_blockers = list(dict.fromkeys([reason for status in statuses.values() for reason in status.blocker_reasons]))
+    # Only roles the bot actually trades or requires for direction may disarm
+    # execution. option_context strikes feed OI/IV context; if they are cold
+    # they must degrade context, never block trading on the ready ATM pair.
+    _execution_gating_roles = {"spot", "futures_context", "selected_ce", "selected_pe"}
+    status_blockers = list(dict.fromkeys([
+        reason
+        for status in statuses.values()
+        if getattr(status, "role", "") in _execution_gating_roles
+        for reason in status.blocker_reasons
+    ]))
+    context_only_blockers = list(dict.fromkeys([
+        reason
+        for status in statuses.values()
+        if getattr(status, "role", "") not in _execution_gating_roles
+        for reason in status.blocker_reasons
+    ]))
+    if context_only_blockers:
+        LOGGER.info(
+            "CONTEXT_SYMBOL_BLOCKERS_NON_GATING blockers=%s",
+            context_only_blockers,
+            extra={"event": "CONTEXT_SYMBOL_BLOCKERS_NON_GATING", "blockers": context_only_blockers},
+        )
     hydration_hard_blockers = [
         blocker for blocker in status_blockers
         if not (blocker.endswith("_quote_missing") or blocker.endswith("_depth_missing") or blocker == "spread_too_wide" or blocker.endswith("_token_missing") or blocker == "option_token_missing")
