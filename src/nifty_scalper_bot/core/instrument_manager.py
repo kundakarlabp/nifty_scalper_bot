@@ -9,11 +9,15 @@ Runtime role:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Mapping, Optional
+
+from nifty_scalper_bot.config.env_utils import parse_int_env
+from nifty_scalper_bot.instruments.active_contracts import cap_option_universe
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.instrument_manager")
 
@@ -588,6 +592,34 @@ class InstrumentManager:
         if not required_tokens.issubset({item[1] for item in selected_options}):
             selected_options.extend(item for item in (selected_ce, selected_pe) if item[1] not in {x[1] for x in selected_options})
             selected_options = sorted(selected_options, key=opt_sort)
+
+        # Global option-universe cap: applied here, at the single source of
+        # truth, so DataHub flush, MDM tracking, WS subscriptions, runner
+        # registration, hydration, and evaluation all inherit the same set.
+        max_options = parse_int_env(
+            os.getenv("MAX_ACTIVE_OPTION_SYMBOLS") or os.getenv("MAX_LIVE_OPTION_SYMBOLS"), 8
+        )
+        diagnostic_full = str(os.getenv("DIAGNOSTIC_FULL_UNIVERSE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+        if not diagnostic_full and max_options > 0 and len(selected_options) > max_options:
+            cap_items = [
+                (self._exchange_qualified(item[4]), int(item[1]), float(item[2]), str(item[3]))
+                for item in selected_options
+            ]
+            capped = cap_option_universe(
+                cap_items,
+                selected_ce=self._exchange_qualified(selected_ce[4]),
+                selected_pe=self._exchange_qualified(selected_pe[4]),
+                atm_strike=float(atm),
+                max_options=max_options,
+            )
+            kept_tokens = {item[1] for item in capped}
+            full_count = len(selected_options)
+            selected_options = [item for item in selected_options if int(item[1]) in kept_tokens]
+            LOGGER.info(
+                "CONTRACT_SSOT_UNIVERSE_CAPPED full_option_count=%d capped_option_count=%d max_options=%d atm_strike=%s",
+                full_count, len(selected_options), max_options, atm,
+                extra={"event": "CONTRACT_SSOT_UNIVERSE_CAPPED", "full_option_count": full_count, "capped_option_count": len(selected_options), "max_options": max_options, "atm_strike": atm},
+            )
 
         option_symbols = tuple(self._exchange_qualified(item[4]) for item in selected_options)
         option_tokens = tuple(int(item[1]) for item in selected_options)

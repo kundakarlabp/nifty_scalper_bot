@@ -41,6 +41,7 @@ from typing import (
 )
 
 import pytz
+from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
 
 from nifty_scalper_bot.config.paths import get_data_dir
@@ -7329,6 +7330,13 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
             except Exception:
                 market_open_now = False
             if not market_open_now:
+                # Market closed: nothing to rearm. Sleep the post-market
+                # interval (default 300s) to keep the loop near-idle overnight.
+                post_close = max(
+                    float(interval_seconds),
+                    parse_float_env(os.getenv("POST_MARKET_REARM_INTERVAL_SECONDS"), 300.0),
+                )
+                await asyncio.sleep(max(0.0, post_close - float(interval_seconds)))
                 continue
             runner = getattr(ctx, "strategy_runner", None)
             active_symbols = len(getattr(runner, "_active_symbols", set()) or [])
