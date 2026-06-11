@@ -3165,7 +3165,7 @@ class StrategyManager(_BaseStrategyManager):
                     if should_emit_diag:
                         last_diag_map[symbol] = now
                         self._smc_history_diag_last_emitted = last_diag_map
-                        log.info(
+                        log.debug(
                             "SMC_HISTORY_INPUT_DIAGNOSTICS symbol=%s eval_id=%s history_domain_used=%s history_count=%s history_resolved_count=%s option_history_count=%s",
                             symbol,
                             eval_id,
@@ -3243,7 +3243,7 @@ class StrategyManager(_BaseStrategyManager):
             )
 
         if no_vote_reason_counts:
-            log.info(
+            log.debug(
                 "STRATEGY_NO_VOTE_SUMMARY symbol=%s eval_id=%s no_vote_reason_counts=%s strategy_reasons=%s trigger_vote_count=%s context_vote_count=%s final_block_reason=%s",
                 symbol,
                 eval_id,
@@ -3707,7 +3707,7 @@ class StrategyManager(_BaseStrategyManager):
         if combined_md.get("selected_ok_reason"):
             selected_ok_reason = str(combined_md.get("selected_ok_reason"))
             selected_ok = selected_ok_reason != "not_selected_or_near_atm"
-        log.info(
+        log.debug(
             "STRATEGY_COMBINER_BLOCKER symbol=%s strategy_vote_count=%s trigger_vote_count=%s context_vote_count=%s best_strategy=%s best_score=%s best_confidence=%s single_vote_allowed=%s selected_ok=%s selected_ok_reason=%s final_trade_score=%s final_trade_threshold=%s blocked_reason=%s",
             symbol,
             len(signal_votes),
