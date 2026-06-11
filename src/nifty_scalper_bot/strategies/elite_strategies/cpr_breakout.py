@@ -72,8 +72,15 @@ class CPRBreakoutStrategy(EliteStrategy):
             if nearest_level_distance >= atr:
                 score += 2.0
                 reasons.append('adequate_distance_to_next_level')
-            score += 2.0
-            reasons.append('candidate_quality')
+            # Grade breakout momentum by ATR-normalized penetration beyond CPR
+            if breakout_quality >= 1.0:
+                score += 2.0
+                reasons.append(f'momentum_strong_{breakout_quality:.1f}')
+            elif breakout_quality >= 0.6:
+                score += 1.0
+                reasons.append(f'momentum_moderate_{breakout_quality:.1f}')
+            else:
+                reasons.append(f'momentum_weak_{breakout_quality:.1f}')
 
             strategy_score = max(0.0, min(10.0, score))
             metadata = {

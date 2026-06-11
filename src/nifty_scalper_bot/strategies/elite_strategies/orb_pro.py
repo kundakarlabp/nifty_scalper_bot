@@ -91,8 +91,18 @@ class ORBProStrategy(EliteStrategy):
             if vol_tick:
                 score += 1.0
                 reasons.append('volume_or_tick_confirmation')
-            score += 2.0
-            reasons.append('clean_rr')
+            # Real RR from the actual stop (range invalidation) and target (2*ATR)
+            stop_level = orb_low if breakout_side == 'CE' else orb_high
+            risk = abs(close - stop_level)
+            rr = (2.0 * atr) / risk if risk > 1e-9 else 0.0
+            if rr >= 1.8:
+                score += 2.0
+                reasons.append(f'rr_strong_{rr:.1f}')
+            elif rr >= 1.2:
+                score += 1.0
+                reasons.append(f'rr_acceptable_{rr:.1f}')
+            else:
+                reasons.append(f'rr_thin_{rr:.1f}')
 
             strategy_score = max(0.0, min(10.0, score))
             metadata = {
