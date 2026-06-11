@@ -28,7 +28,7 @@ from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-_PRODUCTION_DIRECTIONAL = {'smc', 'vwap', 'order_flow'}
+_PRODUCTION_DIRECTIONAL = {'smc', 'vwap', 'order_flow', 'orb', 'bb_squeeze'}
 _CONTEXT_ONLY = {'oi_max_pain'}
 _DISABLED_UNTIL_FEATURE_COMPLETE = {'cpr', 'rsi_div'}
 _EXPIRY_ONLY = {'gamma_scalping', 'tuesday_gamma_buyer'}
