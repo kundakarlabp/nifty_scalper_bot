@@ -1329,6 +1329,13 @@ class StrategyRunner:
                 and normalized not in self._frozen_universe
             ):
                 if is_dynamic_option_symbol:
+                    if self._dynamic_add_blocked_market_closed():
+                        self._logger.info(
+                            "DYNAMIC_OPTION_UNIVERSE_SKIPPED reason=market_closed symbol=%s",
+                            normalized,
+                            extra={"event": "DYNAMIC_OPTION_UNIVERSE_SKIPPED", "reason": "market_closed", "symbol": normalized},
+                        )
+                        return
                     self._frozen_universe.add(normalized)
                     self._logger.info(
                         "Dynamic option symbol admitted to frozen universe",
@@ -7717,6 +7724,26 @@ class StrategyRunner:
                 break
             whitelist.add(sym)
         return whitelist
+
+    def _dynamic_add_blocked_market_closed(self) -> bool:
+        """Args: none. Returns: True when market is closed, no positions are
+        open, and DIAGNOSTIC_FULL_UNIVERSE is not set — i.e. there is no
+        reason to grow the option universe. Raises: none.
+        """
+        if str(os.getenv("DIAGNOSTIC_FULL_UNIVERSE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}:
+            return False
+        try:
+            if get_market_state() == MarketState.OPEN:
+                return False
+        except Exception:
+            return False
+        try:
+            manager = getattr(self, "_position_manager", None)
+            if manager is not None and manager.get_open_positions():
+                return False
+        except Exception:
+            return False
+        return True
 
     def _midday_idle_skip_active(self) -> bool:
         """Args: none. Returns: True when midday pause is on and no positions are open. Raises: none."""

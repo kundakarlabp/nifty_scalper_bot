@@ -7355,11 +7355,12 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
             configured_mode = str(getattr(ctx.settings, "execution_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
             if configured_mode != "LIVE":
                 continue
-            LOGGER.info("LIVE_READINESS_REARM_CHECK")
             try:
                 market_open_now = get_market_state() == MarketState.OPEN
             except Exception:
                 market_open_now = False
+            if market_open_now:
+                LOGGER.info("LIVE_READINESS_REARM_CHECK")
             if not market_open_now:
                 # Market closed: nothing to rearm. Sleep the post-market
                 # interval (default 300s) to keep the loop near-idle overnight.
@@ -7367,8 +7368,16 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                     float(interval_seconds),
                     parse_float_env(os.getenv("POST_MARKET_REARM_INTERVAL_SECONDS"), 300.0),
                 )
+                if not getattr(ctx, "_rearm_sleep_logged", False):
+                    ctx._rearm_sleep_logged = True
+                    LOGGER.info(
+                        "LIVE_READINESS_REARM_SLEEPING market_state=closed sleep_s=%d",
+                        int(post_close),
+                        extra={"event": "LIVE_READINESS_REARM_SLEEPING", "market_state": "closed", "sleep_s": int(post_close)},
+                    )
                 await asyncio.sleep(max(0.0, post_close - float(interval_seconds)))
                 continue
+            ctx._rearm_sleep_logged = False
             runner = getattr(ctx, "strategy_runner", None)
             active_symbols = len(getattr(runner, "_active_symbols", set()) or [])
             if active_symbols == 0:
@@ -11649,11 +11658,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     else "DATA_WARMUP"
                                 )
                                 ctx.effective_mode = ctx.readiness_mode
+                                try:
+                                    _market_closed_now = get_market_state() != MarketState.OPEN
+                                except Exception:
+                                    _market_closed_now = False
                                 LOGGER.info(
                                     "STARTUP_MODE_BLOCKED current=%s reason=%s",
                                     ctx.readiness_mode,
                                     (
-                                        "selected_option_history_or_quote_not_ready"
+                                        "market_closed"
+                                        if (ctx.readiness_mode == "EVALUATION_READY" and _market_closed_now)
+                                        else "selected_option_history_or_quote_not_ready"
                                         if ctx.readiness_mode == "EVALUATION_READY"
                                         else "awaiting_spot_or_active_basket"
                                     ),

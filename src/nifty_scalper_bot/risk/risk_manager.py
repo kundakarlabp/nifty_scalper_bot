@@ -17,7 +17,7 @@ from nifty_scalper_bot.execution.position_manager import Position
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.risk.limits import RiskSwitches
 from nifty_scalper_bot.utils.env import get_float
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 
@@ -967,6 +967,21 @@ class RiskManager:
         if snap.daily_loss_limit > 0 and snap.daily_realized <= -snap.daily_loss_limit:
             self._last_rejection = (
                 f"DAILY_REALIZED_LIMIT:{snap.daily_realized:.2f}/{-snap.daily_loss_limit:.2f}"
+            )
+            try:
+                next_day = self._current_trading_day() + timedelta(days=1)
+                reset_time = next_day.isoformat()
+            except Exception:
+                reset_time = "next_trading_day"
+            log_once_or_throttled(
+                self._logger,
+                "risk_state_summary_daily_realized",
+                "RISK_STATE_SUMMARY realized_pnl=%.2f realized_limit=%.2f trading_blocked=true reset_time=%s",
+                snap.daily_realized,
+                -snap.daily_loss_limit,
+                reset_time,
+                interval_sec=300.0,
+                extra={"event": "RISK_STATE_SUMMARY", "realized_pnl": round(snap.daily_realized, 2), "realized_limit": round(-snap.daily_loss_limit, 2), "trading_blocked": True, "reset_time": reset_time},
             )
             return False
         max_trades = int(getattr(self.settings, "max_trades_per_day", 0) or 0)
