@@ -44,6 +44,11 @@ class RSIDivergenceStrategy(EliteStrategy):
 
             p1, r1 = hist[-4]
             p2, r2 = hist[-1]
+            # Noise filter: a divergence needs a real price displacement,
+            # not a few-tick wiggle, or every flat patch becomes a "signal".
+            if abs(p2 - p1) < 0.25 * atr:
+                self._no_vote('price_move_too_small')
+                return None
             bullish_div = p2 < p1 and r2 > r1
             bearish_div = p2 > p1 and r2 < r1
             if not bullish_div and not bearish_div:
