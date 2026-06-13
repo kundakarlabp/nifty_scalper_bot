@@ -678,6 +678,8 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> No
     runner._selected_option_prewarm_last = {}
     runner._selected_option_prewarm_inflight = set()
     runner._selected_option_prewarm_cooldown_s = 0.0
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = None
     runner._data_hub = SimpleNamespace(hydrate_symbol_history=lambda *a, **k: [1, 2, 3, 4, 5])
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t1")
@@ -685,7 +687,7 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> No
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
     assert rec.success is True
     assert rec.bars_after == 5
-    assert rec.source == "data_hub_hydrate"
+    assert rec.source == "selected_option_history_prewarm"
 
 
 @pytest.mark.asyncio
@@ -695,6 +697,8 @@ async def test_selected_option_prewarm_sync_hydrator_runs_off_event_loop() -> No
     runner._selected_option_prewarm_last = {}
     runner._selected_option_prewarm_inflight = set()
     runner._selected_option_prewarm_cooldown_s = 0.0
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = None
     import threading
     called_thread = {"name": ""}
     def _hydrate(*_a, **_k):
@@ -714,6 +718,8 @@ async def test_selected_option_prewarm_accepts_async_hydrator_list_result(caplog
     runner._selected_option_prewarm_last = {}
     runner._selected_option_prewarm_inflight = set()
     runner._selected_option_prewarm_cooldown_s = 0.0
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = None
     async def _hydrate(*_a, **_k):
         return [1, 2, 3, 4, 5]
     runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)

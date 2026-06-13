@@ -136,17 +136,30 @@ class HydrationResult:
     symbol: str
     interval: str
     role: str | None
+    phase: str | None
     reason: str
     required_bars: int
     target_bars: int
     cached_before: int
-    fetch_requested: bool
+    cached_after: int
+    broker_fetch_started: bool
+    joined_inflight: bool
+    broker_fetch_observed: bool
     fetched_rows: int
     accepted_rows: int
-    cached_after: int
-    joined_inflight: bool
-    success: bool
+    minimum_ready: bool
+    target_ready: bool
     failure_reason: str | None = None
+
+    @property
+    def success(self) -> bool:
+        """Compatibility: operational success means minimum readiness."""
+        return self.minimum_ready
+
+    @property
+    def fetch_requested(self) -> bool:
+        """Compatibility alias for callers/tests that predate broker_fetch_started."""
+        return self.broker_fetch_started
 
 @dataclass(frozen=True)
 class PollingPolicy:
@@ -9521,8 +9534,10 @@ class MarketDataManager:
         target_bars: int | None = None,
         days: int | None = None,
         role: str | None = None,
+        phase: str | None = None,
         reason: str,
         force: bool = False,
+        minimum_only: bool = False,
     ) -> HydrationResult:
         """Canonical historical OHLC owner/coordinator for one symbol/interval."""
         normalized = self._canonical_symbol(symbol)
@@ -9538,36 +9553,87 @@ class MarketDataManager:
             except Exception:
                 return 0
 
+        def _result(
+            *,
+            cached_before: int,
+            cached_after: int,
+            broker_fetch_started: bool,
+            joined_inflight: bool,
+            broker_fetch_observed: bool,
+            fetched_rows: int,
+            accepted_rows: int,
+            failure_reason: str | None = None,
+        ) -> HydrationResult:
+            return HydrationResult(
+                symbol=normalized,
+                interval=normalized_interval,
+                role=role,
+                phase=phase,
+                reason=reason,
+                required_bars=required,
+                target_bars=target,
+                cached_before=cached_before,
+                cached_after=cached_after,
+                broker_fetch_started=broker_fetch_started,
+                joined_inflight=joined_inflight,
+                broker_fetch_observed=broker_fetch_observed,
+                fetched_rows=int(fetched_rows or 0),
+                accepted_rows=int(accepted_rows or 0),
+                minimum_ready=cached_after >= required and failure_reason is None,
+                target_ready=cached_after >= target and failure_reason is None,
+                failure_reason=failure_reason,
+            )
+
         cached_before = _cached_count()
-        if cached_before >= required and not force:
+        skip_reason: str | None = None
+        if not force and cached_before >= target:
+            skip_reason = "target_cache_sufficient"
+        elif not force and minimum_only and cached_before >= required:
+            skip_reason = "minimum_cache_sufficient"
+        if skip_reason:
             self._logger.info(
-                "HISTORY_ENSURE_SKIPPED symbol=%s role=%s reason=%s required_bars=%s target_bars=%s mdm_before=%s skip_reason=cache_sufficient",
+                "HISTORY_ENSURE_SKIPPED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s skip_reason=%s minimum_ready=%s target_ready=%s",
                 normalized,
                 role,
+                phase,
                 reason,
                 required,
                 target,
                 cached_before,
+                skip_reason,
+                cached_before >= required,
+                cached_before >= target,
                 extra={
                     "event": "HISTORY_ENSURE_SKIPPED",
                     "symbol": normalized,
                     "role": role,
+                    "phase": phase,
                     "reason": reason,
                     "required_bars": required,
                     "target_bars": target,
-                    "mdm_before": cached_before,
-                    "skip_reason": "cache_sufficient",
+                    "cached_before": cached_before,
+                    "cached_after": cached_before,
+                    "skip_reason": skip_reason,
+                    "minimum_ready": cached_before >= required,
+                    "target_ready": cached_before >= target,
                 },
             )
-            return HydrationResult(normalized, normalized_interval, role, reason, required, target, cached_before, False, 0, 0, cached_before, False, True, None)
+            return _result(
+                cached_before=cached_before,
+                cached_after=cached_before,
+                broker_fetch_started=False,
+                joined_inflight=False,
+                broker_fetch_observed=False,
+                fetched_rows=0,
+                accepted_rows=0,
+            )
 
         if not hasattr(self, "_history_inflight"):
             self._history_inflight = {}
         if not hasattr(self, "_history_inflight_lock"):
             self._history_inflight_lock = asyncio.Lock()
 
-        async def _run_hydration(requested_bars: int) -> HydrationResult:
-            before = _cached_count()
+        async def _run_hydration(requested_bars: int, request_cached_before: int) -> HydrationResult:
             fetched_rows = 0
             accepted_rows = 0
             failure_reason: str | None = None
@@ -9580,33 +9646,55 @@ class MarketDataManager:
             except Exception as exc:  # noqa: BLE001 - broker/data boundary diagnostics
                 failure_reason = f"{type(exc).__name__}: {exc}"
                 self._logger.warning(
-                    "HISTORY_ENSURE_FAILED symbol=%s role=%s reason=%s exception_type=%s exception_message=%s",
+                    "HISTORY_ENSURE_FAILED symbol=%s role=%s phase=%s reason=%s exception_type=%s exception_message=%s",
                     normalized,
                     role,
+                    phase,
                     reason,
                     type(exc).__name__,
                     str(exc),
-                    extra={"event": "HISTORY_ENSURE_FAILED", "symbol": normalized, "role": role, "reason": reason, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    extra={"event": "HISTORY_ENSURE_FAILED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "exception_type": type(exc).__name__, "exception_message": str(exc)},
                 )
             after = _cached_count()
-            success = after >= required and failure_reason is None
+            result = _result(
+                cached_before=request_cached_before,
+                cached_after=after,
+                broker_fetch_started=True,
+                joined_inflight=False,
+                broker_fetch_observed=True,
+                fetched_rows=fetched_rows,
+                accepted_rows=accepted_rows,
+                failure_reason=failure_reason,
+            )
             self._logger.info(
-                "HISTORY_ENSURE_COMPLETED symbol=%s role=%s reason=%s required_bars=%s target_bars=%s mdm_before=%s fetched_rows=%s accepted_rows=%s mdm_after=%s success=%s",
+                "HISTORY_ENSURE_COMPLETED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s fetched_rows=%s accepted_rows=%s cached_after=%s minimum_ready=%s target_ready=%s failure_reason=%s",
                 normalized,
                 role,
+                phase,
                 reason,
                 required,
                 requested_bars,
-                before,
+                request_cached_before,
                 fetched_rows,
                 accepted_rows,
                 after,
-                success,
-                extra={"event": "HISTORY_ENSURE_COMPLETED", "symbol": normalized, "role": role, "reason": reason, "required_bars": required, "target_bars": requested_bars, "mdm_before": before, "fetched_rows": fetched_rows, "accepted_rows": accepted_rows, "mdm_after": after, "success": success},
+                result.minimum_ready,
+                result.target_ready,
+                failure_reason,
+                extra={"event": "HISTORY_ENSURE_COMPLETED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": requested_bars, "cached_before": request_cached_before, "fetched_rows": fetched_rows, "accepted_rows": accepted_rows, "cached_after": after, "minimum_ready": result.minimum_ready, "target_ready": result.target_ready, "failure_reason": failure_reason},
             )
-            return HydrationResult(normalized, normalized_interval, role, reason, required, requested_bars, before, True, fetched_rows, accepted_rows, after, False, success, failure_reason)
+            return result
 
+        joined_observed_fetch = False
+        joined_fetched_rows = 0
+        joined_accepted_rows = 0
+        joined_failure: str | None = None
         while True:
+            cached_now = _cached_count()
+            if not force and cached_now >= target:
+                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=joined_observed_fetch, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
+            if not force and minimum_only and cached_now >= required:
+                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=joined_observed_fetch, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
             async with self._history_inflight_lock:
                 current = self._history_inflight.get(key)
                 if current is not None and current[1].done():
@@ -9615,42 +9703,72 @@ class MarketDataManager:
                 if current is not None:
                     inflight_bars, inflight_task = current
                     self._logger.info(
-                        "HISTORY_ENSURE_JOINED symbol=%s role=%s reason=%s required_bars=%s target_bars=%s inflight_bars=%s",
+                        "HISTORY_ENSURE_JOINED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s inflight_bars=%s",
                         normalized,
                         role,
+                        phase,
                         reason,
                         required,
                         target,
                         inflight_bars,
-                        extra={"event": "HISTORY_ENSURE_JOINED", "symbol": normalized, "role": role, "reason": reason, "required_bars": required, "target_bars": target, "inflight_bars": inflight_bars},
+                        extra={"event": "HISTORY_ENSURE_JOINED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "inflight_bars": inflight_bars},
                     )
                 else:
                     self._logger.info(
-                        "HISTORY_ENSURE_REQUESTED symbol=%s role=%s reason=%s required_bars=%s target_bars=%s mdm_before=%s",
+                        "HISTORY_ENSURE_REQUESTED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s",
                         normalized,
                         role,
+                        phase,
                         reason,
                         required,
                         target,
-                        cached_before,
-                        extra={"event": "HISTORY_ENSURE_REQUESTED", "symbol": normalized, "role": role, "reason": reason, "required_bars": required, "target_bars": target, "mdm_before": cached_before},
+                        cached_now,
+                        extra={"event": "HISTORY_ENSURE_REQUESTED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "cached_before": cached_now},
                     )
-                    task = asyncio.create_task(_run_hydration(target))
+                    task = asyncio.create_task(_run_hydration(target, cached_now))
                     self._history_inflight[key] = (target, task)
                     break
             try:
                 joined = await inflight_task
+                joined_observed_fetch = joined_observed_fetch or joined.broker_fetch_observed or joined.broker_fetch_started
+                joined_fetched_rows += int(joined.fetched_rows or 0)
+                joined_accepted_rows += int(joined.accepted_rows or 0)
+                joined_failure = joined.failure_reason
             finally:
                 if inflight_task.done():
                     async with self._history_inflight_lock:
                         current = self._history_inflight.get(key)
                         if current and current[1] is inflight_task:
                             self._history_inflight.pop(key, None)
-            if inflight_bars >= target or _cached_count() >= required:
-                return HydrationResult(normalized, normalized_interval, role, reason, required, target, cached_before, False, joined.fetched_rows, joined.accepted_rows, _cached_count(), True, _cached_count() >= required, joined.failure_reason)
+            # If a larger/sufficient request completed, return its observed state.
+            if inflight_bars >= target:
+                cached_after_join = _cached_count()
+                return _result(
+                    cached_before=cached_before,
+                    cached_after=cached_after_join,
+                    broker_fetch_started=joined_observed_fetch,
+                    joined_inflight=True,
+                    broker_fetch_observed=joined_observed_fetch,
+                    fetched_rows=joined_fetched_rows,
+                    accepted_rows=joined_accepted_rows,
+                    failure_reason=joined_failure,
+                )
+            # Smaller request completed first; loop, recheck cache, and start target request if needed.
 
         try:
-            return await task
+            result = await task
+            if joined_observed_fetch:
+                return _result(
+                    cached_before=cached_before,
+                    cached_after=result.cached_after,
+                    broker_fetch_started=True,
+                    joined_inflight=True,
+                    broker_fetch_observed=True,
+                    fetched_rows=joined_fetched_rows + int(result.fetched_rows or 0),
+                    accepted_rows=joined_accepted_rows + int(result.accepted_rows or 0),
+                    failure_reason=result.failure_reason,
+                )
+            return result
         finally:
             async with self._history_inflight_lock:
                 current = self._history_inflight.get(key)

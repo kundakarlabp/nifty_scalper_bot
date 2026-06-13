@@ -254,6 +254,7 @@ class HistorySyncResult:
     runner_bars: int
     indicator_bars: int
     success: bool
+    failure_reason: str | None = None
 
 @dataclass(slots=True)
 class TradeDecisionSnapshot:
@@ -1533,24 +1534,48 @@ class StrategyRunner:
         normalized = self._normalize_symbol(symbol)
         target = max(1, int(required_bars or 1))
         if not normalized:
-            return HistorySyncResult("", role, reason, target, 0, 0, 0, False)
-        indicator_before = self._history_count_for_symbol(normalized)
-        rows = self._get_mdm_bars(normalized, max(target, indicator_before))
+            return HistorySyncResult("", role, reason, target, 0, 0, 0, False, "symbol_empty")
+        failure_reason: str | None = None
+        try:
+            indicator_before = self._history_count_for_symbol(normalized)
+        except (AttributeError, TypeError, ValueError) as exc:
+            indicator_before = 0
+            failure_reason = f"indicator_count_failed:{type(exc).__name__}"
+        try:
+            rows = self._get_mdm_bars(normalized, max(target, indicator_before))
+        except (AttributeError, TypeError, ValueError) as exc:
+            rows = []
+            failure_reason = f"mdm_history_read_failed:{type(exc).__name__}"
         mdm_bars = len(rows)
         runner_before = len(getattr(self, "_symbol_history", {}).get(normalized, []) or [])
         if rows and (runner_before < min(target, mdm_bars) or indicator_before < min(target, mdm_bars)):
-            self.reseed_history_from_bars(normalized, rows, source=reason, min_bars=target)
+            try:
+                self.reseed_history_from_bars(normalized, rows, source=reason, min_bars=target)
+            except (TypeError, ValueError, KeyError, AttributeError) as exc:
+                failure_reason = f"runner_reseed_failed:{type(exc).__name__}"
+                self._logger.warning(
+                    "RUNNER_HISTORY_SYNC_FAILED symbol=%s role=%s reason=%s failure_reason=%s",
+                    normalized,
+                    role,
+                    reason,
+                    failure_reason,
+                    extra={"event": "RUNNER_HISTORY_SYNC_FAILED", "symbol": normalized, "role": role, "reason": reason, "failure_reason": failure_reason},
+                )
         runner_after = len(getattr(self, "_symbol_history", {}).get(normalized, []) or [])
-        indicator_after = self._history_count_for_symbol(normalized)
-        success = mdm_bars >= target and runner_after >= target and indicator_after >= target
+        try:
+            indicator_after = self._history_count_for_symbol(normalized)
+        except (AttributeError, TypeError, ValueError) as exc:
+            indicator_after = 0
+            failure_reason = failure_reason or f"indicator_count_failed:{type(exc).__name__}"
+        success = failure_reason is None and mdm_bars >= target and runner_after >= target and indicator_after >= target
         self._logger.info(
-            "RUNNER_HISTORY_SYNC_COMPLETED symbol=%s role=%s reason=%s required_bars=%s mdm_after=%s runner_after=%s indicator_after=%s success=%s",
-            normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success,
-            extra={"event": "RUNNER_HISTORY_SYNC_COMPLETED", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success},
+            "RUNNER_HISTORY_SYNC_COMPLETED symbol=%s role=%s reason=%s required_bars=%s mdm_after=%s runner_after=%s indicator_after=%s success=%s failure_reason=%s",
+            normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason,
+            extra={"event": "RUNNER_HISTORY_SYNC_COMPLETED", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
         )
         if not success and request_if_short:
             self._request_mdm_hydration(normalized, target, reason=reason)
-        return HistorySyncResult(normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success)
+        return HistorySyncResult(normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason)
 
     def _sync_history_from_mdm_cache(
         self,
@@ -7358,8 +7383,25 @@ class StrategyRunner:
                 )
 
     def _is_selected_option_symbol(self, symbol: str) -> bool:
-        """Return whether symbol is the current selected CE/PE contract."""
+        """Return whether symbol exactly matches the current selected CE/PE contract."""
         normalized = self._normalize_symbol(symbol)
+        if not normalized:
+            return False
+
+        def _basket_selected(basket: Any) -> set[str]:
+            if not basket:
+                return set()
+            if isinstance(basket, Mapping):
+                values = (basket.get("selected_ce"), basket.get("selected_pe"), basket.get("selected_ce_symbol"), basket.get("selected_pe_symbol"))
+            else:
+                values = (
+                    getattr(basket, "selected_ce", None),
+                    getattr(basket, "selected_pe", None),
+                    getattr(basket, "selected_ce_symbol", None),
+                    getattr(basket, "selected_pe_symbol", None),
+                )
+            return {self._normalize_symbol(str(value)) for value in values if value}
+
         selected = {
             self._normalize_symbol(str(raw))
             for raw in (
@@ -7372,10 +7414,12 @@ class StrategyRunner:
             )
             if raw
         }
-        if not selected:
-            # Legacy callers without basket state are selected-option prewarm callers.
-            return bool(normalized)
-        return bool(normalized and normalized in selected)
+        selected |= _basket_selected(getattr(self, "_active_contract_basket", None))
+        data_hub = getattr(self, "_data_hub", None)
+        selected |= _basket_selected(getattr(data_hub, "_active_contract_basket", None))
+        mdm = getattr(data_hub, "_mdm", None) or getattr(self, "_market_data", None)
+        selected |= _basket_selected(getattr(mdm, "_active_contract_basket", None))
+        return bool(selected and normalized in selected)
 
     def _request_selected_option_history_prewarm(
         self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None, selected: bool | None = None
