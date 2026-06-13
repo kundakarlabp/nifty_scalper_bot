@@ -2637,10 +2637,12 @@ class StrategyRunner:
             except Exception:  # noqa: BLE001
                 return False
 
-        candidate_symbols = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
-        for sym in (selected_ce_norm, selected_pe_norm):
-            if sym:
-                candidate_symbols.add(sym)
+        raw_candidate_symbols = [normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym]
+        max_active_options = max(2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "8") or 8))
+        selected_core = [sym for sym in (selected_ce_norm, selected_pe_norm) if sym]
+        candidate_symbols = set(dict.fromkeys([*selected_core, *raw_candidate_symbols]).keys())
+        if len(candidate_symbols) > max_active_options:
+            candidate_symbols = set(list(dict.fromkeys([*selected_core, *raw_candidate_symbols]))[:max_active_options])
         prev_ce = getattr(self, "_active_selected_ce", None)
         prev_pe = getattr(self, "_active_selected_pe", None)
         pair_requested = bool(selected_ce_norm and selected_pe_norm)
@@ -7330,22 +7332,36 @@ class StrategyRunner:
                 )
 
     def _request_selected_option_history_prewarm(
-        self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None
+        self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None, selected: bool | None = None
     ) -> None:
         now = time.monotonic()
+        if selected is None:
+            selected = True
+        request_event = "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_REQUESTED"
+        result_event = "SELECTED_OPTION_HISTORY_PREWARM_RESULT" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_RESULT"
+        if not selected and bars_before >= required_bars:
+            return
+        data_hub = getattr(self, "_data_hub", None)
+        mdm = getattr(data_hub, "_mdm", None)
+        inflight = getattr(mdm, "_history_inflight", {}) if mdm is not None else {}
+        inflight_entry = inflight.get((symbol, "minute")) if isinstance(inflight, Mapping) else None
+        if not selected and inflight_entry and int(inflight_entry[0] or 0) >= required_bars:
+            return
+        if not selected and get_runtime_market_mode() != "OPEN":
+            return
         last = float(self._selected_option_prewarm_last.get(symbol, 0.0) or 0.0)
         if (now - last) < self._selected_option_prewarm_cooldown_s or symbol in self._selected_option_prewarm_inflight:
             return
         self._selected_option_prewarm_last[symbol] = now
         self._selected_option_prewarm_inflight.add(symbol)
         self._logger.info(
-            "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED symbol=%s bars_before=%s required_bars=%s",
+            "%s symbol=%s bars_before=%s required_bars=%s",
+            request_event,
             symbol,
             bars_before,
             required_bars,
-            extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED", "symbol": symbol, "bars_before": bars_before, "required_bars": required_bars, "trace_id": trace_id},
+            extra={"event": request_event, "symbol": symbol, "bars_before": bars_before, "required_bars": required_bars, "trace_id": trace_id},
         )
-        data_hub = getattr(self, "_data_hub", None)
         hydrate = getattr(data_hub, "hydrate_symbol_history", None)
         if not callable(hydrate):
             self._selected_option_prewarm_inflight.discard(symbol)
@@ -7423,9 +7439,9 @@ class StrategyRunner:
                     reason = "insufficient_bars"
                 self._maybe_promote_pending_active_basket(source="selected_option_history_prewarm")
                 self._logger.info(
-                    "SELECTED_OPTION_HISTORY_PREWARM_RESULT symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
-                    symbol, bars_before, bars_after, required_bars, success,
-                    extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_RESULT", "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": reason, "source": source, "trace_id": trace_id},
+                    "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
+                    result_event, symbol, bars_before, bars_after, required_bars, success,
+                    extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": reason, "source": source, "trace_id": trace_id},
                 )
         try:
             loop = asyncio.get_running_loop()
@@ -7435,9 +7451,9 @@ class StrategyRunner:
         except Exception as exc:
             self._selected_option_prewarm_inflight.discard(symbol)
             self._logger.info(
-                "SELECTED_OPTION_HISTORY_PREWARM_RESULT symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
-                symbol, bars_before, bars_before, required_bars, False,
-                extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_RESULT", "symbol": symbol, "bars_before": bars_before, "bars_after": bars_before, "required_bars": required_bars, "success": False, "reason": type(exc).__name__, "source": "prewarm_scheduler_exception", "trace_id": trace_id},
+                "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
+                result_event, symbol, bars_before, bars_before, required_bars, False,
+                extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_before, "required_bars": required_bars, "success": False, "reason": type(exc).__name__, "source": "prewarm_scheduler_exception", "trace_id": trace_id},
             )
 
     def _history_count_for_symbol(self, symbol: str) -> int:
@@ -8735,6 +8751,7 @@ class StrategyRunner:
                                 bars_before=int(history_count),
                                 required_bars=int(required_bars),
                                 trace_id=trace_id,
+                                selected=self._is_selected_option_symbol(symbol),
                             )
                         spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
                         fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY" and not self._is_context_symbol_suspended(sym)), "")

@@ -219,6 +219,42 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
                 "pe_symbols": pe_symbols,
             }
         )
+    max_options = max(2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "8") or 8))
+    selected_core = [s for s in (selected_ce, selected_pe) if s and str(s).endswith(("CE", "PE"))]
+    option_symbols = list(dict.fromkeys([*selected_core, *option_symbols]))[:max_options]
+    ce_symbols = [s for s in option_symbols if s.endswith("CE")]
+    pe_symbols = [s for s in option_symbols if s.endswith("PE")]
+    token_by_symbol_raw = dict(out.get("token_by_symbol") or {})
+    symbols = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
+
+    def _positive_int(value: object) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    token_by_symbol = dict(token_by_symbol_raw)
+    expected_token_symbols = [s for s in symbols if s]
+    complete_token_map = all(_positive_int(token_by_symbol_raw.get(sym)) for sym in expected_token_symbols)
+    if complete_token_map:
+        token_by_symbol = {sym: int(token_by_symbol_raw[sym]) for sym in expected_token_symbols}
+        all_tokens = list(dict.fromkeys(token_by_symbol[sym] for sym in expected_token_symbols))[: max_options + 2]
+        option_tokens = [token_by_symbol[s] for s in option_symbols if s in token_by_symbol]
+    else:
+        all_tokens = list(out.get("all_tokens") or [])[: max_options + 2]
+        option_tokens = list(out.get("option_tokens") or [])[:max_options]
+        LOGGER.info(
+            "ACTIVE_BASKET_TOKEN_MAP_PARTIAL mapped_symbol_count=%d expected_symbol_count=%d preserved_all_token_count=%d preserved_option_token_count=%d",
+            len(token_by_symbol_raw), len(expected_token_symbols), len(all_tokens), len(option_tokens),
+            extra={
+                "event": "ACTIVE_BASKET_TOKEN_MAP_PARTIAL",
+                "mapped_symbol_count": len(token_by_symbol_raw),
+                "expected_symbol_count": len(expected_token_symbols),
+                "preserved_all_token_count": len(all_tokens),
+                "preserved_option_token_count": len(option_tokens),
+            },
+        )
     out["spot_symbol"] = spot_symbol
     out["futures_symbol"] = futures_symbol
     out["option_symbols"] = option_symbols
@@ -228,10 +264,15 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     out["selected_pe"] = selected_pe
     out["atm_ce"] = out.get("atm_ce") or selected_ce
     out["atm_pe"] = out.get("atm_pe") or selected_pe
-    out["symbols"] = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
-    # Token fields must survive normalization untouched so MDM can consume them.
-    # They are already in `out` from the input dict; no action needed beyond
-    # the comment to make the invariant explicit.
+    out["symbols"] = symbols
+    out["all_symbols"] = symbols
+    out["token_by_symbol"] = token_by_symbol
+    out["all_tokens"] = all_tokens
+    out["option_tokens"] = option_tokens
+    out["basket_version"] = str(out.get("basket_version") or out.get("version") or out.get("committed_at") or "1")
+    out["basket_source"] = str(out.get("basket_source") or out.get("source") or "active_contract_basket")
+    out["basket_committed_at"] = str(out.get("basket_committed_at") or out.get("committed_at") or "")
+    out["context_only"] = not bool(selected_ce and selected_pe)
     return out
 
 

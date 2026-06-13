@@ -46,7 +46,7 @@ from nifty_scalper_bot.streaming.websocket_manager import (
     ConnectionState,
     WebSocketManager,
 )
-from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
+from nifty_scalper_bot.execution.readiness import evaluate_quote_readiness, resolve_quote_bid_ask_spread
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
@@ -392,6 +392,8 @@ class MarketDataManager:
         self._polling_policy = PollingPolicy.from_settings(settings)
         self._poll_error_last_log: dict[str, float] = {}
         self._history_lock = asyncio.Lock()
+        self._history_inflight_lock = asyncio.Lock()
+        self._history_inflight: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]] = {}
         self._last_history_request_ts = 0.0
         self._history_min_interval_sec = float(
             getattr(settings, "history_min_interval_sec", 1.2)
@@ -1957,14 +1959,20 @@ class MarketDataManager:
             if is_future and raw_sym != self._basket_value(basket, "futures_symbol", None):
                 self._logger.warning("MDM_BASKET_ROLE_INCONSISTENCY symbol=%s role=%s", canonical, role, extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": canonical, "role": role})
             token = token_map.get(sym) or token_map.get(sym.upper()) or token_map.get(canonical) or token_map.get(canonical.split(":", 1)[-1] if ":" in canonical else canonical)
-            entry = {"role": role, "token": token, "quote_ready": False, "ohlc_ready": True, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
+            entry = {"role": role, "token": token, "ltp_ready": False, "depth_available": False, "bid_ask_available": False, "tradable_quote_ready": False, "quote_ready": False, "quote_ready_alias": "ltp_ready_compat_only", "quote_ready_reason": "quote_missing", "ohlc_ready": True, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
             if is_option and token is None:
                 report["missing"].append(f"{sym}:token_missing")
                 report["hard_ready"] = False
             quote = self.get_latest_tick(sym) or self.get_latest_tick(canonical) or self.get_quote(sym) or self.get_quote(canonical)
-            entry["quote_ready"] = bool(quote and float((quote or {}).get("ltp") or (quote or {}).get("last_price") or 0.0) > 0)
-            if is_option and not entry["quote_ready"]:
-                report["missing"].append(f"{sym}:quote_missing")
+            qr = evaluate_quote_readiness(canonical, quote, max_spread_pct=float(os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10), max_age_s=self._option_stale_seconds)
+            entry["ltp_ready"] = qr.ltp_ready
+            entry["depth_available"] = qr.depth_available
+            entry["bid_ask_available"] = qr.bid_ask_available
+            entry["tradable_quote_ready"] = qr.tradable_quote_ready
+            entry["quote_ready"] = qr.ltp_ready
+            entry["quote_ready_reason"] = qr.reason
+            if is_option and not qr.ltp_ready:
+                report["missing"].append(f"{sym}:quote_missing:{qr.reason}")
                 report["hard_ready"] = False
             bars = self.get_ohlc_bars(sym) or self.get_ohlc_bars(canonical) or []
             entry["bars_count"] = len(bars)
@@ -4358,9 +4366,10 @@ class MarketDataManager:
                     or ""
                 ).lower()
                 bid_ask_source = str(tick.get("bid_ask_source") or "").lower()
-                if bool(tick.get("tradable_quote")) and (
+                qr = evaluate_quote_readiness(symbol, tick, max_spread_pct=float(os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10), max_age_s=self._option_stale_seconds)
+                if qr.tradable_quote_ready and (
                     source in {"ws", "ws_full", "full"}
-                    or bid_ask_source in {"market_depth", "ws_full"}
+                    or bid_ask_source in {"market_depth", "ws_full", "top_level", "best_bid_ask"}
                 ):
                     return True
         return False
@@ -9491,21 +9500,83 @@ class MarketDataManager:
         max_bars: int = 300,
         reason: str = "startup",
     ) -> list[dict[str, Any]]:
-        """Hydrate cached OHLC history for a symbol. Args: symbol/interval/days/max_bars/reason. Returns: normalized rows. Raises: none."""
+        """Hydrate cached OHLC history without overlapping same-symbol broker requests."""
         normalized = self._canonical_symbol(symbol)
-        rows = await self.fetch_history(normalized, interval, days)
-        rows = list(rows or [])[-max_bars:]
-        accepted = self.ingest_historical_ohlc(normalized, rows)
-        self.update_hydration_status(normalized, self.get_ohlc_bars(normalized))
-        self._logger.info(
-            "HYDRATION_MDM_COMPLETE symbol=%s rows=%d accepted=%d reason=%s",
-            normalized,
-            len(rows),
-            int(accepted),
-            reason,
-            extra={"event":"HYDRATION_MDM_COMPLETE","symbol":normalized,"rows":len(rows),"accepted":int(accepted),"reason":reason},
-        )
-        return rows
+        if not hasattr(self, "_history_inflight"):
+            self._history_inflight = {}
+        if not hasattr(self, "_history_inflight_lock"):
+            self._history_inflight_lock = asyncio.Lock()
+        key = (normalized, interval)
+
+        def _cached_rows() -> list[dict[str, Any]]:
+            try:
+                return list(self.get_ohlc_bars(normalized) or [])
+            except Exception:
+                return []
+
+        async def _run_hydration(requested_bars: int) -> list[dict[str, Any]]:
+            rows_inner = await self.fetch_history(normalized, interval, days)
+            rows_inner = list(rows_inner or [])[-requested_bars:]
+            accepted_inner = self.ingest_historical_ohlc(normalized, rows_inner)
+            self.update_hydration_status(normalized, self.get_ohlc_bars(normalized))
+            self._logger.info(
+                "HYDRATION_MDM_COMPLETE symbol=%s rows=%d accepted=%d reason=%s",
+                normalized, len(rows_inner), int(accepted_inner), reason,
+                extra={"event":"HYDRATION_MDM_COMPLETE","symbol":normalized,"rows":len(rows_inner),"accepted":int(accepted_inner),"reason":reason},
+            )
+            return rows_inner
+
+        while True:
+            async with self._history_inflight_lock:
+                current = self._history_inflight.get(key)
+                if current is not None and current[1].done():
+                    self._history_inflight.pop(key, None)
+                    current = None
+                if current is not None:
+                    inflight_bars, inflight_task = current
+                    self._logger.info(
+                        "HYDRATION_REQUEST_JOINED symbol=%s requested_bars=%s inflight_bars=%s reason=%s",
+                        normalized, max_bars, inflight_bars, reason,
+                        extra={"event":"HYDRATION_REQUEST_JOINED","symbol":normalized,"requested_bars":max_bars,"inflight_bars":inflight_bars,"reason":reason},
+                    )
+                else:
+                    task = asyncio.create_task(_run_hydration(max_bars))
+                    self._history_inflight[key] = (max_bars, task)
+                    self._logger.info(
+                        "HYDRATION_REQUEST_CREATED symbol=%s requested_bars=%s reason=%s",
+                        normalized, max_bars, reason,
+                        extra={"event":"HYDRATION_REQUEST_CREATED","symbol":normalized,"requested_bars":max_bars,"reason":reason},
+                    )
+                    break
+
+            try:
+                rows = await inflight_task
+            finally:
+                if inflight_task.done():
+                    async with self._history_inflight_lock:
+                        current = self._history_inflight.get(key)
+                        if current and current[1] is inflight_task:
+                            self._history_inflight.pop(key, None)
+            if inflight_bars >= max_bars:
+                return list(rows or [])[-max_bars:]
+            cached = _cached_rows()
+            if len(cached) >= max_bars:
+                return cached[-max_bars:]
+            # A smaller request completed first; loop and create a larger request only if still short.
+
+        try:
+            rows = await task
+            self._logger.info(
+                "HYDRATION_REQUEST_COMPLETED symbol=%s requested_bars=%s returned_rows=%s reason=%s",
+                normalized, max_bars, len(rows), reason,
+                extra={"event":"HYDRATION_REQUEST_COMPLETED","symbol":normalized,"requested_bars":max_bars,"returned_rows":len(rows),"reason":reason},
+            )
+            return list(rows)[-max_bars:]
+        finally:
+            async with self._history_inflight_lock:
+                current = self._history_inflight.get(key)
+                if current and current[1] is task:
+                    self._history_inflight.pop(key, None)
 
     async def fetch_history(
         self, symbol: str, interval: str, days: int = 3
