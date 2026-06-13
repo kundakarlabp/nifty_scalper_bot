@@ -324,6 +324,83 @@ def resolve_quote_bid_ask_spread(quote: dict | object) -> tuple[float | None, fl
     return bid, ask, spread_pct, source
 
 
+
+@dataclass(frozen=True, slots=True)
+class QuoteReadiness:
+    """Canonical quote readiness split into LTP, depth, bid/ask, and tradable states."""
+
+    symbol: str
+    ltp_ready: bool
+    depth_available: bool
+    bid_ask_available: bool
+    tradable_quote_ready: bool
+    reason: str
+    bid: float | None = None
+    ask: float | None = None
+    spread_pct: float | None = None
+    source: str = "missing"
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_quote_readiness(
+    symbol: str,
+    quote: dict | object | None,
+    *,
+    max_spread_pct: float | None = None,
+    require_fresh: bool = True,
+    max_age_s: float | None = None,
+) -> QuoteReadiness:
+    """Return canonical quote readiness for startup, runtime, execution, Telegram, and health.
+
+    Tradable quote readiness is stricter than LTP readiness: bid and ask must be
+    present, positive, non-crossed, fresh when age is known, and within the
+    configured spread limit.
+    """
+    if quote is None:
+        return QuoteReadiness(symbol=symbol, ltp_ready=False, depth_available=False, bid_ask_available=False, tradable_quote_ready=False, reason="quote_missing")
+    getter = quote.get if isinstance(quote, dict) else lambda key, default=None: getattr(quote, key, default)
+    ltp = _quote_float(quote, "ltp", "last_price", "last_traded_price")
+    ltp_ready = bool(ltp is not None and ltp > 0)
+    depth = getter("depth", None)
+    depth_available = bool(getter("depth_available", False) or depth)
+    bid, ask, spread_pct, source = resolve_quote_bid_ask_spread(quote)
+    bid_ask_available = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
+    if not ltp_ready:
+        reason = "ltp_missing"
+    elif not bid_ask_available:
+        raw_bid = _quote_float(quote, "bid", "bid_price", "best_bid", "best_bid_price")
+        raw_ask = _quote_float(quote, "ask", "ask_price", "best_ask", "best_ask_price")
+        if raw_bid is not None and raw_ask is not None and raw_bid > 0 and raw_ask > 0 and raw_ask <= raw_bid:
+            reason = "bid_ask_crossed"
+        else:
+            reason = "bid_ask_missing"
+    else:
+        reason = "ready"
+    if reason == "ready" and require_fresh:
+        age = _quote_float(quote, "tick_age_s", "age_s")
+        if age is None:
+            ts = _quote_float(quote, "timestamp_ms", "last_tick_ts_ms")
+            if ts and ts > 10_000_000_000:
+                age = max(0.0, datetime.now(timezone.utc).timestamp() - (ts / 1000.0))
+        if max_age_s is not None and age is not None and age > max_age_s:
+            reason = "quote_stale"
+    if reason == "ready" and max_spread_pct is not None and spread_pct is not None and spread_pct > max_spread_pct:
+        reason = "spread_too_wide"
+    return QuoteReadiness(
+        symbol=symbol,
+        ltp_ready=ltp_ready,
+        depth_available=depth_available,
+        bid_ask_available=bid_ask_available,
+        tradable_quote_ready=reason == "ready",
+        reason=reason,
+        bid=bid,
+        ask=ask,
+        spread_pct=spread_pct,
+        source=source,
+    )
+
 def quote_has_tradable_bid_ask(quote: dict | object) -> bool:
     """Return True when quote has valid top-level/depth bid-ask proof."""
     bid, ask, _spread, _source = resolve_quote_bid_ask_spread(quote)

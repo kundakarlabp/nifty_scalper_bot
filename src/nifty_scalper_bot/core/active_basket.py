@@ -219,8 +219,17 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
                 "pe_symbols": pe_symbols,
             }
         )
+    max_options = max(2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "8") or 8))
+    selected_core = [s for s in (selected_ce, selected_pe) if s and str(s).endswith(("CE", "PE"))]
+    option_symbols = list(dict.fromkeys([*selected_core, *option_symbols]))[:max_options]
+    ce_symbols = [s for s in option_symbols if s.endswith("CE")]
+    pe_symbols = [s for s in option_symbols if s.endswith("PE")]
+    token_by_symbol_raw = dict(out.get("token_by_symbol") or {})
+    symbols = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
+    token_by_symbol = {str(sym): int(tok) for sym, tok in token_by_symbol_raw.items() if str(sym) in symbols and tok}
+    all_tokens = list(dict.fromkeys(int(tok) for sym, tok in token_by_symbol.items() if sym in symbols and int(tok) > 0))
     out["spot_symbol"] = spot_symbol
-    out["futures_symbol"] = futures_symbol
+    out["futures_symbol"] = futures_symbol if futures_symbol.endswith("FUT") or not futures_symbol else futures_symbol
     out["option_symbols"] = option_symbols
     out["ce_symbols"] = ce_symbols
     out["pe_symbols"] = pe_symbols
@@ -228,10 +237,15 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     out["selected_pe"] = selected_pe
     out["atm_ce"] = out.get("atm_ce") or selected_ce
     out["atm_pe"] = out.get("atm_pe") or selected_pe
-    out["symbols"] = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
-    # Token fields must survive normalization untouched so MDM can consume them.
-    # They are already in `out` from the input dict; no action needed beyond
-    # the comment to make the invariant explicit.
+    out["symbols"] = symbols
+    out["all_symbols"] = symbols
+    out["token_by_symbol"] = token_by_symbol
+    out["all_tokens"] = all_tokens[: max_options + 2]
+    out["option_tokens"] = [token_by_symbol[s] for s in option_symbols if s in token_by_symbol]
+    out["basket_version"] = str(out.get("basket_version") or out.get("version") or out.get("committed_at") or "1")
+    out["basket_source"] = str(out.get("basket_source") or out.get("source") or "active_contract_basket")
+    out["basket_committed_at"] = str(out.get("basket_committed_at") or out.get("committed_at") or "")
+    out["context_only"] = not bool(selected_ce and selected_pe)
     return out
 
 

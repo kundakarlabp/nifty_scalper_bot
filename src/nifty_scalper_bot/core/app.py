@@ -43,6 +43,7 @@ from typing import (
 import pytz
 from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
+from nifty_scalper_bot.utils.smart_symbol import NSE_HOLIDAYS
 
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.active_basket import (
@@ -78,6 +79,22 @@ def _basket_attr(basket: Mapping[str, object] | object | None, key: str, default
     return getattr(basket, key, default)
 
 
+
+
+def _next_eod_flatten_time_ist(now_ist: datetime) -> datetime | None:
+    """Return the next trading-day EOD flatten time, skipping weekends/NSE holidays."""
+    if now_ist.tzinfo is None:
+        now_ist = now_ist.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    else:
+        now_ist = now_ist.astimezone(ZoneInfo("Asia/Kolkata"))
+    for day_offset in range(0, 10):
+        candidate_day = (now_ist + timedelta(days=day_offset)).date()
+        if candidate_day.weekday() >= 5 or candidate_day in NSE_HOLIDAYS:
+            continue
+        candidate = datetime.combine(candidate_day, time(15, 24), tzinfo=ZoneInfo("Asia/Kolkata"))
+        if candidate > now_ist:
+            return candidate
+    return None
 
 
 BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
@@ -8563,8 +8580,10 @@ def _commit_active_dynamic_basket(
         _val = basket.get(_token_key)
         if _val is not None:
             committed[_token_key] = _val
+    committed = normalize_active_basket_schema(committed)
     ctx.active_trading_universe = committed
-    ctx.active_contract_basket = committed
+    if not committed.get("context_only") or not getattr(ctx, "active_contract_basket", None):
+        ctx.active_contract_basket = committed
     selection = active_contract_selection_from_basket(committed)
     _sync_active_selection_from_basket(ctx, selection)
     runner = getattr(ctx, "strategy_runner", None)
@@ -10064,19 +10083,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                 *active_option_symbols,
             ]))
             readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
+            readiness_option_count = sum(1 for sym in readiness_symbols if str(sym).endswith(("CE", "PE")))
+            full_basket_option_count = len([sym for sym in (basket.get("option_symbols", []) or []) if str(sym).endswith(("CE", "PE"))])
             LOGGER.info(
-                "READINESS_SYMBOLS_SELECTED count=%d spot=%s futures=%s option_count=%d symbols=%s",
+                "READINESS_SYMBOLS_SELECTED readiness_symbol_count=%d readiness_option_count=%d full_basket_option_count=%d spot=%s futures=%s symbols=%s",
                 len(readiness_symbols),
+                readiness_option_count,
+                full_basket_option_count,
                 basket.get("spot_symbol"),
                 active_futures_symbol,
-                len(basket.get("option_symbols", []) or []),
                 readiness_symbols,
                 extra={
                     "event": "READINESS_SYMBOLS_SELECTED",
-                    "count": len(readiness_symbols),
-                    "spot": basket.get("spot_symbol"),
-                    "futures": active_futures_symbol,
-                    "option_count": len(basket.get("option_symbols", []) or []),
+                    "readiness_symbol_count": len(readiness_symbols),
+                    "readiness_option_count": readiness_option_count,
+                    "full_basket_option_count": full_basket_option_count,
                     "symbols": readiness_symbols,
                 },
             )
@@ -10890,7 +10911,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         interval="minute",
                                         days=_history_lookback_days(required_bars),
                                         max_bars=required_bars,
-                                        reason="dynamic_option_universe",
+                                        reason=("futures_context_refresh" if str(sym).endswith("FUT") else "spot_context_refresh" if str(sym).startswith("NSE:") else "dynamic_option_universe"),
                                     )
                                     runner_ingested = 0
                                     bars = ctx.market_data_manager.get_ohlc_bars(sym, limit=required_bars)
@@ -11105,7 +11126,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     committed_ce,
                                     committed_pe,
                                     (getattr(ctx, "active_trading_universe", {}) or {}).get("atm_strike"),
-                                    len(latest_symbols),
+                                    len([sym for sym in (getattr(ctx, "active_contract_basket", {}) or {}).get("option_symbols", []) if str(sym).endswith(("CE", "PE"))]),
                                     ce_bars >= _symbol_history_requirement(ctx),
                                     pe_bars >= _symbol_history_requirement(ctx),
                                 )
@@ -11523,11 +11544,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                             ctx.data_hard_ready = bool(
                                 spot_ready_for_live and atm_ce_ready and atm_pe_ready
                             )
+                            quote_event = "OPTION_TRADABLE_QUOTE_READY" if option_ticks_ready else "OPTION_TRADABLE_QUOTE_NOT_READY"
                             LOGGER.info(
-                                "OPTION_QUOTE_READY selected_ce=%s selected_pe=%s",
-                                selected_ce,
-                                selected_pe,
-                                extra={"event": "OPTION_QUOTE_READY", "selected_ce": selected_ce, "selected_pe": selected_pe},
+                                "%s selected_ce=%s selected_pe=%s ce_tradable_quote=%s pe_tradable_quote=%s",
+                                quote_event, selected_ce, selected_pe, bool(quote_ce), bool(quote_pe),
+                                extra={"event": quote_event, "selected_ce": selected_ce, "selected_pe": selected_pe, "ce_tradable_quote": bool(quote_ce), "pe_tradable_quote": bool(quote_pe)},
                             )
                             LOGGER.info(
                                 "OPTION_HISTORY_READY selected_ce=%s selected_pe=%s",
@@ -12016,18 +12037,17 @@ async def startup_sequence(ctx: BotContext) -> None:
     if ctx.bracket_manager:
         try:
             now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-            eod_target_ist = now_ist.replace(hour=15, minute=24, second=0, microsecond=0)
-            if now_ist >= eod_target_ist:
-                eod_target_ist = eod_target_ist + timedelta(days=1)
-            seconds_to_15h24 = max(
-                0.0, (eod_target_ist - now_ist).total_seconds()
-            )
-            loop.call_later(seconds_to_15h24, ctx.bracket_manager.eod_flatten_all)
-            LOGGER.info(
-                "EOD bracket flatten scheduled for %s IST (in %.1fs)",
-                eod_target_ist.isoformat(),
-                seconds_to_15h24,
-            )
+            eod_target_ist = _next_eod_flatten_time_ist(now_ist)
+            if eod_target_ist is None:
+                LOGGER.info("EOD bracket flatten not scheduled: no trading day found")
+            else:
+                seconds_to_15h24 = max(0.0, (eod_target_ist - now_ist).total_seconds())
+                loop.call_later(seconds_to_15h24, ctx.bracket_manager.eod_flatten_all)
+                LOGGER.info(
+                    "EOD bracket flatten scheduled for %s IST (in %.1fs)",
+                    eod_target_ist.isoformat(),
+                    seconds_to_15h24,
+                )
         except Exception as e:
             LOGGER.error("Failed to schedule EOD flatten: %s", e)
 
