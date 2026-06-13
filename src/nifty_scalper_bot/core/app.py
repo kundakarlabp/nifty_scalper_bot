@@ -7896,86 +7896,135 @@ def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str
     return pick_atm_option_symbols_from_basket(basket)
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeHistoryResult:
+    """Canonical runtime history orchestration result."""
+
+    symbol: str
+    role: str
+    phase: str
+    reason: str
+    required_bars: int
+    mdm_bars: int
+    runner_bars: int
+    indicator_bars: int
+    ready: bool
+
+
+async def ensure_symbol_runtime_history(
+    ctx: "BotContext",
+    symbol: str,
+    *,
+    role: str,
+    phase: str,
+    reason: str,
+    required_bars: int | None = None,
+) -> RuntimeHistoryResult:
+    """Coordinate policy -> MDM canonical hydration -> Runner canonical sync."""
+    mdm = getattr(ctx, "market_data_manager", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    required = int(required_bars or _symbol_history_requirement(ctx) or 1)
+    mdm_bars = 0
+    runner_bars = 0
+    indicator_bars = 0
+    if mdm is not None:
+        try:
+            mdm_bars = len(mdm.get_ohlc_bars(symbol) or [])
+        except Exception:
+            mdm_bars = 0
+        if mdm_bars < required:
+            ensure = getattr(mdm, "ensure_history", None)
+            if callable(ensure):
+                await ensure(
+                    symbol,
+                    interval="minute",
+                    required_bars=required,
+                    target_bars=required,
+                    days=_history_lookback_days(required),
+                    role=role,
+                    reason=reason,
+                )
+            else:
+                hydrate = getattr(mdm, "hydrate_symbol_history", None)
+                if callable(hydrate):
+                    await hydrate(symbol, interval="minute", days=_history_lookback_days(required), max_bars=required, reason=reason)
+            try:
+                mdm_bars = len(mdm.get_ohlc_bars(symbol) or [])
+            except Exception:
+                mdm_bars = 0
+    if runner is not None:
+        sync = getattr(runner, "sync_history_from_mdm", None)
+        if callable(sync):
+            sync_result = sync(symbol, required_bars=required, reason=reason, role=role, request_if_short=False)
+            runner_bars = int(getattr(sync_result, "runner_bars", 0) or 0)
+            indicator_bars = int(getattr(sync_result, "indicator_bars", 0) or 0)
+        else:
+            bars = []
+            if mdm is not None:
+                try:
+                    bars = list(mdm.get_ohlc_bars(symbol, limit=required) or [])
+                except TypeError:
+                    bars = list(mdm.get_ohlc_bars(symbol) or [])[-required:]
+                except Exception:
+                    bars = []
+            reseed = getattr(runner, "reseed_history_from_bars", None)
+            if callable(reseed) and bars:
+                try:
+                    indicator_bars = int(reseed(symbol, bars, source=reason, min_bars=required) or 0)
+                    runner_bars = indicator_bars
+                except Exception:
+                    LOGGER.exception("RUNNER_HISTORY_SYNC_FAILED symbol=%s reason=%s", symbol, reason)
+            elif bars and callable(getattr(runner, "ingest_historical_bar", None)):
+                for row in bars:
+                    bar = dict(row) if isinstance(row, Mapping) else {"value": row}
+                    bar["symbol"] = symbol
+                    runner.ingest_historical_bar(bar)
+                try:
+                    indicator_bars = len(runner._indicator_engine.get_history(symbol) or [])
+                    runner_bars = indicator_bars
+                except Exception:
+                    indicator_bars = len(bars)
+                    runner_bars = len(bars)
+            if indicator_bars <= 0:
+                try:
+                    indicator_bars = len(runner._indicator_engine.get_history(symbol) or [])
+                    runner_bars = indicator_bars
+                except Exception:
+                    indicator_bars = 0
+                    runner_bars = 0
+    ready = bool(mdm_bars >= required and (runner is None or (runner_bars >= required and indicator_bars >= required)))
+    LOGGER.info(
+        "HISTORY_READINESS_COMPUTED symbol=%s role=%s phase=%s reason=%s required_bars=%s mdm_bars=%s runner_bars=%s indicator_bars=%s ready=%s",
+        symbol, role, phase, reason, required, mdm_bars, runner_bars, indicator_bars, ready,
+        extra={"event": "HISTORY_READINESS_COMPUTED", "symbol": symbol, "role": role, "phase": phase, "reason": reason, "required_bars": required, "mdm_bars": mdm_bars, "runner_bars": runner_bars, "indicator_bars": indicator_bars, "ready": ready},
+    )
+    return RuntimeHistoryResult(symbol, role, phase, reason, required, mdm_bars, runner_bars, indicator_bars, ready)
+
+
 async def _ensure_context_history_hydrated(
     ctx: BotContext, spot_symbol: str | None, futures_symbol: str | None, required_bars: int, reason: str
 ) -> dict[str, dict[str, int | bool]]:
-    """Ensure spot/futures history is visible to MDM and runner IndicatorEngine."""
-    mdm = getattr(ctx, "market_data_manager", None)
-    runner = getattr(ctx, "strategy_runner", None)
+    """Ensure spot/futures history through the canonical runtime orchestrator."""
     result: dict[str, dict[str, int | bool]] = {}
-    if mdm is None:
-        return result
-    symbols = [sym for sym in (spot_symbol or "NSE:NIFTY", futures_symbol) if sym]
-    for sym in symbols:
-        before_mdm = len(mdm.get_ohlc_bars(sym) or [])
-        before_runner = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
-        if before_mdm < required_bars:
-            hydrate_fn = getattr(mdm, "hydrate_symbol_history", None)
-            if callable(hydrate_fn):
-                try:
-                    await hydrate_fn(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_context_force_hydration")
-                except Exception as exc:  # noqa: BLE001 - readiness remains blocked and logged
-                    LOGGER.warning(
-                        "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
-                        sym,
-                        f"{reason}_context_force_hydration",
-                        exc,
-                        extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": sym, "source": f"{reason}_context_force_hydration", "error": str(exc)},
-                    )
-        try:
-            bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
-        except TypeError:
-            bars = mdm.get_ohlc_bars(sym) or []
-        ingested = 0
-        if runner is not None and hasattr(runner, "reseed_history_from_bars") and bars:
-            try:
-                ingested = int(
-                    runner.reseed_history_from_bars(
-                        sym,
-                        bars,
-                        source=f"{reason}_context_reseed",
-                        min_bars=required_bars,
-                    )
-                    or 0
-                )
-            except Exception as exc:  # noqa: BLE001 - readiness remains blocked and logged
-                LOGGER.warning(
-                    "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
-                    sym,
-                    f"{reason}_context_reseed",
-                    exc,
-                    extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": sym, "source": f"{reason}_context_reseed", "error": str(exc)},
-                )
-        after_mdm = len(mdm.get_ohlc_bars(sym) or [])
-        after_runner = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
-        new_ingested_bars = max(0, after_runner - before_runner)
-        duplicate_bars = max(0, len(bars) - new_ingested_bars) if bars else 0
-        if not bars:
-            rejection_reason = "provider_empty"
-        elif new_ingested_bars == 0 and after_runner >= before_runner and after_runner > 0:
-            rejection_reason = "duplicate_noop"
-        elif after_runner == 0:
-            rejection_reason = "validation_rejected"
-        else:
-            rejection_reason = "none"
+    for sym in [s for s in (spot_symbol or "NSE:NIFTY", futures_symbol) if s]:
+        before_mdm = _count_symbol_bars(ctx, sym)
+        before_runner = 0
+        runner = getattr(ctx, "strategy_runner", None)
+        if runner is not None and hasattr(runner, "_indicator_engine"):
+            before_runner = len(runner._indicator_engine.get_history(sym) or [])
+        role = "futures_context" if str(sym).endswith("FUT") else "spot_context"
+        runtime = await ensure_symbol_runtime_history(ctx, sym, role=role, phase="startup", reason=f"{reason}_context", required_bars=required_bars)
         LOGGER.info(
             "CONTEXT_HISTORY_HYDRATION_TRACE symbol=%s source=%s requested_bars=%d fetched_bars=%d new_ingested_bars=%d duplicate_bars=%d final_indicator_history_count=%d rejection_reason=%s",
-            sym,
-            f"{reason}_context",
-            required_bars,
-            len(bars),
-            new_ingested_bars,
-            duplicate_bars,
-            after_runner,
-            rejection_reason,
-            extra={"event": "CONTEXT_HISTORY_HYDRATION_TRACE", "symbol": sym, "source": f"{reason}_context", "requested_bars": required_bars, "fetched_bars": len(bars), "new_ingested_bars": new_ingested_bars, "duplicate_bars": duplicate_bars, "final_indicator_history_count": after_runner, "rejection_reason": rejection_reason},
+            sym, f"{reason}_context", required_bars, runtime.mdm_bars, max(0, runtime.indicator_bars - before_runner), 0, runtime.indicator_bars, "none" if runtime.ready else "insufficient_bars",
+            extra={"event": "CONTEXT_HISTORY_HYDRATION_TRACE", "symbol": sym, "source": f"{reason}_context", "requested_bars": required_bars, "fetched_bars": runtime.mdm_bars, "new_ingested_bars": max(0, runtime.indicator_bars - before_runner), "duplicate_bars": 0, "final_indicator_history_count": runtime.indicator_bars, "rejection_reason": "none" if runtime.ready else "insufficient_bars"},
         )
         result[sym] = {
             "before_mdm_bars": before_mdm,
-            "after_mdm_bars": after_mdm,
+            "after_mdm_bars": runtime.mdm_bars,
             "before_runner_bars": before_runner,
-            "after_runner_bars": after_runner,
-            "ready": bool(after_mdm >= required_bars and after_runner >= required_bars),
+            "after_runner_bars": runtime.indicator_bars,
+            "ready": runtime.ready,
         }
     return result
 
@@ -7983,120 +8032,32 @@ async def _ensure_context_history_hydrated(
 async def _ensure_selected_options_hydrated(
     ctx: BotContext, selected_ce: str | None, selected_pe: str | None, required_bars: int, reason: str
 ) -> dict[str, dict[str, int | bool]]:
-    """Ensure selected options have required bars in MDM and runner. Args: ctx/symbols/required_bars/reason. Returns: none. Raises: none."""
-    mdm = getattr(ctx, "market_data_manager", None)
-    runner = getattr(ctx, "strategy_runner", None)
+    """Ensure selected options through the canonical runtime orchestrator."""
     hydration_result: dict[str, dict[str, int | bool]] = {}
-    if mdm is None:
-        return hydration_result
+    runner = getattr(ctx, "strategy_runner", None)
     for sym in (selected_ce, selected_pe):
         if not sym:
             continue
-        before_mdm_bars = len(mdm.get_ohlc_bars(sym) or [])
-        before_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
-        if before_mdm_bars >= required_bars and before_runner_bars >= required_bars:
-            hydration_result[sym] = {
-                "before_mdm_bars": before_mdm_bars,
-                "after_mdm_bars": before_mdm_bars,
-                "before_runner_bars": before_runner_bars,
-                "after_runner_bars": before_runner_bars,
-                "ready": True,
-            }
-            continue
-        hydrate_fn = getattr(mdm, "hydrate_symbol_history", None)
-        if before_mdm_bars < required_bars and callable(hydrate_fn):
-            await hydrate_fn(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_selected_option_force_hydration")
-        try:
-            bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
-        except TypeError:
-            bars = mdm.get_ohlc_bars(sym) or []
-        normalized_bars: list[dict[str, Any]] = []
-        for row in bars:
-            if not isinstance(row, Mapping):
-                continue
-            bar_data = dict(row)
-            bar_data["symbol"] = sym
-
-            if "timestamp" not in bar_data:
-                if "start" in bar_data:
-                    bar_data["timestamp"] = bar_data["start"]
-                elif "date" in bar_data:
-                    bar_data["timestamp"] = bar_data["date"]
-                elif "time" in bar_data:
-                    bar_data["timestamp"] = bar_data["time"]
-
-            if {"open", "high", "low", "close"}.issubset(bar_data):
-                bar_data.setdefault("timestamp", str(bar_data.get("date") or bar_data.get("start") or bar_data.get("time") or f"{sym}-bar-{len(normalized_bars)}"))
-                normalized_bars.append(bar_data)
-        used_reseed = False
-        if runner is not None and hasattr(runner, "reseed_history_from_bars"):
-            try:
-                reseeded_count = runner.reseed_history_from_bars(
-                    sym,
-                    normalized_bars,
-                    source=f"{reason}_selected_option_reseed",
-                    min_bars=required_bars,
-                )
-                used_reseed = True
-                LOGGER.info(
-                    "SELECTED_OPTION_RUNNER_RESEED_DONE symbol=%s reseeded_count=%s required_bars=%d reason=%s",
-                    sym,
-                    reseeded_count,
-                    required_bars,
-                    reason,
-                )
-                LOGGER.info(
-                    "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM symbol=%s mdm_bars=%d runner_bars=%s required_bars=%d reason=%s",
-                    sym,
-                    len(normalized_bars),
-                    reseeded_count,
-                    required_bars,
-                    reason,
-                )
-            except Exception:
-                LOGGER.exception(
-                    "SELECTED_OPTION_RUNNER_RESEED_FAILED symbol=%s required_bars=%d reason=%s",
-                    sym,
-                    required_bars,
-                    reason,
-                )
-        elif runner is not None and hasattr(runner, "ingest_historical_bar"):
-            for bar_data in normalized_bars:
-                runner.ingest_historical_bar(bar_data)
-        update_fn = getattr(mdm, "update_hydration_status", None)
-        if callable(update_fn):
-            update_fn(sym, mdm.get_ohlc_bars(sym))
-        after_mdm_bars = len(mdm.get_ohlc_bars(sym) or [])
-        after_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
-        if used_reseed and after_mdm_bars >= required_bars and after_runner_bars < required_bars:
-            LOGGER.warning(
-                "SELECTED_OPTION_RESEED_FAILED symbol=%s after_mdm_bars=%d after_runner_bars=%d required_bars=%d reason=%s",
-                sym,
-                after_mdm_bars,
-                after_runner_bars,
-                required_bars,
-                reason,
-            )
-        ready = bool(after_mdm_bars >= required_bars and after_runner_bars >= required_bars)
-        hydration_result[sym] = {
-            "before_mdm_bars": before_mdm_bars,
-            "after_mdm_bars": after_mdm_bars,
-            "before_runner_bars": before_runner_bars,
-            "after_runner_bars": after_runner_bars,
-            "ready": ready,
-        }
+        before_mdm = _count_symbol_bars(ctx, sym)
+        before_runner = 0
+        if runner is not None and hasattr(runner, "_indicator_engine"):
+            before_runner = len(runner._indicator_engine.get_history(sym) or [])
+        runtime = await ensure_symbol_runtime_history(ctx, sym, role="selected_option", phase="startup", reason=f"{reason}_selected_option", required_bars=required_bars)
         LOGGER.info(
-            "SELECTED_OPTION_FORCE_HYDRATION_RESULT symbol=%s before_mdm_bars=%d after_mdm_bars=%d before_runner_bars=%d after_runner_bars=%d required_bars=%d",
-            sym, before_mdm_bars, after_mdm_bars, before_runner_bars, after_runner_bars, required_bars,
+            "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM symbol=%s mdm_bars=%d runner_bars=%d required_bars=%d reason=%s",
+            sym, runtime.mdm_bars, runtime.indicator_bars, required_bars, reason,
         )
-        if not ready:
+        hydration_result[sym] = {
+            "before_mdm_bars": before_mdm,
+            "after_mdm_bars": runtime.mdm_bars,
+            "before_runner_bars": before_runner,
+            "after_runner_bars": runtime.indicator_bars,
+            "ready": runtime.ready,
+        }
+        if not runtime.ready:
             LOGGER.warning(
                 "SELECTED_OPTION_HYDRATION_NOT_READY symbol=%s after_mdm_bars=%d after_runner_bars=%d required_bars=%d reason=%s",
-                sym,
-                after_mdm_bars,
-                after_runner_bars,
-                required_bars,
-                reason,
+                sym, runtime.mdm_bars, runtime.indicator_bars, required_bars, reason,
             )
     return hydration_result
 

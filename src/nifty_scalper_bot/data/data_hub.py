@@ -152,6 +152,7 @@ class DataHub:
         self._quote_update_versions: dict[str, int] = defaultdict(int)
         self._last_listener_error_log_ts = 0.0
         self._listener_error_streak = 0
+        # Compatibility-only; never authoritative. Historical bars are owned by MDM.
         self._history_cache: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
         self._iv_cache: Dict[str, float] = {}
         self._oi_cache: Dict[str, float] = {}
@@ -1788,38 +1789,51 @@ class DataHub:
         max_bars: int = 300,
         reason: str = "datahub",
     ) -> list[dict[str, Any]]:
-        """Delegate symbol hydration to MDM. Args: symbol/interval/days/max_bars/reason. Returns: rows. Raises: none."""
-        mdm_fn = getattr(self._mdm, "hydrate_symbol_history", None)
-        if callable(mdm_fn):
-            rows = await mdm_fn(
+        """Compatibility facade: delegate historical hydration to canonical MDM owner."""
+        ensure = getattr(self._mdm, "ensure_history", None)
+        if callable(ensure):
+            result = await ensure(
                 symbol,
                 interval=interval,
                 days=days,
-                max_bars=max_bars,
+                required_bars=max(1, int(max_bars or 1)),
+                target_bars=max_bars,
                 reason=reason,
             )
+            rows = self.get_ohlc_bars(result.symbol, limit=max_bars)
             if rows:
                 self._touch_warm_symbol_cache(symbol)
             return rows
-        rows = await self.fetch_history(symbol, interval, days)
-        return list(rows or [])[-max_bars:]
+        mdm_fn = getattr(self._mdm, "hydrate_symbol_history", None)
+        if callable(mdm_fn):
+            rows = await mdm_fn(symbol, interval=interval, days=days, max_bars=max_bars, reason=reason)
+            if rows:
+                self._touch_warm_symbol_cache(symbol)
+            return list(rows or [])[-max_bars:]
+        return []
 
     async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
+        """Compatibility delegate only; never maintains an authoritative history cache."""
         normalized = self._canonical_quote_symbol(symbol)
-        key = (normalized, str(interval or "minute").lower(), int(days or 0))
+        ensure = getattr(self._mdm, "ensure_history", None)
+        if callable(ensure):
+            await ensure(
+                normalized,
+                interval=interval,
+                days=days,
+                required_bars=1,
+                target_bars=None,
+                reason="datahub_fetch_history_compat",
+            )
+            return self.get_ohlc_bars(normalized)
         mdm_fn = getattr(self._mdm, "fetch_history", None)
         if not callable(mdm_fn):
-            return [dict(row) for row in self._history_cache.get(key, [])]
-        try:
-            rows = await mdm_fn(normalized, interval, days)
-        except Exception:  # noqa: BLE001
-            return [dict(row) for row in self._history_cache.get(key, [])]
-        normalized_rows = self._normalize_history_rows(normalized, rows)
-        if normalized_rows:
-            self._history_cache[key] = normalized_rows
-        return [dict(row) for row in self._history_cache.get(key, [])]
+            return []
+        rows = await mdm_fn(normalized, interval, days)
+        return self._normalize_history_rows(normalized, rows)
 
     def _normalize_history_rows(self, symbol: str, rows: Iterable[Any]) -> list[dict[str, Any]]:
+        """Compatibility normalization helper; MDM remains authoritative for stored history."""
         normalized_rows: list[dict[str, Any]] = []
         for row in rows or []:
             bar = normalize_history_row(symbol, row, source="historical")
