@@ -1959,7 +1959,7 @@ class MarketDataManager:
             if is_future and raw_sym != self._basket_value(basket, "futures_symbol", None):
                 self._logger.warning("MDM_BASKET_ROLE_INCONSISTENCY symbol=%s role=%s", canonical, role, extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": canonical, "role": role})
             token = token_map.get(sym) or token_map.get(sym.upper()) or token_map.get(canonical) or token_map.get(canonical.split(":", 1)[-1] if ":" in canonical else canonical)
-            entry = {"role": role, "token": token, "ltp_ready": False, "depth_available": False, "bid_ask_available": False, "tradable_quote_ready": False, "quote_ready": False, "quote_ready_reason": "quote_missing", "ohlc_ready": True, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
+            entry = {"role": role, "token": token, "ltp_ready": False, "depth_available": False, "bid_ask_available": False, "tradable_quote_ready": False, "quote_ready": False, "quote_ready_alias": "ltp_ready_compat_only", "quote_ready_reason": "quote_missing", "ohlc_ready": True, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
             if is_option and token is None:
                 report["missing"].append(f"{sym}:token_missing")
                 report["hard_ready"] = False

@@ -59,7 +59,7 @@ from nifty_scalper_bot.data.robust_provider import (
 )
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
-from nifty_scalper_bot.execution.readiness import normalize_readiness_blockers
+from nifty_scalper_bot.execution.readiness import evaluate_quote_readiness, normalize_readiness_blockers
 from nifty_scalper_bot.utils.market_hours import (
     get_runtime_market_mode,
     post_market_basket_refresh_seconds,
@@ -7549,6 +7549,22 @@ def _best_hydrated_option(
     return best_symbol
 
 
+def _quote_readiness_for_symbol(ctx: Any, symbol: str | None, *, max_age_s: float = 60.0) -> Any:
+    """Return canonical quote readiness for a runtime symbol without raising."""
+    snap = None
+    if symbol and getattr(ctx, "market_data_manager", None) is not None:
+        try:
+            snap = ctx.market_data_manager.get_symbol_snapshot(symbol)
+        except Exception:
+            snap = None
+    return evaluate_quote_readiness(
+        symbol or "",
+        snap,
+        max_spread_pct=float(os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10),
+        max_age_s=max_age_s,
+    )
+
+
 def _fresh_option_quote(
     ctx: BotContext, symbol: str | None, *, max_age_s: float = 60.0
 ) -> str | None:
@@ -11520,14 +11536,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 getattr(ctx, "selected_pe", None)
                                 or basket_universe.get("selected_pe"),
                             )
-                            quote_ce = _fresh_option_quote(ctx, selected_ce) if selected_ce else None
-                            quote_pe = _fresh_option_quote(ctx, selected_pe) if selected_pe else None
+                            ce_qr = _quote_readiness_for_symbol(ctx, selected_ce)
+                            pe_qr = _quote_readiness_for_symbol(ctx, selected_pe)
+                            quote_ce = selected_ce if ce_qr.tradable_quote_ready else None
+                            quote_pe = selected_pe if pe_qr.tradable_quote_ready else None
                             hydrated_ce = _count_symbol_bars(ctx, selected_ce) if selected_ce else 0
                             hydrated_pe = _count_symbol_bars(ctx, selected_pe) if selected_pe else 0
-                            option_ticks_ready = bool(quote_ce is not None and quote_pe is not None)
+                            option_ticks_ready = bool(ce_qr.tradable_quote_ready and pe_qr.tradable_quote_ready)
                             futures_ready = "futures" not in set(missing_soft)
-                            atm_ce_ready = bool(selected_ce and (quote_ce is not None or hydrated_ce >= 3))
-                            atm_pe_ready = bool(selected_pe and (quote_pe is not None or hydrated_pe >= 3))
+                            atm_ce_ready = bool(selected_ce and (ce_qr.tradable_quote_ready or hydrated_ce >= 3))
+                            atm_pe_ready = bool(selected_pe and (pe_qr.tradable_quote_ready or hydrated_pe >= 3))
                             req_atm_ce = readiness_state.get("requirements", {}).get("atm_ce")
                             req_atm_pe = readiness_state.get("requirements", {}).get("atm_pe")
                             if quote_ce and req_atm_ce and quote_ce != req_atm_ce:
@@ -11552,9 +11570,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             quote_event = "OPTION_TRADABLE_QUOTE_READY" if option_ticks_ready else "OPTION_TRADABLE_QUOTE_NOT_READY"
                             LOGGER.info(
-                                "%s selected_ce=%s selected_pe=%s ce_tradable_quote=%s pe_tradable_quote=%s",
-                                quote_event, selected_ce, selected_pe, bool(quote_ce), bool(quote_pe),
-                                extra={"event": quote_event, "selected_ce": selected_ce, "selected_pe": selected_pe, "ce_tradable_quote": bool(quote_ce), "pe_tradable_quote": bool(quote_pe)},
+                                "%s selected_ce=%s selected_pe=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_reason=%s pe_reason=%s",
+                                quote_event, selected_ce, selected_pe, ce_qr.tradable_quote_ready, pe_qr.tradable_quote_ready, ce_qr.reason, pe_qr.reason,
+                                extra={"event": quote_event, "selected_ce": selected_ce, "selected_pe": selected_pe, "ce_tradable_quote": ce_qr.tradable_quote_ready, "pe_tradable_quote": pe_qr.tradable_quote_ready, "ce_quote_readiness": ce_qr.to_dict(), "pe_quote_readiness": pe_qr.to_dict()},
                             )
                             LOGGER.info(
                                 "OPTION_HISTORY_READY selected_ce=%s selected_pe=%s",
@@ -11611,9 +11629,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                             pe_hydration = _status_for_role(hydration_statuses, "selected_pe")
                             hydrated_ce = min(ce_hydration.mdm_bars, ce_hydration.datahub_bars, ce_hydration.runner_bars, ce_hydration.indicator_bars) if ce_hydration else 0
                             hydrated_pe = min(pe_hydration.mdm_bars, pe_hydration.datahub_bars, pe_hydration.runner_bars, pe_hydration.indicator_bars) if pe_hydration else 0
-                            quote_ce = selected_ce if ce_hydration and ce_hydration.tradable_quote else None
-                            quote_pe = selected_pe if pe_hydration and pe_hydration.tradable_quote else None
-                            option_ticks_ready = bool(quote_ce is not None and quote_pe is not None)
+                            ce_qr_runtime = _quote_readiness_for_symbol(ctx, selected_ce)
+                            pe_qr_runtime = _quote_readiness_for_symbol(ctx, selected_pe)
+                            quote_ce = selected_ce if ce_qr_runtime.tradable_quote_ready else None
+                            quote_pe = selected_pe if pe_qr_runtime.tradable_quote_ready else None
+                            option_ticks_ready = bool(ce_qr_runtime.tradable_quote_ready and pe_qr_runtime.tradable_quote_ready)
                             spot_ready = bool(spot_hydration and spot_hydration.ready_for_evaluation)
                             futures_ready = bool(futures_hydration and futures_hydration.ready_for_evaluation) if (basket_universe.get("futures_symbol") or basket_universe.get("future_symbol")) else True
                             atm_ce_ready = bool(ce_hydration and ce_hydration.ready_for_evaluation)

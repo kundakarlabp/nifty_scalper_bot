@@ -244,6 +244,17 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     else:
         all_tokens = list(out.get("all_tokens") or [])[: max_options + 2]
         option_tokens = list(out.get("option_tokens") or [])[:max_options]
+        LOGGER.info(
+            "ACTIVE_BASKET_TOKEN_MAP_PARTIAL mapped_symbol_count=%d expected_symbol_count=%d preserved_all_token_count=%d preserved_option_token_count=%d",
+            len(token_by_symbol_raw), len(expected_token_symbols), len(all_tokens), len(option_tokens),
+            extra={
+                "event": "ACTIVE_BASKET_TOKEN_MAP_PARTIAL",
+                "mapped_symbol_count": len(token_by_symbol_raw),
+                "expected_symbol_count": len(expected_token_symbols),
+                "preserved_all_token_count": len(all_tokens),
+                "preserved_option_token_count": len(option_tokens),
+            },
+        )
     out["spot_symbol"] = spot_symbol
     out["futures_symbol"] = futures_symbol
     out["option_symbols"] = option_symbols

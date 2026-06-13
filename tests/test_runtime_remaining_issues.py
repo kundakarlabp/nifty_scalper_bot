@@ -163,3 +163,100 @@ def test_eod_flatten_skips_weekend_and_holiday(monkeypatch):
     assert _next_eod_flatten_time_ist(datetime(2026, 6, 13, 10, 0, tzinfo=ist)).date().isoformat() == "2026-06-15"
     assert _next_eod_flatten_time_ist(datetime(2026, 6, 14, 10, 0, tzinfo=ist)).date().isoformat() == "2026-06-15"
     assert _next_eod_flatten_time_ist(datetime(2026, 10, 2, 10, 0, tzinfo=ist)).date().isoformat() == "2026-10-05"
+
+
+def test_startup_quote_event_uses_canonical_tradable_results():
+    source = __import__("pathlib").Path("src/nifty_scalper_bot/core/app.py").read_text()
+    assert "option_ticks_ready = bool(ce_qr.tradable_quote_ready and pe_qr.tradable_quote_ready)" in source
+    assert 'quote_event = "OPTION_TRADABLE_QUOTE_READY" if option_ticks_ready else "OPTION_TRADABLE_QUOTE_NOT_READY"' in source
+    assert '"ce_quote_readiness": ce_qr.to_dict()' in source
+
+
+def test_ltp_only_quote_does_not_arm_live_execution():
+    from nifty_scalper_bot.execution.readiness import compute_live_readiness
+
+    ce_qr = evaluate_quote_readiness(CE, {"ltp": 100.0, "tick_age_s": 1.0}, max_age_s=5.0)
+    pe_qr = evaluate_quote_readiness(PE, {"ltp": 90.0, "tick_age_s": 1.0}, max_age_s=5.0)
+    assert ce_qr.ltp_ready is True
+    assert pe_qr.ltp_ready is True
+    assert ce_qr.tradable_quote_ready is False
+    assert pe_qr.tradable_quote_ready is False
+
+    armed, reasons = compute_live_readiness(
+        live_mode=True,
+        hard_ready=True,
+        quote_available=True,
+        ws_quote_proof=True,
+        market_open=True,
+        runner_running=True,
+        selected_ce=CE,
+        selected_pe=PE,
+        ce_bars=30,
+        pe_bars=30,
+        option_exec_min_bars=30,
+        ce_quote_ready=ce_qr.tradable_quote_ready,
+        pe_quote_ready=pe_qr.tradable_quote_ready,
+    )
+    assert armed is False
+    assert "selected_ce_quote_missing" in reasons
+    assert "selected_pe_quote_missing" in reasons
+
+
+def test_no_execution_module_reads_ambiguous_quote_ready():
+    from pathlib import Path
+    for path in Path("src/nifty_scalper_bot/execution").glob("*.py"):
+        text = path.read_text()
+        assert 'get("quote_ready"' not in text
+        assert "['quote_ready']" not in text
+        assert '.quote_ready' not in text
+
+
+def test_partial_token_mapping_logs_diagnostic_and_preserves_tokens(caplog):
+    with caplog.at_level("INFO"):
+        basket = normalize_active_basket_schema({
+            "spot_symbol": "NSE:NIFTY",
+            "spot_token": 1,
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "futures_token": 2,
+            "selected_ce": CE,
+            "selected_pe": PE,
+            "selected_ce_token": 3,
+            "selected_pe_token": 4,
+            "option_symbols": [CE, PE],
+            "all_tokens": [1, 2, 3, 4],
+            "option_tokens": [3, 4],
+            "token_by_symbol": {CE: 3},
+        })
+    assert basket["all_tokens"] == [1, 2, 3, 4]
+    assert basket["option_tokens"] == [3, 4]
+    assert basket["selected_ce_token"] == 3
+    assert basket["selected_pe_token"] == 4
+    rec = next(record for record in caplog.records if getattr(record, "event", "") == "ACTIVE_BASKET_TOKEN_MAP_PARTIAL")
+    assert rec.mapped_symbol_count == 1
+    assert rec.expected_symbol_count == 4
+    assert rec.preserved_all_token_count == 4
+    assert rec.preserved_option_token_count == 2
+
+
+def test_mdm_runtime_clamp_keeps_8_options_and_10_total_tokens(monkeypatch):
+    monkeypatch.setenv("MAX_ACTIVE_OPTION_SYMBOLS", "8")
+    mdm = MarketDataManager(broker=SimpleNamespace(), settings=SimpleNamespace(history_min_interval_sec=0))
+    option_symbols = [f"NFO:NIFTY26JUN25{i:03d}CE" for i in range(10)]
+    token_by_symbol = {"NSE:NIFTY": 1, "NFO:NIFTY26JUNFUT": 2}
+    token_by_symbol.update({sym: idx + 3 for idx, sym in enumerate(option_symbols)})
+    basket = {
+        "spot_symbol": "NSE:NIFTY",
+        "futures_symbol": "NFO:NIFTY26JUNFUT",
+        "selected_ce": option_symbols[0],
+        "selected_pe": option_symbols[1],
+        "option_symbols": option_symbols,
+        "symbols": ["NSE:NIFTY", "NFO:NIFTY26JUNFUT", *option_symbols],
+        "all_symbols": ["NSE:NIFTY", "NFO:NIFTY26JUNFUT", *option_symbols],
+        "all_tokens": list(token_by_symbol.values()),
+        "token_by_symbol": token_by_symbol,
+    }
+    mdm.set_active_contract_basket(basket)
+    option_tokens = {token_by_symbol[s] for s in option_symbols}
+    desired = set(mdm._desired_tokens)
+    assert len(desired & option_tokens) <= 8
+    assert len(desired) <= 10
