@@ -43,7 +43,7 @@ from typing import (
 import pytz
 from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
-from nifty_scalper_bot.utils.smart_symbol import NSE_HOLIDAYS
+from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.active_basket import (
@@ -89,7 +89,7 @@ def _next_eod_flatten_time_ist(now_ist: datetime) -> datetime | None:
         now_ist = now_ist.astimezone(ZoneInfo("Asia/Kolkata"))
     for day_offset in range(0, 10):
         candidate_day = (now_ist + timedelta(days=day_offset)).date()
-        if candidate_day.weekday() >= 5 or candidate_day in NSE_HOLIDAYS:
+        if not is_nse_trading_day(candidate_day):
             continue
         candidate = datetime.combine(candidate_day, time(15, 24), tzinfo=ZoneInfo("Asia/Kolkata"))
         if candidate > now_ist:
@@ -8589,6 +8589,12 @@ def _commit_active_dynamic_basket(
     runner = getattr(ctx, "strategy_runner", None)
     if runner is not None and hasattr(runner, "set_active_trading_universe"):
         runner.set_active_trading_universe(committed)
+    data_hub = getattr(ctx, "data_hub", None)
+    if data_hub is not None and hasattr(data_hub, "set_active_contract_basket"):
+        data_hub.set_active_contract_basket(committed)
+    option_universe = getattr(ctx, "option_universe", None)
+    if option_universe is not None and hasattr(option_universe, "set_active_contract_basket"):
+        option_universe.set_active_contract_basket(committed)
     strategy_manager = getattr(ctx, "strategy_manager", None)
     set_fut = getattr(strategy_manager, "set_active_futures_symbol", None)
     if callable(set_fut):

@@ -2637,10 +2637,12 @@ class StrategyRunner:
             except Exception:  # noqa: BLE001
                 return False
 
-        candidate_symbols = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
-        for sym in (selected_ce_norm, selected_pe_norm):
-            if sym:
-                candidate_symbols.add(sym)
+        raw_candidate_symbols = [normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym]
+        max_active_options = max(2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "8") or 8))
+        selected_core = [sym for sym in (selected_ce_norm, selected_pe_norm) if sym]
+        candidate_symbols = set(dict.fromkeys([*selected_core, *raw_candidate_symbols]).keys())
+        if len(candidate_symbols) > max_active_options:
+            candidate_symbols = set(list(dict.fromkeys([*selected_core, *raw_candidate_symbols]))[:max_active_options])
         prev_ce = getattr(self, "_active_selected_ce", None)
         prev_pe = getattr(self, "_active_selected_pe", None)
         pair_requested = bool(selected_ce_norm and selected_pe_norm)
@@ -7339,6 +7341,14 @@ class StrategyRunner:
         result_event = "SELECTED_OPTION_HISTORY_PREWARM_RESULT" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_RESULT"
         if not selected and bars_before >= required_bars:
             return
+        data_hub = getattr(self, "_data_hub", None)
+        mdm = getattr(data_hub, "_mdm", None)
+        inflight = getattr(mdm, "_history_inflight", {}) if mdm is not None else {}
+        inflight_entry = inflight.get((symbol, "minute")) if isinstance(inflight, Mapping) else None
+        if not selected and inflight_entry and int(inflight_entry[0] or 0) >= required_bars:
+            return
+        if not selected and get_runtime_market_mode() != "OPEN":
+            return
         last = float(self._selected_option_prewarm_last.get(symbol, 0.0) or 0.0)
         if (now - last) < self._selected_option_prewarm_cooldown_s or symbol in self._selected_option_prewarm_inflight:
             return
@@ -7352,7 +7362,6 @@ class StrategyRunner:
             required_bars,
             extra={"event": request_event, "symbol": symbol, "bars_before": bars_before, "required_bars": required_bars, "trace_id": trace_id},
         )
-        data_hub = getattr(self, "_data_hub", None)
         hydrate = getattr(data_hub, "hydrate_symbol_history", None)
         if not callable(hydrate):
             self._selected_option_prewarm_inflight.discard(symbol)

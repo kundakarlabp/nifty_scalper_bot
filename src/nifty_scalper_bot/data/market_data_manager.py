@@ -392,6 +392,7 @@ class MarketDataManager:
         self._polling_policy = PollingPolicy.from_settings(settings)
         self._poll_error_last_log: dict[str, float] = {}
         self._history_lock = asyncio.Lock()
+        self._history_inflight_lock = asyncio.Lock()
         self._history_inflight: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]] = {}
         self._last_history_request_ts = 0.0
         self._history_min_interval_sec = float(
@@ -9499,11 +9500,20 @@ class MarketDataManager:
         max_bars: int = 300,
         reason: str = "startup",
     ) -> list[dict[str, Any]]:
-        """Hydrate cached OHLC history for a symbol. Args: symbol/interval/days/max_bars/reason. Returns: normalized rows. Raises: none."""
+        """Hydrate cached OHLC history without overlapping same-symbol broker requests."""
         normalized = self._canonical_symbol(symbol)
         if not hasattr(self, "_history_inflight"):
             self._history_inflight = {}
+        if not hasattr(self, "_history_inflight_lock"):
+            self._history_inflight_lock = asyncio.Lock()
         key = (normalized, interval)
+
+        def _cached_rows() -> list[dict[str, Any]]:
+            try:
+                return list(self.get_ohlc_bars(normalized) or [])
+            except Exception:
+                return []
+
         async def _run_hydration(requested_bars: int) -> list[dict[str, Any]]:
             rows_inner = await self.fetch_history(normalized, interval, days)
             rows_inner = list(rows_inner or [])[-requested_bars:]
@@ -9515,22 +9525,45 @@ class MarketDataManager:
                 extra={"event":"HYDRATION_MDM_COMPLETE","symbol":normalized,"rows":len(rows_inner),"accepted":int(accepted_inner),"reason":reason},
             )
             return rows_inner
-        with suppress(KeyError):
-            inflight_bars, inflight_task = self._history_inflight[key]
-            if not inflight_task.done() and inflight_bars >= max_bars:
-                self._logger.info(
-                    "HYDRATION_REQUEST_JOINED symbol=%s requested_bars=%s inflight_bars=%s reason=%s",
-                    normalized, max_bars, inflight_bars, reason,
-                    extra={"event":"HYDRATION_REQUEST_JOINED","symbol":normalized,"requested_bars":max_bars,"inflight_bars":inflight_bars,"reason":reason},
-                )
-                return list(await inflight_task)[-max_bars:]
-        task = asyncio.create_task(_run_hydration(max_bars))
-        self._history_inflight[key] = (max_bars, task)
-        self._logger.info(
-            "HYDRATION_REQUEST_CREATED symbol=%s requested_bars=%s reason=%s",
-            normalized, max_bars, reason,
-            extra={"event":"HYDRATION_REQUEST_CREATED","symbol":normalized,"requested_bars":max_bars,"reason":reason},
-        )
+
+        while True:
+            async with self._history_inflight_lock:
+                current = self._history_inflight.get(key)
+                if current is not None and current[1].done():
+                    self._history_inflight.pop(key, None)
+                    current = None
+                if current is not None:
+                    inflight_bars, inflight_task = current
+                    self._logger.info(
+                        "HYDRATION_REQUEST_JOINED symbol=%s requested_bars=%s inflight_bars=%s reason=%s",
+                        normalized, max_bars, inflight_bars, reason,
+                        extra={"event":"HYDRATION_REQUEST_JOINED","symbol":normalized,"requested_bars":max_bars,"inflight_bars":inflight_bars,"reason":reason},
+                    )
+                else:
+                    task = asyncio.create_task(_run_hydration(max_bars))
+                    self._history_inflight[key] = (max_bars, task)
+                    self._logger.info(
+                        "HYDRATION_REQUEST_CREATED symbol=%s requested_bars=%s reason=%s",
+                        normalized, max_bars, reason,
+                        extra={"event":"HYDRATION_REQUEST_CREATED","symbol":normalized,"requested_bars":max_bars,"reason":reason},
+                    )
+                    break
+
+            try:
+                rows = await inflight_task
+            finally:
+                if inflight_task.done():
+                    async with self._history_inflight_lock:
+                        current = self._history_inflight.get(key)
+                        if current and current[1] is inflight_task:
+                            self._history_inflight.pop(key, None)
+            if inflight_bars >= max_bars:
+                return list(rows or [])[-max_bars:]
+            cached = _cached_rows()
+            if len(cached) >= max_bars:
+                return cached[-max_bars:]
+            # A smaller request completed first; loop and create a larger request only if still short.
+
         try:
             rows = await task
             self._logger.info(
@@ -9540,9 +9573,10 @@ class MarketDataManager:
             )
             return list(rows)[-max_bars:]
         finally:
-            current = self._history_inflight.get(key)
-            if current and current[1] is task:
-                self._history_inflight.pop(key, None)
+            async with self._history_inflight_lock:
+                current = self._history_inflight.get(key)
+                if current and current[1] is task:
+                    self._history_inflight.pop(key, None)
 
     async def fetch_history(
         self, symbol: str, interval: str, days: int = 3

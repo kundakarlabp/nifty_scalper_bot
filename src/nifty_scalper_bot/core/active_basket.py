@@ -226,10 +226,26 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     pe_symbols = [s for s in option_symbols if s.endswith("PE")]
     token_by_symbol_raw = dict(out.get("token_by_symbol") or {})
     symbols = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
-    token_by_symbol = {str(sym): int(tok) for sym, tok in token_by_symbol_raw.items() if str(sym) in symbols and tok}
-    all_tokens = list(dict.fromkeys(int(tok) for sym, tok in token_by_symbol.items() if sym in symbols and int(tok) > 0))
+
+    def _positive_int(value: object) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    token_by_symbol = dict(token_by_symbol_raw)
+    expected_token_symbols = [s for s in symbols if s]
+    complete_token_map = all(_positive_int(token_by_symbol_raw.get(sym)) for sym in expected_token_symbols)
+    if complete_token_map:
+        token_by_symbol = {sym: int(token_by_symbol_raw[sym]) for sym in expected_token_symbols}
+        all_tokens = list(dict.fromkeys(token_by_symbol[sym] for sym in expected_token_symbols))[: max_options + 2]
+        option_tokens = [token_by_symbol[s] for s in option_symbols if s in token_by_symbol]
+    else:
+        all_tokens = list(out.get("all_tokens") or [])[: max_options + 2]
+        option_tokens = list(out.get("option_tokens") or [])[:max_options]
     out["spot_symbol"] = spot_symbol
-    out["futures_symbol"] = futures_symbol if futures_symbol.endswith("FUT") or not futures_symbol else futures_symbol
+    out["futures_symbol"] = futures_symbol
     out["option_symbols"] = option_symbols
     out["ce_symbols"] = ce_symbols
     out["pe_symbols"] = pe_symbols
@@ -240,8 +256,8 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     out["symbols"] = symbols
     out["all_symbols"] = symbols
     out["token_by_symbol"] = token_by_symbol
-    out["all_tokens"] = all_tokens[: max_options + 2]
-    out["option_tokens"] = [token_by_symbol[s] for s in option_symbols if s in token_by_symbol]
+    out["all_tokens"] = all_tokens
+    out["option_tokens"] = option_tokens
     out["basket_version"] = str(out.get("basket_version") or out.get("version") or out.get("committed_at") or "1")
     out["basket_source"] = str(out.get("basket_source") or out.get("source") or "active_contract_basket")
     out["basket_committed_at"] = str(out.get("basket_committed_at") or out.get("committed_at") or "")

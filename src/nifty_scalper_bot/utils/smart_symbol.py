@@ -30,6 +30,21 @@ NSE_HOLIDAYS = {
 }
 
 
+def is_nse_trading_day(day: date) -> bool:
+    """Return True when *day* is a weekday and not in the project NSE holiday set."""
+    return day.weekday() < 5 and day not in NSE_HOLIDAYS
+
+
+def next_nse_trading_day(start_day: date) -> date:
+    """Return the first NSE trading day on or after *start_day*."""
+    day = start_day
+    for _ in range(14):
+        if is_nse_trading_day(day):
+            return day
+        day += timedelta(days=1)
+    return day
+
+
 def now_ist() -> datetime:
     """Return current datetime in IST."""
     return datetime.now(IST)

@@ -384,7 +384,9 @@ def evaluate_quote_readiness(
             ts = _quote_float(quote, "timestamp_ms", "last_tick_ts_ms")
             if ts and ts > 10_000_000_000:
                 age = max(0.0, datetime.now(timezone.utc).timestamp() - (ts / 1000.0))
-        if max_age_s is not None and age is not None and age > max_age_s:
+        if age is None:
+            reason = "quote_age_unknown"
+        elif max_age_s is not None and age > max_age_s:
             reason = "quote_stale"
     if reason == "ready" and max_spread_pct is not None and spread_pct is not None and spread_pct > max_spread_pct:
         reason = "spread_too_wide"
