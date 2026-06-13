@@ -9702,12 +9702,14 @@ class MarketDataManager:
         joined_fetched_rows = 0
         joined_accepted_rows = 0
         joined_failure: str | None = None
+        joined_any = False
         while True:
             cached_now = _cached_count()
             if not force and cached_now >= target:
-                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=joined_observed_fetch, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
+                # Returned without this request ever starting a broker task.
+                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_any, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
             if not force and minimum_only and cached_now >= required:
-                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=joined_observed_fetch, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
+                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_any, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
             async with self._history_inflight_lock:
                 current = self._history_inflight.get(key)
                 if current is not None and current[1].done():
@@ -9743,6 +9745,7 @@ class MarketDataManager:
                     break
             try:
                 joined = await inflight_task
+                joined_any = True
                 joined_observed_fetch = joined_observed_fetch or joined.broker_fetch_observed or joined.broker_fetch_started
                 joined_fetched_rows += int(joined.fetched_rows or 0)
                 joined_accepted_rows += int(joined.accepted_rows or 0)
@@ -9753,13 +9756,14 @@ class MarketDataManager:
                         current = self._history_inflight.get(key)
                         if current and current[1] is inflight_task:
                             self._history_inflight.pop(key, None)
-            # If a larger/sufficient request completed, return its observed state.
+            # If a larger/sufficient request completed, this caller only joined —
+            # it never started a broker task itself (spec §7).
             if inflight_bars >= target:
                 cached_after_join = _cached_count()
                 return _result(
                     cached_before=cached_before,
                     cached_after=cached_after_join,
-                    broker_fetch_started=joined_observed_fetch,
+                    broker_fetch_started=False,
                     joined_inflight=True,
                     broker_fetch_observed=joined_observed_fetch,
                     fetched_rows=joined_fetched_rows,
@@ -9770,7 +9774,7 @@ class MarketDataManager:
 
         try:
             result = await task
-            if joined_observed_fetch:
+            if joined_any:
                 return _result(
                     cached_before=cached_before,
                     cached_after=result.cached_after,
@@ -9797,12 +9801,19 @@ class MarketDataManager:
         max_bars: int = 300,
         reason: str = "startup",
     ) -> list[dict[str, Any]]:
-        """Compatibility wrapper: delegate to canonical ensure_history and return MDM rows."""
+        """Compatibility wrapper: delegate to canonical ensure_history and return MDM rows.
+
+        Legacy max_bars is the target ceiling, not the operational minimum; a
+        modest required floor keeps a compatibility caller from forcing the full
+        ceiling as the readiness requirement.
+        """
+        ceiling = max(1, int(max_bars or 1))
+        required = min(int(os.getenv("HYDRATION_COMPAT_REQUIRED_BARS", "30") or 30), ceiling)
         result = await self.ensure_history(
             symbol,
             interval=interval,
-            required_bars=max(1, int(max_bars or 1)),
-            target_bars=max_bars,
+            required_bars=required,
+            target_bars=ceiling,
             days=days,
             reason=reason,
         )

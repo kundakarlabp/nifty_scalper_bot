@@ -648,6 +648,16 @@ class StrategyRunner:
             self._logger.error(f"❌ Failed to create 'data/' directory: {e}")
         self._data_hub = data_hub
         self.datahub = datahub or data_hub
+        # Spec §4: optional injected canonical hydration callback. When set by the
+        # app/runtime layer it routes prewarm through
+        # resolve_history_policy -> ensure_symbol_runtime_history ->
+        # MDM.ensure_history -> sync_history_from_mdm, so Runner owns no second
+        # hydrate-and-reseed lifecycle. Signature:
+        #   async def(symbol, *, role, phase, reason, required_bars=None,
+        #             target_bars=None) -> RuntimeHistoryResult-like
+        # None means fall back to the legacy compatibility path (kept for tests
+        # and for runtimes that do not inject the callback).
+        self._runtime_history_ensurer: Callable[..., Any] | None = None
         self._datahub_registered_symbols: set[str] = set()
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
@@ -7453,11 +7463,56 @@ class StrategyRunner:
             extra={"event": request_event, "symbol": symbol, "bars_before": bars_before, "required_bars": required_bars, "trace_id": trace_id},
         )
         hydrate = getattr(data_hub, "hydrate_symbol_history", None)
-        if not callable(hydrate):
+        ensurer = getattr(self, "_runtime_history_ensurer", None)
+        if ensurer is None and not callable(hydrate):
             self._selected_option_prewarm_inflight.discard(symbol)
             return
         policy = HistoryReadinessPolicy.from_env()
         max_bars = max(required_bars, policy.smc_min_bars)
+
+        async def _do_prewarm_canonical() -> None:
+            """Canonical path: delegate to the injected runtime orchestrator."""
+            success = False
+            bars_after = bars_before
+            reason = "selected_option_history_cold" if selected else "option_context_history_cold"
+            source = "canonical_runtime_history_ensurer"
+            role = "selected_option" if selected else "option_context"
+            try:
+                result = ensurer(
+                    symbol,
+                    role=role,
+                    phase="prewarm",
+                    reason=reason,
+                    required_bars=required_bars,
+                    target_bars=max_bars,
+                )
+                if inspect.isawaitable(result):
+                    result = await result
+                bars_after = self._history_count_for_symbol(symbol)
+                success = bool(getattr(result, "minimum_ready", None) if result is not None else False) or bars_after >= required_bars
+                self._emit_history_hydration_trace(
+                    symbol,
+                    source=source,
+                    fetched_bars=int(getattr(result, "mdm_bars", bars_after) or bars_after),
+                    ingested_bars=bars_after,
+                )
+            except Exception as exc:  # noqa: BLE001 - orchestration boundary
+                success = False
+                source = "canonical_ensurer_exception"
+                reason = type(exc).__name__
+                bars_after = self._history_count_for_symbol(symbol)
+            finally:
+                self._selected_option_prewarm_inflight.discard(symbol)
+                success = bool(success and bars_after >= required_bars)
+                if not success and bars_after < required_bars and reason in {"scheduled", "selected_option_history_cold", "option_context_history_cold"}:
+                    reason = "insufficient_bars"
+                self._maybe_promote_pending_active_basket(source="selected_option_history_prewarm")
+                self._logger.info(
+                    "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
+                    result_event, symbol, bars_before, bars_after, required_bars, success,
+                    extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": reason, "source": source, "trace_id": trace_id},
+                )
+
         async def _do_prewarm() -> None:
             success = False
             bars_after = bars_before
@@ -7533,11 +7588,12 @@ class StrategyRunner:
                     result_event, symbol, bars_before, bars_after, required_bars, success,
                     extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": reason, "source": source, "trace_id": trace_id},
                 )
+        _prewarm_coro = _do_prewarm_canonical if ensurer is not None else _do_prewarm
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_do_prewarm())
+            loop.create_task(_prewarm_coro())
         except RuntimeError:
-            threading.Thread(target=lambda: asyncio.run(_do_prewarm()), name=f"selected-option-prewarm-{symbol}", daemon=True).start()
+            threading.Thread(target=lambda: asyncio.run(_prewarm_coro()), name=f"selected-option-prewarm-{symbol}", daemon=True).start()
         except Exception as exc:
             self._selected_option_prewarm_inflight.discard(symbol)
             self._logger.info(
@@ -7545,6 +7601,14 @@ class StrategyRunner:
                 result_event, symbol, bars_before, bars_before, required_bars, False,
                 extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_before, "required_bars": required_bars, "success": False, "reason": type(exc).__name__, "source": "prewarm_scheduler_exception", "trace_id": trace_id},
             )
+
+    def set_runtime_history_ensurer(self, ensurer: Callable[..., Any] | None) -> None:
+        """Args: canonical hydration callback (or None to clear). Returns: None.
+        Injected by the app/runtime layer so prewarm routes through the single
+        canonical orchestration path instead of a Runner-owned reseed lifecycle.
+        Raises: none.
+        """
+        self._runtime_history_ensurer = ensurer
 
     def _history_count_for_symbol(self, symbol: str) -> int:
         try:

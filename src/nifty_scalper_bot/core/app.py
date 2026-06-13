@@ -640,7 +640,8 @@ def sync_symbol_history_to_runner(
     runner_before = get_runner_history_count(ctx, symbol)
     if runner is None or not callable(getattr(runner, "sync_history_from_mdm", None)):
         return {"symbol": symbol, "mdm_before": mdm_before, "runner_before": runner_before, "runner_after": runner_before, "required": safe_required_bars, "ready": False, "ingested": 0}
-    result = runner.sync_history_from_mdm(symbol, required_bars=safe_required_bars, reason=reason, role="selected_option", request_if_short=False)
+    resolved_role = resolve_symbol_history_role(ctx, symbol)
+    result = runner.sync_history_from_mdm(symbol, required_bars=safe_required_bars, reason=reason, role=resolved_role, request_if_short=False)
     runner_after = int(getattr(result, "indicator_bars", 0) or 0)
     ready = bool(getattr(result, "success", False))
     LOGGER.info(
@@ -5880,6 +5881,16 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 )
 
     ctx_ref["ctx"] = ctx
+    # Spec §4: inject the canonical hydration callback so Runner prewarm routes
+    # through the single orchestration path instead of its own reseed lifecycle.
+    # The closure binds ctx here in app.py; Runner never imports app (no cycle).
+    async def _runtime_history_ensurer(symbol: str, **kwargs: Any) -> Any:
+        return await ensure_symbol_runtime_history(ctx, symbol, **kwargs)
+
+    try:
+        strategy_runner.set_runtime_history_ensurer(_runtime_history_ensurer)
+    except Exception:  # pragma: no cover - defensive
+        LOGGER.debug("strategy_runner lacks set_runtime_history_ensurer", exc_info=True)
     runtime_selfchecker = RuntimeSelfChecker(ctx)
     ctx.selfchecker = runtime_selfchecker
     try:
@@ -7394,8 +7405,9 @@ def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> 
     """Compatibility projection over StrategyRunner.sync_history_from_mdm."""
     if ctx.strategy_runner is None or not callable(getattr(ctx.strategy_runner, "sync_history_from_mdm", None)):
         return 0
-    before = _runner_bar_count(ctx, symbol)
-    result = ctx.strategy_runner.sync_history_from_mdm(symbol, required_bars=min_bars, reason="runtime_bar_sync", role="selected_option", request_if_short=False)
+    before = get_runner_history_count(ctx, symbol)
+    resolved_role = resolve_symbol_history_role(ctx, symbol)
+    result = ctx.strategy_runner.sync_history_from_mdm(symbol, required_bars=min_bars, reason="runtime_bar_sync", role=resolved_role, request_if_short=False)
     after = int(getattr(result, "indicator_bars", 0) or 0)
     return max(0, after - before)
 
@@ -7816,6 +7828,8 @@ class HistoryPolicyDecision:
     sync_runner: bool
     priority: int
     minimum_only: bool
+    role_cap: int = 75
+    deep_cap: int = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -7879,22 +7893,38 @@ def compute_history_readiness(
 
 def resolve_symbol_history_role(ctx: "BotContext", symbol: str) -> str:
     """Args: ctx, symbol. Returns: canonical history role. Resolution order:
-    selected CE/PE -> spot -> current future -> recovery/open-position ->
-    option_context fallback. Never hardcodes selected_option for generic
-    symbols. Raises: none.
+    active basket selected CE/PE -> Runner selected CE/PE -> spot -> active
+    future -> open/recovery positions -> option_context fallback. Symbols are
+    normalized before comparison; not every CE/PE is 'selected'. Raises: none.
     """
     runner = getattr(ctx, "strategy_runner", None)
-    norm = str(symbol or "")
 
     def _n(value: Any) -> str:
-        return str(value or "")
+        s = str(value or "").strip().upper()
+        return s
 
-    if norm and norm in {_n(getattr(runner, "_active_selected_ce", None)), _n(getattr(runner, "_active_selected_pe", None))}:
+    norm = _n(symbol)
+    if not norm:
+        return "option_context"
+
+    selected = set()
+    basket = getattr(ctx, "active_contract_basket", None)
+    for src_obj, attrs in ((basket, ("selected_ce", "selected_pe")), (runner, ("_active_selected_ce", "_active_selected_pe"))):
+        for attr in attrs:
+            val = _n(getattr(src_obj, attr, None))
+            if val:
+                selected.add(val)
+    if norm in selected:
         return "selected_option"
-    if norm and norm == _n(getattr(ctx, "spot_symbol", None)) or norm.startswith("NSE:NIFTY") and norm.endswith("NIFTY"):
+
+    spot = _n(getattr(ctx, "spot_symbol", None)) or _n(getattr(runner, "_spot_symbol", None))
+    if norm == spot or (norm.startswith("NSE:") and "NIFTY" in norm):
         return "spot_context"
-    if norm and norm == _n(getattr(runner, "_active_futures_symbol", None)) or norm.endswith("FUT"):
+
+    fut = _n(getattr(runner, "_active_futures_symbol", None)) or _n(getattr(ctx, "active_futures_symbol", None))
+    if norm == fut or norm.endswith("FUT"):
         return "futures_context"
+
     try:
         manager = getattr(ctx, "position_manager", None) or getattr(runner, "_position_manager", None)
         open_syms = {_n(getattr(p, "symbol", p)) for p in (manager.get_open_positions() if manager else [])}
@@ -7987,10 +8017,22 @@ def resolve_history_policy(
         "recovery_or_open_position": int(os.getenv("HYDRATION_CAP_RECOVERY", "100") or 100),
     }
     role_cap = _role_caps.get(role, int(os.getenv("HYDRATION_CAP_DEFAULT", "75") or 75))
+    # Deep caps: the maximum an EXPLICIT deep-history request may reach for this
+    # role (EMA200 warm-up, recovery, configured deep hydration). Never the
+    # automatic target — only reachable via explicit deep_history/target.
+    _deep_caps = {
+        "selected_option": int(os.getenv("HYDRATION_DEEP_SELECTED_OPTION", "300") or 300),
+        "option_context": int(os.getenv("HYDRATION_DEEP_OPTION_CONTEXT", str(role_cap)) or role_cap),
+        "spot_context": int(os.getenv("HYDRATION_DEEP_SPOT_CONTEXT", "300") or 300),
+        "futures_context": int(os.getenv("HYDRATION_DEEP_FUTURES_CONTEXT", "300") or 300),
+        "recovery_or_open_position": int(os.getenv("HYDRATION_DEEP_RECOVERY", "300") or 300),
+    }
+    deep_cap = max(role_cap, _deep_caps.get(role, role_cap))
     # Treat any configured hydration_max_bars as an upper *safety limit*, not a target.
     safety_max = int(os.getenv("HYDRATION_MAX_BARS", "0") or 0)
     if safety_max > 0:
         role_cap = min(role_cap, safety_max)
+        deep_cap = min(deep_cap, safety_max)
     target = max(required, min(target, role_cap))
     return HistoryPolicyDecision(
         role=role,
@@ -8001,6 +8043,8 @@ def resolve_history_policy(
         sync_runner=True,
         priority=priority,
         minimum_only=False,
+        role_cap=role_cap,
+        deep_cap=deep_cap,
     )
 
 
@@ -8013,23 +8057,43 @@ async def ensure_symbol_runtime_history(
     reason: str,
     required_bars: int | None = None,
     target_bars: int | None = None,
+    deep_history: bool = False,
 ) -> RuntimeHistoryResult:
-    """Coordinate policy -> MDM.ensure_history -> Runner.sync_history_from_mdm."""
+    """Coordinate policy -> MDM.ensure_history -> Runner.sync_history_from_mdm.
+
+    Explicit required_bars/target_bars overrides are clamped to the role cap
+    (or the role deep cap when deep_history is set or the target itself exceeds
+    the normal cap — supporting EMA200 warm-up etc), to MDM retention capacity,
+    and to the global safety maximum. A true strategy requirement is never
+    silently reduced below what the deep cap allows.
+    """
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
     policy = resolve_history_policy(ctx, symbol, role=role, phase=phase, reason=reason)
-    if required_bars is not None:
-        policy = replace(policy, required_bars=max(1, int(required_bars)), target_bars=max(policy.target_bars, int(required_bars)))
-    if target_bars is not None:
-        # Spec §2: explicit target override, clamped to >= required, <= role
-        # policy target (already role-capped), and <= MDM retention capacity.
-        clamped = max(policy.required_bars, int(target_bars))
-        clamped = min(clamped, policy.target_bars)
+
+    def _capacity() -> int:
         if mdm is not None and callable(getattr(mdm, "history_capacity_for", None)):
-            capacity = mdm.history_capacity_for(symbol, "minute")
-            if capacity > 0:
-                clamped = min(clamped, capacity)
-        policy = replace(policy, target_bars=clamped)
+            try:
+                return int(mdm.history_capacity_for(symbol, "minute") or 0)
+            except Exception:
+                return 0
+        return 0
+
+    capacity = _capacity()
+    global_safety = int(os.getenv("HYDRATION_GLOBAL_SAFETY_MAX", "1000") or 1000)
+    # An explicit target above the normal role cap implies a deep request.
+    wants_deep = bool(deep_history or (target_bars is not None and int(target_bars) > policy.role_cap) or (required_bars is not None and int(required_bars) > policy.role_cap))
+    upper = policy.deep_cap if wants_deep else policy.role_cap
+    for bound in (capacity, global_safety):
+        if bound and bound > 0:
+            upper = min(upper, bound)
+
+    if required_bars is not None or target_bars is not None:
+        req = int(required_bars) if required_bars is not None else policy.required_bars
+        req = max(1, min(req, upper))
+        tgt = int(target_bars) if target_bars is not None else policy.target_bars
+        tgt = max(req, min(tgt, upper))
+        policy = replace(policy, required_bars=req, target_bars=tgt)
     hydration: Any | None = None
     failure_reason: str | None = None
     if mdm is None or not callable(getattr(mdm, "ensure_history", None)):
@@ -8146,6 +8210,15 @@ async def _ensure_selected_options_hydrated(
                 "SELECTED_OPTION_HYDRATION_NOT_READY symbol=%s after_mdm_bars=%d after_runner_bars=%d required_bars=%d reason=%s",
                 sym, runtime.mdm_bars, runtime.indicator_bars, required_bars, reason,
             )
+    # Spec §8: derive the cold/ready verdict from the single canonical readiness
+    # function so every path (startup, dynamic, rearm, /why, diagnostics) shares
+    # one source of truth and never carries a stale blocker forward.
+    readiness = compute_selected_option_history_readiness(ctx, selected_ce, selected_pe)
+    LOGGER.info(
+        "SELECTED_OPTION_HISTORY_READINESS selected_ce=%s selected_pe=%s both_ready=%s blocker=%s",
+        selected_ce, selected_pe, readiness.both_ready, readiness.blocker,
+        extra={"event": "SELECTED_OPTION_HISTORY_READINESS", "selected_ce": selected_ce, "selected_pe": selected_pe, "both_ready": readiness.both_ready, "blocker": readiness.blocker},
+    )
     return hydration_result
 
 

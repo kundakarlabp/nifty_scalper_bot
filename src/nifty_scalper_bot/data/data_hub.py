@@ -1783,23 +1783,35 @@ class DataHub:
         *,
         interval: str = "minute",
         days: int = 2,
-        max_bars: int = 300,
+        required_bars: int | None = None,
+        target_bars: int | None = None,
+        max_bars: int | None = None,
         reason: str = "datahub",
     ) -> list[dict[str, Any]]:
-        """Compatibility facade: delegate historical hydration to canonical MDM owner."""
+        """Compatibility facade: delegate historical hydration to canonical MDM owner.
+
+        Legacy max_bars is translated as the target ceiling/explicit target, NOT
+        as the operational minimum. required_bars stays a modest minimum clamped
+        to <= target so an explicit deep target (e.g. 300) is preserved while a
+        compatibility caller does not force 300 as the readiness requirement.
+        """
         ensure = getattr(self._mdm, "ensure_history", None)
         if not callable(ensure):
             LOGGER.warning("DATAHUB_HISTORY_CANONICAL_OWNER_MISSING symbol=%s reason=%s", symbol, reason)
             return []
+        default_target = int(os.getenv("DATAHUB_DEFAULT_HISTORY_TARGET", "60") or 60)
+        default_required = int(os.getenv("DATAHUB_DEFAULT_REQUIRED_BARS", "30") or 30)
+        target = max(1, int(target_bars) if target_bars else (int(max_bars) if max_bars else default_target))
+        required = min(int(required_bars) if required_bars else default_required, target)
         result = await ensure(
             symbol,
             interval=interval,
             days=days,
-            required_bars=max(1, int(max_bars or 1)),
-            target_bars=max_bars,
+            required_bars=required,
+            target_bars=target,
             reason=reason,
         )
-        rows = self.get_ohlc_bars(result.symbol, limit=max_bars)
+        rows = self.get_ohlc_bars(result.symbol, limit=target)
         if rows:
             self._touch_warm_symbol_cache(symbol)
         return rows
@@ -1810,21 +1822,30 @@ class DataHub:
         interval: str,
         days: int = 3,
         *,
+        required_bars: int | None = None,
         target_bars: int | None = None,
         force_refresh: bool = False,
     ) -> list[dict]:
-        """Compatibility facade over MDM.ensure_history; DataHub stores no history."""
+        """Compatibility facade over MDM.ensure_history; DataHub stores no history.
+
+        days controls only the broker lookback window. The readiness target is
+        target_bars when supplied, else a modest configurable default — never
+        days*375. required_bars is an operational minimum, clamped to <= target.
+        """
         normalized = self._canonical_quote_symbol(symbol)
         ensure = getattr(self._mdm, "ensure_history", None)
         if not callable(ensure):
             LOGGER.warning("DATAHUB_HISTORY_CANONICAL_OWNER_MISSING symbol=%s reason=fetch_history", normalized)
             return []
-        target = max(1, int(target_bars or max(1, int(days or 1)) * 375))
+        default_target = int(os.getenv("DATAHUB_DEFAULT_HISTORY_TARGET", "60") or 60)
+        default_required = int(os.getenv("DATAHUB_DEFAULT_REQUIRED_BARS", "30") or 30)
+        target = max(1, int(target_bars) if target_bars else default_target)
+        required = min(int(required_bars) if required_bars else default_required, target)
         result = await ensure(
             normalized,
             interval=interval,
             days=days,
-            required_bars=target,
+            required_bars=required,
             target_bars=target,
             reason="datahub_fetch_history_compat",
             force=force_refresh,

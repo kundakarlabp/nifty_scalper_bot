@@ -183,3 +183,90 @@ async def test_datahub_facade_delegates_and_has_no_authoritative_cache() -> None
     assert len(rows) >= 30
     rows2 = await hub.fetch_history("NSE:NIFTY", "minute", target_bars=30)
     assert rows2 == rows
+
+
+# ---- DataHub compatibility-facade semantics (spec §1/§3/§11 DataHub) ----
+
+def _datahub_over(mdm: MarketDataManager) -> DataHub:
+    hub = DataHub.__new__(DataHub)
+    hub._mdm = mdm
+    hub._canonical_quote_symbol = lambda s: str(s)
+    hub.get_ohlc_bars = lambda *a, **k: list(mdm._test_store["rows"])
+    hub._touch_warm_symbol_cache = lambda *a, **k: None
+    return hub
+
+
+async def test_datahub_fetch_history_days_does_not_become_target(monkeypatch) -> None:
+    monkeypatch.delenv("DATAHUB_DEFAULT_HISTORY_TARGET", raising=False)
+    mdm = _mdm(_rows(60))
+    captured = {}
+    async def ensure(symbol, **kw):
+        captured.update(kw)
+        return SimpleNamespace(symbol=symbol, failure_reason=None)
+    mdm.ensure_history = ensure
+    hub = _datahub_over(mdm)
+    await hub.fetch_history("NSE:NIFTY", "minute", days=5)
+    # days=5 must NOT make target 5*375=1875; modest default (60) applies.
+    assert captured["target_bars"] <= 100, captured
+    assert captured["required_bars"] <= captured["target_bars"]
+    assert captured["days"] == 5  # days still forwarded as lookback
+
+
+async def test_datahub_fetch_history_preserves_explicit_deep_target() -> None:
+    mdm = _mdm(_rows(10))
+    captured = {}
+    async def ensure(symbol, **kw):
+        captured.update(kw)
+        return SimpleNamespace(symbol=symbol, failure_reason=None)
+    mdm.ensure_history = ensure
+    hub = _datahub_over(mdm)
+    await hub.fetch_history("NSE:NIFTY", "minute", days=2, target_bars=300)
+    assert captured["target_bars"] == 300
+
+
+async def test_datahub_hydrate_max_bars_is_ceiling_not_required() -> None:
+    mdm = _mdm(_rows(10))
+    captured = {}
+    async def ensure(symbol, **kw):
+        captured.update(kw)
+        return SimpleNamespace(symbol=symbol, failure_reason=None)
+    mdm.ensure_history = ensure
+    hub = _datahub_over(mdm)
+    await hub.hydrate_symbol_history("NFO:NIFTYCE", max_bars=300)
+    assert captured["target_bars"] == 300
+    assert captured["required_bars"] < 300  # not forced to ceiling
+
+
+async def test_datahub_missing_canonical_api_returns_empty() -> None:
+    mdm = SimpleNamespace()  # no ensure_history
+    hub = DataHub.__new__(DataHub)
+    hub._mdm = mdm
+    hub._canonical_quote_symbol = lambda s: str(s)
+    rows = await hub.fetch_history("NSE:NIFTY", "minute", days=2)
+    assert rows == []
+
+
+# ---- Joined-request semantics (spec §7/§11 MDM 8-10) ----
+
+async def test_joined_only_caller_reports_not_started() -> None:
+    mdm = _mdm(_rows(0))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    async def slow_fetch(*_a, **_k):
+        started.set()
+        await release.wait()
+        return _rows(300)
+    mdm.fetch_history = slow_fetch
+    # First caller starts the broker task (target 300).
+    first = asyncio.ensure_future(mdm.ensure_history("NSE:NIFTY", required_bars=30, target_bars=300, reason="first"))
+    await asyncio.wait_for(started.wait(), 1.0)
+    # Second caller joins the in-flight sufficient request (also target 300).
+    second = asyncio.ensure_future(mdm.ensure_history("NSE:NIFTY", required_bars=30, target_bars=300, reason="joiner"))
+    await asyncio.sleep(0.05)
+    release.set()
+    r1 = await asyncio.wait_for(first, 1.0)
+    r2 = await asyncio.wait_for(second, 1.0)
+    assert r1.broker_fetch_started is True       # creator started it
+    assert r2.broker_fetch_started is False      # joiner did not
+    assert r2.broker_fetch_observed is True      # joiner observed it
+    assert r2.joined_inflight is True
