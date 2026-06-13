@@ -90,3 +90,61 @@ async def test_warm_runner_sync_only_no_broker_refetch(monkeypatch) -> None:
 async def test_missing_interfaces_return_controlled_failures() -> None:
     assert (await app.ensure_symbol_runtime_history(ctx(SimpleNamespace(), Runner()), "NSE:NIFTY", role="spot_context", phase="startup", reason="t")).failure_reason == "mdm_ensure_history_missing"
     assert (await app.ensure_symbol_runtime_history(ctx(MDM(30), SimpleNamespace()), "NSE:NIFTY", role="spot_context", phase="startup", reason="t")).failure_reason == "runner_sync_history_missing"
+
+
+async def test_role_caps_bound_targets_modestly(monkeypatch):
+    """Spec §1: targets are bounded by per-role caps, not derived deep.
+    async so it executes under the repo conftest pyfunc hook."""
+    import nifty_scalper_bot.core.app as app
+
+    class _Runner:
+        _option_required_bars = 30
+        _context_required_bars = 20
+        _required_candles = 200  # deliberately large generic requirement
+
+    class _MDM:
+        _min_required_bars = 250  # deliberately large
+        def history_capacity_for(self, *_a, **_k):
+            return 1000
+
+    ctx = SimpleNamespace(strategy_runner=_Runner(), market_data_manager=_MDM())
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN", raising=False)
+    monkeypatch.delenv("HYDRATION_MAX_BARS", raising=False)
+
+    sel = app.resolve_history_policy(ctx, "NFO:NIFTY2661623150CE", role="selected_option", phase="startup", reason="t")
+    assert sel.target_bars <= 75, sel.target_bars
+    assert sel.required_bars >= 30
+    octx = app.resolve_history_policy(ctx, "NFO:NIFTY2661623450CE", role="option_context", phase="startup", reason="t")
+    assert octx.target_bars <= 50, octx.target_bars
+    spot = app.resolve_history_policy(ctx, "NSE:NIFTY 50", role="spot_context", phase="startup", reason="t")
+    assert spot.target_bars <= 100, spot.target_bars
+
+
+async def test_capacity_clamps_explicit_target(monkeypatch):
+    """Spec §2/§3: explicit target override is clamped to MDM retention."""
+    import nifty_scalper_bot.core.app as app
+
+    captured = {}
+
+    class _MDM:
+        _min_required_bars = 0
+        def history_capacity_for(self, *_a, **_k):
+            return 40  # smaller than the 75 selected_option cap
+        async def ensure_history(self, symbol, **kw):
+            captured.update(kw)
+            return SimpleNamespace(failure_reason=None)
+        def get_ohlc_bars(self, *_a, **_k):
+            return []
+
+    class _Runner:
+        _option_required_bars = 30
+        _required_candles = 60
+        def sync_history_from_mdm(self, symbol, **kw):
+            return SimpleNamespace(runner_bars=40, indicator_bars=40, success=True, failure_reason=None)
+
+    ctx = SimpleNamespace(strategy_runner=_Runner(), market_data_manager=_MDM())
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN", raising=False)
+    await app.ensure_symbol_runtime_history(
+        ctx, "NFO:NIFTY2661623150CE", role="selected_option", phase="startup", reason="t", target_bars=500
+    )
+    assert captured["target_bars"] <= 40, captured.get("target_bars")

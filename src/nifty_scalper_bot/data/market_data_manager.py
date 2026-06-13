@@ -9525,6 +9525,14 @@ class MarketDataManager:
     # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
     # -------------------------------------------------------------------------
 
+    def history_capacity_for(self, symbol: str, interval: str = "minute") -> int:
+        """Args: symbol, interval. Returns: max bars the canonical OHLC cache can
+        retain for this symbol (deque maxlen). Used to clamp hydration targets so
+        an impossible target (e.g. 1125 into a 1000-deep cache) can never be
+        requested. Raises: none.
+        """
+        return int(getattr(self, "_cache_len", 0) or 0)
+
     async def ensure_history(
         self,
         symbol: str,
@@ -9544,6 +9552,11 @@ class MarketDataManager:
         normalized_interval = str(interval or "minute").lower()
         required = max(1, int(required_bars or 1))
         target = max(required, int(target_bars or required))
+        # Spec §3: never request more than the cache can physically retain.
+        capacity = self.history_capacity_for(normalized, normalized_interval)
+        if capacity > 0:
+            target = min(target, capacity)
+            required = min(required, capacity)
         lookback_days = int(days or 2)
         key = (normalized, normalized_interval)
 

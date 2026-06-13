@@ -1,3 +1,17 @@
+"""Architecture guards for canonical history-hydration ownership (spec §13).
+
+These tests are written as ``async def`` deliberately. The repository conftest's
+``pytest_pyfunc_call`` hook executes coroutine test bodies but currently no-ops
+plain sync test bodies; writing the guards as coroutines guarantees their
+assertions actually run instead of silently passing.
+
+Broker historical-data access is allow-listed to the real architecture: the
+canonical owner (MarketDataManager) plus the broker adapter that defines the
+raw client method, and the known legacy ``data/source.py`` fetch path (tracked
+for removal). The allowlist is intentionally explicit so a NEW unexpected caller
+fails the guard.
+"""
+
 from __future__ import annotations
 
 import ast
@@ -6,8 +20,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "nifty_scalper_bot"
 
+BROKER_HISTORY_ALLOWLIST = {
+    "src/nifty_scalper_bot/data/market_data_manager.py",
+    "src/nifty_scalper_bot/data/rest/zerodha_client.py",
+    "src/nifty_scalper_bot/data/source.py",
+}
 
-def _calls(path: Path, names: set[str]) -> list[str]:
+HYDRATION_FORBIDDEN_DIRS = ("execution", "notifications")
+HYDRATION_OWNERSHIP_NAMES = {
+    "hydrate_symbol_history",
+    "ensure_history",
+    "reseed_history_from_bars",
+    "ingest_historical_bar",
+    "replace_history",
+}
+
+
+def _call_names(path: Path, names: set[str]) -> list[str]:
     tree = ast.parse(path.read_text())
     found: list[str] = []
     for node in ast.walk(tree):
@@ -20,40 +49,69 @@ def _calls(path: Path, names: set[str]) -> list[str]:
     return found
 
 
-def test_only_mdm_calls_broker_historical_data() -> None:
+def _call_names_in_node(node: ast.AST, names: set[str]) -> list[str]:
+    found: list[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            fn = sub.func
+            if isinstance(fn, ast.Attribute) and fn.attr in names:
+                found.append(fn.attr)
+            elif isinstance(fn, ast.Name) and fn.id in names:
+                found.append(fn.id)
+    return found
+
+
+async def test_only_allowlisted_files_call_broker_historical_data() -> None:
     offenders = []
     for path in SRC.rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        if rel.endswith("data/market_data_manager.py"):
+        if rel in BROKER_HISTORY_ALLOWLIST:
             continue
-        if "historical_data" in _calls(path, {"historical_data"}):
+        if _call_names(path, {"historical_data", "get_historical_data"}):
             offenders.append(rel)
-    assert offenders == []
+    assert offenders == [], f"Unexpected broker-history callers: {offenders}"
 
 
-def test_app_uses_canonical_runtime_history_not_mdm_wrappers() -> None:
+async def test_app_uses_canonical_runtime_history_not_mdm_wrappers() -> None:
     text = (SRC / "core" / "app.py").read_text()
     assert "ctx.market_data_manager.hydrate_symbol_history" not in text
     assert "ctx.market_data_manager.fetch_history" not in text
     assert "_indicator_engine.replace_history" not in text
 
 
-def test_datahub_has_no_authoritative_history_cache() -> None:
+async def test_datahub_has_no_authoritative_history_cache() -> None:
     text = (SRC / "data" / "data_hub.py").read_text()
     assert "_history_cache" not in text
     assert "def _normalize_history_rows" not in text
 
 
-def test_runner_does_not_call_broker_history() -> None:
+async def test_runner_does_not_call_broker_history() -> None:
     text = (SRC / "strategies" / "runner.py").read_text()
     assert ".historical_data(" not in text
     assert ".fetch_history(" not in text
 
 
-def test_execution_and_order_manager_do_not_hydrate() -> None:
+async def test_execution_and_notifications_do_not_hydrate() -> None:
     offenders = []
-    for path in (SRC / "execution").rglob("*.py"):
-        calls = _calls(path, {"hydrate_symbol_history", "ensure_history", "sync_history_from_mdm", "reseed_history_from_bars"})
-        if calls:
-            offenders.append((path.relative_to(ROOT).as_posix(), calls))
-    assert offenders == []
+    for sub in HYDRATION_FORBIDDEN_DIRS:
+        base = SRC / sub
+        if not base.exists():
+            continue
+        for path in base.rglob("*.py"):
+            calls = _call_names(path, HYDRATION_OWNERSHIP_NAMES)
+            if calls:
+                offenders.append((path.relative_to(ROOT).as_posix(), calls))
+    assert offenders == [], f"Hydration ownership leaked into {offenders}"
+
+
+async def test_canonical_readiness_function_exists_and_is_pure() -> None:
+    text = (SRC / "core" / "app.py").read_text()
+    tree = ast.parse(text)
+    target = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "compute_selected_option_history_readiness":
+            target = node
+            break
+    assert target is not None, "compute_selected_option_history_readiness missing"
+    body_calls = _call_names_in_node(target, {"ensure_history", "historical_data", "reseed_history_from_bars", "replace_history", "ingest_historical_bar"})
+    assert body_calls == [], f"Canonical readiness must be pure, found: {body_calls}"

@@ -7863,6 +7863,87 @@ class SelectedOptionHistoryReadiness:
     blocker: str | None
 
 
+def compute_history_readiness(
+    *,
+    symbol: str,
+    role: str,
+    required_bars: int,
+    mdm_bars: int,
+    runner_bars: int,
+    indicator_bars: int,
+) -> HistoryReadiness:
+    """Compute current-state history readiness without mutation."""
+    minimum_ready = bool(mdm_bars >= required_bars and runner_bars >= required_bars and indicator_bars >= required_bars)
+    return HistoryReadiness(symbol, role, required_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready)
+
+
+def resolve_symbol_history_role(ctx: "BotContext", symbol: str) -> str:
+    """Args: ctx, symbol. Returns: canonical history role. Resolution order:
+    selected CE/PE -> spot -> current future -> recovery/open-position ->
+    option_context fallback. Never hardcodes selected_option for generic
+    symbols. Raises: none.
+    """
+    runner = getattr(ctx, "strategy_runner", None)
+    norm = str(symbol or "")
+
+    def _n(value: Any) -> str:
+        return str(value or "")
+
+    if norm and norm in {_n(getattr(runner, "_active_selected_ce", None)), _n(getattr(runner, "_active_selected_pe", None))}:
+        return "selected_option"
+    if norm and norm == _n(getattr(ctx, "spot_symbol", None)) or norm.startswith("NSE:NIFTY") and norm.endswith("NIFTY"):
+        return "spot_context"
+    if norm and norm == _n(getattr(runner, "_active_futures_symbol", None)) or norm.endswith("FUT"):
+        return "futures_context"
+    try:
+        manager = getattr(ctx, "position_manager", None) or getattr(runner, "_position_manager", None)
+        open_syms = {_n(getattr(p, "symbol", p)) for p in (manager.get_open_positions() if manager else [])}
+        if norm in open_syms:
+            return "recovery_or_open_position"
+    except Exception:
+        pass
+    return "option_context"
+
+
+def compute_selected_option_history_readiness(
+    ctx: "BotContext",
+    selected_ce: str | None,
+    selected_pe: str | None,
+) -> SelectedOptionHistoryReadiness:
+    """Args: ctx, selected CE/PE. Returns: canonical selected-option history
+    readiness built fresh from current MDM/Runner/Indicator counts — never
+    carries forward a stale blocker, never hydrates or mutates. This is the one
+    function every path computing selected_option_history_cold must use. Raises:
+    none.
+    """
+    mdm = getattr(ctx, "market_data_manager", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    option_min = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+    required = max(option_min, int(getattr(runner, "_option_required_bars", 0) or 0))
+
+    def _readiness(sym: str | None) -> HistoryReadiness | None:
+        if not sym:
+            return None
+        try:
+            mdm_bars = len(mdm.get_ohlc_bars(sym) or []) if mdm is not None else 0
+        except Exception:
+            mdm_bars = 0
+        runner_bars = int(runner._history_count_for_symbol(sym)) if runner is not None and callable(getattr(runner, "_history_count_for_symbol", None)) else 0
+        indicator_bars = int(getattr(runner, "_indicator_count_for_symbol", lambda _s: runner_bars)(sym)) if runner is not None else 0
+        return compute_history_readiness(symbol=sym, role="selected_option", required_bars=required, mdm_bars=mdm_bars, runner_bars=runner_bars, indicator_bars=indicator_bars)
+
+    ce = _readiness(selected_ce)
+    pe = _readiness(selected_pe)
+    both_ready = bool(ce and pe and ce.minimum_ready and pe.minimum_ready)
+    blocker: str | None = None
+    if not both_ready:
+        if selected_ce and selected_pe:
+            blocker = "selected_option_history_cold"
+        else:
+            blocker = "selected_option_not_set"
+    return SelectedOptionHistoryReadiness(selected_ce, selected_pe, ce, pe, both_ready, blocker)
+
+
 def resolve_history_policy(
     ctx: "BotContext",
     symbol: str,
@@ -7896,6 +7977,21 @@ def resolve_history_policy(
         target = max(required, generic_required)
         priority = 1
     market_closed_context = role == "option_context" and get_runtime_market_mode() != "OPEN" and phase != "recovery"
+    # Spec §1: bound the target by a canonical per-role cap so normal startup
+    # never mechanically fetches deep history. Caps are overridable but modest.
+    _role_caps = {
+        "selected_option": int(os.getenv("HYDRATION_CAP_SELECTED_OPTION", "75") or 75),
+        "option_context": int(os.getenv("HYDRATION_CAP_OPTION_CONTEXT", "50") or 50),
+        "spot_context": int(os.getenv("HYDRATION_CAP_SPOT_CONTEXT", "100") or 100),
+        "futures_context": int(os.getenv("HYDRATION_CAP_FUTURES_CONTEXT", "100") or 100),
+        "recovery_or_open_position": int(os.getenv("HYDRATION_CAP_RECOVERY", "100") or 100),
+    }
+    role_cap = _role_caps.get(role, int(os.getenv("HYDRATION_CAP_DEFAULT", "75") or 75))
+    # Treat any configured hydration_max_bars as an upper *safety limit*, not a target.
+    safety_max = int(os.getenv("HYDRATION_MAX_BARS", "0") or 0)
+    if safety_max > 0:
+        role_cap = min(role_cap, safety_max)
+    target = max(required, min(target, role_cap))
     return HistoryPolicyDecision(
         role=role,
         phase=phase,
@@ -7908,20 +8004,6 @@ def resolve_history_policy(
     )
 
 
-def compute_history_readiness(
-    *,
-    symbol: str,
-    role: str,
-    required_bars: int,
-    mdm_bars: int,
-    runner_bars: int,
-    indicator_bars: int,
-) -> HistoryReadiness:
-    """Compute current-state history readiness without mutation."""
-    minimum_ready = bool(mdm_bars >= required_bars and runner_bars >= required_bars and indicator_bars >= required_bars)
-    return HistoryReadiness(symbol, role, required_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready)
-
-
 async def ensure_symbol_runtime_history(
     ctx: "BotContext",
     symbol: str,
@@ -7930,6 +8012,7 @@ async def ensure_symbol_runtime_history(
     phase: str,
     reason: str,
     required_bars: int | None = None,
+    target_bars: int | None = None,
 ) -> RuntimeHistoryResult:
     """Coordinate policy -> MDM.ensure_history -> Runner.sync_history_from_mdm."""
     mdm = getattr(ctx, "market_data_manager", None)
@@ -7937,6 +8020,16 @@ async def ensure_symbol_runtime_history(
     policy = resolve_history_policy(ctx, symbol, role=role, phase=phase, reason=reason)
     if required_bars is not None:
         policy = replace(policy, required_bars=max(1, int(required_bars)), target_bars=max(policy.target_bars, int(required_bars)))
+    if target_bars is not None:
+        # Spec §2: explicit target override, clamped to >= required, <= role
+        # policy target (already role-capped), and <= MDM retention capacity.
+        clamped = max(policy.required_bars, int(target_bars))
+        clamped = min(clamped, policy.target_bars)
+        if mdm is not None and callable(getattr(mdm, "history_capacity_for", None)):
+            capacity = mdm.history_capacity_for(symbol, "minute")
+            if capacity > 0:
+                clamped = min(clamped, capacity)
+        policy = replace(policy, target_bars=clamped)
     hydration: Any | None = None
     failure_reason: str | None = None
     if mdm is None or not callable(getattr(mdm, "ensure_history", None)):
