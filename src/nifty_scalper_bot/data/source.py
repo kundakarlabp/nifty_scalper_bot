@@ -1,14 +1,13 @@
 """Data-source integrity helpers for strategy execution.
 
 Runtime role:
-- Low-level broker data adapter for quote/LTP/historical fetches.
-- Consumed by MarketDataManager hydration.
+- Low-level broker data adapter for quote/LTP helpers.
+- Must not fetch historical broker candles; MarketDataManager owns runtime history hydration.
 - Must not select contracts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 import time
@@ -268,25 +267,14 @@ class MarketDataSource:
         *,
         min_required_bars: int = 30,
     ) -> list[dict[str, Any]]:
-        """Get token OHLC with TTL cache. Args: token/interval/ttl/min_required_bars. Returns: rows. Raises: DataIntegrityError."""
+        """Return cached OHLC only; broker history fetch is MDM-owned.
 
+        Runtime historical hydration must flow through
+        MarketDataManager.ensure_history(), never this legacy data source.
+        """
         cached = self._state.get_ohlc_cache(token, interval, ttl=ttl)
         if cached is not None:
             return cached
-        try:
-            rows = self._kite.historical_data(
-                int(token),
-                datetime.now(timezone.utc).replace(hour=3, minute=45, second=0, microsecond=0),
-                datetime.now(timezone.utc),
-                interval,
-            )
-        except Exception as e:
-            raise DataIntegrityError(f'OHLC fetch failed for token {token}: {e}') from e
-        required = max(1, int(min_required_bars))
-        if len(rows) < required:
-            raise DataIntegrityError(
-                f"Insufficient OHLC candles for token {token}: {len(rows)}/{required}"
-            )
-        normalized = [dict(row) for row in rows]
-        self._state.set_ohlc_cache(int(token), interval, normalized)
-        return normalized
+        raise DataIntegrityError(
+            "Historical OHLC fetch is owned by MarketDataManager.ensure_history"
+        )

@@ -297,3 +297,63 @@ async def test_mdm_hydrate_explicit_max_bars_maps_to_target(monkeypatch) -> None
     await mdm.hydrate_symbol_history("NFO:NIFTYCE", max_bars=300)
     assert captured["target_bars"] == 300
     assert captured["required_bars"] < 300  # required stays modest
+
+# ---- Raw tick vs canonical OHLC storage/readiness semantics ----
+
+from collections import defaultdict, deque
+import threading
+
+
+def _storage_mdm() -> MarketDataManager:
+    mdm = MarketDataManager.__new__(MarketDataManager)
+    mdm._logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None, debug=lambda *a, **k: None)
+    mdm._lock = threading.RLock()
+    mdm._min_required_bars = 2
+    mdm._raw_tick_history = defaultdict(lambda: deque(maxlen=100))
+    mdm._ohlc = defaultdict(lambda: deque(maxlen=100))
+    mdm._last_historical_ts = {}
+    mdm._bar_symbol_key = lambda s: str(s)
+    mdm._canonical_symbol = lambda s: str(s)
+    mdm._active_subscribed_symbols = set()
+    mdm._readiness_requirements = {}
+    mdm._last_readiness_state = {}
+    mdm._spot_ready_logged = False
+    mdm.update_hydration_status = lambda *_a, **_k: None
+    # tick ingestion support
+    mdm._symbol_by_token = {}
+    mdm._token_to_symbol = {}
+    mdm._symbol_to_token = {}
+    mdm._token_by_symbol = {}
+    mdm._latest_ticks = {}
+    mdm._tick_cache = {}
+    mdm._last_tick_time = {}
+    mdm._ticks_received_per_symbol = defaultdict(int)
+    mdm._symbols_with_tick = set()
+    mdm._last_tick_wallclock = {}
+    mdm._last_quote_ts_ms = {}
+    mdm._tick_wallclock = lambda tick: tick.get("timestamp")
+    mdm._now_ms = lambda: 1
+    mdm._dedupe_symbol_history = lambda *_a, **_k: None
+    mdm._refresh_ohlc_from_tick = lambda *_a, **_k: None
+    return mdm
+
+
+def test_historical_bar_writes_only_canonical_ohlc_not_raw_ticks() -> None:
+    mdm = _storage_mdm()
+    bar = {"symbol": "NSE:NIFTY", "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10}
+    mdm.ingest_historical_bar(bar)
+    assert len(mdm._ohlc["NSE:NIFTY"]) == 1
+    assert len(mdm._raw_tick_history["NSE:NIFTY"]) == 0
+    assert mdm.is_ohlc_ready("NSE:NIFTY", required_bars=1) is True
+    assert mdm.is_tick_ready("NSE:NIFTY") is False
+
+
+def test_live_tick_writes_raw_tick_history_without_implying_ohlc_ready() -> None:
+    mdm = _storage_mdm()
+    tick = {"symbol": "NSE:NIFTY", "ltp": 100.0, "timestamp": 1.0, "source": "ws"}
+    mdm._store_tick("NSE:NIFTY", dict(tick))
+    mdm._store_tick("NSE:NIFTY", dict(tick, timestamp=2.0, ltp=101.0))
+    assert len(mdm._raw_tick_history["NSE:NIFTY"]) == 2
+    assert mdm.is_tick_ready("NSE:NIFTY") is True
+    assert mdm.is_ohlc_ready("NSE:NIFTY") is False
+    assert mdm.is_market_data_ready("NSE:NIFTY") is False

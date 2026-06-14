@@ -511,16 +511,15 @@ async def test_readiness_passes_with_required_quorum(
         option_symbols=symbols[2:],
     )
     for symbol in symbols:
-        manager.ingest_historical_bar(
+        manager._store_tick(  # noqa: SLF001 - readiness is raw/live tick based
+            symbol,
             {
                 "symbol": symbol,
-                "open": 1,
-                "high": 2,
-                "low": 1,
-                "close": 1.5,
-                "volume": 1,
+                "ltp": 1.5,
                 "timestamp": datetime.now(timezone.utc),
-            }
+                "received_at": datetime.now(timezone.utc),
+                "source": "ws",
+            },
         )
     await manager.wait_until_ready(timeout=0.5)
     assert manager.ready is True
@@ -553,16 +552,15 @@ async def test_readiness_allows_outer_option_basket_to_lag(
         option_symbols=symbols[2:],
     )
     for symbol in symbols[:4]:
-        manager.ingest_historical_bar(
+        manager._store_tick(  # noqa: SLF001 - readiness is raw/live tick based
+            symbol,
             {
                 "symbol": symbol,
-                "open": 1,
-                "high": 2,
-                "low": 1,
-                "close": 1.5,
-                "volume": 1,
+                "ltp": 1.5,
                 "timestamp": datetime.now(timezone.utc),
-            }
+                "received_at": datetime.now(timezone.utc),
+                "source": "ws",
+            },
         )
     await manager.wait_until_ready(timeout=0.5)
     assert manager.ready is True
