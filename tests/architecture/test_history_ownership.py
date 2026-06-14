@@ -155,3 +155,35 @@ async def test_runner_declares_ensurer_field() -> None:
     text = (SRC / "strategies" / "runner.py").read_text()
     assert "self._runtime_history_ensurer" in text
     assert "def set_runtime_history_ensurer" in text
+
+
+async def test_runner_makes_no_direct_request_hydration_call() -> None:
+    # Spec §9: Runner must not call request_hydration on DataHub or MDM. We scan
+    # for an ast.Call whose attr is 'request_hydration'.
+    src = (SRC / "strategies" / "runner.py").read_text()
+    tree = ast.parse(src)
+    bad = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Attribute) and fn.attr == "request_hydration":
+                bad.append(node.lineno)
+    assert bad == [], f"Runner calls request_hydration directly at lines {bad}"
+
+
+async def test_sync_history_schedules_only_via_canonical_ensurer() -> None:
+    # Spec §9: sync_history_from_mdm body must schedule through
+    # _schedule_runtime_history_ensure, not request_hydration.
+    src = _func_source(SRC / "strategies" / "runner.py", "sync_history_from_mdm")
+    assert src, "sync_history_from_mdm not found"
+    assert "request_hydration" not in src
+    assert "_schedule_runtime_history_ensure" in src
+
+
+async def test_request_mdm_hydration_is_thin_canonical_delegate() -> None:
+    # Spec §2: if _request_mdm_hydration remains, it must delegate to the
+    # canonical scheduler and not call request_hydration.
+    src = _func_source(SRC / "strategies" / "runner.py", "_request_mdm_hydration")
+    if src:
+        assert "_schedule_runtime_history_ensure" in src
+        assert "request_hydration" not in src.replace("request_hydration; routes", "")

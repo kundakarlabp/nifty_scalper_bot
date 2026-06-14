@@ -648,16 +648,20 @@ class StrategyRunner:
             self._logger.error(f"❌ Failed to create 'data/' directory: {e}")
         self._data_hub = data_hub
         self.datahub = datahub or data_hub
-        # Spec §4: optional injected canonical hydration callback. When set by the
-        # app/runtime layer it routes prewarm through
+        # Spec: optional injected canonical hydration callback. When set by the
+        # app/runtime layer it routes hydration through
         # resolve_history_policy -> ensure_symbol_runtime_history ->
-        # MDM.ensure_history -> sync_history_from_mdm, so Runner owns no second
-        # hydrate-and-reseed lifecycle. Signature:
+        # MDM.ensure_history -> sync_history_from_mdm. Signature:
         #   async def(symbol, *, role, phase, reason, required_bars=None,
         #             target_bars=None) -> RuntimeHistoryResult-like
-        # None means fall back to the legacy compatibility path (kept for tests
-        # and for runtimes that do not inject the callback).
+        # None means canonical runtime hydration is unavailable: prewarm and
+        # short-history requests fail safely (CANONICAL_HISTORY_ENSURER_MISSING)
+        # without falling back to DataHub or broker hydration.
         self._runtime_history_ensurer: Callable[..., Any] | None = None
+        # Runner-level dedupe for canonical history scheduling (not MDM's own
+        # inflight map). Keyed by canonical symbol; added before scheduling,
+        # removed in finally.
+        self._runtime_history_ensure_inflight: set[str] = set()
         self._datahub_registered_symbols: set[str] = set()
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
@@ -1435,30 +1439,110 @@ class StrategyRunner:
                     continue
         return []
 
+    def _schedule_runtime_history_ensure(
+        self,
+        symbol: str,
+        *,
+        role: str,
+        phase: str,
+        reason: str,
+        required_bars: int,
+        target_bars: int | None = None,
+    ) -> bool:
+        """Schedule canonical history hydration via the injected runtime callback.
+
+        Args: symbol, role, phase, reason, required/target bars. Returns: True if
+        scheduled (or already inflight), False if no canonical callback. Raises:
+        none. Never blocks the synchronous Runner path and never calls DataHub
+        or MDM hydration directly.
+        """
+        normalized = self._normalize_symbol(symbol)
+        if not normalized:
+            return False
+        ensurer = getattr(self, "_runtime_history_ensurer", None)
+        if not callable(ensurer):
+            log_throttled(
+                self._logger,
+                f"canonical_history_ensurer_missing:{normalized}",
+                f"CANONICAL_HISTORY_ENSURER_MISSING symbol={normalized} role={role}",
+                interval_sec=60.0,
+                level=logging.WARNING,
+                extra={"event": "CANONICAL_HISTORY_ENSURER_MISSING", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required_bars},
+            )
+            return False
+        inflight = getattr(self, "_runtime_history_ensure_inflight", None)
+        if inflight is None:
+            inflight = set()
+            self._runtime_history_ensure_inflight = inflight
+        if normalized in inflight:
+            log_throttled(
+                self._logger,
+                f"canonical_history_ensure_inflight:{normalized}",
+                f"CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT symbol={normalized} role={role}",
+                interval_sec=60.0,
+                level=logging.DEBUG,
+                extra={"event": "CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT", "symbol": normalized, "role": role},
+            )
+            return True
+        self._hydration_attempted_symbols.add(normalized)
+        self._last_hydration_reason_by_symbol[normalized] = reason
+        tgt = int(target_bars) if target_bars is not None else int(required_bars)
+        self._logger.info(
+            "CANONICAL_HISTORY_ENSURE_SCHEDULED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s",
+            normalized, role, phase, reason, required_bars, tgt,
+            extra={"event": "CANONICAL_HISTORY_ENSURE_SCHEDULED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required_bars, "target_bars": tgt},
+        )
+
+        async def _run() -> None:
+            try:
+                result = ensurer(
+                    symbol,
+                    role=role,
+                    phase=phase,
+                    reason=reason,
+                    required_bars=int(required_bars),
+                    target_bars=tgt,
+                )
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - orchestration boundary
+                self._logger.warning(
+                    "CANONICAL_HISTORY_ENSURE_FAILED symbol=%s role=%s reason=%s error_type=%s error=%s",
+                    normalized, role, reason, type(exc).__name__, exc,
+                    extra={"event": "CANONICAL_HISTORY_ENSURE_FAILED", "symbol": normalized, "role": role, "reason": reason, "error_type": type(exc).__name__, "error": str(exc)},
+                )
+            finally:
+                self._runtime_history_ensure_inflight.discard(normalized)
+
+        inflight.add(normalized)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_run())
+        except RuntimeError:
+            threading.Thread(target=lambda: asyncio.run(_run()), name=f"runtime-history-ensure-{normalized}", daemon=True).start()
+        except Exception as exc:  # noqa: BLE001 - scheduling boundary
+            self._runtime_history_ensure_inflight.discard(normalized)
+            self._logger.warning(
+                "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED symbol=%s error_type=%s error=%s",
+                normalized, type(exc).__name__, exc,
+                extra={"event": "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED", "symbol": normalized, "error_type": type(exc).__name__, "error": str(exc)},
+            )
+            return False
+        return True
+
     def _request_mdm_hydration(self, symbol: str, min_bars: int, *, reason: str = "runner_missing_bars") -> None:
-        """Request async hydration from owner service. Args: symbol/min_bars/reason. Returns: None. Raises: None."""
-        self._hydration_attempted_symbols.add(symbol)
-        self._last_hydration_reason_by_symbol[symbol] = reason
-        for source in (self._market_data, self._data_hub):
-            fn = getattr(source, "request_hydration", None)
-            if callable(fn):
-                try:
-                    fn(symbol, min_bars=min_bars, reason=reason)
-                    return
-                except Exception as exc:  # noqa: BLE001 - owner request failures are diagnostic only
-                    self._logger.warning(
-                        "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=request_hydration error=%s",
-                        symbol,
-                        exc,
-                        extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": symbol, "source": "request_hydration", "error": str(exc), "reason": reason},
-                    )
-        log_throttled(
-            self._logger,
-            f"runner_waiting_for_mdm_hydration:{symbol}",
-            f"RUNNER_WAITING_FOR_MDM_HYDRATION symbol={symbol} min_bars={min_bars}",
-            interval_sec=60.0,
-            level=logging.INFO,
-            extra={"event": "RUNNER_WAITING_FOR_MDM_HYDRATION", "symbol": symbol, "min_bars": min_bars, "reason": reason},
+        """Thin compatibility alias -> canonical runtime ensurer. Args: symbol,
+        min_bars, reason. Returns: None. Raises: none. Does NOT call DataHub or
+        MDM request_hydration; routes through the injected canonical callback so
+        role/phase policy, market-closed suppression and caps all apply.
+        """
+        self._schedule_runtime_history_ensure(
+            symbol,
+            role=self._history_role_for_symbol(symbol),
+            phase="runner_short_history",
+            reason=reason,
+            required_bars=int(min_bars),
+            target_bars=int(min_bars),
         )
 
     def _history_role_for_symbol(self, symbol: str) -> str:
@@ -1580,15 +1664,16 @@ class StrategyRunner:
         if rows and (runner_before < min(target, mdm_bars) or indicator_before < min(target, mdm_bars)):
             try:
                 self.reseed_history_from_bars(normalized, rows, source=reason, min_bars=target)
-            except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            except Exception as exc:  # noqa: BLE001 - sync boundary returns structured failure
                 failure_reason = f"runner_reseed_failed:{type(exc).__name__}"
                 self._logger.warning(
-                    "RUNNER_HISTORY_SYNC_FAILED symbol=%s role=%s reason=%s failure_reason=%s",
+                    "RUNNER_HISTORY_SYNC_FAILED symbol=%s role=%s reason=%s exception_type=%s exception_message=%s",
                     normalized,
                     role,
                     reason,
-                    failure_reason,
-                    extra={"event": "RUNNER_HISTORY_SYNC_FAILED", "symbol": normalized, "role": role, "reason": reason, "failure_reason": failure_reason},
+                    type(exc).__name__,
+                    str(exc),
+                    extra={"event": "RUNNER_HISTORY_SYNC_FAILED", "symbol": normalized, "role": role, "reason": reason, "exception_type": type(exc).__name__, "exception_message": str(exc), "failure_reason": failure_reason},
                 )
         runner_after = len(getattr(self, "_symbol_history", {}).get(normalized, []) or [])
         try:
@@ -1609,7 +1694,14 @@ class StrategyRunner:
             extra={"event": "RUNNER_HISTORY_SYNC_COMPLETED", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
         )
         if not success and request_if_short:
-            self._request_mdm_hydration(normalized, target, reason=reason)
+            self._schedule_runtime_history_ensure(
+                normalized,
+                role=role or self._history_role_for_symbol(normalized),
+                phase="runner_sync",
+                reason=reason,
+                required_bars=target,
+                target_bars=target,
+            )
         return HistorySyncResult(normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason)
 
     def _sync_history_from_mdm_cache(
