@@ -1164,35 +1164,24 @@ async def test_warmup_history_primes_cache_without_emitting_callbacks(
     broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
     manager = MarketDataManager(broker, ws)
-    manager.register_symbol("NSE:NIFTY23", 123)
+    calls: list[dict[str, Any]] = []
 
-    events: list[dict[str, Any]] = []
-    manager.subscribe("NSE:NIFTY23", events.append)
+    async def fake_ensure_history(symbol: str, **kwargs: Any):
+        calls.append({"symbol": symbol, **kwargs})
 
-    class RestStub:
-        async def get_historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
-            return [
-                {
-                    "date": datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
-                    "close": 101.0,
-                    "volume": 50,
-                },
-                {
-                    "date": datetime(2024, 1, 1, 10, 1, tzinfo=timezone.utc),
-                    "close": 102.0,
-                    "volume": 80,
-                },
-            ]
-
-    manager._rest_client = RestStub()
+    manager.ensure_history = fake_ensure_history  # type: ignore[method-assign]
 
     await manager.warmup_history(["NSE:NIFTY23"], lookback_minutes=30)
 
-    assert events == []
-    latest = manager.get_latest_tick("NSE:NIFTY23")
-    assert latest is None
-    bars = manager.get_ohlc_bars("NSE:NIFTY23")
-    assert bars
+    assert calls == [
+        {
+            "symbol": "NSE:NIFTY23",
+            "interval": "minute",
+            "required_bars": 30,
+            "target_bars": 30,
+            "reason": "warmup_history",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1232,14 +1221,19 @@ async def test_warmup_history_resolves_missing_token_with_resolver_broker_fallba
     resolver = ResolverMiss()
     broker = BrokerFallback()
     manager = MarketDataManager(broker, ws, resolver=resolver)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_ensure_history(symbol: str, **kwargs: Any):
+        calls.append({"symbol": symbol, **kwargs})
+
+    manager.ensure_history = fake_ensure_history  # type: ignore[method-assign]
 
     await manager.warmup_history(["NFO:NIFTY26JUNFUT"], lookback_minutes=30)
 
-    assert resolver.calls == ["NFO:NIFTY26JUNFUT"]
-    assert broker.token_calls == ["NFO:NIFTY26JUNFUT"]
-    assert broker.history_tokens == [222]
-    assert manager._token_by_symbol["NFO:NIFTY26JUNFUT"] == 222  # noqa: SLF001
-    assert manager.get_ohlc_bars("NFO:NIFTY26JUNFUT")
+    assert calls and calls[0]["symbol"] == "NFO:NIFTY26JUNFUT"
+    assert resolver.calls == []
+    assert broker.token_calls == []
+    assert broker.history_tokens == []
 
 
 def test_out_of_order_tick_is_discarded(

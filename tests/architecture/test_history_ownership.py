@@ -334,3 +334,56 @@ async def test_production_code_uses_explicit_readiness_apis() -> None:
     if mdm_src:
         assert "is_tick_ready" in mdm_src
         assert "is_ohlc_ready" not in mdm_src
+
+async def test_mdm_contract_ssot_regression_guards() -> None:
+    text = (SRC / "data" / "market_data_manager.py").read_text()
+    assert "256265" not in text
+    assert "260105" not in text
+    assert "resolve_active_nifty_future," not in text
+    assert "resolve_active_nifty_future_from_instruments" not in text.split("from nifty_scalper_bot.instruments.active_contracts", 1)[0]
+    assert '.instruments("NFO")' not in text
+    assert "broker_instruments" not in text
+    assert "CRITICAL FALLBACK" not in text
+
+
+async def test_mdm_warmup_history_delegates_to_ensure_history() -> None:
+    src = _func_source(SRC / "data" / "market_data_manager.py", "warmup_history")
+    assert "ensure_history" in src
+    assert "historical_data" not in src
+    assert "get_historical_data" not in src
+    assert "ingest_historical_bar" not in src
+
+
+async def test_mdm_basket_replaces_desired_tokens_and_uses_mapping_helper() -> None:
+    text = (SRC / "data" / "market_data_manager.py").read_text()
+    set_basket = _func_source(SRC / "data" / "market_data_manager.py", "set_active_contract_basket")
+    assert "_desired_tokens.update(tokens)" not in set_basket
+    assert "_replace_desired_tokens_from_basket" in set_basket
+    assert "_set_symbol_token_mapping" in text
+    assert "seed_symbol_tokens" in text
+
+
+async def test_mdm_readiness_requires_tradable_quote_and_canonical_bars() -> None:
+    src = _func_source(SRC / "data" / "market_data_manager.py", "hydrate_active_contract_basket")
+    assert "tradable_quote_ready" in src
+    assert "tradable_quote_not_ready" in src
+    assert "_selected_option_history_required_bars" in src
+    assert '"ohlc_ready": False' in src
+
+
+async def test_mdm_poll_volume_uses_cumulative_delta() -> None:
+    src = _func_source(SRC / "data" / "market_data_manager.py", "_process_poll_quote")
+    assert "_last_cumulative_volume_by_symbol" in src
+    assert "cumulative_delta" in src
+    assert "volume_traded_today" in src
+
+
+async def test_runtime_execution_path_has_no_forbidden_router_imports() -> None:
+    forbidden = {"execution_router", "order_execution_hub", "preflight_validator", "ExecutionRouter", "OrderExecutionHub", "PreflightValidator"}
+    offenders = []
+    for rel in ["core/app.py", "strategies/runner.py", "execution/order_manager.py", "execution/bracket_manager.py"]:
+        text = (SRC / rel).read_text()
+        hits = sorted(item for item in forbidden if item in text)
+        if hits:
+            offenders.append((rel, hits))
+    assert offenders == []

@@ -38,8 +38,6 @@ from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.instruments.active_contracts import (
     canonical_nifty_future_symbol,
     is_nifty_future_expired,
-    resolve_active_nifty_future,
-    resolve_active_nifty_future_from_instruments,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.streaming.websocket_manager import (
@@ -196,7 +194,8 @@ class FuturesContextRotationResult:
 def canonical_symbol(symbol: str) -> str:
     """Canonicalize symbols (including NIFTY spot aliases) to EXCHANGE:SYMBOL."""
     normalized = enforce_canonical(normalize_symbol(str(symbol or "")))
-    if normalized == "NSE:NIFTY 50":
+    alias = normalized.replace(" ", "")
+    if alias in {"NSE:NIFTY50", "NIFTY50"} or normalized in {"NSE:NIFTY 50", "NIFTY 50"}:
         return "NSE:NIFTY"
     return normalized
 
@@ -245,8 +244,6 @@ def _is_nifty_index_future_row(row: Mapping[str, Any]) -> bool:
     return bool(_NIFTY_FUT_RE.match(tradingsymbol))
 
 
-NIFTY_SPOT_TOKEN = 256265
-
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
@@ -292,19 +289,11 @@ class MarketDataManager:
         self._desired_tokens: set[int] = set()
         self._symbol_to_token: dict[str, int] = {}
         self._token_to_symbol: dict[int, str] = {}
-        self._token_by_symbol["NSE:NIFTY"] = 256265       # canonical
-        self._symbol_by_token[256265] = "NSE:NIFTY"
-        self._token_by_symbol["NSE:BANKNIFTY"] = 260105
-        self._symbol_by_token[260105] = "NSE:BANKNIFTY"
-        self._symbol_to_token.update(self._token_by_symbol)
-        self._token_to_symbol.update(self._symbol_by_token)
         self._last_signature: dict[
             str, tuple[tuple[float | None, float | None, float | None], float]
         ] = {}
         self._last_tick_wallclock: dict[str, float] = {}
         self._last_quote_ts_ms: dict[str, float] = {}
-        self._active_nifty_future_cache_symbol: str | None = None
-        self._active_nifty_future_cache_until_mono: float = 0.0
         self._last_mid: dict[str, tuple[float, float]] = {}
         self._lock = threading.RLock()
         self._authoritative_tick_lock = threading.Lock()
@@ -684,11 +673,24 @@ class MarketDataManager:
         with self._lock:
             symbol_by_token = dict(self._symbol_by_token)
             token_by_symbol = dict(self._token_by_symbol)
+            symbol_to_token = dict(self._symbol_to_token)
+            token_to_symbol = dict(self._token_to_symbol)
         mismatches: list[str] = []
+        for symbol, token in token_by_symbol.items():
+            if symbol_to_token.get(symbol) != token:
+                mismatches.append(f"symbol missing/mismatch in _symbol_to_token {symbol}:{token}->{symbol_to_token.get(symbol)}")
         for token, symbol in symbol_by_token.items():
+            if token_to_symbol.get(token) != symbol:
+                mismatches.append(f"token missing/mismatch in _token_to_symbol {token}:{symbol}->{token_to_symbol.get(token)}")
             reverse = token_by_symbol.get(symbol)
             if reverse != token:
-                mismatches.append(f"{symbol}:{token}->{reverse}")
+                mismatches.append(f"reverse mismatch {symbol}:{token}->{reverse}")
+        for symbol, token in symbol_to_token.items():
+            if token_by_symbol.get(symbol) != token:
+                mismatches.append(f"compat symbol mismatch {symbol}:{token}->{token_by_symbol.get(symbol)}")
+        for token, symbol in token_to_symbol.items():
+            if symbol_by_token.get(token) != symbol:
+                mismatches.append(f"compat token mismatch {token}:{symbol}->{symbol_by_token.get(token)}")
         if mismatches:
             raise RuntimeError(
                 f"Token/symbol mapping mismatch detected ({len(mismatches)}): {mismatches[:5]}"
@@ -746,6 +748,7 @@ class MarketDataManager:
                     "low": None,
                     "close": None,
                     "volume": 0,
+                    "volume_source": "missing",
                 },
             )
 
@@ -761,6 +764,25 @@ class MarketDataManager:
                 state["high"] = max(float(state["high"] or price), price)
                 state["low"] = min(float(state["low"] or price), price)
             state["close"] = price
+            cumulative = (
+                quote.get("volume_traded_today")
+                or quote.get("volume_traded")
+                or quote.get("volume")
+            )
+            try:
+                cumulative_value = float(cumulative)
+            except (TypeError, ValueError):
+                cumulative_value = None
+            if cumulative_value is not None and cumulative_value >= 0:
+                prev = self._last_cumulative_volume_by_symbol.get(symbol)
+                delta = 0.0 if prev is None else max(0.0, cumulative_value - float(prev))
+                self._last_cumulative_volume_by_symbol[symbol] = cumulative_value
+                state["volume"] = float(state.get("volume") or 0.0) + delta
+                state["volume_source"] = "cumulative_delta"
+            elif self._safe_canonical_for_basket(symbol) == "NSE:NIFTY":
+                state["volume_source"] = "not_applicable_index"
+            else:
+                state["volume_source"] = "missing"
 
             last_bucket = self._last_poll_bucket.get(symbol)
             if last_bucket is None:
@@ -775,6 +797,7 @@ class MarketDataManager:
                     "low": state["low"],
                     "close": state["close"],
                     "volume": int(state["volume"] or 0),
+                    "volume_source": state.get("volume_source", "missing"),
                     "timestamp": last_bucket * 60,
                     "source": "poll",
                 }
@@ -784,6 +807,7 @@ class MarketDataManager:
                     "low": price,
                     "close": price,
                     "volume": 0,
+                    "volume_source": "missing",
                 }
                 self._last_poll_bucket[symbol] = bucket
                 self._emit_poll_candle(candle)
@@ -975,41 +999,27 @@ class MarketDataManager:
         limit: int = 60,
         force_refresh: bool = False,
     ) -> list[dict[str, Any]] | None:
-        """Robust option chain fetcher using direct broker fallback."""
+        """Return resolver-owned option chain projection; MDM does not select contracts."""
         normalized_underlying = (underlying or "").strip().upper()
-        
-        # FIX: Directly ask broker if resolver is failing or in-memory cache is empty
         option_contracts = []
         try:
-            # First try the existing resolver logic
-            if self._resolver:
+            if self._resolver and hasattr(self._resolver, "option_contracts"):
                 option_contracts = self._resolver.option_contracts(normalized_underlying)
-            
-            # CRITICAL FALLBACK: If resolver returns nothing, query broker for active NFO instruments
-            if not option_contracts and hasattr(self._broker, "instruments"):
-                self._logger.info(f"Resolver failed. Fetching NIFTY chain directly from broker for {expiry}")
-                all_nfo = self._broker.instruments("NFO")
-                target_expiry = _select_expiry(expiry, sorted({
-                    parsed
-                    for ins in all_nfo
-                    if isinstance(ins, Mapping)
-                    and str(ins.get("name") or normalized_underlying).upper() == normalized_underlying
-                    and str(ins.get("instrument_type") or ins.get("option_type") or ins.get("type") or "").upper() in {"CE", "PE"}
-                    for parsed in [_parse_instrument_expiry(ins.get("expiry"))]
-                    if parsed is not None
-                }), datetime.now(timezone.utc))
+            if not option_contracts:
+                basket = getattr(self, "_active_contract_basket", None)
+                token_map = self._basket_token_map(basket)
+                symbols = list(self._basket_value(basket, "option_symbols", []) or [])
                 option_contracts = [
-                    ins for ins in all_nfo
-                    if isinstance(ins, Mapping)
-                    and str(ins.get("name") or normalized_underlying).upper() == normalized_underlying
-                    and str(ins.get("instrument_type") or ins.get("option_type") or ins.get("type") or "").upper() in {"CE", "PE"}
-                    and (
-                        target_expiry is None
-                        or (
-                            (parsed_expiry := _parse_instrument_expiry(ins.get("expiry"))) is not None
-                            and parsed_expiry.date() == target_expiry.date()
-                        )
-                    )
+                    {
+                        "symbol": sym,
+                        "tradingsymbol": str(sym).split(":", 1)[-1],
+                        "exchange": "NFO",
+                        "instrument_token": token_map.get(sym) or token_map.get(str(sym).split(":", 1)[-1]),
+                        "instrument_type": "CE" if str(sym).endswith("CE") else "PE",
+                        "expiry": self._basket_value(basket, "option_expiry", expiry),
+                    }
+                    for sym in symbols
+                    if str(sym).endswith(("CE", "PE"))
                 ]
         except Exception as exc:
             self._logger.error(f"Option chain recovery failed: {exc}")
@@ -1805,7 +1815,14 @@ class MarketDataManager:
         try:
             return self._canonical_symbol(text)
         except Exception:
-            return enforce_canonical(normalize_symbol(text))
+            try:
+                return canonical_symbol(text)
+            except Exception:
+                normalized = enforce_canonical(normalize_symbol(text))
+                alias = normalized.replace(" ", "")
+                if alias in {"NSE:NIFTY50", "NIFTY50"} or normalized in {"NSE:NIFTY 50", "NIFTY 50"}:
+                    return "NSE:NIFTY"
+                return normalized
 
     def _basket_token_map(self, basket: Any) -> dict[str, int]:
         token_map: dict[str, int] = {}
@@ -1955,20 +1972,51 @@ class MarketDataManager:
         with self._lock:
             self._active_contract_basket = basket
             self._invalidate_priority_context_cache()
-            self._desired_tokens.update(tokens)
             for sym, tok in token_map.items():
                 canonical = self._safe_canonical_for_basket(sym)
                 if canonical:
-                    self._symbol_to_token[canonical] = int(tok)
-                    self._token_to_symbol[int(tok)] = canonical
-                    self._token_by_symbol[canonical] = int(tok)
-                    self._symbol_by_token[int(tok)] = canonical
-        ws = self._ws
-        if ws is not None and hasattr(ws, "set_tokens"):
+                    self._set_symbol_token_mapping(canonical, int(tok), source="active_contract_basket")
+        self._replace_desired_tokens_from_basket(tokens, reason="active_contract_basket")
+
+    def _persistent_context_tokens(self) -> set[int]:
+        """Return tokens that should persist outside active option rotations."""
+        return set()
+
+    def _replace_desired_tokens_from_basket(self, tokens: Iterable[int], *, reason: str) -> None:
+        new_tokens = {int(t) for t in tokens if t and int(t) > 0}
+        new_tokens |= self._persistent_context_tokens()
+        with self._lock:
+            old_tokens = set(self._desired_tokens)
+            removed = old_tokens - new_tokens
+            added = new_tokens - old_tokens
+            self._desired_tokens = set(new_tokens)
+            for token in removed:
+                self._pending_subscription_tokens.discard(token)
+                self._pending_subscriptions.discard(token)
+                self._dispatched_subscriptions.discard(token)
+                self._confirmed_subscriptions.discard(token)
+                self._remove_symbol_token_mapping(token=token, reason=reason)
+        self._reconcile_ws_subscriptions()
+        self._logger.info(
+            "MDM_DESIRED_TOKENS_REPLACED added_count=%d removed_count=%d total_count=%d",
+            len(added),
+            len(removed),
+            len(new_tokens),
+            extra={"event": "MDM_DESIRED_TOKENS_REPLACED", "added_count": len(added), "removed_count": len(removed), "total_count": len(new_tokens), "reason": reason},
+        )
+
+    def _selected_option_history_required_bars(self) -> int:
+        def _env_int(name: str, default: int) -> int:
             try:
-                ws.set_tokens(sorted(set(tokens)))
-            except Exception as exc:  # noqa: BLE001
-                self._logger.warning("MDM_ACTIVE_BASKET_WS_SET_FAILED error=%s", exc)
+                return int(os.getenv(name, str(default)) or default)
+            except (TypeError, ValueError):
+                return default
+        return max(
+            int(getattr(self, "_min_required_bars", 0) or 0),
+            _env_int("MIN_INDICATOR_BARS", 20),
+            _env_int("HISTORY_REQUIRED_BARS", 30),
+            _env_int("HYDRATION_SELECTED_OPTION_MIN_BARS", 30),
+        )
 
     def get_active_contract_basket(self) -> Any | None:
         return self._active_contract_basket
@@ -1981,7 +2029,7 @@ class MarketDataManager:
         symbols = list(self._basket_value(basket, "all_symbols", None) or self._basket_value(basket, "symbols", None) or [])
         if not symbols:
             symbols = [self._basket_value(basket, "spot_symbol", "NSE:NIFTY"), *list(self._basket_value(basket, "option_symbols", []) or [])]
-        min_bars = int(os.getenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "0") or 0) or int(getattr(self, "_selected_option_min_bars", 5) or 5)
+        min_bars = self._selected_option_history_required_bars()
         report: dict[str, Any] = {"hard_ready": True, "missing": [], "symbols": {}, "hydration_min_bars_required": min_bars, "retry_scheduled": False}
         for raw_sym in symbols:
             sym = str(raw_sym or "")
@@ -1994,7 +2042,7 @@ class MarketDataManager:
             if is_future and raw_sym != self._basket_value(basket, "futures_symbol", None):
                 self._logger.warning("MDM_BASKET_ROLE_INCONSISTENCY symbol=%s role=%s", canonical, role, extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": canonical, "role": role})
             token = token_map.get(sym) or token_map.get(sym.upper()) or token_map.get(canonical) or token_map.get(canonical.split(":", 1)[-1] if ":" in canonical else canonical)
-            entry = {"role": role, "token": token, "ltp_ready": False, "depth_available": False, "bid_ask_available": False, "tradable_quote_ready": False, "quote_ready": False, "quote_ready_alias": "ltp_ready_compat_only", "quote_ready_reason": "quote_missing", "ohlc_ready": True, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
+            entry = {"role": role, "token": token, "ltp_ready": False, "depth_available": False, "bid_ask_available": False, "tradable_quote_ready": False, "quote_ready": False, "quote_ready_alias": "ltp_ready_compat_only", "quote_ready_reason": "quote_missing", "ohlc_ready": False, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
             if is_option and token is None:
                 report["missing"].append(f"{sym}:token_missing")
                 report["hard_ready"] = False
@@ -2008,6 +2056,9 @@ class MarketDataManager:
             entry["quote_ready_reason"] = qr.reason
             if is_option and not qr.ltp_ready:
                 report["missing"].append(f"{sym}:quote_missing:{qr.reason}")
+                report["hard_ready"] = False
+            if is_option and sym in selected and not qr.tradable_quote_ready:
+                report["missing"].append(f"{sym}:tradable_quote_not_ready:{qr.reason}")
                 report["hard_ready"] = False
             bars = self.get_ohlc_bars(sym) or self.get_ohlc_bars(canonical) or []
             entry["bars_count"] = len(bars)
@@ -2036,6 +2087,8 @@ class MarketDataManager:
                     report["hard_ready"] = False
                 elif 0 < entry["bars_count"] < int(getattr(self, "_min_required_bars", 20) or 20):
                     entry["ohlc_provisional"] = True
+            elif entry["bars_count"] > 0:
+                entry["ohlc_ready"] = True
             report["symbols"][sym] = entry
         return report
 
@@ -2078,9 +2131,7 @@ class MarketDataManager:
         with self._lock:
             self._desired_tokens.add(token_int)
             if normalized_symbol:
-                self._symbol_to_token[normalized_symbol] = token_int
-                self._token_to_symbol[token_int] = normalized_symbol
-                self._symbol_by_token[token_int] = normalized_symbol
+                self._set_symbol_token_mapping(normalized_symbol, token_int, source="request_token_subscription")
         if active_future:
             self.purge_stale_nifty_futures(active_future, reason="request_token_subscription_post")
         self._reconcile_ws_subscriptions()
@@ -5232,7 +5283,7 @@ class MarketDataManager:
     def _is_nifty_spot_tick(self, symbol: str | None = None, token: int | None = None) -> bool:
         """Return whether tick belongs to NIFTY spot aliases/token."""
         s = (symbol or "").upper().replace(" ", "")
-        return token == NIFTY_SPOT_TOKEN or s in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}
+        return (token is not None and self._symbol_by_token.get(int(token)) == "NSE:NIFTY") or s in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}
 
     def _record_ws_arrival_fast(
         self,
@@ -5262,10 +5313,7 @@ class MarketDataManager:
             with self._lock:
                 if token is not None:
                     token_int = int(token)
-                    self._symbol_by_token[token_int] = canonical
-                    self._token_to_symbol[token_int] = canonical
-                    self._symbol_to_token[canonical] = token_int
-                    self._token_by_symbol[canonical] = token_int
+                    self._set_symbol_token_mapping(canonical, token_int, source="ws_arrival")
 
                 self._latest_ticks[canonical] = payload
                 self._tick_cache[canonical] = payload
@@ -5438,7 +5486,7 @@ class MarketDataManager:
         if str(symbol).strip().upper() in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}:
             candidates.append("NSE:NIFTY")
             with self._lock:
-                token = self._token_by_symbol.get("NSE:NIFTY") or NIFTY_SPOT_TOKEN
+                token = self._token_by_symbol.get("NSE:NIFTY")
                 if token:
                     mapped = self._symbol_by_token.get(int(token))
                     if mapped:
@@ -5465,7 +5513,7 @@ class MarketDataManager:
         if str(symbol).strip().upper() in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}:
             candidates = ["NSE:NIFTY"]
             with self._lock:
-                token = self._token_by_symbol.get("NSE:NIFTY") or NIFTY_SPOT_TOKEN
+                token = self._token_by_symbol.get("NSE:NIFTY")
                 if token:
                     mapped = self._symbol_by_token.get(int(token))
                     if mapped:
@@ -5919,6 +5967,51 @@ class MarketDataManager:
             self._engines[symbol] = CandleEngine()
         return self._engines[symbol]
 
+    def _set_symbol_token_mapping(self, symbol: str, token: int, *, source: str) -> None:
+        normalized = self._canonical_symbol(symbol)
+        token_int = int(token)
+        old_token = self._token_by_symbol.get(normalized)
+        old_symbol = self._symbol_by_token.get(token_int)
+        if old_token is not None and old_token != token_int:
+            self._symbol_by_token.pop(old_token, None)
+            self._token_to_symbol.pop(old_token, None)
+        if old_symbol is not None and old_symbol != normalized:
+            self._token_by_symbol.pop(old_symbol, None)
+            self._symbol_to_token.pop(old_symbol, None)
+        self._token_by_symbol[normalized] = token_int
+        self._symbol_by_token[token_int] = normalized
+        self._symbol_to_token[normalized] = token_int
+        self._token_to_symbol[token_int] = normalized
+
+    def _remove_symbol_token_mapping(self, *, symbol: str | None = None, token: int | None = None, reason: str) -> None:
+        normalized = self._canonical_symbol(symbol) if symbol else None
+        token_int = int(token) if token is not None else None
+        if normalized is not None and token_int is None:
+            token_int = self._token_by_symbol.get(normalized) or self._symbol_to_token.get(normalized)
+        if token_int is not None and normalized is None:
+            normalized = self._symbol_by_token.get(token_int) or self._token_to_symbol.get(token_int)
+        if normalized is not None:
+            self._token_by_symbol.pop(normalized, None)
+            self._symbol_to_token.pop(normalized, None)
+        if token_int is not None:
+            self._symbol_by_token.pop(token_int, None)
+            self._token_to_symbol.pop(token_int, None)
+
+    def seed_symbol_tokens(self, token_by_symbol: Mapping[str, int], *, source: str = "instrument_manager") -> None:
+        if not token_by_symbol:
+            self._logger.warning("MDM_SYMBOL_TOKENS_SEED_SKIPPED source=%s reason=empty_mapping", source)
+            return
+        count = 0
+        with self._lock:
+            for sym, tok in token_by_symbol.items():
+                try:
+                    if int(tok) > 0:
+                        self._set_symbol_token_mapping(str(sym), int(tok), source=source)
+                        count += 1
+                except (TypeError, ValueError, RuntimeError):
+                    continue
+        self._logger.info("MDM_SYMBOL_TOKENS_SEEDED source=%s count=%d", source, count, extra={"event": "MDM_SYMBOL_TOKENS_SEEDED", "source": source, "count": count})
+
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
             return
@@ -5936,10 +6029,7 @@ class MarketDataManager:
         with self._lock:
             if self._token_by_symbol.get(normalized_symbol) == token_int:
                 return
-            self._token_by_symbol[normalized_symbol] = token_int
-            self._symbol_by_token[token_int] = normalized_symbol
-            self._symbol_to_token[normalized_symbol] = token_int
-            self._token_to_symbol[token_int] = normalized_symbol
+            self._set_symbol_token_mapping(normalized_symbol, token_int, source="register_symbol")
         try:
             if self._resolver is not None and hasattr(self._resolver, "register"):
                 self._resolver.register(normalized_symbol, token_int)
@@ -6000,10 +6090,7 @@ class MarketDataManager:
         exchange_ts = self._tick_wallclock(cached_tick) or now_wall
         with self._lock:
             if token_int is not None:
-                self._symbol_by_token[token_int] = symbol
-                self._token_to_symbol[token_int] = symbol
-                self._symbol_to_token[symbol] = token_int
-                self._token_by_symbol[symbol] = token_int
+                self._set_symbol_token_mapping(symbol, token_int, source="store_tick")
             self._latest_ticks[symbol] = cached_tick
             self._tick_cache[symbol] = cached_tick
             self._last_tick_time[symbol] = float(exchange_ts)
@@ -6743,147 +6830,22 @@ class MarketDataManager:
         symbols: list[str],
         lookback_minutes: int = 30,
     ) -> None:
-        """Warm caches from minute candles; Args: symbols/lookback; Returns: None; Raises: RuntimeError."""
-
-        try:
-            end_time = datetime.now(timezone.utc)
-            start_time = end_time - timedelta(minutes=lookback_minutes)
-
-            self._logger.info(
-                "WARMUP_START symbols=%d lookback=%dmin",
-                len(symbols),
-                lookback_minutes,
+        """Compatibility warmup loop delegated to canonical ensure_history()."""
+        target = max(1, int(lookback_minutes or 1))
+        self._logger.info(
+            "WARMUP_START symbols=%d lookback=%dmin source=ensure_history",
+            len(symbols),
+            target,
+        )
+        for symbol in symbols:
+            await self.ensure_history(
+                symbol,
+                interval="minute",
+                required_bars=min(30, target),
+                target_bars=target,
+                reason="warmup_history",
             )
-
-            rest_client = self._rest_client
-            fetcher = getattr(rest_client, "get_historical_data", None)
-            if not callable(fetcher):
-                fetcher = getattr(rest_client, "historical_data", None)
-            if not callable(fetcher):
-                raise RuntimeError("WARMUP failed: historical data client unavailable")
-
-            for symbol in symbols:
-                canonical_symbol = normalize_symbol(str(symbol))
-                token = self._token_by_symbol.get(canonical_symbol)
-                if not token:
-                    self._logger.info(
-                        "WARMUP_TOKEN_CACHE_MISS symbol=%s reason=attempting_resolver_broker_fallback",
-                        canonical_symbol,
-                        extra={
-                            "event": "warmup_token_cache_miss",
-                            "symbol": canonical_symbol,
-                            "reason": "attempting_resolver_broker_fallback",
-                        },
-                    )
-                    resolver = getattr(self, "_resolver", None)
-                    if resolver is not None:
-                        try:
-                            if hasattr(resolver, "resolve"):
-                                resolved = resolver.resolve(canonical_symbol)
-                                if resolved:
-                                    token = int(resolved)
-                            if not token and hasattr(resolver, "get_token"):
-                                resolved = resolver.get_token(canonical_symbol)
-                                if resolved:
-                                    token = int(resolved)
-                        except Exception:
-                            self._logger.exception("Unhandled exception", exc_info=True)
-                            raise
-                    if (
-                        not token
-                        and self._broker
-                        and hasattr(self._broker, "get_instrument_token")
-                    ):
-                        try:
-                            resolved = self._broker.get_instrument_token(canonical_symbol)
-                            if resolved:
-                                token = int(resolved)
-                        except Exception:
-                            self._logger.exception("Unhandled exception", exc_info=True)
-                            raise
-                    if token:
-                        self.register_symbol(canonical_symbol, int(token))
-                if not token:
-                    # BUG-β FIX: Never raise — skip and warn so remaining
-                    # symbols are still warmed and callers don't abort.
-                    self._logger.warning(
-                        "WARMUP_SKIP: missing token for %s",
-                        canonical_symbol,
-                        extra={
-                            "event": "warmup_skip_missing_token",
-                            "symbol": canonical_symbol,
-                        },
-                    )
-                    continue
-
-                if asyncio.iscoroutinefunction(fetcher):
-                    candles = await fetcher(
-                        instrument_token=token,
-                        from_date=start_time,
-                        to_date=end_time,
-                        interval="minute",
-                    )
-                else:
-                    candles = await asyncio.to_thread(
-                        fetcher,
-                        token,
-                        start_time,
-                        end_time,
-                        "minute",
-                    )
-
-                hydrated_count = 0
-                for candle in candles or ():
-                    candle_dt = candle.get("date")
-                    if isinstance(candle_dt, str):
-                        try:
-                            candle_dt = datetime.fromisoformat(
-                                candle_dt.replace("Z", "+00:00")
-                            )
-                        except ValueError:
-                            continue
-                    if not isinstance(candle_dt, datetime):
-                        continue
-                    if candle_dt.tzinfo is None:
-                        candle_dt = candle_dt.replace(tzinfo=timezone.utc)
-
-                    historical_tick = {
-                        "symbol": canonical_symbol,
-                        "ltp": float(candle.get("close", 0.0)),
-                        "volume": float(candle.get("volume", 0.0)),
-                        "timestamp": candle_dt,
-                        "source": "historical",
-                    }
-                    validated = validate_tick(historical_tick)
-                    engine = self._get_engine(canonical_symbol)
-                    finalized = engine.on_tick(validated)
-                    if finalized:
-                        self._ohlc[self._bar_symbol_key(canonical_symbol)].append(
-                            finalized
-                        )
-                    validated_ts = getattr(validated, "timestamp", None)
-                    if validated_ts is not None:
-                        self._last_historical_ts[canonical_symbol] = float(
-                            validated_ts.timestamp()
-                        )
-                    hydrated_count += 1
-                    self.ingest_historical_bar(
-                        {
-                            "symbol": canonical_symbol,
-                            "open": float(candle.get("open", 0.0)),
-                            "high": float(candle.get("high", 0.0)),
-                            "low": float(candle.get("low", 0.0)),
-                            "close": float(candle.get("close", 0.0)),
-                            "volume": float(candle.get("volume", 0.0)),
-                            "timestamp": candle_dt,
-                        }
-                    )
-                self._logger.info("Hydrated %s: %d bars", canonical_symbol, hydrated_count)
-
-            self._logger.info("WARMUP_COMPLETE")
-        except Exception as e:
-            self._logger.error("Failure in warmup_history: %s", e)
-            raise
+        self._logger.info("WARMUP_COMPLETE source=ensure_history")
 
     def _is_ws_connected(self) -> bool:
         """Args: none; Returns: websocket connectivity; Raises: none."""
@@ -7706,92 +7668,26 @@ class MarketDataManager:
         return quote
 
     def resolve_active_nifty_future_symbol(self, now: datetime | None = None) -> str | None:
-        """Resolve nearest non-expired NIFTY futures symbol from instrument masters."""
-        ref_now = now or datetime.now(timezone.utc)
-        fetchers = ("list_instruments", "get_instruments", "instruments")
-        instruments: list[Mapping[str, Any]] = []
-
-        def _call_instrument_fetcher(fetcher: Callable[..., Any]) -> list[Mapping[str, Any]]:
-            attempts = (lambda: fetcher(), lambda: fetcher("NFO"), lambda: fetcher(exchange="NFO"))
-            for call in attempts:
-                try:
-                    raw = call() or []
-                except TypeError:
-                    continue
-                except Exception:
-                    continue
-                if isinstance(raw, Mapping):
-                    raw = raw.values()
-                if isinstance(raw, Iterable):
-                    rows = [item for item in raw if isinstance(item, Mapping)]
-                    if rows:
-                        return rows
-            return []
-
-        resolver = getattr(self, "_resolver", None)
-        if resolver is not None:
-            for fetcher_name in fetchers:
-                fetcher = getattr(resolver, fetcher_name, None)
-                if callable(fetcher):
-                    instruments = _call_instrument_fetcher(fetcher)
-                    if instruments:
-                        break
-
-        best_symbol: str | None = None
-        best_expiry: datetime | None = None
-        for row in instruments:
-            if not _is_nifty_index_future_row(row):
-                continue
-            tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
-            expiry = _parse_instrument_expiry(row.get("expiry"))
-            if expiry is None or expiry < ref_now:
-                continue
-            if best_expiry is None or expiry < best_expiry:
-                best_expiry = expiry
-                best_symbol = f"NFO:{tradingsymbol}"
-        if best_symbol:
-            return self._set_active_nifty_future_cache(best_symbol)
-
-        broker_instruments = getattr(self._broker, "instruments", None)
-        if callable(broker_instruments):
-            try:
-                rows = broker_instruments("NFO") or []
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug(
-                    "ACTIVE_NIFTY_FUTURE_BROKER_INSTRUMENTS_FAILED error=%s",
-                    exc,
-                    extra={"event": "ACTIVE_NIFTY_FUTURE_BROKER_INSTRUMENTS_FAILED", "error": str(exc)},
-                )
-            else:
-                if isinstance(rows, Mapping):
-                    rows = rows.values()
-                if isinstance(rows, Iterable):
-                    resolved = self._resolve_active_nifty_future_from_instruments(
-                        [row for row in rows if isinstance(row, Mapping)],
-                        now=now,
-                    )
-                    if resolved:
-                        return self._set_active_nifty_future_cache(resolved)
-        return None
+        """Return active future from committed basket only; InstrumentManager owns selection."""
+        return self.get_active_nifty_future_symbol_cached(now=now)
 
     def get_active_nifty_future_symbol_cached(self, *, now: datetime | None = None, ttl_seconds: float = 30.0) -> str | None:
-        now_mono = time.monotonic()
-        cached = self._active_nifty_future_cache_symbol
-        if cached and now_mono < self._active_nifty_future_cache_until_mono:
-            return cached
-        resolved = self.resolve_active_nifty_future_symbol(now=now)
-        if resolved:
-            return self._set_active_nifty_future_cache(resolved, ttl_seconds=ttl_seconds)
-        return resolved
+        basket = getattr(self, "_active_contract_basket", None)
+        symbol = self._basket_value(basket, "futures_symbol", None)
+        canonical = canonical_nifty_future_symbol(symbol)
+        if canonical:
+            return self._canonical_symbol(canonical)
+        self._logger.warning(
+            "FUTURES_CONTEXT_UNAVAILABLE_BASKET_MISSING",
+            extra={"event": "FUTURES_CONTEXT_UNAVAILABLE_BASKET_MISSING"},
+        )
+        return None
 
     def _set_active_nifty_future_cache(self, symbol: str, *, ttl_seconds: float = 30.0) -> str:
-        canonical = self._canonical_symbol(symbol)
-        self._active_nifty_future_cache_symbol = canonical
-        self._active_nifty_future_cache_until_mono = time.monotonic() + max(1.0, float(ttl_seconds))
-        return canonical
+        return self._canonical_symbol(symbol)
 
     def _resolve_active_nifty_future_from_instruments(self, instruments: Iterable[Mapping[str, Any]], now: datetime | None = None) -> str | None:
-        return resolve_active_nifty_future_from_instruments(instruments, now=now).symbol
+        raise RuntimeError("MDM does not resolve active futures from instruments; use InstrumentManager basket")
 
     def maybe_rotate_nifty_futures_context(
         self,
@@ -7818,27 +7714,7 @@ class MarketDataManager:
         selected_option_symbols: Sequence[str] | None = None,
     ) -> FuturesContextRotationResult:
         active = self.get_active_nifty_future_symbol_cached(now=now)
-        source = "resolver"
-        selected_symbols = [str(s or "") for s in (selected_option_symbols or []) if s]
-        if not active:
-            broker_instruments = getattr(self._broker, "instruments", None)
-            if callable(broker_instruments):
-                try:
-                    rows = broker_instruments("NFO") or []
-                    resolved = self._resolve_active_nifty_future_from_instruments(rows, now=now)
-                    if resolved:
-                        active = self._set_active_nifty_future_cache(resolved)
-                        source = "broker_instruments"
-                except Exception:
-                    pass
-        if not active and selected_symbols:
-            resolved = resolve_active_nifty_future(
-                selected_option_symbols=selected_symbols,
-                now=now,
-            )
-            if resolved.symbol:
-                active = self._set_active_nifty_future_cache(resolved.symbol)
-                source = resolved.source
+        source = "basket"
         if not active:
             self._logger.warning(
                 "FUTURES_CONTEXT_STALE_OR_UNRESOLVED current_symbol=%s reason=%s",
@@ -9875,7 +9751,6 @@ class MarketDataManager:
                 token = getattr(self, "_token_by_symbol", {}).get(spot_key)
                 if token:
                     break
-            token = token or 256265
 
         if not token:
             resolver = getattr(self, "_resolver", None)

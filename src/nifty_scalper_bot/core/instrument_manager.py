@@ -163,6 +163,15 @@ class InstrumentManager:
             extra={"event": "instrument_manager_loaded", "count": count},
         )
 
+    def token_by_symbol_snapshot(self) -> dict[str, int]:
+        """Return InstrumentManager-owned symbol-token map for runtime consumers."""
+        with self._lock:
+            snapshot: dict[str, int] = dict(_WELL_KNOWN_TOKENS)
+            for token, symbol in self._symbol_map.items():
+                exchange = self._exchange_map.get(token, "NFO")
+                snapshot[f"{exchange}:{symbol}"] = int(token)
+            return dict(snapshot)
+
     def get_token(self, symbol: str) -> int:
         """Return the broker instrument token for *symbol*.
 
