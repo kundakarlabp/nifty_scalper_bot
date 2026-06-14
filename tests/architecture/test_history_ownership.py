@@ -123,6 +123,37 @@ def _func_source(path: Path, func_name: str) -> str:
     return ""
 
 
+def _function_call_attrs(path: Path) -> dict[str, set[str]]:
+    text = path.read_text()
+    tree = ast.parse(text)
+    result: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            calls: set[str] = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    fn = sub.func
+                    if isinstance(fn, ast.Attribute):
+                        calls.add(fn.attr)
+                    elif isinstance(fn, ast.Name):
+                        calls.add(fn.id)
+            result[node.name] = calls
+    return result
+
+
+def _imported_names(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text())
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.rsplit('.', 1)[-1])
+    return names
+
+
 async def test_runner_prewarm_has_no_datahub_hydrate_or_reseed() -> None:
     # Spec §3/§13: production prewarm must not call DataHub hydrate, reseed, or
     # ingest historical bars.
@@ -336,14 +367,27 @@ async def test_production_code_uses_explicit_readiness_apis() -> None:
         assert "is_ohlc_ready" not in mdm_src
 
 async def test_mdm_contract_ssot_regression_guards() -> None:
-    text = (SRC / "data" / "market_data_manager.py").read_text()
+    path = SRC / "data" / "market_data_manager.py"
+    text = path.read_text()
+    imported = _imported_names(path)
+    assert "NIFTY_SPOT_TOKEN" not in text
     assert "256265" not in text
     assert "260105" not in text
-    assert "resolve_active_nifty_future," not in text
-    assert "resolve_active_nifty_future_from_instruments" not in text.split("from nifty_scalper_bot.instruments.active_contracts", 1)[0]
+    assert "resolve_active_nifty_future" not in imported
+    assert "resolve_active_nifty_future_from_instruments" not in imported
     assert '.instruments("NFO")' not in text
     assert "broker_instruments" not in text
     assert "CRITICAL FALLBACK" not in text
+
+
+async def test_mdm_broker_history_calls_stay_inside_canonical_fetch_helper() -> None:
+    calls_by_func = _function_call_attrs(SRC / "data" / "market_data_manager.py")
+    offenders = {
+        name: sorted(calls & {"historical_data", "get_historical_data"})
+        for name, calls in calls_by_func.items()
+        if name != "fetch_history" and calls & {"historical_data", "get_historical_data"}
+    }
+    assert offenders == {}
 
 
 async def test_mdm_warmup_history_delegates_to_ensure_history() -> None:
