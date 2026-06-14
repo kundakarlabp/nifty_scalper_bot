@@ -5924,21 +5924,22 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         setattr(ctx, "execution_block_reason", reason)
         setattr(ctx, "trading_ready", False)
         setattr(ctx, "live_orders_armed", False)
-        try:
-            safe_order_manager.set_live_enabled(False)
-        except Exception as live_exc:  # noqa: BLE001 - live safety best effort with explicit diagnostic
-            LOGGER.error(
-                "CANONICAL_HISTORY_ENSURER_DISABLE_LIVE_FAILED exception_type=%s exception_message=%s",
-                type(live_exc).__name__,
-                str(live_exc),
-                extra={
-                    "event": "CANONICAL_HISTORY_ENSURER_DISABLE_LIVE_FAILED",
-                    "reason": reason,
-                    "exception_type": type(live_exc).__name__,
-                    "exception_message": str(live_exc),
-                },
-                exc_info=live_exc,
-            )
+        if safe_order_manager is not None:
+            try:
+                safe_order_manager.set_live_enabled(False)
+            except Exception as live_exc:  # noqa: BLE001 - live safety best effort with explicit diagnostic
+                LOGGER.error(
+                    "CANONICAL_HISTORY_ENSURER_DISABLE_LIVE_FAILED exception_type=%s exception_message=%s",
+                    type(live_exc).__name__,
+                    str(live_exc),
+                    extra={
+                        "event": "CANONICAL_HISTORY_ENSURER_DISABLE_LIVE_FAILED",
+                        "reason": reason,
+                        "exception_type": type(live_exc).__name__,
+                        "exception_message": str(live_exc),
+                    },
+                    exc_info=live_exc,
+                )
         LOGGER.error(
             "CANONICAL_HISTORY_ENSURER_INJECTION_FAILED exception_type=%s exception_message=%s",
             type(exc).__name__,

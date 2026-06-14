@@ -269,6 +269,26 @@ async def test_datahub_has_no_runtime_history_ownership_or_readiness_decisions()
             assert "normalize_history" not in src
 
 
+async def test_datahub_get_ohlc_accepts_positional_limit() -> None:
+    from nifty_scalper_bot.data.data_hub import DataHub
+
+    class _Mdm:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int | None]] = []
+
+        def get_ohlc_bars(self, symbol: str, *, limit: int | None = None):
+            self.calls.append((symbol, limit))
+            return [{"close": 1}, {"close": 2}][-limit if limit else 0:] if limit else [{"close": 1}, {"close": 2}]
+
+    mdm = _Mdm()
+    hub = DataHub(market_data_manager=mdm)
+
+    rows = hub.get_ohlc("NSE:NIFTY", 1)
+
+    assert rows == [{"close": 2}]
+    assert mdm.calls == [("NSE:NIFTY", 1)]
+
+
 async def test_runner_has_no_direct_mdm_or_datahub_hydration_ownership_calls() -> None:
     text = (SRC / "strategies" / "runner.py").read_text()
     assert ".ensure_history(" not in text
@@ -281,8 +301,9 @@ async def test_runner_has_no_direct_mdm_or_datahub_hydration_ownership_calls() -
 async def test_app_injection_failure_marks_health_and_live_state() -> None:
     text = (SRC / "core" / "app.py").read_text()
     failure_idx = text.index("CANONICAL_HISTORY_ENSURER_INJECTION_FAILED")
-    failure_block = text[failure_idx - 1000 : failure_idx + 1000]
+    failure_block = text[failure_idx - 2000 : failure_idx + 1000]
     assert "canonical_history_ensurer_injection_failed" in failure_block
+    assert "if safe_order_manager is not None" in failure_block
     assert "safe_order_manager.set_live_enabled(False)" in failure_block
     assert "live_block_reason" in failure_block
     checker_src = _func_source(SRC / "core" / "app.py", "_check_canonical_history_ensurer")
