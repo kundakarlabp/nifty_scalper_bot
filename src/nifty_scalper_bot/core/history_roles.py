@@ -11,8 +11,36 @@ from __future__ import annotations
 from collections.abc import Collection
 
 
+HISTORY_ROLE_PRIORITY: dict[str, int] = {
+    "option_context": 10,
+    "spot_context": 20,
+    "futures_context": 20,
+    "selected_option": 30,
+    "recovery_or_open_position": 40,
+}
+
+
 def _normalize(value: str | None) -> str:
     return str(value or "").strip().upper()
+
+
+def _spot_alias_key(value: str | None) -> str:
+    normalized = _normalize(value)
+    if normalized.startswith("NSE:"):
+        normalized = normalized.split(":", 1)[1]
+    return normalized.replace(" ", "")
+
+
+def is_same_spot_symbol(left: str | None, right: str | None) -> bool:
+    left_key = _spot_alias_key(left)
+    right_key = _spot_alias_key(right)
+    if not left_key or not right_key:
+        return False
+    return left_key in {"NIFTY", "NIFTY50"} and right_key in {"NIFTY", "NIFTY50"}
+
+
+def history_role_priority(role: str | None) -> int:
+    return HISTORY_ROLE_PRIORITY.get(_normalize(role).lower(), HISTORY_ROLE_PRIORITY["option_context"])
 
 
 def resolve_symbol_history_role(
@@ -33,8 +61,7 @@ def resolve_symbol_history_role(
     if normalized in selected:
         return "selected_option"
 
-    spot = _normalize(spot_symbol)
-    if normalized == spot or (not spot and normalized == "NSE:NIFTY"):
+    if is_same_spot_symbol(normalized, spot_symbol) or (not _normalize(spot_symbol) and is_same_spot_symbol(normalized, "NSE:NIFTY")):
         return "spot_context"
 
     future = _normalize(futures_symbol)

@@ -46,7 +46,7 @@ import pandas as pd
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import ActiveContractSelection, active_contract_selection_from_basket, extract_symbol_strike
 from nifty_scalper_bot.core.event_bus import EventBus
-from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role
+from nifty_scalper_bot.core.history_roles import history_role_priority, resolve_symbol_history_role
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
@@ -1472,14 +1472,32 @@ class StrategyRunner:
             self._runtime_history_ensure_roles = roles
         previous_target = inflight.get(normalized)
         previous_role = roles.get(normalized)
-        if previous_target is not None and previous_target >= requested_target:
-            log_throttled(self._logger, f"canonical_history_ensure_inflight:{normalized}", f"CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT symbol={normalized} role={role}", interval_sec=60.0, level=logging.DEBUG, extra={"event": "CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT", "symbol": normalized, "role": role, "target_bars": requested_target, "inflight_target_bars": previous_target})
+        target_upgraded = previous_target is not None and requested_target > previous_target
+        role_upgraded = previous_role is not None and history_role_priority(role) > history_role_priority(previous_role)
+        if previous_target is not None and not target_upgraded and not role_upgraded:
+            log_throttled(
+                self._logger,
+                f"canonical_history_ensure_inflight:{normalized}",
+                f"CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT symbol={normalized} role={role}",
+                interval_sec=60.0,
+                level=logging.DEBUG,
+                extra={
+                    "event": "CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT",
+                    "symbol": normalized,
+                    "role": role,
+                    "previous_role": previous_role,
+                    "target_bars": requested_target,
+                    "inflight_target_bars": previous_target,
+                    "target_upgraded": False,
+                    "role_upgraded": False,
+                },
+            )
             return True
         inflight[normalized] = requested_target
         roles[normalized] = role
 
         def restore_after_schedule_failure() -> None:
-            if inflight.get(normalized) != requested_target:
+            if inflight.get(normalized) != requested_target or roles.get(normalized) != role:
                 return
             if previous_target is None:
                 inflight.pop(normalized, None)
@@ -1494,7 +1512,33 @@ class StrategyRunner:
         self._hydration_attempted_symbols.add(normalized)
         self._last_hydration_reason_by_symbol[normalized] = reason
         event = "CANONICAL_HISTORY_ENSURE_UPGRADED" if previous_target is not None else "CANONICAL_HISTORY_ENSURE_SCHEDULED"
-        self._logger.info("%s symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s previous_target_bars=%s", event, normalized, role, phase, reason, requested_required, requested_target, previous_target, extra={"event": event, "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": requested_required, "target_bars": requested_target, "previous_target_bars": previous_target})
+        self._logger.info(
+            "%s symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s previous_target_bars=%s previous_role=%s target_upgraded=%s role_upgraded=%s",
+            event,
+            normalized,
+            role,
+            phase,
+            reason,
+            requested_required,
+            requested_target,
+            previous_target,
+            previous_role,
+            target_upgraded,
+            role_upgraded,
+            extra={
+                "event": event,
+                "symbol": normalized,
+                "role": role,
+                "previous_role": previous_role,
+                "phase": phase,
+                "reason": reason,
+                "required_bars": requested_required,
+                "target_bars": requested_target,
+                "previous_target_bars": previous_target,
+                "target_upgraded": target_upgraded,
+                "role_upgraded": role_upgraded,
+            },
+        )
 
         async def _run() -> None:
             try:
@@ -1504,7 +1548,10 @@ class StrategyRunner:
             except Exception as exc:  # noqa: BLE001 - orchestration boundary
                 self._logger.warning("CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED symbol=%s role=%s reason=%s error_type=%s error=%s", normalized, role, reason, type(exc).__name__, exc, extra={"event": "CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED", "symbol": normalized, "role": role, "reason": reason, "error_type": type(exc).__name__, "error": str(exc)})
             finally:
-                if self._runtime_history_ensure_inflight.get(normalized) == requested_target:
+                if (
+                    self._runtime_history_ensure_inflight.get(normalized) == requested_target
+                    and self._runtime_history_ensure_roles.get(normalized) == role
+                ):
                     self._runtime_history_ensure_inflight.pop(normalized, None)
                     self._runtime_history_ensure_roles.pop(normalized, None)
 
@@ -1515,7 +1562,12 @@ class StrategyRunner:
                 thread = threading.Thread(target=lambda: asyncio.run(_run()), name=f"runtime-history-ensure-{normalized}", daemon=True)
                 thread.start()
             else:
-                loop.create_task(_run())
+                scheduled_coro = _run()
+                try:
+                    loop.create_task(scheduled_coro)
+                except Exception:
+                    scheduled_coro.close()
+                    raise
         except Exception as exc:  # noqa: BLE001 - scheduling boundary
             restore_after_schedule_failure()
             self._logger.warning("CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED symbol=%s error_type=%s error=%s", normalized, type(exc).__name__, exc, extra={"event": "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED", "symbol": normalized, "error_type": type(exc).__name__, "error": str(exc)})

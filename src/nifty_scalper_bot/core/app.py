@@ -8101,7 +8101,22 @@ async def ensure_symbol_runtime_history(
     failure_reason: str | None = None
     if mdm is None or not callable(getattr(mdm, "ensure_history", None)):
         failure_reason = "mdm_ensure_history_missing"
-        return RuntimeHistoryResult(symbol, policy.role, policy.phase, reason, policy.required_bars, policy.target_bars, 0, 0, 0, False, False, False, None, failure_reason)
+        return RuntimeHistoryResult(
+            symbol=symbol,
+            role=policy.role,
+            phase=policy.phase,
+            reason=reason,
+            required_bars=policy.required_bars,
+            target_bars=policy.target_bars,
+            mdm_bars=0,
+            runner_bars=0,
+            indicator_bars=0,
+            minimum_ready=False,
+            target_ready=False,
+            sync_success=False,
+            hydration=None,
+            failure_reason=failure_reason,
+        )
     if policy.allow_broker_fetch:
         hydration = await mdm.ensure_history(
             symbol,
@@ -8151,7 +8166,22 @@ async def ensure_symbol_runtime_history(
         symbol, policy.role, policy.phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, failure_reason,
         extra={"event": "CANONICAL_HISTORY_RESULT", "symbol": symbol, "role": policy.role, "phase": policy.phase, "reason": reason, "required_bars": policy.required_bars, "target_bars": policy.target_bars, "mdm_bars": mdm_bars, "runner_bars": runner_bars, "indicator_bars": indicator_bars, "minimum_ready": minimum_ready, "target_ready": target_ready, "failure_reason": failure_reason},
     )
-    return RuntimeHistoryResult(symbol, policy.role, policy.phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, sync_success, hydration, failure_reason)
+    return RuntimeHistoryResult(
+        symbol=symbol,
+        role=policy.role,
+        phase=policy.phase,
+        reason=reason,
+        required_bars=policy.required_bars,
+        target_bars=policy.target_bars,
+        mdm_bars=mdm_bars,
+        runner_bars=runner_bars,
+        indicator_bars=indicator_bars,
+        minimum_ready=minimum_ready,
+        target_ready=target_ready,
+        sync_success=sync_success,
+        hydration=hydration,
+        failure_reason=failure_reason,
+    )
 
 
 async def _ensure_context_history_hydrated(

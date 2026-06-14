@@ -164,3 +164,115 @@ async def test_reseed_runtime_error_returns_structured_failure() -> None:
     result = r.sync_history_from_mdm("NSE:NIFTY", required_bars=30, reason="t", role="spot_context", request_if_short=False)
     assert result.success is False
     assert "runner_reseed_failed:RuntimeError" in (result.failure_reason or "")
+
+
+async def test_same_target_stronger_role_schedules_upgrade_selected_option() -> None:
+    r = _runner_for_scheduling()
+    calls = []
+    async def _ensurer(symbol, **kw):
+        calls.append((symbol, kw))
+    r.set_runtime_history_ensurer(_ensurer)
+    r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
+    r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
+
+    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="upgrade", required_bars=30)
+
+    import asyncio as _asyncio
+    for _ in range(5):
+        await _asyncio.sleep(0)
+        if calls:
+            break
+    assert calls and calls[0][1]["role"] == "selected_option"
+    assert calls[0][1]["target_bars"] == 30
+
+
+async def test_same_target_weaker_role_suppresses_existing_selected_option() -> None:
+    r = _runner_for_scheduling()
+    calls = []
+    async def _ensurer(symbol, **kw):
+        calls.append((symbol, kw))
+    r.set_runtime_history_ensurer(_ensurer)
+    r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
+    r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "selected_option"
+
+    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="option_context", phase="runner_sync", reason="weaker", required_bars=30)
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)
+    assert calls == []
+
+
+async def test_same_target_recovery_role_schedules_upgrade() -> None:
+    r = _runner_for_scheduling()
+    calls = []
+    async def _ensurer(symbol, **kw):
+        calls.append((symbol, kw))
+    r.set_runtime_history_ensurer(_ensurer)
+    r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
+    r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
+
+    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="recovery_or_open_position", phase="runner_sync", reason="recovery", required_bars=30)
+    import asyncio as _asyncio
+    for _ in range(5):
+        await _asyncio.sleep(0)
+        if calls:
+            break
+    assert calls and calls[0][1]["role"] == "recovery_or_open_position"
+
+
+async def test_smaller_target_weaker_role_suppresses_larger_selected_option() -> None:
+    r = _runner_for_scheduling()
+    calls = []
+    async def _ensurer(symbol, **kw):
+        calls.append((symbol, kw))
+    r.set_runtime_history_ensurer(_ensurer)
+    r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 75
+    r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "selected_option"
+
+    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="option_context", phase="runner_sync", reason="smaller", required_bars=30)
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)
+    assert calls == []
+
+
+async def test_larger_target_and_stronger_role_preserves_both_upgrades() -> None:
+    r = _runner_for_scheduling()
+    calls = []
+    async def _ensurer(symbol, **kw):
+        calls.append((symbol, kw))
+    r.set_runtime_history_ensurer(_ensurer)
+    r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
+    r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
+
+    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="both", required_bars=30, target_bars=75)
+    import asyncio as _asyncio
+    for _ in range(5):
+        await _asyncio.sleep(0)
+        if calls:
+            break
+    assert calls and calls[0][1]["role"] == "selected_option"
+    assert calls[0][1]["target_bars"] == 75
+
+
+async def test_create_task_failure_closes_coroutine_and_does_not_overwrite_newer_upgrade(monkeypatch, recwarn) -> None:
+    r = _runner_for_scheduling()
+    async def _ensurer(symbol, **kw):
+        raise AssertionError("callback must not run when scheduling fails")
+    r.set_runtime_history_ensurer(_ensurer)
+    r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
+    r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
+
+    class _Loop:
+        def create_task(self, _coro):
+            # Simulate a concurrent stronger same-target upgrade that wins before
+            # rollback executes; rollback must not overwrite this role marker.
+            r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
+            r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "recovery_or_open_position"
+            raise RuntimeError("create_task boom")
+
+    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.asyncio.get_running_loop", lambda: _Loop())
+    scheduled = r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="fail", required_bars=30)
+
+    assert scheduled is False
+    assert r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] == 30
+    assert r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] == "recovery_or_open_position"
+    assert [w for w in recwarn if "was never awaited" in str(w.message)] == []
