@@ -255,3 +255,19 @@ def test_selected_option_prewarm_reseeds_indicator_from_datahub_result(monkeypat
     r._request_selected_option_history_prewarm(symbol, bars_before=0, required_bars=5)
 
     assert len(r._indicator_engine.get_history(symbol)) >= 5
+
+
+def test_runner_sync_history_from_mdm_is_canonical_transition() -> None:
+    r = _runner()
+    r._normalize_symbol = lambda s: s
+    r._symbol_history = {}
+    r._indicator_engine = IndicatorEngine()
+    r._set_symbol_hydration_state = lambda _s, st: st
+    r._seed_pipeline_store = lambda _s: None
+    r._seed_candle_engine_from_history = lambda _s: None
+    r._get_mdm_bars = lambda _symbol, _limit: _bars(5)
+    result = r.sync_history_from_mdm('NSE:NIFTY', required_bars=5, reason='test', role='spot_context')
+    assert result.success is True
+    assert result.mdm_bars == 5
+    assert result.runner_bars >= 5
+    assert result.indicator_bars >= 5

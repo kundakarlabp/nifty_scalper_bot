@@ -55,42 +55,35 @@ def test_runner_reseed_history_from_bars_sets_indicator_ready() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_selected_options_hydrated_prefers_reseed_path() -> None:
+async def test_ensure_selected_options_hydrated_uses_canonical_sync() -> None:
     symbol = 'NFO:NIFTY26MAY23300CE'
-    base = datetime(2026, 5, 1, 3, 45, tzinfo=timezone.utc)
-    mdm_bars = _make_bars(symbol, 30, base)
 
     class RunnerStub:
         def __init__(self) -> None:
-            self._indicator_engine = SimpleNamespace(get_history=lambda _s: list(range(5)))
-            self.reseed_calls: list[tuple[str, int, int]] = []
-            self._current = 5
+            self.sync_calls: list[tuple[str, int, str]] = []
 
-        def reseed_history_from_bars(self, sym: str, bars: list[dict[str, object]], source: str, min_bars: int) -> int:
-            self.reseed_calls.append((sym, len(bars), min_bars))
-            self._current = len(bars)
-            self._indicator_engine = SimpleNamespace(get_history=lambda _s: list(range(self._current)))
-            return self._current
+        def sync_history_from_mdm(self, sym: str, *, required_bars: int, reason: str, role: str | None = None, request_if_short: bool = False):
+            self.sync_calls.append((sym, required_bars, role or ''))
+            return SimpleNamespace(runner_bars=required_bars, indicator_bars=required_bars, success=True, failure_reason=None)
 
     class MdmStub:
         def __init__(self) -> None:
-            self.hydrate_calls = 0
+            self.ensure_calls = 0
 
-        async def hydrate_symbol_history(self, *args, **kwargs) -> None:
-            self.hydrate_calls += 1
+        async def ensure_history(self, *args, **kwargs):
+            self.ensure_calls += 1
+            return SimpleNamespace(failure_reason=None, minimum_ready=True, target_ready=True, fetched_rows=30, accepted_rows=30)
 
         def get_ohlc_bars(self, _sym: str, limit: int | None = None):
-            return list(mdm_bars[: limit or len(mdm_bars)])
+            return [object()] * 30
 
     runner = RunnerStub()
     mdm = MdmStub()
     ctx = SimpleNamespace(market_data_manager=mdm, strategy_runner=runner)
     await app._ensure_selected_options_hydrated(ctx, symbol, None, 30, 'test')
 
-    assert runner.reseed_calls
-    assert runner.reseed_calls[0][0] == symbol
-    assert runner.reseed_calls[0][1] >= 30
-    assert runner.reseed_calls[0][2] == 30
+    assert mdm.ensure_calls == 1
+    assert runner.sync_calls == [(symbol, 30, 'selected_option')]
 
 
 def test_runner_on_tick_safe_caches_last_tick() -> None:

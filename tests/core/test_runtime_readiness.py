@@ -6,8 +6,9 @@ class Runner:
     def __init__(self):
         self._indicator_engine = SimpleNamespace(get_history=lambda s: self.hist.get(s, []))
         self.hist = {}
-    def ingest_historical_bar(self, bar):
-        self.hist.setdefault(bar['symbol'], []).append(bar)
+    def sync_history_from_mdm(self, sym, *, required_bars, reason, role=None, request_if_short=False):
+        self.hist[sym] = [object()] * required_bars
+        return SimpleNamespace(runner_bars=required_bars, indicator_bars=required_bars, success=True, failure_reason=None)
     def set_runtime_readiness(self, **kwargs):
         pass
 
@@ -19,8 +20,10 @@ class MDM:
         return v[-limit:] if limit else v
     def get_symbol_snapshot(self,s):
         return {'ltp':1}
-    async def hydrate_symbol_history(self, sym, **kwargs):
-        self.store[sym]=[{'open':1,'high':1,'low':1,'close':1,'volume':1} for _ in range(10)]
+    async def ensure_history(self, sym, **kwargs):
+        bars = kwargs.get('target_bars') or kwargs.get('required_bars') or 30
+        self.store[sym]=[{'open':1,'high':1,'low':1,'close':1,'volume':1} for _ in range(bars)]
+        return SimpleNamespace(minimum_ready=True, target_ready=True, fetched_rows=bars, accepted_rows=bars, failure_reason=None)
     def update_hydration_status(self,s,b):
         pass
 

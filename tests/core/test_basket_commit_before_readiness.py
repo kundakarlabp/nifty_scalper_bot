@@ -298,9 +298,9 @@ async def test_readiness_syncs_selected_option_runner_history_from_mdm_and_desir
             self.runtime_payloads = []
             self._indicator_engine = SimpleNamespace(get_history=lambda sym: [object()] * self.counts.get(sym, 0))
 
-        def reseed_history_from_bars(self, sym, bars, source, min_bars):
-            self.counts[sym] = max(len(bars), min_bars)
-            return self.counts[sym]
+        def sync_history_from_mdm(self, sym, *, required_bars, reason, role=None, request_if_short=False):
+            self.counts[sym] = max(self.counts.get(sym, 0), required_bars)
+            return SimpleNamespace(runner_bars=self.counts[sym], indicator_bars=self.counts[sym], success=True, failure_reason=None)
 
         def set_runtime_readiness(self, **kwargs):
             self.runtime_payloads.append(kwargs)
@@ -317,6 +317,9 @@ async def test_readiness_syncs_selected_option_runner_history_from_mdm_and_desir
         def get_ohlc_bars(self, sym, limit=None):
             bars = list(base_bars)
             return bars[-limit:] if limit else bars
+
+        async def ensure_history(self, *args, **kwargs):
+            return SimpleNamespace(minimum_ready=True, target_ready=True, fetched_rows=0, accepted_rows=0, failure_reason=None)
 
         async def hydrate_symbol_history(self, *args, **kwargs):
             raise AssertionError("MDM already has enough bars; broker hydration should not be called")
@@ -474,18 +477,23 @@ async def test_context_hydration_uses_runner_required_bars(monkeypatch, caplog):
         def get_ohlc_bars(self, symbol, limit=None):
             data = self.store.get(symbol, [])
             return data[-limit:] if limit else data
-        async def hydrate_symbol_history(self, symbol, **kwargs):
-            requested.append((symbol, kwargs['max_bars']))
+        async def ensure_history(self, symbol, **kwargs):
+            requested.append((symbol, kwargs['target_bars']))
             self.store[symbol] = list(bars)
-            return self.store.get(symbol, [])
+            return SimpleNamespace(minimum_ready=True, target_ready=True, fetched_rows=len(bars), accepted_rows=len(bars), failure_reason=None)
         def hydrate_active_contract_basket(self, basket):
             return {'hard_ready': True, 'missing': []}
 
     engine = IndicatorEngine()
+    def _sync(symbol, *, required_bars, reason, role=None, request_if_short=False):
+        rows = ctx.market_data_manager.get_ohlc_bars(symbol, limit=required_bars)
+        count = engine.replace_history(symbol, rows, source=reason, min_bars=required_bars)
+        return SimpleNamespace(runner_bars=count, indicator_bars=count, success=count >= required_bars, failure_reason=None)
+
     runner = SimpleNamespace(
         _context_required_bars=50,
         _indicator_engine=engine,
-        reseed_history_from_bars=lambda symbol, rows, **kwargs: len(rows) if engine.replace_history(symbol, rows, **kwargs) else 0,
+        sync_history_from_mdm=_sync,
         set_runtime_readiness=lambda **kwargs: None,
         is_running=True,
     )
