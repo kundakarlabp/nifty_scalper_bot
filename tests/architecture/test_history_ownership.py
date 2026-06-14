@@ -5,11 +5,10 @@ These tests are written as ``async def`` deliberately. The repository conftest's
 plain sync test bodies; writing the guards as coroutines guarantees their
 assertions actually run instead of silently passing.
 
-Broker historical-data access is allow-listed to the real architecture: the
+Broker historical-data access is allow-listed to the final architecture: the
 canonical owner (MarketDataManager) plus the broker adapter that defines the
-raw client method, and the known legacy ``data/source.py`` fetch path (tracked
-for removal). The allowlist is intentionally explicit so a NEW unexpected caller
-fails the guard.
+raw client method. The allowlist is intentionally explicit so a NEW unexpected
+caller fails the guard.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ SRC = ROOT / "src" / "nifty_scalper_bot"
 BROKER_HISTORY_ALLOWLIST = {
     "src/nifty_scalper_bot/data/market_data_manager.py",
     "src/nifty_scalper_bot/data/rest/zerodha_client.py",
-    "src/nifty_scalper_bot/data/source.py",
 }
 
 HYDRATION_FORBIDDEN_DIRS = ("execution", "notifications")
@@ -120,7 +118,7 @@ async def test_canonical_readiness_function_exists_and_is_pure() -> None:
 def _func_source(path: Path, func_name: str) -> str:
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
             return ast.get_source_segment(path.read_text(), node) or ""
     return ""
 
@@ -187,3 +185,44 @@ async def test_request_mdm_hydration_is_thin_canonical_delegate() -> None:
     if src:
         assert "_schedule_runtime_history_ensure" in src
         assert "request_hydration" not in src.replace("request_hydration; routes", "")
+
+
+async def test_runtime_history_ensurer_callback_contract_is_explicit() -> None:
+    text = (SRC / "core" / "app.py").read_text()
+    tree = ast.parse(text)
+    funcs = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_runtime_history_ensurer"]
+    assert len(funcs) == 1
+    fn = funcs[0]
+    assert fn.args.vararg is None
+    assert fn.args.kwarg is None, "production runtime history ensurer must not accept **kwargs"
+    assert [a.arg for a in fn.args.args] == ["symbol"]
+    assert [a.arg for a in fn.args.kwonlyargs] == ["role", "phase", "reason", "required_bars", "target_bars"]
+
+
+async def test_only_one_production_history_ensurer_injection_point() -> None:
+    text = (SRC / "core" / "app.py").read_text()
+    assert text.count("set_runtime_history_ensurer(") == 1
+    assert "CANONICAL_HISTORY_ENSURER_INJECTION_FAILED" in text
+    assert "LOGGER.error" in text[text.index("CANONICAL_HISTORY_ENSURER_INJECTION_FAILED") - 400:]
+
+
+async def test_mdm_readiness_concepts_are_explicit_and_separate() -> None:
+    text = (SRC / "data" / "market_data_manager.py").read_text()
+    assert "def is_tick_ready" in text
+    assert "def is_ohlc_ready" in text
+    assert "def is_market_data_ready" in text
+    wait_src = _func_source(SRC / "data" / "market_data_manager.py", "wait_until_ready")
+    assert "len(self._ohlc" not in wait_src
+    assert "len(self._raw_tick_history" in wait_src
+
+
+async def test_historical_bar_ingestion_does_not_write_raw_tick_history() -> None:
+    src = _func_source(SRC / "data" / "market_data_manager.py", "ingest_historical_bar")
+    assert "_ohlc" in src
+    assert "_raw_tick_history[symbol].append" not in src
+
+
+async def test_data_source_no_longer_calls_broker_historical_data() -> None:
+    text = (SRC / "data" / "source.py").read_text()
+    assert ".historical_data(" not in text
+    assert "MarketDataManager.ensure_history" in text

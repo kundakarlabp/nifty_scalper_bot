@@ -831,7 +831,8 @@ class MarketDataManager:
                 "timestamp": ts.isoformat(),
                 "source": "historical",
             }
-            self._raw_tick_history[symbol].append(dict(payload))
+            # Historical OHLC belongs only in the canonical candle store.
+            # _raw_tick_history is reserved for raw/live tick payloads.
             self._ohlc[self._bar_symbol_key(symbol)].append(dict(payload))
             if isinstance(ts, datetime):
                 self._last_historical_ts[symbol] = ts.timestamp()
@@ -4082,11 +4083,26 @@ class MarketDataManager:
                 "Failure in update_hydration_status: %s", exc, exc_info=exc
             )
 
-    def is_symbol_ready(self, symbol: str) -> bool:
-        """Args: symbol; Returns: bool; Raises: none."""
+    def is_tick_ready(self, symbol: str) -> bool:
+        """Return live/raw tick readiness for a symbol; OHLC bars do not count."""
         normalized = normalize_symbol(str(symbol or ""))
         with self._lock:
             return len(self._raw_tick_history.get(normalized, ())) >= self._min_required_bars
+
+    def is_ohlc_ready(self, symbol: str, required_bars: int | None = None) -> bool:
+        """Return canonical OHLC readiness for a symbol; raw ticks do not count."""
+        normalized = normalize_symbol(str(symbol or ""))
+        needed = max(1, int(required_bars if required_bars is not None else self._min_required_bars))
+        with self._lock:
+            return len(self._ohlc.get(self._bar_symbol_key(normalized), ())) >= needed
+
+    def is_market_data_ready(self, symbol: str) -> bool:
+        """Return live-market readiness: raw ticks and canonical OHLC are both ready."""
+        return self.is_tick_ready(symbol) and self.is_ohlc_ready(symbol)
+
+    def is_symbol_ready(self, symbol: str) -> bool:
+        """Deprecated: raw/live tick readiness only; use is_tick_ready/is_ohlc_ready."""
+        return self.is_tick_ready(symbol)
 
     def is_ready(self) -> bool:
         """Args: none; Returns: bool; Raises: none."""
@@ -4094,10 +4110,7 @@ class MarketDataManager:
             active = sorted(self._active_subscribed_symbols)
             if not active:
                 return False
-            return all(
-                len(self._raw_tick_history.get(symbol, ())) >= self._min_required_bars
-                for symbol in active
-            )
+        return all(self.is_tick_ready(symbol) for symbol in active)
 
     async def wait_until_ready(self, timeout: float = 30.0) -> None:
         """Args: timeout; Returns: None; Raises: None."""
@@ -4111,11 +4124,10 @@ class MarketDataManager:
             with self._lock:
                 subscribed_symbols = sorted(self._active_subscribed_symbols)
                 min_bars = self._min_required_bars
+                # Startup/live data readiness is raw tick readiness.  Historical
+                # OHLC readiness is checked separately by ensure_history/app gates.
                 bars = {
-                    symbol: max(
-                        len(self._raw_tick_history.get(symbol, ())),
-                        len(self._ohlc.get(self._bar_symbol_key(symbol), ())),
-                    )
+                    symbol: len(self._raw_tick_history.get(symbol, ()))
                     for symbol in subscribed_symbols
                 }
             requirements = dict(self._readiness_requirements)

@@ -5883,13 +5883,40 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # Spec §4: inject the canonical hydration callback so Runner prewarm routes
     # through the single orchestration path instead of its own reseed lifecycle.
     # The closure binds ctx here in app.py; Runner never imports app (no cycle).
-    async def _runtime_history_ensurer(symbol: str, **kwargs: Any) -> Any:
-        return await ensure_symbol_runtime_history(ctx, symbol, **kwargs)
+    async def _runtime_history_ensurer(
+        symbol: str,
+        *,
+        role: str,
+        phase: str,
+        reason: str,
+        required_bars: int,
+        target_bars: int | None = None,
+    ) -> RuntimeHistoryResult:
+        return await ensure_symbol_runtime_history(
+            ctx,
+            symbol,
+            role=role,
+            phase=phase,
+            reason=reason,
+            required_bars=required_bars,
+            target_bars=target_bars,
+        )
 
     try:
         strategy_runner.set_runtime_history_ensurer(_runtime_history_ensurer)
-    except Exception:  # pragma: no cover - defensive
-        LOGGER.debug("strategy_runner lacks set_runtime_history_ensurer", exc_info=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        setattr(ctx, "canonical_history_ensurer_injection_failed", True)
+        LOGGER.error(
+            "CANONICAL_HISTORY_ENSURER_INJECTION_FAILED exception_type=%s exception_message=%s",
+            type(exc).__name__,
+            str(exc),
+            extra={
+                "event": "CANONICAL_HISTORY_ENSURER_INJECTION_FAILED",
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+            },
+            exc_info=exc,
+        )
     runtime_selfchecker = RuntimeSelfChecker(ctx)
     ctx.selfchecker = runtime_selfchecker
     try:
