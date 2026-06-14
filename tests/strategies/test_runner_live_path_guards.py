@@ -678,6 +678,8 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> No
     runner._selected_option_prewarm_last = {}
     runner._selected_option_prewarm_inflight = set()
     runner._selected_option_prewarm_cooldown_s = 0.0
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = None
     runner._data_hub = SimpleNamespace(hydrate_symbol_history=lambda *a, **k: [1, 2, 3, 4, 5])
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t1")
@@ -685,43 +687,49 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> No
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
     assert rec.success is True
     assert rec.bars_after == 5
-    assert rec.source == "data_hub_hydrate"
+    assert rec.source == "selected_option_history_prewarm"
 
 
-@pytest.mark.asyncio
-async def test_selected_option_prewarm_sync_hydrator_runs_off_event_loop() -> None:
+async def test_prewarm_uses_injected_canonical_callback_not_datahub() -> None:
     runner = _build_runner()
     runner._indicator_engine = SimpleNamespace(get_history=lambda _s: [1, 2, 3])
     runner._selected_option_prewarm_last = {}
     runner._selected_option_prewarm_inflight = set()
     runner._selected_option_prewarm_cooldown_s = 0.0
-    import threading
-    called_thread = {"name": ""}
-    def _hydrate(*_a, **_k):
-        called_thread["name"] = threading.current_thread().name
-        return [1, 2, 3]
-    runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = None
+    called = {"ensurer": 0, "role": None}
+    async def _ensurer(symbol, *, role, phase, reason, required_bars=None, target_bars=None):
+        called["ensurer"] += 1
+        called["role"] = role
+        return SimpleNamespace(minimum_ready=True, mdm_bars=60, runner_bars=60, indicator_bars=60, hydration=None)
+    runner.set_runtime_history_ensurer(_ensurer)
+    # DataHub hydrate must NOT be called by prewarm anymore.
+    def _boom(*_a, **_k):
+        raise AssertionError("prewarm must not call DataHub.hydrate_symbol_history")
+    runner._data_hub = SimpleNamespace(hydrate_symbol_history=_boom)
     runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t2")
-    assert await _wait_until_async(lambda: bool(called_thread["name"]))
-    assert called_thread["name"] != threading.current_thread().name
+    assert await _wait_until_async(lambda: called["ensurer"] >= 1)
+    assert called["role"] == "selected_option"
 
 
-@pytest.mark.asyncio
-async def test_selected_option_prewarm_accepts_async_hydrator_list_result(caplog) -> None:
+async def test_prewarm_missing_callback_fails_safe_no_fallback(caplog) -> None:
     runner = _build_runner()
-    runner._logger = logging.getLogger("test.runner.prewarm.async")
+    runner._logger = logging.getLogger("test.runner.prewarm.missing")
     runner._indicator_engine = SimpleNamespace(get_history=lambda _s: [1, 2, 3])
     runner._selected_option_prewarm_last = {}
     runner._selected_option_prewarm_inflight = set()
     runner._selected_option_prewarm_cooldown_s = 0.0
-    async def _hydrate(*_a, **_k):
-        return [1, 2, 3, 4, 5]
-    runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)
-    with caplog.at_level("INFO"):
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = None
+    runner._runtime_history_ensurer = None  # not injected
+    def _boom(*_a, **_k):
+        raise AssertionError("missing callback must NOT fall back to DataHub")
+    runner._data_hub = SimpleNamespace(hydrate_symbol_history=_boom)
+    with caplog.at_level("WARNING"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t3")
-        assert await _wait_until_async(lambda: "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight)
-    rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
-    assert rec.success is True
+    assert any(getattr(r, "event", "") == "CANONICAL_HISTORY_ENSURER_MISSING" for r in caplog.records)
+    assert "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight
 
 
 def test_atr_fallback_used_for_insufficient_bars() -> None:

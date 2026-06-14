@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Option
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
-from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 from nifty_scalper_bot.utils.symbols import canonical
 from nifty_scalper_bot.utils.serialization import to_json_safe
@@ -152,7 +151,6 @@ class DataHub:
         self._quote_update_versions: dict[str, int] = defaultdict(int)
         self._last_listener_error_log_ts = 0.0
         self._listener_error_streak = 0
-        self._history_cache: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
         self._iv_cache: Dict[str, float] = {}
         self._oi_cache: Dict[str, float] = {}
         self._greeks_cache: Dict[str, dict[str, float]] = {}
@@ -1785,47 +1783,74 @@ class DataHub:
         *,
         interval: str = "minute",
         days: int = 2,
-        max_bars: int = 300,
+        required_bars: int | None = None,
+        target_bars: int | None = None,
+        max_bars: int | None = None,
         reason: str = "datahub",
     ) -> list[dict[str, Any]]:
-        """Delegate symbol hydration to MDM. Args: symbol/interval/days/max_bars/reason. Returns: rows. Raises: none."""
-        mdm_fn = getattr(self._mdm, "hydrate_symbol_history", None)
-        if callable(mdm_fn):
-            rows = await mdm_fn(
-                symbol,
-                interval=interval,
-                days=days,
-                max_bars=max_bars,
-                reason=reason,
-            )
-            if rows:
-                self._touch_warm_symbol_cache(symbol)
-            return rows
-        rows = await self.fetch_history(symbol, interval, days)
-        return list(rows or [])[-max_bars:]
+        """Compatibility facade: delegate historical hydration to canonical MDM owner.
 
-    async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
+        Legacy max_bars is translated as the target ceiling/explicit target, NOT
+        as the operational minimum. required_bars stays a modest minimum clamped
+        to <= target so an explicit deep target (e.g. 300) is preserved while a
+        compatibility caller does not force 300 as the readiness requirement.
+        """
+        ensure = getattr(self._mdm, "ensure_history", None)
+        if not callable(ensure):
+            LOGGER.warning("DATAHUB_HISTORY_CANONICAL_OWNER_MISSING symbol=%s reason=%s", symbol, reason)
+            return []
+        default_target = int(os.getenv("DATAHUB_DEFAULT_HISTORY_TARGET", "60") or 60)
+        default_required = int(os.getenv("DATAHUB_DEFAULT_REQUIRED_BARS", "30") or 30)
+        target = max(1, int(target_bars) if target_bars else (int(max_bars) if max_bars else default_target))
+        required = min(int(required_bars) if required_bars else default_required, target)
+        result = await ensure(
+            symbol,
+            interval=interval,
+            days=days,
+            required_bars=required,
+            target_bars=target,
+            reason=reason,
+        )
+        rows = self.get_ohlc_bars(result.symbol, limit=target)
+        if rows:
+            self._touch_warm_symbol_cache(symbol)
+        return rows
+
+    async def fetch_history(
+        self,
+        symbol: str,
+        interval: str,
+        days: int = 3,
+        *,
+        required_bars: int | None = None,
+        target_bars: int | None = None,
+        force_refresh: bool = False,
+    ) -> list[dict]:
+        """Compatibility facade over MDM.ensure_history; DataHub stores no history.
+
+        days controls only the broker lookback window. The readiness target is
+        target_bars when supplied, else a modest configurable default — never
+        days*375. required_bars is an operational minimum, clamped to <= target.
+        """
         normalized = self._canonical_quote_symbol(symbol)
-        key = (normalized, str(interval or "minute").lower(), int(days or 0))
-        mdm_fn = getattr(self._mdm, "fetch_history", None)
-        if not callable(mdm_fn):
-            return [dict(row) for row in self._history_cache.get(key, [])]
-        try:
-            rows = await mdm_fn(normalized, interval, days)
-        except Exception:  # noqa: BLE001
-            return [dict(row) for row in self._history_cache.get(key, [])]
-        normalized_rows = self._normalize_history_rows(normalized, rows)
-        if normalized_rows:
-            self._history_cache[key] = normalized_rows
-        return [dict(row) for row in self._history_cache.get(key, [])]
-
-    def _normalize_history_rows(self, symbol: str, rows: Iterable[Any]) -> list[dict[str, Any]]:
-        normalized_rows: list[dict[str, Any]] = []
-        for row in rows or []:
-            bar = normalize_history_row(symbol, row, source="historical")
-            if bar is not None:
-                normalized_rows.append(bar)
-        return normalized_rows
+        ensure = getattr(self._mdm, "ensure_history", None)
+        if not callable(ensure):
+            LOGGER.warning("DATAHUB_HISTORY_CANONICAL_OWNER_MISSING symbol=%s reason=fetch_history", normalized)
+            return []
+        default_target = int(os.getenv("DATAHUB_DEFAULT_HISTORY_TARGET", "60") or 60)
+        default_required = int(os.getenv("DATAHUB_DEFAULT_REQUIRED_BARS", "30") or 30)
+        target = max(1, int(target_bars) if target_bars else default_target)
+        required = min(int(required_bars) if required_bars else default_required, target)
+        result = await ensure(
+            normalized,
+            interval=interval,
+            days=days,
+            required_bars=required,
+            target_bars=target,
+            reason="datahub_fetch_history_compat",
+            force=force_refresh,
+        )
+        return self.get_ohlc_bars(result.symbol, limit=target)
 
     def get_indicator(self, symbol: str, name: str) -> Optional[float]:
         mdm_fn = getattr(self._mdm, "get_indicator", None)
