@@ -23,7 +23,8 @@ def _runner(rows: list[dict] | None = None) -> StrategyRunner:
     r._seed_pipeline_store = lambda *_a, **_k: None
     r._seed_candle_engine_from_history = lambda *_a, **_k: None
     r._active_symbols = set(); r._tracked_symbols = set(); r._data_phase = {}; r._last_bar_ts = {}
-    r._runtime_history_ensure_inflight = set()
+    r._runtime_history_ensure_inflight = {}
+    r._runtime_history_ensure_roles = {}
     r._hydration_attempted_symbols = set()
     r._last_hydration_reason_by_symbol = {}
     r._history_role_for_symbol = lambda _s: "spot_context"
@@ -97,7 +98,8 @@ def _runner_for_scheduling():
     r._indicator_engine = IndicatorEngine()
     r._get_mdm_bars = lambda _s, limit: []  # cold -> short -> schedule
     r._set_symbol_hydration_state = lambda *_a, **_k: None
-    r._runtime_history_ensure_inflight = set()
+    r._runtime_history_ensure_inflight = {}
+    r._runtime_history_ensure_roles = {}
     r._hydration_attempted_symbols = set()
     r._last_hydration_reason_by_symbol = {}
     r._history_role_for_symbol = lambda _s: "selected_option"
@@ -145,7 +147,8 @@ async def test_duplicate_scheduling_suppressed() -> None:
         n["count"] += 1
     r.set_runtime_history_ensurer(_ensurer)
     # pre-mark inflight to simulate an active request
-    r._runtime_history_ensure_inflight.add("NFO:NIFTY26JUN24000CE")
+    r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
+    r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "selected_option"
     scheduled = r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="t", required_bars=30)
     assert scheduled is True  # already inflight counts as scheduled
     assert n["count"] == 0  # callback not invoked again

@@ -46,6 +46,7 @@ import pandas as pd
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import ActiveContractSelection, active_contract_selection_from_basket, extract_symbol_strike
 from nifty_scalper_bot.core.event_bus import EventBus
+from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
@@ -661,7 +662,8 @@ class StrategyRunner:
         # Runner-level dedupe for canonical history scheduling (not MDM's own
         # inflight map). Keyed by canonical symbol; added before scheduling,
         # removed in finally.
-        self._runtime_history_ensure_inflight: set[str] = set()
+        self._runtime_history_ensure_inflight: dict[str, int] = {}
+        self._runtime_history_ensure_roles: dict[str, str | None] = {}
         self._datahub_registered_symbols: set[str] = set()
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
@@ -1449,84 +1451,74 @@ class StrategyRunner:
         required_bars: int,
         target_bars: int | None = None,
     ) -> bool:
-        """Schedule canonical history hydration via the injected runtime callback.
-
-        Args: symbol, role, phase, reason, required/target bars. Returns: True if
-        scheduled (or already inflight), False if no canonical callback. Raises:
-        none. Never blocks the synchronous Runner path and never calls DataHub
-        or MDM hydration directly.
-        """
+        """Schedule canonical target-aware runtime history hydration."""
         normalized = self._normalize_symbol(symbol)
         if not normalized:
             return False
         ensurer = getattr(self, "_runtime_history_ensurer", None)
         if not callable(ensurer):
-            log_throttled(
-                self._logger,
-                f"canonical_history_ensurer_missing:{normalized}",
-                f"CANONICAL_HISTORY_ENSURER_MISSING symbol={normalized} role={role}",
-                interval_sec=60.0,
-                level=logging.WARNING,
-                extra={"event": "CANONICAL_HISTORY_ENSURER_MISSING", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required_bars},
-            )
+            log_throttled(self._logger, f"canonical_history_ensurer_missing:{normalized}", f"CANONICAL_HISTORY_ENSURER_MISSING symbol={normalized} role={role}", interval_sec=60.0, level=logging.WARNING, extra={"event": "CANONICAL_HISTORY_ENSURER_MISSING", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required_bars})
             return False
+        requested_required = max(1, int(required_bars or 1))
+        requested_target = max(requested_required, int(target_bars) if target_bars is not None else requested_required)
         inflight = getattr(self, "_runtime_history_ensure_inflight", None)
-        if inflight is None:
-            inflight = set()
+        roles = getattr(self, "_runtime_history_ensure_roles", None)
+        if not isinstance(inflight, dict):
+            getattr(self._logger, "error", self._logger.warning)("CANONICAL_HISTORY_ENSURE_INVALID_STATE symbol=%s state_type=%s", normalized, type(inflight).__name__, extra={"event": "CANONICAL_HISTORY_ENSURE_INVALID_STATE", "symbol": normalized, "state_type": type(inflight).__name__})
+            inflight = {}
             self._runtime_history_ensure_inflight = inflight
-        if normalized in inflight:
-            log_throttled(
-                self._logger,
-                f"canonical_history_ensure_inflight:{normalized}",
-                f"CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT symbol={normalized} role={role}",
-                interval_sec=60.0,
-                level=logging.DEBUG,
-                extra={"event": "CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT", "symbol": normalized, "role": role},
-            )
+        if not isinstance(roles, dict):
+            roles = {}
+            self._runtime_history_ensure_roles = roles
+        previous_target = inflight.get(normalized)
+        previous_role = roles.get(normalized)
+        if previous_target is not None and previous_target >= requested_target:
+            log_throttled(self._logger, f"canonical_history_ensure_inflight:{normalized}", f"CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT symbol={normalized} role={role}", interval_sec=60.0, level=logging.DEBUG, extra={"event": "CANONICAL_HISTORY_ENSURE_ALREADY_INFLIGHT", "symbol": normalized, "role": role, "target_bars": requested_target, "inflight_target_bars": previous_target})
             return True
+        inflight[normalized] = requested_target
+        roles[normalized] = role
+
+        def restore_after_schedule_failure() -> None:
+            if inflight.get(normalized) != requested_target:
+                return
+            if previous_target is None:
+                inflight.pop(normalized, None)
+                roles.pop(normalized, None)
+            else:
+                inflight[normalized] = previous_target
+                if previous_role is None:
+                    roles.pop(normalized, None)
+                else:
+                    roles[normalized] = previous_role
+
         self._hydration_attempted_symbols.add(normalized)
         self._last_hydration_reason_by_symbol[normalized] = reason
-        tgt = int(target_bars) if target_bars is not None else int(required_bars)
-        self._logger.info(
-            "CANONICAL_HISTORY_ENSURE_SCHEDULED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s",
-            normalized, role, phase, reason, required_bars, tgt,
-            extra={"event": "CANONICAL_HISTORY_ENSURE_SCHEDULED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required_bars, "target_bars": tgt},
-        )
+        event = "CANONICAL_HISTORY_ENSURE_UPGRADED" if previous_target is not None else "CANONICAL_HISTORY_ENSURE_SCHEDULED"
+        self._logger.info("%s symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s previous_target_bars=%s", event, normalized, role, phase, reason, requested_required, requested_target, previous_target, extra={"event": event, "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": requested_required, "target_bars": requested_target, "previous_target_bars": previous_target})
 
         async def _run() -> None:
             try:
-                result = ensurer(
-                    symbol,
-                    role=role,
-                    phase=phase,
-                    reason=reason,
-                    required_bars=int(required_bars),
-                    target_bars=tgt,
-                )
+                result = ensurer(normalized, role=role, phase=phase, reason=reason, required_bars=requested_required, target_bars=requested_target)
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:  # noqa: BLE001 - orchestration boundary
-                self._logger.warning(
-                    "CANONICAL_HISTORY_ENSURE_FAILED symbol=%s role=%s reason=%s error_type=%s error=%s",
-                    normalized, role, reason, type(exc).__name__, exc,
-                    extra={"event": "CANONICAL_HISTORY_ENSURE_FAILED", "symbol": normalized, "role": role, "reason": reason, "error_type": type(exc).__name__, "error": str(exc)},
-                )
+                self._logger.warning("CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED symbol=%s role=%s reason=%s error_type=%s error=%s", normalized, role, reason, type(exc).__name__, exc, extra={"event": "CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED", "symbol": normalized, "role": role, "reason": reason, "error_type": type(exc).__name__, "error": str(exc)})
             finally:
-                self._runtime_history_ensure_inflight.discard(normalized)
+                if self._runtime_history_ensure_inflight.get(normalized) == requested_target:
+                    self._runtime_history_ensure_inflight.pop(normalized, None)
+                    self._runtime_history_ensure_roles.pop(normalized, None)
 
-        inflight.add(normalized)
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_run())
-        except RuntimeError:
-            threading.Thread(target=lambda: asyncio.run(_run()), name=f"runtime-history-ensure-{normalized}", daemon=True).start()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                thread = threading.Thread(target=lambda: asyncio.run(_run()), name=f"runtime-history-ensure-{normalized}", daemon=True)
+                thread.start()
+            else:
+                loop.create_task(_run())
         except Exception as exc:  # noqa: BLE001 - scheduling boundary
-            self._runtime_history_ensure_inflight.discard(normalized)
-            self._logger.warning(
-                "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED symbol=%s error_type=%s error=%s",
-                normalized, type(exc).__name__, exc,
-                extra={"event": "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED", "symbol": normalized, "error_type": type(exc).__name__, "error": str(exc)},
-            )
+            restore_after_schedule_failure()
+            self._logger.warning("CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED symbol=%s error_type=%s error=%s", normalized, type(exc).__name__, exc, extra={"event": "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED", "symbol": normalized, "error_type": type(exc).__name__, "error": str(exc)})
             return False
         return True
 
@@ -1550,21 +1542,13 @@ class StrategyRunner:
         only (no app import). Selected CE/PE -> selected_option; spot -> spot
         context; future -> futures_context; else option_context. Raises: none.
         """
-        norm = normalize_symbol(str(symbol or "")).upper()
-        if not norm:
-            return "option_context"
-        sel = {
-            normalize_symbol(str(getattr(self, "_active_selected_ce", "") or "")).upper(),
-            normalize_symbol(str(getattr(self, "_active_selected_pe", "") or "")).upper(),
-        }
-        if norm in sel:
-            return "selected_option"
-        if norm.startswith("NSE:") and "NIFTY" in norm:
-            return "spot_context"
-        fut = normalize_symbol(str(getattr(self, "_active_futures_symbol", "") or "")).upper()
-        if norm == fut or norm.endswith("FUT"):
-            return "futures_context"
-        return "option_context"
+        return resolve_symbol_history_role(
+            symbol=normalize_symbol(str(symbol or "")),
+            selected_ce=normalize_symbol(str(getattr(self, "_active_selected_ce", "") or "")),
+            selected_pe=normalize_symbol(str(getattr(self, "_active_selected_pe", "") or "")),
+            spot_symbol=getattr(self, "_spot_symbol", None),
+            futures_symbol=getattr(self, "_active_futures_symbol", None),
+        )
 
     def _hydrate_from_mdm_cache(self, symbol: str) -> int:
         """Thin compatibility delegate to the canonical Runner sync path.
@@ -1689,9 +1673,9 @@ class StrategyRunner:
         except Exception:  # noqa: BLE001 - state map is best-effort diagnostic
             pass
         self._logger.info(
-            "RUNNER_HISTORY_SYNC_COMPLETED symbol=%s role=%s reason=%s required_bars=%s mdm_after=%s runner_after=%s indicator_after=%s success=%s failure_reason=%s",
+            "RUNNER_HISTORY_SYNC_RESULT symbol=%s role=%s reason=%s required_bars=%s mdm_after=%s runner_after=%s indicator_after=%s success=%s failure_reason=%s",
             normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason,
-            extra={"event": "RUNNER_HISTORY_SYNC_COMPLETED", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
+            extra={"event": "RUNNER_HISTORY_SYNC_RESULT", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
         )
         if not success and request_if_short:
             self._schedule_runtime_history_ensure(

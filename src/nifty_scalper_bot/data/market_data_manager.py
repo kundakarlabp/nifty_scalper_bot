@@ -284,7 +284,7 @@ class MarketDataManager:
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
         self._bar_subscribers: list[Callable[[dict[str, Any]], None]] = []
         self._latest_ticks: dict[str, dict[str, Any]] = {}
-        self._history: dict[str, Deque[dict[str, Any]]] = defaultdict(
+        self._raw_tick_history: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self._cache_len)
         )
         self._token_by_symbol: dict[str, int] = {}
@@ -425,11 +425,11 @@ class MarketDataManager:
         )
         self._polling_policy = PollingPolicy.from_settings(settings)
         self._poll_error_last_log: dict[str, float] = {}
-        self._history_lock = asyncio.Lock()
-        self._history_inflight_lock = asyncio.Lock()
-        self._history_inflight: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]] = {}
+        self._canonical_history_lock = asyncio.Lock()
+        self._canonical_history_inflight_lock = asyncio.Lock()
+        self._canonical_history_inflight: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]] = {}
         self._last_history_request_ts = 0.0
-        self._history_min_interval_sec = float(
+        self._canonical_history_min_interval_sec = float(
             getattr(settings, "history_min_interval_sec", 1.2)
             if settings is not None
             else 1.2
@@ -831,7 +831,7 @@ class MarketDataManager:
                 "timestamp": ts.isoformat(),
                 "source": "historical",
             }
-            self._history[symbol].append(dict(payload))
+            self._raw_tick_history[symbol].append(dict(payload))
             self._ohlc[self._bar_symbol_key(symbol)].append(dict(payload))
             if isinstance(ts, datetime):
                 self._last_historical_ts[symbol] = ts.timestamp()
@@ -2999,7 +2999,7 @@ class MarketDataManager:
 
     def get_tick_history(self, symbol: str) -> list[dict[str, Any]]:
         with self._lock:
-            history = self._history.get(symbol)
+            history = self._raw_tick_history.get(symbol)
             if history is None:
                 return []
             return [dict(item) for item in history]
@@ -4086,7 +4086,7 @@ class MarketDataManager:
         """Args: symbol; Returns: bool; Raises: none."""
         normalized = normalize_symbol(str(symbol or ""))
         with self._lock:
-            return len(self._history.get(normalized, ())) >= self._min_required_bars
+            return len(self._raw_tick_history.get(normalized, ())) >= self._min_required_bars
 
     def is_ready(self) -> bool:
         """Args: none; Returns: bool; Raises: none."""
@@ -4095,7 +4095,7 @@ class MarketDataManager:
             if not active:
                 return False
             return all(
-                len(self._history.get(symbol, ())) >= self._min_required_bars
+                len(self._raw_tick_history.get(symbol, ())) >= self._min_required_bars
                 for symbol in active
             )
 
@@ -4113,7 +4113,7 @@ class MarketDataManager:
                 min_bars = self._min_required_bars
                 bars = {
                     symbol: max(
-                        len(self._history.get(symbol, ())),
+                        len(self._raw_tick_history.get(symbol, ())),
                         len(self._ohlc.get(self._bar_symbol_key(symbol), ())),
                     )
                     for symbol in subscribed_symbols
@@ -6001,7 +6001,7 @@ class MarketDataManager:
                     extra={"event": "mdm_history_append_rejected", "symbol": symbol},
                 )
                 return
-            self._history[symbol].append(cached_tick)
+            self._raw_tick_history[symbol].append(cached_tick)
             self._ticks_received_per_symbol[symbol] += 1
             self._symbols_with_tick.add(symbol)
             self._last_tick_wallclock[symbol] = float(now_wall)
@@ -6498,7 +6498,7 @@ class MarketDataManager:
                         if sym in self._active_subscribed_symbols
                     }
                     history_lengths = {
-                        sym: len(self._history.get(sym, ()))
+                        sym: len(self._raw_tick_history.get(sym, ()))
                         for sym in sorted(self._active_subscribed_symbols)
                     }
                     self._last_tick_rate_snapshot = dict(
@@ -7926,7 +7926,7 @@ class MarketDataManager:
                 self._latest_ticks.pop(symbol, None)
                 self._tick_cache.pop(symbol, None)
                 self._last_tick_snapshot.pop(symbol, None)
-                self._history.pop(symbol, None)
+                self._raw_tick_history.pop(symbol, None)
                 self._ohlc.pop(self._bar_symbol_key(symbol), None)
                 self._poll_bar_state.pop(symbol, None)
                 self._last_poll_bucket.pop(symbol, None)
@@ -8071,7 +8071,7 @@ class MarketDataManager:
                 self._subscribers.pop(old_canonical, None)
                 self._latest_ticks.pop(old_canonical, None)
                 self._tick_cache.pop(old_canonical, None)
-                self._history.pop(old_canonical, None)
+                self._raw_tick_history.pop(old_canonical, None)
                 self._ohlc.pop(self._bar_symbol_key(old_canonical), None)
                 self._last_tick_time.pop(old_canonical, None)
                 self._last_tick_wallclock.pop(old_canonical, None)
@@ -8153,7 +8153,7 @@ class MarketDataManager:
                 self._last_tick_source.get(canonical) or tick.get("source") or "unknown"
             ).lower()
             recent_cutoff = time.time() - 60.0
-            history = list(self._history.get(canonical, ()))
+            history = list(self._raw_tick_history.get(canonical, ()))
             real_ticks = sum(
                 1
                 for row in history
@@ -9521,6 +9521,24 @@ class MarketDataManager:
         """Normalize broker/DataHub OHLC row. Args: symbol/row/source. Returns: canonical bar or None. Raises: None."""
         return normalize_history_row(symbol, row, source=source)
 
+    @property
+    def _history(self) -> dict[str, Deque[dict[str, Any]]]:
+        """Deprecated compatibility alias for raw tick history, not OHLC history."""
+        return self._raw_tick_history
+
+    @_history.setter
+    def _history(self, value: dict[str, Deque[dict[str, Any]]]) -> None:
+        self._raw_tick_history = value
+
+    @property
+    def _history_inflight(self) -> dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]]:
+        """Deprecated compatibility alias for the canonical history coordinator."""
+        return self._canonical_history_inflight
+
+    @_history_inflight.setter
+    def _history_inflight(self, value: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]]) -> None:
+        self._canonical_history_inflight = value
+
     # -------------------------------------------------------------------------
     # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
     # -------------------------------------------------------------------------
@@ -9605,7 +9623,7 @@ class MarketDataManager:
             skip_reason = "minimum_cache_sufficient"
         if skip_reason:
             self._logger.info(
-                "HISTORY_ENSURE_SKIPPED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s skip_reason=%s minimum_ready=%s target_ready=%s",
+                "CANONICAL_HISTORY_FETCH_RESULT symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s skip_reason=%s minimum_ready=%s target_ready=%s",
                 normalized,
                 role,
                 phase,
@@ -9617,7 +9635,7 @@ class MarketDataManager:
                 cached_before >= required,
                 cached_before >= target,
                 extra={
-                    "event": "HISTORY_ENSURE_SKIPPED",
+                    "event": "CANONICAL_HISTORY_FETCH_RESULT",
                     "symbol": normalized,
                     "role": role,
                     "phase": phase,
@@ -9641,10 +9659,10 @@ class MarketDataManager:
                 accepted_rows=0,
             )
 
-        if not hasattr(self, "_history_inflight"):
-            self._history_inflight = {}
-        if not hasattr(self, "_history_inflight_lock"):
-            self._history_inflight_lock = asyncio.Lock()
+        if not hasattr(self, "_canonical_history_inflight"):
+            self._canonical_history_inflight = {}
+        if not hasattr(self, "_canonical_history_inflight_lock"):
+            self._canonical_history_inflight_lock = asyncio.Lock()
 
         async def _run_hydration(requested_bars: int, request_cached_before: int) -> HydrationResult:
             fetched_rows = 0
@@ -9659,14 +9677,14 @@ class MarketDataManager:
             except Exception as exc:  # noqa: BLE001 - broker/data boundary diagnostics
                 failure_reason = f"{type(exc).__name__}: {exc}"
                 self._logger.warning(
-                    "HISTORY_ENSURE_FAILED symbol=%s role=%s phase=%s reason=%s exception_type=%s exception_message=%s",
+                    "CANONICAL_HISTORY_FETCH_RESULT symbol=%s role=%s phase=%s reason=%s exception_type=%s exception_message=%s",
                     normalized,
                     role,
                     phase,
                     reason,
                     type(exc).__name__,
                     str(exc),
-                    extra={"event": "HISTORY_ENSURE_FAILED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "exception_type": type(exc).__name__, "exception_message": str(exc)},
                 )
             after = _cached_count()
             result = _result(
@@ -9680,7 +9698,7 @@ class MarketDataManager:
                 failure_reason=failure_reason,
             )
             self._logger.info(
-                "HISTORY_ENSURE_COMPLETED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s fetched_rows=%s accepted_rows=%s cached_after=%s minimum_ready=%s target_ready=%s failure_reason=%s",
+                "CANONICAL_HISTORY_FETCH_RESULT symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s fetched_rows=%s accepted_rows=%s cached_after=%s minimum_ready=%s target_ready=%s failure_reason=%s",
                 normalized,
                 role,
                 phase,
@@ -9694,7 +9712,7 @@ class MarketDataManager:
                 result.minimum_ready,
                 result.target_ready,
                 failure_reason,
-                extra={"event": "HISTORY_ENSURE_COMPLETED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": requested_bars, "cached_before": request_cached_before, "fetched_rows": fetched_rows, "accepted_rows": accepted_rows, "cached_after": after, "minimum_ready": result.minimum_ready, "target_ready": result.target_ready, "failure_reason": failure_reason},
+                extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": requested_bars, "cached_before": request_cached_before, "fetched_rows": fetched_rows, "accepted_rows": accepted_rows, "cached_after": after, "minimum_ready": result.minimum_ready, "target_ready": result.target_ready, "failure_reason": failure_reason},
             )
             return result
 
@@ -9710,15 +9728,15 @@ class MarketDataManager:
                 return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_any, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
             if not force and minimum_only and cached_now >= required:
                 return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_any, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
-            async with self._history_inflight_lock:
-                current = self._history_inflight.get(key)
+            async with self._canonical_history_inflight_lock:
+                current = self._canonical_history_inflight.get(key)
                 if current is not None and current[1].done():
-                    self._history_inflight.pop(key, None)
+                    self._canonical_history_inflight.pop(key, None)
                     current = None
                 if current is not None:
                     inflight_bars, inflight_task = current
                     self._logger.info(
-                        "HISTORY_ENSURE_JOINED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s inflight_bars=%s",
+                        "CANONICAL_HISTORY_FETCH_RESULT symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s inflight_bars=%s",
                         normalized,
                         role,
                         phase,
@@ -9726,11 +9744,11 @@ class MarketDataManager:
                         required,
                         target,
                         inflight_bars,
-                        extra={"event": "HISTORY_ENSURE_JOINED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "inflight_bars": inflight_bars},
+                        extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "inflight_bars": inflight_bars},
                     )
                 else:
                     self._logger.info(
-                        "HISTORY_ENSURE_REQUESTED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s",
+                        "CANONICAL_HISTORY_FETCH_RESULT symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s cached_before=%s",
                         normalized,
                         role,
                         phase,
@@ -9738,10 +9756,10 @@ class MarketDataManager:
                         required,
                         target,
                         cached_now,
-                        extra={"event": "HISTORY_ENSURE_REQUESTED", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "cached_before": cached_now},
+                        extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "cached_before": cached_now},
                     )
                     task = asyncio.create_task(_run_hydration(target, cached_now))
-                    self._history_inflight[key] = (target, task)
+                    self._canonical_history_inflight[key] = (target, task)
                     break
             try:
                 joined = await inflight_task
@@ -9752,10 +9770,10 @@ class MarketDataManager:
                 joined_failure = joined.failure_reason
             finally:
                 if inflight_task.done():
-                    async with self._history_inflight_lock:
-                        current = self._history_inflight.get(key)
+                    async with self._canonical_history_inflight_lock:
+                        current = self._canonical_history_inflight.get(key)
                         if current and current[1] is inflight_task:
-                            self._history_inflight.pop(key, None)
+                            self._canonical_history_inflight.pop(key, None)
             # If a larger/sufficient request completed, this caller only joined —
             # it never started a broker task itself (spec §7).
             if inflight_bars >= target:
@@ -9787,10 +9805,10 @@ class MarketDataManager:
                 )
             return result
         finally:
-            async with self._history_inflight_lock:
-                current = self._history_inflight.get(key)
+            async with self._canonical_history_inflight_lock:
+                current = self._canonical_history_inflight.get(key)
                 if current and current[1] is task:
-                    self._history_inflight.pop(key, None)
+                    self._canonical_history_inflight.pop(key, None)
 
     async def hydrate_symbol_history(
         self,
@@ -9919,9 +9937,14 @@ class MarketDataManager:
                 extra={"event": "HYDRATION_FETCH_ATTEMPT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "interval": interval, "attempt": attempt_name},
             )
             try:
-                async with self._history_lock:
+                lock = getattr(self, "_canonical_history_lock", None) or getattr(self, "_history_lock", None)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._canonical_history_lock = lock
+                min_interval = float(getattr(self, "_canonical_history_min_interval_sec", getattr(self, "_history_min_interval_sec", 0.0)) or 0.0)
+                async with lock:
                     now_mono = time.monotonic()
-                    wait = self._history_min_interval_sec - (now_mono - self._last_history_request_ts)
+                    wait = min_interval - (now_mono - self._last_history_request_ts)
                     if wait > 0:
                         await asyncio.sleep(wait)
                     self._last_history_request_ts = time.monotonic()
