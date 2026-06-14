@@ -101,3 +101,29 @@ async def test_runner_cold_indicator_warm_not_ready() -> None:
     r = app.compute_selected_option_history_readiness(ctx, "NFO:NIFTY2661623300CE", "NFO:NIFTY2661623300PE")
     assert r.both_ready is False
     assert r.blocker == "selected_option_history_cold"
+
+
+async def test_shared_role_resolver_spot_aliases_are_consistent() -> None:
+    from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role
+
+    aliases = ["NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"]
+    for configured in aliases:
+        for symbol in aliases:
+            assert resolve_symbol_history_role(symbol=symbol, spot_symbol=configured) == "spot_context"
+
+
+async def test_shared_role_resolver_keeps_selected_option_exact() -> None:
+    from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role
+
+    assert resolve_symbol_history_role(
+        symbol="NFO:NIFTY26JUN24000CE",
+        selected_ce="NFO:NIFTY26JUN24000CE",
+        selected_pe="NFO:NIFTY26JUN24000PE",
+        spot_symbol="NSE:NIFTY",
+    ) == "selected_option"
+    assert resolve_symbol_history_role(
+        symbol="NFO:NIFTY26JUN24100CE",
+        selected_ce="NFO:NIFTY26JUN24000CE",
+        selected_pe="NFO:NIFTY26JUN24000PE",
+        spot_symbol="NSE:NIFTY",
+    ) == "option_context"

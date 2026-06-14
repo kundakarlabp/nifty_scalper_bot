@@ -53,6 +53,8 @@ from nifty_scalper_bot.core.active_basket import (
     pick_atm_option_symbols_from_basket,
 )
 
+from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role as _shared_resolve_symbol_history_role
+
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
     RobustDataProvider,
@@ -4228,10 +4230,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     rate_limiter = _configure_rate_limiter(config.ratelimit)
     message_bus = MessageBus()
 
-    from nifty_scalper_bot.data.robust_provider import (
-        CircuitBreakerConfig,
-        RobustDataProvider,
-    )
+
 
     broker_client = ZerodhaKiteClient(
         api_key=config.broker.api_key,
@@ -7898,41 +7897,28 @@ def resolve_symbol_history_role(ctx: "BotContext", symbol: str) -> str:
     normalized before comparison; not every CE/PE is 'selected'. Raises: none.
     """
     runner = getattr(ctx, "strategy_runner", None)
-
-    def _n(value: Any) -> str:
-        s = str(value or "").strip().upper()
-        return s
-
-    norm = _n(symbol)
-    if not norm:
-        return "option_context"
-
-    selected = set()
     basket = getattr(ctx, "active_contract_basket", None)
-    for src_obj, attrs in ((basket, ("selected_ce", "selected_pe")), (runner, ("_active_selected_ce", "_active_selected_pe"))):
-        for attr in attrs:
-            val = _n(getattr(src_obj, attr, None))
-            if val:
-                selected.add(val)
-    if norm in selected:
-        return "selected_option"
 
-    spot = _n(getattr(ctx, "spot_symbol", None)) or _n(getattr(runner, "_spot_symbol", None))
-    if norm == spot or (norm.startswith("NSE:") and "NIFTY" in norm):
-        return "spot_context"
+    def _attr(obj: Any, name: str) -> Any:
+        if isinstance(obj, Mapping):
+            return obj.get(name)
+        return getattr(obj, name, None)
 
-    fut = _n(getattr(runner, "_active_futures_symbol", None)) or _n(getattr(ctx, "active_futures_symbol", None))
-    if norm == fut or norm.endswith("FUT"):
-        return "futures_context"
-
+    manager = getattr(ctx, "position_manager", None) or getattr(runner, "_position_manager", None)
+    open_symbols: list[str] = []
     try:
-        manager = getattr(ctx, "position_manager", None) or getattr(runner, "_position_manager", None)
-        open_syms = {_n(getattr(p, "symbol", p)) for p in (manager.get_open_positions() if manager else [])}
-        if norm in open_syms:
-            return "recovery_or_open_position"
+        if manager is not None and callable(getattr(manager, "get_open_positions", None)):
+            open_symbols = [str(getattr(p, "symbol", p)) for p in manager.get_open_positions()]
     except Exception:
-        pass
-    return "option_context"
+        open_symbols = []
+    return _shared_resolve_symbol_history_role(
+        symbol=symbol,
+        selected_ce=_attr(basket, "selected_ce") or getattr(runner, "_active_selected_ce", None),
+        selected_pe=_attr(basket, "selected_pe") or getattr(runner, "_active_selected_pe", None),
+        spot_symbol=getattr(ctx, "spot_symbol", None) or getattr(runner, "_spot_symbol", None) or "NSE:NIFTY",
+        futures_symbol=getattr(runner, "_active_futures_symbol", None) or getattr(ctx, "active_futures_symbol", None),
+        open_position_symbols=open_symbols,
+    )
 
 
 def compute_selected_option_history_readiness(
@@ -8115,7 +8101,22 @@ async def ensure_symbol_runtime_history(
     failure_reason: str | None = None
     if mdm is None or not callable(getattr(mdm, "ensure_history", None)):
         failure_reason = "mdm_ensure_history_missing"
-        return RuntimeHistoryResult(symbol, policy.role, policy.phase, reason, policy.required_bars, policy.target_bars, 0, 0, 0, False, False, False, None, failure_reason)
+        return RuntimeHistoryResult(
+            symbol=symbol,
+            role=policy.role,
+            phase=policy.phase,
+            reason=reason,
+            required_bars=policy.required_bars,
+            target_bars=policy.target_bars,
+            mdm_bars=0,
+            runner_bars=0,
+            indicator_bars=0,
+            minimum_ready=False,
+            target_ready=False,
+            sync_success=False,
+            hydration=None,
+            failure_reason=failure_reason,
+        )
     if policy.allow_broker_fetch:
         hydration = await mdm.ensure_history(
             symbol,
@@ -8156,15 +8157,31 @@ async def ensure_symbol_runtime_history(
         mdm_bars = 0
     runner_bars = int(getattr(sync_result, "runner_bars", 0) or 0)
     indicator_bars = int(getattr(sync_result, "indicator_bars", 0) or 0)
-    minimum_ready = bool(mdm_bars >= policy.required_bars and runner_bars >= policy.required_bars and indicator_bars >= policy.required_bars and failure_reason is None)
+    readiness = compute_history_readiness(symbol=symbol, role=policy.role, required_bars=policy.required_bars, mdm_bars=mdm_bars, runner_bars=runner_bars, indicator_bars=indicator_bars)
+    minimum_ready = readiness.minimum_ready and failure_reason is None
     target_ready = bool(mdm_bars >= policy.target_bars and failure_reason is None)
     sync_success = bool(getattr(sync_result, "success", False)) if policy.sync_runner else True
     LOGGER.info(
-        "HISTORY_READINESS_COMPUTED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s mdm_bars=%s runner_bars=%s indicator_bars=%s minimum_ready=%s target_ready=%s failure_reason=%s",
+        "CANONICAL_HISTORY_RESULT symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s mdm_bars=%s runner_bars=%s indicator_bars=%s minimum_ready=%s target_ready=%s failure_reason=%s",
         symbol, policy.role, policy.phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, failure_reason,
-        extra={"event": "HISTORY_READINESS_COMPUTED", "symbol": symbol, "role": policy.role, "phase": policy.phase, "reason": reason, "required_bars": policy.required_bars, "target_bars": policy.target_bars, "mdm_bars": mdm_bars, "runner_bars": runner_bars, "indicator_bars": indicator_bars, "minimum_ready": minimum_ready, "target_ready": target_ready, "failure_reason": failure_reason},
+        extra={"event": "CANONICAL_HISTORY_RESULT", "symbol": symbol, "role": policy.role, "phase": policy.phase, "reason": reason, "required_bars": policy.required_bars, "target_bars": policy.target_bars, "mdm_bars": mdm_bars, "runner_bars": runner_bars, "indicator_bars": indicator_bars, "minimum_ready": minimum_ready, "target_ready": target_ready, "failure_reason": failure_reason},
     )
-    return RuntimeHistoryResult(symbol, policy.role, policy.phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, sync_success, hydration, failure_reason)
+    return RuntimeHistoryResult(
+        symbol=symbol,
+        role=policy.role,
+        phase=policy.phase,
+        reason=reason,
+        required_bars=policy.required_bars,
+        target_bars=policy.target_bars,
+        mdm_bars=mdm_bars,
+        runner_bars=runner_bars,
+        indicator_bars=indicator_bars,
+        minimum_ready=minimum_ready,
+        target_ready=target_ready,
+        sync_success=sync_success,
+        hydration=hydration,
+        failure_reason=failure_reason,
+    )
 
 
 async def _ensure_context_history_hydrated(
