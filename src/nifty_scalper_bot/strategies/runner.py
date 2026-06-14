@@ -1400,13 +1400,26 @@ class StrategyRunner:
             self._symbol_history[normalized] = list(cached)
             self._restored_from_cache_symbols.add(normalized)
             self._logger.info("RUNNER_HISTORY_CACHE_RESTORED symbol=%s bars=%d", normalized, len(cached))
-        self._hydrate_from_mdm_cache(normalized)
+        self.sync_history_from_mdm(
+            normalized,
+            required_bars=self._required_bars_for_symbol(normalized),
+            reason="add_symbol",
+            role=self._symbol_role_for_runner(normalized),
+            request_if_short=True,
+        )
 
         self._logger.info("Tracking symbol %s", normalized)
 
     def _prehydrate_symbol_history(self, symbol: str) -> None:
-        """Hydrate startup candles from cache only. Args: symbol. Returns: None. Raises: None."""
-        self._hydrate_from_mdm_cache(symbol)
+        """Hydrate startup candles from canonical MDM cache only."""
+        normalized = self._normalize_symbol(symbol)
+        self.sync_history_from_mdm(
+            normalized or symbol,
+            required_bars=self._required_bars_for_symbol(normalized or symbol),
+            reason="prehydrate_symbol_history",
+            role=self._symbol_role_for_runner(normalized or symbol),
+            request_if_short=True,
+        )
 
     def _get_mdm_bars(self, symbol: str, limit: int) -> list[dict[str, Any]]:
         """Fetch cached bars from MDM/DataHub only. Args: symbol, limit. Returns: rows. Raises: None."""
@@ -1429,40 +1442,29 @@ class StrategyRunner:
         return []
 
     def _request_mdm_hydration(self, symbol: str, min_bars: int, *, reason: str = "runner_missing_bars") -> None:
-        """Compatibility alias that schedules canonical runtime history ensure."""
-        self._hydration_attempted_symbols.add(symbol)
-        self._last_hydration_reason_by_symbol[symbol] = reason
-        role = self._symbol_role_for_runner(symbol) if hasattr(self, "_symbol_role_for_runner") else None
-        scheduled = self._schedule_runtime_history_ensure(
+        """Deprecated alias: schedule canonical runtime history ensure."""
+        self._schedule_runtime_history_ensure(
             symbol,
-            role=role,
+            role=None,
             phase="runner_start",
             reason=reason,
             required_bars=max(1, int(min_bars or 1)),
             target_bars=max(1, int(min_bars or 1)),
         )
-        if not scheduled:
-            log_throttled(
-                self._logger,
-                f"runner_waiting_for_runtime_history_ensure:{symbol}",
-                f"RUNNER_WAITING_FOR_RUNTIME_HISTORY_ENSURE symbol={symbol} min_bars={min_bars}",
-                interval_sec=60.0,
-                level=logging.INFO,
-                extra={"event": "RUNNER_WAITING_FOR_RUNTIME_HISTORY_ENSURE", "symbol": symbol, "min_bars": min_bars, "reason": reason},
-            )
 
     def _hydrate_from_mdm_cache(self, symbol: str) -> int:
-        """Compatibility wrapper around canonical Runner history sync."""
+        """Deprecated alias: return newly synchronized bars from canonical sync."""
         normalized = self._normalize_symbol(symbol)
         target = self._required_bars_for_symbol(normalized) if normalized else self._required_candles
+        before = self._history_count_for_symbol(normalized or symbol)
         result = self.sync_history_from_mdm(
             normalized or symbol,
             required_bars=max(1, int(target or 1)),
             reason="mdm_cache_sync",
-            role=self._symbol_role_for_runner(normalized or symbol) if hasattr(self, "_symbol_role_for_runner") else None,
+            role=None,
             request_if_short=True,
         )
-        return result.indicator_bars
+        return max(0, int(result.indicator_bars or 0) - before)
 
     def _emit_history_hydration_trace(
         self,
@@ -1562,7 +1564,14 @@ class StrategyRunner:
             extra={"event": "RUNNER_HISTORY_SYNC_RESULT", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
         )
         if not success and request_if_short:
-            self._request_mdm_hydration(normalized, target, reason=reason)
+            self._schedule_runtime_history_ensure(
+                normalized,
+                role=role,
+                phase="runner_start",
+                reason=reason,
+                required_bars=target,
+                target_bars=target,
+            )
         return HistorySyncResult(normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason)
 
     def _sync_history_from_mdm_cache(
@@ -1580,7 +1589,7 @@ class StrategyRunner:
             symbol,
             required_bars=target,
             reason=source,
-            role=self._symbol_role_for_runner(symbol) if hasattr(self, "_symbol_role_for_runner") else None,
+            role=None,
             request_if_short=request_if_short,
         )
         return result.indicator_bars
@@ -1842,11 +1851,14 @@ class StrategyRunner:
                 # Already warm — skip sync and suppress duplicate_noop trace.
                 continue
             try:
-                after = self._sync_history_from_mdm_cache(
+                sync_result = self.sync_history_from_mdm(
                     ctx_symbol,
                     required_bars=self._context_required_bars,
-                    source=source,
+                    reason=source,
+                    role=self._symbol_role_for_runner(ctx_symbol),
+                    request_if_short=True,
                 )
+                after = int(sync_result.indicator_bars or 0)
                 if after < self._context_required_bars:
                     # _sync_history_from_mdm_cache already dispatched an async REST
                     # hydration request. On the first few cold passes that fetch is
@@ -1907,12 +1919,14 @@ class StrategyRunner:
             # permanently below the 30/50-bar readiness threshold (the rearm
             # loop retried forever without ever closing the gap).
             symbol_required = max(required, int(self._required_bars_for_symbol(option_symbol) or 0))
-            before = self._sync_history_from_mdm_cache(
+            sync_result = self.sync_history_from_mdm(
                 option_symbol,
                 required_bars=symbol_required,
-                source=f"{source}_option_cache_sync",
+                reason=f"{source}_option_cache_sync",
+                role=self._symbol_role_for_runner(option_symbol),
                 request_if_short=False,
             )
+            before = int(sync_result.indicator_bars or 0)
             if before < symbol_required:
                 self._request_selected_option_history_prewarm(
                     option_symbol,
@@ -4614,7 +4628,7 @@ class StrategyRunner:
                 and symbol not in self._gap_repair_inflight
             ):
                 self._gap_repair_inflight.add(symbol)
-                self._request_mdm_hydration(symbol, self._required_bars_for_symbol(symbol))
+                self._schedule_runtime_history_ensure(symbol, role=self._symbol_role_for_runner(symbol), phase="runner_start", reason="gap_repair", required_bars=self._required_bars_for_symbol(symbol), target_bars=self._required_bars_for_symbol(symbol))
         return repaired
 
     async def _refresh_gap_history_async(self, symbol: str) -> None:
@@ -4628,7 +4642,7 @@ class StrategyRunner:
                     with suppress(Exception):
                         self.ingest_historical_bar(row)
             else:
-                self._request_mdm_hydration(symbol, target)
+                self._schedule_runtime_history_ensure(symbol, role=self._symbol_role_for_runner(symbol), phase="runner_start", reason="history_refresh", required_bars=target, target_bars=target)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("gap_history_refresh_failed for %s: %s", symbol, exc)
         finally:
@@ -4647,7 +4661,7 @@ class StrategyRunner:
             "Condition met: historical_refresh_triggered",
             extra={"event": "historical_refresh_triggered", "symbol": symbol},
         )
-        self._request_mdm_hydration(symbol, self._required_bars_for_symbol(symbol))
+        self._schedule_runtime_history_ensure(symbol, role=self._symbol_role_for_runner(symbol), phase="runner_start", reason="history_refresh", required_bars=self._required_bars_for_symbol(symbol), target_bars=self._required_bars_for_symbol(symbol))
 
     def _emit_composite_reports(self) -> None:
         """Emit periodic system/strategy aggregate logs. Args: none; Returns: none; Raises: none."""
@@ -6746,10 +6760,10 @@ class StrategyRunner:
                             self._set_symbol_hydration_state(symbol, SymbolState.READY)
                         else:
                             self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-                            self._request_mdm_hydration(symbol, target)
+                            self._schedule_runtime_history_ensure(symbol, role=self._symbol_role_for_runner(symbol), phase="runner_start", reason="history_refresh", required_bars=target, target_bars=target)
                     else:
                         self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-                        self._request_mdm_hydration(symbol, target)
+                        self._schedule_runtime_history_ensure(symbol, role=self._symbol_role_for_runner(symbol), phase="runner_start", reason="history_refresh", required_bars=target, target_bars=target)
 
                 except Exception as e:
                     self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
@@ -6772,7 +6786,7 @@ class StrategyRunner:
             self.ingest_historical_bar(payload)
         if len(normalized) < min_bars:
             self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-            self._request_mdm_hydration(symbol, min_bars)
+            self._schedule_runtime_history_ensure(symbol, role=self._symbol_role_for_runner(symbol), phase="runner_start", reason="backfill_history", required_bars=min_bars, target_bars=min_bars)
             return []
         self._set_symbol_hydration_state(symbol, SymbolState.READY)
         return normalized
@@ -7666,7 +7680,6 @@ class StrategyRunner:
         if (now - last) < self._selected_option_prewarm_cooldown_s or symbol in self._selected_option_prewarm_inflight:
             return
         self._selected_option_prewarm_last[symbol] = now
-        self._selected_option_prewarm_inflight.add(symbol)
         self._logger.info(
             "%s symbol=%s bars_before=%s required_bars=%s",
             request_event,
@@ -7675,99 +7688,21 @@ class StrategyRunner:
             required_bars,
             extra={"event": request_event, "symbol": symbol, "bars_before": bars_before, "required_bars": required_bars, "trace_id": trace_id},
         )
-        hydrate = getattr(data_hub, "hydrate_symbol_history", None)
-        if not callable(hydrate):
-            self._selected_option_prewarm_inflight.discard(symbol)
-            return
-        policy = HistoryReadinessPolicy.from_env()
-        max_bars = max(required_bars, policy.smc_min_bars)
-        async def _do_prewarm() -> None:
-            success = False
-            bars_after = bars_before
-            reason = "selected_option_history_cold" if selected else "option_context_history_cold"
-            source = "selected_option_history_prewarm" if selected else "option_context_history_prewarm"
-            try:
-                kwargs = {
-                    "interval": "minute",
-                    "days": 2,
-                    "max_bars": max_bars,
-                    "reason": reason,
-                }
-                if inspect.iscoroutinefunction(hydrate):
-                    result = await hydrate(symbol, **kwargs)
-                else:
-                    result = await asyncio.to_thread(hydrate, symbol, **kwargs)
-                if inspect.isawaitable(result):
-                    result = await result
-                success = result is not None
-                if isinstance(result, list):
-                    fetched = len(result)
-                    if fetched and all(isinstance(row, Mapping) for row in result):
-                        self.reseed_history_from_bars(
-                            symbol,
-                            result,
-                            source=source,
-                            min_bars=required_bars,
-                        )
-                        bars_after = self._history_count_for_symbol(symbol)
-                    elif fetched:
-                        bars_after = max(self._history_count_for_symbol(symbol), fetched)
-                    else:
-                        bars_after = self._history_count_for_symbol(symbol)
-                    self._emit_history_hydration_trace(
-                        symbol,
-                        source="selected_option_history_prewarm",
-                        fetched_bars=fetched,
-                        ingested_bars=bars_after,
-                    )
-                elif isinstance(result, Mapping):
-                    rows = result.get("bars") or result.get("rows")
-                    if isinstance(rows, list) and rows:
-                        self.reseed_history_from_bars(
-                            symbol,
-                            rows,
-                            source=source,
-                            min_bars=required_bars,
-                        )
-                    bars_after = self._history_count_for_symbol(symbol)
-                    if bars_after <= bars_before:
-                        bars_after = int(result.get("bars_after") or result.get("count") or bars_before)
-                    success = bool(result.get("success", success))
-                    self._emit_history_hydration_trace(
-                        symbol,
-                        source="selected_option_history_prewarm",
-                        fetched_bars=len(rows) if isinstance(rows, list) else int(result.get("count") or 0),
-                        ingested_bars=bars_after,
-                    )
-                else:
-                    bars_after = self._history_count_for_symbol(symbol)
-            except Exception as exc:
-                success = False
-                source = "data_hub_hydrate_exception"
-                reason = type(exc).__name__
-            finally:
-                self._selected_option_prewarm_inflight.discard(symbol)
-                success = bool(success and bars_after >= required_bars)
-                if not success and bars_after < required_bars and reason == "scheduled":
-                    reason = "insufficient_bars"
-                self._maybe_promote_pending_active_basket(source="selected_option_history_prewarm")
-                self._logger.info(
-                    "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
-                    result_event, symbol, bars_before, bars_after, required_bars, success,
-                    extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": reason, "source": source, "trace_id": trace_id},
-                )
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_do_prewarm())
-        except RuntimeError:
-            threading.Thread(target=lambda: asyncio.run(_do_prewarm()), name=f"selected-option-prewarm-{symbol}", daemon=True).start()
-        except Exception as exc:
-            self._selected_option_prewarm_inflight.discard(symbol)
-            self._logger.info(
-                "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
-                result_event, symbol, bars_before, bars_before, required_bars, False,
-                extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_before, "required_bars": required_bars, "success": False, "reason": type(exc).__name__, "source": "prewarm_scheduler_exception", "trace_id": trace_id},
-            )
+        reason = "selected_option_history_cold" if selected else "option_context_history_cold"
+        source = "selected_option_history_prewarm" if selected else "option_context_history_prewarm"
+        scheduled = self._schedule_runtime_history_ensure(
+            symbol,
+            role=("selected_option" if selected else "option_context"),
+            phase="dynamic_update",
+            reason=reason,
+            required_bars=required_bars,
+            target_bars=required_bars,
+        )
+        self._logger.info(
+            "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
+            result_event, symbol, bars_before, self._history_count_for_symbol(symbol), required_bars, scheduled,
+            extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": self._history_count_for_symbol(symbol), "required_bars": required_bars, "success": scheduled, "reason": reason, "source": source, "trace_id": trace_id},
+        )
 
     def _history_count_for_symbol(self, symbol: str) -> int:
         try:
@@ -9035,10 +8970,12 @@ class StrategyRunner:
                 if _indicator_count_pre < required_bars:
                     # Only sync option history when we still need bars; avoids
                     # duplicate_noop trace spam during normal warm operation.
-                    self._sync_history_from_mdm_cache(
+                    self.sync_history_from_mdm(
                         symbol,
                         required_bars=required_bars,
-                        source="pre_option_eval_option_sync",
+                        reason="pre_option_eval_option_sync",
+                        role=self._symbol_role_for_runner(symbol),
+                        request_if_short=True,
                     )
             history_count = len(self._indicator_engine.get_history(symbol) or [])
             restored_from_cache = symbol in self._restored_from_cache_symbols

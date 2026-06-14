@@ -9692,9 +9692,9 @@ class MarketDataManager:
         while True:
             cached_now = _cached_count()
             if not force and cached_now >= target:
-                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=joined_observed_fetch, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
+                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
             if not force and minimum_only and cached_now >= required:
-                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=joined_observed_fetch, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
+                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_observed_fetch, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
             async with self._history_inflight_lock:
                 current = self._history_inflight.get(key)
                 if current is not None and current[1].done():
@@ -9746,7 +9746,7 @@ class MarketDataManager:
                 return _result(
                     cached_before=cached_before,
                     cached_after=cached_after_join,
-                    broker_fetch_started=joined_observed_fetch,
+                    broker_fetch_started=False,
                     joined_inflight=True,
                     broker_fetch_observed=joined_observed_fetch,
                     fetched_rows=joined_fetched_rows,

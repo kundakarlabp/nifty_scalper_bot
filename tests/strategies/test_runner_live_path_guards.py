@@ -680,14 +680,15 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> No
     runner._selected_option_prewarm_cooldown_s = 0.0
     runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
     runner._active_selected_pe = None
-    runner._data_hub = SimpleNamespace(hydrate_symbol_history=lambda *a, **k: [1, 2, 3, 4, 5])
+    scheduled: list[dict] = []
+    runner._runtime_history_ensurer = lambda symbol, **kwargs: scheduled.append({"symbol": symbol, **kwargs})
+    runner._data_hub = SimpleNamespace()
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t1")
-    assert _wait_until(lambda: "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight)
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
     assert rec.success is True
-    assert rec.bars_after == 5
     assert rec.source == "selected_option_history_prewarm"
+    assert scheduled and scheduled[-1]["target_bars"] == 5
 
 
 @pytest.mark.asyncio
@@ -699,15 +700,14 @@ async def test_selected_option_prewarm_sync_hydrator_runs_off_event_loop() -> No
     runner._selected_option_prewarm_cooldown_s = 0.0
     runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
     runner._active_selected_pe = None
-    import threading
-    called_thread = {"name": ""}
-    def _hydrate(*_a, **_k):
-        called_thread["name"] = threading.current_thread().name
-        return [1, 2, 3]
-    runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)
+    calls: list[dict] = []
+    async def _ensurer(symbol, **kwargs):
+        calls.append({"symbol": symbol, **kwargs})
+    runner._runtime_history_ensurer = _ensurer
+    runner._data_hub = SimpleNamespace()
     runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t2")
-    assert await _wait_until_async(lambda: bool(called_thread["name"]))
-    assert called_thread["name"] != threading.current_thread().name
+    assert await _wait_until_async(lambda: bool(calls))
+    assert calls[-1]["role"] == "selected_option"
 
 
 @pytest.mark.asyncio
@@ -720,12 +720,14 @@ async def test_selected_option_prewarm_accepts_async_hydrator_list_result(caplog
     runner._selected_option_prewarm_cooldown_s = 0.0
     runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
     runner._active_selected_pe = None
-    async def _hydrate(*_a, **_k):
-        return [1, 2, 3, 4, 5]
-    runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)
+    calls: list[dict] = []
+    async def _ensurer(symbol, **kwargs):
+        calls.append({"symbol": symbol, **kwargs})
+    runner._runtime_history_ensurer = _ensurer
+    runner._data_hub = SimpleNamespace()
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t3")
-        assert await _wait_until_async(lambda: "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight)
+        assert await _wait_until_async(lambda: bool(calls))
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
     assert rec.success is True
 

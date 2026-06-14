@@ -83,3 +83,47 @@ def test_no_old_set_based_runtime_history_fixtures() -> None:
         if "_runtime_history_ensure_inflight = set()" in text:
             offenders.append(rel)
     assert offenders == []
+
+
+def test_single_production_runtime_history_ensurer_injection() -> None:
+    text = (SRC / "core" / "app.py").read_text()
+    assert text.count("set_runtime_history_ensurer(runtime_history_ensurer)") == 1
+    assert text.count("async def runtime_history_ensurer") == 1
+
+
+def test_one_canonical_role_resolver_and_readiness_helper() -> None:
+    app_text = (SRC / "core" / "app.py").read_text()
+    assert app_text.count("def resolve_symbol_history_role") == 1
+    assert app_text.count("def compute_history_readiness") == 1
+    assert "class HistoryPolicyDecision" not in app_text
+    assert "class HistoryPolicy" in app_text
+
+
+def test_datahub_compatibility_has_no_target_policy_or_coordinator() -> None:
+    text = (SRC / "data" / "data_hub.py").read_text()
+    assert "* 375" not in text
+    assert "ensure_history(" not in text
+    assert "_history_inflight" not in text
+
+
+def test_mdm_historical_ohlc_ingest_uses_only_ohlc_store() -> None:
+    text = (SRC / "data" / "market_data_manager.py").read_text()
+    start = text.index("    def ingest_historical_ohlc")
+    end = text.index("    def normalize_history_row", start)
+    body = text[start:end]
+    assert "_ohlc" in body
+    assert "_history" not in body
+
+
+def test_runner_compatibility_wrappers_delegate_to_canonical_scheduler_or_sync() -> None:
+    text = (SRC / "strategies" / "runner.py").read_text()
+    req_start = text.index("    def _request_mdm_hydration")
+    req_end = text.index("    def _hydrate_from_mdm_cache", req_start)
+    req_body = text[req_start:req_end]
+    assert "_schedule_runtime_history_ensure" in req_body
+    assert "request_hydration" not in req_body
+    hyd_start = req_end
+    hyd_end = text.index("    def _emit_history_hydration_trace", hyd_start)
+    hyd_body = text[hyd_start:hyd_end]
+    assert "sync_history_from_mdm" in hyd_body
+    assert "ingest_historical_bar" not in hyd_body

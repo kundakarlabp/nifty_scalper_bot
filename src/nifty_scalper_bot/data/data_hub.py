@@ -1786,23 +1786,11 @@ class DataHub:
         max_bars: int = 300,
         reason: str = "datahub",
     ) -> list[dict[str, Any]]:
-        """Compatibility facade: delegate historical hydration to canonical MDM owner."""
-        ensure = getattr(self._mdm, "ensure_history", None)
-        if not callable(ensure):
-            LOGGER.warning("DATAHUB_HISTORY_CANONICAL_OWNER_MISSING symbol=%s reason=%s", symbol, reason)
-            return []
-        result = await ensure(
-            symbol,
-            interval=interval,
-            days=days,
-            required_bars=max(1, int(max_bars or 1)),
-            target_bars=max_bars,
-            reason=reason,
-        )
-        rows = self.get_ohlc_bars(result.symbol, limit=max_bars)
-        if rows:
-            self._touch_warm_symbol_cache(symbol)
-        return rows
+        """Deprecated compatibility facade; canonical runtime uses app orchestration."""
+        hydrate = getattr(self._mdm, "hydrate_symbol_history", None)
+        if not callable(hydrate):
+            return self.get_ohlc_bars(symbol, limit=max_bars)
+        return await hydrate(symbol, interval=interval, days=days, max_bars=max_bars, reason=reason)
 
     async def fetch_history(
         self,
@@ -1813,23 +1801,11 @@ class DataHub:
         target_bars: int | None = None,
         force_refresh: bool = False,
     ) -> list[dict]:
-        """Compatibility facade over MDM.ensure_history; DataHub stores no history."""
-        normalized = self._canonical_quote_symbol(symbol)
-        ensure = getattr(self._mdm, "ensure_history", None)
-        if not callable(ensure):
-            LOGGER.warning("DATAHUB_HISTORY_CANONICAL_OWNER_MISSING symbol=%s reason=fetch_history", normalized)
+        """Deprecated compatibility facade over MDM raw history fetch."""
+        fetch = getattr(self._mdm, "fetch_history", None)
+        if not callable(fetch):
             return []
-        target = max(1, int(target_bars or max(1, int(days or 1)) * 375))
-        result = await ensure(
-            normalized,
-            interval=interval,
-            days=days,
-            required_bars=target,
-            target_bars=target,
-            reason="datahub_fetch_history_compat",
-            force=force_refresh,
-        )
-        return self.get_ohlc_bars(result.symbol, limit=target)
+        return await fetch(symbol, interval, days)
 
     def get_indicator(self, symbol: str, name: str) -> Optional[float]:
         mdm_fn = getattr(self._mdm, "get_indicator", None)

@@ -230,31 +230,21 @@ def test_datahub_context_bars_sync_into_indicator_engine() -> None:
     assert len(r._indicator_engine.get_history("NFO:NIFTY26JUNFUT")) >= 50
 
 
-def test_selected_option_prewarm_reseeds_indicator_from_datahub_result(monkeypatch) -> None:
+def test_selected_option_prewarm_schedules_canonical_runtime_ensure() -> None:
     r = _runner()
     r._indicator_engine = IndicatorEngine()
-    r._symbol_history = {}
-    r._tracked_symbols = set()
-    r._data_phase = {}
-    r._last_bar_ts = {}
-    r._symbol_states = {}
-    r._set_symbol_hydration_state = lambda _s, st: st
-    r._seed_pipeline_store = lambda _s: None
-    r._seed_candle_engine_from_history = lambda _s: None
     r._selected_option_prewarm_last = {}
     r._selected_option_prewarm_inflight = set()
     r._selected_option_prewarm_cooldown_s = 0.0
     symbol = "NFO:NIFTY26JUN24000CE"
-
-    async def hydrate(_symbol: str, **_kwargs):
-        return _bars(5, start_close=50.0)
-
-    r._data_hub = SimpleNamespace(hydrate_symbol_history=hydrate)
-    monkeypatch.setattr("threading.Thread", lambda target, **_kwargs: SimpleNamespace(start=target))
+    calls: list[dict] = []
+    r._runtime_history_ensurer = lambda sym, **kwargs: calls.append({"symbol": sym, **kwargs})
+    r._data_hub = SimpleNamespace()
 
     r._request_selected_option_history_prewarm(symbol, bars_before=0, required_bars=5)
 
-    assert len(r._indicator_engine.get_history(symbol)) >= 5
+    assert calls and calls[-1]["symbol"] == symbol
+    assert calls[-1]["target_bars"] == 5
 
 
 def test_runner_sync_history_from_mdm_is_canonical_transition() -> None:
