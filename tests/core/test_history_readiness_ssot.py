@@ -20,6 +20,10 @@ def _ctx(ce_bars: int, pe_bars: int, *, ce="NFO:NIFTY2661623300CE", pe="NFO:NIFT
 
     class _Runner:
         _option_required_bars = 30
+        def runner_history_count(self, sym):
+            return counts.get(sym, 0)
+        def indicator_history_count(self, sym):
+            return counts.get(sym, 0)
         def _history_count_for_symbol(self, sym):
             return counts.get(sym, 0)
         def _indicator_count_for_symbol(self, sym):
@@ -74,7 +78,26 @@ async def test_missing_selection_returns_not_set() -> None:
 async def test_readiness_is_pure_no_mutation() -> None:
     # Calling it must not change the underlying counts (no hydration/reseed).
     ctx = _ctx(60, 60)
-    before = ctx.strategy_runner._history_count_for_symbol("NFO:NIFTY2661623300CE")
+    before = ctx.strategy_runner.runner_history_count("NFO:NIFTY2661623300CE")
     app.compute_selected_option_history_readiness(ctx, "NFO:NIFTY2661623300CE", "NFO:NIFTY2661623300PE")
-    after = ctx.strategy_runner._history_count_for_symbol("NFO:NIFTY2661623300CE")
+    after = ctx.strategy_runner.runner_history_count("NFO:NIFTY2661623300CE")
     assert before == after
+
+
+async def test_runner_cold_indicator_warm_not_ready() -> None:
+    # Spec §5/§12: distinct counts — runner history cold must block even if
+    # indicator history is warm.
+    from types import SimpleNamespace as NS
+    class _MDM:
+        def get_ohlc_bars(self, sym):
+            return [{}] * 60
+    class _Runner:
+        _option_required_bars = 30
+        def runner_history_count(self, sym):
+            return 5  # cold
+        def indicator_history_count(self, sym):
+            return 60  # warm
+    ctx = NS(market_data_manager=_MDM(), strategy_runner=_Runner())
+    r = app.compute_selected_option_history_readiness(ctx, "NFO:NIFTY2661623300CE", "NFO:NIFTY2661623300PE")
+    assert r.both_ready is False
+    assert r.blocker == "selected_option_history_cold"

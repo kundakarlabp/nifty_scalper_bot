@@ -9798,29 +9798,38 @@ class MarketDataManager:
         *,
         interval: str = "minute",
         days: int = 2,
-        max_bars: int = 300,
+        required_bars: int | None = None,
+        target_bars: int | None = None,
+        max_bars: int | None = None,
         reason: str = "startup",
     ) -> list[dict[str, Any]]:
         """Compatibility wrapper: delegate to canonical ensure_history and return MDM rows.
 
-        Legacy max_bars is the target ceiling, not the operational minimum; a
-        modest required floor keeps a compatibility caller from forcing the full
-        ceiling as the readiness requirement.
+        max_bars is a legacy alias for target_bars only and is NOT implicitly
+        300. An omitted target uses a modest configurable default; required stays
+        modest unless explicitly supplied. Explicit target_bars=300 is preserved.
         """
-        ceiling = max(1, int(max_bars or 1))
-        required = min(int(os.getenv("HYDRATION_COMPAT_REQUIRED_BARS", "30") or 30), ceiling)
+        default_target = int(os.getenv("MDM_COMPAT_HISTORY_TARGET", "60") or 60)
+        default_required = int(os.getenv("MDM_COMPAT_REQUIRED_BARS", "30") or 30)
+        target = (
+            int(target_bars) if target_bars is not None
+            else int(max_bars) if max_bars is not None
+            else default_target
+        )
+        target = max(1, target)
+        required = min(int(required_bars) if required_bars is not None else default_required, target)
         result = await self.ensure_history(
             symbol,
             interval=interval,
             required_bars=required,
-            target_bars=ceiling,
+            target_bars=target,
             days=days,
             reason=reason,
         )
         if result.failure_reason:
             raise RuntimeError(result.failure_reason)
         rows = list(self.get_ohlc_bars(result.symbol) or [])
-        return rows[-max_bars:]
+        return rows[-target:]
 
     async def fetch_history(
         self, symbol: str, interval: str, days: int = 3

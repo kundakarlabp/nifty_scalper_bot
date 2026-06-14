@@ -115,3 +115,43 @@ async def test_canonical_readiness_function_exists_and_is_pure() -> None:
     assert target is not None, "compute_selected_option_history_readiness missing"
     body_calls = _call_names_in_node(target, {"ensure_history", "historical_data", "reseed_history_from_bars", "replace_history", "ingest_historical_bar"})
     assert body_calls == [], f"Canonical readiness must be pure, found: {body_calls}"
+
+
+def _func_source(path: Path, func_name: str) -> str:
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+            return ast.get_source_segment(path.read_text(), node) or ""
+    return ""
+
+
+async def test_runner_prewarm_has_no_datahub_hydrate_or_reseed() -> None:
+    # Spec §3/§13: production prewarm must not call DataHub hydrate, reseed, or
+    # ingest historical bars.
+    src = _func_source(SRC / "strategies" / "runner.py", "_request_selected_option_history_prewarm")
+    assert src, "prewarm function not found"
+    assert "hydrate_symbol_history" not in src, "prewarm must not call DataHub hydrate"
+    assert "reseed_history_from_bars" not in src, "prewarm must not reseed raw rows"
+    assert "ingest_historical_bar" not in src, "prewarm must not ingest rows directly"
+
+
+async def test_hydrate_from_mdm_cache_is_thin_delegate() -> None:
+    # Spec §2/§13: _hydrate_from_mdm_cache delegates to sync_history_from_mdm and
+    # performs no manual ingestion loop.
+    src = _func_source(SRC / "strategies" / "runner.py", "_hydrate_from_mdm_cache")
+    assert src, "function not found"
+    assert "sync_history_from_mdm" in src, "must delegate to canonical sync"
+    assert "ingest_historical_bar" not in src, "must not ingest rows manually"
+
+
+async def test_app_injects_runtime_history_ensurer() -> None:
+    # Spec §13: app wires the canonical callback into the runner.
+    text = (SRC / "core" / "app.py").read_text()
+    assert "set_runtime_history_ensurer" in text
+    assert "ensure_symbol_runtime_history" in text
+
+
+async def test_runner_declares_ensurer_field() -> None:
+    text = (SRC / "strategies" / "runner.py").read_text()
+    assert "self._runtime_history_ensurer" in text
+    assert "def set_runtime_history_ensurer" in text

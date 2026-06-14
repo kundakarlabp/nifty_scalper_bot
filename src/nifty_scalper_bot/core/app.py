@@ -7958,8 +7958,13 @@ def compute_selected_option_history_readiness(
             mdm_bars = len(mdm.get_ohlc_bars(sym) or []) if mdm is not None else 0
         except Exception:
             mdm_bars = 0
-        runner_bars = int(runner._history_count_for_symbol(sym)) if runner is not None and callable(getattr(runner, "_history_count_for_symbol", None)) else 0
-        indicator_bars = int(getattr(runner, "_indicator_count_for_symbol", lambda _s: runner_bars)(sym)) if runner is not None else 0
+        runner_bars = int(runner.runner_history_count(sym)) if runner is not None and callable(getattr(runner, "runner_history_count", None)) else 0
+        if runner is not None and callable(getattr(runner, "indicator_history_count", None)):
+            indicator_bars = int(runner.indicator_history_count(sym))
+        elif runner is not None and callable(getattr(runner, "_history_count_for_symbol", None)):
+            indicator_bars = int(runner._history_count_for_symbol(sym))
+        else:
+            indicator_bars = 0
         return compute_history_readiness(symbol=sym, role="selected_option", required_bars=required, mdm_bars=mdm_bars, runner_bars=runner_bars, indicator_bars=indicator_bars)
 
     ce = _readiness(selected_ce)
@@ -8081,16 +8086,28 @@ async def ensure_symbol_runtime_history(
 
     capacity = _capacity()
     global_safety = int(os.getenv("HYDRATION_GLOBAL_SAFETY_MAX", "1000") or 1000)
-    # An explicit target above the normal role cap implies a deep request.
-    wants_deep = bool(deep_history or (target_bars is not None and int(target_bars) > policy.role_cap) or (required_bars is not None and int(required_bars) > policy.role_cap))
-    upper = policy.deep_cap if wants_deep else policy.role_cap
+    # Spec §7: deep mode is explicit only. A large required_bars from a legacy
+    # caller does NOT silently enable deep hydration.
+    wants_deep = bool(deep_history or (target_bars is not None and int(target_bars) > policy.role_cap))
+    normal_upper = policy.role_cap
+    deep_upper = policy.deep_cap
     for bound in (capacity, global_safety):
         if bound and bound > 0:
-            upper = min(upper, bound)
+            normal_upper = min(normal_upper, bound)
+            deep_upper = min(deep_upper, bound)
+    upper = deep_upper if wants_deep else normal_upper
 
     if required_bars is not None or target_bars is not None:
-        req = int(required_bars) if required_bars is not None else policy.required_bars
-        req = max(1, min(req, upper))
+        req_requested = int(required_bars) if required_bars is not None else policy.required_bars
+        # A large required override without explicit deep mode is clamped to the
+        # normal role cap (never a silent deep fetch).
+        if not wants_deep and req_requested > policy.role_cap:
+            LOGGER.info(
+                "HISTORY_REQUIRED_BARS_CLAMPED symbol=%s role=%s requested=%s effective=%s",
+                symbol, policy.role, req_requested, normal_upper,
+                extra={"event": "HISTORY_REQUIRED_BARS_CLAMPED", "symbol": symbol, "role": policy.role, "requested": req_requested, "effective": normal_upper},
+            )
+        req = max(1, min(req_requested, upper))
         tgt = int(target_bars) if target_bars is not None else policy.target_bars
         tgt = max(req, min(tgt, upper))
         policy = replace(policy, required_bars=req, target_bars=tgt)

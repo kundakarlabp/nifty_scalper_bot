@@ -270,3 +270,30 @@ async def test_joined_only_caller_reports_not_started() -> None:
     assert r2.broker_fetch_started is False      # joiner did not
     assert r2.broker_fetch_observed is True      # joiner observed it
     assert r2.joined_inflight is True
+
+
+# ---- MDM wrapper: no implicit 300 default (spec §1/§12) ----
+
+async def test_mdm_hydrate_omitted_target_uses_modest_default(monkeypatch) -> None:
+    monkeypatch.delenv("MDM_COMPAT_HISTORY_TARGET", raising=False)
+    mdm = _mdm(_rows(0))
+    captured = {}
+    async def ensure(symbol, **kw):
+        captured.update(kw)
+        return SimpleNamespace(symbol=symbol, failure_reason=None)
+    mdm.ensure_history = ensure
+    await mdm.hydrate_symbol_history("NFO:NIFTYCE")  # max_bars omitted
+    assert captured["target_bars"] <= 100, captured  # modest default, NOT 300
+    assert captured["required_bars"] <= captured["target_bars"]
+
+
+async def test_mdm_hydrate_explicit_max_bars_maps_to_target(monkeypatch) -> None:
+    mdm = _mdm(_rows(0))
+    captured = {}
+    async def ensure(symbol, **kw):
+        captured.update(kw)
+        return SimpleNamespace(symbol=symbol, failure_reason=None)
+    mdm.ensure_history = ensure
+    await mdm.hydrate_symbol_history("NFO:NIFTYCE", max_bars=300)
+    assert captured["target_bars"] == 300
+    assert captured["required_bars"] < 300  # required stays modest

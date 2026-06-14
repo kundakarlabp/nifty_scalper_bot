@@ -237,3 +237,65 @@ async def test_generic_sync_helper_resolves_role(monkeypatch):
     # the selected CE must resolve to selected_option
     app._sync_mdm_bars_to_runner(ctx, "NFO:NIFTY2661623300CE", min_bars=10)
     assert seen["NFO:NIFTY2661623300CE"] == "selected_option"
+
+
+async def test_large_required_without_deep_mode_clamps_with_diagnostic(monkeypatch, caplog):
+    """Spec §7: required_bars > role_cap WITHOUT deep mode is clamped, logged."""
+    import logging
+    import nifty_scalper_bot.core.app as app
+
+    captured = {}
+    class _MDM:
+        _min_required_bars = 0
+        def history_capacity_for(self, *_a, **_k):
+            return 1000
+        async def ensure_history(self, symbol, **kw):
+            captured.update(kw)
+            return SimpleNamespace(failure_reason=None)
+        def get_ohlc_bars(self, *_a, **_k):
+            return []
+    class _Runner:
+        _option_required_bars = 30
+        _required_candles = 60
+        def sync_history_from_mdm(self, symbol, **kw):
+            return SimpleNamespace(runner_bars=0, indicator_bars=0, success=False, failure_reason=None)
+    ctx = SimpleNamespace(strategy_runner=_Runner(), market_data_manager=_MDM())
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN", raising=False)
+    with caplog.at_level(logging.INFO, logger="nifty_scalper_bot.core.app"):
+        await app.ensure_symbol_runtime_history(
+            ctx, "NFO:NIFTY2661623150CE", role="selected_option", phase="startup",
+            reason="legacy_big", required_bars=300,  # no deep_history, no target
+        )
+    # clamped to normal role cap (75), NOT 300
+    assert captured["required_bars"] <= 75, captured
+    assert any(getattr(r, "event", "") == "HISTORY_REQUIRED_BARS_CLAMPED" for r in caplog.records)
+
+
+async def test_deep_history_flag_allows_large_required(monkeypatch):
+    """Spec §7: explicit deep_history=True permits the role deep cap."""
+    import nifty_scalper_bot.core.app as app
+
+    captured = {}
+    class _MDM:
+        _min_required_bars = 0
+        def history_capacity_for(self, *_a, **_k):
+            return 1000
+        async def ensure_history(self, symbol, **kw):
+            captured.update(kw)
+            return SimpleNamespace(failure_reason=None)
+        def get_ohlc_bars(self, *_a, **_k):
+            return []
+    class _Runner:
+        _option_required_bars = 30
+        _required_candles = 60
+        def sync_history_from_mdm(self, symbol, **kw):
+            return SimpleNamespace(runner_bars=0, indicator_bars=0, success=False, failure_reason=None)
+    ctx = SimpleNamespace(strategy_runner=_Runner(), market_data_manager=_MDM())
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN", raising=False)
+    monkeypatch.setenv("HYDRATION_DEEP_SELECTED_OPTION", "300")
+    await app.ensure_symbol_runtime_history(
+        ctx, "NFO:NIFTY2661623150CE", role="selected_option", phase="recovery",
+        reason="ema200", required_bars=200, target_bars=300, deep_history=True,
+    )
+    assert captured["target_bars"] == 300, captured
+    assert captured["required_bars"] == 200, captured  # preserved, not clamped
