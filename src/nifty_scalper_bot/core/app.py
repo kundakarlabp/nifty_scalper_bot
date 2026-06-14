@@ -2821,10 +2821,23 @@ class RuntimeSelfChecker:
         """
 
         return {
+            "canonical_history_ensurer": self._check_canonical_history_ensurer,
             "data_freshness": self._check_data_freshness,
             "streamer": self._check_streamer,
             "risk_breaker": self._check_risk_breaker,
             "session_guard": self._check_session_guard,
+        }
+
+    def _check_canonical_history_ensurer(self) -> tuple[bool, str, dict[str, object]]:
+        """Report canonical runtime-history callback injection failures. Args: none. Returns: status tuple. Raises: none."""
+        failed = bool(getattr(self._context, "canonical_history_ensurer_injection_failed", False))
+        if not failed:
+            return True, "canonical_history_ensurer_ready", {}
+        reason = "canonical_history_ensurer_injection_failed"
+        return False, reason, {
+            "reason": reason,
+            "live_block_reason": getattr(self._context, "live_block_reason", None),
+            "execution_block_reason": getattr(self._context, "execution_block_reason", None),
         }
 
     def _check_data_freshness(self) -> tuple[bool, str, dict[str, object]]:
@@ -5906,6 +5919,26 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strategy_runner.set_runtime_history_ensurer(_runtime_history_ensurer)
     except Exception as exc:  # pragma: no cover - defensive
         setattr(ctx, "canonical_history_ensurer_injection_failed", True)
+        reason = "canonical_history_ensurer_injection_failed"
+        setattr(ctx, "live_block_reason", reason)
+        setattr(ctx, "execution_block_reason", reason)
+        setattr(ctx, "trading_ready", False)
+        setattr(ctx, "live_orders_armed", False)
+        try:
+            safe_order_manager.set_live_enabled(False)
+        except Exception as live_exc:  # noqa: BLE001 - live safety best effort with explicit diagnostic
+            LOGGER.error(
+                "CANONICAL_HISTORY_ENSURER_DISABLE_LIVE_FAILED exception_type=%s exception_message=%s",
+                type(live_exc).__name__,
+                str(live_exc),
+                extra={
+                    "event": "CANONICAL_HISTORY_ENSURER_DISABLE_LIVE_FAILED",
+                    "reason": reason,
+                    "exception_type": type(live_exc).__name__,
+                    "exception_message": str(live_exc),
+                },
+                exc_info=live_exc,
+            )
         LOGGER.error(
             "CANONICAL_HISTORY_ENSURER_INJECTION_FAILED exception_type=%s exception_message=%s",
             type(exc).__name__,

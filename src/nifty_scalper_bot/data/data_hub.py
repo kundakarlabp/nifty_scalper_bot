@@ -2006,8 +2006,12 @@ class DataHub:
     def get_hydration_status(self, *args, **kwargs) -> Any:
         return self._mdm_call("get_hydration_status", *args, **kwargs)
 
-    def get_ohlc(self, *args, **kwargs) -> Any:
-        return self._mdm_call("get_ohlc", *args, **kwargs)
+    def get_ohlc(self, symbol: str, *args, **kwargs) -> Any:
+        """Deprecated cache-only OHLC read; delegates to MDM.get_ohlc_bars, never broker fetch."""
+        limit = kwargs.pop("limit", None)
+        if kwargs:
+            LOGGER.debug("DATAHUB_GET_OHLC_IGNORED_KWARGS symbol=%s keys=%s", symbol, sorted(kwargs))
+        return self.get_ohlc_bars(symbol, limit=limit)
 
     def get_orderbook(self, *args, **kwargs) -> Any:
         return self._mdm_call("get_orderbook", *args, **kwargs)

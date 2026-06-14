@@ -4101,7 +4101,7 @@ class MarketDataManager:
         return self.is_tick_ready(symbol) and self.is_ohlc_ready(symbol)
 
     def is_symbol_ready(self, symbol: str) -> bool:
-        """Deprecated: raw/live tick readiness only; use is_tick_ready/is_ohlc_ready."""
+        """Deprecated external alias for raw/live tick readiness only."""
         return self.is_tick_ready(symbol)
 
     def is_ready(self) -> bool:

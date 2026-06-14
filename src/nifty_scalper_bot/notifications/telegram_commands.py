@@ -415,9 +415,9 @@ def cmd_ohlc(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, serv
     if not sym:
         return "Usage: /ohlc <SYMBOL>"
     
-    if services.market_data_manager and hasattr(services.market_data_manager, "get_ohlc"):
-        res = services.market_data_manager.get_ohlc(sym)
-        return str(res) if res else "n/a"
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_ohlc_bars"):
+        res = services.market_data_manager.get_ohlc_bars(sym)
+        return str(res) if res else "OHLC cache empty; request canonical hydration first."
     return "MDM unavailable"
 
 

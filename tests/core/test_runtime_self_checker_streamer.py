@@ -55,3 +55,18 @@ def test_streamer_no_recent_ticks_marks_disconnected(monkeypatch) -> None:
     assert ok is False
     assert detail == "no_recent_ticks"
     assert payload["connected"] is False
+
+
+def test_canonical_history_ensurer_injection_failure_is_unhealthy() -> None:
+    ctx = SimpleNamespace(
+        canonical_history_ensurer_injection_failed=True,
+        live_block_reason="canonical_history_ensurer_injection_failed",
+        execution_block_reason="canonical_history_ensurer_injection_failed",
+    )
+    checker = RuntimeSelfChecker(ctx)
+
+    ok, detail, payload = checker._check_canonical_history_ensurer()
+
+    assert ok is False
+    assert detail == "canonical_history_ensurer_injection_failed"
+    assert payload["live_block_reason"] == "canonical_history_ensurer_injection_failed"
