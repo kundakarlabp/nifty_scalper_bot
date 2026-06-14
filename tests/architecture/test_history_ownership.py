@@ -226,3 +226,111 @@ async def test_data_source_no_longer_calls_broker_historical_data() -> None:
     text = (SRC / "data" / "source.py").read_text()
     assert ".historical_data(" not in text
     assert "MarketDataManager.ensure_history" in text
+
+async def test_market_data_source_get_ohlc_has_no_production_callers() -> None:
+    offenders = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel == "src/nifty_scalper_bot/data/source.py":
+            continue
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_ohlc":
+                offenders.append((rel, node.lineno))
+    assert offenders == [], f"Production get_ohlc callers must use MDM.get_ohlc_bars/cache helpers: {offenders}"
+
+
+async def test_no_cache_miss_then_direct_broker_history_fetch_pattern() -> None:
+    offenders = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler):
+                body_calls = _call_names_in_node(node, {"historical_data", "get_historical_data"})
+                if body_calls:
+                    offenders.append((rel, node.lineno, body_calls))
+    assert offenders == [], f"Cache-miss fallbacks must not fetch broker history directly: {offenders}"
+
+
+async def test_datahub_has_no_runtime_history_ownership_or_readiness_decisions() -> None:
+    text = (SRC / "data" / "data_hub.py").read_text()
+    assert "_history_cache" not in text
+    assert "def _normalize_history_rows" not in text
+    assert "historical_data" not in text
+    assert "get_historical_data" not in text
+    assert "compute_history_readiness" not in text
+    assert "is_symbol_ready(" not in text.replace("def is_symbol_ready(", "")
+    for func in ("get_ohlc", "fetch_history", "hydrate_symbol_history"):
+        src = _func_source(SRC / "data" / "data_hub.py", func)
+        if src:
+            assert "historical_data" not in src
+            assert "_history_cache" not in src
+            assert "normalize_history" not in src
+
+
+async def test_datahub_get_ohlc_accepts_positional_limit() -> None:
+    from nifty_scalper_bot.data.data_hub import DataHub
+
+    class _Mdm:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int | None]] = []
+
+        def get_ohlc_bars(self, symbol: str, *, limit: int | None = None):
+            self.calls.append((symbol, limit))
+            return [{"close": 1}, {"close": 2}][-limit if limit else 0:] if limit else [{"close": 1}, {"close": 2}]
+
+    mdm = _Mdm()
+    hub = DataHub(market_data_manager=mdm)
+
+    rows = hub.get_ohlc("NSE:NIFTY", 1)
+
+    assert rows == [{"close": 2}]
+    assert mdm.calls == [("NSE:NIFTY", 1)]
+
+
+async def test_runner_has_no_direct_mdm_or_datahub_hydration_ownership_calls() -> None:
+    text = (SRC / "strategies" / "runner.py").read_text()
+    assert ".ensure_history(" not in text
+    assert ".fetch_history(" not in text
+    assert ".hydrate_symbol_history(" not in text
+    assert ".historical_data(" not in text
+    assert ".request_hydration(" not in text
+
+
+async def test_app_injection_failure_marks_health_and_live_state() -> None:
+    text = (SRC / "core" / "app.py").read_text()
+    failure_idx = text.index("CANONICAL_HISTORY_ENSURER_INJECTION_FAILED")
+    failure_block = text[failure_idx - 2000 : failure_idx + 1000]
+    assert "canonical_history_ensurer_injection_failed" in failure_block
+    assert "if safe_order_manager is not None" in failure_block
+    assert "safe_order_manager.set_live_enabled(False)" in failure_block
+    assert "live_block_reason" in failure_block
+    checker_src = _func_source(SRC / "core" / "app.py", "_check_canonical_history_ensurer")
+    assert checker_src
+    assert "canonical_history_ensurer_injection_failed" in checker_src
+    assert "return False" in checker_src
+
+
+async def test_mdm_storage_names_remain_separate() -> None:
+    text = (SRC / "data" / "market_data_manager.py").read_text()
+    assert "self._ohlc" in text
+    assert "self._raw_tick_history" in text
+    ingest_src = _func_source(SRC / "data" / "market_data_manager.py", "ingest_historical_bar")
+    assert "_ohlc" in ingest_src
+    assert "_raw_tick_history[" not in ingest_src and "_raw_tick_history.setdefault" not in ingest_src
+
+
+async def test_production_code_uses_explicit_readiness_apis() -> None:
+    offenders = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "is_symbol_ready":
+                offenders.append((rel, node.lineno))
+    assert offenders == [], f"Use is_tick_ready/is_ohlc_ready/is_market_data_ready instead: {offenders}"
+    mdm_src = _func_source(SRC / "data" / "market_data_manager.py", "is_symbol_ready")
+    if mdm_src:
+        assert "is_tick_ready" in mdm_src
+        assert "is_ohlc_ready" not in mdm_src
