@@ -284,7 +284,7 @@ class MarketDataManager:
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
         self._bar_subscribers: list[Callable[[dict[str, Any]], None]] = []
         self._latest_ticks: dict[str, dict[str, Any]] = {}
-        self._history: dict[str, Deque[dict[str, Any]]] = defaultdict(
+        self._raw_tick_history: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self._cache_len)
         )
         self._token_by_symbol: dict[str, int] = {}
@@ -831,7 +831,7 @@ class MarketDataManager:
                 "timestamp": ts.isoformat(),
                 "source": "historical",
             }
-            self._history[symbol].append(dict(payload))
+            self._raw_tick_history[symbol].append(dict(payload))
             self._ohlc[self._bar_symbol_key(symbol)].append(dict(payload))
             if isinstance(ts, datetime):
                 self._last_historical_ts[symbol] = ts.timestamp()
@@ -2999,7 +2999,7 @@ class MarketDataManager:
 
     def get_tick_history(self, symbol: str) -> list[dict[str, Any]]:
         with self._lock:
-            history = self._history.get(symbol)
+            history = self._raw_tick_history.get(symbol)
             if history is None:
                 return []
             return [dict(item) for item in history]
@@ -4086,7 +4086,7 @@ class MarketDataManager:
         """Args: symbol; Returns: bool; Raises: none."""
         normalized = normalize_symbol(str(symbol or ""))
         with self._lock:
-            return len(self._history.get(normalized, ())) >= self._min_required_bars
+            return len(self._raw_tick_history.get(normalized, ())) >= self._min_required_bars
 
     def is_ready(self) -> bool:
         """Args: none; Returns: bool; Raises: none."""
@@ -4095,7 +4095,7 @@ class MarketDataManager:
             if not active:
                 return False
             return all(
-                len(self._history.get(symbol, ())) >= self._min_required_bars
+                len(self._raw_tick_history.get(symbol, ())) >= self._min_required_bars
                 for symbol in active
             )
 
@@ -4113,7 +4113,7 @@ class MarketDataManager:
                 min_bars = self._min_required_bars
                 bars = {
                     symbol: max(
-                        len(self._history.get(symbol, ())),
+                        len(self._raw_tick_history.get(symbol, ())),
                         len(self._ohlc.get(self._bar_symbol_key(symbol), ())),
                     )
                     for symbol in subscribed_symbols
@@ -6001,7 +6001,7 @@ class MarketDataManager:
                     extra={"event": "mdm_history_append_rejected", "symbol": symbol},
                 )
                 return
-            self._history[symbol].append(cached_tick)
+            self._raw_tick_history[symbol].append(cached_tick)
             self._ticks_received_per_symbol[symbol] += 1
             self._symbols_with_tick.add(symbol)
             self._last_tick_wallclock[symbol] = float(now_wall)
@@ -6498,7 +6498,7 @@ class MarketDataManager:
                         if sym in self._active_subscribed_symbols
                     }
                     history_lengths = {
-                        sym: len(self._history.get(sym, ()))
+                        sym: len(self._raw_tick_history.get(sym, ()))
                         for sym in sorted(self._active_subscribed_symbols)
                     }
                     self._last_tick_rate_snapshot = dict(
@@ -7899,7 +7899,7 @@ class MarketDataManager:
                         if canonical and canonical != active:
                             stale_symbols.add(canonical)
                             _mark_token(token)
-            for cache_name in ("_latest_ticks", "_tick_cache", "_last_tick_snapshot", "_history", "_poll_bar_state", "_last_poll_bucket"):
+            for cache_name in ("_latest_ticks", "_tick_cache", "_last_tick_snapshot", "_raw_tick_history", "_poll_bar_state", "_last_poll_bucket"):
                 cache = getattr(self, cache_name, {})
                 if isinstance(cache, dict):
                     for symbol in list(cache.keys()):
@@ -7926,7 +7926,7 @@ class MarketDataManager:
                 self._latest_ticks.pop(symbol, None)
                 self._tick_cache.pop(symbol, None)
                 self._last_tick_snapshot.pop(symbol, None)
-                self._history.pop(symbol, None)
+                self._raw_tick_history.pop(symbol, None)
                 self._ohlc.pop(self._bar_symbol_key(symbol), None)
                 self._poll_bar_state.pop(symbol, None)
                 self._last_poll_bucket.pop(symbol, None)
@@ -8071,7 +8071,7 @@ class MarketDataManager:
                 self._subscribers.pop(old_canonical, None)
                 self._latest_ticks.pop(old_canonical, None)
                 self._tick_cache.pop(old_canonical, None)
-                self._history.pop(old_canonical, None)
+                self._raw_tick_history.pop(old_canonical, None)
                 self._ohlc.pop(self._bar_symbol_key(old_canonical), None)
                 self._last_tick_time.pop(old_canonical, None)
                 self._last_tick_wallclock.pop(old_canonical, None)
@@ -8153,7 +8153,7 @@ class MarketDataManager:
                 self._last_tick_source.get(canonical) or tick.get("source") or "unknown"
             ).lower()
             recent_cutoff = time.time() - 60.0
-            history = list(self._history.get(canonical, ()))
+            history = list(self._raw_tick_history.get(canonical, ()))
             real_ticks = sum(
                 1
                 for row in history

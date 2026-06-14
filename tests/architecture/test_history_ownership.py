@@ -93,7 +93,11 @@ def test_single_production_runtime_history_ensurer_injection() -> None:
 
 def test_one_canonical_role_resolver_and_readiness_helper() -> None:
     app_text = (SRC / "core" / "app.py").read_text()
-    assert app_text.count("def resolve_symbol_history_role") == 1
+    runner_text = (SRC / "strategies" / "runner.py").read_text()
+    helper_text = (SRC / "core" / "history_roles.py").read_text()
+    assert helper_text.count("def resolve_symbol_history_role") == 1
+    assert "from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role" in runner_text
+    assert "resolve_shared_symbol_history_role" in app_text
     assert app_text.count("def compute_history_readiness") == 1
     assert "class HistoryPolicyDecision" not in app_text
     assert "class HistoryPolicy" in app_text
@@ -108,11 +112,13 @@ def test_datahub_compatibility_has_no_target_policy_or_coordinator() -> None:
 
 def test_mdm_historical_ohlc_ingest_uses_only_ohlc_store() -> None:
     text = (SRC / "data" / "market_data_manager.py").read_text()
+    assert "self._raw_tick_history" in text
+    assert "self._history" not in text
     start = text.index("    def ingest_historical_ohlc")
     end = text.index("    def normalize_history_row", start)
     body = text[start:end]
     assert "_ohlc" in body
-    assert "_history" not in body
+    assert "_raw_tick_history" not in body
 
 
 def test_runner_compatibility_wrappers_delegate_to_canonical_scheduler_or_sync() -> None:
@@ -127,3 +133,15 @@ def test_runner_compatibility_wrappers_delegate_to_canonical_scheduler_or_sync()
     hyd_body = text[hyd_start:hyd_end]
     assert "sync_history_from_mdm" in hyd_body
     assert "ingest_historical_bar" not in hyd_body
+
+
+def test_no_production_datahub_fetch_history_callers() -> None:
+    offenders = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel.endswith("data/data_hub.py"):
+            continue
+        text = path.read_text()
+        if "data_hub.fetch_history(" in text or "data_hub.hydrate_symbol_history(" in text or "getattr(data_hub, \"fetch_history\"" in text or "getattr(data_hub, \"hydrate_symbol_history\"" in text:
+            offenders.append(rel)
+    assert offenders == []

@@ -685,8 +685,8 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> No
     runner._data_hub = SimpleNamespace()
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t1")
-    rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
-    assert rec.success is True
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_SCHEDULED")
+    assert rec.scheduled is True
     assert rec.source == "selected_option_history_prewarm"
     assert scheduled and scheduled[-1]["target_bars"] == 5
 
@@ -728,8 +728,8 @@ async def test_selected_option_prewarm_accepts_async_hydrator_list_result(caplog
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t3")
         assert await _wait_until_async(lambda: bool(calls))
-    rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
-    assert rec.success is True
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_SCHEDULED")
+    assert rec.scheduled is True
 
 
 def test_atr_fallback_used_for_insufficient_bars() -> None:

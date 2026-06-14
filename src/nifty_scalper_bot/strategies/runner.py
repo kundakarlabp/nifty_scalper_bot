@@ -46,6 +46,7 @@ import pandas as pd
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import ActiveContractSelection, active_contract_selection_from_basket, extract_symbol_strike
 from nifty_scalper_bot.core.event_bus import EventBus
+from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
@@ -7620,43 +7621,8 @@ class StrategyRunner:
                 )
 
     def _is_selected_option_symbol(self, symbol: str) -> bool:
-        """Return whether symbol exactly matches the current selected CE/PE contract."""
-        normalized = self._normalize_symbol(symbol)
-        if not normalized:
-            return False
-
-        def _basket_selected(basket: Any) -> set[str]:
-            if not basket:
-                return set()
-            if isinstance(basket, Mapping):
-                values = (basket.get("selected_ce"), basket.get("selected_pe"), basket.get("selected_ce_symbol"), basket.get("selected_pe_symbol"))
-            else:
-                values = (
-                    getattr(basket, "selected_ce", None),
-                    getattr(basket, "selected_pe", None),
-                    getattr(basket, "selected_ce_symbol", None),
-                    getattr(basket, "selected_pe_symbol", None),
-                )
-            return {self._normalize_symbol(str(value)) for value in values if value}
-
-        selected = {
-            self._normalize_symbol(str(raw))
-            for raw in (
-                getattr(self, "_active_selected_ce", None),
-                getattr(self, "_active_selected_pe", None),
-                getattr(self, "_selected_ce_symbol", None),
-                getattr(self, "_selected_pe_symbol", None),
-                getattr(self, "_pending_selected_ce", None),
-                getattr(self, "_pending_selected_pe", None),
-            )
-            if raw
-        }
-        selected |= _basket_selected(getattr(self, "_active_contract_basket", None))
-        data_hub = getattr(self, "_data_hub", None)
-        selected |= _basket_selected(getattr(data_hub, "_active_contract_basket", None))
-        mdm = getattr(data_hub, "_mdm", None) or getattr(self, "_market_data", None)
-        selected |= _basket_selected(getattr(mdm, "_active_contract_basket", None))
-        return bool(selected and normalized in selected)
+        """Thin delegate to shared history role resolver for selected options."""
+        return self._symbol_role_for_runner(symbol) == "selected_option"
 
     def _request_selected_option_history_prewarm(
         self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None, selected: bool | None = None
@@ -7665,7 +7631,7 @@ class StrategyRunner:
         if selected is None:
             selected = self._is_selected_option_symbol(symbol)
         request_event = "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_REQUESTED"
-        result_event = "SELECTED_OPTION_HISTORY_PREWARM_RESULT" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_RESULT"
+        scheduled_event = "SELECTED_OPTION_HISTORY_PREWARM_SCHEDULED" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_SCHEDULED"
         if not selected and bars_before >= required_bars:
             return
         data_hub = getattr(self, "_data_hub", None)
@@ -7699,9 +7665,9 @@ class StrategyRunner:
             target_bars=required_bars,
         )
         self._logger.info(
-            "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
-            result_event, symbol, bars_before, self._history_count_for_symbol(symbol), required_bars, scheduled,
-            extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": self._history_count_for_symbol(symbol), "required_bars": required_bars, "success": scheduled, "reason": reason, "source": source, "trace_id": trace_id},
+            "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s scheduled=%s",
+            scheduled_event, symbol, bars_before, self._history_count_for_symbol(symbol), required_bars, scheduled,
+            extra={"event": scheduled_event, "symbol": symbol, "bars_before": bars_before, "bars_after": self._history_count_for_symbol(symbol), "required_bars": required_bars, "scheduled": scheduled, "reason": reason, "source": source, "trace_id": trace_id},
         )
 
     def _history_count_for_symbol(self, symbol: str) -> int:
@@ -8885,15 +8851,24 @@ class StrategyRunner:
         return False
 
     def _symbol_role_for_runner(self, symbol: str) -> str:
-        """Return runner role label for a symbol. Args: symbol. Returns: role. Raises: none."""
-        s = normalize_symbol(str(symbol or "")).upper()
-        if s in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}:
-            return "spot_context"
-        if s.startswith("NFO:NIFTY") and s.endswith("FUT"):
-            return "futures_context"
-        if s.startswith("NFO:NIFTY") and (s.endswith("CE") or s.endswith("PE")):
-            return "tradable_option"
-        return "unknown"
+        """Return shared canonical history role for a runner symbol."""
+        basket = getattr(self, "_active_contract_basket", None)
+        selected_ce = getattr(self, "_active_selected_ce", None) or getattr(self, "_selected_ce_symbol", None) or getattr(self, "_pending_selected_ce", None)
+        selected_pe = getattr(self, "_active_selected_pe", None) or getattr(self, "_selected_pe_symbol", None) or getattr(self, "_pending_selected_pe", None)
+        spot_symbol = "NSE:NIFTY"
+        futures_symbol = getattr(self, "_active_futures_symbol", None)
+        if isinstance(basket, Mapping):
+            selected_ce = selected_ce or basket.get("selected_ce") or basket.get("atm_ce")
+            selected_pe = selected_pe or basket.get("selected_pe") or basket.get("atm_pe")
+            spot_symbol = str(basket.get("spot_symbol") or spot_symbol)
+            futures_symbol = futures_symbol or basket.get("futures_symbol")
+        return resolve_symbol_history_role(
+            symbol=symbol,
+            selected_ce=str(selected_ce or ""),
+            selected_pe=str(selected_pe or ""),
+            spot_symbol=spot_symbol,
+            futures_symbol=str(futures_symbol or ""),
+        )
 
     def _required_bars_for_symbol(self, symbol: str) -> int:
         """Return readiness bars by role. Args: symbol. Returns: int. Raises: none."""

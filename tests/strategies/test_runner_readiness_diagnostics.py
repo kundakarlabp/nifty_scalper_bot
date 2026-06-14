@@ -10,10 +10,10 @@ from nifty_scalper_bot.strategies.runner import StrategyRunner, _safe_positive_f
 
 class _DummyIndicator:
     def __init__(self, history_map: dict[str, list[object]] | None = None) -> None:
-        self._history_map = history_map or {}
+        self._raw_tick_history_map = history_map or {}
 
     def get_history(self, symbol: str) -> list[object]:
-        return list(self._history_map.get(symbol, []))
+        return list(self._raw_tick_history_map.get(symbol, []))
 
 
 def _make_runner() -> StrategyRunner:
@@ -204,7 +204,7 @@ def test_market_data_stale_symbols_detail_emitted(caplog) -> None:
     mdm._last_tick_rate_snapshot_at = time.monotonic()
     mdm._last_tick_rate_snapshot = {}
     mdm._ticks_received_per_symbol = {}
-    mdm._history = {}
+    mdm._raw_tick_history = {}
     mdm._last_async_drop_log = 0.0
     mdm._async_dispatch_drops = 0
     mdm._dispatch_awaitable_callback_result = lambda *_a, **_kw: None

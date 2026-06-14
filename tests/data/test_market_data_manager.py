@@ -311,7 +311,7 @@ async def test_spot_ready_not_logged_for_huge_age(
     manager = MarketDataManager(broker, ws)
     manager._active_subscribed_symbols = {"NSE:NIFTY"}  # noqa: SLF001
     manager._min_required_bars = 1  # noqa: SLF001
-    manager._history["NSE:NIFTY"].append({"ltp": 25000.0})  # noqa: SLF001
+    manager._raw_tick_history["NSE:NIFTY"].append({"ltp": 25000.0})  # noqa: SLF001
     manager.set_readiness_requirements(
         spot_symbol="NSE:NIFTY",
         futures_symbol="",
@@ -1126,7 +1126,7 @@ async def test_wait_until_ready_bypasses_off_market(
     manager = MarketDataManager(broker, ws, cache_len=5)
     manager._min_required_bars = 2
     manager._active_subscribed_symbols = {"NSE:NIFTY23"}
-    manager._history["NSE:NIFTY23"].append({"ltp": 100.0, "timestamp": time.time()})
+    manager._raw_tick_history["NSE:NIFTY23"].append({"ltp": 100.0, "timestamp": time.time()})
 
     with patch(
         "nifty_scalper_bot.data.market_data_manager.get_market_state",
@@ -1137,7 +1137,7 @@ async def test_wait_until_ready_bypasses_off_market(
     assert manager.ready is True
     assert manager.degraded is False
 
-    manager._history["NSE:NIFTY23"].append({"ltp": 101.0, "timestamp": time.time()})
+    manager._raw_tick_history["NSE:NIFTY23"].append({"ltp": 101.0, "timestamp": time.time()})
     await manager.wait_until_ready(timeout=0.2)
     assert manager.ready is True
     assert manager.degraded is False
@@ -1448,14 +1448,14 @@ def test_rotate_active_future_context_purges_expired_future_state(ws: DummyWebSo
     manager._subscribers["NFO:NIFTY26MAYFUT"].add(lambda *_a: None)  # noqa: SLF001
     manager._latest_ticks["NFO:NIFTY26MAYFUT"] = {"ltp": 1.0}  # noqa: SLF001
     manager._tick_cache["NFO:NIFTY26MAYFUT"] = {"ltp": 1.0}  # noqa: SLF001
-    manager._history["NFO:NIFTY26MAYFUT"].append({"ltp": 1.0})  # noqa: SLF001
+    manager._raw_tick_history["NFO:NIFTY26MAYFUT"].append({"ltp": 1.0})  # noqa: SLF001
     manager._ohlc[manager._bar_symbol_key("NFO:NIFTY26MAYFUT")].append({"close": 1.0})  # noqa: SLF001
     manager.rotate_active_nifty_future_context("NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT", reason="test")
     assert "NFO:NIFTY26MAYFUT" not in manager._tracked_symbols  # noqa: SLF001
     assert "NFO:NIFTY26MAYFUT" not in manager._subscribers  # noqa: SLF001
     assert "NFO:NIFTY26MAYFUT" not in manager._latest_ticks  # noqa: SLF001
     assert "NFO:NIFTY26MAYFUT" not in manager._tick_cache  # noqa: SLF001
-    assert "NFO:NIFTY26MAYFUT" not in manager._history  # noqa: SLF001
+    assert "NFO:NIFTY26MAYFUT" not in manager._raw_tick_history  # noqa: SLF001
     assert manager._readiness_requirements["futures"] == "NFO:NIFTY26JUNFUT"  # noqa: SLF001
     assert "NFO:NIFTY26JUNFUT" in manager._tracked_symbols  # noqa: SLF001
 

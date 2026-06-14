@@ -52,6 +52,7 @@ from nifty_scalper_bot.core.active_basket import (
     normalize_active_basket_schema,
     pick_atm_option_symbols_from_basket,
 )
+from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role as resolve_shared_symbol_history_role
 
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
@@ -7861,21 +7862,22 @@ class SelectedOptionHistoryReadiness:
 
 
 def resolve_symbol_history_role(ctx: "BotContext", symbol: str | None) -> str:
-    """Resolve one canonical history role for a runtime symbol."""
-    normalized = str(symbol or "")
+    """Resolve canonical history role from app runtime context."""
     basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", {}) or {}
+    selected_ce = selected_pe = spot_symbol = futures_symbol = None
     if isinstance(basket, Mapping):
-        selected = {str(basket.get("selected_ce") or basket.get("atm_ce") or ""), str(basket.get("selected_pe") or basket.get("atm_pe") or "")}
-        if normalized in selected:
-            return "selected_option"
-        if normalized == str(basket.get("spot_symbol") or "NSE:NIFTY") or normalized.startswith("NSE:"):
-            return "spot_context"
-        if normalized == str(basket.get("futures_symbol") or "") or normalized.endswith("FUT"):
-            return "futures_context"
-    open_positions = getattr(ctx, "open_position_symbols", ()) or ()
-    if normalized in {str(s) for s in open_positions}:
-        return "recovery_or_open_position"
-    return "option_context"
+        selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "")
+        selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "")
+        spot_symbol = str(basket.get("spot_symbol") or "NSE:NIFTY")
+        futures_symbol = str(basket.get("futures_symbol") or "")
+    return resolve_shared_symbol_history_role(
+        symbol=symbol,
+        selected_ce=selected_ce,
+        selected_pe=selected_pe,
+        spot_symbol=spot_symbol,
+        futures_symbol=futures_symbol,
+        open_position_symbols=getattr(ctx, "open_position_symbols", ()) or (),
+    )
 
 
 def resolve_history_policy(
@@ -7952,7 +7954,22 @@ async def ensure_symbol_runtime_history(
     failure_reason: str | None = None
     if mdm is None or not callable(getattr(mdm, "ensure_history", None)):
         failure_reason = "mdm_ensure_history_missing"
-        return RuntimeHistoryResult(symbol, role, phase, reason, policy.required_bars, policy.target_bars, 0, 0, 0, False, False, False, None, failure_reason)
+        return RuntimeHistoryResult(
+            symbol=symbol,
+            role=role,
+            phase=phase,
+            reason=reason,
+            required_bars=policy.required_bars,
+            target_bars=policy.target_bars,
+            mdm_bars=0,
+            runner_bars=0,
+            indicator_bars=0,
+            minimum_ready=False,
+            target_ready=False,
+            sync_success=False,
+            hydration=None,
+            failure_reason=failure_reason,
+        )
     if policy.allow_broker_fetch:
         hydration = await mdm.ensure_history(
             symbol,
@@ -7998,16 +8015,26 @@ async def ensure_symbol_runtime_history(
     target_ready = bool(mdm_bars >= policy.target_bars and failure_reason is None)
     sync_success = bool(getattr(sync_result, "success", False))
     LOGGER.info(
-        "HISTORY_READINESS_COMPUTED symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s mdm_bars=%s runner_bars=%s indicator_bars=%s minimum_ready=%s target_ready=%s failure_reason=%s",
-        symbol, role, phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, failure_reason,
-        extra={"event": "HISTORY_READINESS_COMPUTED", "symbol": symbol, "role": role, "phase": phase, "reason": reason, "required_bars": policy.required_bars, "target_bars": policy.target_bars, "mdm_bars": mdm_bars, "runner_bars": runner_bars, "indicator_bars": indicator_bars, "minimum_ready": minimum_ready, "target_ready": target_ready, "failure_reason": failure_reason},
-    )
-    LOGGER.info(
         "CANONICAL_HISTORY_RESULT symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s mdm_bars=%s runner_bars=%s indicator_bars=%s minimum_ready=%s target_ready=%s sync_success=%s failure_reason=%s",
         symbol, role, phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, sync_success, failure_reason,
         extra={"event": "CANONICAL_HISTORY_RESULT", "symbol": symbol, "role": role, "phase": phase, "reason": reason, "required_bars": policy.required_bars, "target_bars": policy.target_bars, "mdm_bars": mdm_bars, "runner_bars": runner_bars, "indicator_bars": indicator_bars, "minimum_ready": minimum_ready, "target_ready": target_ready, "sync_success": sync_success, "failure_reason": failure_reason},
     )
-    return RuntimeHistoryResult(symbol, role, phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, sync_success, hydration, failure_reason)
+    return RuntimeHistoryResult(
+        symbol=symbol,
+        role=role,
+        phase=phase,
+        reason=reason,
+        required_bars=policy.required_bars,
+        target_bars=policy.target_bars,
+        mdm_bars=mdm_bars,
+        runner_bars=runner_bars,
+        indicator_bars=indicator_bars,
+        minimum_ready=minimum_ready,
+        target_ready=target_ready,
+        sync_success=sync_success,
+        hydration=hydration,
+        failure_reason=failure_reason,
+    )
 
 
 async def _ensure_context_history_hydrated(
@@ -10847,10 +10874,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         reason=("futures_context_refresh" if str(sym).endswith("FUT") else "spot_context_refresh" if str(sym).startswith("NSE:") else "dynamic_option_universe"),
                                     )
                                     LOGGER.info(
-                                        "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
+                                        "RUNNER_HISTORY_INGESTED symbol=%s token=%s source=%s runner_history_count=%d mdm_history_count=%d",
                                         sym,
                                         int(tok),
-                                        int(runtime.indicator_bars),
                                         "dynamic_hydration",
                                         int(runtime.indicator_bars),
                                         int(runtime.mdm_bars),
@@ -10858,7 +10884,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             "event": "RUNNER_HISTORY_INGESTED",
                                             "symbol": sym,
                                             "token": int(tok),
-                                            "bars_ingested": int(runtime.indicator_bars),
                                             "source": "dynamic_hydration",
                                             "runner_history_count": int(runtime.indicator_bars),
                                             "mdm_history_count": int(runtime.mdm_bars),
