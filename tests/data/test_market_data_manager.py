@@ -1164,39 +1164,28 @@ async def test_warmup_history_primes_cache_without_emitting_callbacks(
     broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
     manager = MarketDataManager(broker, ws)
-    manager.register_symbol("NSE:NIFTY23", 123)
+    calls: list[dict[str, Any]] = []
 
-    events: list[dict[str, Any]] = []
-    manager.subscribe("NSE:NIFTY23", events.append)
+    async def fake_ensure_history(symbol: str, **kwargs: Any):
+        calls.append({"symbol": symbol, **kwargs})
 
-    class RestStub:
-        async def get_historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
-            return [
-                {
-                    "date": datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
-                    "close": 101.0,
-                    "volume": 50,
-                },
-                {
-                    "date": datetime(2024, 1, 1, 10, 1, tzinfo=timezone.utc),
-                    "close": 102.0,
-                    "volume": 80,
-                },
-            ]
-
-    manager._rest_client = RestStub()
+    manager.ensure_history = fake_ensure_history  # type: ignore[method-assign]
 
     await manager.warmup_history(["NSE:NIFTY23"], lookback_minutes=30)
 
-    assert events == []
-    latest = manager.get_latest_tick("NSE:NIFTY23")
-    assert latest is None
-    bars = manager.get_ohlc_bars("NSE:NIFTY23")
-    assert bars
+    assert calls == [
+        {
+            "symbol": "NSE:NIFTY23",
+            "interval": "minute",
+            "required_bars": 30,
+            "target_bars": 30,
+            "reason": "warmup_history",
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_warmup_history_resolves_missing_token_with_resolver_broker_fallback(
+async def test_warmup_history_delegates_without_resolver_or_broker_fallback(
     ws: DummyWebSocket,
 ) -> None:
     class ResolverMiss:
@@ -1216,30 +1205,22 @@ async def test_warmup_history_resolves_missing_token_with_resolver_broker_fallba
             self.token_calls.append(symbol)
             return 222
 
-        async def get_historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
-            self.history_tokens.append(int(kwargs["instrument_token"]))
-            return [
-                {
-                    "date": datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
-                    "open": 100.0,
-                    "high": 101.0,
-                    "low": 99.0,
-                    "close": 100.5,
-                    "volume": 10,
-                }
-            ]
-
     resolver = ResolverMiss()
     broker = BrokerFallback()
     manager = MarketDataManager(broker, ws, resolver=resolver)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_ensure_history(symbol: str, **kwargs: Any):
+        calls.append({"symbol": symbol, **kwargs})
+
+    manager.ensure_history = fake_ensure_history  # type: ignore[method-assign]
 
     await manager.warmup_history(["NFO:NIFTY26JUNFUT"], lookback_minutes=30)
 
-    assert resolver.calls == ["NFO:NIFTY26JUNFUT"]
-    assert broker.token_calls == ["NFO:NIFTY26JUNFUT"]
-    assert broker.history_tokens == [222]
-    assert manager._token_by_symbol["NFO:NIFTY26JUNFUT"] == 222  # noqa: SLF001
-    assert manager.get_ohlc_bars("NFO:NIFTY26JUNFUT")
+    assert calls and calls[0]["symbol"] == "NFO:NIFTY26JUNFUT"
+    assert resolver.calls == []
+    assert broker.token_calls == []
+    assert broker.history_tokens == []
 
 
 def test_out_of_order_tick_is_discarded(
@@ -1530,3 +1511,76 @@ def test_rotate_future_updates_readiness_when_initially_empty(ws: DummyWebSocket
     manager._readiness_requirements = {}  # noqa: SLF001
     manager.rotate_active_nifty_future_context("NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT", reason="test")
     assert manager._readiness_requirements.get("futures") == "NFO:NIFTY26JUNFUT"  # noqa: SLF001
+
+
+def test_set_active_contract_basket_replaces_desired_tokens(ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(None, ws)
+    first = {
+        "selected_ce": "NFO:NIFTY26JUN25000CE",
+        "selected_pe": "NFO:NIFTY26JUN25000PE",
+        "option_symbols": ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"],
+        "all_symbols": ["NFO:NIFTY26JUN25000CE", "NFO:NIFTY26JUN25000PE"],
+        "all_tokens": [11, 12],
+        "token_by_symbol": {"NFO:NIFTY26JUN25000CE": 11, "NFO:NIFTY26JUN25000PE": 12},
+    }
+    second = {
+        "selected_ce": "NFO:NIFTY26JUN25100CE",
+        "selected_pe": "NFO:NIFTY26JUN25100PE",
+        "option_symbols": ["NFO:NIFTY26JUN25100CE", "NFO:NIFTY26JUN25100PE"],
+        "all_symbols": ["NFO:NIFTY26JUN25100CE", "NFO:NIFTY26JUN25100PE"],
+        "all_tokens": [21, 22],
+        "token_by_symbol": {"NFO:NIFTY26JUN25100CE": 21, "NFO:NIFTY26JUN25100PE": 22},
+    }
+
+    manager.set_active_contract_basket(first)
+    assert manager._desired_tokens == {11, 12}  # noqa: SLF001
+
+    manager.set_active_contract_basket(second)
+
+    assert manager._desired_tokens == {21, 22}  # noqa: SLF001
+    assert 11 not in manager._symbol_by_token  # noqa: SLF001
+    assert 12 not in manager._token_to_symbol  # noqa: SLF001
+
+
+def test_selected_option_ltp_only_and_insufficient_bars_not_live_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIN_INDICATOR_BARS", "20")
+    monkeypatch.setenv("HISTORY_REQUIRED_BARS", "30")
+    monkeypatch.setenv("HYDRATION_SELECTED_OPTION_MIN_BARS", "30")
+    manager = MarketDataManager(None, None)
+    symbol = "NFO:NIFTY26JUN25000CE"
+    basket = {
+        "selected_ce": symbol,
+        "selected_pe": "NFO:NIFTY26JUN25000PE",
+        "option_symbols": [symbol],
+        "all_symbols": [symbol],
+        "all_tokens": [11],
+        "token_by_symbol": {symbol: 11},
+    }
+    quote = {"symbol": symbol, "ltp": 100.0, "last_price": 100.0, "timestamp": time.time(), "received_at": time.time(), "source": "poll"}
+    manager.get_latest_tick = lambda _sym: quote  # type: ignore[method-assign]
+    manager.get_quote = lambda _sym: quote  # type: ignore[method-assign]
+    manager.get_ohlc_bars = lambda _sym, *a, **k: [{"close": 100.0}] * 5  # type: ignore[method-assign]
+
+    report = manager.hydrate_active_contract_basket(basket)
+    entry = report["symbols"][symbol]
+
+    assert report["hard_ready"] is False
+    assert entry["quote_ready"] is True
+    assert entry["tradable_quote_ready"] is False
+    assert entry["ohlc_ready"] is False
+    assert entry["bars_count"] == 5
+
+
+def test_process_poll_quote_option_volume_uses_cumulative_delta() -> None:
+    manager = MarketDataManager(None, None)
+    emitted: list[dict[str, Any]] = []
+    manager._emit_poll_candle = emitted.append  # type: ignore[method-assign]
+    symbol = "NFO:NIFTY26JUN25000CE"
+
+    manager._process_poll_quote(symbol, {"timestamp": 60.0, "last_price": 100.0, "volume_traded_today": 100})
+    manager._process_poll_quote(symbol, {"timestamp": 70.0, "last_price": 101.0, "volume_traded_today": 130})
+    manager._process_poll_quote(symbol, {"timestamp": 120.0, "last_price": 102.0, "volume_traded_today": 180})
+
+    assert emitted
+    assert emitted[0]["volume"] == 80
+    assert emitted[0]["volume_source"] == "cumulative_delta"

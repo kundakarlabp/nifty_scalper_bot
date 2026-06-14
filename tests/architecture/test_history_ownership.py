@@ -123,6 +123,37 @@ def _func_source(path: Path, func_name: str) -> str:
     return ""
 
 
+def _function_call_attrs(path: Path) -> dict[str, set[str]]:
+    text = path.read_text()
+    tree = ast.parse(text)
+    result: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            calls: set[str] = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    fn = sub.func
+                    if isinstance(fn, ast.Attribute):
+                        calls.add(fn.attr)
+                    elif isinstance(fn, ast.Name):
+                        calls.add(fn.id)
+            result[node.name] = calls
+    return result
+
+
+def _imported_names(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text())
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.rsplit('.', 1)[-1])
+    return names
+
+
 async def test_runner_prewarm_has_no_datahub_hydrate_or_reseed() -> None:
     # Spec §3/§13: production prewarm must not call DataHub hydrate, reseed, or
     # ingest historical bars.
@@ -334,3 +365,69 @@ async def test_production_code_uses_explicit_readiness_apis() -> None:
     if mdm_src:
         assert "is_tick_ready" in mdm_src
         assert "is_ohlc_ready" not in mdm_src
+
+async def test_mdm_contract_ssot_regression_guards() -> None:
+    path = SRC / "data" / "market_data_manager.py"
+    text = path.read_text()
+    imported = _imported_names(path)
+    assert "NIFTY_SPOT_TOKEN" not in text
+    assert "256265" not in text
+    assert "260105" not in text
+    assert "resolve_active_nifty_future" not in imported
+    assert "resolve_active_nifty_future_from_instruments" not in imported
+    assert '.instruments("NFO")' not in text
+    assert "broker_instruments" not in text
+    assert "CRITICAL FALLBACK" not in text
+
+
+async def test_mdm_broker_history_calls_stay_inside_canonical_fetch_helper() -> None:
+    calls_by_func = _function_call_attrs(SRC / "data" / "market_data_manager.py")
+    offenders = {
+        name: sorted(calls & {"historical_data", "get_historical_data"})
+        for name, calls in calls_by_func.items()
+        if name != "fetch_history" and calls & {"historical_data", "get_historical_data"}
+    }
+    assert offenders == {}
+
+
+async def test_mdm_warmup_history_delegates_to_ensure_history() -> None:
+    src = _func_source(SRC / "data" / "market_data_manager.py", "warmup_history")
+    assert "ensure_history" in src
+    assert "historical_data" not in src
+    assert "get_historical_data" not in src
+    assert "ingest_historical_bar" not in src
+
+
+async def test_mdm_basket_replaces_desired_tokens_and_uses_mapping_helper() -> None:
+    text = (SRC / "data" / "market_data_manager.py").read_text()
+    set_basket = _func_source(SRC / "data" / "market_data_manager.py", "set_active_contract_basket")
+    assert "_desired_tokens.update(tokens)" not in set_basket
+    assert "_replace_desired_tokens_from_basket" in set_basket
+    assert "_set_symbol_token_mapping" in text
+    assert "seed_symbol_tokens" in text
+
+
+async def test_mdm_readiness_requires_tradable_quote_and_canonical_bars() -> None:
+    src = _func_source(SRC / "data" / "market_data_manager.py", "hydrate_active_contract_basket")
+    assert "tradable_quote_ready" in src
+    assert "tradable_quote_not_ready" in src
+    assert "_selected_option_history_required_bars" in src
+    assert '"ohlc_ready": False' in src
+
+
+async def test_mdm_poll_volume_uses_cumulative_delta() -> None:
+    src = _func_source(SRC / "data" / "market_data_manager.py", "_process_poll_quote")
+    assert "_last_cumulative_volume_by_symbol" in src
+    assert "cumulative_delta" in src
+    assert "volume_traded_today" in src
+
+
+async def test_runtime_execution_path_has_no_forbidden_router_imports() -> None:
+    forbidden = {"execution_router", "order_execution_hub", "preflight_validator", "ExecutionRouter", "OrderExecutionHub", "PreflightValidator"}
+    offenders = []
+    for rel in ["core/app.py", "strategies/runner.py", "execution/order_manager.py", "execution/bracket_manager.py"]:
+        text = (SRC / rel).read_text()
+        hits = sorted(item for item in forbidden if item in text)
+        if hits:
+            offenders.append((rel, hits))
+    assert offenders == []

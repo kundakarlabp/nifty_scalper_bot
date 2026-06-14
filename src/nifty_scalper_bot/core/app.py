@@ -8848,24 +8848,35 @@ def _commit_active_dynamic_basket(
     ctx.active_symbol_tokens = token_map
     committed["token_by_symbol"] = token_map
     if mdm is not None and token_map:
-        register_symbol = getattr(mdm, "register_symbol", None)
-        if callable(register_symbol):
-            for sym, tok in token_map.items():
-                try:
-                    register_symbol(str(sym), int(tok))
-                except (TypeError, ValueError) as exc:
-                    LOGGER.warning(
-                        "ACTIVE_BASKET_TOKEN_REGISTER_SKIPPED symbol=%s token=%s reason=%s",
-                        sym,
-                        tok,
-                        type(exc).__name__,
-                        extra={
-                            "event": "ACTIVE_BASKET_TOKEN_REGISTER_SKIPPED",
-                            "symbol": str(sym),
-                            "token": tok,
-                            "reason": type(exc).__name__,
-                        },
-                    )
+        seeded = False
+        instrument_manager = getattr(ctx, "instrument_manager", None)
+        snapshot_fn = getattr(instrument_manager, "token_by_symbol_snapshot", None)
+        seed_tokens = getattr(mdm, "seed_symbol_tokens", None)
+        if callable(seed_tokens) and callable(snapshot_fn):
+            seed_tokens(snapshot_fn(), source="instrument_manager")
+            seeded = True
+        if callable(seed_tokens):
+            seed_tokens(token_map, source="active_contract_basket")
+            seeded = True
+        if not seeded:
+            register_symbol = getattr(mdm, "register_symbol", None)
+            if callable(register_symbol):
+                for sym, tok in token_map.items():
+                    try:
+                        register_symbol(str(sym), int(tok))
+                    except (TypeError, ValueError) as exc:
+                        LOGGER.warning(
+                            "ACTIVE_BASKET_TOKEN_REGISTER_SKIPPED symbol=%s token=%s reason=%s",
+                            sym,
+                            tok,
+                            type(exc).__name__,
+                            extra={
+                                "event": "ACTIVE_BASKET_TOKEN_REGISTER_SKIPPED",
+                                "symbol": str(sym),
+                                "token": tok,
+                                "reason": type(exc).__name__,
+                            },
+                        )
     event_name, context_only = classify_basket_commit(
         selected_ce=selected_ce,
         selected_pe=selected_pe,

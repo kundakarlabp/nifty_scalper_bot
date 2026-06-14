@@ -73,10 +73,10 @@ async def test_historical_fetch_zero_rows_remains_failure_not_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spot_historical_fetch_uses_nifty_token_fallback() -> None:
+async def test_spot_historical_fetch_uses_seeded_nifty_token() -> None:
     broker = _Broker({256265: [_row()]})
     mdm = _mdm(broker)
-    mdm._token_by_symbol = {}
+    mdm._token_by_symbol = {"NSE:NIFTY": 256265}
 
     rows = await mdm.fetch_history("NSE:NIFTY", "minute", 2)
 
