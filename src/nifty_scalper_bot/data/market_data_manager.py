@@ -6830,22 +6830,18 @@ class MarketDataManager:
         symbols: list[str],
         lookback_minutes: int = 30,
     ) -> None:
-        """Compatibility warmup loop delegated to canonical ensure_history()."""
-        target = max(1, int(lookback_minutes or 1))
-        self._logger.info(
-            "WARMUP_START symbols=%d lookback=%dmin source=ensure_history",
-            len(symbols),
-            target,
-        )
+        """Compatibility warmup; delegates to canonical ensure_history only."""
+        target_bars = max(1, int(lookback_minutes))
+        required_bars = min(30, target_bars)
+
         for symbol in symbols:
             await self.ensure_history(
                 symbol,
                 interval="minute",
-                required_bars=min(30, target),
-                target_bars=target,
+                required_bars=required_bars,
+                target_bars=target_bars,
                 reason="warmup_history",
             )
-        self._logger.info("WARMUP_COMPLETE source=ensure_history")
 
     def _is_ws_connected(self) -> bool:
         """Args: none; Returns: websocket connectivity; Raises: none."""
