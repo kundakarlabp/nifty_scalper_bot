@@ -1415,6 +1415,35 @@ def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None
     if canonical:
         return canonical
 
+    # Final fallback: resolve directly from the InstrumentManager dump — the same
+    # authoritative source the SSOT uses (CONTRACT_SSOT_FUTURE_SELECTED). At
+    # startup the committed basket may not yet carry futures_symbol, so the
+    # MDM/basket/runner lookups above legitimately return empty; the dump is
+    # available and lets futures context resolve instead of being unavailable.
+    instrument_manager = getattr(ctx, "instrument_manager", None)
+    get_futures = getattr(instrument_manager, "get_future_contracts", None)
+    if callable(get_futures):
+        try:
+            if instrument_manager is not None and not instrument_manager.is_loaded():
+                instrument_manager.load()
+            contracts = get_futures("NIFTY") or []
+            # get_future_contracts returns nearest-expiry first.
+            for contract in contracts:
+                canonical = canonical_nifty_future_symbol(contract.get("tradingsymbol"))
+                if canonical:
+                    LOGGER.info(
+                        "FUTURES_CONTEXT_RESOLVED_FROM_INSTRUMENTS symbol=%s reason=basket_pending_dump_fallback",
+                        canonical,
+                        extra={"event": "FUTURES_CONTEXT_RESOLVED_FROM_INSTRUMENTS", "symbol": canonical, "reason": "basket_pending_dump_fallback"},
+                    )
+                    return canonical
+        except Exception as exc:  # noqa: BLE001 - fallback is best-effort
+            LOGGER.debug(
+                "FUTURES_CONTEXT_INSTRUMENT_FALLBACK_FAILED err=%s",
+                exc,
+                extra={"event": "FUTURES_CONTEXT_INSTRUMENT_FALLBACK_FAILED", "error": str(exc)},
+            )
+
     LOGGER.warning(
         "FUTURES_CONTEXT_UNAVAILABLE requested=%s reason=active_future_unresolved",
         requested,
