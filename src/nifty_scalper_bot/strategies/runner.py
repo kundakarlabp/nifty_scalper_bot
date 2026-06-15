@@ -3256,6 +3256,7 @@ class StrategyRunner:
                 getattr(self, "_runtime_readiness_reason", None)
                 or "startup_pipeline_not_ready"
             )
+        original_symbol = signal.symbol
         metadata = dict(signal.metadata or {})
         option_side = infer_option_side(signal.symbol, metadata)
         is_directional_option = option_side in {"CE", "PE"}
@@ -6025,25 +6026,39 @@ class StrategyRunner:
         *,
         trace_id: str | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
-        """Move the final execution symbol through signal/order states before submit."""
+        """Move final trade symbol through signal→order-pending lifecycle."""
+        del trace_id
         normalized = normalize_symbol(symbol)
         with self._execution_state_lock:
             machine = self._execution_state_by_symbol.setdefault(
                 normalized,
                 OrderStateMachine(),
             )
+            before = machine.current_state_details()
 
-        if not machine.can_accept_signal():
-            return False, "signal_state_rejected", machine.current_state_details()
+            if not machine.can_accept_signal():
+                return False, "signal_state_rejected", {
+                    "before": before,
+                    "after": machine.current_state_details(),
+                }
 
-        if machine.state in (ExecutionState.IDLE, ExecutionState.READY):
-            if not machine.transition(ExecutionState.SIGNAL_RECEIVED):
-                return False, "signal_state_rejected", machine.current_state_details()
+            if machine.state in (ExecutionState.IDLE, ExecutionState.READY):
+                if not machine.transition(ExecutionState.SIGNAL_RECEIVED):
+                    return False, "signal_state_rejected", {
+                        "before": before,
+                        "after": machine.current_state_details(),
+                    }
 
-        if not machine.transition(ExecutionState.ORDER_PENDING):
-            return False, "order_state_rejected", machine.current_state_details()
+            if not machine.transition(ExecutionState.ORDER_PENDING):
+                return False, "order_state_rejected", {
+                    "before": before,
+                    "after": machine.current_state_details(),
+                }
 
-        return True, "ok", machine.current_state_details()
+            return True, "ok", {
+                "before": before,
+                "after": machine.current_state_details(),
+            }
 
     def _reset_execution_state(self, symbol: str) -> None:
         """Reset execution state to IDLE. Args: symbol. Returns: none. Raises: none."""
@@ -8850,22 +8865,11 @@ class StrategyRunner:
             return "context_direction_conflict", "underlying_direction_conflict"
         direction_bias = indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias")
         if not direction_bias:
-            direction_reason_flags = {
-                "missing_spot_snapshot": not bool(indicators_ctx.get("spot_snapshot") or indicators_ctx.get("spot_ltp") or indicators_ctx.get("spot_price")),
-                "missing_futures_snapshot": not bool(indicators_ctx.get("futures_snapshot") or indicators_ctx.get("futures_ltp") or indicators_ctx.get("futures_price")),
-                "missing_vwap": indicators_ctx.get("vwap") is None and indicators_ctx.get("underlying_vwap") is None,
-                "missing_vwap_slope": indicators_ctx.get("vwap_slope") is None and indicators_ctx.get("underlying_vwap_slope") is None,
-                "missing_volume_ratio": indicators_ctx.get("volume_ratio") is None and indicators_ctx.get("underlying_volume_ratio") is None,
-                "stale_context": bool(indicators_ctx.get("stale_context") or indicators_ctx.get("context_stale")),
-                "insufficient_context_bars": bool(indicators_ctx.get("insufficient_context_bars")) or int(indicators_ctx.get("context_bar_count") or indicators_ctx.get("underlying_context_bar_count") or 0) < int(self._context_required_bars or 0),
-            }
-            if not any(direction_reason_flags.values()):
-                direction_reason_flags["unknown"] = True
-            else:
-                direction_reason_flags["unknown"] = False
+            reason_detail, direction_reason_flags = self._direction_context_missing_reason(indicators_ctx)
             self._logger.info(
-                "CONTEXT_DIRECTION_UNAVAILABLE symbol=%s reasons=%s",
+                "CONTEXT_DIRECTION_UNAVAILABLE symbol=%s reason_detail=%s diagnostics=%s",
                 symbol,
+                reason_detail,
                 direction_reason_flags,
                 extra={"event": "CONTEXT_DIRECTION_UNAVAILABLE", "symbol": symbol, **direction_reason_flags},
             )
@@ -8875,6 +8879,66 @@ class StrategyRunner:
         if not self._runtime_live_orders_armed:
             return "execution_readiness_false", str(self._runtime_readiness_reason or "runtime_live_orders_not_armed")
         return "strategy_no_trigger", "no_order_condition"
+
+
+    def _direction_context_missing_reason(self, indicators_ctx: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Return precise diagnostics for missing direction context without changing decisions."""
+        def _safe_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        spot_snapshot = indicators_ctx.get("spot_snapshot")
+        futures_snapshot = indicators_ctx.get("futures_snapshot")
+        spot_bars = _safe_int(
+            indicators_ctx.get("spot_bars")
+            or indicators_ctx.get("context_bar_count")
+            or indicators_ctx.get("underlying_context_bar_count")
+        )
+        futures_bars = _safe_int(
+            indicators_ctx.get("futures_bars")
+            or indicators_ctx.get("futures_context_bar_count")
+        )
+        spot_fresh = not bool(indicators_ctx.get("spot_stale") or indicators_ctx.get("stale_context") or indicators_ctx.get("context_stale"))
+        fut_fresh = not bool(indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale"))
+        spot_vwap = indicators_ctx.get("spot_vwap", indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")))
+        futures_vwap = indicators_ctx.get("futures_vwap")
+        futures_vwap_slope = indicators_ctx.get("futures_vwap_slope", indicators_ctx.get("vwap_slope", indicators_ctx.get("underlying_vwap_slope")))
+        futures_volume_ratio = indicators_ctx.get("futures_volume_ratio", indicators_ctx.get("volume_ratio", indicators_ctx.get("underlying_volume_ratio")))
+        regime_available = bool(indicators_ctx.get("regime_snapshot") or indicators_ctx.get("regime") or indicators_ctx.get("market_regime"))
+        required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
+
+        if not bool(spot_snapshot or indicators_ctx.get("spot_ltp") or indicators_ctx.get("spot_price")):
+            reason = "missing_spot_snapshot"
+        elif not bool(futures_snapshot or indicators_ctx.get("futures_ltp") or indicators_ctx.get("futures_price")):
+            reason = "missing_futures_snapshot"
+        elif not spot_fresh or not fut_fresh or bool(indicators_ctx.get("stale_context") or indicators_ctx.get("context_stale")):
+            reason = "stale_context"
+        elif bool(indicators_ctx.get("insufficient_context_bars")) or (required_bars > 0 and spot_bars < required_bars):
+            reason = "insufficient_context_bars"
+        elif spot_vwap is None and futures_vwap is None:
+            reason = "missing_vwap"
+        elif futures_vwap_slope in (None, 0, 0.0):
+            reason = "missing_futures_slope"
+        elif futures_volume_ratio is None:
+            reason = "missing_volume_ratio"
+        elif not regime_available:
+            reason = "missing_regime_snapshot"
+        else:
+            reason = "unknown"
+        return reason, {
+            "reason_detail": reason,
+            "spot_fresh": spot_fresh,
+            "fut_fresh": fut_fresh,
+            "spot_bars": spot_bars,
+            "futures_bars": futures_bars,
+            "spot_vwap": spot_vwap,
+            "futures_vwap": futures_vwap,
+            "futures_vwap_slope": futures_vwap_slope,
+            "futures_volume_ratio": futures_volume_ratio,
+            "regime_available": regime_available,
+        }
 
     def _emit_no_trade_decision(
         self,
@@ -12518,6 +12582,7 @@ class StrategyRunner:
         selected_symbol: str,
         option_side: str,
         selected_snapshot: dict[str, Any],
+        trace_id: str | None = None,
     ) -> SignalExecutionResult | None:
         reason = str(signal.reason or "unknown")
         key = self._directional_dedup_key(
@@ -12589,11 +12654,45 @@ class StrategyRunner:
                 and normalize_symbol(str(snap.get("symbol") or ""))
                 != normalize_symbol(selected_symbol)
             ]
-        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-        strict_depth = mode == "LIVE" or (
-            str(os.getenv("ENABLE_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
-        ) or _env_flag("STRICT_OPTION_DEPTH_FOR_PAPER", default=False)
-        if strict_depth and not depth_available:
+        bid_raw = selected_snapshot.get("bid")
+        ask_raw = selected_snapshot.get("ask")
+        try:
+            bid = float(bid_raw) if bid_raw is not None else 0.0
+        except (TypeError, ValueError):
+            bid = 0.0
+        try:
+            ask = float(ask_raw) if ask_raw is not None else 0.0
+        except (TypeError, ValueError):
+            ask = 0.0
+        mode_snapshot = self._resolve_execution_mode_snapshot()
+        is_live_depth_required = bool(mode_snapshot.is_live_mode) and not _env_flag(
+            "RUNNER_ALLOW_LIVE_DEPTH_FALLBACK", default=False
+        )
+        strict_depth = is_live_depth_required or _env_flag("STRICT_OPTION_DEPTH_FOR_PAPER", default=False)
+        max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
+        invalid_spread = spread_pct_raw is None or spread_pct < 0 or spread_pct > max_spread_pct
+        if strict_depth and (not tradable_quote or bid <= 0 or ask <= 0 or invalid_spread or not depth_available):
+            self._logger.info(
+                "EXECUTION_CANDIDATE_REJECTED symbol=%s reason=candidate_depth_missing tradable_quote=%s depth_available=%s bid=%s ask=%s spread_pct=%s trace_id=%s",
+                selected_symbol,
+                tradable_quote,
+                depth_available,
+                bid,
+                ask,
+                spread_pct_raw,
+                trace_id,
+                extra={
+                    "event": "EXECUTION_CANDIDATE_REJECTED",
+                    "symbol": selected_symbol,
+                    "reason": "candidate_depth_missing",
+                    "tradable_quote": tradable_quote,
+                    "depth_available": depth_available,
+                    "bid": bid,
+                    "ask": ask,
+                    "spread_pct": spread_pct_raw,
+                    "trace_id": trace_id,
+                },
+            )
             return SignalExecutionResult(
                 False,
                 "candidate_depth_missing",
@@ -13238,6 +13337,8 @@ class StrategyRunner:
                         trace_id,
                         extra={
                             "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
+                            "original_signal_symbol": original_symbol,
+                            "final_trade_symbol": selected_symbol,
                             "original_symbol": original_symbol,
                             "selected_symbol": candidate.symbol,
                             "original_trade_price": original_trade_price,
@@ -13336,6 +13437,7 @@ class StrategyRunner:
                     selected_symbol=selected_symbol,
                     option_side=option_side,
                     selected_snapshot=selected_snapshot,
+                    trace_id=trace_id,
                 )
                 if dedup_result is not None:
                     self._reset_execution_state(base_symbol)
@@ -13839,6 +13941,7 @@ class StrategyRunner:
                         "trace_id": trace_id,
                         "state_details": state_details,
                         "target_state": ExecutionState.ORDER_PENDING.value,
+                        "reason": state_reason,
                         "reason_key": reason_key,
                     },
                 )

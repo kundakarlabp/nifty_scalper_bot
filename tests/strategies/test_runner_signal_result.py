@@ -61,7 +61,7 @@ def test_prepare_order_state_from_idle_reaches_order_pending() -> None:
 
     assert ok is True
     assert reason == 'ok'
-    assert details['state'] == ExecutionState.ORDER_PENDING.value
+    assert details['after']['state'] == ExecutionState.ORDER_PENDING.value
 
 
 def test_prepare_order_state_from_ready_reaches_order_pending() -> None:
@@ -75,7 +75,7 @@ def test_prepare_order_state_from_ready_reaches_order_pending() -> None:
 
     assert ok is True
     assert reason == 'ok'
-    assert details['state'] == ExecutionState.ORDER_PENDING.value
+    assert details['after']['state'] == ExecutionState.ORDER_PENDING.value
 
 
 @pytest.mark.parametrize('busy_state', [ExecutionState.ORDER_PENDING, ExecutionState.POSITION_OPEN])
@@ -93,4 +93,4 @@ def test_prepare_order_state_rejects_busy_final_symbol(busy_state) -> None:
 
     assert ok is False
     assert reason == 'signal_state_rejected'
-    assert details['state'] == busy_state.value
+    assert details['after']['state'] == busy_state.value
