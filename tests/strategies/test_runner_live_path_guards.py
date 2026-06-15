@@ -11,6 +11,7 @@ import threading
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
+from nifty_scalper_bot.execution.order_state_machine import ExecutionState
 from nifty_scalper_bot.strategies.runner import ExecutionReadinessResult, SignalExecutionResult, StrategyRunner
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
@@ -2371,6 +2372,8 @@ def test_live_execution_uses_basket_and_submits_alternate_candidate(monkeypatch)
     assert result.reason == "order_submitted"
     submitted_plan = runner._order_manager.submit_trade_plan.call_args.args[0]
     assert submitted_plan.symbol == alt_symbol
+    assert runner._get_execution_state_machine(alt_symbol).state == ExecutionState.ORDER_PENDING
+    assert result.reason != "order_state_rejected"
 
 
 def test_order_rejected_does_not_mark_duplicate_cooldown(monkeypatch) -> None:
@@ -2965,3 +2968,55 @@ def test_symbol_live_entry_ready_allows_near_atm_candidate_when_global_pair_not_
     assert reason == 'symbol_live_ready'
     assert details['candidate_specific_readiness_override'] is True
     assert details['tradable_quote'] is True
+
+
+def test_live_candidate_with_tradable_quote_without_depth_rejected(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY2661623900PE',
+        quantity=1,
+        confidence=0.9,
+        reason='OrderFlow',
+        stop_loss=100.0,
+        take_profit=130.0,
+        metadata={},
+    )
+    result = runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 9.0, 'tradable_quote': True, 'candidate_spread_pct': 0.1},
+        underlying='NIFTY',
+        now_epoch=1000.0,
+        selected_symbol='NFO:NIFTY2661623900PE',
+        option_side='PE',
+        selected_snapshot={'tradable_quote': True, 'bid': 100.0, 'ask': 101.0, 'depth_available': False},
+    )
+
+    assert result is not None
+    assert result.accepted is False
+    assert result.reason == 'candidate_depth_missing'
+
+
+def test_option_context_cache_sync_role_for_five_bar_cache_sync() -> None:
+    runner = _build_runner()
+    captured = {}
+
+    def fake_sync(symbol, *, required_bars, reason, role, request_if_short):
+        captured.update(symbol=symbol, required_bars=required_bars, reason=reason, role=role, request_if_short=request_if_short)
+        return SimpleNamespace(indicator_bars=required_bars)
+
+    runner._normalize_symbol = lambda symbol: symbol
+    runner._required_bars_for_symbol = lambda _symbol: 5
+    runner.sync_history_from_mdm = fake_sync
+
+    after = runner._sync_history_from_mdm_cache(
+        'NFO:NIFTY2661623900PE',
+        required_bars=5,
+        source='active_option_context_option_cache_sync',
+        request_if_short=False,
+    )
+
+    assert after == 5
+    assert captured['required_bars'] == 5
+    assert captured['role'] == 'option_context_cache_sync'

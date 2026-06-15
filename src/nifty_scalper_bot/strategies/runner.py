@@ -1751,11 +1751,14 @@ class StrategyRunner:
         """Compatibility wrapper around canonical Runner history sync."""
         normalized = self._normalize_symbol(symbol)
         target = max(1, int(required_bars or self._required_bars_for_symbol(normalized) or 1)) if normalized else 1
+        role = self._symbol_role_for_runner(symbol) if hasattr(self, "_symbol_role_for_runner") else None
+        if str(source or "").endswith("option_cache_sync"):
+            role = "option_context_cache_sync"
         result = self.sync_history_from_mdm(
             symbol,
             required_bars=target,
             reason=source,
-            role=self._symbol_role_for_runner(symbol) if hasattr(self, "_symbol_role_for_runner") else None,
+            role=role,
             request_if_short=request_if_short,
         )
         return result.indicator_bars
@@ -6016,6 +6019,32 @@ class StrategyRunner:
         machine = self._get_execution_state_machine(symbol)
         return machine.transition(new_state)
 
+    def _prepare_order_state_for_submission(
+        self,
+        symbol: str,
+        *,
+        trace_id: str | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Move the final execution symbol through signal/order states before submit."""
+        normalized = normalize_symbol(symbol)
+        with self._execution_state_lock:
+            machine = self._execution_state_by_symbol.setdefault(
+                normalized,
+                OrderStateMachine(),
+            )
+
+        if not machine.can_accept_signal():
+            return False, "signal_state_rejected", machine.current_state_details()
+
+        if machine.state in (ExecutionState.IDLE, ExecutionState.READY):
+            if not machine.transition(ExecutionState.SIGNAL_RECEIVED):
+                return False, "signal_state_rejected", machine.current_state_details()
+
+        if not machine.transition(ExecutionState.ORDER_PENDING):
+            return False, "order_state_rejected", machine.current_state_details()
+
+        return True, "ok", machine.current_state_details()
+
     def _reset_execution_state(self, symbol: str) -> None:
         """Reset execution state to IDLE. Args: symbol. Returns: none. Raises: none."""
         machine = self._get_execution_state_machine(symbol)
@@ -8821,6 +8850,25 @@ class StrategyRunner:
             return "context_direction_conflict", "underlying_direction_conflict"
         direction_bias = indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias")
         if not direction_bias:
+            direction_reason_flags = {
+                "missing_spot_snapshot": not bool(indicators_ctx.get("spot_snapshot") or indicators_ctx.get("spot_ltp") or indicators_ctx.get("spot_price")),
+                "missing_futures_snapshot": not bool(indicators_ctx.get("futures_snapshot") or indicators_ctx.get("futures_ltp") or indicators_ctx.get("futures_price")),
+                "missing_vwap": indicators_ctx.get("vwap") is None and indicators_ctx.get("underlying_vwap") is None,
+                "missing_vwap_slope": indicators_ctx.get("vwap_slope") is None and indicators_ctx.get("underlying_vwap_slope") is None,
+                "missing_volume_ratio": indicators_ctx.get("volume_ratio") is None and indicators_ctx.get("underlying_volume_ratio") is None,
+                "stale_context": bool(indicators_ctx.get("stale_context") or indicators_ctx.get("context_stale")),
+                "insufficient_context_bars": bool(indicators_ctx.get("insufficient_context_bars")) or int(indicators_ctx.get("context_bar_count") or indicators_ctx.get("underlying_context_bar_count") or 0) < int(self._context_required_bars or 0),
+            }
+            if not any(direction_reason_flags.values()):
+                direction_reason_flags["unknown"] = True
+            else:
+                direction_reason_flags["unknown"] = False
+            self._logger.info(
+                "CONTEXT_DIRECTION_UNAVAILABLE symbol=%s reasons=%s",
+                symbol,
+                direction_reason_flags,
+                extra={"event": "CONTEXT_DIRECTION_UNAVAILABLE", "symbol": symbol, **direction_reason_flags},
+            )
             return "context_direction_unavailable", "direction_context_not_ready"
         if signal is None:
             return "strategy_no_trigger", "evaluation_no_signal"
@@ -12060,14 +12108,6 @@ class StrategyRunner:
             trade_price = price
 
             if action in {"BUY", "SELL"}:
-                if not self._transition_execution_state(
-                    base_symbol, ExecutionState.SIGNAL_RECEIVED
-                ):
-                    return SignalExecutionResult(
-                        False,
-                        "signal_state_rejected",
-                        details={"trace_id": trace_id},
-                    )
                 return self._handle_entry_signal(
                     signal,
                     base_symbol,
@@ -12549,6 +12589,17 @@ class StrategyRunner:
                 and normalize_symbol(str(snap.get("symbol") or ""))
                 != normalize_symbol(selected_symbol)
             ]
+        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+        strict_depth = mode == "LIVE" or (
+            str(os.getenv("ENABLE_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        ) or _env_flag("STRICT_OPTION_DEPTH_FOR_PAPER", default=False)
+        if strict_depth and not depth_available:
+            return SignalExecutionResult(
+                False,
+                "candidate_depth_missing",
+                details={"selected_symbol": selected_symbol, "ranking_fields": ranking_fields},
+            )
+
         self._logger.info(
             "SIGNAL_CANDIDATE_SELECTED direction=%s selected_symbol=%s rejected_symbols=%s ranking_fields=%s",
             option_side,
@@ -13768,20 +13819,28 @@ class StrategyRunner:
                 )
                 return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")
 
-            if not self._transition_execution_state(
-                base_symbol, ExecutionState.ORDER_PENDING
-            ):
-                state_details = self._get_execution_state_machine(base_symbol).current_state_details()
+            state_ok, state_reason, state_details = self._prepare_order_state_for_submission(
+                trade_symbol or base_symbol, trace_id=trace_id
+            )
+            if not state_ok:
                 self._logger.warning(
-                    "EXECUTION_STATE_TRANSITION_REJECTED symbol=%s base_symbol=%s trade_symbol=%s signal_symbol=%s trace_id=%s target_state=%s state_details=%s",
-                    base_symbol,
-                    base_symbol,
+                    "EXECUTION_STATE_TRANSITION_REJECTED symbol=%s trade_symbol=%s signal_symbol=%s trace_id=%s target_state=%s state_details=%s",
+                    trade_symbol or base_symbol,
                     trade_symbol,
                     signal.symbol,
                     trace_id,
                     ExecutionState.ORDER_PENDING.value,
                     state_details,
-                    extra={"event": "EXECUTION_STATE_TRANSITION_REJECTED", "symbol": base_symbol, "trace_id": trace_id, "state_details": state_details, "target_state": ExecutionState.ORDER_PENDING.value, "reason_key": reason_key},
+                    extra={
+                        "event": "EXECUTION_STATE_TRANSITION_REJECTED",
+                        "symbol": trade_symbol or base_symbol,
+                        "trade_symbol": trade_symbol,
+                        "signal_symbol": signal.symbol,
+                        "trace_id": trace_id,
+                        "state_details": state_details,
+                        "target_state": ExecutionState.ORDER_PENDING.value,
+                        "reason_key": reason_key,
+                    },
                 )
                 self._mark_directional_dedup_failed(
                     underlying=underlying, option_side=option_side, reason=reason_key
@@ -13790,7 +13849,7 @@ class StrategyRunner:
                 return self._reject_signal_execution(
                     symbol=base_symbol,
                     trace_id=trace_id,
-                    reason="order_state_rejected",
+                    reason=state_reason,
                     details={"state_details": state_details, "target_state": ExecutionState.ORDER_PENDING.value},
                 )
 
