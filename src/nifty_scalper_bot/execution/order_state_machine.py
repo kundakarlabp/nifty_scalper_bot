@@ -46,6 +46,11 @@ class OrderStateMachine:
         self._lock = threading.RLock()
         self._last_transition_ts: str | None = None
         self._last_reject: dict[str, Any] | None = None
+        # Per-state metadata for stale-state reconciliation and observability.
+        self._entered_at: datetime = datetime.now(timezone.utc)
+        self._order_id: str | None = None
+        self._reason: str | None = None
+        self._trace_id: str | None = None
 
     @property
     def state(self) -> ExecutionState:
@@ -58,8 +63,16 @@ class OrderStateMachine:
         with self._lock:
             return self._state in (ExecutionState.IDLE, ExecutionState.READY)
 
-    def transition(self, new_state: ExecutionState) -> bool:
-        """Apply validated transition. Args: new_state. Returns: bool. Raises: none."""
+    def transition(
+        self,
+        new_state: ExecutionState,
+        *,
+        order_id: str | None = None,
+        reason: str | None = None,
+        trace_id: str | None = None,
+    ) -> bool:
+        """Apply validated transition. Args: new_state and optional order_id/
+        reason/trace_id metadata. Returns: bool. Raises: none."""
         with self._lock:
             allowed = self._VALID_TRANSITIONS.get(self._state, set())
             if new_state not in allowed:
@@ -72,14 +85,43 @@ class OrderStateMachine:
                 return False
             self._state = new_state
             self._last_transition_ts = datetime.now(timezone.utc).isoformat()
+            self._entered_at = datetime.now(timezone.utc)
+            if order_id is not None:
+                self._order_id = order_id
+            if reason is not None:
+                self._reason = reason
+            if trace_id is not None:
+                self._trace_id = trace_id
             self._last_reject = None
             return True
 
-    def force_idle(self) -> None:
-        """Force reset to IDLE state. Args: none. Returns: none. Raises: none."""
+    def force_idle(self, reason: str | None = None) -> None:
+        """Force reset to IDLE state. Args: optional reason. Returns: none. Raises: none."""
         with self._lock:
             self._state = ExecutionState.IDLE
             self._last_transition_ts = datetime.now(timezone.utc).isoformat()
+            self._entered_at = datetime.now(timezone.utc)
+            self._order_id = None
+            self._reason = reason
+            self._trace_id = None
+
+    def state_age_seconds(self) -> float:
+        """Return seconds since the current state was entered. Args: none.
+        Returns: float seconds. Raises: none."""
+        with self._lock:
+            return max(0.0, (datetime.now(timezone.utc) - self._entered_at).total_seconds())
+
+    @property
+    def order_id(self) -> str | None:
+        """Return the order id associated with the current state, if any."""
+        with self._lock:
+            return self._order_id
+
+    def set_order_id(self, order_id: str) -> None:
+        """Attach a broker order id to the current state. Args: order_id.
+        Returns: none. Raises: none."""
+        with self._lock:
+            self._order_id = str(order_id)
 
     def current_state_details(self) -> dict[str, Any]:
         """Return state diagnostic details for transition logging."""
@@ -90,4 +132,9 @@ class OrderStateMachine:
                 "allowed_next": sorted(state.value for state in allowed),
                 "last_transition_ts": self._last_transition_ts,
                 "last_reject": dict(self._last_reject) if self._last_reject else None,
+                "entered_at": self._entered_at.isoformat(),
+                "state_age_seconds": max(0.0, (datetime.now(timezone.utc) - self._entered_at).total_seconds()),
+                "order_id": self._order_id,
+                "reason": self._reason,
+                "trace_id": self._trace_id,
             }

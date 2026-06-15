@@ -902,6 +902,8 @@ class StrategyRunner:
         self._order_timeout_sec = 10
         self._execution_state_lock = threading.RLock()
         self._execution_state_by_symbol: dict[str, OrderStateMachine] = {}
+        # Stale ORDER_PENDING past this age with no backing order is recoverable.
+        self._order_pending_timeout_seconds: float = parse_float_env(os.getenv("ORDER_PENDING_TIMEOUT_SECONDS"), 15.0)
         self._event_bus = EventBus()
         self._entry_lock = threading.Lock()  # Atomic entry lock
         self._last_cumulative_volume: dict[str, int] = {}
@@ -6008,10 +6010,11 @@ class StrategyRunner:
 
     def _get_execution_state_machine(self, symbol: str) -> OrderStateMachine:
         """Return symbol state machine. Args: symbol. Returns: OrderStateMachine. Raises: none."""
+        normalized = normalize_symbol(symbol)
         with self._execution_state_lock:
-            if symbol not in self._execution_state_by_symbol:
-                self._execution_state_by_symbol[symbol] = OrderStateMachine()
-            return self._execution_state_by_symbol[symbol]
+            if normalized not in self._execution_state_by_symbol:
+                self._execution_state_by_symbol[normalized] = OrderStateMachine()
+            return self._execution_state_by_symbol[normalized]
 
     def _transition_execution_state(
         self, symbol: str, new_state: ExecutionState
@@ -6020,6 +6023,61 @@ class StrategyRunner:
         machine = self._get_execution_state_machine(symbol)
         return machine.transition(new_state)
 
+    def _reconcile_stale_execution_state(
+        self, machine: "OrderStateMachine", normalized: str, *, trace_id: str | None
+    ) -> None:
+        """Recover a wedged execution state before it blocks a valid signal.
+
+        Args: machine, normalized symbol, trace_id. Returns: none. Raises: none.
+        ORDER_PENDING with no backing pending order (or aged past the timeout) is
+        recovered to IDLE. POSITION_OPEN is recovered ONLY when the position
+        manager confirms no open position exists; a real open position is never
+        force-cleared here.
+        """
+        state = machine.state
+        if state not in (ExecutionState.ORDER_PENDING, ExecutionState.POSITION_OPEN):
+            return
+        pm = getattr(self, "_position_manager", None)
+
+        def _has_pending_order() -> bool:
+            try:
+                getter = getattr(pm, "get_pending_orders", None)
+                if callable(getter):
+                    return bool(getter(normalized))
+            except Exception:  # noqa: BLE001 - reconciliation is best-effort
+                return True  # fail safe: assume real, do not clear
+            return False
+
+        def _has_open_position() -> bool:
+            try:
+                checker = getattr(pm, "has_position", None) or getattr(pm, "has_open_position", None)
+                if callable(checker):
+                    return bool(checker(normalized))
+            except Exception:  # noqa: BLE001
+                return True  # fail safe
+            return False
+
+        timeout_s = float(getattr(self, "_order_pending_timeout_seconds", 15.0) or 15.0)
+        age = machine.state_age_seconds()
+
+        if state == ExecutionState.ORDER_PENDING:
+            backed = _has_pending_order() or _has_open_position()
+            if not backed and age >= timeout_s:
+                machine.force_idle(reason="stale_order_pending_no_active_order")
+                self._logger.error(
+                    "STALE_ORDER_PENDING_RECOVERED symbol=%s state_age_s=%.1f order_id=%s trace_id=%s",
+                    normalized, age, machine.order_id, trace_id,
+                    extra={"event": "STALE_ORDER_PENDING_RECOVERED", "symbol": normalized, "state_age_seconds": age, "order_id": machine.order_id, "trace_id": trace_id},
+                )
+        elif state == ExecutionState.POSITION_OPEN:
+            if not _has_open_position():
+                machine.force_idle(reason="stale_position_open_no_position")
+                self._logger.error(
+                    "STALE_POSITION_OPEN_RECOVERED symbol=%s state_age_s=%.1f trace_id=%s",
+                    normalized, age, trace_id,
+                    extra={"event": "STALE_POSITION_OPEN_RECOVERED", "symbol": normalized, "state_age_seconds": age, "trace_id": trace_id},
+                )
+
     def _prepare_order_state_for_submission(
         self,
         symbol: str,
@@ -6027,13 +6085,15 @@ class StrategyRunner:
         trace_id: str | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
         """Move final trade symbol through signal→order-pending lifecycle."""
-        del trace_id
         normalized = normalize_symbol(symbol)
         with self._execution_state_lock:
             machine = self._execution_state_by_symbol.setdefault(
                 normalized,
                 OrderStateMachine(),
             )
+            # Reconcile a wedged state against real orders/positions before it
+            # blocks an otherwise-valid signal (root cause of signal_state_rejected).
+            self._reconcile_stale_execution_state(machine, normalized, trace_id=trace_id)
             before = machine.current_state_details()
 
             if not machine.can_accept_signal():
@@ -6043,13 +6103,13 @@ class StrategyRunner:
                 }
 
             if machine.state in (ExecutionState.IDLE, ExecutionState.READY):
-                if not machine.transition(ExecutionState.SIGNAL_RECEIVED):
+                if not machine.transition(ExecutionState.SIGNAL_RECEIVED, trace_id=trace_id):
                     return False, "signal_state_rejected", {
                         "before": before,
                         "after": machine.current_state_details(),
                     }
 
-            if not machine.transition(ExecutionState.ORDER_PENDING):
+            if not machine.transition(ExecutionState.ORDER_PENDING, reason="order_submit", trace_id=trace_id):
                 return False, "order_state_rejected", {
                     "before": before,
                     "after": machine.current_state_details(),
@@ -13921,13 +13981,14 @@ class StrategyRunner:
                 )
                 return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")
 
+            execution_symbol = normalize_symbol(trade_symbol or base_symbol)
             state_ok, state_reason, state_details = self._prepare_order_state_for_submission(
-                trade_symbol or base_symbol, trace_id=trace_id
+                execution_symbol, trace_id=trace_id
             )
             if not state_ok:
                 self._logger.warning(
                     "EXECUTION_STATE_TRANSITION_REJECTED symbol=%s trade_symbol=%s signal_symbol=%s trace_id=%s target_state=%s state_details=%s",
-                    trade_symbol or base_symbol,
+                    execution_symbol,
                     trade_symbol,
                     signal.symbol,
                     trace_id,
@@ -13935,7 +13996,7 @@ class StrategyRunner:
                     state_details,
                     extra={
                         "event": "EXECUTION_STATE_TRANSITION_REJECTED",
-                        "symbol": trade_symbol or base_symbol,
+                        "symbol": execution_symbol,
                         "trade_symbol": trade_symbol,
                         "signal_symbol": signal.symbol,
                         "trace_id": trace_id,
@@ -13948,12 +14009,18 @@ class StrategyRunner:
                 self._mark_directional_dedup_failed(
                     underlying=underlying, option_side=option_side, reason=reason_key
                 )
-                self._reset_execution_state(base_symbol)
+                self._reset_execution_state(execution_symbol)
                 return self._reject_signal_execution(
                     symbol=base_symbol,
                     trace_id=trace_id,
                     reason=state_reason,
-                    details={"state_details": state_details, "target_state": ExecutionState.ORDER_PENDING.value},
+                    details={
+                        "state_details": state_details,
+                        "target_state": ExecutionState.ORDER_PENDING.value,
+                        "execution_symbol": execution_symbol,
+                        "trade_symbol": trade_symbol,
+                        "signal_symbol": signal.symbol,
+                    },
                 )
 
             self._logger.info(
@@ -14031,6 +14098,15 @@ class StrategyRunner:
                 orchestrator = getattr(self, "_orchestrator", None)
                 if orchestrator is not None and hasattr(orchestrator, "notify_entry"):
                     orchestrator.notify_entry(signal.symbol, reason="order_accepted")
+                # Stamp the order id onto the execution state machine so stale-state
+                # reconciliation can tell a real pending order from a wedged one.
+                try:
+                    with self._execution_state_lock:
+                        _machine = self._execution_state_by_symbol.get(normalize_symbol(trade_symbol or base_symbol))
+                        if _machine is not None and _machine.state == ExecutionState.ORDER_PENDING:
+                            _machine.set_order_id(str(order_id))
+                except Exception:  # noqa: BLE001 - observability only
+                    pass
                 self._logger.info(
                     "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s trace_id=%s",
                     order_id, base_symbol, signal.action, qty, trace_id,
