@@ -11488,6 +11488,25 @@ async def startup_sequence(ctx: BotContext) -> None:
     # 4. Start subsystems (guarded singleton startup)
     # ---------------------------------------------------------
     if broker_ready:
+        # Start Telegram polling EARLY and independently of the data-hydration
+        # pipeline below. The bot's start() is self-contained (claims the polling
+        # owner, registers operator command handlers, then begins polling) and
+        # does not depend on market-data readiness. Previously start() was the
+        # last step of the long subsystems_started block, so operator commands
+        # only became live after full hydration — and were skipped entirely if
+        # any earlier step in that block raised. start() is idempotent (no-ops
+        # when already started), so the later call in the pipeline is harmless.
+        if ctx.telegram_bot is not None:
+            try:
+                LOGGER.info("🚀 Starting Telegram Bot (Polling Mode, early)...")
+                await ctx.telegram_bot.start()
+                LOGGER.info("✅ Telegram Bot polling active — commands now live.")
+            except Exception as _tg_early_exc:  # noqa: BLE001 - never block startup on telegram
+                LOGGER.warning(
+                    "telegram_early_start_failed err=%s",
+                    _tg_early_exc,
+                    extra={"event": "telegram_early_start_failed", "err": str(_tg_early_exc)},
+                )
         try:
             if not ctx.subsystems_started:
                 # ── Subscribe handlers BEFORE starting the bus so dispatchers
