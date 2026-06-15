@@ -3539,7 +3539,23 @@ def _build_canonical_active_basket(
     pe_symbols = sorted([s for s in option_symbols if s.endswith("PE")])
     if not ce_symbols or not pe_symbols:
         raise RuntimeError("failed to resolve canonical option basket")
-    futures_token = instrument_manager.get_token(futures_symbol)
+    # Futures is optional context. When the active future is unresolved
+    # (futures_symbol empty), skip token resolution rather than calling
+    # get_token('') which raises and aborts the whole basket build.
+    futures_symbol = str(futures_symbol or "").strip()
+    futures_token = None
+    if futures_symbol:
+        try:
+            futures_token = instrument_manager.get_token(futures_symbol)
+        except Exception as exc:  # noqa: BLE001 - futures is optional context
+            LOGGER.warning(
+                "FUTURES_TOKEN_UNRESOLVED symbol=%s err=%s reason=basket_build_futures_optional",
+                futures_symbol,
+                exc,
+                extra={"event": "FUTURES_TOKEN_UNRESOLVED", "symbol": futures_symbol, "reason": "basket_build_futures_optional"},
+            )
+            futures_symbol = ""
+            futures_token = None
     spot_token: int | None = None
     if callable(spot_token_resolver):
         try:
@@ -3590,10 +3606,11 @@ def _build_canonical_active_basket(
         except Exception:  # noqa: BLE001
             pass
 
-    all_symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
+    _context_symbols = [spot_symbol] + ([futures_symbol] if futures_symbol else [])
+    all_symbols = [*_context_symbols, *ce_symbols, *pe_symbols]
     all_tokens = [token_by_symbol[s] for s in all_symbols if s in token_by_symbol]
 
-    symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
+    symbols = [*_context_symbols, *ce_symbols, *pe_symbols]
     return {
         "spot_symbol": spot_symbol,
         "spot_token": int(spot_token),
