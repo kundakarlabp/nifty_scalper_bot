@@ -1,7 +1,24 @@
-"""
-Thread-safe Bracket Manager with VIRTUAL Execution capabilities.
-Production-Grade: Replaces legacy broker-side brackets with high-speed internal monitoring.
-Enhanced with ATR Trailing, Multi-Target (TP1/TP2), Partial Scaling, and Orphan Sync.
+"""Thread-safe bracket manager with virtual (internal) SL/TP execution.
+
+Runtime role:
+- Replaces broker-side bracket orders with high-speed internal monitoring of
+  stop-loss and take-profit for each open position.
+- Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
+  orphan/position resync.
+
+Position in the pipeline:
+    execution/order_manager.py -> THIS FILE (bracket_manager.py)
+    (monitors fills/positions and issues exit orders back through the order path)
+
+Owns / does NOT own:
+- Owns: the virtual bracket state per position (SL/TP/trailing) and the decision
+  to fire an exit.
+- Does NOT own: entry decisions (runner) or raw order placement mechanics
+  (order_manager). It decides WHEN to exit; placement still goes through the path.
+
+Safe-edit notes:
+- Live money and thread-sensitive (RLock-guarded). Preserve locking and the
+  exit-trigger logic; a missed/duplicated exit is a real financial risk.
 """
 from __future__ import annotations
 

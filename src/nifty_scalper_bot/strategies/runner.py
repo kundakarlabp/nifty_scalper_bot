@@ -1,9 +1,28 @@
-"""Event-driven strategy runner coordinating trading managers.
+"""Event-driven strategy runner: the evaluation loop that turns data into orders.
 
 Runtime role:
-- Runs strategy evaluation over active basket symbols and cached bars.
-- Consumes DataHub/MDM context only.
-- Must not own contract selection or direct broker history fetching."""
+- Runs strategy evaluation over the active basket symbols using cached bars and
+  live quotes; applies readiness, regime, and quality gates.
+- On an accepted signal, prepares execution state and hands off to the order
+  path (OrderManager) for placement.
+- Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
+
+Position in the pipeline:
+    data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
+    -> execution/order_manager.py -> execution/bracket_manager.py
+
+Owns / does NOT own:
+- Owns: strategy evaluation loop, signal->order handoff, execution state machine
+  transitions, runner-side history (_symbol_history) and indicator history counts.
+- Does NOT own: contract selection, broker history fetching (consumes MDM/DataHub
+  context only), or final order placement mechanics (delegates to OrderManager).
+
+Safe-edit notes:
+- The execution path is live money. Keep signal gating and the order handoff
+  intact; do not add side-channel order placement.
+- History readiness uses runner/indicator/MDM counts; keep them consistent with
+  app.py's canonical readiness functions.
+"""
 
 from __future__ import annotations
 

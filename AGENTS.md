@@ -56,6 +56,49 @@ Do not bypass this flow with side-channel patches.
 
 ---
 
+## Module map (one line per major file)
+
+Each core runtime file below carries a standardized module docstring (Runtime
+role / Position in the pipeline / Owns–does NOT own / Safe-edit notes). See
+`docs/REPO_MAP.md` for the fuller map.
+
+### Core runtime path
+| File | Purpose | Owns | Does NOT own |
+| --- | --- | --- | --- |
+| `core/app.py` | Orchestrator; builds context, wires subsystems, runs startup, computes readiness/arming SSOT | wiring, startup ordering, readiness SSOT | contract selection, history, order placement |
+| `data/market_data_manager.py` | Sole owner of ticks + OHLC history; broker fetch; tick fan-out | tick cache, OHLC history, history fetch | contract selection, strategy logic |
+| `data/data_hub.py` | Read facade over MDM (quotes/OHLC/OI/context) | read/derive helpers | history (none), contract selection |
+| `strategies/runner.py` | Evaluation loop; gates; signal→order handoff | eval loop, exec state, runner/indicator history | contract selection, broker fetch, placement |
+| `execution/order_manager.py` | THE live order path: placement, retries, lifecycle | order placement + lifecycle of record | signal generation, contract selection |
+| `execution/bracket_manager.py` | Virtual SL/TP, ATR trailing, multi-target, partial scaling | bracket state, exit-fire decision | entry decisions, raw placement |
+| `notifications/telegram_controller.py` | Operator console: commands, auth, diagnostics, alerts | handler registration, single-chat auth, messaging | trading decisions, order placement |
+
+### Key support modules
+| File | Purpose |
+| --- | --- |
+| `core/instrument_manager.py` | Authoritative contract selection + token resolution from the instrument dump |
+| `instruments/active_contracts.py` | Canonical symbol helpers; active NIFTY future resolution |
+| `execution/safe_order_manager.py` | Safety wrapper (guards/idempotency) around OrderManager |
+| `execution/position_manager.py` | Position + pending-order state of record |
+| `execution/readiness.py` | Pure readiness/arming decision helpers |
+| `execution/order_executor.py` | Separate non-live executor — NOT the live order path |
+| `core/strategy_manager.py` | Scores strategies and allocates between them |
+| `strategies/signal_generator.py` | Produces scored signals from indicators |
+| `core/market_regime.py` | Market-regime detection and fan-out |
+| `data/rest/zerodha_client.py` | Low-level Kite REST + websocket client |
+| `streaming/websocket_manager.py` | Hardened KiteTicker streaming |
+| `risk/risk_manager.py` | Risk guardrails and telemetry |
+| `config/settings.py` | Runtime settings facade |
+| `backtesting/backtest_engine.py` | Event-driven historical replay with simulated fills/costs |
+
+### SSOT invariants
+- History is owned only by MDM; DataHub stores none. Never gate readiness on DataHub bars.
+- Readiness gates on mdm/runner/indicator counts via the canonical functions in `core/app.py`.
+- Contract selection lives in InstrumentManager; MDM/DataHub/runner consume, never select.
+
+
+---
+
 ## Market-data architecture
 
 ### Required live-data flow

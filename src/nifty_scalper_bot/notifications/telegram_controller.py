@@ -1,5 +1,26 @@
 """Telegram operator console: single-chat, production-grade commands.
 
+Runtime role:
+- The operator's control and diagnostics surface. Registers command handlers and
+  polls Telegram for operator commands; sends status/decision/alert messages.
+- Provides read-only diagnostics (status, positions, orders, risk, market data)
+  and guarded controls (pause/resume, shadow/paper toggles, ws reconnect).
+
+Position in the pipeline:
+    core/app.py wires this last and starts polling early (independent of data
+    hydration) so commands are live as soon as the process is up.
+
+Owns / does NOT own:
+- Owns: command handler registration, single-chat authorization, and operator
+  messaging/alert throttling.
+- Does NOT own: trading decisions or order placement. Control commands toggle
+  flags/managers; they never place orders directly.
+
+Safe-edit notes:
+- start() is idempotent and claims a single polling owner; do not add a second
+  poller for the same bot token (Telegram allows one getUpdates consumer).
+- Authorization compares chat ids as ints on both sides; keep that coercion.
+
 Commands (core):
   /opshelp               – show commands
   /ping                  – round-trip latency

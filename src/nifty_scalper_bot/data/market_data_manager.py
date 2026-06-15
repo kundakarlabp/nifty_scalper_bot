@@ -1,4 +1,28 @@
-"""Central market data manager responsible for tick fan-out and broker cache."""
+"""Central market data manager: the single owner of ticks and OHLC history.
+
+Runtime role:
+- Receives broker ticks (WebSocket/REST), maintains the live quote cache, and
+  builds one-minute OHLC bars per symbol.
+- Fans ticks out to subscribers via the message bus.
+- Performs broker history fetch/backfill (ensure_history) and is the sole holder
+  of the OHLC bar cache used for readiness and indicators.
+
+Position in the pipeline:
+    core/app.py → THIS FILE (market_data_manager.py)
+    → data/data_hub.py → strategies/runner.py
+
+Owns / does NOT own:
+- Owns: tick cache, OHLC bar history, broker history fetch, tick fan-out, the
+  committed active-contract basket's futures symbol (read via the basket).
+- Does NOT own: contract selection (InstrumentManager owns that) and strategy
+  logic. MDM returns the active future from the committed basket only.
+
+Safe-edit notes:
+- This is the SSOT for history (PR #562). DataHub is a read facade over MDM and
+  stores no history; never reintroduce a parallel history cache elsewhere.
+- get_ohlc_bars normalizes the symbol via _bar_symbol_key; keep symbol
+  normalization consistent so bar counts agree across the readiness chain.
+"""
 
 from __future__ import annotations
 from nifty_scalper_bot.core.message_bus import Message, MessageType

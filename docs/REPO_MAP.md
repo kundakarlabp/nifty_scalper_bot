@@ -1,40 +1,79 @@
 # Repository Map
 
+> Accurate as of the current `main`. Paths are relative to `src/nifty_scalper_bot/`.
+> For the non-negotiable runtime rules and the authoritative pipeline, see `AGENTS.md`.
+
 ## Top-Level Layout
-- `src/` – Production bot source code including execution, data pipelines, strategies, risk, and utilities.
-- `tests/` – Unit and integration tests mirroring the `src/` structure.
-- `deploy/`, `ops/`, `scripts/` – Operational tooling for deployments, monitoring, and local helpers.
-- `docs/` – Reference documentation (this map).
+- `src/nifty_scalper_bot/` – Production bot source (data, strategies, execution, risk, notifications, infra).
+- `tests/` – Unit/integration tests mirroring `src/`. Note: many sync tests are no-ops under the
+  current conftest hook — new/critical tests must be `async def` to actually execute.
+- `deploy/`, `ops/`, `scripts/` – Deployment, monitoring, and local helper tooling.
+- `docs/` – Reference documentation (this map, playbooks, prompts).
 
-## Key Modules
+## Authoritative Runtime Path
+```text
+core/app.py
+→ data/market_data_manager.py
+→ data/data_hub.py
+→ strategies/runner.py
+→ execution/order_manager.py
+→ execution/bracket_manager.py
+→ notifications/telegram_controller.py
+```
+Do not bypass this flow with side-channel patches. Options are the only tradable
+instrument; spot is direction/context only; futures is optional volume/context.
 
-### Notifications
-- [src/notifications/telegram_controller.py](../nifty_scalper_bot/src/notifications/telegram_controller.py#L527-L680): Production Telegram controller wiring status/diagnostic providers, admin controls, and throttled decision alerts for live operations.
+## Core Runtime Files (each carries a standardized module docstring)
+- `core/app.py` – Orchestrator. Builds BotContext, wires every subsystem, owns the
+  startup sequence and the readiness/arming SSOT.
+- `data/market_data_manager.py` (MDM) – **Sole owner** of ticks and OHLC history;
+  broker history fetch; tick fan-out via the message bus.
+- `data/data_hub.py` – Read facade over MDM (quotes/OHLC/OI/context). Owns no history;
+  selects no contracts.
+- `strategies/runner.py` – Event-driven evaluation loop; applies gates; hands accepted
+  signals to the order path; tracks runner/indicator history counts.
+- `execution/order_manager.py` – THE live order path: placement, retries, idempotency,
+  lifecycle against the broker.
+- `execution/bracket_manager.py` – Virtual (internal) SL/TP, ATR trailing, multi-target
+  exits, partial scaling, orphan resync.
+- `notifications/telegram_controller.py` – Operator console: command handlers, single-chat
+  auth, diagnostics, guarded controls, alerts.
 
-### Execution
-- [src/execution/order_executor.py](../nifty_scalper_bot/src/execution/order_executor.py#L1138-L1270): Kite order router managing placement, microstructure validation, retries, circuit breakers, and order state machines for live and paper modes.
-- [src/execution/micro_filters.py](../nifty_scalper_bot/src/execution/micro_filters.py#L23-L200): Microstructure guardrails deriving spread/depth metrics from quotes and applying configurable entry waits and depth requirements.
+## Key Support Modules
+### Contracts & instruments
+- `core/instrument_manager.py` – Authoritative contract selection from the instrument dump
+  (futures/options/ATM). Token resolution.
+- `instruments/active_contracts.py` – Canonical symbol helpers and active NIFTY future
+  resolution from instruments.
 
-### Data
-- [src/data/source.py](../nifty_scalper_bot/src/data/source.py#L1232-L1320): `LiveKiteSource` fetches ticks/quotes via Kite APIs with TTL caching, subscription tracking, and resilience gates for websocket and REST data.
+### Execution support
+- `execution/safe_order_manager.py` – Safety wrapper around OrderManager (guards/idempotency).
+- `execution/position_manager.py` – Position and pending-order state of record.
+- `execution/readiness.py` – Pure readiness/arming decision helpers used by the live gate.
+- `execution/order_executor.py` – Separate non-live executor. **NOT** the live order path.
 
-### Strategies
-- [src/strategies/atr_gate.py](../nifty_scalper_bot/src/strategies/atr_gate.py#L1-L160): ATR-based gating utilities throttling noisy logs and enforcing configurable volatility floors before taking signals.
-- [src/strategies/scoring.py](../nifty_scalper_bot/src/strategies/scoring.py#L1-L176): Feature scoring helpers computing adjusted totals, regime-aware thresholds, and diagnostics used by strategy runners.
-- [src/strategies/scalper.py](../nifty_scalper_bot/src/strategies/scalper.py#L1-L200): Simplified scalper orchestrator coordinating broker margin probes, entry timing, and hedging controls around short straddles.
+### Strategy support
+- `core/strategy_manager.py` – Scores strategies and allocates between them.
+- `strategies/signal_generator.py` – Produces scored signals from indicators.
+- `strategies/indicators.py` – Technical indicator calculations.
+- `core/market_regime.py` – Market-regime detection and fan-out.
 
-### Risk
-- [src/risk/position_sizing.py](../nifty_scalper_bot/src/risk/position_sizing.py#L1-L200): Position sizing utilities deriving live equity, enforcing premium caps, and returning structured block reasons for trade gating.
+### Data & streaming
+- `data/rest/zerodha_client.py` – Low-level Kite REST + websocket client.
+- `streaming/websocket_manager.py` – Hardened KiteTicker streaming.
+- `data/persistent_state.py` – Persisted runtime state.
 
-### Costs
-- [src/backtesting/sim_connector.py](../nifty_scalper_bot/src/backtesting/sim_connector.py#L21-L68): `CostModel` dataclass encapsulating brokerage, exchange, tax, and stamp duty parameters consumed by simulators (no standalone `costs/model.py` module).
+### Risk, config, infra
+- `risk/risk_manager.py` – Risk guardrails and telemetry.
+- `config/settings.py` – Runtime settings facade.
+- `infra/metrics.py` – Metrics.
 
 ### Backtesting
-- [src/backtesting/backtest_engine.py](../nifty_scalper_bot/src/backtesting/backtest_engine.py#L1-L200): Event-driven engine streaming historical bars through strategies, applying simulated fills/costs, and persisting trade results.
+- `backtesting/backtest_engine.py` – Event-driven historical replay through strategies
+  with simulated fills/costs.
 
-### Utilities
-- [src/utils/market_time.py](../nifty_scalper_bot/src/utils/market_time.py#L1-L110): Market session utilities providing IST-aware time helpers, trading window resolution, and session bounds.
-- [src/utils/freshness.py](../nifty_scalper_bot/src/utils/freshness.py#L1-L73): Freshness computations converting timestamps and scoring tick/bar latency vs. configured thresholds.
-- [src/utils/circuit_breaker.py](../nifty_scalper_bot/src/utils/circuit_breaker.py#L1-L170): Thread-safe circuit breaker implementation tracking failure counts, cooldowns, and health metadata.
-- [src/utils/rate_limiter.py](../nifty_scalper_bot/src/utils/rate_limiter.py#L1-L155): Shared leaky-bucket rate limiter with environment-driven buckets for broker REST throttling.
-
+## SSOT Invariants (read before editing the data/readiness path)
+- History is owned only by MDM. DataHub stores none; never gate readiness on DataHub bars.
+- Readiness gates on mdm/runner/indicator bar counts via the canonical functions in
+  `core/app.py` (`compute_history_readiness`, `compute_selected_option_history_readiness`).
+- Contract selection lives in InstrumentManager; MDM/DataHub/runner consume, never select.

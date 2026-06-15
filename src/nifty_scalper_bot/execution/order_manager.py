@@ -1,4 +1,27 @@
-"""Order lifecycle management utilities."""
+"""Order lifecycle management: the live order path.
+
+Runtime role:
+- THE production order path. Places, modifies, and tracks orders against the
+  broker (Kite), handling retries, idempotency, and lifecycle transitions.
+- Coordinates with the bracket manager (SL/TP), position manager, and risk
+  guardrails around each order.
+
+Position in the pipeline:
+    strategies/runner.py -> THIS FILE (order_manager.py)
+    -> execution/bracket_manager.py / execution/position_manager.py
+
+Owns / does NOT own:
+- Owns: order placement and lifecycle against the broker, order-level retry and
+  idempotency, and the live order state of record.
+- Does NOT own: signal generation (runner) or contract selection. It executes
+  what the runner approved; it does not decide whether to trade.
+
+Safe-edit notes:
+- Live money. Order placement is wrapped by SafeOrderManager; preserve the
+  guard/idempotency boundaries and do not introduce a second placement route.
+- order_executor.py is NOT the live path (it is a separate, non-live executor);
+  do not confuse the two.
+"""
 
 from __future__ import annotations
 
