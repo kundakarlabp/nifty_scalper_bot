@@ -8883,10 +8883,23 @@ class StrategyRunner:
 
     def _direction_context_missing_reason(self, indicators_ctx: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         """Return precise diagnostics for missing direction context without changing decisions."""
+        def _safe_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
         spot_snapshot = indicators_ctx.get("spot_snapshot")
         futures_snapshot = indicators_ctx.get("futures_snapshot")
-        spot_bars = int(indicators_ctx.get("spot_bars") or indicators_ctx.get("context_bar_count") or indicators_ctx.get("underlying_context_bar_count") or 0)
-        futures_bars = int(indicators_ctx.get("futures_bars") or indicators_ctx.get("futures_context_bar_count") or 0)
+        spot_bars = _safe_int(
+            indicators_ctx.get("spot_bars")
+            or indicators_ctx.get("context_bar_count")
+            or indicators_ctx.get("underlying_context_bar_count")
+        )
+        futures_bars = _safe_int(
+            indicators_ctx.get("futures_bars")
+            or indicators_ctx.get("futures_context_bar_count")
+        )
         spot_fresh = not bool(indicators_ctx.get("spot_stale") or indicators_ctx.get("stale_context") or indicators_ctx.get("context_stale"))
         fut_fresh = not bool(indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale"))
         spot_vwap = indicators_ctx.get("spot_vwap", indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")))
@@ -8894,7 +8907,7 @@ class StrategyRunner:
         futures_vwap_slope = indicators_ctx.get("futures_vwap_slope", indicators_ctx.get("vwap_slope", indicators_ctx.get("underlying_vwap_slope")))
         futures_volume_ratio = indicators_ctx.get("futures_volume_ratio", indicators_ctx.get("volume_ratio", indicators_ctx.get("underlying_volume_ratio")))
         regime_available = bool(indicators_ctx.get("regime_snapshot") or indicators_ctx.get("regime") or indicators_ctx.get("market_regime"))
-        required_bars = int(getattr(self, "_context_required_bars", 0) or 0)
+        required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
 
         if not bool(spot_snapshot or indicators_ctx.get("spot_ltp") or indicators_ctx.get("spot_price")):
             reason = "missing_spot_snapshot"

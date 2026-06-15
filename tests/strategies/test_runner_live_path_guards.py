@@ -3075,3 +3075,36 @@ def test_direction_context_unavailable_logs_precise_diagnostics(caplog) -> None:
     assert record.reason_detail in {'missing_futures_snapshot', 'insufficient_context_bars'}
     for field in ['spot_fresh', 'fut_fresh', 'spot_bars', 'futures_bars', 'spot_vwap', 'futures_vwap', 'futures_vwap_slope', 'futures_volume_ratio', 'regime_available']:
         assert hasattr(record, field)
+
+
+@pytest.mark.parametrize(
+    ('indicators_ctx', 'required_bars'),
+    [
+        ({'spot_snapshot': {'ltp': 22000}, 'context_bar_count': 'unknown'}, 30),
+        ({'spot_snapshot': {'ltp': 22000}, 'futures_snapshot': {'ltp': 22100}, 'futures_context_bar_count': 'NA'}, 30),
+        ({'spot_snapshot': {'ltp': 22000}, 'context_bar_count': 10}, 'bad-required'),
+    ],
+)
+def test_direction_context_diagnostics_tolerate_malformed_bar_counts(indicators_ctx, required_bars, caplog) -> None:
+    runner = _build_runner()
+    runner._logger = logging.getLogger('test_direction_context_malformed_counts')
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _symbol: None)
+    runner._context_required_bars = required_bars
+
+    with caplog.at_level(logging.INFO, logger='test_direction_context_malformed_counts'):
+        category, reason = runner._classify_no_trade_decision(
+            symbol='NFO:NIFTY2661623900PE',
+            signal=object(),
+            indicators_ctx=indicators_ctx,
+            option_count=30,
+            option_required=30,
+            trace_id='ctx-malformed',
+        )
+
+    assert category == 'context_direction_unavailable'
+    assert reason == 'direction_context_not_ready'
+    record = next(rec for rec in caplog.records if getattr(rec, 'event', '') == 'CONTEXT_DIRECTION_UNAVAILABLE')
+    assert isinstance(record.reason_detail, str)
+    assert record.reason_detail
+    assert isinstance(record.spot_bars, int)
+    assert isinstance(record.futures_bars, int)
