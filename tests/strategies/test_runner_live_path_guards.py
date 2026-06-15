@@ -3020,3 +3020,58 @@ def test_option_context_cache_sync_role_for_five_bar_cache_sync() -> None:
     assert after == 5
     assert captured['required_bars'] == 5
     assert captured['role'] == 'option_context_cache_sync'
+
+
+def test_prepare_signal_refresh_pending_fallback_uses_original_symbol_without_name_error(monkeypatch, caplog) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._resolve_execution_mode_snapshot = lambda: SimpleNamespace(is_live_mode=True)
+
+    async def fake_build(*, direction_bias, atm_strike, underlying):
+        return [], True
+
+    runner.build_candidate_snapshots_async = fake_build
+    runner._build_single_candidate_from_signal = lambda **_kwargs: {
+        'symbol': 'NFO:NIFTY2661623900PE',
+        'side': 'PE',
+        'option_type': 'PE',
+        'strike': 3900,
+        'atm_strike': 3950,
+        'ltp': 110.0,
+        'bid': 109.0,
+        'ask': 111.0,
+    }
+    runner._logger = logging.getLogger('test_prepare_signal_original_symbol')
+    signal = Signal(action='BUY', symbol='NFO:NIFTY2661623950PE', quantity=1, confidence=0.9, reason='OrderFlow')
+
+    with caplog.at_level(logging.INFO, logger='test_prepare_signal_original_symbol'):
+        prepared, reason = asyncio.run(runner._prepare_signal_for_handling(signal, price=110.0, trace_id='fallback'))
+
+    assert reason is None
+    assert prepared is not None
+    assert prepared.metadata['candidate_snapshots'][0]['symbol'] == 'NFO:NIFTY2661623900PE'
+    assert any(getattr(rec, 'event', '') == 'CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING' for rec in caplog.records)
+
+
+def test_direction_context_unavailable_logs_precise_diagnostics(caplog) -> None:
+    runner = _build_runner()
+    runner._logger = logging.getLogger('test_direction_context_diag')
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _symbol: None)
+    runner._context_required_bars = 30
+
+    with caplog.at_level(logging.INFO, logger='test_direction_context_diag'):
+        category, reason = runner._classify_no_trade_decision(
+            symbol='NFO:NIFTY2661623900PE',
+            signal=object(),
+            indicators_ctx={'spot_snapshot': {'ltp': 22000}, 'context_bar_count': 10},
+            option_count=30,
+            option_required=30,
+            trace_id='ctx',
+        )
+
+    assert category == 'context_direction_unavailable'
+    assert reason == 'direction_context_not_ready'
+    record = next(rec for rec in caplog.records if getattr(rec, 'event', '') == 'CONTEXT_DIRECTION_UNAVAILABLE')
+    assert record.reason_detail in {'missing_futures_snapshot', 'insufficient_context_bars'}
+    for field in ['spot_fresh', 'fut_fresh', 'spot_bars', 'futures_bars', 'spot_vwap', 'futures_vwap', 'futures_vwap_slope', 'futures_volume_ratio', 'regime_available']:
+        assert hasattr(record, field)
