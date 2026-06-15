@@ -1,9 +1,24 @@
-"""Canonical SSOT cache for ticks, positions, orders, and broker facades.
+"""Read facade over MarketDataManager for quotes, OHLC, OI, and context.
 
 Runtime role:
-- Read facade over active basket and market data.
-- Exposes quote/OHLC/OI/context to strategies.
-- Must not select contracts or infer active futures/options independently.
+- Single read surface that strategies/execution use to access ticks, quotes,
+  OHLC, open interest, and active-basket context.
+- Delegates all data access to MarketDataManager; binds to the MDM tick bus.
+
+Position in the pipeline:
+    data/market_data_manager.py → THIS FILE (data_hub.py)
+    → strategies/runner.py / execution/*
+
+Owns / does NOT own:
+- Owns: convenience read/derive helpers (e.g. quote bid/ask/spread, greeks) and
+  a thin store for non-history state.
+- Does NOT own: price history (MDM is the sole owner — DataHub stores none), and
+  does NOT select contracts or infer active futures/options independently.
+
+Safe-edit notes:
+- DataHub.get_ohlc_bars delegates to MDM; its bar count must NEVER be used to
+  gate readiness (doing so previously wedged live arming — fixed in PR #574).
+- Keep this a facade: no contract selection, no broker history fetching here.
 """
 
 from __future__ import annotations

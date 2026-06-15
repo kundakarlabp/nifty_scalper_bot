@@ -1,8 +1,34 @@
 """Core orchestration for the Nifty scalper trading bot.
 
-Polling mode is more reliable for Railway/Heroku/Cloud deploys; WebSocket/
-webhook should be used only on static public IP/server with trusted domain and
-TLS certificate.
+Runtime role:
+- Builds the BotContext and wires every subsystem together (data, strategy,
+  execution, risk, notifications) in one place.
+- Owns the startup sequence: broker auth, instrument load, subsystem bring-up,
+  the data-hydration/readiness pipeline, and the live-arming gate.
+- Computes the canonical readiness/arming decision (history + quote freshness)
+  and pushes it to the runner.
+
+Position in the pipeline (authoritative runtime path):
+    THIS FILE (app.py)
+    → data/market_data_manager.py → data/data_hub.py
+    → strategies/runner.py
+    → execution/order_manager.py → execution/bracket_manager.py
+    → notifications/telegram_controller.py
+
+Owns / does NOT own:
+- Owns: subsystem wiring, startup ordering, the readiness/arming SSOT
+  (compute_history_readiness / compute_selected_option_history_readiness).
+- Does NOT own: contract selection (InstrumentManager), history storage (MDM),
+  or order placement (OrderManager). app.py coordinates; it does not re-implement.
+
+Safe-edit notes:
+- Readiness gates on mdm/runner/indicator bar counts only — never DataHub bars
+  (DataHub owns no history). Keep all readiness paths consistent with the
+  canonical functions.
+- Telegram polling is started early (right after broker_ready), independent of
+  the hydration pipeline; do not move it back inside the hydration block.
+- Polling mode is more reliable for cloud deploys; WebSocket/webhook is only for
+  a static public IP with a trusted domain and TLS certificate.
 """
 
 # ruff: noqa: I001
