@@ -7793,13 +7793,19 @@ def build_symbol_hydration_status(
             live_tick_fresh = False
     exchange = normalized.split(":", 1)[0] if ":" in normalized else None
     tradingsymbol = normalized.split(":", 1)[1] if ":" in normalized else normalized or None
+    # SSOT: MarketDataManager is the sole history owner (PR #562). DataHub is a
+    # facade that stores no history of its own, so its bar count must NOT gate
+    # readiness — it lags MDM and would wedge arming with a false
+    # selected_option_history_cold even when the canonical readiness is ready.
+    # datahub_bars is retained below for observability only.
+    gating_counts = [mdm_bars, runner_bars, indicator_bars]
     counts = [mdm_bars, datahub_bars, runner_bars, indicator_bars]
     blockers: list[str] = []
     if not normalized:
         blockers.append(f"{role}_symbol_missing")
     if token is None and role in {"selected_ce", "selected_pe", "option_context", "futures_context"}:
         blockers.append("option_token_missing" if role.startswith("selected_") or role == "option_context" else "futures_token_missing")
-    if required > 0 and any(count < required for count in counts):
+    if required > 0 and any(count < required for count in gating_counts):
         blockers.append(f"{role}_history_missing")
         blockers.append("insufficient_bars")
         if mdm_bars < required:
@@ -7819,7 +7825,7 @@ def build_symbol_hydration_status(
         max_spread = float(os.getenv("HYDRATION_MAX_SPREAD_PCT", os.getenv("MAX_OPTION_SPREAD_PCT", "12")) or 12)
         if spread_pct is not None and spread_pct > max_spread:
             blockers.append("spread_too_wide")
-    ready_for_evaluation = bool(normalized and required >= 0 and all(count >= required for count in counts))
+    ready_for_evaluation = bool(normalized and required >= 0 and all(count >= required for count in gating_counts))
     ready_for_execution = bool(ready_for_evaluation and (not selected_role or (tradable_quote and depth_available and "spread_too_wide" not in blockers)))
     status = HydrationStatus(
         symbol=normalized,
@@ -8566,8 +8572,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     pe_datahub_bars = pe_status.datahub_bars if pe_status else 0
     pe_runner_bars = pe_status.runner_bars if pe_status else 0
     pe_indicator_bars = pe_status.indicator_bars if pe_status else 0
-    ce_bars = min(ce_mdm_bars, ce_datahub_bars, ce_runner_bars, ce_indicator_bars) if ce_status else 0
-    pe_bars = min(pe_mdm_bars, pe_datahub_bars, pe_runner_bars, pe_indicator_bars) if pe_status else 0
+    # datahub_bars excluded from gating min(): DataHub owns no history (PR #562).
+    ce_bars = min(ce_mdm_bars, ce_runner_bars, ce_indicator_bars) if ce_status else 0
+    pe_bars = min(pe_mdm_bars, pe_runner_bars, pe_indicator_bars) if pe_status else 0
     ce_quote_fresh = bool(ce_status and (ce_status.live_tick_fresh or ce_status.tradable_quote))
     pe_quote_fresh = bool(pe_status and (pe_status.live_tick_fresh or pe_status.tradable_quote))
     ce_bid_ask_complete = bool(ce_status and ce_status.tradable_quote)
@@ -11815,8 +11822,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                             futures_hydration = _status_for_role(hydration_statuses, "futures_context")
                             ce_hydration = _status_for_role(hydration_statuses, "selected_ce")
                             pe_hydration = _status_for_role(hydration_statuses, "selected_pe")
-                            hydrated_ce = min(ce_hydration.mdm_bars, ce_hydration.datahub_bars, ce_hydration.runner_bars, ce_hydration.indicator_bars) if ce_hydration else 0
-                            hydrated_pe = min(pe_hydration.mdm_bars, pe_hydration.datahub_bars, pe_hydration.runner_bars, pe_hydration.indicator_bars) if pe_hydration else 0
+                            hydrated_ce = min(ce_hydration.mdm_bars, ce_hydration.runner_bars, ce_hydration.indicator_bars) if ce_hydration else 0
+                            hydrated_pe = min(pe_hydration.mdm_bars, pe_hydration.runner_bars, pe_hydration.indicator_bars) if pe_hydration else 0
                             ce_qr_runtime = _quote_readiness_for_symbol(ctx, selected_ce)
                             pe_qr_runtime = _quote_readiness_for_symbol(ctx, selected_pe)
                             quote_ce = selected_ce if ce_qr_runtime.tradable_quote_ready else None
