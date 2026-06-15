@@ -115,3 +115,58 @@ def test_selector_allows_higher_nifty_premium_default_cap() -> None:
         snapshots=[_snapshot('NFO:NIFTY26MAY24050PE', 24050, ltp=374.95, bid=374.5, ask=375.4)],
     )
     assert best is not None
+
+
+def _candidate_snapshot(**overrides: object) -> dict[str, object]:
+    payload = _snapshot('NFO:NIFTY23500CE', 23500, side='CE')
+    payload.update(overrides)
+    return payload
+
+
+def test_selector_midday_pause_enabled_blocks_candidates(monkeypatch, caplog) -> None:
+    from nifty_scalper_bot.strategies import trade_selector as trade_selector_mod
+
+    monkeypatch.setattr(trade_selector_mod, 'expiry_theta_block', lambda: (False, 'not_expiry_day'))
+    monkeypatch.setattr(
+        trade_selector_mod,
+        'midday_pause_block',
+        lambda: (True, 'midday_pause_11:30-13:15_ist'),
+    )
+    selector = TradeCandidateSelector()
+
+    with caplog.at_level('INFO', logger=trade_selector_mod.LOGGER.name):
+        ranked = selector.select_ranked_candidates(
+            direction_bias='CE',
+            atm_strike=23500,
+            snapshots=[_candidate_snapshot()],
+        )
+
+    assert ranked == []
+    assert any(
+        record.__dict__.get('event') == 'CANDIDATE_SELECTION_BLOCKED'
+        and 'midday_pause' in str(record.__dict__.get('reason'))
+        for record in caplog.records
+    )
+
+
+def test_selector_midday_pause_disabled_continues_to_quality_filtering(monkeypatch, caplog) -> None:
+    from nifty_scalper_bot.strategies import trade_selector as trade_selector_mod
+
+    monkeypatch.setattr(trade_selector_mod, 'expiry_theta_block', lambda: (False, 'not_expiry_day'))
+    monkeypatch.setattr(trade_selector_mod, 'midday_pause_block', lambda: (False, 'pause_disabled'))
+    selector = TradeCandidateSelector()
+
+    with caplog.at_level('INFO', logger=trade_selector_mod.LOGGER.name):
+        ranked = selector.select_ranked_candidates(
+            direction_bias='CE',
+            atm_strike=23500,
+            snapshots=[_candidate_snapshot()],
+        )
+
+    assert ranked
+    assert ranked[0].symbol == 'NFO:NIFTY23500CE'
+    assert not any(
+        record.__dict__.get('event') == 'CANDIDATE_SELECTION_BLOCKED'
+        and 'midday_pause' in str(record.__dict__.get('reason'))
+        for record in caplog.records
+    )

@@ -52,7 +52,11 @@ def _env_hhmm(name: str, default: dtime) -> dtime:
     raw = str(os.getenv(name) or "").strip()
     try:
         hh, mm = raw.split(":", 1)
-        return dtime(hour=max(0, min(23, int(hh))), minute=max(0, min(59, int(mm))))
+        hour = int(hh)
+        minute = int(mm)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return default
+        return dtime(hour=hour, minute=minute)
     except (ValueError, AttributeError):
         return default
 

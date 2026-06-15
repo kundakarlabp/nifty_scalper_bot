@@ -184,6 +184,9 @@ pytest
 | `RISK_MAX_DAILY_TRADES` | Daily trade cap | `20` |
 | `RISK_MAX_ORDER_NOTIONAL` | Max order notional | `200000.0` |
 | `RISK_ALLOW_SHORT` | Allow short selling | `true` |
+| `MIDDAY_PAUSE_ENABLED` | Block only new option-buy candidate selection during the configurable midday pause; set `false` to disable without code changes. Does not affect exits or order management. | `true` |
+| `MIDDAY_PAUSE_START` | Midday pause start time in IST (`HH:MM`). Invalid values fall back safely to `11:30`. | `11:30` |
+| `MIDDAY_PAUSE_END` | Midday pause end time in IST (`HH:MM`). Invalid values fall back safely to `13:15`. | `13:15` |
 | `RISK_PER_TRADE_CAP_PCT` | Per-trade capital cap percentage for sizing | `1.0` |
 | `RATE_LIMIT_ORDERS_CAPACITY` | Order bucket size | `5` |
 | `RATE_LIMIT_ORDERS_REFILL_PER_SEC` | Order bucket refill rate | `5.0` |
