@@ -1672,3 +1672,15 @@ async def test_quote_with_tracked_timestamp_is_fresh_not_unknown() -> None:
     qr_fresh = evaluate_quote_readiness("NFO:NIFTY2661623900CE", fresh, max_age_s=30.0)
     assert qr_fresh.reason == "ready"
     assert qr_fresh.tradable_quote_ready is True
+
+
+async def test_tick_cache_len_env_override(monkeypatch) -> None:
+    # Default cache_len is unchanged; MDM_TICK_CACHE_LEN lowers it on
+    # memory-constrained hosts without code changes.
+    monkeypatch.delenv("MDM_TICK_CACHE_LEN", raising=False)
+    assert MarketDataManager()._cache_len == 1000
+    monkeypatch.setenv("MDM_TICK_CACHE_LEN", "250")
+    assert MarketDataManager()._cache_len == 250
+    # invalid value falls back to the default
+    monkeypatch.setenv("MDM_TICK_CACHE_LEN", "notanint")
+    assert MarketDataManager()._cache_len == 1000
