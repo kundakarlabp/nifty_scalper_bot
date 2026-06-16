@@ -4008,12 +4008,20 @@ class StrategyManager(_BaseStrategyManager):
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
             threshold_passed = bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed)
-            high_conviction_allowed = bool(raw_trigger_score >= single_high and selected_ok and not vetoed)
+            # Issue E: STRATEGY_ALLOW_SINGLE_VOTE_SCALP only governs the generic
+            # near-ATM scalp fallback. High-conviction and selected-option single
+            # votes are intentionally allowed independently (a single trigger on the
+            # SELECTED ATM option that cleared all gates is the core scalp). To let
+            # an operator disable EVERY single-vote path, these now have their own
+            # explicit flags, defaulting true so behavior is unchanged.
+            allow_high_conviction = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION", "true")).lower() in {"1", "true", "yes", "on"}
+            allow_selected_option = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION", "true")).lower() in {"1", "true", "yes", "on"}
+            high_conviction_allowed = bool(raw_trigger_score >= single_high and selected_ok and not vetoed and allow_high_conviction)
             # A single trigger on the actually-SELECTED ATM option that already
             # cleared score/confidence/veto gates is the core scalp this platform
             # exists to take. Allow it without the global scalp flag, since
             # selected_option is a stronger guarantee than mere near_atm.
-            selected_option_scalp_allowed = bool(threshold_passed and selected_option)
+            selected_option_scalp_allowed = bool(threshold_passed and selected_option and allow_selected_option)
             scalp_fallback_allowed = bool((allow_scalp_single and threshold_passed) or selected_option_scalp_allowed)
             final_allowed = bool(high_conviction_allowed or scalp_fallback_allowed)
             approval_path_single = (
