@@ -45,11 +45,44 @@ def test_selected_option_single_vote_can_be_disabled(monkeypatch):
     assert out is None
 
 
-def test_selected_option_single_vote_allowed_by_default(monkeypatch):
-    # Default (flags unset/true) preserves the core selected-option scalp.
+def test_single_vote_selected_option_requires_explicit_override(monkeypatch):
     monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'false')
+    monkeypatch.delenv('STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE', raising=False)
+    monkeypatch.delenv('STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE', raising=False)
     monkeypatch.delenv('STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION', raising=False)
     monkeypatch.delenv('STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION', raising=False)
+    mgr = _mgr()
+    sig = Signal(action='BUY', symbol='NFO:NIFTY26MAY24100CE', quantity=1, confidence=0.7,
+                 reason='x', stop_loss=90, take_profit=110,
+                 metadata={'is_selected_option': True, 'spread_pct': 1.0})
+    trigger = StrategyVote(strategy='VWAPPro', side='CE', score=6.5, confidence=0.7,
+                           reasons=[], metadata={'role': 'trigger', 'raw_setup_score': 6.5, 'strategy_score': 6.5})
+    out = mgr._combine_strategy_votes(symbol=sig.symbol, signals=[(sig, trigger)],
+                                      indicators={'is_selected_option': True})
+    assert out is None
+
+
+def test_single_vote_disabled_blocks_high_conviction_by_default(monkeypatch):
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'false')
+    monkeypatch.delenv('STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE', raising=False)
+    monkeypatch.delenv('STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE', raising=False)
+    monkeypatch.delenv('STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION', raising=False)
+    monkeypatch.delenv('STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION', raising=False)
+    mgr = _mgr()
+    sig = Signal(action='BUY', symbol='NFO:NIFTY26MAY24100CE', quantity=1, confidence=0.95,
+                 reason='x', stop_loss=90, take_profit=110,
+                 metadata={'is_selected_option': True, 'spread_pct': 1.0})
+    trigger = StrategyVote(strategy='VWAPPro', side='CE', score=9.2, confidence=0.95,
+                           reasons=[], metadata={'role': 'trigger', 'raw_setup_score': 9.2, 'strategy_score': 9.2})
+    out = mgr._combine_strategy_votes(symbol=sig.symbol, signals=[(sig, trigger)],
+                                      indicators={'is_selected_option': True})
+    assert out is None
+
+
+def test_selected_option_single_vote_allows_explicit_override(monkeypatch):
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'false')
+    monkeypatch.setenv('STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE', 'true')
+    monkeypatch.setenv('STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE', 'false')
     mgr = _mgr()
     sig = Signal(action='BUY', symbol='NFO:NIFTY26MAY24100CE', quantity=1, confidence=0.7,
                  reason='x', stop_loss=90, take_profit=110,

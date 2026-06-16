@@ -13372,7 +13372,28 @@ class StrategyRunner:
                     bid_ask_ok = bid > 0 and ask > bid
                     allow_ltp_only = _env_flag("ALLOW_LTP_ONLY_CANDIDATE", default=False)
                     tradable = bool(lone.get("tradable_quote")) or bid_ask_ok or (allow_ltp_only and bool(lone.get("ltp_only_fallback")) and ltp > 0)
-                    premium_ok = self._trade_candidate_selector.min_option_premium <= ltp <= self._trade_candidate_selector.max_option_premium
+                    min_option_premium = float(self._trade_candidate_selector.min_option_premium)
+                    max_option_premium = float(self._trade_candidate_selector.max_option_premium)
+                    premium_dynamic_override = False
+                    dynamic_spread_pct = None
+                    if ltp < min_option_premium:
+                        dynamic_mid = (bid + ask) / 2.0 if bid_ask_ok else 0.0
+                        dynamic_spread_pct = ((ask - bid) / dynamic_mid * 100.0) if dynamic_mid > 0 else None
+                        dynamic_near_atm = bool(
+                            is_selected
+                            or strike_distance
+                            <= (50.0 * max(1, int(getattr(self._trade_candidate_selector, "option_strike_window_each_side", 2) or 2)))
+                        )
+                        premium_dynamic_override = bool(
+                            _env_flag("MIN_OPTION_PREMIUM_DYNAMIC", default=True)
+                            and ltp >= float(os.getenv("MIN_OPTION_PREMIUM_DYNAMIC_FLOOR", "25") or "25")
+                            and bid_ask_ok
+                            and is_fresh
+                            and dynamic_near_atm
+                            and dynamic_spread_pct is not None
+                            and dynamic_spread_pct <= float(os.getenv("MIN_OPTION_PREMIUM_DYNAMIC_MAX_SPREAD_PCT", "0.75") or "0.75")
+                        )
+                    premium_ok = bool((min_option_premium <= ltp <= max_option_premium) or premium_dynamic_override)
                     if not (is_selected and is_fresh and tradable and premium_ok and strike_distance <= float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100)):
                         basket_details = {
                             "symbol": signal.symbol,
@@ -13390,8 +13411,10 @@ class StrategyRunner:
                             "bid": bid,
                             "ask": ask,
                             "tick_age_s": tick_age_s,
-                            "min_option_premium": self._trade_candidate_selector.min_option_premium,
-                            "max_option_premium": self._trade_candidate_selector.max_option_premium,
+                            "min_option_premium": min_option_premium,
+                            "max_option_premium": max_option_premium,
+                            "premium_dynamic_override": premium_dynamic_override,
+                            "dynamic_spread_pct": dynamic_spread_pct,
                             "allow_ltp_only_candidate": allow_ltp_only,
                             "reason": "candidate_screen_failed",
                         }

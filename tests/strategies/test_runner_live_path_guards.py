@@ -1755,6 +1755,64 @@ def test_single_candidate_distance_fallback_from_strike_allows_selected_candidat
     assert result.reason != "candidate_basket_inadequate"
 
 
+def test_single_candidate_screen_uses_dynamic_premium_override(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setenv("MIN_OPTION_PREMIUM_DYNAMIC", "true")
+    monkeypatch.setenv("MIN_OPTION_PREMIUM_DYNAMIC_FLOOR", "25")
+    monkeypatch.setenv("MIN_OPTION_PREMIUM_DYNAMIC_MAX_SPREAD_PCT", "0.75")
+    monkeypatch.setenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100")
+    symbol = "NFO:NIFTY26MAY24050PE"
+    runner._trade_candidate_selector = TradeCandidateSelector(min_option_premium=40, max_option_premium=650)
+    runner._transition_execution_state = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    runner._order_manager.submit_trade_plan = MagicMock(return_value="oid-dynamic-premium")  # type: ignore[attr-defined]
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=35.0, bid=34.95, ask=35.05, tick_age_s=0.2, real_ticks_last_60s=3, tradable_quote=True, source="ws"
+    )
+    runner._active_selected_pe = symbol
+    signal = Signal(
+        action="BUY",
+        symbol=symbol,
+        quantity=1,
+        confidence=0.9,
+        reason="OrderFlow",
+        stop_loss=30.0,
+        take_profit=48.0,
+        metadata={
+            "candidate_snapshots": [
+                {
+                    "symbol": symbol,
+                    "side": "PE",
+                    "strike": 24050,
+                    "atm_strike": 24050,
+                    "ltp": 35.0,
+                    "bid": 34.95,
+                    "ask": 35.05,
+                    "tick_age_s": 0.2,
+                    "real_ticks_last_60s": 3,
+                    "tradable_quote": True,
+                    "is_selected_option": True,
+                }
+            ],
+            "atm_strike": 24050,
+            "is_selected_option": True,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol=symbol,
+        trade_symbol=symbol,
+        trade_price=35.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id="trace-dynamic-premium",
+    )
+    assert result.reason != "candidate_basket_inadequate"
+
 def test_single_candidate_distance_fallback_rejects_far_strike(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
