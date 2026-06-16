@@ -12750,31 +12750,47 @@ class StrategyRunner:
         strict_depth = is_live_depth_required or _env_flag("STRICT_OPTION_DEPTH_FOR_PAPER", default=False)
         max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
         invalid_spread = spread_pct_raw is None or spread_pct < 0 or spread_pct > max_spread_pct
-        if strict_depth and (not tradable_quote or bid <= 0 or ask <= 0 or invalid_spread or not depth_available):
+        # A fresh quote with valid bid/ask and acceptable spread is executable even
+        # when the full broker depth array is absent. depth_available=False alone
+        # must NOT reject unless REQUIRE_FULL_DEPTH_FOR_EXECUTION is explicitly set.
+        # The real tradability checks (tradable_quote, bid/ask > 0, ask > bid, spread)
+        # are preserved.
+        require_full_depth = _env_flag("REQUIRE_FULL_DEPTH_FOR_EXECUTION", default=False)
+        bid_ask_invalid = not tradable_quote or bid <= 0 or ask <= 0 or ask <= bid or invalid_spread
+        depth_blocks = require_full_depth and not depth_available
+        if strict_depth and (bid_ask_invalid or depth_blocks):
+            reject_reason = (
+                "candidate_depth_missing"
+                if depth_blocks and not bid_ask_invalid
+                else "candidate_quote_not_tradable"
+            )
             self._logger.info(
-                "EXECUTION_CANDIDATE_REJECTED symbol=%s reason=candidate_depth_missing tradable_quote=%s depth_available=%s bid=%s ask=%s spread_pct=%s trace_id=%s",
+                "EXECUTION_CANDIDATE_REJECTED symbol=%s reason=%s tradable_quote=%s depth_available=%s bid=%s ask=%s spread_pct=%s require_full_depth=%s trace_id=%s",
                 selected_symbol,
+                reject_reason,
                 tradable_quote,
                 depth_available,
                 bid,
                 ask,
                 spread_pct_raw,
+                require_full_depth,
                 trace_id,
                 extra={
                     "event": "EXECUTION_CANDIDATE_REJECTED",
                     "symbol": selected_symbol,
-                    "reason": "candidate_depth_missing",
+                    "reason": reject_reason,
                     "tradable_quote": tradable_quote,
                     "depth_available": depth_available,
                     "bid": bid,
                     "ask": ask,
                     "spread_pct": spread_pct_raw,
+                    "require_full_depth": require_full_depth,
                     "trace_id": trace_id,
                 },
             )
             return SignalExecutionResult(
                 False,
-                "candidate_depth_missing",
+                reject_reason,
                 details={"selected_symbol": selected_symbol, "ranking_fields": ranking_fields},
             )
 
