@@ -3314,3 +3314,32 @@ def test_frozen_direction_context_prevents_fast_flip_block(monkeypatch) -> None:
     assert current_bias != frozen_bias
     assert frozen_bias == contract_side
     assert signal_age_s <= float(os.getenv("SIGNAL_MAX_EXECUTION_AGE_SECONDS", "5"))
+
+
+def test_expiry_day_cutoff_surfaces_final_execution_reason(monkeypatch) -> None:
+    import nifty_scalper_bot.strategies.runner as runner_mod
+
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("ALLOW_EXPIRY_DAY_AFTER_CUTOFF", raising=False)
+    monkeypatch.setattr(runner_mod, "expiry_theta_block", lambda: (True, "expiry_day_after_13:30_ist"))
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY26JUN23900PE",
+        quantity=1,
+        confidence=0.8,
+        reason="OrderFlow",
+        stop_loss=90.0,
+        take_profit=120.0,
+        metadata={"candidate_snapshots": []},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol=signal.symbol,
+        trade_symbol=signal.symbol,
+        trade_price=100.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id="expiry-cutoff",
+    )
+    assert result.accepted is False
+    assert result.reason == "expiry_day_after_13:30_ist"

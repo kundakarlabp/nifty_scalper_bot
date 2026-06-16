@@ -102,7 +102,7 @@ from nifty_scalper_bot.execution.order_state_machine import (
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
-from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
+from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.risk.position_sizing import (
     RiskManager as DeterministicRiskManager,
     RiskSnapshot,
@@ -13142,6 +13142,17 @@ class StrategyRunner:
                 return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
             is_directional_option = option_side in {"CE", "PE"}
+            if is_directional_option:
+                expiry_blocked, expiry_reason = expiry_theta_block()
+                if expiry_blocked:
+                    self._reset_execution_state(base_symbol)
+                    _trace(expiry_reason)
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason=expiry_reason,
+                        details={"option_side": option_side, "stage": "expiry_day_entry_cutoff"},
+                    )
             selected_symbol = normalize_symbol(
                 trade_symbol or base_symbol or signal.symbol
             )

@@ -138,3 +138,10 @@ def test_midday_pause_custom_window_blocks_and_allows(monkeypatch) -> None:
     blocked, reason = midday_pause_block(_ist(2026, 6, 10, 12, 45))
     assert not blocked
     assert reason == "outside_pause"
+
+
+def test_allow_expiry_day_after_cutoff_env_allows_entries(monkeypatch) -> None:
+    monkeypatch.setenv("ALLOW_EXPIRY_DAY_AFTER_CUTOFF", "true")
+    blocked, reason = expiry_theta_block(_ist(2026, 6, 9, 14, 0))
+    assert not blocked
+    assert reason == "expiry_after_cutoff_allowed"
