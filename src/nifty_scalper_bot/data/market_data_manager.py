@@ -7697,8 +7697,16 @@ class MarketDataManager:
         canonical = canonical_nifty_future_symbol(symbol)
         if canonical:
             return self._canonical_symbol(canonical)
-        self._logger.warning(
+        # Pre-commit, the basket has no futures_symbol yet; this method is polled
+        # many times during startup. The app-level resolver handles the fallback
+        # (FUTURES_CONTEXT_RESOLVED_FROM_INSTRUMENTS), so emit at most once per
+        # minute instead of flooding the log on every call.
+        log_throttled(
+            self._logger,
+            "futures_context_unavailable_basket_missing",
             "FUTURES_CONTEXT_UNAVAILABLE_BASKET_MISSING",
+            interval_sec=60.0,
+            level=logging.WARNING,
             extra={"event": "FUTURES_CONTEXT_UNAVAILABLE_BASKET_MISSING"},
         )
         return None
