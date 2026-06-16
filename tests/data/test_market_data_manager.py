@@ -1650,3 +1650,25 @@ async def test_stale_unsubscribed_token_tick_drops_quietly(
     assert out is None
     # ... and must NOT be logged as the WARNING-level unmapped_token anomaly.
     assert "unmapped" not in levels, "non-desired token must not warn as unmapped"
+
+
+async def test_quote_with_tracked_timestamp_is_fresh_not_unknown() -> None:
+    # Regression: a selected option with valid bid/ask but no age field was reported
+    # quote_age_unknown -> tradable_quote_not_ready -> blocked arming, even though
+    # MDM tracks the quote timestamp. evaluate_quote_readiness must treat an injected
+    # epoch-ms timestamp as fresh.
+    import time as _time
+    from nifty_scalper_bot.execution.readiness import evaluate_quote_readiness
+
+    base = {"ltp": 100.0, "bid": 99.5, "ask": 100.5, "bid_qty": 50, "ask_qty": 50}
+
+    # Without any age/timestamp -> quote_age_unknown (the pre-fix symptom).
+    qr_unknown = evaluate_quote_readiness("NFO:NIFTY2661623900CE", base, max_age_s=30.0)
+    assert qr_unknown.reason == "quote_age_unknown"
+    assert qr_unknown.tradable_quote_ready is False
+
+    # With the MDM-tracked epoch-ms timestamp injected -> ready.
+    fresh = {**base, "timestamp_ms": _time.time() * 1000.0}
+    qr_fresh = evaluate_quote_readiness("NFO:NIFTY2661623900CE", fresh, max_age_s=30.0)
+    assert qr_fresh.reason == "ready"
+    assert qr_fresh.tradable_quote_ready is True
