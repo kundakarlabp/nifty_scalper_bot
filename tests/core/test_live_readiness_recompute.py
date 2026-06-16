@@ -19,6 +19,10 @@ class _Runner:
     def set_active_trading_universe(self, basket):
         self.basket = basket
 
+    def sync_history_from_mdm(self, symbol, **kwargs):
+        bars = len(self._indicator_engine.get_history(symbol) or [])
+        return SimpleNamespace(success=True, runner_bars=bars, indicator_bars=bars)
+
 
 def _ctx(mdm):
     return SimpleNamespace(
@@ -29,6 +33,10 @@ def _ctx(mdm):
         order_manager=object(),
         active_trading_universe={},
     )
+
+
+async def _ok_history(*args, **kwargs):
+    return SimpleNamespace(failure_reason=None, fetched_rows=0, accepted_rows=0)
 
 
 def test_selected_options_derived_from_basket() -> None:
@@ -171,3 +179,75 @@ async def test_selected_option_ltp_only_blocks_live_execution_bid_ask_missing(mo
         'NFO:NIFTY24600PE': False,
     }
     assert ctx.live_block_reason == 'execution_not_armed:selected_option_quote_missing'
+
+
+@pytest.mark.asyncio
+async def test_selected_option_history_cold_clears_when_both_selected_histories_ready(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
+
+    class _Snap:
+        ltp = 100.0
+        tick_age_s = 1.0
+        bid = 99.0
+        ask = 101.0
+        tradable_quote = True
+        depth_available = True
+
+    mdm = SimpleNamespace(
+        get_ohlc_bars=lambda s, limit=None: list(range(118)),
+        get_symbol_snapshot=lambda s: _Snap(),
+        hydrate_active_contract_basket=lambda basket=None: {
+            "hard_ready": False,
+            "missing": ["selected_option_history_cold"],
+            "symbols": {},
+        },
+        ensure_history=_ok_history,
+    )
+    ctx = _ctx(mdm)
+    ctx.active_symbol_tokens = {'NFO:NIFTY24600CE': 1, 'NFO:NIFTY24600PE': 2}
+    ctx.active_trading_universe = {
+        'spot_symbol': 'NSE:NIFTY',
+        'selected_ce': 'NFO:NIFTY24600CE',
+        'selected_pe': 'NFO:NIFTY24600PE',
+        'option_symbols': ['NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'],
+    }
+
+    with caplog.at_level('INFO'):
+        await app._recompute_and_push_runtime_readiness(ctx, reason='test')
+
+    assert 'selected_option_history_cold' not in (ctx.live_block_reason or '')
+    assert any('READINESS_BLOCKER_CLEARED blocker=selected_option_history_cold' in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_live_orders_armed_becomes_true_after_history_ready(monkeypatch) -> None:
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
+
+    class _Snap:
+        ltp = 100.0
+        tick_age_s = 1.0
+        bid = 99.0
+        ask = 101.0
+        tradable_quote = True
+        depth_available = True
+
+    mdm = SimpleNamespace(
+        get_ohlc_bars=lambda s, limit=None: list(range(118)),
+        get_symbol_snapshot=lambda s: _Snap(),
+        hydrate_active_contract_basket=lambda basket=None: {"hard_ready": True, "missing": [], "symbols": {}},
+        ensure_history=_ok_history,
+    )
+    ctx = _ctx(mdm)
+    ctx.active_symbol_tokens = {'NFO:NIFTY24600CE': 1, 'NFO:NIFTY24600PE': 2}
+    ctx.active_trading_universe = {
+        'spot_symbol': 'NSE:NIFTY',
+        'selected_ce': 'NFO:NIFTY24600CE',
+        'selected_pe': 'NFO:NIFTY24600PE',
+        'option_symbols': ['NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'],
+    }
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason='test')
+
+    assert ctx.live_orders_armed is True
+    assert ctx.live_block_reason is None
+    assert ctx.strategy_runner.calls[-1]['live_orders_armed'] is True

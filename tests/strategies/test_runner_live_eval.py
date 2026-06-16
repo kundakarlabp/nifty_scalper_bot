@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import time
+from collections import defaultdict
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -90,3 +92,28 @@ def test_set_runtime_readiness_logs_without_typeerror(caplog) -> None:
             selected_pe="NFO:NIFTY26MAY24200PE",
         )
     assert any("RUNNER_STARTUP_READINESS_UPDATE" in rec.message for rec in caplog.records)
+
+
+def test_strategy_eval_stall_recomputes_readiness_once(monkeypatch) -> None:
+    calls: list[str] = []
+    starts: list[bool] = []
+    runner = object.__new__(StrategyRunner)
+    runner.ready = True
+    runner._last_tick_seen_ts = time.monotonic()
+    runner._last_global_eval_ts = time.monotonic() - 91.0
+    runner._eval_stall_recovery_attempted = False
+    runner._runtime_readiness_recompute_callback = lambda reason: calls.append(reason)
+    runner._logger = logging.getLogger('test.stall.recovery')
+    runner._candle_engines = {}
+    runner._active_symbols = set()
+    runner._last_eval_ts = defaultdict(float)
+    runner._last_periodic_eval_at_by_symbol = {'NFO:XCE': time.monotonic()}
+    runner.start = lambda: starts.append(True)
+
+    monkeypatch.setattr('nifty_scalper_bot.strategies.runner.is_market_open_now', lambda: True)
+
+    runner._health_watchdog()
+    runner._health_watchdog()
+
+    assert calls == ['strategy_eval_stall_watchdog']
+    assert starts == [True]
