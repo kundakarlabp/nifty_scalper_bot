@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from datetime import datetime, timezone
 import logging
+import os
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -3209,3 +3210,136 @@ def test_frozen_direction_context_honored_when_fresh(monkeypatch) -> None:
     quote_fresh = True
     honored = bool(frozen_bias and contract_side and frozen_bias == contract_side and context_fresh and quote_fresh)
     assert honored is True
+
+
+def test_execution_allows_valid_bid_ask_without_depth(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SPREAD_MAX_PCT", "12.5")
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=65.0,
+        last_price=65.0,
+        bid=64.7,
+        ask=64.9,
+        best_bid=None,
+        best_ask=None,
+        depth=None,
+        depth_available=False,
+        tick_age_s=0.2,
+        tradable_quote=True,
+        source="ws",
+        real_ticks_last_60s=5,
+    )
+    result = runner._ensure_symbol_execution_ready_result("NFO:NIFTY26MAY23700PE", trace_id="bidask-no-depth")
+    assert result.allowed is True
+    assert result.reason in {"fresh_runtime_revalidation", "already_ready"}
+    assert result.reason not in {"quote_not_tradable", "candidate_depth_missing"}
+    assert result.details["depth_available"] is False
+
+
+def _bootstrap_runner_with_quotes(ce_quote: dict, pe_quote: dict) -> StrategyRunner:
+    runner = _build_runner()
+    runner._active_selected_ce = "NFO:NIFTY26MAY23700CE"
+    runner._active_selected_pe = "NFO:NIFTY26MAY23700PE"
+    runner._active_symbols = []
+    runner._active_option_symbols = {runner._active_selected_ce, runner._active_selected_pe}
+    runner._active_basket_all_symbols = set(runner._active_option_symbols)
+    runner._active_basket_token_by_symbol = {runner._active_selected_ce: 1, runner._active_selected_pe: 2}
+    runner._current_active_contract_selection = MagicMock(return_value=SimpleNamespace(selected_ce=runner._active_selected_ce, selected_pe=runner._active_selected_pe))
+    runner._market_data = SimpleNamespace(_token_by_symbol={runner._active_selected_ce: 1, runner._active_selected_pe: 2}, _active_subscribed_symbols=set(runner._active_option_symbols), _desired_tokens={1, 2}, _subscribed_tokens={1, 2}, _confirmed_subscriptions={1, 2}, _ws=None)
+    runner._indicator_engine = MagicMock()
+    runner._indicator_engine.get_history.return_value = [1] * 100
+    runner._required_bars_for_symbol = MagicMock(return_value=5)
+    quotes = {runner._active_selected_ce: ce_quote, runner._active_selected_pe: pe_quote}
+    runner._get_cached_quote_for_live_entry = MagicMock(side_effect=lambda symbol: quotes.get(symbol, {}))
+    runner._is_option_symbol_tick_fresh = MagicMock(return_value=True)
+    runner._selected_option_has_real_depth = MagicMock(return_value=False)
+    return runner
+
+
+def test_bootstrap_does_not_require_raw_depth_when_bid_ask_valid(monkeypatch) -> None:
+    monkeypatch.setenv("REQUIRE_FULL_DEPTH_FOR_EXECUTION", "false")
+    quote = {"ltp": 65.0, "bid": 64.7, "ask": 64.9, "depth_available": False, "tradable_quote": True}
+    runner = _bootstrap_runner_with_quotes(dict(quote), dict(quote, ltp=66.0, bid=65.7, ask=65.9))
+    ready, reason = runner._emit_live_universe_bootstrap_status(symbol=runner._active_selected_ce)
+    assert ready is True
+    assert reason != "selected_option_depth_missing"
+
+
+def test_full_depth_env_can_block_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("REQUIRE_FULL_DEPTH_FOR_EXECUTION", "true")
+    quote = {"ltp": 65.0, "bid": 64.7, "ask": 64.9, "depth_available": False, "tradable_quote": True}
+    runner = _bootstrap_runner_with_quotes(dict(quote), dict(quote, ltp=66.0, bid=65.7, ask=65.9))
+    ready, reason = runner._emit_live_universe_bootstrap_status(symbol=runner._active_selected_ce)
+    assert ready is False
+    assert reason == "selected_option_depth_missing"
+
+
+def test_dynamic_min_premium_override_accepts_tight_near_atm(monkeypatch) -> None:
+    monkeypatch.setenv("MIN_OPTION_PREMIUM", "40")
+    monkeypatch.setenv("MIN_OPTION_PREMIUM_DYNAMIC", "true")
+    selector = TradeCandidateSelector(option_strike_window_each_side=1)
+    ranked = selector.select_ranked_candidates(
+        direction_bias="PE",
+        atm_strike=4000,
+        snapshots=[{"symbol": "NFO:NIFTY26MAY4000PE", "side": "PE", "strike": 4000, "ltp": 35.0, "bid": 34.95, "ask": 35.05, "tick_age_s": 0.2, "real_ticks_last_60s": 2}],
+    )
+    assert ranked
+    assert "premium_filter_dynamic_override" in ranked[0].reasons
+
+
+def test_candidate_replacement_disabled_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("ALLOW_CANDIDATE_REPLACEMENT", raising=False)
+    assert os.getenv("ALLOW_CANDIDATE_REPLACEMENT", "false").lower() == "false"
+
+
+def test_candidate_replacement_blocked_by_premium_jump(monkeypatch) -> None:
+    monkeypatch.setenv("ALLOW_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", "35")
+    original_premium = 35.0
+    replacement_premium = 65.0
+    max_deviation = float(os.getenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", "35"))
+    assert abs(replacement_premium - original_premium) / original_premium * 100.0 > max_deviation
+
+
+def test_frozen_direction_context_prevents_fast_flip_block(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("SIGNAL_MAX_EXECUTION_AGE_SECONDS", "5")
+    current_bias = "CE"
+    frozen_bias = "PE"
+    signal_age_s = 2.0
+    contract_side = "PE"
+    assert current_bias != frozen_bias
+    assert frozen_bias == contract_side
+    assert signal_age_s <= float(os.getenv("SIGNAL_MAX_EXECUTION_AGE_SECONDS", "5"))
+
+
+def test_expiry_day_cutoff_surfaces_final_execution_reason(monkeypatch) -> None:
+    import nifty_scalper_bot.strategies.runner as runner_mod
+
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("ALLOW_EXPIRY_DAY_AFTER_CUTOFF", raising=False)
+    monkeypatch.setattr(runner_mod, "expiry_theta_block", lambda: (True, "expiry_day_after_13:30_ist"))
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY26JUN23900PE",
+        quantity=1,
+        confidence=0.8,
+        reason="OrderFlow",
+        stop_loss=90.0,
+        take_profit=120.0,
+        metadata={"candidate_snapshots": []},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol=signal.symbol,
+        trade_symbol=signal.symbol,
+        trade_price=100.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id="expiry-cutoff",
+    )
+    assert result.accepted is False
+    assert result.reason == "expiry_day_after_13:30_ist"

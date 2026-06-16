@@ -102,7 +102,7 @@ from nifty_scalper_bot.execution.order_state_machine import (
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
-from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
+from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.risk.position_sizing import (
     RiskManager as DeterministicRiskManager,
     RiskSnapshot,
@@ -3151,12 +3151,25 @@ class StrategyRunner:
                 snapshot_key_used = candidate_symbol
                 break
             if snap is not None:
-                bid = float(snap.bid or 0.0)
-                ask = float(snap.ask or 0.0)
-                tradable_quote = bool(getattr(snap, "tradable_quote", False) and bid > 0 and ask > bid)
-                tick_age_ms = int(max(0.0, float(getattr(snap, "tick_age_s", 9999.0)) * 1000.0))
+                quote = {
+                    "ltp": getattr(snap, "ltp", None),
+                    "last_price": getattr(snap, "last_price", None),
+                    "bid": getattr(snap, "bid", None),
+                    "ask": getattr(snap, "ask", None),
+                    "best_bid": getattr(snap, "best_bid", None),
+                    "best_ask": getattr(snap, "best_ask", None),
+                    "depth": getattr(snap, "depth", None),
+                    "depth_available": getattr(snap, "depth_available", False),
+                    "tradable_quote": getattr(snap, "tradable_quote", False),
+                    "tick_age_s": getattr(snap, "tick_age_s", None),
+                    "source": getattr(snap, "source", None),
+                }
+                bid, ask, spread_pct, quote_source = resolve_quote_bid_ask_spread(quote)
+                ltp = _extract_float(quote, "ltp", "last_price") or 0.0
+                tradable_quote = bool(ltp > 0 and bid is not None and ask is not None and bid > 0 and ask > bid and spread_pct is not None)
+                tick_age_ms = int(max(0.0, float(getattr(snap, "tick_age_s", 9999.0) or 9999.0) * 1000.0))
             else:
-                reason = "snapshot_unavailable"
+                reason = "quote_missing"
         lot_size_key_used: str | None = None
         if self._order_manager is not None and hasattr(self._order_manager, "resolve_lot_size"):
             for lot_key in candidate_keys or [symbol, normalized]:
@@ -3179,19 +3192,26 @@ class StrategyRunner:
         dynamic_revalidation_attempted = True
         dynamic_revalidation_passed = False
         history_fallback = "none"
+        spread_pct = locals().get("spread_pct")
         if snap is not None:
-            quote_source = getattr(snap, "source", None)
+            quote_source = locals().get("quote_source") or getattr(snap, "source", None)
             try:
                 history_count = int(getattr(snap, "real_ticks_last_60s", 0) or 0)
             except (TypeError, ValueError):
                 history_count = 0
-            spread_ok = bool(bid and ask and ask > bid and ((ask - bid) / max((ask + bid) / 2.0, 1e-9)) * 100.0 <= float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5"))
+            spread_ok = bool(spread_pct is not None and spread_pct <= float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5"))
         else:
             spread_ok = False
         min_history = int(os.getenv("RUNNER_MIN_REAL_TICKS_60S", "1") or "1")
         allow_fresh_without_tick_count = _env_flag("RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT", default=True)
-        if not tradable_quote:
-            reason = "quote_not_tradable"
+        if snap is None:
+            reason = "quote_missing"
+        elif (locals().get("ltp") or 0.0) <= 0:
+            reason = "ltp_missing"
+        elif bid is None or ask is None or bid <= 0 or ask <= 0:
+            reason = "bid_ask_missing"
+        elif ask <= bid:
+            reason = "bid_ask_crossed"
         elif tick_age_ms is None or tick_age_ms > max_quote_age_ms:
             reason = "quote_stale"
         elif not spread_ok:
@@ -3212,8 +3232,9 @@ class StrategyRunner:
             self._runtime_execution_ready_by_symbol[runtime_key] = True
             self._runtime_symbol_last_ready_at[runtime_key] = time.time()
             self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, runtime_key, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
-        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
-        return ExecutionReadinessResult(final_ready, reason, {"symbol": normalized, "runtime_key": runtime_key, "tick_age_ms": tick_age_ms, "bid": bid, "ask": ask, "tradable_quote": tradable_quote, "lot_size_resolved": lot_size_resolved})
+        depth_available = bool(getattr(snap, "depth_available", False) or getattr(snap, "depth", None)) if snap is not None else False
+        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s spread_pct=%s tradable_quote=%s depth_available=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, spread_pct, tradable_quote, depth_available, lot_size_resolved)
+        return ExecutionReadinessResult(final_ready, reason, {"symbol": normalized, "runtime_key": runtime_key, "tick_age_ms": tick_age_ms, "bid": bid, "ask": ask, "spread_pct": spread_pct, "quote_source": quote_source, "snapshot_key_used": snapshot_key_used, "tradable_quote": tradable_quote, "depth_available": depth_available, "lot_size_resolved": lot_size_resolved})
 
     def _execution_reject_cooldown_result(
         self, symbol: str, reason_key: str, now_epoch: float, trace_id: str | None
@@ -7353,8 +7374,19 @@ class StrategyRunner:
         ws = getattr(mdm, "_ws", None) if mdm is not None else None
         subscribed_tokens.update(set(getattr(ws, "_tokens", set()) or set()))
         confirmed_tokens = set(getattr(mdm, "_confirmed_subscriptions", set()) or set())
-        ce_quote = bool(ce_symbol and self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0))
-        pe_quote = bool(pe_symbol and self._is_option_symbol_tick_fresh(pe_symbol, max_age_s=60.0))
+        ce_quote_payload = self._get_cached_quote_for_live_entry(ce_symbol) if ce_symbol else {}
+        pe_quote_payload = self._get_cached_quote_for_live_entry(pe_symbol) if pe_symbol else {}
+        max_boot_spread = float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5")
+        def _selected_quote_tradable(sym: str | None, quote: Mapping[str, Any]) -> tuple[bool, bool, float | None, float | None, float | None, str]:
+            if not sym or not quote or not self._is_option_symbol_tick_fresh(sym, max_age_s=60.0):
+                return False, bool(quote.get("depth_available") or quote.get("depth")) if isinstance(quote, Mapping) else False, None, None, None, "missing"
+            bid_v, ask_v, spread_v, source_v = resolve_quote_bid_ask_spread(dict(quote))
+            ltp_v = _extract_float(quote, "ltp", "last_price", "last_traded_price") or 0.0
+            depth_v = bool(quote.get("depth_available") or quote.get("depth"))
+            ok_v = bool(ltp_v > 0 and bid_v is not None and ask_v is not None and bid_v > 0 and ask_v > bid_v and spread_v is not None and spread_v <= max_boot_spread)
+            return ok_v, depth_v, bid_v, ask_v, spread_v, source_v
+        ce_quote, ce_depth, ce_bid, ce_ask, ce_spread_pct, ce_quote_source = _selected_quote_tradable(ce_symbol, ce_quote_payload)
+        pe_quote, pe_depth, pe_bid, pe_ask, pe_spread_pct, pe_quote_source = _selected_quote_tradable(pe_symbol, pe_quote_payload)
         fut_quote = bool(fut_symbol and self._is_option_symbol_tick_fresh(fut_symbol, max_age_s=60.0)) if fut_symbol else False
         def _sub_state(sym: str | None, token: Any, fresh_tick: bool) -> bool:
             token_int = None
@@ -7393,8 +7425,9 @@ class StrategyRunner:
         except (TypeError, ValueError):
             fut_token_int = None
         fut_sub = bool(fut_symbol and (fut_symbol in active_subs or (fut_token_int is not None and fut_token_int in desired_tokens)))
-        ce_depth = bool(ce_symbol and self._selected_option_has_real_depth(ce_symbol))
-        pe_depth = bool(pe_symbol and self._selected_option_has_real_depth(pe_symbol))
+        if _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False):
+            ce_depth = bool(ce_symbol and self._selected_option_has_real_depth(ce_symbol))
+            pe_depth = bool(pe_symbol and self._selected_option_has_real_depth(pe_symbol))
         ce_hist = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
         pe_hist = len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
         min_bars = int(self._required_bars_for_symbol(ce_symbol or pe_symbol or symbol))
@@ -7403,7 +7436,7 @@ class StrategyRunner:
             reason = "selected_option_subscription_pending"
         elif not (ce_quote and pe_quote):
             reason = "selected_option_quote_missing"
-        elif not (ce_depth and pe_depth):
+        elif _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False) and not (ce_depth and pe_depth):
             reason = "selected_option_depth_missing"
         elif ce_hist < min_bars or pe_hist < min_bars:
             reason = "selected_option_history_cold"
@@ -7447,6 +7480,15 @@ class StrategyRunner:
                     "fut_quote_fresh": fut_quote,
                     "ce_depth_available": ce_depth,
                     "pe_depth_available": pe_depth,
+                    "ce_bid": ce_bid,
+                    "ce_ask": ce_ask,
+                    "ce_spread_pct": ce_spread_pct,
+                    "ce_quote_source": ce_quote_source,
+                    "pe_bid": pe_bid,
+                    "pe_ask": pe_ask,
+                    "pe_spread_pct": pe_spread_pct,
+                    "pe_quote_source": pe_quote_source,
+                    "require_full_depth_for_execution": _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False),
                     "ce_history_count": ce_hist,
                     "pe_history_count": pe_hist,
                     "ready": ready,
@@ -8759,9 +8801,24 @@ class StrategyRunner:
                 meta.get("trigger_conditions_met")
                 or meta.get("bias_invalidated_by_microstructure")
             )
-            if not orderflow_confirmed:
+            frozen_bias = str(meta.get("frozen_direction_bias") or meta.get("frozen_underlying_direction_bias") or "").upper()
+            signal_age_s = _extract_float(meta, "signal_age_seconds", "frozen_context_age_seconds")
+            max_signal_age_s = safe_positive_float_env("SIGNAL_MAX_EXECUTION_AGE_SECONDS", 5.0, minimum=0.1)
+            frozen_context_fresh = bool(frozen_bias == contract_side and (signal_age_s is None or signal_age_s <= max_signal_age_s))
+            if frozen_context_fresh:
+                details["frozen_direction_bias"] = frozen_bias
+                details["context_direction_conflict_overridden"] = True
+                self._logger.warning(
+                    "FROZEN_DIRECTION_CONTEXT_USED current_bias=%s frozen_bias=%s symbol=%s",
+                    direction_bias,
+                    frozen_bias,
+                    symbol_norm,
+                    extra={"event": "FROZEN_DIRECTION_CONTEXT_USED", "symbol": symbol_norm, "current_bias": direction_bias, "frozen_bias": frozen_bias},
+                )
+            elif not orderflow_confirmed:
                 return _finish(False, "context_direction_conflict")
-            details["context_direction_conflict_overridden"] = True
+            else:
+                details["context_direction_conflict_overridden"] = True
         required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
         history_count = len(self._indicator_engine.get_history(symbol) or [])
         details["history_count"] = history_count
@@ -8916,7 +8973,7 @@ class StrategyRunner:
         details["selected_option_bid_ask_ready"] = bool(is_selected_symbol and tradable_quote)
         if not tradable_quote:
             return _finish(False, "quote_not_tradable")
-        if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
+        if _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False) and not depth_available:
             return _finish(False, "quote_depth_unavailable")
         max_spread_pct = safe_positive_float_env("LIVE_MAX_SPREAD_PCT", 0.75, minimum=0.01)
         require_spread = _env_bool("LIVE_REQUIRE_SPREAD_PCT", True)
@@ -13085,6 +13142,17 @@ class StrategyRunner:
                 return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
             is_directional_option = option_side in {"CE", "PE"}
+            if is_directional_option:
+                expiry_blocked, expiry_reason = expiry_theta_block()
+                if expiry_blocked:
+                    self._reset_execution_state(base_symbol)
+                    _trace(expiry_reason)
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason=expiry_reason,
+                        details={"option_side": option_side, "stage": "expiry_day_entry_cutoff"},
+                    )
             selected_symbol = normalize_symbol(
                 trade_symbol or base_symbol or signal.symbol
             )
@@ -13398,33 +13466,45 @@ class StrategyRunner:
                 original_symbol = normalize_symbol(signal.symbol)
                 original_trade_price = float(trade_price or 0.0)
                 if selected_symbol != original_symbol:
-                    # Guard against a materially different candidate silently
-                    # replacing the original (e.g. 3950PE -> 4000PE). A replacement
-                    # is allowed only if it stays close in strike AND premium, unless
-                    # ALLOW_CANDIDATE_REPLACEMENT=true relaxes the bounds.
                     allow_replace = _env_flag("ALLOW_CANDIDATE_REPLACEMENT", default=False)
-                    replacement_blocked_reason = None
-                    if not allow_replace:
-                        max_strike_dist = float(
-                            os.getenv("CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50") or "50"
-                        )
-                        max_premium_pct = float(
-                            os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35") or "35"
-                        )
-                        orig_strike = self._extract_strike_from_symbol(original_symbol)
-                        new_strike = self._extract_strike_from_symbol(selected_symbol)
-                        if orig_strike is not None and new_strike is not None:
-                            if abs(float(new_strike) - float(orig_strike)) > max_strike_dist:
-                                replacement_blocked_reason = "strike_jump"
-                        new_premium = float(getattr(candidate, "entry_price", 0.0) or 0.0)
-                        if (
-                            replacement_blocked_reason is None
-                            and original_trade_price > 0.0
-                            and new_premium > 0.0
-                            and abs(new_premium - original_trade_price) / original_trade_price * 100.0
-                            > max_premium_pct
-                        ):
-                            replacement_blocked_reason = "premium_jump"
+                    strict_replace = _env_flag("STRICT_CANDIDATE_REPLACEMENT", default=True)
+                    max_strike_dist = float(os.getenv("MAX_REPLACEMENT_STRIKE_DISTANCE", os.getenv("CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50")) or "50")
+                    max_premium_pct = float(os.getenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35")) or "35")
+                    replacement_blocked_reason = "config_disabled" if not allow_replace else None
+
+                    orig_side = self._contract_side_from_symbol(original_symbol)
+                    new_side = self._contract_side_from_symbol(selected_symbol)
+                    if replacement_blocked_reason is None and orig_side in {"CE", "PE"} and new_side in {"CE", "PE"} and orig_side != new_side:
+                        replacement_blocked_reason = "side_mismatch"
+                    def _expiry_key(sym: str) -> str | None:
+                        match = re.search(r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$", normalize_symbol(sym))
+                        return match.group(1) if match else None
+                    orig_expiry = _expiry_key(original_symbol)
+                    new_expiry = _expiry_key(selected_symbol)
+                    if replacement_blocked_reason is None and strict_replace and orig_expiry and new_expiry and orig_expiry != new_expiry:
+                        replacement_blocked_reason = "expiry_mismatch"
+                    orig_strike = self._extract_strike_from_symbol(original_symbol)
+                    new_strike = self._extract_strike_from_symbol(selected_symbol)
+                    if replacement_blocked_reason is None and orig_strike is not None and new_strike is not None and abs(float(new_strike) - float(orig_strike)) > max_strike_dist:
+                        replacement_blocked_reason = "strike_jump"
+                    new_premium = float(getattr(candidate, "entry_price", 0.0) or 0.0)
+                    if (
+                        replacement_blocked_reason is None
+                        and original_trade_price > 0.0
+                        and new_premium > 0.0
+                        and abs(new_premium - original_trade_price) / original_trade_price * 100.0 > max_premium_pct
+                    ):
+                        replacement_blocked_reason = "premium_jump"
+                    active_symbols = {normalize_symbol(str(item)) for item in (getattr(self, "_active_option_symbols", set()) or set())}
+                    active_symbols.update(normalize_symbol(str(item)) for item in (getattr(self, "_active_basket_all_symbols", set()) or set()))
+                    active_symbols.update(normalize_symbol(str(item)) for item in (getattr(self, "_active_basket_token_by_symbol", {}) or {}).keys())
+                    if replacement_blocked_reason is None and active_symbols and selected_symbol not in active_symbols:
+                        replacement_blocked_reason = "not_in_active_basket"
+                    if replacement_blocked_reason is None:
+                        replacement_readiness = self._ensure_symbol_execution_ready_result(selected_symbol, trace_id=trace_id)
+                        if not replacement_readiness.allowed:
+                            replacement_blocked_reason = "quote_not_tradable"
+
                     if replacement_blocked_reason is not None:
                         self._logger.info(
                             "CANDIDATE_REPLACEMENT_BLOCKED original_symbol=%s selected_symbol=%s reason=%s original_premium=%s candidate_premium=%s",
@@ -13438,6 +13518,10 @@ class StrategyRunner:
                                 "original_symbol": original_symbol,
                                 "selected_symbol": selected_symbol,
                                 "reason": replacement_blocked_reason,
+                                "allow_candidate_replacement": allow_replace,
+                                "strict_candidate_replacement": strict_replace,
+                                "max_replacement_strike_distance": max_strike_dist,
+                                "max_replacement_premium_deviation_pct": max_premium_pct,
                             },
                         )
                         selected_symbol = original_symbol

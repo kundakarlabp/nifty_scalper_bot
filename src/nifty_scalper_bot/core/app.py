@@ -7680,6 +7680,13 @@ async def ensure_symbol_runtime_history(
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
     policy = resolve_history_policy(ctx, symbol, role=role, phase=phase, reason=reason)
+    if (
+        str(policy.role) == "option_context"
+        and str(policy.phase) != "recovery"
+        and get_runtime_market_mode() != "OPEN"
+        and bool(getattr(policy, "allow_broker_fetch", True))
+    ):
+        policy = replace(policy, allow_broker_fetch=False)
 
     def _capacity() -> int:
         if mdm is not None and callable(getattr(mdm, "history_capacity_for", None)):

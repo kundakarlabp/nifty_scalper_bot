@@ -9,6 +9,7 @@ Env overrides:
 - EXPIRY_THETA_GATE_ENABLED (default true)
 - EXPIRY_ENTRY_CUTOFF_IST   (default "13:30", HH:MM, IST)
 - EXPIRY_WEEKDAY            (default 1 = Tuesday, Monday=0)
+- ALLOW_EXPIRY_DAY_AFTER_CUTOFF (default false)
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ def expiry_theta_block(now: datetime | None = None) -> tuple[bool, str]:
     """
     if not parse_bool_env(os.getenv("EXPIRY_THETA_GATE_ENABLED"), True):
         return False, "gate_disabled"
+    if parse_bool_env(os.getenv("ALLOW_EXPIRY_DAY_AFTER_CUTOFF"), False):
+        return False, "expiry_after_cutoff_allowed"
     current = now.astimezone(IST) if now else datetime.now(IST)
     expiry_weekday = parse_int_env(os.getenv("EXPIRY_WEEKDAY"), 1)
     if current.weekday() != expiry_weekday:
