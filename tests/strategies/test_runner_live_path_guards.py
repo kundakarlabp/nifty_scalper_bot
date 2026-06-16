@@ -3108,3 +3108,59 @@ def test_direction_context_diagnostics_tolerate_malformed_bar_counts(indicators_
     assert record.reason_detail
     assert isinstance(record.spot_bars, int)
     assert isinstance(record.futures_bars, int)
+
+
+def _prime_dedup_runner(runner: StrategyRunner, *, live: bool = True) -> None:
+    from nifty_scalper_bot.strategies.runner import ExecutionModeSnapshot
+
+    runner._signal_attempt_debounce_state = {}
+    runner._directional_dedup_key = lambda **_k: "k"
+    snap = ExecutionModeSnapshot.__new__(ExecutionModeSnapshot)
+    object.__setattr__(snap, "is_live_mode", live)
+    runner._resolve_execution_mode_snapshot = lambda: snap
+
+
+def _depth_test_signal():
+    from nifty_scalper_bot.strategies.signal_generator import Signal
+
+    return Signal(
+        action="BUY", symbol="NFO:NIFTY26JUN23900CE", quantity=1, confidence=0.8,
+        reason="OrderFlow", stop_loss=90.0, take_profit=120.0,
+        metadata={"tradable_quote": True, "candidate_spread_pct": 0.3, "candidate_tick_age_ms": 500.0},
+    )
+
+
+def test_execution_allows_valid_bid_ask_without_depth(monkeypatch) -> None:
+    # Issue A: live mode, valid bid/ask, acceptable spread, depth_available=False ->
+    # must NOT reject with candidate_depth_missing (default REQUIRE_FULL_DEPTH off).
+    monkeypatch.delenv("REQUIRE_FULL_DEPTH_FOR_EXECUTION", raising=False)
+    monkeypatch.delenv("RUNNER_ALLOW_LIVE_DEPTH_FALLBACK", raising=False)
+    runner = _build_runner()
+    _prime_dedup_runner(runner, live=True)
+    snapshot = {"symbol": "NFO:NIFTY26JUN23900CE", "bid": 64.7, "ask": 64.9,
+                "depth_available": False, "premium_within_range": True}
+    result = runner._apply_directional_signal_dedup(
+        signal=_depth_test_signal(), metadata=_depth_test_signal().metadata,
+        underlying="NIFTY", now_epoch=time.time(),
+        selected_symbol="NFO:NIFTY26JUN23900CE", option_side="CE",
+        selected_snapshot=snapshot, trace_id="depth-ok",
+    )
+    # No rejection from this gate when bid/ask valid and full depth not required.
+    assert result is None
+
+
+def test_candidate_depth_missing_only_when_full_depth_required(monkeypatch) -> None:
+    # With REQUIRE_FULL_DEPTH_FOR_EXECUTION=true, missing depth DOES block (opt-in).
+    monkeypatch.setenv("REQUIRE_FULL_DEPTH_FOR_EXECUTION", "true")
+    monkeypatch.delenv("RUNNER_ALLOW_LIVE_DEPTH_FALLBACK", raising=False)
+    runner = _build_runner()
+    _prime_dedup_runner(runner, live=True)
+    snapshot = {"symbol": "NFO:NIFTY26JUN23900CE", "bid": 64.7, "ask": 64.9,
+                "depth_available": False, "premium_within_range": True}
+    result = runner._apply_directional_signal_dedup(
+        signal=_depth_test_signal(), metadata=_depth_test_signal().metadata,
+        underlying="NIFTY", now_epoch=time.time(),
+        selected_symbol="NFO:NIFTY26JUN23900CE", option_side="CE",
+        selected_snapshot=snapshot, trace_id="depth-required",
+    )
+    assert result is not None and result.reason == "candidate_depth_missing"
