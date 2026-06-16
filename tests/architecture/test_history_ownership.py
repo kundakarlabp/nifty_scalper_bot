@@ -103,7 +103,8 @@ async def test_execution_and_notifications_do_not_hydrate() -> None:
 
 
 async def test_canonical_readiness_function_exists_and_is_pure() -> None:
-    text = (SRC / "core" / "app.py").read_text()
+    # Readiness computation was extracted from app.py to core/history_readiness.py.
+    text = (SRC / "core" / "history_readiness.py").read_text()
     tree = ast.parse(text)
     target = None
     for node in ast.walk(tree):
