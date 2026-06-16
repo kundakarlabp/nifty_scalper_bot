@@ -122,7 +122,26 @@ class TradeCandidateSelector:
                 self._log_reject("missing_bid_ask", symbol, throttle_key_parts=("missing_bid_ask", symbol, "invalid_ltp"), ltp=ltp, bid=bid, ask=ask, quote_quality=s.get("quote_quality"), ltp_only_fallback=bool(s.get("ltp_only_fallback")), allow_ltp_only=allow_ltp_only)
                 continue
             premium = ltp
-            if premium < self.min_option_premium or premium > self.max_option_premium:
+            premium_dynamic_override = False
+            if premium < self.min_option_premium:
+                dynamic_enabled = os.getenv('MIN_OPTION_PREMIUM_DYNAMIC', 'true').lower() in {'1', 'true', 'yes', 'on'}
+                dynamic_floor = float(os.getenv('MIN_OPTION_PREMIUM_DYNAMIC_FLOOR', '25') or '25')
+                dynamic_max_spread = float(os.getenv('MIN_OPTION_PREMIUM_DYNAMIC_MAX_SPREAD_PCT', '0.75') or '0.75')
+                near_atm_for_dynamic = atm_distance <= max(1, self.option_strike_window_each_side)
+                if has_bid_ask:
+                    dyn_mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
+                    dyn_spread = (((ask or 0.0) - (bid or 0.0)) / dyn_mid * 100.0) if dyn_mid > 0 else 100.0
+                else:
+                    dyn_spread = None
+                premium_dynamic_override = bool(
+                    dynamic_enabled
+                    and premium >= dynamic_floor
+                    and has_bid_ask
+                    and dyn_spread is not None
+                    and dyn_spread <= dynamic_max_spread
+                    and near_atm_for_dynamic
+                )
+            if (premium < self.min_option_premium and not premium_dynamic_override) or premium > self.max_option_premium:
                 rejects['premium_out_of_range'] += 1
                 LOGGER.info(
                     "CANDIDATE_REJECTED symbol=%s reason=premium_out_of_range premium=%s min=%s max=%s ltp=%s bid=%s ask=%s strike=%s atm=%s atm_distance=%s",
@@ -163,6 +182,8 @@ class TradeCandidateSelector:
                 self._log_reject("insufficient_ticks", symbol, throttle_key_parts=("insufficient_ticks", symbol, min_ticks), real_ticks_last_60s=real_ticks, min_ticks=min_ticks)
                 continue
             reasons = ['candidate_valid']
+            if premium_dynamic_override:
+                reasons.append('premium_filter_dynamic_override')
             spread_pct: float | None = None
             if has_bid_ask:
                 mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
