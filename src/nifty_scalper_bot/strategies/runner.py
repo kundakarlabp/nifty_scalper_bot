@@ -8783,6 +8783,39 @@ class StrategyRunner:
             direction_bias=direction_bias,
         )
         details.update(eligibility_details)
+        # Issue D: freeze direction context at signal generation. If eligibility
+        # rejects on a direction conflict caused by the LIVE bias flipping after
+        # the signal was generated, honor the signal's own generation-time side
+        # (its frozen bias) when the context is still fresh. A momentary one-tick
+        # flip within MAX_CONTEXT_AGE_SECONDS must not block a fresh signal.
+        if not eligible and eligibility_reason == "context_direction_conflict":
+            meta = (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+            frozen_bias = str(
+                meta.get("frozen_direction_bias")
+                or meta.get("option_side")
+                or meta.get("direction_bias")
+                or ""
+            ).upper()
+            contract_side = self._contract_side_from_symbol(symbol_norm)
+            context_fresh = ctx_age is None or ctx_age <= max_context_age
+            if frozen_bias and contract_side and frozen_bias == contract_side and context_fresh and quote_fresh:
+                eligible = True
+                eligibility_reason = "frozen_direction_context_honored"
+                details["frozen_direction_bias"] = frozen_bias
+                details["context_direction_conflict_overridden"] = True
+                self._logger.info(
+                    "FROZEN_DIRECTION_CONTEXT_HONORED symbol=%s frozen_bias=%s contract_side=%s ctx_age=%s",
+                    symbol_norm,
+                    frozen_bias,
+                    contract_side,
+                    ctx_age,
+                    extra={
+                        "event": "FROZEN_DIRECTION_CONTEXT_HONORED",
+                        "symbol": symbol_norm,
+                        "frozen_bias": frozen_bias,
+                        "contract_side": contract_side,
+                    },
+                )
         if not eligible and eligibility_reason in {"candidate_not_selected_or_near_atm", "candidate_distance_unknown", "candidate_not_in_active_basket"}:
             metadata = (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
             trigger_evidence = bool(
@@ -13364,6 +13397,50 @@ class StrategyRunner:
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
                 original_trade_price = float(trade_price or 0.0)
+                if selected_symbol != original_symbol:
+                    # Guard against a materially different candidate silently
+                    # replacing the original (e.g. 3950PE -> 4000PE). A replacement
+                    # is allowed only if it stays close in strike AND premium, unless
+                    # ALLOW_CANDIDATE_REPLACEMENT=true relaxes the bounds.
+                    allow_replace = _env_flag("ALLOW_CANDIDATE_REPLACEMENT", default=False)
+                    replacement_blocked_reason = None
+                    if not allow_replace:
+                        max_strike_dist = float(
+                            os.getenv("CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50") or "50"
+                        )
+                        max_premium_pct = float(
+                            os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35") or "35"
+                        )
+                        orig_strike = self._extract_strike_from_symbol(original_symbol)
+                        new_strike = self._extract_strike_from_symbol(selected_symbol)
+                        if orig_strike is not None and new_strike is not None:
+                            if abs(float(new_strike) - float(orig_strike)) > max_strike_dist:
+                                replacement_blocked_reason = "strike_jump"
+                        new_premium = float(getattr(candidate, "entry_price", 0.0) or 0.0)
+                        if (
+                            replacement_blocked_reason is None
+                            and original_trade_price > 0.0
+                            and new_premium > 0.0
+                            and abs(new_premium - original_trade_price) / original_trade_price * 100.0
+                            > max_premium_pct
+                        ):
+                            replacement_blocked_reason = "premium_jump"
+                    if replacement_blocked_reason is not None:
+                        self._logger.info(
+                            "CANDIDATE_REPLACEMENT_BLOCKED original_symbol=%s selected_symbol=%s reason=%s original_premium=%s candidate_premium=%s",
+                            original_symbol,
+                            selected_symbol,
+                            replacement_blocked_reason,
+                            original_trade_price,
+                            getattr(candidate, "entry_price", None),
+                            extra={
+                                "event": "CANDIDATE_REPLACEMENT_BLOCKED",
+                                "original_symbol": original_symbol,
+                                "selected_symbol": selected_symbol,
+                                "reason": replacement_blocked_reason,
+                            },
+                        )
+                        selected_symbol = original_symbol
                 if selected_symbol != original_symbol:
                     trade_symbol = selected_symbol
                     base_symbol = selected_symbol

@@ -25,3 +25,37 @@ def test_single_trigger_path_not_context_promoted(monkeypatch):
     assert out is not None
     assert out.metadata['approval_path'] in {'single_vote_fallback', 'single_trigger'}
     assert out.metadata.get('promoted_from_context') is not True
+
+
+def test_selected_option_single_vote_can_be_disabled(monkeypatch):
+    # Issue E: STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION=false must block the
+    # selected-option single-vote path that otherwise bypasses the scalp flag.
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'false')
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION', 'false')
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION', 'false')
+    mgr = _mgr()
+    sig = Signal(action='BUY', symbol='NFO:NIFTY26MAY24100CE', quantity=1, confidence=0.7,
+                 reason='x', stop_loss=90, take_profit=110,
+                 metadata={'is_selected_option': True, 'spread_pct': 1.0})
+    trigger = StrategyVote(strategy='VWAPPro', side='CE', score=6.5, confidence=0.7,
+                           reasons=[], metadata={'role': 'trigger', 'raw_setup_score': 6.5, 'strategy_score': 6.5})
+    out = mgr._combine_strategy_votes(symbol=sig.symbol, signals=[(sig, trigger)],
+                                      indicators={'is_selected_option': True})
+    # With all single-vote paths disabled, a lone trigger must not be approved.
+    assert out is None
+
+
+def test_selected_option_single_vote_allowed_by_default(monkeypatch):
+    # Default (flags unset/true) preserves the core selected-option scalp.
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'false')
+    monkeypatch.delenv('STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION', raising=False)
+    monkeypatch.delenv('STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION', raising=False)
+    mgr = _mgr()
+    sig = Signal(action='BUY', symbol='NFO:NIFTY26MAY24100CE', quantity=1, confidence=0.7,
+                 reason='x', stop_loss=90, take_profit=110,
+                 metadata={'is_selected_option': True, 'spread_pct': 1.0})
+    trigger = StrategyVote(strategy='VWAPPro', side='CE', score=6.5, confidence=0.7,
+                           reasons=[], metadata={'role': 'trigger', 'raw_setup_score': 6.5, 'strategy_score': 6.5})
+    out = mgr._combine_strategy_votes(symbol=sig.symbol, signals=[(sig, trigger)],
+                                      indicators={'is_selected_option': True})
+    assert out is not None
