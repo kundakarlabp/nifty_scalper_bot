@@ -5636,13 +5636,27 @@ class MarketDataManager:
             )
 
         if not symbol:
-            log_throttled(
-                self._logger,
-                f"mdm_unmapped_token_{token}",
-                "MDM_TICK_DROPPED reason=unmapped_token token=%s" % token,
-                interval_sec=30.0,
-                level=logging.WARNING,
-            )
+            # A tick for a token not in the desired set is an expected artifact of
+            # basket rotation: the token was just removed from the desired set and
+            # its mapping pruned, but the broker may stream a few more ticks before
+            # the WS unsubscribe lands. Dropping it is correct; log at DEBUG. Only a
+            # token that IS still desired but unmapped is a genuine anomaly (WARN).
+            if token in self._desired_tokens:
+                log_throttled(
+                    self._logger,
+                    f"mdm_unmapped_token_{token}",
+                    "MDM_TICK_DROPPED reason=unmapped_token token=%s" % token,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
+            else:
+                log_throttled(
+                    self._logger,
+                    f"mdm_stale_token_{token}",
+                    "MDM_TICK_DROPPED reason=stale_unsubscribed_token token=%s" % token,
+                    interval_sec=60.0,
+                    level=logging.DEBUG,
+                )
             return None
 
         price_raw = raw.get("last_price") or raw.get("ltp") or raw.get("price")
