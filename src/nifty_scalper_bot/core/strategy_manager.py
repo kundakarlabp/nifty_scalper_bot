@@ -4008,14 +4008,17 @@ class StrategyManager(_BaseStrategyManager):
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
             threshold_passed = bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed)
-            # Issue E: STRATEGY_ALLOW_SINGLE_VOTE_SCALP only governs the generic
-            # near-ATM scalp fallback. High-conviction and selected-option single
-            # votes are intentionally allowed independently (a single trigger on the
-            # SELECTED ATM option that cleared all gates is the core scalp). To let
-            # an operator disable EVERY single-vote path, these now have their own
-            # explicit flags, defaulting true so behavior is unchanged.
-            allow_high_conviction = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION", "true")).lower() in {"1", "true", "yes", "on"}
-            allow_selected_option = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION", "true")).lower() in {"1", "true", "yes", "on"}
+            # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block.
+            # Single-vote high-conviction/selected-option paths require explicit,
+            # narrower operator overrides to avoid accidental lone-vote approvals.
+            allow_high_conviction = self._env_bool(
+                "STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE",
+                self._env_bool("STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION", False),
+            )
+            allow_selected_option = self._env_bool(
+                "STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE",
+                self._env_bool("STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION", False),
+            )
             high_conviction_allowed = bool(raw_trigger_score >= single_high and selected_ok and not vetoed and allow_high_conviction)
             # A single trigger on the actually-SELECTED ATM option that already
             # cleared score/confidence/veto gates is the core scalp this platform
@@ -4090,7 +4093,7 @@ class StrategyManager(_BaseStrategyManager):
                 approval_path = "single_vote_high_conviction"
             elif scalp_fallback_allowed:
                 metadata_stage = "single_vote_scalp_controlled"
-                approval_path = "single_vote_fallback"
+                approval_path = approval_path_single or "single_vote_fallback"
             else:
                 allow_candidate_switch = str(os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false")).lower() in {"1", "true", "yes", "on"}
                 max_candidate_switch_distance = float(os.getenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "100") or "100")
