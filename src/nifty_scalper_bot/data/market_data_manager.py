@@ -2071,6 +2071,14 @@ class MarketDataManager:
                 report["missing"].append(f"{sym}:token_missing")
                 report["hard_ready"] = False
             quote = self.get_latest_tick(sym) or self.get_latest_tick(canonical) or self.get_quote(sym) or self.get_quote(canonical)
+            if isinstance(quote, dict) and quote.get("tick_age_s") is None and quote.get("age_s") is None and not quote.get("timestamp_ms") and not quote.get("last_tick_ts_ms"):
+                # The tick/quote dict may carry bid/ask but no age field, which makes
+                # evaluate_quote_readiness report quote_age_unknown and wrongly block a
+                # selected option. MDM already tracks the last quote timestamp, so
+                # surface it (read-only copy) to let freshness be evaluated.
+                _ts_ms = self._last_quote_ts_ms.get(canonical) or self._last_quote_ts_ms.get(sym)
+                if _ts_ms:
+                    quote = {**quote, "timestamp_ms": float(_ts_ms)}
             qr = evaluate_quote_readiness(canonical, quote, max_spread_pct=float(os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10), max_age_s=self._option_stale_seconds)
             entry["ltp_ready"] = qr.ltp_ready
             entry["depth_available"] = qr.depth_available
