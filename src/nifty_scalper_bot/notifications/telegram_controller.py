@@ -648,7 +648,20 @@ class TelegramBot:
             await self.application.start()
             if self.application.updater is not None:
                 log.info("TELEGRAM_POLLING_START_REQUESTED")
-                await self.application.updater.start_polling()
+                # Guarantee polling mode: a leftover webhook makes getUpdates return
+                # 409 Conflict and silently kills command polling (commands appear
+                # unresponsive, especially after a restart). Clearing it and dropping
+                # the stale backlog first makes start_polling reliable. Mirrors the
+                # fallback/manual paths which already do this.
+                try:
+                    await self.application.bot.delete_webhook(drop_pending_updates=True)
+                except Exception as _wh_exc:  # noqa: BLE001
+                    log.warning(
+                        "telegram_delete_webhook_failed err=%s",
+                        _wh_exc,
+                        extra={"event": "telegram_delete_webhook_failed"},
+                    )
+                await self.application.updater.start_polling(drop_pending_updates=True)
                 log.info("TELEGRAM_POLLING_STARTED")
             await self._safe_send("🤖 Telegram bot started")
             log.info("Telegram bot started")

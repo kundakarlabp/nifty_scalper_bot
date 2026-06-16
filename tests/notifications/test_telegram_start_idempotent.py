@@ -42,3 +42,31 @@ async def test_handlers_registered_flag_guards_double_registration() -> None:
     # second call is a no-op (would raise if it tried to re-add on a real app twice)
     bot._register_handlers()
     assert bot._handlers_registered is True
+
+
+async def test_start_clears_webhook_and_drops_pending_before_polling() -> None:
+    # Regression: operator commands were unresponsive because start_polling ran
+    # without first clearing a possible webhook / stale backlog, causing a 409
+    # Conflict on getUpdates. start() must delete the webhook (drop_pending=True)
+    # and start polling with drop_pending_updates=True.
+    from unittest.mock import AsyncMock, MagicMock
+
+    deps = TelegramDeps(token="dummy", chat_id=12345, app_version="test")
+    bot = TelegramBot(deps)
+
+    app = MagicMock()
+    app.initialize = AsyncMock()
+    app.start = AsyncMock()
+    app.bot.delete_webhook = AsyncMock()
+    app.updater = MagicMock()
+    app.updater.start_polling = AsyncMock()
+    bot.application = app
+    bot._register_handlers = lambda: None  # type: ignore[method-assign]
+    bot._safe_send = AsyncMock()  # type: ignore[method-assign]
+    bot._ensure_alert_worker = lambda: None  # type: ignore[method-assign]
+    bot._bg_task_started = True  # skip heartbeat task creation
+
+    await bot.start()
+
+    app.bot.delete_webhook.assert_awaited_once_with(drop_pending_updates=True)
+    app.updater.start_polling.assert_awaited_once_with(drop_pending_updates=True)
