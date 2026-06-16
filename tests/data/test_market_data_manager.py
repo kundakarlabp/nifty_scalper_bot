@@ -1584,3 +1584,34 @@ def test_process_poll_quote_option_volume_uses_cumulative_delta() -> None:
     assert emitted
     assert emitted[0]["volume"] == 80
     assert emitted[0]["volume_source"] == "cumulative_delta"
+
+
+async def test_futures_basket_missing_warning_is_throttled(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    # Pre-commit, get_active_nifty_future_symbol_cached returns None and previously
+    # logged a WARNING on EVERY call, flooding startup logs (44x in 32s observed).
+    # It must now return None and emit the warning at most once per throttle window.
+    import logging as _logging
+
+    manager = MarketDataManager(broker, ws)
+    manager._active_contract_basket = None  # no committed basket -> no futures symbol
+
+    records: list[str] = []
+
+    class _Capture(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            if getattr(record, "event", "") == "FUTURES_CONTEXT_UNAVAILABLE_BASKET_MISSING":
+                records.append(record.getMessage())
+
+    handler = _Capture()
+    manager._logger.addHandler(handler)
+    try:
+        # Many calls (mimicking the startup poll storm)
+        for _ in range(25):
+            assert manager.get_active_nifty_future_symbol_cached() is None
+    finally:
+        manager._logger.removeHandler(handler)
+
+    # Throttled: at most one emission for the burst (definitely not 25).
+    assert len(records) <= 1, f"expected throttled (<=1) warning, got {len(records)}"
