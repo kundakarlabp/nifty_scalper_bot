@@ -8088,6 +8088,55 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     # datahub_bars excluded from gating min(): DataHub owns no history (PR #562).
     ce_bars = min(ce_mdm_bars, ce_runner_bars, ce_indicator_bars) if ce_status else 0
     pe_bars = min(pe_mdm_bars, pe_runner_bars, pe_indicator_bars) if pe_status else 0
+    selected_history_ready = bool(
+        selected_ce
+        and selected_pe
+        and ce_bars >= option_execution_min_bars
+        and pe_bars >= option_execution_min_bars
+    )
+    selected_history_blockers = {
+        "selected_option_history_cold",
+        "selected_ce_history_missing",
+        "selected_pe_history_missing",
+        "ce_eval_bars_missing",
+        "pe_eval_bars_missing",
+        "ce_exec_bars_missing",
+        "pe_exec_bars_missing",
+        "ce_exec_quote_or_history_not_ready",
+        "pe_exec_quote_or_history_not_ready",
+        "insufficient_bars",
+        "mdm_bars_missing",
+        "runner_bars_missing",
+        "indicator_bars_missing",
+    }
+    if selected_history_ready:
+        stale_history_blockers = [
+            blocker
+            for blocker in [*basket_missing, *status_blockers]
+            if blocker in selected_history_blockers
+        ]
+        if stale_history_blockers:
+            LOGGER.info(
+                "READINESS_BLOCKER_CLEARED blocker=selected_option_history_cold",
+                extra={
+                    "event": "READINESS_BLOCKER_CLEARED",
+                    "blocker": "selected_option_history_cold",
+                    "cleared_blockers": list(dict.fromkeys(stale_history_blockers)),
+                    "selected_ce": selected_ce,
+                    "selected_pe": selected_pe,
+                    "ce_bars_effective": ce_bars,
+                    "pe_bars_effective": pe_bars,
+                    "required_bars": option_execution_min_bars,
+                },
+            )
+        status_blockers = [
+            blocker for blocker in status_blockers if blocker not in selected_history_blockers
+        ]
+        basket_missing = [
+            blocker for blocker in basket_missing if blocker not in selected_history_blockers
+        ]
+        if not basket_missing:
+            basket_hard_ready = True
     ce_quote_fresh = bool(ce_status and (ce_status.live_tick_fresh or ce_status.tradable_quote))
     pe_quote_fresh = bool(pe_status and (pe_status.live_tick_fresh or pe_status.tradable_quote))
     ce_bid_ask_complete = bool(ce_status and ce_status.tradable_quote)
@@ -8119,10 +8168,11 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     if not futures_ready: missing.append('futures_history_missing')
     if not basket_hard_ready: missing.extend(basket_missing or ['active_basket_hydration_not_ready'])
     if not evaluation_ready: missing.append('eval_not_ready')
-    if ce_runner_bars < option_eval_min_live_bars or ce_indicator_bars < option_eval_min_live_bars: missing.append('ce_eval_bars_missing')
-    if pe_runner_bars < option_eval_min_live_bars or pe_indicator_bars < option_eval_min_live_bars: missing.append('pe_eval_bars_missing')
-    if ce_bars < option_execution_min_bars: missing.append('ce_exec_bars_missing')
-    if pe_bars < option_execution_min_bars: missing.append('pe_exec_bars_missing')
+    if not selected_history_ready:
+        if ce_runner_bars < option_eval_min_live_bars or ce_indicator_bars < option_eval_min_live_bars: missing.append('ce_eval_bars_missing')
+        if pe_runner_bars < option_eval_min_live_bars or pe_indicator_bars < option_eval_min_live_bars: missing.append('pe_eval_bars_missing')
+        if ce_bars < option_execution_min_bars: missing.append('ce_exec_bars_missing')
+        if pe_bars < option_execution_min_bars: missing.append('pe_exec_bars_missing')
     if ce_status and not ce_status.tradable_quote: missing.append('selected_ce_quote_missing')
     if pe_status and not pe_status.tradable_quote: missing.append('selected_pe_quote_missing')
     if ce_status and not ce_status.depth_available: missing.append('selected_ce_depth_missing')
@@ -8131,8 +8181,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     if not runner_running: missing.append('runner_not_running')
     if live_mode:
         if not market_open: missing.append('market_closed')
-        if not ce_exec_ready: missing.append('ce_exec_quote_or_history_not_ready')
-        if not pe_exec_ready: missing.append('pe_exec_quote_or_history_not_ready')
+        if not ce_exec_ready and not selected_history_ready: missing.append('ce_exec_quote_or_history_not_ready')
+        if not pe_exec_ready and not selected_history_ready: missing.append('pe_exec_quote_or_history_not_ready')
         if not context_exec_ready: missing.append('context_exec_not_ready')
         if not broker_ready: missing.append('broker_not_ready')
     normalized_decision = normalize_readiness_blockers(
@@ -8194,6 +8244,17 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     )
     LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, ce_exec_ready, pe_exec_ready, execution_ready_by_symbol, block_reason, extra={"event":"LIVE_READINESS_COMPUTED","selected_ce":selected_ce,"selected_pe":selected_pe,"live_block_reason":block_reason,"primary_blocker":normalized_decision.primary_blocker,"secondary_blockers":normalized_decision.secondary_blockers,"market_mode":get_runtime_market_mode()})
     if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
+        try:
+            setattr(
+                ctx.strategy_runner,
+                "_runtime_readiness_recompute_callback",
+                lambda callback_reason: _recompute_and_push_runtime_readiness(
+                    ctx,
+                    reason=str(callback_reason or "strategy_eval_stall_watchdog"),
+                ),
+            )
+        except Exception:
+            LOGGER.debug("RUNNER_READINESS_CALLBACK_ATTACH_FAILED", exc_info=True)
         ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}))
 
 

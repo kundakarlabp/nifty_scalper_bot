@@ -783,6 +783,8 @@ class StrategyRunner:
         self._runtime_execution_ready_by_symbol: dict[str, bool] = {}
         self._runtime_symbol_last_ready_at: dict[str, float] = {}
         self._runtime_readiness_reason: str | None = None
+        self._runtime_readiness_recompute_callback: Callable[[str], Any] | None = None
+        self._eval_stall_recovery_attempted = False
         self._last_trade_decision: TradeDecisionSnapshot | None = None
         self._runtime_indicators: dict[str, dict[str, Any]] = {}
         self._last_direction_context: dict[str, Any] | None = None
@@ -6668,6 +6670,11 @@ class StrategyRunner:
                         "stall_sec": round(now - self._last_global_eval_ts, 1),
                     },
                 )
+                if not self._eval_stall_recovery_attempted:
+                    self._eval_stall_recovery_attempted = True
+                    self._recover_strategy_eval_stall_once(now)
+        elif self._eval_stall_recovery_attempted and not eval_stalled:
+            self._eval_stall_recovery_attempted = False
 
         now_wall = time.time()
         stale_count = 0
@@ -6780,6 +6787,43 @@ class StrategyRunner:
                     self._logger.exception(
                         "CRITICAL: Failure in StrategyRunner._health_watchdog.reconnect"
                     )
+
+    # Watchdog recovery for a genuine live eval stall while ticks are flowing.
+    def _recover_strategy_eval_stall_once(self, now: float | None = None) -> None:
+        """Recompute readiness and nudge evaluation after one genuine live stall."""
+        now = time.monotonic() if now is None else now
+        self._logger.warning(
+            "STRATEGY_EVAL_STALL_RECOVERY_ONCE stall_sec=%s action=recompute_readiness_and_restart_loop",
+            round(now - self._last_global_eval_ts, 1),
+            extra={
+                "event": "STRATEGY_EVAL_STALL_RECOVERY_ONCE",
+                "stall_sec": round(now - self._last_global_eval_ts, 1),
+                "action": "recompute_readiness_and_restart_loop",
+            },
+        )
+        callback = getattr(self, "_runtime_readiness_recompute_callback", None)
+        if callable(callback):
+            try:
+                result = callback("strategy_eval_stall_watchdog")
+                if inspect.isawaitable(result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.run(result)
+                    else:
+                        loop.create_task(result)
+            except Exception:
+                self._logger.exception(
+                    "STRATEGY_EVAL_STALL_READINESS_RECOMPUTE_FAILED"
+                )
+        try:
+            self.start()
+        except Exception:
+            self._logger.exception("STRATEGY_EVAL_STALL_LOOP_RESTART_FAILED")
+        # Reset per-symbol eval throttles once so the next flowing tick can
+        # enter _on_tick instead of being held behind stale same-bar state.
+        self._last_eval_ts.clear()
+        self._last_periodic_eval_at_by_symbol.clear()
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
