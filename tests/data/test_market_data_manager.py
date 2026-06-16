@@ -1615,3 +1615,38 @@ async def test_futures_basket_missing_warning_is_throttled(
 
     # Throttled: at most one emission for the burst (definitely not 25).
     assert len(records) <= 1, f"expected throttled (<=1) warning, got {len(records)}"
+
+
+async def test_stale_unsubscribed_token_tick_drops_quietly(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    # A tick for a token NOT in the desired set (post-rotation artifact) must drop
+    # at DEBUG as stale_unsubscribed_token, not WARNING as unmapped_token.
+    import logging as _logging
+
+    manager = MarketDataManager(broker, ws)
+    manager._desired_tokens = {111}  # token 999 is NOT desired
+
+    levels: dict[str, int] = {}
+
+    class _Cap(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            msg = record.getMessage()
+            if "MDM_TICK_DROPPED" in msg:
+                if "stale_unsubscribed_token" in msg:
+                    levels["stale"] = record.levelno
+                elif "unmapped_token" in msg:
+                    levels["unmapped"] = record.levelno
+
+    h = _Cap(); h.setLevel(_logging.DEBUG)
+    root = _logging.getLogger()
+    root.addHandler(h); _prev = root.level; root.setLevel(_logging.DEBUG)
+    try:
+        out = manager._normalize_ws_tick({"instrument_token": 999, "last_price": 100.0})
+    finally:
+        root.removeHandler(h); root.setLevel(_prev)
+
+    # Tick for a non-desired token is dropped (returns None) ...
+    assert out is None
+    # ... and must NOT be logged as the WARNING-level unmapped_token anomaly.
+    assert "unmapped" not in levels, "non-desired token must not warn as unmapped"
