@@ -6415,7 +6415,13 @@ class StrategyRunner:
             # Reuse an upstream trace_id if the tick payload already carries one
             # (set by RunnerCallback or by an outer caller); otherwise mint here.
             trace_id = tick.get("trace_id") or f"{normalized_symbol}-{time_module.monotonic_ns()}"
-            if self._is_context_symbol(normalized_symbol):
+            # Context-symbol readiness fires on every tick ingress with a constant
+            # reason — pure steady-state noise on a memory-tight host. Throttle per
+            # symbol (the message never changes, so nothing is lost).
+            if self._is_context_symbol(normalized_symbol) and self._should_log_throttled(
+                f"global_readiness_ctx:{normalized_symbol}",
+                float(os.getenv("RUNNER_GLOBAL_READINESS_LOG_INTERVAL_SECONDS", "60") or "60"),
+            ):
                 self._logger.info(
                     "RUNNER_GLOBAL_READINESS_DECISION symbol=%s allowed=%s reason=%s trade_candidate=%s",
                     normalized_symbol,
@@ -9193,35 +9199,40 @@ class StrategyRunner:
             return
         try:
             ctx = dict(indicators_ctx or {})
-            self._logger.info(
-                "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
-                symbol,
-                category,
-                reason,
-                extra={
-                    "event": "RUNNER_NO_TRADE_DECISION",
-                    "symbol": symbol,
-                    "trace_id": trace_id,
-                    "broker_attempted": bool(broker_attempted),
-                    "category": category,
-                    "reason": reason,
-                    "data_phase": self._data_phase.get(symbol),
-                    "option_history_count": int(option_history_count or 0),
-                    "option_history_required": int(option_history_required or 0),
-                    "context_fresh": bool(ctx.get("spot_fresh") or ctx.get("futures_fresh")),
-                    "context_direction_valid": bool((ctx.get("direction_bias") or ctx.get("underlying_direction_bias"))),
-                    "direction_bias": ctx.get("underlying_direction_bias") or ctx.get("direction_bias"),
-                    "strategy_vote_count": 0,
-                    "no_vote_reason_counts": {},
-                    "execution_readiness_allowed": bool(self._runtime_live_orders_armed),
-                    "execution_readiness_reason": self._runtime_readiness_reason,
-                    "broker_health_effect": None,
-                    "margin_status": None,
-                    "kill_switch_active": self._safe_kill_switch_active_for_diagnostics(),
-                    "git_sha": self._build_info.get("git_sha"),
-                    "git_branch": self._build_info.get("git_branch"),
-                    "deployment_id": self._build_info.get("deployment_id"),
-                },
+            # Logs on every loop; throttle when the symbol+category+reason is
+            # unchanged (logs immediately when the reason changes, so diagnostic
+            # signal is kept while steady-state repeats are suppressed).
+            _ntd_interval = float(os.getenv("RUNNER_NO_TRADE_LOG_INTERVAL_SECONDS", "60") or "60")
+            if self._should_log_throttled(f"no_trade:{symbol}:{category}:{reason}", _ntd_interval):
+                self._logger.info(
+                    "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
+                    symbol,
+                    category,
+                    reason,
+                    extra={
+                        "event": "RUNNER_NO_TRADE_DECISION",
+                        "symbol": symbol,
+                        "trace_id": trace_id,
+                        "broker_attempted": bool(broker_attempted),
+                        "category": category,
+                        "reason": reason,
+                        "data_phase": self._data_phase.get(symbol),
+                        "option_history_count": int(option_history_count or 0),
+                        "option_history_required": int(option_history_required or 0),
+                        "context_fresh": bool(ctx.get("spot_fresh") or ctx.get("futures_fresh")),
+                        "context_direction_valid": bool((ctx.get("direction_bias") or ctx.get("underlying_direction_bias"))),
+                        "direction_bias": ctx.get("underlying_direction_bias") or ctx.get("direction_bias"),
+                        "strategy_vote_count": 0,
+                        "no_vote_reason_counts": {},
+                        "execution_readiness_allowed": bool(self._runtime_live_orders_armed),
+                        "execution_readiness_reason": self._runtime_readiness_reason,
+                        "broker_health_effect": None,
+                        "margin_status": None,
+                        "kill_switch_active": self._safe_kill_switch_active_for_diagnostics(),
+                        "git_sha": self._build_info.get("git_sha"),
+                        "git_branch": self._build_info.get("git_branch"),
+                        "deployment_id": self._build_info.get("deployment_id"),
+                    },
             )
         except Exception:
             return
