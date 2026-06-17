@@ -276,6 +276,7 @@ def upsert_instruments(
         )
     )
     try:
+        upsert_data = []
         with conn:
             for raw_row in rows:
                 processed += 1
@@ -352,7 +353,22 @@ def upsert_instruments(
                     if underlying
                     else _derive_underlying(tradingsymbol)
                 )
-                conn.execute(
+                upsert_data.append(
+                    (
+                        token_int,
+                        exchange,
+                        tradingsymbol,
+                        lot_size,
+                        expiry_str,
+                        underlying_str,
+                        strike_value,
+                        opt_type,
+                        timestamp,
+                    )
+                )
+
+            if upsert_data:
+                conn.executemany(
                     """
                     INSERT INTO instruments(
                         token,
@@ -375,19 +391,9 @@ def upsert_instruments(
                         opt_type=excluded.opt_type,
                         updated_at=excluded.updated_at
                     """,
-                    (
-                        token_int,
-                        exchange,
-                        tradingsymbol,
-                        lot_size,
-                        expiry_str,
-                        underlying_str,
-                        strike_value,
-                        opt_type,
-                        timestamp,
-                    ),
+                    upsert_data,
                 )
-                stored += 1
+                stored = len(upsert_data)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in upsert_instruments: %s",
