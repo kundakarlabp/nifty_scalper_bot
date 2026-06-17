@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from nifty_scalper_bot.config.env_utils import parse_int_env
 from nifty_scalper_bot.instruments.active_contracts import cap_option_universe
+from nifty_scalper_bot.utils.smart_symbol import next_nse_trading_day
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.instrument_manager")
 
@@ -60,8 +61,8 @@ class ActiveContractBasket:
 
 
 def _exchange_trading_date() -> date:
-    """Return the current NSE trading date in IST. TODO: holiday calendar handling."""
-    return datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    """Return the current NSE trading date in IST."""
+    return next_nse_trading_day(datetime.now(ZoneInfo("Asia/Kolkata")).date())
 
 
 def _atm_strike_for_spot(spot: float, step: int) -> int:
