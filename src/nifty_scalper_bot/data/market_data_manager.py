@@ -38,6 +38,7 @@ import math
 import os
 
 from nifty_scalper_bot.config.env_utils import parse_int_env
+import queue
 import re
 from random import uniform
 import threading
@@ -383,6 +384,9 @@ class MarketDataManager:
             "MDM_TICK_QUEUE_MAX", default=10_000, minimum=1_000
         )
         self._tick_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=self._tick_queue_maxsize
+        )
+        self._fallback_tick_queue: queue.Queue[dict[str, Any]] = queue.Queue(
             maxsize=self._tick_queue_maxsize
         )
         self._tick_queue_dropped = 0
@@ -5134,14 +5138,105 @@ class MarketDataManager:
 
 
     @staticmethod
-    def _mark_queue_item_done(queue: asyncio.Queue) -> None:
+    def _mark_queue_item_done(q: asyncio.Queue) -> None:
         """Balance unfinished task count when queue surgery permanently removes an item."""
         try:
-            queue.task_done()
+            q.task_done()
         except ValueError:
             # Tests and some fallback paths may remove items that were not tracked
             # by join() callers. Never let accounting diagnostics block tick intake.
             pass
+
+    @staticmethod
+    def _mark_queue_item_done_fallback(q: queue.Queue) -> None:
+        """Balance unfinished task count when queue surgery permanently removes an item (fallback queue)."""
+        try:
+            q.task_done()
+        except ValueError:
+            pass
+
+    def _put_priority_tick_fallback(self, q: queue.Queue, tick_payload: dict[str, Any]) -> bool:
+        """Insert tick into fallback queue, evicting/coalescing lower-value work when full."""
+        symbol = self._resolve_tick_symbol_for_priority(tick_payload)
+        priority, bucket = self._tick_priority(symbol)
+        tick_payload["_mdm_priority"] = priority
+        tick_payload["_mdm_priority_bucket"] = bucket
+        if priority == 0:
+            self._log_open_position_priority_if_needed(symbol)
+        try:
+            q.put_nowait(tick_payload)
+            self._bus_priority_counts[bucket] += 1
+            return True
+        except queue.Full:
+            retained: list[dict[str, Any]] = []
+            removed = False
+            removed_reason = ""
+            removed_bucket = ""
+            try:
+                while True:
+                    existing = q.get_nowait()
+                    self._mark_queue_item_done_fallback(q)
+                    existing_symbol = self._resolve_tick_symbol_for_priority(existing if isinstance(existing, Mapping) else {})
+                    existing_priority, existing_bucket = self._tick_priority(existing_symbol)
+                    if not removed and existing_priority > priority:
+                        removed = True
+                        removed_reason = "drop_lower_priority"
+                        removed_bucket = existing_bucket
+                        continue
+                    if (
+                        not removed
+                        and existing_symbol == symbol
+                        and existing_priority >= priority
+                    ):
+                        removed = True
+                        removed_reason = "coalesce_same_symbol"
+                        removed_bucket = existing_bucket
+                        continue
+                    retained.append(existing)
+            except queue.Empty:
+                pass
+            for item in retained:
+                try:
+                    q.put_nowait(item)
+                except queue.Full:
+                    break
+            if removed:
+                if removed_reason == "coalesce_same_symbol":
+                    self._tick_queue_priority_coalesced[removed_bucket or bucket] += 1
+                else:
+                    self._tick_queue_priority_drops[removed_bucket or bucket] += 1
+            elif priority >= 1:
+                self._tick_queue_priority_drops[bucket] += 1
+                return False
+            else:
+                # Queue contains only other priority-0 ticks. Do not silently
+                # discard another protected position tick; emit a critical log.
+                try:
+                    removed_item = q.get_nowait()
+                    self._mark_queue_item_done_fallback(q)
+                    removed_symbol = self._resolve_tick_symbol_for_priority(
+                        removed_item if isinstance(removed_item, Mapping) else {}
+                    )
+                    self._tick_queue_priority_drops["open_position"] += 1
+                    self._logger.critical(
+                        "MDM_OPEN_POSITION_TICK_FORCED_DROP dropped_symbol=%s incoming_symbol=%s",
+                        removed_symbol,
+                        symbol,
+                        extra={
+                            "event": "MDM_OPEN_POSITION_TICK_FORCED_DROP",
+                            "dropped_symbol": removed_symbol,
+                            "incoming_symbol": symbol,
+                        },
+                    )
+                except queue.Empty:
+                    pass
+            try:
+                q.put_nowait(tick_payload)
+                self._bus_priority_counts[bucket] += 1
+                return True
+            except queue.Full:
+                self._tick_queue_priority_drops[bucket] += 1
+                return False
 
     def _put_priority_tick_nowait(self, queue: asyncio.Queue, tick_payload: dict[str, Any]) -> bool:
         """Insert tick, evicting/coalescing lower-value work when full.
@@ -5267,7 +5362,7 @@ class MarketDataManager:
         # thread never performs processing work inline.
         self._ensure_tick_worker()
         try:
-            if not self._put_priority_tick_nowait(self._tick_queue, tick_payload):
+            if not self._put_priority_tick_fallback(self._fallback_tick_queue, tick_payload):
                 self._tick_queue_dropped += 1
                 now = time.monotonic()
                 if now - self._last_tick_queue_full_log > 5.0:
@@ -5282,10 +5377,6 @@ class MarketDataManager:
 
     def _ensure_tick_worker(self) -> None:
         """Start the fallback drain thread once, on first need."""
-        # TODO: fallback worker currently uses asyncio.Queue from a worker thread.
-        # Runtime path normally uses run_coroutine_threadsafe() onto _main_loop.
-        # If fallback becomes production-critical, replace with queue.Queue for
-        # cross-thread safety.
         t = self._tick_worker_thread
         if t is not None and t.is_alive():
             return
@@ -5298,14 +5389,14 @@ class MarketDataManager:
         self._tick_worker_thread.start()
 
     def _tick_worker_loop(self) -> None:
-        """Drain the tick queue off-thread when no asyncio loop is running."""
+        """Drain the fallback tick queue off-thread when no asyncio loop is running."""
         while not self._tick_worker_stop.is_set():
             # Prefer the loop when it comes online — self-terminate.
             if self._main_loop is not None and self._main_loop.is_running():
                 return
             try:
-                raw = self._tick_queue.get_nowait()
-            except asyncio.QueueEmpty:
+                raw = self._fallback_tick_queue.get_nowait()
+            except queue.Empty:
                 # Light spin — 25 ms pacing keeps latency low without
                 # burning CPU.
                 if self._tick_worker_stop.wait(0.025):
@@ -5315,6 +5406,11 @@ class MarketDataManager:
                 self._process_queued_tick(raw)
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("tick worker drain error: %s", exc)
+            finally:
+                try:
+                    self._fallback_tick_queue.task_done()
+                except Exception:
+                    pass
 
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Legacy tick-bus hook routed to queue ingestion."""
