@@ -275,6 +275,11 @@ def upsert_instruments(
             "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY",
         )
     )
+    # BOLT OPTIMIZATION: Accumulate parameters to batch SQLite inserts using executemany()
+    # Expected Impact: Reduces N+1 query overhead and significantly improves bulk insertion speed
+    # for instrument caching by executing a single transaction instead of individual loop queries.
+    params_list: list[tuple[Any, ...]] = []
+
     try:
         with conn:
             for raw_row in rows:
@@ -352,7 +357,22 @@ def upsert_instruments(
                     if underlying
                     else _derive_underlying(tradingsymbol)
                 )
-                conn.execute(
+                params_list.append(
+                    (
+                        token_int,
+                        exchange,
+                        tradingsymbol,
+                        lot_size,
+                        expiry_str,
+                        underlying_str,
+                        strike_value,
+                        opt_type,
+                        timestamp,
+                    )
+                )
+
+            if params_list:
+                conn.executemany(
                     """
                     INSERT INTO instruments(
                         token,
@@ -375,19 +395,9 @@ def upsert_instruments(
                         opt_type=excluded.opt_type,
                         updated_at=excluded.updated_at
                     """,
-                    (
-                        token_int,
-                        exchange,
-                        tradingsymbol,
-                        lot_size,
-                        expiry_str,
-                        underlying_str,
-                        strike_value,
-                        opt_type,
-                        timestamp,
-                    ),
+                    params_list,
                 )
-                stored += 1
+                stored += len(params_list)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in upsert_instruments: %s",
