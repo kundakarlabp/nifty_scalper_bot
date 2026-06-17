@@ -1904,6 +1904,15 @@ class TelegramBot:
                         extra={"event": "TELEGRAM_FLOOD_HOLD", "retry_after": retry_after_seconds, "hold_until": self._telegram_hold_until.isoformat() if self._telegram_hold_until else None},
                     )
                 return
+            # A timeout or transient network blip means this best-effort alert
+            # simply didn't go out — not an error worth a scary ❌ ERROR line.
+            if "timed out" in lowered or "timeout" in lowered or "connection" in lowered:
+                log.debug(
+                    "telegram alert send transient failure: %s",
+                    exc,
+                    extra={"event": "telegram_alert_dispatch_transient"},
+                )
+                return
             log.error(
                 "Failure in _dispatch_alert send: %s",
                 exc,
