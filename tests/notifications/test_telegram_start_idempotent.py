@@ -70,3 +70,30 @@ async def test_start_clears_webhook_and_drops_pending_before_polling() -> None:
 
     app.bot.delete_webhook.assert_awaited_once_with(drop_pending_updates=True)
     app.updater.start_polling.assert_awaited_once_with(drop_pending_updates=True)
+
+
+async def test_dispatch_alert_timeout_is_quiet_not_error(caplog) -> None:
+    # A transient timeout while sending a best-effort alert must be logged quietly
+    # (debug), not as a scary ❌ ERROR. Alerts are best-effort; a timeout just means
+    # the message didn't go out.
+    import logging
+    from unittest.mock import AsyncMock, MagicMock
+
+    deps = TelegramDeps(token="dummy", chat_id=12345, app_version="test")
+    bot = TelegramBot(deps)
+    app = MagicMock()
+    app.bot = MagicMock()
+    bot._app = app
+    bot._telegram_hold_until = None
+    bot._telegram_last_dispatch_at = None
+
+    messenger = MagicMock()
+    messenger.send_text = AsyncMock(side_effect=TimeoutError("Timed out"))
+    bot._ensure_messenger = lambda *_a, **_k: messenger
+
+    with caplog.at_level(logging.DEBUG):
+        await bot._dispatch_alert("hello", "info")
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("Failure in _dispatch_alert send" in m for m in msgs), "timeout must not log as ERROR"
+    assert any("transient failure" in m for m in msgs), "timeout should log a quiet transient line"
