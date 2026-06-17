@@ -7149,7 +7149,8 @@ class MarketDataManager:
             last_ws_healthy = ws_healthy
             last_poll_active = poll_active
             if not poll_active:
-                time.sleep(1)
+                if self._rest_poll_stop.wait(1.0):
+                    break
                 continue
 
             try:
@@ -7226,7 +7227,8 @@ class MarketDataManager:
                         "⚠️ Rate Limit Hit! Cooling down Scout Poller...",
                         extra={"event": "scout_rate_limit"},
                     )
-                    time.sleep(5.0)  # Hard wait
+                    if self._rest_poll_stop.wait(5.0):
+                        break
                     target_interval = min(
                         5.0, target_interval + 0.5
                     )  # Permanently slow down
@@ -7239,7 +7241,8 @@ class MarketDataManager:
                         exc_info=True,
                         extra={"event": "scout_critical_error", "backoff": backoff},
                     )
-                    time.sleep(backoff)
+                    if self._rest_poll_stop.wait(backoff):
+                        break
 
             # 4. Smart Sleep (Maintain Rhythm)
             elapsed = time.time() - loop_start
