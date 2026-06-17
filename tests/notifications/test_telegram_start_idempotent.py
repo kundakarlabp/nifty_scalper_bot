@@ -97,3 +97,32 @@ async def test_dispatch_alert_timeout_is_quiet_not_error(caplog) -> None:
     msgs = [r.getMessage() for r in caplog.records]
     assert not any("Failure in _dispatch_alert send" in m for m in msgs), "timeout must not log as ERROR"
     assert any("transient failure" in m for m in msgs), "timeout should log a quiet transient line"
+
+
+async def test_ptb_error_handler_classifies_conflict() -> None:
+    # The error handler must surface a 409 polling conflict explicitly (the #1
+    # cause of "Telegram not responding"), not let it vanish into PTB's generic
+    # "Exception happened while polling" with no cause.
+    import logging
+    from types import SimpleNamespace
+
+    deps = TelegramDeps(token="dummy", chat_id=12345, app_version="test")
+    bot = TelegramBot(deps)
+
+    records: list[tuple[int, str]] = []
+
+    class _Cap(logging.Handler):
+        def emit(self, r: logging.LogRecord) -> None:
+            records.append((r.levelno, r.getMessage()))
+
+    h = _Cap()
+    root = logging.getLogger("nifty_scalper_bot.notifications.telegram_controller")
+    root.addHandler(h)
+    try:
+        ctx = SimpleNamespace(error=Exception("Conflict: terminated by other getUpdates request"))
+        await bot._on_ptb_error(None, ctx)
+    finally:
+        root.removeHandler(h)
+
+    assert any("TELEGRAM_POLLING_CONFLICT" in m for _lv, m in records), \
+        "409 conflict must be logged explicitly so the duplicate-poller cause is visible"
