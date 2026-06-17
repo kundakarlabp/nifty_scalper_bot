@@ -4475,17 +4475,16 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         # [FIX] Start Health Monitor (Watchdog) for Polling Mode
         # This prevents "Zombie Mode" by killing the process if data stops for 3 mins
-        def _monitor_data_health():
+        async def _monitor_data_health():
             import logging
             import os
-            import threading
             import time
 
             logger = logging.getLogger("nifty_scalper_bot.watchdog")
             logger.info("✅ Data Health Monitor Started (Polling Mode)")
 
             while True:
-                time.sleep(60)  # Check every minute
+                await asyncio.sleep(60)  # Check every minute
 
                 # Check if data is flowing
                 last_tick = getattr(market_data_manager, "last_tick_time", 0)
@@ -4499,8 +4498,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         1
                     )  # Kill process -> Railway auto-restarts -> Connection restored
 
-        health_thread = threading.Thread(target=_monitor_data_health, daemon=True)
-        health_thread.start()
+        # Store the coroutine so it can be scheduled once the event loop is available.
+        market_data_manager._monitor_coro = _monitor_data_health
         try:
             start_watchdog(market_data_manager)
             LOGGER.info("✅ Data Health Monitor (Watchdog) started")
@@ -12346,6 +12345,7 @@ class NiftyScalperApp:
         self._health_task: asyncio.Task[None] | None = None
         self._self_test_task: asyncio.Task[None] | None = None
         self._telegram_task: asyncio.Task[None] | None = None
+        self._polling_monitor_task: asyncio.Task[None] | None = None
         self._telegram_application_started = False
         self._self_test_interval = 600.0
         # Edge-trigger runtime self-check state to avoid repeated failure floods.
@@ -12487,6 +12487,13 @@ class NiftyScalperApp:
         self._health_task = asyncio.create_task(
             self._health_loop(), name="core-health-monitor"
         )
+
+        # Start the polling monitor if it was stored
+        if hasattr(self._ctx.market_data_manager, "_monitor_coro"):
+            self._polling_monitor_task = asyncio.create_task(
+                self._ctx.market_data_manager._monitor_coro(),
+                name="polling-data-health"
+            )
         if self._ctx.selfchecker is not None:
             self._self_test_task = asyncio.create_task(
                 self._self_test_loop(),
