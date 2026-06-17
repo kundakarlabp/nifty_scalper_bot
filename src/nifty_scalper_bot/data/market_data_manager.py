@@ -295,15 +295,21 @@ class MarketDataManager:
         self._resolver = resolver
         self._logger = get_logger(__name__)
         # FIX: Initialize cache_len before it is used
-        # Per-symbol tick deque length. Defaults to 1000 (unchanged). On
-        # memory-constrained hosts (e.g. a 1.9GB Lightsail box) this can be
-        # lowered via MDM_TICK_CACHE_LEN to cut per-symbol memory without code
-        # changes; a scalper building 1-minute bars rarely needs 1000 raw ticks.
+        # Per-symbol tick/OHLC deque length. A 1-minute scalper only needs the
+        # current session, not 1000 raw ticks per symbol, which bloated RAM on the
+        # 1.9GB Lightsail host (~10 symbols x 1000 full-mode tick dicts). Default to
+        # an intraday-sized 250; raise via MDM_TICK_CACHE_LEN if ever needed.
         try:
             _env_cache_len = int(os.getenv("MDM_TICK_CACHE_LEN", "0") or 0)
         except (TypeError, ValueError):
             _env_cache_len = 0
-        self._cache_len = _env_cache_len if _env_cache_len > 0 else cache_len
+        if _env_cache_len > 0:
+            self._cache_len = _env_cache_len
+        elif cache_len != 1000:
+            # An explicit non-default value was passed by the caller; honor it.
+            self._cache_len = cache_len
+        else:
+            self._cache_len = 250
 
         # FIX: Initialize duplicate window (Missing in your file, causing the crash)
         self._duplicate_window = self._parse_float_env(

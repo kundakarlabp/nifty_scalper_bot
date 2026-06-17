@@ -1678,9 +1678,19 @@ async def test_tick_cache_len_env_override(monkeypatch) -> None:
     # Default cache_len is unchanged; MDM_TICK_CACHE_LEN lowers it on
     # memory-constrained hosts without code changes.
     monkeypatch.delenv("MDM_TICK_CACHE_LEN", raising=False)
-    assert MarketDataManager()._cache_len == 1000
-    monkeypatch.setenv("MDM_TICK_CACHE_LEN", "250")
-    assert MarketDataManager()._cache_len == 250
+    assert MarketDataManager()._cache_len == 250  # intraday-sized default
+    monkeypatch.setenv("MDM_TICK_CACHE_LEN", "400")
+    assert MarketDataManager()._cache_len == 400
     # invalid value falls back to the default
     monkeypatch.setenv("MDM_TICK_CACHE_LEN", "notanint")
-    assert MarketDataManager()._cache_len == 1000
+    assert MarketDataManager()._cache_len == 250
+
+
+async def test_history_retention_default_is_intraday(monkeypatch) -> None:
+    # Runner symbol-history retention defaults to an intraday-sized cap (500),
+    # env-tunable, instead of the old 2000 (~5 trading days) that bloated RAM.
+    monkeypatch.delenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", raising=False)
+    import os as _os
+    assert int(_os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500") == 500
+    monkeypatch.setenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "300")
+    assert int(_os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500") == 300

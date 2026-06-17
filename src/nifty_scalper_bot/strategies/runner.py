@@ -2551,6 +2551,16 @@ class StrategyRunner:
             atm_strike=atm_strike,
             version=version,
         )
+        # Opportunistically drop expired entries so this cache (keyed by an
+        # ever-incrementing version) can't grow unbounded across a session.
+        _ttl = max(0.0, self._execution_candidate_basket_cache_ttl_seconds)
+        if _ttl > 0 and len(self._execution_candidate_basket_cache) > 8:
+            _now = time.time()
+            for _k in [
+                _k for _k, _v in self._execution_candidate_basket_cache.items()
+                if _now - float(_v.get("created_at", 0.0)) > _ttl
+            ]:
+                self._execution_candidate_basket_cache.pop(_k, None)
         self._execution_candidate_basket_cache[key] = {
             "snapshots": list(snapshots),
             "created_at": time.time(),
@@ -4290,7 +4300,12 @@ class StrategyRunner:
                     )
                 )
             with self._lock:
-                self._symbol_history[normalized_symbol] = list(one_minute_bars[-2000:])
+                # Intraday-only retention: a 1-minute scalper needs the current
+                # session (~375 bars), not days of history. Cap well above a single
+                # session for indicator warmup, but far below the old 2000 (≈5 days)
+                # that bloated RAM on the memory-tight host. Env-tunable.
+                _hist_cap = int(os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500")
+                self._symbol_history[normalized_symbol] = list(one_minute_bars[-_hist_cap:])
                 if one_minute_bars:
                     self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start
                 self._active_symbols.add(normalized_symbol)
