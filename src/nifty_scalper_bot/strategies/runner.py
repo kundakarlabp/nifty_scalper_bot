@@ -5511,45 +5511,44 @@ class StrategyRunner:
                         aggregated[symbol] = best
                         continue
 
-                normalized_confidences = [
-                    self._normalize_confidence(sig.confidence) for sig in symbol_signals
-                ]
-                weight_sum = sum(conf**2 for conf in normalized_confidences)
+                weight_sum = 0.0
+                weighted_conf_sum = 0.0
+                sig_data = []  # List of (signal, normalized_confidence)
+                max_nc = -1.0
+                best_signal = None
+                stop_candidates = []
+                target_candidates = []
+
+                for sig in symbol_signals:
+                    nc = self._normalize_confidence(sig.confidence)
+                    nc_sq = nc**2
+                    weight_sum += nc_sq
+                    weighted_conf_sum += nc * nc_sq
+                    sig_data.append((sig, nc))
+
+                    if nc > max_nc:
+                        max_nc = nc
+                        best_signal = sig
+
+                    if isinstance(sig.stop_loss, (int, float)):
+                        stop_candidates.append(float(sig.stop_loss))
+                    if isinstance(sig.take_profit, (int, float)):
+                        target_candidates.append(float(sig.take_profit))
+
                 avg_confidence = (
-                    sum(conf * (conf**2) for conf in normalized_confidences)
-                    / weight_sum
-                    if weight_sum > 0
-                    else 0.0
+                    weighted_conf_sum / weight_sum if weight_sum > 0 else 0.0
                 )
 
-                stop_candidates = [
-                    float(sig.stop_loss)
-                    for sig in symbol_signals
-                    if isinstance(sig.stop_loss, (int, float))
-                ]
-
-                target_candidates = [
-                    float(sig.take_profit)
-                    for sig in symbol_signals
-                    if isinstance(sig.take_profit, (int, float))
-                ]
-
-                best_signal = max(
-                    symbol_signals,
-                    key=lambda sig: self._normalize_confidence(sig.confidence),
-                )
-                metadata = dict(best_signal.metadata)
+                metadata = dict(best_signal.metadata)  # best_signal is not None
                 metadata["aggregated_count"] = len(symbol_signals)
                 metadata["aggregated_sources"] = [
                     {
-                        "strategy": sig.metadata.get("strategy"),
-                        "confidence": sig.confidence,
-                        "normalized_confidence": self._normalize_confidence(
-                            sig.confidence
-                        ),
-                        "reason": sig.reason,
+                        "strategy": s.metadata.get("strategy"),
+                        "confidence": s.confidence,
+                        "normalized_confidence": nc,
+                        "reason": s.reason,
                     }
-                    for sig in symbol_signals
+                    for s, nc in sig_data
                 ]
 
                 aggregated_signal = Signal(
