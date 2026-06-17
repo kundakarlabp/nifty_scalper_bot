@@ -3437,3 +3437,17 @@ def test_nonselected_cold_option_still_requires_fresh_tick() -> None:
         runner._request_selected_option_history_prewarm(symbol, bars_before=1, required_bars=5, trace_id="t", selected=is_selected_opt)
 
     assert calls == []  # no prewarm for non-selected stale option
+
+
+def test_log_throttle_suppresses_repeats_logs_on_change() -> None:
+    # Steady-state log throttling: first emit allowed, immediate identical repeat
+    # suppressed, a changed key emits again. Underpins the dashboard-freeze /
+    # log-spam reduction on the memory-tight host.
+    runner = _build_runner()
+    k_ctx = "global_readiness_ctx:NFO:NIFTY26JUNFUT"
+    assert runner._should_log_throttled(k_ctx, 60.0) is True   # first
+    assert runner._should_log_throttled(k_ctx, 60.0) is False  # repeat suppressed
+    # different reason -> different key -> emits
+    assert runner._should_log_throttled("no_trade:X:cat:reasonA", 60.0) is True
+    assert runner._should_log_throttled("no_trade:X:cat:reasonA", 60.0) is False
+    assert runner._should_log_throttled("no_trade:X:cat:reasonB", 60.0) is True
