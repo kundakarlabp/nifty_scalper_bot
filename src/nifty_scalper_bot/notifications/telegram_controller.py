@@ -621,6 +621,33 @@ class TelegramBot:
     # ✅ CORRECTED STARTUP LOGIC (Single Source of Truth)
     # =========================================================================
 
+    async def _on_ptb_error(self, update: object, context: object) -> None:
+        """Log the real cause of PTB polling/handler errors (was silently hidden)."""
+        exc = getattr(context, "error", None)
+        text = str(exc or "")
+        lowered = text.lower()
+        if "conflict" in lowered or "terminated by other getupdates" in lowered:
+            # Another process is polling the same bot token -> commands never
+            # arrive. This is the #1 cause of "Telegram not responding".
+            self._polling_conflict_count = getattr(self, "_polling_conflict_count", 0) + 1
+            log.error(
+                "TELEGRAM_POLLING_CONFLICT another process is polling this bot token "
+                "(duplicate instance?) — commands will not arrive until it stops. count=%s err=%s",
+                self._polling_conflict_count,
+                text,
+                extra={"event": "TELEGRAM_POLLING_CONFLICT", "count": self._polling_conflict_count},
+            )
+            return
+        if "timed out" in lowered or "timeout" in lowered or isinstance(exc, NetworkError):
+            log.warning("telegram polling transient error: %s", text, extra={"event": "telegram_polling_transient"})
+            return
+        log.error(
+            "TELEGRAM_UPDATER_ERROR type=%s err=%s",
+            type(exc).__name__ if exc else "None",
+            text,
+            extra={"event": "TELEGRAM_UPDATER_ERROR"},
+        )
+
     async def start(self) -> None:
         """Start Telegram polling once; Args: none. Returns: None. Raises: None."""
         if self._started:
@@ -636,6 +663,15 @@ class TelegramBot:
                 return
             log.info("Telegram bot startup initiated", extra={"event": "telegram_start_enter"})
             self._register_handlers()
+            # Surface the real cause of polling failures. The PTB updater otherwise
+            # logs only a generic "Exception happened while polling for updates"
+            # with no cause, which hides the common case: a 409 Conflict from a
+            # second poller (duplicate process / leftover webhook) silently killing
+            # command reception.
+            try:
+                self.application.add_error_handler(self._on_ptb_error)
+            except Exception as _eh_exc:  # noqa: BLE001
+                log.debug("telegram add_error_handler failed: %s", _eh_exc)
             command_count = len(registered_command_names(self.application))
             log.info(
                 "TELEGRAM_RUNTIME_CONFIG bot_token_present=%s chat_id_configured=%s command_count=%s polling_mode=%s",
