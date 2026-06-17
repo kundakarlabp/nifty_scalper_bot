@@ -9332,13 +9332,22 @@ class StrategyRunner:
                     elif self._is_tradable_symbol(symbol):
                         if self._should_log_throttled(f"opt_cold:{symbol}", 120.0):
                             self._logger.warning("OPTION_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, required_bars)
-                        if self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
+                        # The prewarm is a historical-data backfill, not a live-tick
+                        # consumer, so a fresh tick is not required for it to work.
+                        # For the SELECTED tradable option, requiring tick freshness
+                        # here creates a chicken-and-egg stall in thin/just-opened
+                        # markets: no fresh tick -> no prewarm -> history stays cold.
+                        # Always attempt prewarm for selected options (its own
+                        # cooldown/inflight guards prevent spam); keep the freshness
+                        # gate for non-selected context symbols to limit scope.
+                        is_selected_opt = self._is_selected_option_symbol(symbol)
+                        if is_selected_opt or self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
                             self._request_selected_option_history_prewarm(
                                 symbol,
                                 bars_before=int(history_count),
                                 required_bars=int(required_bars),
                                 trace_id=trace_id,
-                                selected=self._is_selected_option_symbol(symbol),
+                                selected=is_selected_opt,
                             )
                         spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
                         fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY" and not self._is_context_symbol_suspended(sym)), "")
