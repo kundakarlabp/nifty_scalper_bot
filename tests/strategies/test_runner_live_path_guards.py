@@ -3401,3 +3401,39 @@ def test_expiry_day_cutoff_surfaces_final_execution_reason(monkeypatch) -> None:
     )
     assert result.accepted is False
     assert result.reason == "expiry_day_after_13:30_ist"
+
+
+def test_selected_cold_option_prewarms_even_with_stale_tick(monkeypatch) -> None:
+    # Improvement: a SELECTED option that is cold (few bars) must trigger a
+    # historical prewarm even when its live tick is stale. Previously the stale
+    # tick blocked the prewarm, leaving option history cold (chicken-and-egg).
+    runner = _build_runner()
+    calls: list[str] = []
+    runner._is_selected_option_symbol = lambda _s: True
+    runner._is_option_symbol_tick_fresh = lambda _s, **_k: False  # stale tick
+    runner._request_selected_option_history_prewarm = lambda symbol, **_k: calls.append(symbol)
+
+    # Reproduce the call-site decision: selected OR fresh -> prewarm.
+    symbol = "NFO:NIFTY26JUN23950CE"
+    is_selected_opt = runner._is_selected_option_symbol(symbol)
+    if is_selected_opt or runner._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
+        runner._request_selected_option_history_prewarm(symbol, bars_before=1, required_bars=5, trace_id="t", selected=is_selected_opt)
+
+    assert calls == [symbol]  # prewarm fired despite stale tick
+
+
+def test_nonselected_cold_option_still_requires_fresh_tick() -> None:
+    # Scope guard: a NON-selected option with a stale tick must NOT prewarm
+    # (behavior unchanged for context symbols).
+    runner = _build_runner()
+    calls: list[str] = []
+    runner._is_selected_option_symbol = lambda _s: False
+    runner._is_option_symbol_tick_fresh = lambda _s, **_k: False
+    runner._request_selected_option_history_prewarm = lambda symbol, **_k: calls.append(symbol)
+
+    symbol = "NFO:NIFTY26JUN24500CE"
+    is_selected_opt = runner._is_selected_option_symbol(symbol)
+    if is_selected_opt or runner._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
+        runner._request_selected_option_history_prewarm(symbol, bars_before=1, required_bars=5, trace_id="t", selected=is_selected_opt)
+
+    assert calls == []  # no prewarm for non-selected stale option
