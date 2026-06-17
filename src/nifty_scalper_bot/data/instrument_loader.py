@@ -19,8 +19,7 @@ from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-_SCHEMA_STATEMENTS: tuple[str, ...] = (
-    """
+_SCHEMA_SCRIPT: str = """
     CREATE TABLE IF NOT EXISTS instruments(
       token INTEGER PRIMARY KEY,
       exchange TEXT NOT NULL,
@@ -31,11 +30,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       strike INTEGER,
       opt_type TEXT,
       updated_at TEXT NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_instruments_symbol ON instruments(tradingsymbol)",
-    "CREATE INDEX IF NOT EXISTS idx_instruments_exchange ON instruments(exchange)",
-)
+    );
+    CREATE INDEX IF NOT EXISTS idx_instruments_symbol ON instruments(tradingsymbol);
+    CREATE INDEX IF NOT EXISTS idx_instruments_exchange ON instruments(exchange);
+"""
 
 
 @dataclass(slots=True)
@@ -109,8 +107,7 @@ def ensure_sqlite(path: str) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         with conn:
-            for statement in _SCHEMA_STATEMENTS:
-                conn.execute(statement)
+            conn.executescript(_SCHEMA_SCRIPT)
         LOGGER.info(
             "Condition met: instrument_cache_ready",
             extra={
