@@ -1747,11 +1747,19 @@ class StrategyRunner:
             self._set_symbol_hydration_state(normalized, SymbolState.READY if success else SymbolState.HYDRATING)
         except Exception:  # noqa: BLE001 - state map is best-effort diagnostic
             pass
-        self._logger.info(
-            "RUNNER_HISTORY_SYNC_RESULT symbol=%s role=%s reason=%s required_bars=%s mdm_after=%s runner_after=%s indicator_after=%s success=%s failure_reason=%s",
-            normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason,
-            extra={"event": "RUNNER_HISTORY_SYNC_RESULT", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
-        )
+        # This fires on every rearm-loop sync. In steady state (success, unchanged
+        # bar counts) it is pure repetition that floods the log/dashboard on the
+        # memory-tight host. Throttle the healthy/steady case per symbol+state
+        # (60s); failures and state changes still log immediately. Same pattern as
+        # LIVE_TRADING_READINESS_SNAPSHOT / LIVE_UNIVERSE_BOOTSTRAP_STATUS.
+        _sync_key = f"hist_sync:{normalized}:{role}:{success}:{reason}:{mdm_bars}:{runner_after}:{indicator_after}"
+        _sync_interval = float(os.getenv("RUNNER_HISTORY_SYNC_LOG_INTERVAL_SECONDS", "60") or "60")
+        if (not success) or self._should_log_throttled(_sync_key, _sync_interval):
+            self._logger.info(
+                "RUNNER_HISTORY_SYNC_RESULT symbol=%s role=%s reason=%s required_bars=%s mdm_after=%s runner_after=%s indicator_after=%s success=%s failure_reason=%s",
+                normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason,
+                extra={"event": "RUNNER_HISTORY_SYNC_RESULT", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
+            )
         if not success and request_if_short:
             self._schedule_runtime_history_ensure(
                 normalized,
@@ -1893,10 +1901,14 @@ class StrategyRunner:
 
     def _should_log_throttled(self, key: str, interval_s: float = 30.0) -> bool:
         """Decide whether a throttled log should emit. Args: key/interval_s. Returns: bool. Raises: None."""
+        state = getattr(self, "_log_throttle_state", None)
+        if state is None:
+            state = {}
+            self._log_throttle_state = state
         now = time.monotonic()
-        last = float(self._log_throttle_state.get(key, 0.0))
+        last = float(state.get(key, 0.0))
         if now - last >= max(0.0, float(interval_s)):
-            self._log_throttle_state[key] = now
+            state[key] = now
             return True
         return False
 

@@ -130,6 +130,19 @@ def _clean_log_line(line: str) -> str:
     return f"{m.group(1)}  {msg}"
 
 
+def _tail_file(path: Path, lines: int, *, max_bytes: int = 2_000_000) -> str:
+    """Return roughly the last *lines* lines of *path* without loading the whole
+    file. Reads at most *max_bytes* from the end — bounded memory regardless of how
+    large bot.log grows (prevents the dashboard from spiking RAM on each refresh)."""
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        read = min(size, max_bytes)
+        fh.seek(size - read)
+        chunk = fh.read(read)
+    return "\n".join(chunk.decode("utf-8", errors="replace").splitlines()[-lines:])
+
+
 def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "", clean: bool = True) -> str:
     lines = max(50, min(int(lines or 400), 20000))
     text = ""
@@ -146,7 +159,7 @@ def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "
         text = ""
     if not text and LOG_PATH.exists():
         try:
-            text = "\n".join(LOG_PATH.read_text(errors="replace").splitlines()[-lines:])
+            text = _tail_file(LOG_PATH, lines)
         except Exception as exc:  # noqa: BLE001
             text = f"log read error: {exc}"
     if not text:
