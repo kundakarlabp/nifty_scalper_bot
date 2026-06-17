@@ -275,6 +275,12 @@ def upsert_instruments(
             "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY",
         )
     )
+    # ⚡ Bolt Optimization: Batch database inserts
+    # Replaces N+1 conn.execute() calls with a single conn.executemany()
+    # Expected Impact: Significantly faster instrument upserts by avoiding
+    # Python-to-SQLite context switching for every single row.
+    insert_params = []
+
     try:
         with conn:
             for raw_row in rows:
@@ -352,7 +358,22 @@ def upsert_instruments(
                     if underlying
                     else _derive_underlying(tradingsymbol)
                 )
-                conn.execute(
+
+                insert_params.append((
+                    token_int,
+                    exchange,
+                    tradingsymbol,
+                    lot_size,
+                    expiry_str,
+                    underlying_str,
+                    strike_value,
+                    opt_type,
+                    timestamp,
+                ))
+                stored += 1
+
+            if insert_params:
+                conn.executemany(
                     """
                     INSERT INTO instruments(
                         token,
@@ -375,19 +396,8 @@ def upsert_instruments(
                         opt_type=excluded.opt_type,
                         updated_at=excluded.updated_at
                     """,
-                    (
-                        token_int,
-                        exchange,
-                        tradingsymbol,
-                        lot_size,
-                        expiry_str,
-                        underlying_str,
-                        strike_value,
-                        opt_type,
-                        timestamp,
-                    ),
+                    insert_params
                 )
-                stored += 1
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in upsert_instruments: %s",
