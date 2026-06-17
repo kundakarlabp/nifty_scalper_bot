@@ -5,10 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from nifty_scalper_bot.utils.logging import get_logger
-# TODO: remove compatibility shim once downstream modules are updated.
-from nifty_scalper_bot.utils.pricing import canonical_price_source  # compat
 
-__all__ = ["NiftyScalperApp", "canonical_price_source"]
+__all__ = ["NiftyScalperApp"]
 
 _LOGGER = get_logger(__name__)
 
