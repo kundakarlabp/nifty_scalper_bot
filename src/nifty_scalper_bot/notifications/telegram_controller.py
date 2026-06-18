@@ -132,7 +132,7 @@ from nifty_scalper_bot.utils.response_builder import EMOJI, RB, ResponseBuilder
 from nifty_scalper_bot.utils.symbols import canonical as canonical_symbol
 from telegram import Bot, Chat, InputFile, Message, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -713,6 +713,38 @@ class TelegramBot:
             release_polling_owner(token=self.deps.token, owner=type(self).__name__)
             self._started = False
             self._running = False
+            text = str(exc).lower()
+            transient = (
+                isinstance(exc, (NetworkError, TimedOut))
+                or "timed out" in text
+                or "timeout" in text
+                or "connection" in text
+            )
+            if transient:
+                # A network blip reaching api.telegram.org during startup must not
+                # leave Telegram dead for the whole session. Retry a few times in
+                # the background with backoff; commands recover on their own.
+                attempt = getattr(self, "_start_retry_attempt", 0) + 1
+                self._start_retry_attempt = attempt
+                max_retries = int(os.getenv("TELEGRAM_START_MAX_RETRIES", "5") or "5")
+                if attempt <= max_retries:
+                    delay = min(60.0, 5.0 * attempt)
+                    log.warning(
+                        "Telegram bot start transient failure (%s); retrying in %ss (attempt %s/%s)",
+                        type(exc).__name__, delay, attempt, max_retries,
+                        extra={"event": "telegram_start_retry", "attempt": attempt},
+                    )
+
+                    async def _retry_start() -> None:
+                        await asyncio.sleep(delay)
+                        await self.start()
+
+                    try:
+                        asyncio.create_task(_retry_start(), name="telegram-start-retry")
+                    except Exception as _t_exc:  # pragma: no cover - defensive
+                        log.debug("telegram start retry schedule failed: %s", _t_exc)
+                    return
+            self._start_retry_attempt = 0
             log.error(
                 "Telegram bot start failed type=%s err=%s",
                 type(exc).__name__,
