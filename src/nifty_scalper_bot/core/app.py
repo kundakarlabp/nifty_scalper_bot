@@ -11979,6 +11979,43 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     LOGGER.info("Bot shutdown complete")
 
 
+def _should_reconcile_now(ctx: BotContext) -> bool:
+    """Whether the periodic broker reconcile should run this cycle.
+
+    Post-close, with a flat book, the loop was hammering Zerodha (~3 calls/min all
+    night) to reconcile orders that can no longer change — needless API load, log
+    noise, and battery on a small host. Skip the broker reconcile only when BOTH
+    the market is closed AND there is no open position; otherwise always reconcile
+    (safety-first: open exposure must keep syncing, and any uncertainty reconciles).
+    Disable this optimization with HEALTH_RECONCILE_SKIP_WHEN_CLOSED=false.
+    """
+    try:
+        if os.getenv("HEALTH_RECONCILE_SKIP_WHEN_CLOSED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+            return True
+        from nifty_scalper_bot.risk.session_gate import (
+            MARKET_CLOSE,
+            MARKET_OPEN,
+            _is_market_open,
+        )
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if _is_market_open(now_ist, start=MARKET_OPEN, end=MARKET_CLOSE):
+            return True  # market open -> always reconcile
+        # Market closed: reconcile only if a position is still open (overnight safety).
+        pm = getattr(ctx, "position_manager", None)
+        if pm is not None and hasattr(pm, "get_open_positions"):
+            try:
+                if list(pm.get_open_positions()):
+                    return True
+            except Exception:  # noqa: BLE001 - if unsure, reconcile
+                return True
+        return False
+    except Exception:  # noqa: BLE001 - never let the guard break the loop
+        return True
+
+
 async def _reconcile_state(ctx: BotContext) -> None:
     """
     Syncs local state with Broker (Orders & Positions).
@@ -12788,7 +12825,8 @@ class NiftyScalperApp:
                         )
                         await asyncio.sleep(5.0)
                     try:
-                        await _reconcile_state(self._ctx)
+                        if _should_reconcile_now(self._ctx):
+                            await _reconcile_state(self._ctx)
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
                             "Periodic state reconciliation failed",
