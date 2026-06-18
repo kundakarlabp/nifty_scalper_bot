@@ -92,3 +92,19 @@ async def test_sessions_are_bounded_and_expire(monkeypatch) -> None:
     dash._SESSIONS["old"] = 1.0  # far in the past
     assert dash._session_valid("old") is False
     assert "old" not in dash._SESSIONS  # cleaned on check
+
+
+async def test_trades_json_filters_trade_events(tmp_path, monkeypatch) -> None:
+    # The trades endpoint returns only trade-relevant lines so the trade can be
+    # reviewed without scrolling the whole log.
+    import nifty_scalper_bot.admin_dashboard as dash
+    sample = "\n".join([
+        "[2026-06-18 13:20:08 IST] ORDER_SENT symbol=NFO:NIFTY26JUN24150PE side=BUY qty=65",
+        "[2026-06-18 13:20:09 IST] RUNNER_NO_TRADE_DECISION symbol=X reason=no_vote",
+        "[2026-06-18 13:25:00 IST] EXIT symbol=NFO:NIFTY26JUN24150PE pnl=325.0",
+    ])
+    monkeypatch.setattr(dash, "_gather_logs", lambda *a, **k: sample)
+    monkeypatch.setattr(dash, "_check_auth", lambda _r: None)
+    out = dash.trades_json(request=None).body.decode()
+    assert "ORDER_SENT" in out and "EXIT" in out
+    assert "RUNNER_NO_TRADE_DECISION" not in out  # noise filtered out
