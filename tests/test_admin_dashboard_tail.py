@@ -27,3 +27,30 @@ async def test_tail_file_is_byte_bounded(tmp_path: Path) -> None:
     rows = _tail_file(p, 50_000, max_bytes=20_000).splitlines()
     assert 0 < len(rows) < 50_000  # capped by the byte budget, not the line count
     assert rows[-1] == "line 99999"  # still anchored to the file's end
+
+
+async def test_status_json_caches_subprocess(monkeypatch) -> None:
+    # The Logs page polls status.json every few seconds; it must NOT spawn a
+    # systemctl subprocess on every poll (that saturated the threadpool and hung
+    # the dashboard). Second call within TTL must be served from cache.
+    import nifty_scalper_bot.admin_dashboard as dash
+
+    calls = {"n": 0}
+
+    class _Out:
+        stdout = "active"
+
+    def _fake_run(*_a, **_k):
+        calls["n"] += 1
+        return _Out()
+
+    monkeypatch.setattr(dash.subprocess, "run", _fake_run)
+    monkeypatch.setattr(dash, "_gather_logs", lambda *_a, **_k: "Bot fully operational")
+    monkeypatch.setattr(dash, "_check_auth", lambda _r: None)
+    monkeypatch.setenv("ADMIN_STATUS_CACHE_SECONDS", "10")
+    dash._STATUS_CACHE.update({"at": 0.0})  # force a cold first call
+
+    dash.status_json(request=None)  # cold -> spawns
+    dash.status_json(request=None)  # cached -> no spawn
+    dash.status_json(request=None)  # cached -> no spawn
+    assert calls["n"] == 1, "status.json must cache, not spawn systemctl every poll"

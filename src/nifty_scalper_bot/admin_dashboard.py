@@ -471,9 +471,20 @@ def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLRes
     return HTMLResponse(_page(body))
 
 
+_STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3fb950"}
+
+
 @router.get("/admin/status.json")
 def status_json(request: Request) -> JSONResponse:
     _check_auth(request)
+    # The Logs page polls this every few seconds. Spawning a `systemctl`
+    # subprocess + scanning logs on every poll saturated the sync threadpool
+    # (esp. with multiple tabs) and hung the dashboard. Cache for 10s so polling
+    # is cheap; status changes are still reflected within the interval.
+    now = time.time()
+    ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
+    if now - float(_STATUS_CACHE["at"]) < ttl:
+        return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]})
     # Lightweight health: is the trading engine up, or degraded/stopped?
     label, color = "running", "#3fb950"
     try:
@@ -493,6 +504,7 @@ def status_json(request: Request) -> JSONResponse:
                 label, color = "operational", "#3fb950"
     except Exception:
         label, color = "unknown", "#8b97a6"
+    _STATUS_CACHE.update({"at": now, "label": label, "color": color})
     return JSONResponse({"label": label, "color": color})
 
 
