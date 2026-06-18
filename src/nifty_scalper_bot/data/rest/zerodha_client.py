@@ -717,8 +717,18 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         # [FIX] Filter out None values
         clean_params = {k: v for k, v in params.items() if v is not None}
-        if clean_params.get("order_type") == "MARKET":
+        _ot = clean_params.get("order_type")
+        if _ot == "MARKET":
             clean_params.pop("trigger_price", None)
+        if _ot in ("MARKET", "SL-M"):
+            # Zerodha rejects API MARKET/SL-M orders that lack market protection
+            # (mandatory since 2026-04-01); a bare market order returns HTTP 400.
+            # -1 => automatic protection per the exchange band. A caller may
+            # override per-order by passing market_protection explicitly.
+            clean_params.setdefault(
+                "market_protection",
+                int(os.getenv("ZERODHA_MARKET_PROTECTION", "-1")),
+            )
 
         try:
             # 3. Attempt Placement
