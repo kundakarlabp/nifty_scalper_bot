@@ -1250,7 +1250,7 @@ from nifty_scalper_bot.utils.market_hours import (
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
-from nifty_scalper_bot.utils.symbols import canonical, unique_normalized_symbols
+from nifty_scalper_bot.utils.symbols import canonical, normalize_symbol, unique_normalized_symbols
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
@@ -12054,7 +12054,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
 
                     # 1. Normalize Symbol
                     raw_symbol = pos.symbol
-                    norm_symbol = DataHub.normalize(raw_symbol) or raw_symbol
+                    norm_symbol = normalize_symbol(raw_symbol) or raw_symbol
 
                     # 2. Check if this symbol is actively managed
                     is_managed = bm.is_symbol_managed(norm_symbol)
