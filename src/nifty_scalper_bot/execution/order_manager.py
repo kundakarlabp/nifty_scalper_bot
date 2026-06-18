@@ -6993,8 +6993,10 @@ class OrderManager:
                     else:
                         order_type = OrderType.LIMIT
 
-                    # Create Order object (adjust based on your Order dataclass)
-                    order = Order(
+                    # Create the order object (OrderDetails is the class actually
+                    # stored in self._orders; 'Order' does not exist, which made
+                    # every restore raise NameError and silently skip).
+                    order = OrderDetails(
                         order_id=record.get("order_id", oid),
                         symbol=record.get("symbol", ""),
                         side=record.get("side", "BUY"),

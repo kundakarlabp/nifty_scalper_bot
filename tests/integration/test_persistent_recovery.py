@@ -141,3 +141,26 @@ def test_persistent_state_recovery(tmp_path) -> None:
     assert "OPEN-1" in order_manager._brackets  # noqa: SLF001 - integration visibility
 
     restored_manager.close()
+
+
+async def test_load_orders_restores_orderdetails_not_nameerror(tmp_path, monkeypatch) -> None:
+    # Regression: _load_orders referenced an undefined `Order` class -> every saved
+    # order raised NameError and was silently skipped. Must restore as OrderDetails.
+    import json
+    from nifty_scalper_bot.execution.order_manager import OrderManager, OrderStatus
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    (tmp_path / "orders.json").write_text(json.dumps({
+        "OID-1": {"order_id": "OID-1", "symbol": "NFO:NIFTY26JUN23900CE", "side": "BUY",
+                  "quantity": 65, "price": 88.5, "order_type": "MARKET", "status": "SUBMITTED"},
+    }))
+    om = OrderManager.__new__(OrderManager)
+    om._orders = {}
+    from threading import RLock
+    om._lock = RLock()
+    import logging
+    om._logger = logging.getLogger("test_om_restore")
+    om._load_orders()
+    assert "OID-1" in om._orders
+    assert om._orders["OID-1"].symbol == "NFO:NIFTY26JUN23900CE"
+    assert om._orders["OID-1"].status == OrderStatus.SUBMITTED
