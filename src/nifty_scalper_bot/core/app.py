@@ -3862,11 +3862,12 @@ async def reconcile_with_broker(
                     sym, qty, avg_price,
                 )
 
-                # Attach orphan position with default ATR-based SL (2% fallback)
+                # Attach orphan position. BracketManager computes its own
+                # ATR-based rescue SL/TP internally and does NOT accept sl/tp
+                # kwargs — passing them raised TypeError and left the ghost
+                # position unprotected.
                 if bracket_manager and avg_price > 0:
                     try:
-                        sl_default = round(avg_price * 0.98, 2)  # 2% below entry
-                        tp_default = round(avg_price * 1.04, 2)  # 4% above entry
                         side = "BUY" if qty > 0 else "SELL"
 
                         attach_fn = getattr(bracket_manager, "attach_orphan_position", None)
@@ -3876,12 +3877,10 @@ async def reconcile_with_broker(
                                 side=side,
                                 qty=abs(qty),
                                 entry_price=avg_price,
-                                sl=sl_default,
-                                tp=tp_default,
                             )
                             logger.warning(
-                                "SAFETY_BRACKET_ATTACHED: symbol=%s sl=%.2f tp=%.2f",
-                                sym, sl_default, tp_default,
+                                "SAFETY_BRACKET_ATTACHED: symbol=%s qty=%d entry=%.2f",
+                                sym, abs(qty), avg_price,
                             )
                         else:
                             logger.warning(
