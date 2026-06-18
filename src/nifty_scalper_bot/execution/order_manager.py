@@ -905,7 +905,7 @@ class OrderManager:
         self._consecutive_failures: int = 0
         self._max_failures: int = max(1, int(os.getenv("ORDER_KILL_SWITCH_MAX_FAILURES", "5") or 5))
         self._kill_switch_auto_reset_seconds: int = max(60, int(os.getenv("ORDER_KILL_SWITCH_AUTO_RESET_SECONDS", "900") or 900))
-        self._kill_switch_allow_auto_reset: bool = os.getenv("ORDER_KILL_SWITCH_ALLOW_AUTO_RESET", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self._kill_switch_allow_auto_reset: bool = os.getenv("ORDER_KILL_SWITCH_ALLOW_AUTO_RESET", "true").strip().lower() in {"1", "true", "yes", "on"}
         self._kill_switch_engaged_at: datetime | None = None
         self._kill_switch_reason: str | None = None
         self._last_kill_switch_log_ts: float = 0.0
@@ -2056,10 +2056,13 @@ class OrderManager:
         """Return whether kill switch is currently blocking new entries. Args: none. Returns: bool. Raises: none."""
         if self._kill_switch_engaged_at is None:
             return False
-        if self._order_live_execution_enabled():
-            return True
         if not self._kill_switch_allow_auto_reset:
             return True
+        # Auto-reset after the cooldown even in live mode. Without this, a transient
+        # broker problem (e.g. an IP-allowlist/network blip that trips 5 consecutive
+        # failures) would halt trading for the rest of the day until a manual reset
+        # or restart. Resetting only after the full cooldown avoids instantly
+        # re-trying into a still-broken broker.
         elapsed = (datetime.now(timezone.utc) - self._kill_switch_engaged_at).total_seconds()
         if elapsed < float(self._kill_switch_auto_reset_seconds):
             return True

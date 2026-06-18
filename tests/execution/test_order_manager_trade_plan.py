@@ -85,7 +85,7 @@ def test_stale_last_order_decision_does_not_leak() -> None:
     assert out.reason == 'place_order_rejected_without_decision'
     assert out.broker_attempted is False
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import deque
 import time
 import nifty_scalper_bot.execution.order_manager as order_manager_module
@@ -358,15 +358,38 @@ def test_broker_health_emit_never_raises(monkeypatch) -> None:
     OrderManager._emit_broker_health_status(om, force=True)
 
 
-def test_live_kill_switch_does_not_auto_reset(monkeypatch) -> None:
+def test_live_kill_switch_auto_resets_after_cooldown(monkeypatch) -> None:
+    # An unattended live bot must self-heal: a tripped kill switch (e.g. from a
+    # transient broker/IP failure) auto-resets after the cooldown rather than
+    # halting trading for the rest of the day. Within the cooldown it stays active;
+    # after it, it resets — even in live mode.
+    import time as _t
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
-    monkeypatch.setenv("PAPER__ENABLED", "false")
-    monkeypatch.setenv("SHADOW_MODE", "false")
     om = OrderManager.__new__(OrderManager)
     om._kill_switch_engaged_at = datetime.now(timezone.utc)
     om._kill_switch_allow_auto_reset = True
     om._kill_switch_auto_reset_seconds = 1
-    om.reset_kill_switch = lambda reason="manual": (_ for _ in ()).throw(AssertionError("must not auto reset in live"))
+    # within cooldown -> still active
     assert OrderManager.is_kill_switch_active(om) is True
-    assert om._kill_switch_engaged_at is not None
+    # after cooldown -> auto-resets
+    om._kill_switch_engaged_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    reset_called = {"n": 0}
+    real_reset = OrderManager.reset_kill_switch
+    def _spy_reset(self, reason="manual"):
+        reset_called["n"] += 1
+        return real_reset(self, reason=reason)
+    om.reset_kill_switch = lambda reason="manual": _spy_reset(om, reason=reason)
+    om._last_kill_switch_log_ts = 0.0
+    assert OrderManager.is_kill_switch_active(om) is False
+    assert reset_called["n"] == 1
+    assert om._kill_switch_engaged_at is None
+
+
+def test_kill_switch_blocks_within_cooldown_when_auto_reset_disabled(monkeypatch) -> None:
+    # With auto-reset disabled, it stays active (opt-out preserved).
+    om = OrderManager.__new__(OrderManager)
+    om._kill_switch_engaged_at = datetime.now(timezone.utc)
+    om._kill_switch_allow_auto_reset = False
+    om._kill_switch_auto_reset_seconds = 1
+    assert OrderManager.is_kill_switch_active(om) is True
