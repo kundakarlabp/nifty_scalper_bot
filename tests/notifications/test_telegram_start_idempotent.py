@@ -126,3 +126,33 @@ async def test_ptb_error_handler_classifies_conflict() -> None:
 
     assert any("TELEGRAM_POLLING_CONFLICT" in m for _lv, m in records), \
         "409 conflict must be logged explicitly so the duplicate-poller cause is visible"
+
+
+async def test_start_retries_on_transient_timeout(monkeypatch) -> None:
+    # A TimedOut during startup must NOT leave Telegram dead for the session; it
+    # should schedule a background retry (commands recover on their own).
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram.error import TimedOut
+    import asyncio
+
+    deps = TelegramDeps(token="dummy", chat_id=1, app_version="t")
+    bot = TelegramBot(deps)
+    app = MagicMock()
+    app.initialize = AsyncMock(side_effect=TimedOut("Timed out"))  # fail at init
+    app.add_error_handler = MagicMock()
+    bot.application = app
+    bot._register_handlers = lambda: None  # type: ignore[method-assign]
+
+    scheduled = {"n": 0}
+    real_create_task = asyncio.create_task
+    def _spy(coro, **k):
+        if k.get("name") == "telegram-start-retry":
+            scheduled["n"] += 1
+            coro.close()  # don't actually run the retry
+            return MagicMock()
+        return real_create_task(coro, **k)
+    monkeypatch.setattr(asyncio, "create_task", _spy)
+
+    await bot.start()
+    assert scheduled["n"] == 1, "transient timeout must schedule a retry, not give up"
+    assert bot._started is False  # reset so the retry can re-enter
