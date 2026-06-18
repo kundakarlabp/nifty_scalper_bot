@@ -12,6 +12,7 @@ Security: every route requires ADMIN_PASSWORD. Serve behind the firewall.
 """
 from __future__ import annotations
 
+import html
 import hashlib
 import json
 import os
@@ -338,12 +339,12 @@ def _flash(request: Request) -> str:
     q = request.query_params
     if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
     if q.get("token") == "ok": return '<div class="flash ok">Access token updated and bot restarted.</div>'
-    if q.get("token") == "err": return f'<div class="flash err">Token exchange failed: {q.get("msg","")}</div>'
+    if q.get("token") == "err": return f'<div class="flash err">Token exchange failed: {html.escape(q.get("msg", ""))}</div>'
     if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first (Save them below), then toggle.</div>'
     if q.get("mode"): return '<div class="flash ok">Mode changed and bot restarted.</div>'
     if q.get("restart"): return '<div class="flash ok">Bot restarting…</div>'
     if q.get("upd") == "ok": return '<div class="flash ok">Updated from GitHub and restarted.</div>'
-    if q.get("upd") == "err": return f'<div class="flash err">Update failed: {q.get("msg","")}</div>'
+    if q.get("upd") == "err": return f'<div class="flash err">Update failed: {html.escape(q.get("msg", ""))}</div>'
     return ""
 
 
