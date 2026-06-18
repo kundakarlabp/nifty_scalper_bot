@@ -177,8 +177,24 @@ def _tail_file(path: Path, lines: int, *, max_bytes: int = 2_000_000) -> str:
     return "\n".join(chunk.decode("utf-8", errors="replace").splitlines()[-lines:])
 
 
+_LOGS_CACHE: dict[tuple, tuple[float, str]] = {}
+
+
 def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "", clean: bool = True) -> str:
     lines = max(50, min(int(lines or 400), 20000))
+    # The Logs page polls this every few seconds and the page/status/download all
+    # call it. Each call otherwise spawns a journalctl subprocess (up to 15s),
+    # which saturates the shared threadpool and hangs the dashboard. Cache results
+    # for a couple of seconds keyed by the query so polling is near-instant while
+    # logs stay fresh. Time-window/download queries (since/until) bypass the cache.
+    ttl = float(os.getenv("ADMIN_LOGS_CACHE_SECONDS", "2.5") or "2.5")
+    cache_key = (lines, contains, clean)
+    cacheable = not since and not until
+    now = time.time()
+    if cacheable and ttl > 0:
+        hit = _LOGS_CACHE.get(cache_key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
     text = ""
     try:
         cmd = ["journalctl", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager", "-o", "cat"]
@@ -204,7 +220,13 @@ def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "
     if contains:
         n = contains.lower()
         rows = [r for r in rows if n in r.lower()]
-    return "\n".join(rows) if rows else "No matching log lines."
+    result = "\n".join(rows) if rows else "No matching log lines."
+    if cacheable and ttl > 0:
+        _LOGS_CACHE[cache_key] = (now, result)
+        if len(_LOGS_CACHE) > 32:  # bound the cache
+            for k in list(_LOGS_CACHE)[:-16]:
+                _LOGS_CACHE.pop(k, None)
+    return result
 
 
 def _restart_service() -> None:
