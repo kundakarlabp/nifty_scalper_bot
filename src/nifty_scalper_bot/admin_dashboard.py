@@ -549,6 +549,25 @@ def logs_json(request: Request, lines: int = 400, contains: str = "") -> JSONRes
     return JSONResponse({"text": text})
 
 
+# Trade-relevant event markers — entry, fill, exit, P&L, rejections.
+_TRADE_MARKERS = (
+    "ORDER_SENT", "Sending Order", "FILLED", "average_price", "EXIT",
+    "TRADE_ATTEMPT", "ORDER_REJECTED", "ORDER_BROKER_CONFIG_ERROR", "pnl",
+    "TRADE_CLOSED", "ORDER_COMPLETE", "SIGNAL_GENERATED",
+)
+
+
+@router.get("/admin/trades.json")
+def trades_json(request: Request, lines: int = 4000) -> JSONResponse:
+    # Just the trade-relevant lines (entry / fill / exit / P&L / rejections) so the
+    # trade can be reviewed without scrolling the whole log. Reuses the bounded
+    # tail reader, so it stays cheap even as bot.log grows.
+    _check_auth(request)
+    text = _gather_logs(lines, clean=True)
+    hits = [ln for ln in text.splitlines() if any(m in ln for m in _TRADE_MARKERS)]
+    return JSONResponse({"text": "\n".join(hits) or "No trade events in the recent log window."})
+
+
 @router.get("/admin/logs/download")
 def logs_download(request: Request, fmt: str = "txt", lines: int = 2000, contains: str = "") -> PlainTextResponse:
     _check_auth(request)
