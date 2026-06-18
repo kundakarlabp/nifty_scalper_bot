@@ -120,3 +120,29 @@ async def test_app_uses_normalize_symbol_not_datahub_normalize() -> None:
     assert "norm_symbol = normalize_symbol(raw_symbol)" in src
     from nifty_scalper_bot.utils.symbols import normalize_symbol
     assert normalize_symbol("nfo:nifty2662324100ce") == "NFO:NIFTY2662324100CE"
+
+
+async def test_gather_logs_is_cached(monkeypatch) -> None:
+    # The Logs page polls + page + download + status all call _gather_logs. Each
+    # call otherwise spawns a journalctl subprocess (up to 15s) and saturates the
+    # shared threadpool, hanging the dashboard. Repeated identical calls within the
+    # TTL must spawn journalctl once.
+    import nifty_scalper_bot.admin_dashboard as dash
+    dash._LOGS_CACHE.clear()
+    monkeypatch.setenv("ADMIN_LOGS_CACHE_SECONDS", "5")
+    calls = {"n": 0}
+    class _O:
+        returncode = 0
+        stdout = "[2026-06-18 14:00:00 IST] ORDER_SENT x\n"
+    def _run(*a, **k):
+        calls["n"] += 1
+        return _O()
+    monkeypatch.setattr(dash.subprocess, "run", _run)
+    a = dash._gather_logs(400)
+    b = dash._gather_logs(400)
+    c = dash._gather_logs(400)
+    assert calls["n"] == 1, "journalctl must be spawned once, then served from cache"
+    assert a == b == c
+    # a download-style time-window query bypasses the cache (always fresh)
+    dash._gather_logs(400, since="2026-06-18")
+    assert calls["n"] == 2
