@@ -2889,9 +2889,23 @@ class ZerodhaKiteClient(BaseBrokerClient):
             self._breaker_open_until = 0.0
 
     def _create_http_client(self, base_url: str) -> httpx.Client:
+        # Force outbound connections over IPv4. Zerodha's developer console
+        # allowlists the static IPv4 (15.206.3.6), but the host can otherwise
+        # reach Zerodha over IPv6, which is NOT allowlisted -> 403 "IP is not
+        # allowed to place orders". Binding the local address to the IPv4 stack
+        # makes every request present the allowlisted IPv4. Opt out with
+        # ZERODHA_FORCE_IPV4=false if ever needed.
+        transport = None
+        force_ipv4 = str(os.getenv("ZERODHA_FORCE_IPV4", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if force_ipv4:
+            try:
+                transport = httpx.HTTPTransport(local_address="0.0.0.0")
+            except Exception:  # pragma: no cover - defensive
+                transport = None
         return httpx.Client(
             base_url=base_url,
             timeout=self._timeout,
+            transport=transport,
             headers={
                 "X-Kite-Version": "3",
                 "Authorization": f"token {self._api_key}:{self._access_token}",

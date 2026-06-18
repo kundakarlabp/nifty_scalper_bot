@@ -128,3 +128,25 @@ def test_get_ltp_bulk_depth_maps_symbol_payload_to_token(
     assert out == {256265: 25382.4}
 
     client._client.close()
+
+
+def test_http_client_forces_ipv4_by_default(monkeypatch):
+    # Fix for Zerodha 403 "IP not allowed": the host can reach Zerodha over IPv6,
+    # which is not allowlisted. The client must bind outbound to the IPv4 stack so
+    # it presents the allowlisted IPv4. _create_http_client builds with an IPv4
+    # local_address transport unless disabled.
+    monkeypatch.delenv("ZERODHA_FORCE_IPV4", raising=False)
+    import httpx
+    captured = {}
+    real_client = httpx.Client
+    def _spy_client(*a, **k):
+        captured["transport"] = k.get("transport")
+        return real_client(*a, **k)
+    monkeypatch.setattr(httpx, "Client", _spy_client)
+    ZerodhaKiteClient(api_key="key", access_token="token")
+    assert captured["transport"] is not None, "default must force IPv4 transport"
+
+    captured.clear()
+    monkeypatch.setenv("ZERODHA_FORCE_IPV4", "false")
+    ZerodhaKiteClient(api_key="key", access_token="token")
+    assert captured["transport"] is None, "opt-out must disable the forced transport"
