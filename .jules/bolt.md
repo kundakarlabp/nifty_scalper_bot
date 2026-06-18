@@ -1,0 +1,3 @@
+## 2024-03-24 - [Avoid N+1 queries by using executemany]
+**Learning:** Found a loop doing `conn.execute(...)` for each row inside `upsert_instruments`. In Python/SQLite, accumulating parameters in a list and calling `conn.executemany` is much faster than executing statements individually inside a loop. This is mentioned in memory too: "For repetitive SQLite data insertions in Python, avoid N+1 queries by accumulating parameters in a list and using a single conn.executemany() instead of executing statements individually inside a loop."
+**Action:** When inserting multiple rows, always try to use `executemany` instead of looping with `execute`.

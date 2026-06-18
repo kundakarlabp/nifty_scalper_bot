@@ -275,6 +275,7 @@ def upsert_instruments(
             "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY",
         )
     )
+    insert_params = []
     try:
         with conn:
             for raw_row in rows:
@@ -352,7 +353,20 @@ def upsert_instruments(
                     if underlying
                     else _derive_underlying(tradingsymbol)
                 )
-                conn.execute(
+                insert_params.append((
+                    token_int,
+                    exchange,
+                    tradingsymbol,
+                    lot_size,
+                    expiry_str,
+                    underlying_str,
+                    strike_value,
+                    opt_type,
+                    timestamp,
+                ))
+
+            if insert_params:
+                conn.executemany(
                     """
                     INSERT INTO instruments(
                         token,
@@ -375,19 +389,10 @@ def upsert_instruments(
                         opt_type=excluded.opt_type,
                         updated_at=excluded.updated_at
                     """,
-                    (
-                        token_int,
-                        exchange,
-                        tradingsymbol,
-                        lot_size,
-                        expiry_str,
-                        underlying_str,
-                        strike_value,
-                        opt_type,
-                        timestamp,
-                    ),
+                    insert_params
                 )
-                stored += 1
+                stored = len(insert_params)
+
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in upsert_instruments: %s",
