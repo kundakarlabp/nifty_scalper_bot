@@ -42,12 +42,44 @@ FIELDS: list[tuple[str, str, bool]] = [
     ("Telegram Allowed ID", "TELEGRAM_ALLOWED_ID", False),
 ]
 
-_SESSIONS: set[str] = set()
+_SESSIONS: dict[str, float] = {}  # token -> expiry epoch; bounded + expiring
+_SESSION_TTL = 86400.0
+_SESSION_MAX = 50
+
+
+def _session_valid(token: str) -> bool:
+    exp = _SESSIONS.get(token)
+    if exp is None:
+        return False
+    if time.time() > exp:
+        _SESSIONS.pop(token, None)
+        return False
+    return True
+
+
+def _session_add(token: str) -> None:
+    now = time.time()
+    # Drop expired, then cap size (oldest first) so this can't grow unbounded.
+    for t in [t for t, e in _SESSIONS.items() if e < now]:
+        _SESSIONS.pop(t, None)
+    if len(_SESSIONS) >= _SESSION_MAX:
+        for t in sorted(_SESSIONS, key=_SESSIONS.get)[: len(_SESSIONS) - _SESSION_MAX + 1]:
+            _SESSIONS.pop(t, None)
+    _SESSIONS[token] = now + _SESSION_TTL
 
 
 # ---------------- env helpers ----------------
 
+_ENV_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
+
+
 def _read_env() -> dict[str, str]:
+    # Read on every request (auth, dashboard render). Cache briefly so a burst of
+    # requests / polls doesn't hammer the disk on the memory-tight host (disk is
+    # slow under swap pressure, which contributed to the dashboard hanging).
+    now = time.time()
+    if now - float(_ENV_CACHE["at"]) < 5.0 and _ENV_CACHE["data"]:
+        return dict(_ENV_CACHE["data"])  # copy so callers can't mutate the cache
     data: dict[str, str] = {}
     if ENV_PATH.exists():
         for line in ENV_PATH.read_text().splitlines():
@@ -56,6 +88,7 @@ def _read_env() -> dict[str, str]:
                 continue
             k, _, v = line.partition("=")
             data[k.strip()] = v.strip().strip('"').strip("'")
+    _ENV_CACHE.update({"at": now, "data": dict(data)})
     return data
 
 
@@ -78,10 +111,11 @@ def _write_env(updates: dict[str, str]) -> None:
     ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     ENV_PATH.write_text("\n".join(out) + "\n")
     os.chmod(ENV_PATH, 0o600)
+    _ENV_CACHE.update({"at": 0.0, "data": {}})  # bust cache so next read is fresh
 
 
 def _check_auth(request: Request) -> None:
-    if request.cookies.get("admin_session", "") not in _SESSIONS:
+    if not _session_valid(request.cookies.get("admin_session", "")):
         raise HTTPException(status_code=303, headers={"Location": "/admin/login"})
 
 
@@ -272,7 +306,7 @@ def login(password: str = Form(...)) -> RedirectResponse:
     if not expected or not secrets.compare_digest(password, expected):
         return RedirectResponse("/admin/login?e=1", status_code=303)
     token = secrets.token_urlsafe(32)
-    _SESSIONS.add(token)
+    _session_add(token)
     resp = RedirectResponse("/admin", status_code=303)
     resp.set_cookie("admin_session", token, httponly=True, max_age=86400, samesite="lax")
     return resp
