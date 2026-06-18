@@ -108,3 +108,15 @@ async def test_trades_json_filters_trade_events(tmp_path, monkeypatch) -> None:
     out = dash.trades_json(request=None).body.decode()
     assert "ORDER_SENT" in out and "EXIT" in out
     assert "RUNNER_NO_TRADE_DECISION" not in out  # noise filtered out
+
+
+async def test_app_uses_normalize_symbol_not_datahub_normalize() -> None:
+    # Regression: position sync/adoption called DataHub.normalize (does not exist),
+    # raising 'type object DataHub has no attribute normalize' and aborting adoption.
+    # Must use the normalize_symbol helper instead.
+    import pathlib
+    src = pathlib.Path("src/nifty_scalper_bot/core/app.py").read_text()
+    assert "DataHub.normalize(" not in src
+    assert "norm_symbol = normalize_symbol(raw_symbol)" in src
+    from nifty_scalper_bot.utils.symbols import normalize_symbol
+    assert normalize_symbol("nfo:nifty2662324100ce") == "NFO:NIFTY2662324100CE"
