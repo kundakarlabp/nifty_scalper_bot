@@ -54,3 +54,41 @@ async def test_status_json_caches_subprocess(monkeypatch) -> None:
     dash.status_json(request=None)  # cached -> no spawn
     dash.status_json(request=None)  # cached -> no spawn
     assert calls["n"] == 1, "status.json must cache, not spawn systemctl every poll"
+
+
+async def test_read_env_is_cached(tmp_path, monkeypatch) -> None:
+    # Env must not be re-read from disk on every request (disk is slow under swap
+    # pressure; repeated reads contributed to the hang). Second call within TTL
+    # returns the cached copy without touching disk.
+    import nifty_scalper_bot.admin_dashboard as dash
+
+    envf = tmp_path / ".env"
+    envf.write_text("ADMIN_PASSWORD=secret\n")
+    monkeypatch.setattr(dash, "ENV_PATH", envf)
+    dash._ENV_CACHE.update({"at": 0.0, "data": {}})
+
+    reads = {"n": 0}
+    orig_read_text = type(envf).read_text
+    def _counting_read_text(self, *a, **k):
+        reads["n"] += 1
+        return orig_read_text(self, *a, **k)
+    monkeypatch.setattr(type(envf), "read_text", _counting_read_text)
+
+    assert dash._read_env()["ADMIN_PASSWORD"] == "secret"
+    dash._read_env(); dash._read_env()
+    assert reads["n"] == 1, "env should be read from disk once, then cached"
+
+
+async def test_sessions_are_bounded_and_expire(monkeypatch) -> None:
+    # Session store must not grow unbounded (was a plain set that only ever grew).
+    import nifty_scalper_bot.admin_dashboard as dash
+    dash._SESSIONS.clear()
+    for i in range(dash._SESSION_MAX + 20):
+        dash._session_add(f"tok{i}")
+    assert len(dash._SESSIONS) <= dash._SESSION_MAX
+
+    # expired token is rejected
+    dash._SESSIONS.clear()
+    dash._SESSIONS["old"] = 1.0  # far in the past
+    assert dash._session_valid("old") is False
+    assert "old" not in dash._SESSIONS  # cleaned on check
