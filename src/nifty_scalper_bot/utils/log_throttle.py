@@ -262,6 +262,7 @@ def log_throttled(logger: logging.Logger, level: int, event: str, key: str, inte
         extra.setdefault("event", event)
         if event_is_never_throttled(event):
             extra.setdefault("suppressed_count", 0)
+            extra["bypass_filters"] = True
             logger.log(level, message, *args, extra=extra, **kwargs)
             return True
         if throttle.should_log(key, interval_seconds):

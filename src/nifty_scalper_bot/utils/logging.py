@@ -230,9 +230,9 @@ class _BurstDedupFilter(logging.Filter):
         self._lock = threading.Lock()
 
     def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
-        if self._window <= 0:
-            return True
         if getattr(record, "bypass_filters", False):
+            return True
+        if self._window <= 0:
             return True
         try:
             signature = f"{record.name}|{record.levelno}|{record.getMessage()}"
@@ -263,9 +263,9 @@ class _RateLimitFilter(logging.Filter):
         self._lock = threading.Lock()
 
     def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
-        if self._interval <= 0:
-            return True
         if getattr(record, "bypass_filters", False):
+            return True
+        if self._interval <= 0:
             return True
         try:
             key = (
@@ -303,6 +303,8 @@ class _DedupFilter(logging.Filter):
         self._lock = threading.Lock()
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401 - override
+        if getattr(record, "bypass_filters", False):
+            return True
         if self._window <= 0:
             return True
         event = getattr(record, "event", "")
@@ -327,6 +329,8 @@ class _EventSamplingFilter(logging.Filter):
         self._counts: dict[str, int] = {}
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401 - override
+        if getattr(record, "bypass_filters", False):
+            return True
         if not self._regex:
             return True
         label = str(getattr(record, "event", None) or record.getMessage())

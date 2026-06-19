@@ -178,3 +178,29 @@ def test_canonical_helpers_malformed_logger_does_not_raise() -> None:
     broken = BrokenLogger()
     assert not log_throttled(broken, logging.INFO, "EV", "broken", 0, "msg")  # type: ignore[arg-type]
     assert not log_on_change(broken, key="broken-change", state="A", message="msg")  # type: ignore[arg-type]
+
+
+def test_critical_execution_events_bypass_global_filters_after_setup_logging(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.delenv("BOT_LOG_FILE", raising=False)
+    monkeypatch.setenv("LOG_DEDUP_ENABLED", "true")
+    monkeypatch.setenv("LOG_DEDUP_WINDOW_SEC", "60")
+    monkeypatch.setenv("LOG_RATE_LIMIT_SEC", "60")
+    setup_logging("INFO")
+    logger = logging.getLogger("nifty_scalper_bot.execution.order_manager")
+
+    assert log_throttled(logger, logging.INFO, "ORDER_SUBMITTED", "submit:1", 300, "ORDER_SUBMITTED order_id=%s", "OID1")
+    assert log_throttled(logger, logging.INFO, "ORDER_SUBMITTED", "submit:2", 300, "ORDER_SUBMITTED order_id=%s", "OID2")
+    assert log_throttled(logger, logging.WARNING, "ORDER_REJECTED", "reject:1", 300, "ORDER_REJECTED symbol=%s", "NFO:NIFTY1CE")
+    assert log_throttled(logger, logging.WARNING, "ORDER_REJECTED", "reject:2", 300, "ORDER_REJECTED symbol=%s", "NFO:NIFTY1PE")
+    assert log_throttled(logger, logging.INFO, "ORDER_KILL_SWITCH_BLOCK", "ks:block:test", 300, "ORDER_KILL_SWITCH_BLOCK reason=%s", "active")
+    assert not log_throttled(logger, logging.INFO, "ORDER_KILL_SWITCH_BLOCK", "ks:block:test", 300, "ORDER_KILL_SWITCH_BLOCK reason=%s", "active")
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    execution_log = (tmp_path / "execution.log").read_text()
+    assert execution_log.count("ORDER_SUBMITTED order_id=OID1") == 1
+    assert execution_log.count("ORDER_SUBMITTED order_id=OID2") == 1
+    assert execution_log.count("ORDER_REJECTED symbol=NFO:NIFTY1CE") == 1
+    assert execution_log.count("ORDER_REJECTED symbol=NFO:NIFTY1PE") == 1
+    assert execution_log.count("ORDER_KILL_SWITCH_BLOCK reason=active") == 1
