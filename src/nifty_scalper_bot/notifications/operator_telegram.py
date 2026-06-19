@@ -690,6 +690,57 @@ async def cmd_stderror(update: Update, _: ContextTypes.DEFAULT_TYPE, service: An
     await safe_reply(update, str(err) if err else "No runtime exception captured.")
 
 
+def _parse_count(update: Update, default: int, lo: int, hi: int) -> int:
+    try:
+        msg = getattr(update, "effective_message", None)
+        parts = (getattr(msg, "text", "") or "").split()
+        if len(parts) > 1:
+            return max(lo, min(int(parts[1]), hi))
+    except Exception:
+        pass
+    return default
+
+
+def _log_ring_tail(n: int) -> list[str]:
+    # Lazy import to avoid a circular import (telegram_controller imports this
+    # module). RING is the in-process buffer fed by every log record.
+    from nifty_scalper_bot.notifications.telegram_controller import RING
+
+    return RING.tail(n)
+
+
+async def cmd_logs(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:
+    """Show the most recent log lines inline (/logs [N], default 80)."""
+    del service
+    n = _parse_count(update, default=80, lo=10, hi=400)
+    lines = _log_ring_tail(n)
+    text = "\n".join(lines) if lines else "No logs buffered yet."
+    # Telegram hard-caps messages near 4096 chars; keep the newest tail.
+    if len(text) > 3500:
+        text = "…(truncated)…\n" + text[-3500:]
+    await safe_reply(update, text)
+
+
+async def cmd_dumplogs(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:
+    """Send recent logs as a downloadable .txt file (/dumplogs [N], default 1500)."""
+    del service
+    import io
+    import time as _time
+
+    from telegram import InputFile
+
+    n = _parse_count(update, default=1500, lo=50, hi=5000)
+    text = "\n".join(_log_ring_tail(n)) or "No logs buffered yet."
+    bio = io.BytesIO(text.encode("utf-8"))
+    bio.name = f"niftybot-logs-{_time.strftime('%Y%m%d-%H%M%S')}.txt"
+    chat = getattr(update, "effective_chat", None)
+    sender = getattr(chat, "send_document", None) if chat is not None else None
+    if sender is None:
+        await safe_reply(update, "Cannot send a document to this chat.")
+        return
+    await sender(InputFile(bio))
+
+
 async def cmd_selftest(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:
     snap = _runtime_snapshot(service)
     await safe_reply(update, _lines("Selftest (read-only)", {
@@ -755,6 +806,8 @@ OPERATOR_COMMANDS: list[CommandSpec] = [
     CommandSpec("check_core", "strategy runner, regime, session, startup/readiness state", cmd_check_core),
     CommandSpec("check_execution", "live-order arming, risk, positions, open orders, bracket status", cmd_check_execution),
     CommandSpec("errors", "recent error log summary", cmd_errors),
+    CommandSpec("logs", "recent log lines inline (/logs [N])", cmd_logs),
+    CommandSpec("dumplogs", "download recent logs as a .txt file (/dumplogs [N])", cmd_dumplogs),
     CommandSpec("stderror", "last runtime exception/error details", cmd_stderror),
     CommandSpec("selftest", "run non-invasive system self-test", cmd_selftest),
     CommandSpec("emergency", "emergency stop / disable live orders", cmd_emergency),
