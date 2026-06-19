@@ -458,7 +458,7 @@ async def _polling_failover_supervisor_iteration(
                 "POLLING_FALLBACK_ACTIVATE",
                 (_fallback_reason, ws_ok, lagging, futures_fresh, options_fresh),
                 level=logging.WARNING,
-                msg="POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s" % (spot_age_ms, quote_stale_ms, ws_ok, lagging),
+                msg="POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s" % (_fallback_reason, spot_age_ms, quote_stale_ms, ws_ok, lagging),
                 extra={"event": "poll_fallback_activate", "reason": _fallback_reason, "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
             )
             _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), False)
