@@ -40,7 +40,7 @@ from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
-from nifty_scalper_bot.utils.symbols import canonical
+from nifty_scalper_bot.utils.symbols import canonical, normalize_symbol
 from nifty_scalper_bot.utils.serialization import to_json_safe
 
 if TYPE_CHECKING:
@@ -122,6 +122,20 @@ _OPTION_RE = re.compile(
 
 class DataHub:
     """Market data single source of truth."""
+
+    @staticmethod
+    def normalize(symbol: Any) -> str:
+        """Return the exchange-qualified canonical form of ``symbol``.
+
+        Numerous execution/risk/notification call sites use
+        ``DataHub.normalize(sym)`` as a static helper, but the method was
+        never defined on the class. Every such call raised
+        ``AttributeError: type object 'DataHub' has no attribute 'normalize'``
+        — silently aborting position sync/adoption and other reconciliation
+        paths wrapped in broad try/except. Delegates to the canonical
+        ``normalize_symbol`` helper already used across execution.
+        """
+        return normalize_symbol(symbol)
 
     def __init__(
         self,
