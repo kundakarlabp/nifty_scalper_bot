@@ -31,7 +31,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse,
 router = APIRouter()
 
 ENV_PATH = Path(os.getenv("BOT_ENV_FILE", "/home/ubuntu/nifty_scalper_bot/.env"))
-LOG_PATH = Path(os.getenv("BOT_LOG_FILE", "/home/ubuntu/nifty_scalper_bot/bot.log"))
+LOG_PATH = Path(os.getenv("BOT_LOG_FILE", str(Path(os.getenv("LOG_DIR", "logs")).expanduser() / "bot.log")))
 SERVICE_NAME = os.getenv("BOT_SERVICE_NAME", "niftybot")
 APP_DIR = Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
 

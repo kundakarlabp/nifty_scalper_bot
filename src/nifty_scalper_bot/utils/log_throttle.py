@@ -11,34 +11,37 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-CRITICAL_EVENTS = {
+NEVER_THROTTLE_EVENTS = {
     "ORDER_SUBMITTED",
     "ORDER_REJECTED",
     "ORDER_REJECTED_FATAL",
     "ORDER_FILLED",
-    "ORDER_CANCELLED",
     "ORDER_CANCEL_FAILED",
     "ORDER_MODIFY_FAILED",
-    "ORDER_TIMEOUT",
-    "ORDER_UNKNOWN_STATUS",
     "ORDER_KILL_SWITCH_ENGAGED",
-    "ORDER_KILL_SWITCH_STATE",
     "POSITION_OPENED",
     "POSITION_CLOSED",
     "POSITION_CLOSE_FAILED",
     "POSITION_RECONCILE_FAILED",
-    "POSITION_RECONCILED",
     "UNPROTECTED_POSITION_BLOCKING_ENTRIES",
     "BRACKET_EXIT_ORDER_FAILED",
     "BRACKET_EXIT_FAILED",
-    "EXIT_ORDER_SUBMITTED",
     "EXIT_ORDER_REJECTED",
     "EXIT_FAILED_ESCALATED",
-    "RISK_REJECTED",
     "RISK_LIMIT_BREACHED",
     "MARGIN_REJECTED",
     "BROKER_REJECTED",
+    "AUTHENTICATION_FAILED",
+    "AUTH_FAILURE",
+    "SESSION_EXPIRED",
+    "SESSION_REFRESH_FAILED",
+    "UNCAUGHT_EXCEPTION",
+    "WEBSOCKET_DISCONNECTED",
+    "WEBSOCKET_RECONNECTED",
+    "WEBSOCKET_RECONNECT_FAILED",
 }
+# Backwards-compatible alias for imports/tests; do not add prefix matching.
+CRITICAL_EVENTS = NEVER_THROTTLE_EVENTS
 
 
 def _utc_iso() -> str:
@@ -243,48 +246,56 @@ DEFAULT_LOG_THROTTLE = LogThrottle()
 
 
 def event_is_never_throttled(event: str | None) -> bool:
-    text = str(event or "").upper()
-    if text in CRITICAL_EVENTS:
-        return True
-    critical_prefixes = (
-        "ORDER_",
-        "POSITION_",
-        "EXIT_FAILED",
-        "BRACKET_EXIT",
-        "UNPROTECTED_POSITION",
-    )
-    return text.startswith(critical_prefixes) or "AUTH" in text or "SESSION" in text or "UNCAUGHT" in text or "WEBSOCKET_DISCONNECT" in text or "WEBSOCKET_RECONNECT" in text
+    """Return True only for explicitly allow-listed safety events."""
+    return str(event or "").upper() in NEVER_THROTTLE_EVENTS
 
 
 def log_throttled(logger: logging.Logger, level: int, event: str, key: str, interval_seconds: float, message: str, *args: Any, **kwargs: Any) -> bool:
-    """Emit a throttled log with shared state and ``suppressed_count`` metadata."""
-    throttle: LogThrottle = kwargs.pop("throttle", DEFAULT_LOG_THROTTLE)
-    extra = dict(kwargs.pop("extra", {}) or {})
-    extra.setdefault("event", event)
-    if event_is_never_throttled(event):
-        extra.setdefault("suppressed_count", 0)
-        logger.log(level, message, *args, extra=extra, **kwargs)
-        return True
-    if throttle.should_log(key, interval_seconds):
-        suppressed = throttle.pop_suppressed(key)
-        extra["suppressed_count"] = suppressed
-        extra.update({k: v for k, v in throttle.state_metadata(key).items() if k != "suppressed_count"})
-        logger.log(level, message, *args, extra=extra, **kwargs)
-        enabled = os.getenv("LOG_THROTTLE_SUMMARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-        if enabled:
-            throttle.maybe_emit_summary(logger, interval_seconds=float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "120") or "120"), top_n=int(os.getenv("LOG_THROTTLE_SUMMARY_TOP_N", "10") or "10"))
-        return True
-    throttle.record_suppressed(key)
-    return False
+    """Emit a throttled log with shared state and ``suppressed_count`` metadata.
+
+    Logging must never break trading paths; any logger/format/extra failure is
+    swallowed after best-effort accounting.
+    """
+    try:
+        throttle: LogThrottle = kwargs.pop("throttle", DEFAULT_LOG_THROTTLE)
+        extra = dict(kwargs.pop("extra", {}) or {})
+        extra.setdefault("event", event)
+        if event_is_never_throttled(event):
+            extra.setdefault("suppressed_count", 0)
+            logger.log(level, message, *args, extra=extra, **kwargs)
+            return True
+        if throttle.should_log(key, interval_seconds):
+            suppressed = throttle.pop_suppressed(key)
+            extra["suppressed_count"] = suppressed
+            extra.update({k: v for k, v in throttle.state_metadata(key).items() if k != "suppressed_count"})
+            logger.log(level, message, *args, extra=extra, **kwargs)
+            enabled = os.getenv("LOG_THROTTLE_SUMMARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+            if enabled:
+                throttle.maybe_emit_summary(logger, interval_seconds=float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "120") or "120"), top_n=int(os.getenv("LOG_THROTTLE_SUMMARY_TOP_N", "10") or "10"))
+            return True
+        throttle.record_suppressed(key)
+        return False
+    except Exception:
+        return False
 
 
 def log_on_change(logger: logging.Logger, *, key: str, state: Any, message: str, reminder_seconds: float = 600, level: int = logging.INFO, extra: dict[str, Any] | None = None, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> bool:
-    return throttle.log_on_change(logger, key=key, state=state, message=message, reminder_seconds=reminder_seconds, level=level, extra=extra)
+    """Emit a state-change log without allowing logging failures to propagate."""
+    try:
+        return throttle.log_on_change(logger, key=key, state=state, message=message, reminder_seconds=reminder_seconds, level=level, extra=extra)
+    except Exception:
+        return False
 
 
 def record_strategy_evaluation(*, strategy: str, symbol: str, accepted: bool, reason: str | None = None, score: Any = None, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> None:
-    throttle.record_strategy_evaluation(strategy=strategy, symbol=symbol, accepted=accepted, reason=reason, score=score)
+    try:
+        throttle.record_strategy_evaluation(strategy=strategy, symbol=symbol, accepted=accepted, reason=reason, score=score)
+    except Exception:
+        return
 
 
 def maybe_emit_strategy_rejection_summary(logger: logging.Logger, *, interval_seconds: float = 300.0, top_n: int = 5, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> bool:
-    return throttle.maybe_emit_strategy_rejection_summary(logger, interval_seconds=interval_seconds, top_n=top_n)
+    try:
+        return throttle.maybe_emit_strategy_rejection_summary(logger, interval_seconds=interval_seconds, top_n=top_n)
+    except Exception:
+        return False

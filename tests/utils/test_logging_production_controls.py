@@ -148,3 +148,33 @@ def test_order_manager_kill_switch_status_logs_on_change_only(caplog):
         manager._log_kill_switch_status()
     records = [r for r in caplog.records if getattr(r, "event", "") == "ORDER_KILL_SWITCH_STATUS"]
     assert len(records) == 1
+
+
+def test_non_allowlisted_order_prefix_event_is_throttleable(caplog):
+    throttle = LogThrottle()
+    logger = logging.getLogger("tests.order.prefix.throttleable")
+    with caplog.at_level(logging.INFO):
+        assert log_throttled(logger, logging.INFO, "ORDER_KILL_SWITCH_BLOCK", "ks:block", 300, "blocked", throttle=throttle)
+        assert not log_throttled(logger, logging.INFO, "ORDER_KILL_SWITCH_BLOCK", "ks:block", 300, "blocked", throttle=throttle)
+    assert sum(1 for r in caplog.records if r.message == "blocked") == 1
+
+
+def test_logging_wrapper_invalid_extra_does_not_raise() -> None:
+    from nifty_scalper_bot.utils.logging import log_state_change, log_throttled as compat_log_throttled
+
+    logger = logging.getLogger("tests.invalid.extra.safe")
+    compat_log_throttled(logger, "bad-extra", "bad extra survives", interval_sec=0, extra={"message": "reserved"})
+    assert log_state_change(logger, "bad-change-extra", "A", msg="bad change survives", extra={"message": "reserved"}) is False
+
+
+def test_canonical_helpers_malformed_logger_does_not_raise() -> None:
+    class BrokenLogger:
+        def log(self, *_args, **_kwargs):
+            raise RuntimeError("logger failed")
+
+        def info(self, *_args, **_kwargs):
+            raise RuntimeError("logger failed")
+
+    broken = BrokenLogger()
+    assert not log_throttled(broken, logging.INFO, "EV", "broken", 0, "msg")  # type: ignore[arg-type]
+    assert not log_on_change(broken, key="broken-change", state="A", message="msg")  # type: ignore[arg-type]

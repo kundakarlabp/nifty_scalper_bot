@@ -477,7 +477,6 @@ def _log_dir() -> Path:
 def _rotating_handler(path: Path, max_bytes: int, backup_count: int) -> RotatingFileHandler:
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
-    handler.addFilter(EventEnricher())
     handler.setFormatter(
         KeyValueFormatter(
             fmt="%(asctime)s %(levelname)s %(name)s event=%(event)s %(message)s",
@@ -519,7 +518,9 @@ def setup_logging(level: str = "INFO") -> None:
         stdout_handler.addFilter(_MaxLevelFilter(logging.WARNING))
         stderr_handler.addFilter(_MinLevelFilter(logging.ERROR))
         log_dir = _log_dir()
-        bot_file = _rotating_handler(log_dir / "bot.log", 20 * 1024 * 1024, 5)
+        bot_log_path = Path(os.getenv("BOT_LOG_FILE", str(log_dir / "bot.log"))).expanduser()
+        os.environ.setdefault("BOT_LOG_FILE", str(bot_log_path))
+        bot_file = _rotating_handler(bot_log_path, 20 * 1024 * 1024, 5)
         strategy_file = _rotating_handler(log_dir / "strategy.log", 50 * 1024 * 1024, 10)
         execution_file = _rotating_handler(log_dir / "execution.log", 50 * 1024 * 1024, 20)
         bot_file.addFilter(_BotLogRoutingFilter())
@@ -631,18 +632,22 @@ def log_throttled(
         logger = LOGGER
     payload = dict(extra or {})
     event = str(payload.get("event") or key)
-    canonical_log_throttled(
-        logger,
-        level,
-        event,
-        key,
-        interval_sec,
-        msg,
-        *fmt_args,
-        extra=payload,
-        exc_info=exc_info,
-        throttle=DEFAULT_LOG_THROTTLE,
-    )
+    try:
+        canonical_log_throttled(
+            logger,
+            level,
+            event,
+            key,
+            interval_sec,
+            msg,
+            *fmt_args,
+            extra=payload,
+            exc_info=exc_info,
+            throttle=DEFAULT_LOG_THROTTLE,
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            logger.log(level, msg, *fmt_args, exc_info=exc_info)
 
 def log_once_or_throttled(
     logger: logging.Logger,
@@ -679,16 +684,21 @@ def log_state_change(
     extra: Optional[dict[str, Any]] = None,
 ) -> bool:
     """Log immediately when a tracked value changes; otherwise remind periodically."""
-    return canonical_log_on_change(
-        logger,
-        key=key,
-        state=value,
-        message=msg or f"{key} changed to {value!r}",
-        reminder_seconds=float(os.getenv("LOG_STATE_CHANGE_REMINDER_SECONDS", "600") or "600"),
-        level=level,
-        extra=extra,
-        throttle=DEFAULT_LOG_THROTTLE,
-    )
+    try:
+        return canonical_log_on_change(
+            logger,
+            key=key,
+            state=value,
+            message=msg or f"{key} changed to {value!r}",
+            reminder_seconds=float(os.getenv("LOG_STATE_CHANGE_REMINDER_SECONDS", "600") or "600"),
+            level=level,
+            extra=extra,
+            throttle=DEFAULT_LOG_THROTTLE,
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            logger.log(level, msg or f"{key} changed to {value!r}")
+        return False
 
 
 # =============================================================================
