@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -3479,6 +3479,64 @@ class OrderManager:
             return OrderPreflightResult(False, "depth_insufficient", {"depth_qty": qd["depth_qty"], "limit_qty": plan.min_depth_qty})
         return OrderPreflightResult(True, "allowed", {"quote": qd, "lot_size": lot_size})
 
+    def _reanchor_bracket_to_price(
+        self, plan: TradePlan, price: float
+    ) -> TradePlan:
+        """Re-anchor a stale SL/TP bracket to the live protected ``price``.
+
+        Strategy SL/TP are computed off the option premium at signal time.
+        Premiums can move materially before submission, so the precomputed
+        band can land on the wrong side of the live protected price and the
+        order is rejected (``protected_price_invalidates_bracket``) — a lost
+        but valid entry. When (and only when) the existing band is invalid
+        against ``price``, rebuild it at ``price`` preserving the plan's
+        intended SL/TP distances (so the sized rupee risk is unchanged).
+        Valid brackets pass through untouched.
+        """
+        entry = plan.entry_price
+        sl = plan.stop_loss
+        tp = plan.take_profit
+        if (
+            not entry
+            or entry <= 0
+            or not price
+            or price <= 0
+            or sl is None
+            or tp is None
+        ):
+            return plan
+
+        if plan.side == "BUY":
+            bracket_valid = sl < price < tp
+        elif plan.side == "SELL":
+            bracket_valid = tp < price < sl
+        else:
+            return plan
+        if bracket_valid:
+            return plan
+
+        # Preserve the strategy's intended absolute distances from its entry.
+        sl_dist = abs(entry - sl)
+        tp_dist = abs(tp - entry)
+        if sl_dist <= 0 or tp_dist <= 0:
+            # Degenerate plan — leave it to be rejected by validation.
+            return plan
+
+        if plan.side == "BUY":
+            new_sl = max(0.05, round(price - sl_dist, 2))
+            new_tp = round(price + tp_dist, 2)
+        else:  # SELL
+            new_sl = round(price + sl_dist, 2)
+            new_tp = max(0.05, round(price - tp_dist, 2))
+
+        self._logger.warning(
+            "BRACKET_REANCHORED symbol=%s side=%s entry=%.2f price=%.2f "
+            "sl=%.2f->%.2f tp=%.2f->%.2f trace_id=%s",
+            plan.symbol, plan.side, entry, price, sl, new_sl, tp, new_tp,
+            plan.trace_id,
+        )
+        return replace(plan, stop_loss=new_sl, take_profit=new_tp)
+
     def _protected_limit_price(self, plan: TradePlan) -> float | None:
         quote = self._get_latest_quote_safe(plan.symbol)
         tick_size = 0.05
@@ -3554,6 +3612,7 @@ class OrderManager:
                 plan.trace_id,
             )
             return TradePlanSubmitResult(False, reason="protected_limit_unavailable", details={"entry_price": plan.entry_price}, broker_attempted=False)
+        plan = self._reanchor_bracket_to_price(plan, price)
         if plan.side == "BUY":
             if plan.stop_loss is not None and plan.stop_loss >= price:
                 details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_above_or_equal_entry"}
