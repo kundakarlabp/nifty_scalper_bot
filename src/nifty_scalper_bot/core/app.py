@@ -12095,6 +12095,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
             setattr(ctx, "position_reconciliation_failed", False)
             setattr(ctx, "position_reconciliation_error", None)
             setattr(ctx, "position_reconciliation_last_success_at", datetime.now(timezone.utc).isoformat())
+            setattr(ctx, "unprotected_broker_position", False)
             # A. Fetch Broker Positions (REQUIRED STEP)
             # Initialise bm here so the ghost-bracket cleanup below never hits NameError
             # even when ctx.order_manager or _bracket_manager is absent.
