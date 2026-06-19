@@ -16,7 +16,16 @@ import re
 import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Optional
+
+from nifty_scalper_bot.utils.log_throttle import (
+    DEFAULT_LOG_THROTTLE,
+    LogThrottle,
+    log_on_change as canonical_log_on_change,
+    log_throttled as canonical_log_throttled,
+)
 
 # =============================================================================
 # 1. CONSTANTS & GLOBALS
@@ -56,8 +65,22 @@ _EVENT_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 # Global State & Locks
 LOGGER = logging.getLogger(f"{_DEFAULT_LOGGER_NAME}.logging")
-_THROTTLE_LOCK = threading.Lock()
-_THROTTLE_STATE: dict[str, float] = {}
+
+class _ThrottleStateCompat(dict):
+    """Backward-compatible clear hook for tests that reset old state."""
+
+    def clear(self) -> None:
+        super().clear()
+        with DEFAULT_LOG_THROTTLE._lock:  # compatibility shim; canonical state remains in log_throttle.py
+            DEFAULT_LOG_THROTTLE._states.clear()
+            DEFAULT_LOG_THROTTLE._change_states.clear()
+            DEFAULT_LOG_THROTTLE._last_emit_mono.clear()
+            DEFAULT_LOG_THROTTLE._suppressed.clear()
+
+
+_THROTTLE_LOCK = DEFAULT_LOG_THROTTLE._lock
+_THROTTLE_STATE: dict[str, float] = _ThrottleStateCompat()
+
 _STATE_CACHE_LOCK = threading.Lock()
 _STATE_CACHE: dict[str, Any] = {}
 _FILTER_INSTALL_LOCK = threading.Lock()
@@ -131,24 +154,6 @@ def _resolve_int(name: str, default: int) -> int:
         )
         return int(default)
 
-
-class LogThrottle:
-    """Per-key cooldown helper for repetitive logs."""
-
-    def __init__(self) -> None:
-        """Initialise throttle state. Args: none. Returns: None. Raises: None."""
-        self._seen: dict[str, float] = {}
-        self._lock = threading.Lock()
-
-    def should_log(self, key: str, cooldown_seconds: float) -> bool:
-        """Check if key can log now. Args: key/cooldown_seconds. Returns: bool. Raises: None."""
-        now = time.monotonic()
-        with self._lock:
-            last = self._seen.get(key, 0.0)
-            if now - last < max(0.0, float(cooldown_seconds)):
-                return False
-            self._seen[key] = now
-        return True
 
 
 # =============================================================================
@@ -380,14 +385,20 @@ def _apply_noisy_overrides() -> None:
     )
     try:
         defaults = {
-            "nifty_scalper_bot.risk.regime_sizing": "WARNING",
-            "nifty_scalper_bot.infra.metrics": "WARNING",
-            "nifty_scalper_bot.data.market_data_manager": "INFO",
-            "nifty_scalper_bot.data.rest.zerodha_client": "INFO",
+            "nifty_scalper_bot.strategies.runner": ("LOG_LEVEL_STRATEGY", "INFO"),
+            "nifty_scalper_bot.core.strategy_manager": ("LOG_LEVEL_STRATEGY", "INFO"),
+            "nifty_scalper_bot.execution.order_manager": ("LOG_LEVEL_EXECUTION", "INFO"),
+            "nifty_scalper_bot.execution.bracket_manager": ("LOG_LEVEL_EXECUTION", "INFO"),
+            "nifty_scalper_bot.data.market_data_manager": ("LOG_LEVEL_DATA", "WARNING"),
+            "nifty_scalper_bot.data.data_hub": ("LOG_LEVEL_DATA", "WARNING"),
+            "nifty_scalper_bot.streaming": ("LOG_LEVEL_STREAMING", "WARNING"),
+            "nifty_scalper_bot.core.app": ("LOG_LEVEL_CORE", "INFO"),
+            "nifty_scalper_bot.risk.regime_sizing": ("LOG_LEVEL_RISK", "WARNING"),
+            "nifty_scalper_bot.infra.metrics": ("LOG_LEVEL_INFRA", "WARNING"),
         }
-        for logger_name, default_level in defaults.items():
+        for logger_name, (env_group, default_level) in defaults.items():
             env_key = f"LOG_OVERRIDE_{logger_name}"
-            raw_level = os.getenv(env_key, default_level) or default_level
+            raw_level = os.getenv(env_key, os.getenv(env_group, default_level) or default_level) or default_level
             override = raw_level.strip().upper()
             with contextlib.suppress(AttributeError, ValueError):
                 level_value = getattr(logging, override or default_level, logging.INFO)
@@ -459,6 +470,41 @@ def _install_filters_once() -> None:
         )
 
 
+def _log_dir() -> Path:
+    return Path(os.getenv("LOG_DIR", "logs")).expanduser()
+
+
+def _rotating_handler(path: Path, max_bytes: int, backup_count: int) -> RotatingFileHandler:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
+    handler.addFilter(EventEnricher())
+    handler.setFormatter(
+        KeyValueFormatter(
+            fmt="%(asctime)s %(levelname)s %(name)s event=%(event)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    return handler
+
+
+class _LoggerPrefixFilter(logging.Filter):
+    def __init__(self, *prefixes: str) -> None:
+        super().__init__()
+        self._prefixes = tuple(prefixes)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith(self._prefixes)
+
+
+class _BotLogRoutingFilter(_LoggerPrefixFilter):
+    """Keep bot.log general, while retaining critical execution errors."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("nifty_scalper_bot.execution"):
+            return record.levelno >= logging.ERROR
+        return not record.name.startswith(("nifty_scalper_bot.strategies", "nifty_scalper_bot.core.strategy_manager"))
+
+
 def setup_logging(level: str = "INFO") -> None:
     """Configure the root logger for the application."""
     LOGGER.debug(
@@ -472,7 +518,14 @@ def setup_logging(level: str = "INFO") -> None:
         stderr_handler = logging.StreamHandler(sys.stderr)
         stdout_handler.addFilter(_MaxLevelFilter(logging.WARNING))
         stderr_handler.addFilter(_MinLevelFilter(logging.ERROR))
-        handlers = [stdout_handler, stderr_handler]
+        log_dir = _log_dir()
+        bot_file = _rotating_handler(log_dir / "bot.log", 20 * 1024 * 1024, 5)
+        strategy_file = _rotating_handler(log_dir / "strategy.log", 50 * 1024 * 1024, 10)
+        execution_file = _rotating_handler(log_dir / "execution.log", 50 * 1024 * 1024, 20)
+        bot_file.addFilter(_BotLogRoutingFilter())
+        strategy_file.addFilter(_LoggerPrefixFilter("nifty_scalper_bot.strategies", "nifty_scalper_bot.core.strategy_manager"))
+        execution_file.addFilter(_LoggerPrefixFilter("nifty_scalper_bot.execution"))
+        handlers = [stdout_handler, stderr_handler, bot_file, strategy_file, execution_file]
         for handler in handlers:
             handler.addFilter(EventEnricher())
 
@@ -573,40 +626,23 @@ def log_throttled(
     extra: Optional[dict[str, Any]] = None,
     exc_info: bool | BaseException | None = None,
 ) -> None:
-    """Emit a log record at most once during the specified interval."""
+    """Compatibility wrapper over utils.log_throttle canonical state."""
     if not isinstance(logger, logging.Logger):
         logger = LOGGER
-    logger.debug(
-        "Entered log_throttled",
-        extra={
-            "event": "logging_log_throttled_enter",
-            "log_key": key,
-            "level": level,
-            "interval": interval_sec,
-        },
+    payload = dict(extra or {})
+    event = str(payload.get("event") or key)
+    canonical_log_throttled(
+        logger,
+        level,
+        event,
+        key,
+        interval_sec,
+        msg,
+        *fmt_args,
+        extra=payload,
+        exc_info=exc_info,
+        throttle=DEFAULT_LOG_THROTTLE,
     )
-    try:
-        interval = float(interval_sec)
-        now = time.time()
-        with _THROTTLE_LOCK:
-            last_emit = _THROTTLE_STATE.get(key, 0.0)
-            if now - last_emit < interval:
-                return
-            _THROTTLE_STATE[key] = now
-        if fmt_args:
-            try:
-                msg = msg % fmt_args
-            except Exception:
-                msg = f"{msg} | fmt_args={fmt_args!r}"
-        logger.log(level, msg, extra=extra or {}, exc_info=exc_info)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "Failure in log_throttled: %s",
-            exc,
-            extra={"event": "logging_log_throttled_error", "log_key": key},
-            exc_info=exc,
-        )
-
 
 def log_once_or_throttled(
     logger: logging.Logger,
@@ -642,31 +678,17 @@ def log_state_change(
     msg: str | None = None,
     extra: Optional[dict[str, Any]] = None,
 ) -> bool:
-    """Log a message when the tracked value changes for the given key."""
-    logger.debug(
-        "Entered log_state_change",
-        extra={"event": "logging_log_state_change_enter", "log_key": key},
+    """Log immediately when a tracked value changes; otherwise remind periodically."""
+    return canonical_log_on_change(
+        logger,
+        key=key,
+        state=value,
+        message=msg or f"{key} changed to {value!r}",
+        reminder_seconds=float(os.getenv("LOG_STATE_CHANGE_REMINDER_SECONDS", "600") or "600"),
+        level=level,
+        extra=extra,
+        throttle=DEFAULT_LOG_THROTTLE,
     )
-    try:
-        with _STATE_CACHE_LOCK:
-            previous = _STATE_CACHE.get(key, None)
-            if previous == value:
-                return False
-            _STATE_CACHE[key] = value
-        message = msg or f"{key} changed: {previous!r} -> {value!r}"
-        payload = {"previous_value": previous, "current_value": value}
-        if extra:
-            payload.update(extra)
-        logger.log(level, message, extra=payload)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "Failure in log_state_change: %s",
-            exc,
-            extra={"event": "logging_log_state_change_error", "log_key": key},
-            exc_info=exc,
-        )
-        return False
 
 
 # =============================================================================
