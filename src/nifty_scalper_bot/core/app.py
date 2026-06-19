@@ -8184,6 +8184,14 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not pe_exec_ready and not selected_history_ready: missing.append('pe_exec_quote_or_history_not_ready')
         if not context_exec_ready: missing.append('context_exec_not_ready')
         if not broker_ready: missing.append('broker_not_ready')
+        if bool(getattr(ctx, "position_reconciliation_failed", False)):
+            missing.append("position_reconciliation_failed")
+        bracket_manager = getattr(ctx, "bracket_manager", None)
+        has_unresolved_exit = getattr(bracket_manager, "has_unresolved_exit", None)
+        if callable(has_unresolved_exit) and bool(has_unresolved_exit()):
+            missing.append("unresolved_exit_position")
+        if bool(getattr(ctx, "unprotected_broker_position", False)):
+            missing.append("unprotected_broker_position")
     normalized_decision = normalize_readiness_blockers(
         list(dict.fromkeys(missing)),
         get_market_state(),
@@ -12051,8 +12059,19 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         raw.cancel()         # cancel Tasks / Futures
                     raw = {}
             except Exception as _pos_err:
-                LOGGER.warning("Position fetch failed in reconcile: %s", _pos_err)
-                raw = {}
+                LOGGER.error(
+                    "POSITION_RECONCILE_FAILED stage=broker_position_fetch error_type=%s error_message=%s",
+                    type(_pos_err).__name__,
+                    str(_pos_err),
+                    extra={
+                        "event": "POSITION_RECONCILE_FAILED",
+                        "stage": "broker_position_fetch",
+                        "error_type": type(_pos_err).__name__,
+                        "error_message": str(_pos_err),
+                    },
+                    exc_info=True,
+                )
+                raise RuntimeError(f"broker_position_fetch_failed:{_pos_err}") from _pos_err
             broker_positions: list[Mapping[str, Any]] = []
             if isinstance(raw, list):
                 broker_positions = [p for p in raw if isinstance(p, Mapping)]
@@ -12069,9 +12088,13 @@ async def _reconcile_state(ctx: BotContext) -> None:
         return cast(list[Mapping[str, Any]], _run_sync_locked(_sync_operation))
 
     # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
+    LOGGER.info("POSITION_RECONCILE_STARTED", extra={"event": "POSITION_RECONCILE_STARTED"})
     if ctx.position_manager:
         try:
             broker_positions = await asyncio.to_thread(safe_sync_fetch)
+            setattr(ctx, "position_reconciliation_failed", False)
+            setattr(ctx, "position_reconciliation_error", None)
+            setattr(ctx, "position_reconciliation_last_success_at", datetime.now(timezone.utc).isoformat())
             # A. Fetch Broker Positions (REQUIRED STEP)
             # Initialise bm here so the ghost-bracket cleanup below never hits NameError
             # even when ctx.order_manager or _bracket_manager is absent.
@@ -12097,9 +12120,10 @@ async def _reconcile_state(ctx: BotContext) -> None:
 
                     # 3. If NOT managed, it is an Orphan -> Guard it!
                     if not is_managed:
+                        setattr(ctx, "unprotected_broker_position", True)
                         LOGGER.warning(
                             f"⚠️ ORPHAN DETECTED: {norm_symbol} (Qty: {pos.quantity}). Auto-Guarding...",
-                            extra={"event": "orphan_detected", "symbol": norm_symbol},
+                            extra={"event": "UNPROTECTED_POSITION_BLOCKING_ENTRIES", "symbol": norm_symbol},
                         )
 
                         avg_price = float(
@@ -12118,6 +12142,13 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             quantity=signed_qty,  # ✅ Now negative for SHORT
                             average_price=avg_price,
                             position_side=pos.side,
+                        )
+                        setattr(ctx, "unprotected_broker_position", False)
+                        LOGGER.info(
+                            "POSITION_ADOPTED_TO_BRACKET symbol=%s quantity=%s",
+                            norm_symbol,
+                            pos.quantity,
+                            extra={"event": "POSITION_ADOPTED_TO_BRACKET", "symbol": norm_symbol, "quantity": pos.quantity},
                         )
 
             # =================================================================
@@ -12152,9 +12183,32 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             bm.manual_override_close(
                                 ghost_sym, reason="State Reconciliation (Ghost)"
                             )
+                            LOGGER.warning(
+                                "STALE_BRACKET_RECONCILED_FLAT symbol=%s",
+                                ghost_sym,
+                                extra={"event": "STALE_BRACKET_RECONCILED_FLAT", "symbol": ghost_sym},
+                            )
+            LOGGER.info("POSITION_RECONCILE_SUCCESS", extra={"event": "POSITION_RECONCILE_SUCCESS"})
 
         except Exception as exc:
-            LOGGER.error(f"Position Sync/Adoption Failed: {exc}", exc_info=True)
+            setattr(ctx, "position_reconciliation_failed", True)
+            setattr(ctx, "position_reconciliation_error", str(exc))
+            setattr(ctx, "position_reconciliation_last_failed_at", datetime.now(timezone.utc).isoformat())
+            setattr(ctx, "live_orders_armed", False)
+            setattr(ctx, "execution_armed", False)
+            setattr(ctx, "live_block_reason", "position_reconciliation_failed")
+            LOGGER.error(
+                "POSITION_RECONCILE_FAILED error_type=%s error_message=%s",
+                type(exc).__name__,
+                str(exc),
+                extra={
+                    "event": "POSITION_RECONCILE_FAILED",
+                    "blocker": "position_reconciliation_failed",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
 
     _sync_data_hub_positions(getattr(ctx, "data_hub", None), ctx.position_manager)
 
