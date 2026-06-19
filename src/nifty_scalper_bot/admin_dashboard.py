@@ -371,7 +371,7 @@ def login_page(e: str = "") -> HTMLResponse:
     body = f"""<div class=wrap style="max-width:380px;margin-top:12vh">
     <div class=card><h2>Sign in</h2><p>Enter the admin password.</p>{err}
     <form method=post action="/admin/login">
-    <input type=password name=password autofocus placeholder="Password">
+    <input type=password name=password aria-label="Password" autofocus placeholder="Password">
     <button type=submit style="width:100%">Sign in</button></form></div></div>"""
     return HTMLResponse(_page(body))
 
@@ -416,7 +416,7 @@ def dashboard(request: Request) -> HTMLResponse:
     for label, key, sec in FIELDS:
         v = env.get(key, "")
         shown = ("••••••••" if v else "") if sec else v
-        rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{shown}" placeholder="(unchanged)">'
+        rows += f'<label for="{key}">{label} <span class=badge>{key}</span></label><input id="{key}" name="{key}" value="{shown}" placeholder="(unchanged)">'
     body = f"""{_topbar(live_on)}<div class=wrap>{_flash(request)}
     <div class=card><h2>Live Trading</h2>
     <p>{'Placing REAL orders with REAL money.' if live_on else 'Analysing only — no real orders. Turn on when ready.'}</p>{toggle}</div>
@@ -424,8 +424,8 @@ def dashboard(request: Request) -> HTMLResponse:
     <div class=card><h2>Daily Token</h2>
     <p>Easiest: paste today's <b>request token</b> (from the Kite login redirect URL) and the bot will fetch the access token for you, then restart.</p>
     <form method=post action="/admin/token">
-    <label>Request Token (recommended)</label><input name="request_token" placeholder="paste request_token from login URL">
-    <label>…or Access Token (if you already have it)</label><input name="access_token" placeholder="paste access_token directly">
+    <label for="request_token">Request Token (recommended)</label><input id="request_token" name="request_token" placeholder="paste request_token from login URL">
+    <label for="access_token">…or Access Token (if you already have it)</label><input id="access_token" name="access_token" placeholder="paste access_token directly">
     <button class=blu type=submit>Update token &amp; restart</button></form></div>
 
     <div class=card><h2>Credentials &amp; Settings</h2>
@@ -528,9 +528,9 @@ def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLRes
     body = f"""{_topbar(False)}<div class="wrap wide">
     <div class=card><h2>Logs <span class=muted id=stamp></span> <span id=botstat class=badge style="margin-left:8px">checking…</span> <span id=cnt class=badge></span></h2>
     <div class=grid>
-      <div><label>Lines</label><input id=lines value="{lines}"></div>
-      <div><label>Filter contains</label><input id=contains value="{contains}" placeholder="e.g. ORDER_SENT"></div>
-      <div><label>Auto-refresh</label>
+      <div><label for="lines">Lines</label><input id=lines value="{lines}"></div>
+      <div><label for="contains">Filter contains</label><input id=contains value="{contains}" placeholder="e.g. ORDER_SENT"></div>
+      <div><label for="auto">Auto-refresh</label>
         <select id=auto style="width:100%;padding:11px;border-radius:9px;background:#0a1019;color:var(--fg);border:1px solid var(--bd)">
           <option value=3>Every 3s</option><option value=5 selected>Every 5s</option>
           <option value=10>Every 10s</option><option value=0>Off</option></select></div>
