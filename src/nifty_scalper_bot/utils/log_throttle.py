@@ -14,14 +14,30 @@ from typing import Any
 CRITICAL_EVENTS = {
     "ORDER_SUBMITTED",
     "ORDER_REJECTED",
+    "ORDER_REJECTED_FATAL",
     "ORDER_FILLED",
+    "ORDER_CANCELLED",
+    "ORDER_CANCEL_FAILED",
+    "ORDER_MODIFY_FAILED",
+    "ORDER_TIMEOUT",
+    "ORDER_UNKNOWN_STATUS",
+    "ORDER_KILL_SWITCH_ENGAGED",
+    "ORDER_KILL_SWITCH_STATE",
     "POSITION_OPENED",
     "POSITION_CLOSED",
-    "BRACKET_EXIT_ORDER_FAILED",
-    "EXIT_FAILED_ESCALATED",
-    "ORDER_KILL_SWITCH_ENGAGED",
+    "POSITION_CLOSE_FAILED",
     "POSITION_RECONCILE_FAILED",
+    "POSITION_RECONCILED",
     "UNPROTECTED_POSITION_BLOCKING_ENTRIES",
+    "BRACKET_EXIT_ORDER_FAILED",
+    "BRACKET_EXIT_FAILED",
+    "EXIT_ORDER_SUBMITTED",
+    "EXIT_ORDER_REJECTED",
+    "EXIT_FAILED_ESCALATED",
+    "RISK_REJECTED",
+    "RISK_LIMIT_BREACHED",
+    "MARGIN_REJECTED",
+    "BROKER_REJECTED",
 }
 
 
@@ -228,7 +244,16 @@ DEFAULT_LOG_THROTTLE = LogThrottle()
 
 def event_is_never_throttled(event: str | None) -> bool:
     text = str(event or "").upper()
-    return text in CRITICAL_EVENTS or "AUTH" in text or "SESSION" in text or "UNCAUGHT" in text or "WEBSOCKET_DISCONNECT" in text or "WEBSOCKET_RECONNECT" in text
+    if text in CRITICAL_EVENTS:
+        return True
+    critical_prefixes = (
+        "ORDER_",
+        "POSITION_",
+        "EXIT_FAILED",
+        "BRACKET_EXIT",
+        "UNPROTECTED_POSITION",
+    )
+    return text.startswith(critical_prefixes) or "AUTH" in text or "SESSION" in text or "UNCAUGHT" in text or "WEBSOCKET_DISCONNECT" in text or "WEBSOCKET_RECONNECT" in text
 
 
 def log_throttled(logger: logging.Logger, level: int, event: str, key: str, interval_seconds: float, message: str, *args: Any, **kwargs: Any) -> bool:

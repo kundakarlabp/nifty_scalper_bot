@@ -107,3 +107,44 @@ def test_malformed_logging_does_not_raise(caplog):
     logger = logging.getLogger("tests.malformed.safe")
     with caplog.at_level(logging.INFO):
         assert log_throttled(logger, logging.INFO, "EV", "badfmt", 0, "bad %s %s", "one", throttle=throttle)
+
+
+def test_runner_repeated_signal_rejection_is_throttled(caplog):
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+    from nifty_scalper_bot.utils.log_throttle import DEFAULT_LOG_THROTTLE
+
+    with DEFAULT_LOG_THROTTLE._lock:
+        DEFAULT_LOG_THROTTLE._states.clear()
+        DEFAULT_LOG_THROTTLE._suppressed.clear()
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = logging.getLogger("nifty_scalper_bot.strategies.runner.test")
+    runner._record_trade_decision_snapshot = lambda **_kwargs: None
+    with caplog.at_level(logging.INFO):
+        first = runner._reject_signal_execution(symbol="NFO:NIFTY1CE", trace_id="t1", reason="strategy_score_below_threshold", details={"strategy": "s1"})
+        second = runner._reject_signal_execution(symbol="NFO:NIFTY1CE", trace_id="t2", reason="strategy_score_below_threshold", details={"strategy": "s1"})
+    assert first.accepted is False
+    assert second.accepted is False
+    records = [r for r in caplog.records if getattr(r, "event", "") == "SIGNAL_EXECUTION_RESULT"]
+    assert len(records) == 1
+
+
+def test_order_manager_kill_switch_status_logs_on_change_only(caplog):
+    from nifty_scalper_bot.execution.order_manager import OrderManager
+    from nifty_scalper_bot.utils.log_throttle import DEFAULT_LOG_THROTTLE
+
+    with DEFAULT_LOG_THROTTLE._lock:
+        DEFAULT_LOG_THROTTLE._change_states.clear()
+    manager = OrderManager.__new__(OrderManager)
+    manager._logger = logging.getLogger("nifty_scalper_bot.execution.order_manager.test")
+    manager._kill_switch_engaged_at = None
+    manager._kill_switch_allow_auto_reset = False
+    manager._kill_switch_auto_reset_seconds = 900
+    manager._kill_switch_reason = None
+    manager._consecutive_failures = 0
+    manager._kill_switch_failure_history = []
+    manager._kill_switch_last_reset = None
+    with caplog.at_level(logging.INFO):
+        manager._log_kill_switch_status()
+        manager._log_kill_switch_status()
+    records = [r for r in caplog.records if getattr(r, "event", "") == "ORDER_KILL_SWITCH_STATUS"]
+    assert len(records) == 1

@@ -86,6 +86,7 @@ from nifty_scalper_bot.storage.journal import AtomicKV
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.circuit_breaker import CircuitBreaker
 from nifty_scalper_bot.utils.errors import RateLimitError
+from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.market_hours import get_time_status
@@ -2085,13 +2086,19 @@ class OrderManager:
 
     def _log_kill_switch_status(self) -> None:
         status = self.get_kill_switch_status()
-        self._logger.info(
-            "ORDER_KILL_SWITCH_STATUS active=%s reason=%s failures=%s engaged_at=%s auto_reset_allowed=%s",
-            status.get("active"),
-            status.get("kill_reason"),
-            status.get("consecutive_failures"),
-            status.get("engaged_at"),
-            status.get("auto_reset_allowed"),
+        log_on_change(
+            self._logger,
+            key="ORDER_KILL_SWITCH_STATUS",
+            state=(status.get("active"), status.get("kill_reason"), status.get("consecutive_failures"), status.get("engaged_at")),
+            message="ORDER_KILL_SWITCH_STATUS active=%s reason=%s failures=%s engaged_at=%s auto_reset_allowed=%s" % (
+                status.get("active"),
+                status.get("kill_reason"),
+                status.get("consecutive_failures"),
+                status.get("engaged_at"),
+                status.get("auto_reset_allowed"),
+            ),
+            reminder_seconds=300.0,
+            level=logging.INFO,
             extra={"event": "ORDER_KILL_SWITCH_STATUS", **status},
         )
 
@@ -2348,12 +2355,17 @@ class OrderManager:
             now_ts = time.time()
             if now_ts - self._last_kill_switch_log_ts >= 300.0:
                 self._last_kill_switch_log_ts = now_ts
-                self._logger.info(
+                log_throttled_live(
+                    self._logger,
+                    logging.INFO,
+                    "ORDER_KILL_SWITCH_BLOCK",
+                    f"ORDER_KILL_SWITCH_BLOCK:{symbol}:{self._kill_switch_reason}",
+                    300.0,
                     "ORDER_KILL_SWITCH_BLOCK symbol=%s consecutive_failures=%s reason=%s",
                     symbol,
                     self._consecutive_failures,
                     self._kill_switch_reason,
-                        extra={"event": "ORDER_KILL_SWITCH_BLOCK", "symbol": symbol, "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason},
+                    extra={"event": "ORDER_KILL_SWITCH_BLOCK", "symbol": symbol, "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason},
                 )
             self._logger.warning(
                 "ORDER_BLOCKED reason=kill_switch_active kill_reason=%s failures=%s engaged_at=%s trace_id=%s symbol=%s side=%s qty=%s last_failure_exception_type=%s last_failure_exception_message=%s",

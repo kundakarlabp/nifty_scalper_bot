@@ -122,7 +122,7 @@ from nifty_scalper_bot.strategies.signal_quality import (
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
-from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
+from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
@@ -3600,7 +3600,12 @@ class StrategyRunner:
     ) -> SignalExecutionResult:
         """Log and return rejection. Args: symbol/trace_id/reason/details. Returns: result. Raises: none."""
         payload = dict(details or {})
-        self._logger.info(
+        log_throttled_live(
+            self._logger,
+            logging.INFO,
+            "SIGNAL_EXECUTION_RESULT",
+            f"SIGNAL_EXECUTION_RESULT:{symbol}:{reason}",
+            float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
             "SIGNAL_EXECUTION_RESULT accepted=False reason=%s symbol=%s trace_id=%s",
             reason,
             symbol,
@@ -7414,10 +7419,25 @@ class StrategyRunner:
                 "order_manager_block_reason": order_manager_block_reason,
             }
             _snap_reason = str(self._runtime_readiness_reason or "")
-            _snap_key = f"readiness_snap:{symbol}:{_snap_reason}"
-            _snap_interval = float(os.getenv("RUNNER_READINESS_SNAP_INTERVAL_SECONDS", "60") or "60")
-            if self._should_log_throttled(_snap_key, _snap_interval):
-                self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), _snap_reason, extra=payload)
+            _snap_state = (
+                bool(self._runtime_evaluation_ready),
+                bool(self._runtime_live_orders_armed),
+                universe_ready,
+                _snap_reason,
+                bool(payload.get("ce_quote_ready")),
+                bool(payload.get("pe_quote_ready")),
+                bool(payload.get("ce_history_ready")),
+                bool(payload.get("pe_history_ready")),
+            )
+            log_on_change(
+                self._logger,
+                key=f"LIVE_TRADING_READINESS_SNAPSHOT:{symbol}",
+                state=_snap_state,
+                message="LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s" % (symbol, bool(self._runtime_live_orders_armed), _snap_reason),
+                reminder_seconds=float(os.getenv("RUNNER_READINESS_SNAP_REMINDER_SECONDS", "600") or "600"),
+                level=logging.INFO,
+                extra=payload,
+            )
         except Exception as exc:
             self._logger.warning(
                 "LIVE_TRADING_READINESS_SNAPSHOT_FAILED symbol=%s error_type=%s error=%s",
@@ -7486,13 +7506,16 @@ class StrategyRunner:
             active_symbol = bool(sym and sym in active_subs)
             selected_pair = (getattr(self, "_active_selected_ce", None), getattr(self, "_active_selected_pe", None))
             state_key = (sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, selected_pair, get_runtime_market_mode())
-            if getattr(self, "_last_selected_subscription_state_key", None) != state_key or self._should_log_throttled(f"selected_subscription_summary:{sym}", float(os.getenv("RUNNER_BOOTSTRAP_LOG_INTERVAL_SECONDS", "60") or "60")):
-                self._last_selected_subscription_state_key = state_key
-                self._logger.info(
-                    "SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s",
-                    sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, None,
-                    extra={"event": "SELECTED_OPTION_SUBSCRIPTION_STATE", "symbol": sym, "token": token_int, "desired": desired, "subscribed": subscribed or active_symbol or confirmed, "fresh_tick": fresh_tick, "tick_age_s": None, "selected_ce": selected_pair[0], "selected_pe": selected_pair[1], "market_mode": get_runtime_market_mode()},
-                )
+            self._last_selected_subscription_state_key = state_key
+            log_on_change(
+                self._logger,
+                key=f"SELECTED_OPTION_SUBSCRIPTION_STATE:{sym}",
+                state=state_key,
+                message="SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s" % (sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, None),
+                reminder_seconds=float(os.getenv("RUNNER_BOOTSTRAP_LOG_REMINDER_SECONDS", "600") or "600"),
+                level=logging.INFO,
+                extra={"event": "SELECTED_OPTION_SUBSCRIPTION_STATE", "symbol": sym, "token": token_int, "desired": desired, "subscribed": subscribed or active_symbol or confirmed, "fresh_tick": fresh_tick, "tick_age_s": None, "selected_ce": selected_pair[0], "selected_pe": selected_pair[1], "market_mode": get_runtime_market_mode()},
+            )
             return bool(active_symbol or desired or subscribed or confirmed or fresh_tick)
         ce_sub = _sub_state(ce_symbol, ce_token, ce_quote)
         pe_sub = _sub_state(pe_symbol, pe_token, pe_quote)
@@ -7528,15 +7551,15 @@ class StrategyRunner:
             symbol_role = self._symbol_role_for_runner(normalized_boot_symbol)
         except Exception:
             symbol_role = "unknown"
-        _boot_key = f"bootstrap:{symbol}:{ready}:{reason}"
-        _boot_interval = float(os.getenv("RUNNER_BOOTSTRAP_LOG_INTERVAL_SECONDS", "60") or "60")
-        if self._should_log_throttled(_boot_key, _boot_interval):
-            self._logger.info(
-                "LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s",
-                symbol,
-                ready,
-                reason,
-                extra={
+        _boot_state = (ready, reason, ce_symbol, pe_symbol, ce_sub, pe_sub, ce_quote, pe_quote, ce_depth, pe_depth, ce_hist, pe_hist)
+        log_on_change(
+            self._logger,
+            key=f"LIVE_UNIVERSE_BOOTSTRAP_STATUS:{symbol}",
+            state=_boot_state,
+            message="LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s" % (symbol, ready, reason),
+            reminder_seconds=float(os.getenv("RUNNER_BOOTSTRAP_LOG_REMINDER_SECONDS", "600") or "600"),
+            level=logging.INFO,
+            extra={
                     "event": "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
                     "symbol": symbol,
                     "evaluated_symbol": normalized_boot_symbol,
