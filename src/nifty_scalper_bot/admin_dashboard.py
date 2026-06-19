@@ -18,7 +18,9 @@ import os
 import re
 import secrets
 import subprocess
+import threading
 import time
+from collections import deque
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -177,24 +179,63 @@ def _tail_file(path: Path, lines: int, *, max_bytes: int = 2_000_000) -> str:
     return "\n".join(chunk.decode("utf-8", errors="replace").splitlines()[-lines:])
 
 
-_LOGS_CACHE: dict[tuple, tuple[float, str]] = {}
+# ── Super-lite logs: one background journalctl --follow streams into an
+# in-memory ring buffer; request handlers read from memory only. No per-request
+# subprocess, no disk storage — so a slow journal can never block the shared
+# threadpool or starve the trading engine.
+_RING_MAX = max(500, int(os.getenv("ADMIN_LOG_RING_LINES", "6000") or "6000"))
+_LOG_RING: "deque[str]" = deque(maxlen=_RING_MAX)
+_LOG_FOLLOWER_STARTED = False
+_LOG_FOLLOWER_LOCK = threading.Lock()
 
 
-def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "", clean: bool = True) -> str:
-    lines = max(50, min(int(lines or 400), 20000))
-    # The Logs page polls this every few seconds and the page/status/download all
-    # call it. Each call otherwise spawns a journalctl subprocess (up to 15s),
-    # which saturates the shared threadpool and hangs the dashboard. Cache results
-    # for a couple of seconds keyed by the query so polling is near-instant while
-    # logs stay fresh. Time-window/download queries (since/until) bypass the cache.
-    ttl = float(os.getenv("ADMIN_LOGS_CACHE_SECONDS", "2.5") or "2.5")
-    cache_key = (lines, contains, clean)
-    cacheable = not since and not until
-    now = time.time()
-    if cacheable and ttl > 0:
-        hit = _LOGS_CACHE.get(cache_key)
-        if hit and now - hit[0] < ttl:
-            return hit[1]
+def _log_follower_loop() -> None:
+    """Stream the service journal into the in-memory ring for the process life."""
+    while True:
+        try:
+            proc = subprocess.Popen(
+                [
+                    "journalctl", "-u", SERVICE_NAME,
+                    "-n", str(_RING_MAX), "-f", "--no-pager", "-o", "cat",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    _LOG_RING.append(line.rstrip("\n"))
+        except Exception:
+            pass
+        # journalctl unavailable/exited: backfill from the log file if present,
+        # then wait briefly and re-attach.
+        try:
+            if LOG_PATH.exists():
+                for line in _tail_file(LOG_PATH, _RING_MAX).splitlines():
+                    _LOG_RING.append(line)
+        except Exception:
+            pass
+        time.sleep(2.0)
+
+
+def _ensure_log_follower() -> None:
+    global _LOG_FOLLOWER_STARTED
+    if _LOG_FOLLOWER_STARTED:
+        return
+    with _LOG_FOLLOWER_LOCK:
+        if _LOG_FOLLOWER_STARTED:
+            return
+        threading.Thread(
+            target=_log_follower_loop, name="admin-log-follower", daemon=True
+        ).start()
+        _LOG_FOLLOWER_STARTED = True
+
+
+def _gather_logs_window(
+    lines: int, since: str, until: str, contains: str, clean: bool
+) -> str:
+    """One-off journalctl for explicit time-window downloads (never polled)."""
     text = ""
     try:
         cmd = ["journalctl", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager", "-o", "cat"]
@@ -211,22 +252,35 @@ def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "
         try:
             text = _tail_file(LOG_PATH, lines)
         except Exception as exc:  # noqa: BLE001
-            text = f"log read error: {exc}"
-    if not text:
-        return "Waiting for logs…"
+            return f"log read error: {exc}"
     rows = text.splitlines()
     if clean:
         rows = [c for c in (_clean_log_line(r) for r in rows) if c]
     if contains:
         n = contains.lower()
         rows = [r for r in rows if n in r.lower()]
-    result = "\n".join(rows) if rows else "No matching log lines."
-    if cacheable and ttl > 0:
-        _LOGS_CACHE[cache_key] = (now, result)
-        if len(_LOGS_CACHE) > 32:  # bound the cache
-            for k in list(_LOGS_CACHE)[:-16]:
-                _LOGS_CACHE.pop(k, None)
-    return result
+    return "\n".join(rows) if rows else "No matching log lines."
+
+
+def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "", clean: bool = True) -> str:
+    lines = max(50, min(int(lines or 400), 20000))
+    # Explicit time-window queries are manual download-only (never polled), so a
+    # one-off subprocess there is fine. Everything else — the polling Logs page,
+    # status, trades — is served straight from the in-memory ring with no
+    # subprocess and no disk access, so the request path never blocks.
+    if since or until:
+        return _gather_logs_window(lines, since, until, contains, clean)
+    _ensure_log_follower()
+    rows = list(_LOG_RING)
+    if clean:
+        rows = [c for c in (_clean_log_line(r) for r in rows) if c]
+    if contains:
+        n = contains.lower()
+        rows = [r for r in rows if n in r.lower()]
+    rows = rows[-lines:]
+    if not rows:
+        return "Waiting for logs…"
+    return "\n".join(rows)
 
 
 def _restart_service() -> None:
@@ -541,23 +595,16 @@ def status_json(request: Request) -> JSONResponse:
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
         return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]})
-    # Lightweight health: is the trading engine up, or degraded/stopped?
+    # The dashboard runs inside the bot process: if this handler is answering,
+    # the process is alive. Derive health from the in-memory log tail only — no
+    # systemctl/journalctl subprocess on the request path.
     label, color = "running", "#3fb950"
     try:
-        out = subprocess.run(
-            ["systemctl", "is-active", SERVICE_NAME],
-            capture_output=True, text=True, timeout=5,
-        )
-        active = out.stdout.strip()
-        if active != "active":
-            label, color = active or "stopped", "#f85149"
-        else:
-            # Look for a recent degraded/crash marker in the tail.
-            tail = _gather_logs(60, clean=True)
-            if "degraded mode" in tail or "Missing required env" in tail:
-                label, color = "degraded", "#d29922"
-            elif "Bot fully operational" in tail or "fully operational" in tail:
-                label, color = "operational", "#3fb950"
+        tail = _gather_logs(60, clean=True)
+        if "degraded mode" in tail or "Missing required env" in tail:
+            label, color = "degraded", "#d29922"
+        elif "fully operational" in tail:
+            label, color = "operational", "#3fb950"
     except Exception:
         label, color = "unknown", "#8b97a6"
     _STATUS_CACHE.update({"at": now, "label": label, "color": color})
