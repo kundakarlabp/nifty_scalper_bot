@@ -1570,6 +1570,35 @@ class BracketManager:
                 bracket.last_exit_error = submit.error_message or submit.status
                 bracket.pending_exit_order_id = None
                 bracket.exit_order_id = None
+                decision = dict(getattr(self.order_manager, "_last_order_decision", {}) or {})
+                LOGGER.error(
+                    "BRACKET_EXIT_ORDER_FAILED symbol=%s bracket_id=%s remaining_qty=%s attempt=%s error_type=%s error_message=%s retryable=%s order_manager_reason=%s broker_attempted=%s kill_switch_active=%s broker_rejection=%s",
+                    symbol,
+                    bracket.bracket_id,
+                    bracket.remaining_quantity,
+                    attempt,
+                    submit.error_type,
+                    submit.error_message,
+                    submit.retryable,
+                    decision.get("block_reason"),
+                    decision.get("broker_attempted"),
+                    bool(getattr(self.order_manager, "_kill_switch_engaged_at", None)),
+                    submit.broker_payload,
+                    extra={
+                        "event": "BRACKET_EXIT_ORDER_FAILED",
+                        "symbol": symbol,
+                        "bracket_id": bracket.bracket_id,
+                        "remaining_qty": bracket.remaining_quantity,
+                        "attempt": attempt,
+                        "error_type": submit.error_type,
+                        "error_message": submit.error_message,
+                        "retryable": submit.retryable,
+                        "order_manager_reason": decision.get("block_reason"),
+                        "broker_attempted": decision.get("broker_attempted"),
+                        "kill_switch_active": bool(getattr(self.order_manager, "_kill_switch_engaged_at", None)),
+                        "broker_rejection": submit.broker_payload,
+                    },
+                )
                 if submit.retryable and self._exit_retry_enabled and attempt < self._exit_max_retry_attempts:
                     bracket.exit_state = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
                     bracket.entry_status = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
@@ -2284,14 +2313,31 @@ class BracketManager:
                     retryable=False,
                     broker_payload={"order_id": str(order_id), "order_type": order_type, "side": side},
                 )
+            decision = dict(getattr(self.order_manager, "_last_order_decision", {}) or {})
+            details = dict(decision.get("details") or {})
+            broker_payload = dict(details.get("broker_payload") or details)
+            error_type = str(decision.get("failure_class") or decision.get("block_reason") or "missing_order_id")
+            error_message = str(
+                decision.get("error_message")
+                or details.get("error_message")
+                or details.get("broker_rejection")
+                or broker_payload.get("message")
+                or broker_payload.get("error")
+                or decision.get("block_reason")
+                or "place_order returned no order_id"
+            )
             return SubmitExitOrderResult(
                 accepted=False,
                 order_id=None,
                 status="rejected",
-                error_type="broker_rejected",
-                error_message="place_order returned no order_id",
-                retryable=True,
-                broker_payload={},
+                error_type=error_type,
+                error_message=error_message,
+                retryable=bool(decision.get("retryable", error_type not in {"broker_config_error", "fatal_order_error"})),
+                broker_payload={
+                    "order_manager_decision": decision,
+                    "broker_payload": broker_payload,
+                    "kill_switch_active": bool(getattr(self.order_manager, "_kill_switch_engaged_at", None)),
+                },
             )
         except Exception as exc:  # noqa: BLE001 - process boundary; result is structured and safe
             message = str(exc)

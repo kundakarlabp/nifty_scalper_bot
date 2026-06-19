@@ -2935,7 +2935,10 @@ class OrderManager:
                 result_holder = {"resp": None}
 
                 def target():
-                    result_holder["resp"] = _broker_call(call_args)
+                    try:
+                        result_holder["resp"] = _broker_call(call_args)
+                    except Exception as exc:  # noqa: BLE001 - re-raised on order thread with broker text intact
+                        result_holder["resp"] = exc
 
                 # We use the 'Thread' class already imported at top of file
                 t = Thread(target=target, name=f"ord_{unique_client_id}", daemon=True)
@@ -3133,6 +3136,18 @@ class OrderManager:
                         self._clear_pending_signal(signal_id)
                         self._remember_signal(signal_id)
                     return order_id
+                _log_order_decision(
+                    allowed=False,
+                    block_reason="missing_order_id",
+                    broker_attempted=True,
+                    details={
+                        "failure_class": "missing_order_id",
+                        "error_message": "broker response did not include order_id",
+                        "broker_payload": response if isinstance(response, dict) else {"raw_response": repr(response)},
+                        "retryable": True,
+                    },
+                )
+                raise ExecutionError(f"missing_order_id: broker response did not include order_id payload={response!r}")
 
             except Exception as e:
                 msg = str(e).lower()
@@ -3148,6 +3163,8 @@ class OrderManager:
                     failure_class = "broker_rejected"
                 elif "timeout" in msg:
                     failure_class = "timeout"
+                elif "missing_order_id" in msg or "did not include order_id" in msg:
+                    failure_class = "missing_order_id"
                 elif "margin" in msg or "fund" in msg:
                     failure_class = "insufficient_margin"
                 elif "market closed" in msg:
@@ -3229,7 +3246,7 @@ class OrderManager:
                     self._log_kill_switch_status()
 
                 # Fail Fast logic
-                if failure_class == "broker_config_error" or any(
+                if failure_class != "missing_order_id" and (failure_class == "broker_config_error" or any(
                     x in msg
                     for x in [
                         "400",
@@ -3238,7 +3255,7 @@ class OrderManager:
                         "bad request",
                         "insufficient funds",
                     ]
-                ):
+                )):
                     self._logger.critical(
                         f"🛑 FATAL Payload Error: {e}",
                         extra={"event": "fatal_order_error"},
@@ -3252,6 +3269,18 @@ class OrderManager:
                         meta={"trade_id": trade_id, "error": str(e)},
                     )
                     _log_order_decision(allowed=False, block_reason="fatal_order_error", broker_attempted=True)
+                    if failure_class == "broker_config_error":
+                        _log_order_decision(
+                            allowed=False,
+                            block_reason="broker_config_error",
+                            broker_attempted=True,
+                            details={
+                                "failure_class": failure_class,
+                                "error_message": str(e),
+                                "broker_rejection": self._sanitize_broker_error(e),
+                                "retryable": False,
+                            },
+                        )
                     if pending_signal_marked:
                         self._clear_pending_signal(signal_id)
                     return None

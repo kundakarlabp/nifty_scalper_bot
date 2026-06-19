@@ -2910,8 +2910,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if force_ipv4:
             try:
                 transport = httpx.HTTPTransport(local_address="0.0.0.0")
+                LOGGER.info(
+                    "ZERODHA_HTTP_IPV4_FORCED enabled=True local_address=0.0.0.0",
+                    extra={"event": "ZERODHA_HTTP_IPV4_FORCED", "enabled": True, "local_address": "0.0.0.0"},
+                )
             except Exception:  # pragma: no cover - defensive
                 transport = None
+        else:
+            LOGGER.info(
+                "ZERODHA_HTTP_IPV4_FORCED enabled=False local_address=None",
+                extra={"event": "ZERODHA_HTTP_IPV4_FORCED", "enabled": False, "local_address": None},
+            )
         return httpx.Client(
             base_url=base_url,
             timeout=self._timeout,

@@ -179,3 +179,45 @@ def test_position_reconcile_failure_keeps_pending_then_escalates() -> None:
 
     assert bracket.exit_state == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
     assert bracket.exit_pending is True
+
+
+def test_missing_order_id_failure_carries_order_manager_reason_and_payload(caplog) -> None:
+    om = _OrderManager(order_id=None)
+    om._last_order_decision = {
+        "block_reason": "missing_order_id",
+        "details": {"broker_payload": {"status": "error", "message": "IP not allowed"}},
+        "broker_attempted": True,
+        "retryable": False,
+    }
+    manager = _active_manager(om)
+
+    with caplog.at_level(logging.ERROR):
+        manager.on_tick("NFO:NIFTY2660923100CE", 157.10)
+
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert bracket.last_exit_error == "IP not allowed"
+    assert manager.has_unresolved_exit() is True
+    assert "BRACKET_EXIT_ORDER_FAILED" in caplog.text
+
+
+def test_repeated_failed_exits_set_unresolved_until_broker_confirms_flat() -> None:
+    broker = _Broker(status="OPEN", positions=[{"symbol": "NFO:NIFTY2660923100CE", "quantity": 65}])
+    om = _OrderManager(broker=broker, order_id=None)
+    manager = _active_manager(om)
+    manager._exit_retry_backoffs = [0.0, 0.0, 0.0]
+
+    manager.on_tick("NFO:NIFTY2660923100CE", 157.10)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    for _ in range(4):
+        bracket.next_exit_attempt_at = time.time() - 0.1
+        manager.on_tick("NFO:NIFTY2660923100CE", 156.80)
+
+    assert bracket.exit_state == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+    assert manager.has_unresolved_exit() is True
+
+    broker.positions = []
+    manager._reconcile_exit_state(bracket, requested_by="test_flat")
+    assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
+    assert manager.has_unresolved_exit() is False
