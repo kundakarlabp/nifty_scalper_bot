@@ -48,6 +48,7 @@ from typing import (
     runtime_checkable,
 )
 
+from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 # --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
@@ -681,11 +682,10 @@ class BracketManager:
         *args: object,
     ) -> None:
         """Emit a throttled log event. Args: level,key,interval_sec,message,args; Returns: none; Raises: none."""
-        now = time.time()
-        if now - self._throttle_log_at.get(key, 0.0) < interval_sec:
-            return
-        self._throttle_log_at[key] = now
-        getattr(LOGGER, level, LOGGER.info)(message, *args)
+        level_value = getattr(logging, str(level).upper(), logging.INFO)
+        event = key.split(":", 1)[0].upper() if key else "BRACKET_MANAGER_THROTTLED_LOG"
+        if log_throttled_live(LOGGER, level_value, event, key, interval_sec, message, *args):
+            self._throttle_log_at[key] = time.monotonic()
 
     def shutdown(self) -> None:
         """Stop watchdog processing. Args: none; Returns: none; Raises: none."""

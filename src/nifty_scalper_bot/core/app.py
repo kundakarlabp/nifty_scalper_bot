@@ -452,13 +452,14 @@ async def _polling_failover_supervisor_iteration(
                     extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "within_spot_stale_threshold", "age_ms": spot_age_ms, "threshold_ms": quote_stale_ms, "ws_ok": ws_ok},
                 )
                 return degraded_since, recovered_since
-            LOGGER.warning(
-                "POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s",
-                spot_age_ms,
-                quote_stale_ms,
-                ws_ok,
-                lagging,
-                extra={"event": "poll_fallback_activate", "reason": "ws_disconnected" if not ws_ok else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale", "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
+            _fallback_reason = "ws_disconnected" if not ws_ok else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale"
+            log_state_change(
+                LOGGER,
+                "POLLING_FALLBACK_ACTIVATE",
+                (_fallback_reason, ws_ok, lagging, futures_fresh, options_fresh),
+                level=logging.WARNING,
+                msg="POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s" % (_fallback_reason, spot_age_ms, quote_stale_ms, ws_ok, lagging),
+                extra={"event": "poll_fallback_activate", "reason": _fallback_reason, "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
             )
             _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), False)
             _safe_supervisor_call("polling_fallback.start", getattr(polling_fallback, "start", None))
@@ -471,7 +472,14 @@ async def _polling_failover_supervisor_iteration(
             symbol=spot_symbol,
             stale_after_ms=quote_stale_ms,
         )
-        LOGGER.info("poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s", spot_symbol, spot_age_ms)
+        log_state_change(
+            LOGGER,
+            f"poll_fallback_skipped_spot_only_stale:{spot_symbol}",
+            ("spot_only_stale", spot_symbol, bool(spot_fresh), bool(futures_fresh), bool(options_fresh)),
+            level=logging.INFO,
+            msg="poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s" % (spot_symbol, spot_age_ms),
+            extra={"event": "poll_fallback_skipped_spot_only_stale", "symbol": spot_symbol, "age_ms": spot_age_ms},
+        )
     degraded_since = None
     recovered_since = recovered_since or now_mono
     if now_mono - recovered_since >= recover_cooldown and bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False)):
@@ -1238,7 +1246,7 @@ from nifty_scalper_bot.utils.env import (
     normalize_path,
 )
 from nifty_scalper_bot.utils.errors import ConfigurationError
-from nifty_scalper_bot.utils.logging import get_logger, log_throttled, setup_logging
+from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled, setup_logging
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     allow_offhours_testing_safe,

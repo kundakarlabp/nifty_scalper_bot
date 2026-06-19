@@ -37,7 +37,7 @@ from nifty_scalper_bot.strategies.signal_generator import (
 from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )
-from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
+from nifty_scalper_bot.utils.log_throttle import maybe_emit_strategy_rejection_summary, record_strategy_evaluation, log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
@@ -4136,7 +4136,12 @@ class StrategyManager(_BaseStrategyManager):
                         blocked_reason = "single_vote_scalp_disabled"
                     else:
                         blocked_reason = "single_vote_gate_failed_unknown"
-                    log.info(
+                    log_throttled_live(
+                        log,
+                        logging.INFO,
+                        "TRADE_DECISION_TRACE",
+                        f"TRADE_DECISION_TRACE:{best_vote.strategy}:{symbol_norm}:{blocked_reason}",
+                        float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s selected_ce=%s selected_pe=%s strike_distance_from_atm=%s near_atm_threshold=%s selected_ok_reason=%s raw_score=%.2f confidence=%.2f",
                         symbol_norm,
                         best_vote.strategy,
@@ -4153,6 +4158,8 @@ class StrategyManager(_BaseStrategyManager):
                         best_vote.confidence,
                         extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "single_vote_gate", "blocked_reason": blocked_reason, "selected_ce": selected_ce, "selected_pe": selected_pe, "strike_distance_from_atm": strike_distance_from_atm, "near_atm_threshold": near_atm_threshold, "selected_ok_reason": selected_ok_reason, "raw_score": raw_trigger_score, "confidence": best_vote.confidence},
                     )
+                    record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=False, reason=str(blocked_reason), score=raw_trigger_score)
+                    maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
                     category = "strategy_single_vote_disabled" if blocked_reason == "single_vote_scalp_disabled" else ("context_direction_conflict" if blocked_reason == "underlying_direction_conflict" else "strategy_no_trigger")
                     _record_no_signal(category, blocked_reason, "single_vote_gate", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
                     return None
@@ -4172,11 +4179,18 @@ class StrategyManager(_BaseStrategyManager):
         metadata["final_trade_score"] = round(final_score, 3)
         if vetoed or final_score < threshold:
             blocked_reason = "hard_context_veto" if vetoed else "final_trade_score_below_threshold"
-            log.info(
+            log_throttled_live(
+                log,
+                logging.INFO,
+                "TRADE_DECISION_TRACE",
+                f"TRADE_DECISION_TRACE:{best_vote.strategy}:{symbol_norm}:{blocked_reason}",
+                float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
                 "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s data_gate=%s setup_score=%.2f setup_min=%.2f weighted_score=%.2f regime_weight=%.2f context_bonus=%.2f context_penalty=%.2f final_score=%.2f final_min=%.2f allowed=%s blocked_at=%s blocked_reason=%s",
                 symbol_norm, best_vote.strategy, best_vote.side, True, raw_trigger_score, threshold, weighted_trigger_score, _regime_weight(best_vote), context_bonus, context_penalty, final_score, threshold, False, "strategy_manager_combine", blocked_reason,
                 extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "data_gate": True, "setup_score": raw_trigger_score, "setup_min": threshold, "weighted_score": weighted_trigger_score, "regime_weight": _regime_weight(best_vote), "context_bonus": context_bonus, "context_penalty": context_penalty, "final_score": final_score, "final_min": threshold, "allowed": False, "blocked_at": "strategy_manager_combine", "blocked_reason": blocked_reason},
             )
+            record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=False, reason=str(blocked_reason), score=final_score)
+            maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
             _record_no_signal("strategy_score_below_threshold", blocked_reason, "strategy_manager_combine", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
             return None
         quality_score, quality_meta = self._compute_trade_quality_score(
@@ -4195,15 +4209,26 @@ class StrategyManager(_BaseStrategyManager):
         if not quality_pass:
             raw_reason = str(metadata.get("quality_block_reason") or "").strip().lower()
             metadata["quality_block_reason"] = "trade_quality_below_threshold" if raw_reason in {"", "ok"} else str(metadata.get("quality_block_reason"))
-            log.info(
+            log_throttled_live(
+                log,
+                logging.INFO,
+                "STRATEGY_QUALITY_REJECT",
+                f"STRATEGY_QUALITY_REJECT:{best_vote.strategy}:{symbol_norm}:{metadata['quality_block_reason']}",
+                float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
                 "STRATEGY_QUALITY_REJECT symbol=%s strategy=%s side=%s score=%.2f reason=%s",
                 symbol_norm,
                 best_vote.strategy,
                 best_vote.side,
                 quality_score,
                 metadata["quality_block_reason"],
+                extra={"event": "STRATEGY_QUALITY_REJECT", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "score": quality_score, "reason": metadata["quality_block_reason"]},
             )
-            log.info(
+            log_throttled_live(
+                log,
+                logging.INFO,
+                "TRADE_DECISION_TRACE",
+                f"TRADE_DECISION_TRACE:{best_vote.strategy}:{symbol_norm}:{metadata['quality_block_reason']}",
+                float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
                 "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s",
                 symbol_norm,
                 best_vote.strategy,
@@ -4211,7 +4236,10 @@ class StrategyManager(_BaseStrategyManager):
                 False,
                 "trade_quality_gate",
                 metadata["quality_block_reason"],
+                extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "trade_quality_gate", "blocked_reason": metadata["quality_block_reason"]},
             )
+            record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=False, reason=str(metadata["quality_block_reason"]), score=quality_score)
+            maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
             _record_no_signal("strategy_no_trigger", str(metadata["quality_block_reason"]), "trade_quality_gate", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
             return None
 
@@ -4268,6 +4296,8 @@ class StrategyManager(_BaseStrategyManager):
         metadata["approval_path"] = approval_path
         metadata["is_approved"] = True
         log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
+        record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=True, reason=str(approval_path), score=final_score)
+        maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
         self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)
         return Signal(
             action="BUY",
@@ -4538,6 +4568,8 @@ class StrategyManager(_BaseStrategyManager):
                 md[key] = value
         promoted = Signal(action="BUY", symbol=best_signal.symbol, quantity=best_signal.quantity, confidence=best_signal.confidence, reason=best_signal.reason, stop_loss=best_signal.stop_loss, take_profit=best_signal.take_profit, metadata=md)
         promoted_vote = StrategyVote(strategy=best_vote.strategy, side=best_vote.side, score=best_vote.score, confidence=best_vote.confidence, reasons=list(best_vote.reasons), metadata=md)
+        record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=str(symbol), accepted=True, reason="direction_context_aligned", score=raw_score)
+        maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
         log.info(
             "ORDERFLOW_TRIGGER_PROMOTED side=%s score=%.2f reason=direction_context_aligned symbol=%s direction_context_source=%s context_age_seconds=%.2f underlying_direction_confidence=%.2f",
             best_vote.side,

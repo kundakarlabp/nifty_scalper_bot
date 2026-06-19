@@ -71,7 +71,7 @@ from nifty_scalper_bot.streaming.websocket_manager import (
 from nifty_scalper_bot.execution.readiness import evaluate_quote_readiness, resolve_quote_bid_ask_spread
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.async_helpers import safe_task
-from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
+from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
@@ -2779,39 +2779,43 @@ class MarketDataManager:
                     if tick_age is None or tick_age <= stale_seconds:
                         return ltp
                     # Tick exists but is stale — log and fall through to broker
-                    last_warn = self._ltp_stale_warn_last.get(canonical_symbol, 0.0)
                     market_state = get_market_state()
                     log_interval = 900.0 if market_state != MarketState.OPEN else 60.0
-                    if now - last_warn >= log_interval:
-                        self._ltp_stale_warn_last[canonical_symbol] = now
-                        if market_state == MarketState.OPEN:
-                            self._logger.warning(
-                                "STALE_DATA symbol=%s age=%.2fs threshold=%.2fs — falling back to broker REST",
-                                canonical_symbol,
-                                tick_age,
-                                stale_seconds,
-                                extra={
-                                    "event": "STALE_DATA",
-                                    "symbol": canonical_symbol,
-                                    "age_s": round(float(tick_age), 3),
-                                    "threshold_s": stale_seconds,
-                                },
-                            )
-                        else:
-                            self._logger.debug(
-                                "OFF_MARKET_LTP_STALE symbol=%s age=%.2fs threshold=%.2fs state=%s",
-                                canonical_symbol,
-                                tick_age,
-                                stale_seconds,
-                                market_state.value,
-                                extra={
-                                    "event": "OFF_MARKET_LTP_STALE",
-                                    "symbol": canonical_symbol,
-                                    "age_s": round(float(tick_age), 3),
-                                    "threshold_s": stale_seconds,
-                                    "state": market_state.value,
-                                },
-                            )
+                    if market_state == MarketState.OPEN:
+                        log_on_change(
+                            self._logger,
+                            key=f"STALE_DATA:{canonical_symbol}",
+                            state=("STALE", round(float(stale_seconds), 0)),
+                            message="STALE_DATA symbol=%s age=%.2fs threshold=%.2fs — falling back to broker REST" % (canonical_symbol, tick_age, stale_seconds),
+                            reminder_seconds=log_interval,
+                            level=logging.WARNING,
+                            extra={
+                                "event": "STALE_DATA",
+                                "symbol": canonical_symbol,
+                                "age_s": round(float(tick_age), 3),
+                                "threshold_s": stale_seconds,
+                            },
+                        )
+                    else:
+                        log_throttled_live(
+                            self._logger,
+                            logging.DEBUG,
+                            "OFF_MARKET_LTP_STALE",
+                            f"OFF_MARKET_LTP_STALE:{canonical_symbol}:{market_state.value}",
+                            log_interval,
+                            "OFF_MARKET_LTP_STALE symbol=%s age=%.2fs threshold=%.2fs state=%s",
+                            canonical_symbol,
+                            tick_age,
+                            stale_seconds,
+                            market_state.value,
+                            extra={
+                                "event": "OFF_MARKET_LTP_STALE",
+                                "symbol": canonical_symbol,
+                                "age_s": round(float(tick_age), 3),
+                                "threshold_s": stale_seconds,
+                                "state": market_state.value,
+                            },
+                        )
             except (KeyError, TypeError, ValueError):
                 pass
 
@@ -6692,7 +6696,12 @@ class MarketDataManager:
                     1
                     for sym in stale_symbols_list
                 )
-            self._logger.info(
+            log_throttled_live(
+                self._logger,
+                logging.INFO,
+                "MARKET_DATA_HEALTH_SUMMARY",
+                f"MARKET_DATA_HEALTH_SUMMARY:{self._is_ws_connected()}:{subscribed}:{live_symbols}:{stale_symbols}",
+                float(os.getenv("LOG_THROTTLE_MARKET_DATA_HEALTH_SECONDS", "300") or "300"),
                 "MARKET_DATA_HEALTH_SUMMARY ws_connected=%s subscribed=%d live_symbols=%d stale_symbols=%d poll_fallbacks=%d bus_running=%s",
                 self._is_ws_connected(),
                 subscribed,
@@ -6700,6 +6709,7 @@ class MarketDataManager:
                 stale_symbols,
                 int(getattr(self, "_poll_fallback_count", 0)),
                 bool(getattr(getattr(self, "bus", None), "running", False)),
+                extra={"event": "MARKET_DATA_HEALTH_SUMMARY", "ws_connected": self._is_ws_connected(), "subscribed": subscribed, "live_symbols": live_symbols, "stale_symbols": stale_symbols},
             )
             now_epoch = time.time()
             last_detail_emit = float(getattr(self, "_last_stale_detail_emit_epoch", 0.0) or 0.0)
@@ -6757,11 +6767,13 @@ class MarketDataManager:
                         )
                 if not postmarket_quiet:
                     self._last_stale_detail_emit_epoch = now_epoch
-                    self._logger.info(
-                        "MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s",
-                        len(stale_symbols_list),
-                        len(fresh_symbols),
-                        self._is_ws_connected(),
+                    log_on_change(
+                        self._logger,
+                        key="MARKET_DATA_STALE_SYMBOLS_DETAIL",
+                        state=(tuple(sorted(stale_symbols_list)), self._is_ws_connected(), selected_ce_stale, selected_pe_stale),
+                        message="MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s" % (len(stale_symbols_list), len(fresh_symbols), self._is_ws_connected()),
+                        reminder_seconds=float(os.getenv("LOG_THROTTLE_MARKET_DATA_HEALTH_SECONDS", "300") or "300"),
+                        level=logging.INFO,
                         extra={
                             "event": "MARKET_DATA_STALE_SYMBOLS_DETAIL",
                             "total_symbols": subscribed,
