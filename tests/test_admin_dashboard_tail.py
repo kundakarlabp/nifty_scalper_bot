@@ -29,31 +29,30 @@ async def test_tail_file_is_byte_bounded(tmp_path: Path) -> None:
     assert rows[-1] == "line 99999"  # still anchored to the file's end
 
 
-async def test_status_json_caches_subprocess(monkeypatch) -> None:
-    # The Logs page polls status.json every few seconds; it must NOT spawn a
-    # systemctl subprocess on every poll (that saturated the threadpool and hung
-    # the dashboard). Second call within TTL must be served from cache.
+async def test_status_json_uses_no_subprocess(monkeypatch) -> None:
+    # The Logs page polls status.json every few seconds. It must derive health
+    # from the in-memory log tail (the dashboard runs inside the bot process, so
+    # answering at all means it's alive) and spawn NO subprocess — the old
+    # systemctl-per-poll saturated the threadpool and hung the dashboard.
+    import json as _json
+
     import nifty_scalper_bot.admin_dashboard as dash
 
     calls = {"n": 0}
 
-    class _Out:
-        stdout = "active"
-
-    def _fake_run(*_a, **_k):
+    def _boom(*_a, **_k):
         calls["n"] += 1
-        return _Out()
+        raise AssertionError("status.json must not spawn a subprocess")
 
-    monkeypatch.setattr(dash.subprocess, "run", _fake_run)
-    monkeypatch.setattr(dash, "_gather_logs", lambda *_a, **_k: "Bot fully operational")
+    monkeypatch.setattr(dash.subprocess, "run", _boom)
+    monkeypatch.setattr(dash.subprocess, "Popen", _boom)
+    monkeypatch.setattr(dash, "_gather_logs", lambda *_a, **_k: "fully operational")
     monkeypatch.setattr(dash, "_check_auth", lambda _r: None)
-    monkeypatch.setenv("ADMIN_STATUS_CACHE_SECONDS", "10")
-    dash._STATUS_CACHE.update({"at": 0.0})  # force a cold first call
+    dash._STATUS_CACHE.update({"at": 0.0})  # force a cold call
 
-    dash.status_json(request=None)  # cold -> spawns
-    dash.status_json(request=None)  # cached -> no spawn
-    dash.status_json(request=None)  # cached -> no spawn
-    assert calls["n"] == 1, "status.json must cache, not spawn systemctl every poll"
+    resp = dash.status_json(request=None)
+    assert calls["n"] == 0
+    assert _json.loads(bytes(resp.body))["label"] == "operational"
 
 
 async def test_read_env_is_cached(tmp_path, monkeypatch) -> None:
@@ -122,27 +121,37 @@ async def test_app_uses_normalize_symbol_not_datahub_normalize() -> None:
     assert normalize_symbol("nfo:nifty2662324100ce") == "NFO:NIFTY2662324100CE"
 
 
-async def test_gather_logs_is_cached(monkeypatch) -> None:
-    # The Logs page polls + page + download + status all call _gather_logs. Each
-    # call otherwise spawns a journalctl subprocess (up to 15s) and saturates the
-    # shared threadpool, hanging the dashboard. Repeated identical calls within the
-    # TTL must spawn journalctl once.
+async def test_gather_logs_reads_ring_not_subprocess(monkeypatch) -> None:
+    # The Logs page / status / trades all call _gather_logs on a poll. It must
+    # read the in-memory ring with NO subprocess on the request path (the old
+    # per-call journalctl saturated the threadpool and hung the dashboard). Only
+    # an explicit since/until download does a one-off journalctl.
     import nifty_scalper_bot.admin_dashboard as dash
-    dash._LOGS_CACHE.clear()
-    monkeypatch.setenv("ADMIN_LOGS_CACHE_SECONDS", "5")
+
+    monkeypatch.setattr(dash, "_LOG_FOLLOWER_STARTED", True, raising=False)
+    dash._LOG_RING.clear()
+    dash._LOG_RING.append("[2026-06-18 14:00:00 IST] ORDER_SENT x")
+
     calls = {"n": 0}
+
     class _O:
         returncode = 0
         stdout = "[2026-06-18 14:00:00 IST] ORDER_SENT x\n"
+
     def _run(*a, **k):
         calls["n"] += 1
         return _O()
+
     monkeypatch.setattr(dash.subprocess, "run", _run)
+
     a = dash._gather_logs(400)
     b = dash._gather_logs(400)
     c = dash._gather_logs(400)
-    assert calls["n"] == 1, "journalctl must be spawned once, then served from cache"
+    assert calls["n"] == 0, "polled path must read the ring, never spawn journalctl"
     assert a == b == c
-    # a download-style time-window query bypasses the cache (always fresh)
+    assert "ORDER_SENT x" in a
+
+    # An explicit time-window download bypasses the ring and does a one-off call.
     dash._gather_logs(400, since="2026-06-18")
-    assert calls["n"] == 2
+    assert calls["n"] == 1
+    dash._LOG_RING.clear()
