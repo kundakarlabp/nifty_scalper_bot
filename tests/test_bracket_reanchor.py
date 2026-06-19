@@ -80,8 +80,8 @@ async def test_missing_levels_untouched() -> None:
     assert out is plan
 
 
-async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
-    """End-to-end: a stale BUY plan is accepted (re-anchored), not rejected."""
+async def test_submit_blocks_material_executable_price_drift(monkeypatch: Any) -> None:
+    """End-to-end: a materially stale BUY plan is blocked before broker placement."""
     from nifty_scalper_bot.execution.order_manager import OrderPreflightResult
     from nifty_scalper_bot.execution.position_manager import PositionManager
     from nifty_scalper_bot.utils.rate_limiter import RateLimiter
@@ -112,8 +112,7 @@ async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
     plan = _plan("BUY", entry=112.70, sl=108.56, tp=116.93)
     result = mgr.submit_trade_plan_result(plan)
 
-    assert result.reason != "protected_price_invalidates_bracket"
-    assert result.accepted
-    # Re-anchored levels were what got submitted.
-    assert captured["entry_price"] == 138.45
-    assert captured["stop_loss"] < 138.45 < captured["take_profit"]
+    assert result.accepted is False
+    assert result.reason == "executable_price_drift"
+    assert result.broker_attempted is False
+    assert captured == {}

@@ -20,6 +20,7 @@ import secrets
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from collections import deque
 import urllib.parse
 import urllib.request
@@ -27,6 +28,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
+from nifty_scalper_bot.execution.mode import resolve_runtime_execution_mode
 
 router = APIRouter()
 
@@ -34,6 +36,9 @@ ENV_PATH = Path(os.getenv("BOT_ENV_FILE", "/home/ubuntu/nifty_scalper_bot/.env")
 LOG_PATH = Path(os.getenv("BOT_LOG_FILE", "/home/ubuntu/nifty_scalper_bot/bot.log"))
 SERVICE_NAME = os.getenv("BOT_SERVICE_NAME", "niftybot")
 APP_DIR = Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
+PROCESS_PID = os.getpid()
+PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
+APP_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("GIT_SHA") or "unknown"
 
 FIELDS: list[tuple[str, str, bool]] = [
     ("Zerodha API Key", "KITE_API_KEY", False),
@@ -262,7 +267,7 @@ def _gather_logs_window(
     return "\n".join(rows) if rows else "No matching log lines."
 
 
-def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "", clean: bool = True) -> str:
+def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "", clean: bool = True, current_process_only: bool = False) -> str:
     lines = max(50, min(int(lines or 400), 20000))
     # Explicit time-window queries are manual download-only (never polled), so a
     # one-off subprocess there is fine. Everything else — the polling Logs page,
@@ -274,6 +279,11 @@ def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "
     rows = list(_LOG_RING)
     if clean:
         rows = [c for c in (_clean_log_line(r) for r in rows) if c]
+    if rows:
+        rows.insert(0, f"BOT_PROCESS_STARTED process_pid={PROCESS_PID} process_started_at={PROCESS_STARTED_AT} app_commit_sha={APP_COMMIT_SHA}")
+    if current_process_only:
+        markers = (f"process_pid={PROCESS_PID}", f"process={PROCESS_PID}", f"pid={PROCESS_PID}", "BOT_PROCESS_STARTED")
+        rows = [r for r in rows if any(m in r for m in markers)]
     if contains:
         n = contains.lower()
         rows = [r for r in rows if n in r.lower()]
@@ -359,7 +369,9 @@ def _page(body: str) -> str:
 
 
 def _topbar(live_on: bool) -> str:
-    pill = '<span class="pill on">● LIVE</span>' if live_on else '<span class="pill off">● SHADOW</span>'
+    mode = "LIVE" if live_on else "SHADOW"
+    cls = "on" if mode == "LIVE" else "off"
+    pill = f'<span class="pill {cls}">● {mode}</span>'
     return (f'<div class=top><h1>⚡ Nifty Scalper Bot</h1>{pill}<span class=sp></span>'
             f'<a class="btn gray" href="/admin">Dashboard</a>'
             f'<a class="btn blu" href="/admin/logs">Logs</a></div>')
@@ -405,8 +417,8 @@ def _flash(request: Request) -> str:
 def dashboard(request: Request) -> HTMLResponse:
     _check_auth(request)
     env = _read_env()
-    live_on = (env.get("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
-               and env.get("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE")
+    mode_snapshot = resolve_runtime_execution_mode(env=env)
+    live_on = mode_snapshot.effective_mode == "LIVE"
     toggle = (
         f'<form method=post action="/admin/mode"><input type=hidden name=mode value="{"shadow" if live_on else "live"}">'
         + (f'<button class=amb type=submit>Switch to SHADOW (stop real trading)</button>' if live_on
@@ -563,7 +575,7 @@ def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLRes
     }}
     async function load(){{
       const ln=document.getElementById('lines').value, ct=document.getElementById('contains').value;
-      try{{const r=await fetch('/admin/logs.json?lines='+ln+'&contains='+encodeURIComponent(ct));
+      try{{const r=await fetch('/admin/logs.json?current_process_only=true&lines='+ln+'&contains='+encodeURIComponent(ct));
         const j=await r.json(); const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
         box.innerHTML=colorize(j.text);
         cnt.textContent=(j.text.split('\\n').length)+' lines';
@@ -594,7 +606,7 @@ def status_json(request: Request) -> JSONResponse:
     now = time.time()
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
-        return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]})
+        return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"], "effective_mode": resolve_runtime_execution_mode(env=_read_env()).effective_mode})
     # The dashboard runs inside the bot process: if this handler is answering,
     # the process is alive. Derive health from the in-memory log tail only — no
     # systemctl/journalctl subprocess on the request path.
@@ -608,14 +620,16 @@ def status_json(request: Request) -> JSONResponse:
     except Exception:
         label, color = "unknown", "#8b97a6"
     _STATUS_CACHE.update({"at": now, "label": label, "color": color})
-    return JSONResponse({"label": label, "color": color})
+    snap = resolve_runtime_execution_mode(env=_read_env())
+    return JSONResponse({"label": label, "color": color, "configured_mode": snap.configured_mode, "effective_mode": snap.effective_mode, "mismatch_detected": snap.mismatch_detected, "mismatch_details": snap.mismatch_details})
 
 
 @router.get("/admin/logs.json")
-def logs_json(request: Request, lines: int = 400, contains: str = "") -> JSONResponse:
+def logs_json(request: Request, lines: int = 400, contains: str = "", current_process_only: bool = True) -> JSONResponse:
     _check_auth(request)
-    text = _gather_logs(lines, contains=contains, clean=True)
-    return JSONResponse({"text": text})
+    text = _gather_logs(lines, contains=contains, clean=True, current_process_only=current_process_only)
+    records = [{"text": line, "process_pid": PROCESS_PID, "process_started_at": PROCESS_STARTED_AT, "app_commit_sha": APP_COMMIT_SHA, "log_timestamp": datetime.now(timezone.utc).isoformat()} for line in text.splitlines()]
+    return JSONResponse({"text": text, "records": records, "current_process_only": current_process_only, "process_pid": PROCESS_PID, "process_started_at": PROCESS_STARTED_AT, "app_commit_sha": APP_COMMIT_SHA})
 
 
 # Trade-relevant event markers — entry, fill, exit, P&L, rejections.

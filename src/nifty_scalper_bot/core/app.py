@@ -68,6 +68,7 @@ from typing import (
 
 import pytz
 from nifty_scalper_bot.config.env_utils import parse_float_env
+from nifty_scalper_bot.execution.mode import resolve_runtime_execution_mode
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
 from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
@@ -452,13 +453,21 @@ async def _polling_failover_supervisor_iteration(
                     extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "within_spot_stale_threshold", "age_ms": spot_age_ms, "threshold_ms": quote_stale_ms, "ws_ok": ws_ok},
                 )
                 return degraded_since, recovered_since
+            activation_reason = "ws_disconnected" if not ws_ok else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale"
+            if activation_reason == "spot_stale" and spot_age_ms is not None and float(spot_age_ms) < float(quote_stale_ms):
+                log_throttled(
+                    LOGGER,
+                    f"polling_fallback_skipped:{spot_symbol}:spot_within_threshold",
+                    "POLLING_FALLBACK_SKIPPED reason=spot_within_threshold age_ms=%s threshold_ms=%s ws_ok=%s",
+                    spot_age_ms, quote_stale_ms, ws_ok,
+                    interval_sec=60.0, level=logging.INFO,
+                    extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "spot_within_threshold", "age_ms": spot_age_ms, "threshold_ms": quote_stale_ms, "ws_ok": ws_ok},
+                )
+                return degraded_since, recovered_since
             LOGGER.warning(
-                "POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s",
-                spot_age_ms,
-                quote_stale_ms,
-                ws_ok,
-                lagging,
-                extra={"event": "poll_fallback_activate", "reason": "ws_disconnected" if not ws_ok else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale", "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
+                "POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s authoritative_age_ms=%s",
+                activation_reason, spot_age_ms, quote_stale_ms, ws_ok, lagging, auth_tick_age_ms,
+                extra={"event": "poll_fallback_activate", "reason": activation_reason, "age_ms": spot_age_ms, "threshold_ms": quote_stale_ms, "ws_ok": ws_ok, "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
             )
             _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), False)
             _safe_supervisor_call("polling_fallback.start", getattr(polling_fallback, "start", None))
@@ -3777,6 +3786,40 @@ def _bind_ws_mdm(ctx: BotContext) -> None:
         )
 
 
+def _mark_position_reconciliation_failed(ctx: Any, reason: str) -> None:
+    """Fail closed after any reconciliation error until a later complete success."""
+    setattr(ctx, "position_reconciliation_failed", True)
+    setattr(ctx, "position_reconciliation_error", reason)
+    setattr(ctx, "position_reconciliation_last_failed_at", datetime.now(timezone.utc).isoformat())
+    setattr(ctx, "live_orders_armed", False)
+    setattr(ctx, "execution_armed", False)
+    setattr(ctx, "live_block_reason", "position_reconciliation_failed")
+
+
+def _log_position_reconcile_runtime_source(ctx: Any) -> None:
+    """Emit process/source identity so stale dashboard logs are distinguishable."""
+    try:
+        from nifty_scalper_bot.data.data_hub import DataHub
+        datahub_path = str(Path(inspect.getfile(DataHub)).resolve())
+        has_normalize = hasattr(DataHub, "normalize")
+    except Exception:
+        datahub_path = "unknown"
+        has_normalize = False
+    try:
+        commit = _build_startup_fingerprint().get("release", "unknown")
+    except Exception:
+        commit = "unknown"
+    started = getattr(ctx, "process_started_at", None) or datetime.fromtimestamp(
+        time_module.time() - max(0.0, time_module.monotonic() - float(getattr(ctx, "started_mono", time_module.monotonic()))),
+        tz=timezone.utc,
+    ).isoformat()
+    LOGGER.info(
+        "POSITION_RECONCILE_RUNTIME_SOURCE app_commit_sha=%s module_file=%s process_pid=%s process_started_at=%s datahub_module_path=%s datahub_has_normalize=%s",
+        commit, __file__, os.getpid(), started, datahub_path, has_normalize,
+        extra={"event": "POSITION_RECONCILE_RUNTIME_SOURCE", "app_commit_sha": commit, "module_file": __file__, "process_pid": os.getpid(), "process_started_at": started, "datahub_module_path": datahub_path, "datahub_has_normalize": has_normalize},
+    )
+
+
 async def reconcile_with_broker(
     broker_client: Any,
     bracket_manager: Any,
@@ -6743,30 +6786,15 @@ _SYNTHETIC_FALLBACK_SPOT = 25600.0
 
 
 def _is_live_execution_mode(configured_mode: str | None = None) -> bool:
-    """Return True when the bot is configured to place live broker orders.
-
-    The check honours both the explicit ``EXECUTION_MODE`` value and the
-    legacy ``ENABLE_LIVE`` flag.  Synthetic fallbacks (such as the 25600.0
-    NIFTY proxy used during off-hours simulation) MUST be gated on the
-    inverse of this so live order arming can never select strikes from a
-    fake spot price.
-
-    Args:
-        configured_mode: Optional pre-resolved ``EXECUTION_MODE`` value.
-
-    Returns:
-        True if execution mode is LIVE *or* ENABLE_LIVE is truthy.
-    """
-
-    mode = str(
-        configured_mode
-        if configured_mode is not None
-        else os.getenv("EXECUTION_MODE", "")
-    ).strip().upper()
-    if mode == "LIVE":
-        return True
-    flag = str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
-    return flag in {"1", "true", "yes", "on"}
+    """Return True only for the canonical effective LIVE execution mode."""
+    env = dict(os.environ)
+    if configured_mode is not None:
+        env["EXECUTION_MODE"] = str(configured_mode)
+        if str(configured_mode).strip().upper() == "LIVE":
+            env["SHADOW_MODE"] = "false"
+            env["PAPER_MODE"] = "false"
+            env["PAPER__ENABLED"] = "false"
+    return resolve_runtime_execution_mode(env=env).effective_mode == "LIVE"
 
 
 def _allow_synthetic_market_data() -> bool:
@@ -6981,6 +7009,12 @@ async def _wait_for_live_spot_or_raise(
                 (configured_mode or "PAPER"),
                 policy.nifty_internal_symbol,
             )
+        LOGGER.info(
+            "STARTUP_SPOT_REST_FALLBACK_USED symbol=%s price=%.2f source=cache",
+            policy.nifty_internal_symbol,
+            cached,
+            extra={"event": "STARTUP_SPOT_REST_FALLBACK_USED", "symbol": policy.nifty_internal_symbol, "price": cached, "source": "cache"},
+        )
         LOGGER.info(
             "LIVE_SPOT_READY symbol=%s price=%.2f source=cache",
             policy.nifty_internal_symbol,
@@ -7508,6 +7542,16 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                         )
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("LIVE_REARM_BASKET_BUILD_FAILED error=%s", exc, exc_info=True)
+                    ctx.live_orders_armed = False
+                    ctx.execution_armed = False
+                    ctx.live_block_reason = "fresh_ws_spot_unavailable"
+                    continue
+            if bool(getattr(ctx, "position_reconciliation_failed", False)):
+                ctx.live_orders_armed = False
+                ctx.execution_armed = False
+                ctx.live_block_reason = "position_reconciliation_failed"
+                LOGGER.warning("LIVE_REARM_BLOCKED reason=position_reconciliation_failed", extra={"event": "LIVE_REARM_BLOCKED", "reason": "position_reconciliation_failed"})
+                continue
             try:
                 await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
             except Exception as exc:
@@ -8150,7 +8194,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     data_hard_ready=bool(basket_hard_ready and spot_ready and futures_ready and ce_eval_ready and pe_eval_ready)
     runner_running=_runner_is_running(getattr(ctx,'strategy_runner',None))
     evaluation_ready=bool(data_hard_ready and runner_running)
-    live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
+    mode_snapshot = resolve_runtime_execution_mode(ctx)
+    live_mode = mode_snapshot.effective_mode == "LIVE"
+    ctx.effective_mode = mode_snapshot.effective_mode
     market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
     execution_ready_by_symbol: dict[str, bool] = {}
@@ -8161,6 +8207,11 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     all_selected_options_exec_ready = bool(ce_exec_ready and pe_exec_ready)
     live_orders_armed=bool(live_mode and market_open and evaluation_ready and context_exec_ready and broker_ready and all_selected_options_exec_ready)
     missing=[]
+    if mode_snapshot.mismatch_detected:
+        missing.append("execution_mode_mismatch")
+        ctx.live_orders_armed = False
+        ctx.execution_armed = False
+        ctx.live_block_reason = "execution_mode_mismatch"
     if not selected_ce: missing.append('selected_ce_missing')
     if not selected_pe: missing.append('selected_pe_missing')
     if not spot_ready: missing.append('spot_history_missing')
@@ -8890,6 +8941,9 @@ async def _build_and_hydrate_live_basket_from_spot(
                 symbols=symbols,
                 atm_strike=basket.get("atm_strike"),
             )
+            ctx.live_orders_armed = False
+            ctx.execution_armed = False
+            ctx.live_block_reason = "basket_committed_waiting_for_readiness"
             LOGGER.info(
                 'LIVE_BASKET_BUILD_COMPLETE selected_ce=%s selected_pe=%s atm_strike=%s symbol_count=%d hydrated=%s duration_ms=%d',
                 committed_ce,
@@ -12089,6 +12143,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
 
     # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
     LOGGER.info("POSITION_RECONCILE_STARTED", extra={"event": "POSITION_RECONCILE_STARTED"})
+    _log_position_reconcile_runtime_source(ctx)
     if ctx.position_manager:
         try:
             broker_positions = await asyncio.to_thread(safe_sync_fetch)
@@ -12192,12 +12247,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
             LOGGER.info("POSITION_RECONCILE_SUCCESS", extra={"event": "POSITION_RECONCILE_SUCCESS"})
 
         except Exception as exc:
-            setattr(ctx, "position_reconciliation_failed", True)
-            setattr(ctx, "position_reconciliation_error", str(exc))
-            setattr(ctx, "position_reconciliation_last_failed_at", datetime.now(timezone.utc).isoformat())
-            setattr(ctx, "live_orders_armed", False)
-            setattr(ctx, "execution_armed", False)
-            setattr(ctx, "live_block_reason", "position_reconciliation_failed")
+            _mark_position_reconciliation_failed(ctx, str(exc))
             LOGGER.error(
                 "POSITION_RECONCILE_FAILED error_type=%s error_message=%s",
                 type(exc).__name__,

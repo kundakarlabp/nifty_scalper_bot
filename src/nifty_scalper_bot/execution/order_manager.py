@@ -74,6 +74,7 @@ from nifty_scalper_bot.execution.margin_engine import (
     SizingResult,
 )
 from nifty_scalper_bot.execution.options_policy import OptionsExecutionPolicy
+from nifty_scalper_bot.execution.mode import resolve_runtime_execution_mode
 from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
@@ -715,12 +716,7 @@ class OrderManager:
     @classmethod
     def _order_live_execution_enabled(cls) -> bool:
         """Return True only when actual live order execution is enabled."""
-        return (
-            cls._execution_mode_env() == "LIVE"
-            and cls._live_flag_enabled()
-            and not cls._shadow_mode_enabled()
-            and not cls._paper_mode_enabled()
-        )
+        return bool(resolve_runtime_execution_mode(env=os.environ).effective_mode == "LIVE")
 
     @property
     def execution_mode(self) -> str:
@@ -734,6 +730,10 @@ class OrderManager:
     def is_live_mode(self) -> bool:
         """Return True only when this manager is allowed to place live orders."""
         return self.execution_mode == "LIVE" and self._order_live_execution_enabled()
+
+    def resolve_execution_mode_snapshot(self) -> Any:
+        """Return the canonical runtime execution mode snapshot for this manager."""
+        return resolve_runtime_execution_mode(env=os.environ)
 
     @classmethod
     def _sanitize_broker_error(cls, exc_or_text: Any) -> str:
@@ -764,9 +764,11 @@ class OrderManager:
         if self._execution_mode == "LIVE" and (
             self._shadow_mode_enabled() or self._paper_mode_enabled()
         ):
-            raise RuntimeError(
-                "LIVE mode blocked because SHADOW_MODE or PAPER mode is enabled"
+            self._logger.error(
+                "EXECUTION_MODE_MISMATCH configured=LIVE shadow_or_paper_enabled=true",
+                extra={"event": "EXECUTION_MODE_MISMATCH", "configured_mode": "LIVE"},
             )
+            self._execution_mode = "SHADOW"
         
         if self._execution_mode == "SIMULATION":
             try:
@@ -3566,6 +3568,77 @@ class OrderManager:
         )
         return replace(plan, stop_loss=new_sl, take_profit=new_tp)
 
+    def _revalidate_final_execution_price(self, plan: TradePlan, executable_price: float) -> OrderPreflightResult:
+        """Fail-closed final price drift and risk revalidation before broker submission."""
+        planned = float(plan.entry_price or 0.0)
+        executable = float(executable_price or 0.0)
+        if planned <= 0 or executable <= 0:
+            return OrderPreflightResult(False, "executable_price_unavailable", {"planned_entry": planned, "executable_entry": executable})
+        drift_pct = abs(executable - planned) / planned * 100.0
+        try:
+            max_drift_pct = float(os.getenv("MAX_ENTRY_PRICE_DRIFT_PCT", "1.0") or "1.0")
+        except (TypeError, ValueError):
+            max_drift_pct = 1.0
+        sl = plan.stop_loss
+        tp = plan.take_profit
+        if sl is None or tp is None:
+            return OrderPreflightResult(False, "missing_bracket", {"planned_entry": planned, "executable_entry": executable})
+        sl_dist = abs(planned - float(sl))
+        tp_dist = abs(float(tp) - planned)
+        if sl_dist <= 0 or tp_dist <= 0:
+            return OrderPreflightResult(False, "invalid_bracket_distance", {"planned_entry": planned, "stop_loss": sl, "take_profit": tp})
+        if plan.side == "BUY":
+            recomputed_sl = max(0.05, round(executable - sl_dist, 2))
+            recomputed_tp = round(executable + tp_dist, 2)
+            stop_distance = executable - recomputed_sl
+            reward = recomputed_tp - executable
+        else:
+            recomputed_sl = round(executable + sl_dist, 2)
+            recomputed_tp = max(0.05, round(executable - tp_dist, 2))
+            stop_distance = recomputed_sl - executable
+            reward = executable - recomputed_tp
+        rr = reward / stop_distance if stop_distance > 0 else 0.0
+        rupee_risk = max(0.0, stop_distance) * max(int(plan.quantity or 0), 0)
+        allowed = True
+        reason = "allowed"
+        if drift_pct > max_drift_pct:
+            allowed = False
+            reason = "executable_price_drift"
+        elif stop_distance <= 0 or rr <= 0:
+            allowed = False
+            reason = "invalid_recomputed_risk"
+        else:
+            ok, margin_reason, margin_meta = self._precheck_margin(
+                plan.symbol, plan.side, plan.quantity, plan.product,
+                dry_run=True, price=executable, stop_loss=recomputed_sl,
+            )
+            if not ok:
+                allowed = False
+                reason = "risk_limit_exceeded"
+            else:
+                margin_meta = {}
+        details = {
+            "planned_entry": planned,
+            "executable_entry": executable,
+            "drift_pct": drift_pct,
+            "max_drift_pct": max_drift_pct,
+            "recomputed_sl": recomputed_sl,
+            "recomputed_tp": recomputed_tp,
+            "rr": rr,
+            "rupee_risk": rupee_risk,
+            "allowed": allowed,
+            "block_reason": None if allowed else reason,
+        }
+        if not allowed and reason == "risk_limit_exceeded":
+            details["risk_reason"] = margin_reason
+            details["risk_meta"] = margin_meta
+        self._logger.info(
+            "FINAL_EXECUTION_PRICE_REVALIDATION planned_entry=%s executable_entry=%s drift_pct=%.4f recomputed_sl=%s recomputed_tp=%s rupee_risk=%s allowed=%s block_reason=%s",
+            planned, executable, drift_pct, recomputed_sl, recomputed_tp, rupee_risk, allowed, details["block_reason"],
+            extra={"event": "FINAL_EXECUTION_PRICE_REVALIDATION", **details},
+        )
+        return OrderPreflightResult(allowed, reason, details)
+
     def _protected_limit_price(self, plan: TradePlan) -> float | None:
         quote = self._get_latest_quote_safe(plan.symbol)
         tick_size = 0.05
@@ -3641,7 +3714,14 @@ class OrderManager:
                 plan.trace_id,
             )
             return TradePlanSubmitResult(False, reason="protected_limit_unavailable", details={"entry_price": plan.entry_price}, broker_attempted=False)
-        plan = self._reanchor_bracket_to_price(plan, price)
+        final_price_check = self._revalidate_final_execution_price(plan, price)
+        if not final_price_check.allowed:
+            self._logger.warning(
+                "ORDER_REJECTED symbol=%s reason=%s details=%s trace_id=%s",
+                symbol, final_price_check.reason, final_price_check.details, plan.trace_id,
+            )
+            return TradePlanSubmitResult(False, reason=final_price_check.reason, details=final_price_check.details, broker_attempted=False)
+        plan = replace(plan, entry_price=price, stop_loss=final_price_check.details.get("recomputed_sl"), take_profit=final_price_check.details.get("recomputed_tp"))
         if plan.side == "BUY":
             if plan.stop_loss is not None and plan.stop_loss >= price:
                 details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_above_or_equal_entry"}
