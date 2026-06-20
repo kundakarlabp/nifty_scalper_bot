@@ -1,0 +1,3 @@
+## 2024-06-25 - Missing Form Labels in Inline HTML Responses
+**Learning:** Python applications using inline HTML string formatting (like FastAPI `HTMLResponse`) often miss critical accessibility bindings (like matching `for` on `<label>` and `id` on `<input>`) because standard a11y linters (e.g., `eslint-plugin-jsx-a11y`) don't scan string literals in backend code.
+**Action:** When working on backend-rendered applications without template engines or frontend setups, manually verify that form elements are properly semantically linked for screen readers and keyboard navigation, as automated tools won't catch these omissions.
