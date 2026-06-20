@@ -13,6 +13,7 @@ Security: every route requires ADMIN_PASSWORD. Serve behind the firewall.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -392,12 +393,12 @@ def _flash(request: Request) -> str:
     q = request.query_params
     if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
     if q.get("token") == "ok": return '<div class="flash ok">Access token updated and bot restarted.</div>'
-    if q.get("token") == "err": return f'<div class="flash err">Token exchange failed: {q.get("msg","")}</div>'
+    if q.get("token") == "err": return f'<div class="flash err">Token exchange failed: {html.escape(q.get("msg",""))}</div>'
     if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first (Save them below), then toggle.</div>'
     if q.get("mode"): return '<div class="flash ok">Mode changed and bot restarted.</div>'
     if q.get("restart"): return '<div class="flash ok">Bot restarting…</div>'
     if q.get("upd") == "ok": return '<div class="flash ok">Updated from GitHub and restarted.</div>'
-    if q.get("upd") == "err": return f'<div class="flash err">Update failed: {q.get("msg","")}</div>'
+    if q.get("upd") == "err": return f'<div class="flash err">Update failed: {html.escape(q.get("msg",""))}</div>'
     return ""
 
 
@@ -529,7 +530,7 @@ def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLRes
     <div class=card><h2>Logs <span class=muted id=stamp></span> <span id=botstat class=badge style="margin-left:8px">checking…</span> <span id=cnt class=badge></span></h2>
     <div class=grid>
       <div><label>Lines</label><input id=lines value="{lines}"></div>
-      <div><label>Filter contains</label><input id=contains value="{contains}" placeholder="e.g. ORDER_SENT"></div>
+      <div><label>Filter contains</label><input id=contains value="{html.escape(contains)}" placeholder="e.g. ORDER_SENT"></div>
       <div><label>Auto-refresh</label>
         <select id=auto style="width:100%;padding:11px;border-radius:9px;background:#0a1019;color:var(--fg);border:1px solid var(--bd)">
           <option value=3>Every 3s</option><option value=5 selected>Every 5s</option>
