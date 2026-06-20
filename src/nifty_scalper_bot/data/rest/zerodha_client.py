@@ -14,6 +14,7 @@ from datetime import datetime
 import io
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import threading
@@ -51,6 +52,8 @@ from nifty_scalper_bot.data.rest.client import BaseBrokerClient
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.utils.env import get_float, get_int, get_str
 from nifty_scalper_bot.utils.errors import (
+    BrokerAuthenticationError,
+    BrokerBalanceUnavailableError,
     BrokerError,
     ConfigurationError,
     OrderPlacementError,
@@ -236,11 +239,94 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._positions_cache: _RestCacheEntry | None = None
         self._orders_cache: _RestCacheEntry | None = None
         self._margins_cache: dict[str, _RestCacheEntry] = {}
+        self._auth_invalid = False
+        self._auth_invalid_reason: str | None = None
+        self._auth_invalid_at: float | None = None
+        self._auth_failure_generation = 0
+        self._auth_failure_alerted_generation = -1
         self._quote_api_available = True
         self._quote_api_error: str | None = None
         self._quote_api_last_checked_at: float | None = None
         self._md_policy = MarketDataPolicy.from_env()
         self._last_quote_error_log_at: dict[str, float] = {}
+
+    @property
+    def auth_invalid(self) -> bool:
+        """Return whether terminal broker authentication failure is latched."""
+        return bool(self._auth_invalid)
+
+    def authentication_status_snapshot(self) -> dict[str, Any]:
+        """Return sanitized broker authentication latch state."""
+        return {
+            "valid": not self._auth_invalid,
+            "reason": self._auth_invalid_reason,
+            "invalid_at": self._auth_invalid_at,
+            "generation": self._auth_failure_generation,
+        }
+
+    @staticmethod
+    def _is_authentication_failure(
+        *,
+        status_code: int | None,
+        payload: Mapping[str, Any] | None,
+        error_text: str,
+    ) -> bool:
+        """Classify terminal Zerodha authentication/session failures."""
+        if status_code in {401, 403}:
+            return True
+        fragments: list[str] = [error_text or ""]
+        if isinstance(payload, Mapping):
+            for key in ("message", "error_type", "status", "error"):
+                value = payload.get(key)
+                if value is not None:
+                    fragments.append(str(value))
+        text = " ".join(fragments).lower()
+        auth_tokens = (
+            "tokenexception",
+            "invalidtoken",
+            "incorrect api_key",
+            "incorrect access_token",
+            "invalid session",
+            "token expired",
+            "permission denied",
+            "authentication failed",
+            "unauthorized",
+        )
+        return any(token in text for token in auth_tokens)
+
+    def _clear_rest_caches(self) -> None:
+        self._positions_cache = None
+        self._orders_cache = None
+        self._margins_cache.clear()
+
+    def _mark_authentication_invalid(self, reason: str) -> NoReturn:
+        """Latch terminal authentication failure and raise typed broker error."""
+        safe_reason = str(reason or "authentication_failed")[:256]
+        if not self._auth_invalid:
+            self._auth_invalid = True
+            self._auth_invalid_reason = safe_reason
+            self._auth_invalid_at = self._log_time_fn()
+            self._auth_failure_generation += 1
+            self._clear_rest_caches()
+            LOGGER.error(
+                "ZERODHA_AUTH_INVALIDATED reason=%s generation=%s",
+                safe_reason,
+                self._auth_failure_generation,
+                extra={
+                    "event": "ZERODHA_AUTH_INVALIDATED",
+                    "reason": safe_reason,
+                    "generation": self._auth_failure_generation,
+                },
+            )
+        raise BrokerAuthenticationError(
+            f"Zerodha authentication invalid: {self._auth_invalid_reason}"
+        )
+
+    def _raise_if_authentication_latched(self) -> None:
+        if self._auth_invalid:
+            raise BrokerAuthenticationError(
+                f"Zerodha authentication invalid: {self._auth_invalid_reason}"
+            )
 
     def quote_api_available(self) -> bool:
         """Return quote API capability flag."""
@@ -1371,6 +1457,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 error_message="Failed to fetch Zerodha account margins",
                 on_retry=on_retry,
             )
+        except BrokerAuthenticationError:
+            raise
         except Exception as exc:  # noqa: BLE001 - propagate after logging
             LOGGER.error(
                 "Failure in ZerodhaKiteClient.get_account_margins: %s",
@@ -1509,18 +1597,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
         return summary
 
     def get_available_balance(self, segment: str = "equity") -> float:
-        """Return available margin balance for a Zerodha segment.
+        """Return broker-reported available account balance for a Zerodha segment.
 
-        Args:
-            segment: Zerodha segment identifier such as ``"equity"``.
-
-        Returns:
-            float: Available balance extracted from the margin payload.
-
-        Raises:
-            BrokerError: Propagated when the margin fetch fails.
+        Live account funds are fail-closed: only ``/user/margins/{segment}`` is
+        accepted, terminal authentication failures are re-raised, and missing or
+        malformed broker payloads raise ``BrokerBalanceUnavailableError``.
         """
 
+        self._raise_if_authentication_latched()
         normalized_segment = (
             str(segment or self._default_margin_segment).strip().lower()
             or self._default_margin_segment
@@ -1532,142 +1616,43 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 "segment": normalized_segment,
             },
         )
-        summary: dict[str, float] | None = None
-        account_payload: Mapping[str, Any] | None = None
-        account_error: Exception | None = None
         try:
             account_payload = self.get_account_margins(segment=normalized_segment)
-            if account_payload:
-                summary = self._normalize_margin_payload(
-                    account_payload,
-                    segment=normalized_segment,
-                )
-        except Exception as exc:  # noqa: BLE001 - continue with fallback
-            account_error = exc
+            summary = self._parse_account_margin_summary(
+                account_payload,
+                segment=normalized_segment,
+            )
+        except BrokerAuthenticationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - convert to typed fail-closed error
             LOGGER.error(
-                "Failure in ZerodhaKiteClient.get_available_balance account fetch: %s",
-                exc,
+                "ZERODHA_BALANCE_REFRESH_FAILED segment=%s reason=%s",
+                normalized_segment,
+                str(exc),
                 extra={
-                    "event": "zerodha_available_balance_account_error",
+                    "event": "ZERODHA_BALANCE_REFRESH_FAILED",
                     "segment": normalized_segment,
+                    "reason": str(exc),
+                    "error_type": type(exc).__name__,
                 },
                 exc_info=exc,
             )
+            raise BrokerBalanceUnavailableError(
+                f"Broker balance unavailable for segment {normalized_segment}: {exc}"
+            ) from exc
 
-        if not summary:
-            try:
-                summary = self.get_margin_summary(segment=normalized_segment)
-                if account_error is not None:
-                    LOGGER.info(
-                        "Condition met: zerodha_available_balance_summary_fallback",
-                        extra={
-                            "event": "zerodha_available_balance_summary_fallback",
-                            "segment": normalized_segment,
-                        },
-                    )
-            except Exception as exc:  # noqa: BLE001 - fallback to env
-                LOGGER.error(
-                    "Failure in ZerodhaKiteClient.get_available_balance: %s",
-                    exc,
-                    extra={
-                        "event": "zerodha_available_balance_error",
-                        "segment": normalized_segment,
-                    },
-                    exc_info=exc,
-                )
-                fallback_balance = self._resolve_balance_fallback()
-                LOGGER.warning(
-                    "Condition met: zerodha_available_balance_env_fallback",
-                    extra={
-                        "event": "zerodha_available_balance_env_fallback",
-                        "segment": normalized_segment,
-                        "fallback": fallback_balance,
-                    },
-                )
-                return fallback_balance
-
-        summary = summary or {"available": 0.0}
-        available = float(summary.get("available", 0.0) or 0.0)
-        if available <= 0.0:
-            alternate_keys = ("available_cash", "cash", "net")
-            for key in alternate_keys:
-                raw_value = summary.get(key)
-                if raw_value is None:
-                    continue
-                try:
-                    candidate = float(raw_value)
-                except (TypeError, ValueError):
-                    continue
-                if candidate > 0.0:
-                    available = candidate
-                    LOGGER.info(
-                        "Condition met: zerodha_available_balance_alternate_key",
-                        extra={
-                            "event": "zerodha_available_balance_alternate_key",
-                            "segment": normalized_segment,
-                            "key": key,
-                            "available": available,
-                        },
-                    )
-                    break
-
-        if available <= 0.0:
-            fallback_balance = self._resolve_balance_fallback()
-            LOGGER.warning(
-                "Condition met: zerodha_available_balance_non_positive",
-                extra={
-                    "event": "zerodha_available_balance_non_positive",
-                    "segment": normalized_segment,
-                    "available": available,
-                    "fallback": fallback_balance,
-                },
-            )
-            return fallback_balance
-
-        available_cash = float(available)
-        live_balance = 0.0
-        opening_balance = 0.0
-        net = float(summary.get("net", available_cash) or available_cash)
-        if isinstance(account_payload, Mapping):
-            equity = account_payload.get("equity")
-            equity_map = equity if isinstance(equity, Mapping) else {}
-            available_map_raw = equity_map.get("available")
-            available_map = (
-                available_map_raw if isinstance(available_map_raw, Mapping) else {}
-            )
-            available_cash = float(
-                available_map.get("cash")
-                or available_map.get("live_balance")
-                or available_map.get("opening_balance")
-                or available_cash
-                or 0.0
-            )
-            live_balance = float(available_map.get("live_balance") or 0.0)
-            opening_balance = float(available_map.get("opening_balance") or 0.0)
-            net = float(equity_map.get("net") or summary.get("net") or available_cash or 0.0)
-        else:
-            live_balance = float(summary.get("live_balance", 0.0) or 0.0)
-            opening_balance = float(summary.get("opening_balance", 0.0) or 0.0)
-
+        available = float(summary["available"])
         snapshot = {
-            "available_cash": round(available_cash, 2),
-            "live_balance": round(live_balance, 2),
-            "opening_balance": round(opening_balance, 2),
-            "net": round(net, 2),
+            "available_cash": round(available, 2),
+            "live_balance": round(float(summary["live_balance"]), 2),
+            "opening_balance": round(float(summary["opening_balance"]), 2),
+            "net": round(float(summary["net"]), 2),
         }
         now = time.time()
-        refresh_interval = max(
-            60.0,
-            float(
-                os.getenv("RISK_EQUITY_REFRESH_SECONDS")
-                or os.getenv("EQUITY_REFRESH_SECONDS")
-                or "60"
-            ),
-        )
         snapshot_tuple = (
-            round(float(snapshot["available_cash"]), 2),
-            round(float(snapshot["live_balance"]), 2),
-            round(float(snapshot["net"]), 2),
+            snapshot["available_cash"],
+            snapshot["live_balance"],
+            snapshot["net"],
         )
         heartbeat_interval = float(os.getenv("BALANCE_SUCCESS_LOG_INTERVAL_SECONDS", "900"))
         should_log = (
@@ -1680,87 +1665,97 @@ class ZerodhaKiteClient(BaseBrokerClient):
             self._last_balance_success_log_ts = now
             self._last_balance_success_snapshot = snapshot_tuple
             LOGGER.info(
-                (
-                    "ZERODHA_BALANCE_REFRESH_SUCCESS available_cash=%.2f "
-                    "live_balance=%.2f opening_balance=%.2f net=%.2f"
-                ),
+                "ZERODHA_BALANCE_REFRESH_SUCCESS available_cash=%.2f live_balance=%.2f opening_balance=%.2f net=%.2f",
                 snapshot["available_cash"],
                 snapshot["live_balance"],
                 snapshot["opening_balance"],
                 snapshot["net"],
-                extra={
-                    "event": "ZERODHA_BALANCE_REFRESH_SUCCESS",
-                    "segment": normalized_segment,
-                    "available_cash": snapshot["available_cash"],
-                    "live_balance": snapshot["live_balance"],
-                    "opening_balance": snapshot["opening_balance"],
-                    "net": snapshot["net"],
-                },
+                extra={"event": "ZERODHA_BALANCE_REFRESH_SUCCESS", "segment": normalized_segment, **snapshot},
             )
-            self._last_log_balance = now
-            self._last_balance_snapshot = snapshot
-            self._last_balance_snapshot_at = now
-        else:
-            LOGGER.debug(
-                "ZERODHA_BALANCE_REFRESH_SUPPRESSED available_cash=%0.2f live_balance=%0.2f net=%0.2f",
-                snapshot["available_cash"], snapshot["live_balance"], snapshot["net"],
-                extra={
-                    "event": "ZERODHA_BALANCE_REFRESH_UNCHANGED",
-                    "segment": normalized_segment,
-                    "available_cash": snapshot["available_cash"],
-                    "net": snapshot["net"],
-                },
-            )
+        self._last_log_balance = now
+        self._last_balance_snapshot = snapshot
+        self._last_balance_snapshot_at = now
         return available
 
-    def _resolve_balance_fallback(self) -> float:
-        """Return environment configured fallback balance figure.
+    def _parse_account_margin_summary(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        segment: str,
+    ) -> dict[str, float]:
+        """Strictly parse ``/user/margins/{segment}`` account-funds payload."""
+        if not isinstance(payload, Mapping) or not payload:
+            raise BrokerBalanceUnavailableError("empty_account_margin_payload")
+        if self._is_authentication_failure(status_code=None, payload=payload, error_text=""):
+            self._mark_authentication_invalid(str(payload.get("message") or payload.get("error_type") or "authentication_failed"))
+        if str(payload.get("status", "")).lower() == "error" or "error_type" in payload:
+            raise BrokerBalanceUnavailableError("broker_error_margin_payload")
 
-        Args:
-            None.
+        segment_key = str(segment or "equity").strip().lower() or "equity"
+        target: Mapping[str, Any]
+        candidate = payload.get(segment_key)
+        if isinstance(candidate, Mapping):
+            target = candidate
+        elif isinstance(payload.get("available"), Mapping) or "net" in payload:
+            target = payload
+        else:
+            raise BrokerBalanceUnavailableError("missing_segment_margin_payload")
 
-        Returns:
-            float: Non-negative fallback balance from environment variables.
+        available_map = target.get("available")
+        utilised_map = target.get("utilised")
+        if not isinstance(available_map, Mapping):
+            raise BrokerBalanceUnavailableError("missing_available_margin_fields")
+        if not isinstance(utilised_map, Mapping):
+            utilised_map = {}
 
-        Raises:
-            None.
-        """
+        def _number(name: str, value: Any, *, required: bool = True) -> float:
+            if value is None:
+                if required:
+                    raise BrokerBalanceUnavailableError(f"missing_margin_field:{name}")
+                return 0.0
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError) as exc:
+                raise BrokerBalanceUnavailableError(f"invalid_margin_field:{name}") from exc
+            if not math.isfinite(parsed):
+                raise BrokerBalanceUnavailableError(f"non_finite_margin_field:{name}")
+            if parsed < 0.0:
+                raise BrokerBalanceUnavailableError(f"negative_margin_field:{name}")
+            return parsed
 
-        LOGGER.debug(
-            "Entered ZerodhaKiteClient._resolve_balance_fallback",
-            extra={"event": "zerodha_balance_fallback_enter"},
-        )
-        fallback_value = 1_000_000.0
-        try:
-            candidates = (
-                os.getenv("RISK__CAPITAL"),
-                os.getenv("RISK_CAPITAL"),
-                os.getenv("BACKTEST__CAPITAL"),
-            )
-            for candidate in candidates:
-                if candidate is None:
-                    continue
-                token = candidate.strip()
-                if not token:
-                    continue
-                fallback_value = max(float(token), 0.0)
-                break
-        except Exception as exc:  # noqa: BLE001 - defensive parsing
-            LOGGER.error(
-                "Failure in ZerodhaKiteClient._resolve_balance_fallback: %s",
-                exc,
-                extra={"event": "zerodha_balance_fallback_error"},
-                exc_info=exc,
-            )
-            fallback_value = 1_000_000.0
-        LOGGER.info(
-            "Condition met: zerodha_balance_fallback_resolved",
-            extra={
-                "event": "zerodha_balance_fallback_resolved",
-                "fallback": fallback_value,
-            },
-        )
-        return fallback_value
+        cash_value = available_map.get("cash")
+        if cash_value is None:
+            cash_value = available_map.get("live_balance")
+        if cash_value is None:
+            cash_value = available_map.get("opening_balance")
+        available = _number("available.cash", cash_value)
+        live_balance = _number("available.live_balance", available_map.get("live_balance"), required=False)
+        opening_balance = _number("available.opening_balance", available_map.get("opening_balance"), required=False)
+        used = 0.0
+        for key in ("debits", "span", "exposure", "option_premium", "holding_sales"):
+            value = utilised_map.get(key)
+            if value is not None:
+                used += _number(f"utilised.{key}", value, required=False)
+        net_value = target.get("net")
+        net = _number("net", net_value) if net_value is not None else available + used
+        return {
+            "available": available,
+            "used": used,
+            "net": net,
+            "live_balance": live_balance,
+            "opening_balance": opening_balance,
+        }
+
+    def _resolve_simulated_balance(self) -> float:
+        """Return explicit non-live simulation capital; never used as live fallback."""
+        for name in ("RISK__CAPITAL", "RISK_CAPITAL", "BACKTEST__CAPITAL"):
+            raw = os.getenv(name)
+            if raw is None or not raw.strip():
+                continue
+            value = float(raw)
+            if math.isfinite(value) and value >= 0.0:
+                return value
+        raise ConfigurationError("simulated_balance_requires_explicit_capital")
 
     def _resolve_margin_payload(
         self,
@@ -2669,6 +2664,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             BrokerError: If the request exhausts retries or encounters a fatal error.
         """
 
+        self._raise_if_authentication_latched()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
         label = operation_label or (url.lstrip("/") or "zerodha")
         should_retry, on_retry = self._build_retry_handlers(endpoint=url)
@@ -2720,6 +2716,16 @@ class ZerodhaKiteClient(BaseBrokerClient):
                             delay_hint=0.5,
                         ),
                     ) from exc
+                if self._is_authentication_failure(
+                    status_code=response.status_code,
+                    payload=payload if isinstance(payload, Mapping) else None,
+                    error_text="",
+                ):
+                    self._mark_authentication_invalid(
+                        str(payload.get("message") or payload.get("error_type") or "authentication_failed")
+                        if isinstance(payload, Mapping)
+                        else "authentication_failed"
+                    )
                 self._reset_transient_state()
                 return payload
 
@@ -2777,6 +2783,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         message = self._safe_error_message(response)
         status = response.status_code
+        payload: Mapping[str, Any] | None = None
+        with suppress(Exception):
+            raw_payload = response.json()
+            if isinstance(raw_payload, Mapping):
+                payload = raw_payload
+        if self._is_authentication_failure(
+            status_code=status,
+            payload=payload,
+            error_text=message,
+        ):
+            self._mark_authentication_invalid(message)
         error: Exception
         if status in {400, 404} and expect_order_response:
             error = OrderPlacementError(message)

@@ -1089,19 +1089,25 @@ class DataHub:
             mdm_sub(symbol, self.ingest_tick_sync)
             self._mdm_subscribed_symbols.add(symbol)
             LOGGER.info(
-                "datahub_live_symbol_subscribed symbol=%s",
+                "SUBSCRIPTION_STATE_CHANGED symbol=%s previous=pending_token current=queued reason=mdm_delegate_registered",
                 symbol,
-                extra={"event": "datahub_live_symbol_subscribed", "symbol": symbol},
+                extra={
+                    "event": "SUBSCRIPTION_STATE_CHANGED",
+                    "symbol": symbol,
+                    "previous": "pending_token",
+                    "current": "queued",
+                    "reason": "mdm_delegate_registered",
+                },
             )
             LOGGER.info(
-                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=true reason=mdm_subscribed",
+                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=false reason=queued_for_mdm",
                 symbol,
                 extra={
                     "event": "DATAHUB_LIVE_SUBSCRIBE",
                     "symbol": symbol,
                     "trace_id": trace_id,
-                    "subscribed": True,
-                    "reason": "mdm_subscribed",
+                    "subscribed": False,
+                    "reason": "queued_for_mdm",
                     "mdm_delegate_called": True,
                 },
             )

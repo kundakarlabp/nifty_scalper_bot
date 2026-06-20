@@ -103,3 +103,33 @@ This document captures a battle-tested set of practices for operating the Nifty 
   ```
 
 Adopt these practices incrementally to keep the system safe, observable, and ready for production incidents.
+
+## Broker authentication, balance, and readiness fail-closed behavior
+
+- Zerodha terminal authentication failures (HTTP 401/403, token exceptions, invalid
+  sessions, incorrect API key/access token, and authentication-related permission
+  denials) are treated as fail-closed. The client latches the invalid-auth state,
+  clears REST caches, raises `BrokerAuthenticationError`, and suppresses repeated
+  authenticated REST calls until credentials are replaced by a controlled restart
+  or a future explicit credential-refresh lifecycle.
+- LIVE account funds are read only from `GET /user/margins/{segment}`. The legacy
+  `GET /margins/{segment}` endpoint is not an account-balance fallback and must
+  not be used for live risk capital.
+- LIVE mode never substitutes `RISK_CAPITAL`, `RISK__CAPITAL`,
+  `BACKTEST__CAPITAL`, cached simulation capital, default capital, or fabricated
+  zero for an unavailable broker balance. Those variables are simulation inputs
+  only and are ignored as live broker funds.
+- Live execution arming requires valid broker authentication, a valid broker
+  balance snapshot, and successful startup position reconciliation. Position
+  reconciliation failures leave the process alive for diagnostics while keeping
+  live orders unarmed.
+- Health endpoints are separated by purpose:
+  - `/livez`: process liveness for platform restarts; market closure and expired
+    broker tokens do not make this endpoint fail.
+  - `/readyz`: operational dependency readiness; broker auth or reconciliation
+    failures return 503.
+  - `/health/trading`: trading-domain status with blockers; returns a diagnostic
+    payload even when trading is blocked.
+- Closed-market conditions are expected, not subsystem failures. Off-hours basket
+  retries should wait for the next useful market event instead of polling live
+  depth repeatedly.

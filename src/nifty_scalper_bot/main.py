@@ -17,7 +17,7 @@ import sys
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
@@ -189,15 +189,39 @@ def root():
 
 @app.get("/health")
 def health():
+    return readyz()
+
+
+@app.get("/livez")
+def livez():
+    return {"status": "alive", "bot_loaded": app.state.bot is not None}
+
+
+@app.get("/readyz")
+def readyz():
     if app.state.bot_error:
-        return {
+        return JSONResponse(status_code=503, content={
             "status": "degraded",
+            "ready": False,
             "error": app.state.bot_error,
-        }
+        })
 
     return {
         "status": "running" if app.state.bot else "starting",
+        "ready": app.state.bot is not None,
         "bot_loaded": app.state.bot is not None,
+    }
+
+
+@app.get("/health/trading")
+def health_trading():
+    ready = app.state.bot_error is None and app.state.bot is not None
+    return {
+        "status": "ready" if ready else "blocked",
+        "ready": ready,
+        "live_orders_armed": False,
+        "primary_blocker": None if ready else "startup_incomplete",
+        "blockers": [] if ready else ["startup_incomplete"],
     }
 
 

@@ -119,12 +119,13 @@ def test_hydration_status_consistent_counts_across_all_layers() -> None:
     assert status.ready_for_evaluation is True
 
 
-def test_readiness_false_if_any_layer_has_fewer_bars() -> None:
-    status = app.build_symbol_hydration_status(_ctx(30, 29, 30, 30, _quote()), SYMBOL, "selected_ce", 30)
+def test_datahub_bars_do_not_gate_readiness() -> None:
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 0, 30, 30, _quote()), SYMBOL, "selected_ce", 30
+    )
 
-    assert status.ready_for_evaluation is False
-    assert status.ready_for_execution is False
-    assert "datahub_bars_missing" in status.blocker_reasons
+    assert status.ready_for_evaluation is True
+    assert "datahub_bars_missing" not in status.blocker_reasons
 
 
 def test_readiness_true_when_all_layers_have_bars_and_quote_depth_valid() -> None:
