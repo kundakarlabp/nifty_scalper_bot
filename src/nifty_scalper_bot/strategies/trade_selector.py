@@ -59,18 +59,21 @@ class TradeCandidateSelector:
         self.require_real_ticks_last_60s = require_real_ticks_last_60s
         self._last_rejects: dict[str, int] = {}
         self._candidate_reject_log_throttle_seconds = max(
-            1.0, float(os.getenv("CANDIDATE_REJECT_LOG_THROTTLE_SECONDS", "15") or 15)
+            1.0,
+            float(os.getenv("CANDIDATE_REJECT_LOG_THROTTLE_SECONDS", "120") or 120),
+        )
+        self._candidate_summary_log_throttle_seconds = max(
+            1.0,
+            float(os.getenv("CANDIDATE_SUMMARY_LOG_THROTTLE_SECONDS", "300") or 300),
         )
 
     def _log_reject(self, reason: str, symbol: str, *, throttle_key_parts: tuple[Any, ...], **fields: Any) -> None:
         key = "CANDIDATE_REJECTED:" + ":".join(str(part) for part in throttle_key_parts)
+        message = f"CANDIDATE_REJECTED symbol={symbol} reason={reason} fields={fields}"
         log_once_or_throttled(
             LOGGER,
             key,
-            "CANDIDATE_REJECTED symbol=%s reason=%s fields=%s",
-            symbol,
-            reason,
-            fields,
+            message,
             interval_sec=self._candidate_reject_log_throttle_seconds,
             level=logging.INFO,
             extra={"event": "CANDIDATE_REJECTED", "symbol": symbol, "reason": reason, **fields},
@@ -89,7 +92,14 @@ class TradeCandidateSelector:
             blocked, gate_reason = midday_pause_block()
         if blocked:
             self._last_rejects = {'entry_window_blocked': len(snapshots)}
-            log_once_or_throttled(LOGGER, f'entry_window_blocked:{gate_reason}:{direction_bias}', f'CANDIDATE_SELECTION_BLOCKED reason={gate_reason} direction={direction_bias} total={len(snapshots)}', interval_sec=60.0, level=logging.INFO, extra={'event': 'CANDIDATE_SELECTION_BLOCKED', 'reason': gate_reason, 'direction': direction_bias, 'total': len(snapshots)})
+            log_once_or_throttled(
+                LOGGER,
+                f'entry_window_blocked:{gate_reason}:{direction_bias}',
+                f'CANDIDATE_SELECTION_BLOCKED reason={gate_reason} direction={direction_bias} total={len(snapshots)}',
+                interval_sec=self._candidate_summary_log_throttle_seconds,
+                level=logging.INFO,
+                extra={'event': 'CANDIDATE_SELECTION_BLOCKED', 'reason': gate_reason, 'direction': direction_bias, 'total': len(snapshots)},
+            )
             return []
         max_spread, max_age, min_ticks = self._limits()
         if self.max_option_spread_pct is not None:
@@ -143,32 +153,19 @@ class TradeCandidateSelector:
                 )
             if (premium < self.min_option_premium and not premium_dynamic_override) or premium > self.max_option_premium:
                 rejects['premium_out_of_range'] += 1
-                LOGGER.info(
-                    "CANDIDATE_REJECTED symbol=%s reason=premium_out_of_range premium=%s min=%s max=%s ltp=%s bid=%s ask=%s strike=%s atm=%s atm_distance=%s",
+                self._log_reject(
+                    "premium_out_of_range",
                     symbol,
-                    premium,
-                    self.min_option_premium,
-                    self.max_option_premium,
-                    ltp,
-                    bid,
-                    ask,
-                    strike,
-                    atm_strike,
-                    atm_distance,
-                    extra={
-                        "event": "CANDIDATE_REJECTED",
-                        "symbol": symbol,
-                        "reason": "premium_out_of_range",
-                        "premium": premium,
-                        "min_option_premium": self.min_option_premium,
-                        "max_option_premium": self.max_option_premium,
-                        "ltp": ltp,
-                        "bid": bid,
-                        "ask": ask,
-                        "strike": strike,
-                        "atm": atm_strike,
-                        "atm_distance": atm_distance,
-                    },
+                    throttle_key_parts=("premium_out_of_range", symbol, int(self.min_option_premium), int(self.max_option_premium)),
+                    premium=premium,
+                    min_option_premium=self.min_option_premium,
+                    max_option_premium=self.max_option_premium,
+                    ltp=ltp,
+                    bid=bid,
+                    ask=ask,
+                    strike=strike,
+                    atm=atm_strike,
+                    atm_distance=atm_distance,
                 )
                 continue
             tick_age_s = self._f(s.get('tick_age_s'))
@@ -247,7 +244,14 @@ class TradeCandidateSelector:
         if sorted_ranked:
             LOGGER.debug('CANDIDATE_SELECTION_SUMMARY direction=%s atm=%s total=%s ranked=%s ltp_only_used=%s rejects=%s', direction_bias, atm_strike, len(snapshots), len(sorted_ranked), ltp_only_used, rejects, extra=event_extra)
         else:
-            log_once_or_throttled(LOGGER, key, f'CANDIDATE_SELECTION_SUMMARY direction={direction_bias} atm={atm_strike} total={len(snapshots)} ranked=0 ltp_only_used={ltp_only_used} rejects={rejects}', interval_sec=30.0, level=logging.INFO, extra=event_extra)
+            log_once_or_throttled(
+                LOGGER,
+                key,
+                f'CANDIDATE_SELECTION_SUMMARY direction={direction_bias} atm={atm_strike} total={len(snapshots)} ranked=0 ltp_only_used={ltp_only_used} rejects={rejects}',
+                interval_sec=self._candidate_summary_log_throttle_seconds,
+                level=logging.INFO,
+                extra=event_extra,
+            )
         return sorted_ranked
 
     def select_best_candidate(self, *, underlying: str, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> TradeCandidate | None:

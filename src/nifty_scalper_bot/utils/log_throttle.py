@@ -163,13 +163,13 @@ class LogThrottle:
         with self._lock:
             if self._summary_last_emit_mono > 0 and (now - self._summary_last_emit_mono) < float(interval_seconds):
                 return
-            self._summary_last_emit_mono = now
             pending = {k: s.suppressed_count for k, s in self._states.items() if s.suppressed_count > 0}
+            if not pending:
+                return
+            self._summary_last_emit_mono = now
             for key in pending:
                 self._states[key].suppressed_count = 0
                 self._suppressed[key] = 0
-        if not pending:
-            return
         top = sorted(pending.items(), key=lambda item: item[1], reverse=True)[: max(1, int(top_n))]
         total_suppressed = sum(int(v) for v in pending.values())
         keys = ",".join(f"{k}:{v}" for k, v in top)
@@ -216,10 +216,10 @@ class LogThrottle:
         with self._lock:
             if self._strategy_summary_last_emit_mono > 0 and (now - self._strategy_summary_last_emit_mono) < float(interval_seconds):
                 return False
-            self._strategy_summary_last_emit_mono = now
             stats = self._strategy_stats
             if stats.rejected_count <= 0:
                 return False
+            self._strategy_summary_last_emit_mono = now
             payload = {
                 "event": "STRATEGY_REJECTION_SUMMARY",
                 "evaluation_count": stats.evaluation_count,
