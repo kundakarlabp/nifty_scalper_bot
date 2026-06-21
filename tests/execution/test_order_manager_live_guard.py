@@ -99,3 +99,32 @@ def test_live_selected_option_ltp_only_rejected_before_broker(monkeypatch):
     assert broker.calls == 0
     assert om.get_last_skip_reason() == "selected_option_bid_ask_missing"
     assert om._last_order_decision["block_reason"] == "selected_option_bid_ask_missing"
+
+
+def test_auth_latch_blocks_order_before_broker(monkeypatch):
+    from nifty_scalper_bot.utils.errors import OrderPlacementError
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    broker = _Broker(connected=True)
+    broker.auth_invalid = True
+    broker.calls = 0
+
+    def _place_order(**_kwargs):
+        broker.calls += 1
+        return {"order_id": "OID"}
+
+    broker.place_order = _place_order
+    om = OrderManager(broker, _Positions(), _Limiter())
+
+    with pytest.raises(OrderPlacementError, match="broker_auth_invalid"):
+        om.place_order(
+            "NFO:NIFTY26MAY23750CE",
+            "BUY",
+            75,
+            stop_loss=90.0,
+            take_profit=120.0,
+        )
+
+    assert broker.calls == 0
+    assert om.get_last_skip_reason() == "broker_auth_invalid"

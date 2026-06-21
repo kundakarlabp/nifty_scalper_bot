@@ -85,7 +85,7 @@ from nifty_scalper_bot.risk.session_gate import can_trade
 from nifty_scalper_bot.storage.journal import AtomicKV
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.circuit_breaker import CircuitBreaker
-from nifty_scalper_bot.utils.errors import BrokerAuthenticationError, RateLimitError
+from nifty_scalper_bot.utils.errors import RateLimitError
 from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
@@ -2223,9 +2223,7 @@ class OrderManager:
         broker = getattr(self, "_broker", None)
         if bool(getattr(broker, "auth_invalid", False)):
             self.set_last_skip_reason("broker_auth_invalid")
-            raise OrderPlacementError("broker_auth_invalid") from BrokerAuthenticationError(
-                "broker_auth_invalid"
-            )
+            raise OrderPlacementError("broker_auth_invalid")
 
         def _log_order_decision(
             *,

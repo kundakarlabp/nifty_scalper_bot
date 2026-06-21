@@ -244,6 +244,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._auth_invalid_at: float | None = None
         self._auth_failure_generation = 0
         self._auth_failure_alerted_generation = -1
+        self._auth_failure_callback: Callable[[dict[str, Any]], None] | None = None
         self._quote_api_available = True
         self._quote_api_error: str | None = None
         self._quote_api_last_checked_at: float | None = None
@@ -263,6 +264,12 @@ class ZerodhaKiteClient(BaseBrokerClient):
             "invalid_at": self._auth_invalid_at,
             "generation": self._auth_failure_generation,
         }
+
+    def set_auth_failure_callback(
+        self, callback: Callable[[dict[str, Any]], None] | None
+    ) -> None:
+        """Register callback invoked when terminal authentication failure latches."""
+        self._auth_failure_callback = callback
 
     @staticmethod
     def _is_authentication_failure(
@@ -318,6 +325,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     "generation": self._auth_failure_generation,
                 },
             )
+            callback = self._auth_failure_callback
+            if callback is not None:
+                with suppress(Exception):
+                    callback(self.authentication_status_snapshot())
         raise BrokerAuthenticationError(
             f"Zerodha authentication invalid: {self._auth_invalid_reason}"
         )
@@ -1671,6 +1682,18 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 snapshot["opening_balance"],
                 snapshot["net"],
                 extra={"event": "ZERODHA_BALANCE_REFRESH_SUCCESS", "segment": normalized_segment, **snapshot},
+            )
+        else:
+            LOGGER.debug(
+                "ZERODHA_BALANCE_REFRESH_UNCHANGED available_cash=%.2f live_balance=%.2f net=%.2f",
+                snapshot["available_cash"],
+                snapshot["live_balance"],
+                snapshot["net"],
+                extra={
+                    "event": "ZERODHA_BALANCE_REFRESH_UNCHANGED",
+                    "segment": normalized_segment,
+                    **snapshot,
+                },
             )
         self._last_log_balance = now
         self._last_balance_snapshot = snapshot

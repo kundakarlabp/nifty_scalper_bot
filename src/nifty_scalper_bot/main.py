@@ -107,11 +107,14 @@ print("🚀 PYTHON START: Initializing...", flush=True)
 async def lifespan(app: FastAPI):
     app.state.bot = None
     app.state.bot_error = None
+    app.state.bot_started = False
+    app.state.bot_starting = False
 
     async def run_bot_background():
         try:
             print("⏳ BACKGROUND: Waiting 5s for Server Port Bind...", flush=True)
             await asyncio.sleep(5)
+            app.state.bot_starting = True
 
             print("📦 BACKGROUND: Importing Trading Engine...", flush=True)
             from nifty_scalper_bot.core.app import NiftyScalperApp
@@ -122,6 +125,8 @@ async def lifespan(app: FastAPI):
 
             print("▶️ BACKGROUND: Starting Trading Loop...", flush=True)
             await bot.start()
+            app.state.bot_started = True
+            app.state.bot_starting = False
 
             print("🟢 BACKGROUND: Bot fully operational", flush=True)
 
@@ -131,6 +136,8 @@ async def lifespan(app: FastAPI):
 
         except Exception as exc:
             app.state.bot_error = str(exc)
+            app.state.bot_started = False
+            app.state.bot_starting = False
             print(f"⚠️ BOT STARTUP WARNING: {exc}", flush=True)
             warmup_tokens = ('WARMING_UP', 'DATA_WARMUP', 'HISTORICAL_READY')
             is_warmup_like = any(token in str(exc).upper() for token in warmup_tokens)
@@ -168,6 +175,10 @@ async def lifespan(app: FastAPI):
 # -------------------------------------------------------
 
 app = FastAPI(lifespan=lifespan)
+app.state.bot = None
+app.state.bot_error = None
+app.state.bot_started = False
+app.state.bot_starting = False
 
 # Browser admin dashboard (credentials, logs, daily token, restart) for
 # non-technical operation on a plain VM. Routes are password-protected.
@@ -197,32 +208,154 @@ def livez():
     return {"status": "alive", "bot_loaded": app.state.bot is not None}
 
 
+def _latest_context():
+    bot = getattr(app.state, "bot", None)
+    ctx = getattr(bot, "_ctx", None)
+    if ctx is not None:
+        return ctx
+    try:
+        from nifty_scalper_bot.core.app import get_latest_bot_context
+
+        return get_latest_bot_context()
+    except Exception:
+        return None
+
+
+def _context_blockers(ctx) -> list[str]:  # noqa: ANN001
+    blockers: list[str] = []
+    decision = getattr(ctx, "readiness_decision", None)
+    decision_blockers = list(getattr(decision, "blocker_list", ()) or ())
+    blockers.extend(str(item) for item in decision_blockers if item)
+    if bool(getattr(ctx, "broker_auth_invalid", False)):
+        blockers.append("broker_auth_invalid")
+    if not bool(getattr(ctx, "broker_balance_valid", False)):
+        blockers.append("broker_balance_unavailable")
+    if bool(getattr(ctx, "position_reconciliation_failed", False)):
+        blockers.append("position_reconciliation_failed")
+    if not bool(getattr(ctx, "position_reconciliation_completed", False)):
+        blockers.append("position_reconciliation_incomplete")
+    if bool(getattr(ctx, "unprotected_broker_positions", set())):
+        blockers.append("unprotected_broker_position")
+    live_block_reason = getattr(ctx, "live_block_reason", None)
+    if live_block_reason:
+        reason = str(live_block_reason).split(":", 1)[-1]
+        if reason:
+            blockers.append(reason)
+    return list(dict.fromkeys(blockers))
+
+
+_NON_OPERATIONAL_READYZ_BLOCKERS = {
+    "market_closed",
+    "exchange_holiday",
+    "outside_session",
+}
+
+
 @app.get("/readyz")
 def readyz():
     if app.state.bot_error:
-        return JSONResponse(status_code=503, content={
-            "status": "degraded",
-            "ready": False,
-            "error": app.state.bot_error,
-        })
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "ready": False,
+                "primary_blocker": "startup_failed",
+                "error": app.state.bot_error,
+            },
+        )
 
-    return {
-        "status": "running" if app.state.bot else "starting",
-        "ready": app.state.bot is not None,
-        "bot_loaded": app.state.bot is not None,
-    }
+    ctx = _latest_context()
+    if not bool(getattr(app.state, "bot_started", False)) or ctx is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "starting",
+                "ready": False,
+                "primary_blocker": "startup_incomplete",
+            },
+        )
+
+    blockers = _context_blockers(ctx)
+    operational_blockers = [
+        blocker
+        for blocker in blockers
+        if blocker not in _NON_OPERATIONAL_READYZ_BLOCKERS
+    ]
+    ready = (
+        not bool(getattr(ctx, "broker_auth_invalid", False))
+        and bool(getattr(ctx, "broker_balance_valid", False))
+        and bool(getattr(ctx, "position_reconciliation_completed", False))
+        and not bool(getattr(ctx, "position_reconciliation_failed", False))
+        and not operational_blockers
+    )
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "blocked",
+            "ready": ready,
+            "primary_blocker": (
+                operational_blockers[0]
+                if operational_blockers
+                else blockers[0]
+                if blockers
+                else None
+            ),
+            "blockers": blockers,
+        },
+    )
 
 
 @app.get("/health/trading")
 def health_trading():
-    ready = app.state.bot_error is None and app.state.bot is not None
-    return {
-        "status": "ready" if ready else "blocked",
-        "ready": ready,
-        "live_orders_armed": False,
-        "primary_blocker": None if ready else "startup_incomplete",
-        "blockers": [] if ready else ["startup_incomplete"],
-    }
+    ctx = _latest_context()
+    if ctx is None:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "starting",
+                "ready": False,
+                "live_orders_armed": False,
+                "primary_blocker": "startup_incomplete",
+                "blockers": ["startup_incomplete"],
+            },
+        )
+    decision = getattr(ctx, "readiness_decision", None)
+    blockers = _context_blockers(ctx)
+    live_orders_armed = bool(
+        getattr(decision, "live_orders_armed", getattr(ctx, "live_orders_armed", False))
+    )
+    execution_ready = bool(
+        getattr(decision, "execution_ready", getattr(ctx, "execution_armed", False))
+    )
+    primary = getattr(decision, "primary_blocker", None) or (
+        blockers[0] if blockers else None
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "armed" if live_orders_armed else "blocked",
+            "ready": execution_ready and not blockers,
+            "live_orders_armed": live_orders_armed and not blockers,
+            "primary_blocker": primary,
+            "blockers": blockers,
+            "broker": {
+                "ready": bool(getattr(ctx, "broker_ready", False)),
+                "auth_invalid": bool(getattr(ctx, "broker_auth_invalid", False)),
+                "balance_valid": bool(getattr(ctx, "broker_balance_valid", False)),
+                "balance": getattr(ctx, "last_valid_broker_balance", None),
+                "balance_error": getattr(ctx, "broker_balance_error", None),
+            },
+            "reconciliation": {
+                "started": bool(getattr(ctx, "position_reconciliation_started", False)),
+                "completed": bool(getattr(ctx, "position_reconciliation_completed", False)),
+                "failed": bool(getattr(ctx, "position_reconciliation_failed", False)),
+                "error": getattr(ctx, "position_reconciliation_error", None),
+                "unprotected_positions": sorted(
+                    getattr(ctx, "unprotected_broker_positions", set()) or []
+                ),
+            },
+        },
+    )
 
 
 @app.get("/debug/env")

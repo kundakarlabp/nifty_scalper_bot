@@ -4388,6 +4388,51 @@ def _setup_telegram(ctx: BotContext) -> None:
         LOGGER.error(f"❌ Telegram setup failed: {e}", exc_info=True)
 
 
+def _resolve_startup_risk_initial_balance(
+    *,
+    settings: Settings,
+    config: Any,
+    startup_available_balance: float | None,
+) -> float:
+    """Return the RiskManager opening balance without synthetic LIVE funding."""
+
+    execution_mode = str(
+        getattr(settings, "execution_mode", None)
+        or os.getenv("EXECUTION_MODE", "PAPER")
+    ).strip().upper()
+    if execution_mode == "LIVE":
+        if startup_available_balance is None:
+            raise BrokerBalanceUnavailableError(
+                "LIVE startup requires validated broker balance"
+            )
+        initial_balance = float(startup_available_balance)
+        if initial_balance != float(startup_available_balance):
+            raise ConfigurationError("live_risk_capital_must_equal_broker_balance")
+        return initial_balance
+    return float(getattr(config, "initial_balance", 0.0) or 0.0)
+
+
+def apply_broker_auth_failure_to_context(
+    ctx: Any,
+    snapshot: Mapping[str, Any] | None,
+) -> None:
+    """Atomically reflect a latched broker-auth failure in BotContext."""
+
+    snapshot = snapshot or {}
+    reason = str(snapshot.get("reason") or "broker_auth_invalid")
+    ctx.broker_auth_invalid = True
+    ctx.broker_auth_error = reason
+    ctx.broker_auth_invalid_at = datetime.now(timezone.utc)
+    ctx.broker_ready = False
+    ctx.broker_balance_valid = False
+    ctx.broker_balance_error = reason
+    ctx.live_orders_armed = False
+    ctx.execution_armed = False
+    ctx.trading_ready = False
+    ctx.live_block_reason = "broker_auth_invalid"
+    ctx.execution_block_reason = "broker_auth_invalid"
+
+
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
@@ -5120,8 +5165,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         total_timeout_sec=60.0,
     )
 
-    initial_balance = float(
-        getattr(config, "initial_balance", 1_000_000.0) or 1_000_000.0
+    initial_balance = _resolve_startup_risk_initial_balance(
+        settings=settings,
+        config=config,
+        startup_available_balance=startup_available_balance,
     )
 
     # 1. Initialize Risk Manager
@@ -6086,18 +6133,29 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bracket_manager_attached=bracket_manager_attached,
     )
     ensure_bot_context_runtime_fields(ctx)
+
+    def _on_broker_auth_failure(snapshot: Mapping[str, Any]) -> None:
+        apply_broker_auth_failure_to_context(ctx, snapshot)
+        reason = str(snapshot.get("reason") or "broker_auth_invalid")
+        LOGGER.error(
+            "BROKER_AUTH_INVALID_PROPAGATED reason=%s generation=%s",
+            reason,
+            snapshot.get("generation"),
+            extra={
+                "event": "BROKER_AUTH_INVALID_PROPAGATED",
+                "reason": reason,
+                "generation": snapshot.get("generation"),
+            },
+        )
+
+    set_auth_callback = getattr(broker_client, "set_auth_failure_callback", None)
+    if callable(set_auth_callback):
+        set_auth_callback(_on_broker_auth_failure)
     if startup_broker_auth_error is not None:
-        ctx.broker_auth_invalid = True
-        ctx.broker_auth_error = startup_broker_auth_error
-        ctx.broker_auth_invalid_at = datetime.now(timezone.utc)
-        ctx.broker_ready = False
-        ctx.broker_balance_valid = False
-        ctx.broker_balance_error = startup_balance_error
-        ctx.live_orders_armed = False
-        ctx.execution_armed = False
-        ctx.trading_ready = False
-        ctx.live_block_reason = "broker_auth_invalid"
-        ctx.execution_block_reason = "broker_auth_invalid"
+        apply_broker_auth_failure_to_context(
+            ctx,
+            {"reason": startup_broker_auth_error},
+        )
     elif startup_available_balance is not None:
         ctx.broker_balance_valid = True
         ctx.broker_balance_error = None
@@ -8865,6 +8923,20 @@ def _register_and_subscribe_live_symbol(
         else:
             LOGGER.warning("LIVE_OPTION_SUBSCRIBE_FAILED symbol=%s subscribed=false reason=token_missing", normalized)
     return bool(resolved_token)
+
+
+def _next_nse_open_after(now_ist: datetime) -> datetime:
+    """Return the next likely NSE open timestamp after *now_ist*."""
+
+    if now_ist.tzinfo is None:
+        now_ist = now_ist.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    candidate = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    if now_ist >= candidate:
+        candidate = candidate + timedelta(days=1)
+    while not is_nse_trading_day(candidate.date()):
+        candidate = candidate + timedelta(days=1)
+    return candidate
+
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -8881,10 +8953,11 @@ async def _deferred_basket_hydration_retry(
     for attempt in range(1, max_attempts + 1):
         market_state = get_market_state()
         if market_state != MarketState.OPEN and delay_seconds >= 15.0:
-            next_open = _next_nse_open_after(datetime.now(ZoneInfo("Asia/Kolkata")))
-            delay = 3600.0
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+            next_open = _next_nse_open_after(now_ist)
+            delay = 24 * 3600.0
             if next_open is not None:
-                delay = max(60.0, min((next_open - datetime.now(ZoneInfo("Asia/Kolkata"))).total_seconds(), 6 * 3600.0))
+                delay = max(60.0, (next_open - now_ist).total_seconds())
             LOGGER.info(
                 "DEFERRED_BASKET_RETRY_SKIPPED reason=market_closed next_retry_seconds=%d",
                 int(delay),
@@ -12309,10 +12382,6 @@ async def _reconcile_state(ctx: BotContext) -> None:
     if ctx.position_manager:
         try:
             broker_positions = await asyncio.to_thread(safe_sync_fetch)
-            ctx.position_reconciliation_failed = False
-            ctx.position_reconciliation_error = None
-            ctx.position_reconciliation_completed = True
-            ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
             if hasattr(ctx, "unresolved_reconciliation_symbols"):
                 ctx.unresolved_reconciliation_symbols.clear()
             if hasattr(ctx, "unprotected_broker_positions"):
@@ -12415,6 +12484,10 @@ async def _reconcile_state(ctx: BotContext) -> None:
                                 ghost_sym,
                                 extra={"event": "STALE_BRACKET_RECONCILED_FLAT", "symbol": ghost_sym},
                             )
+            ctx.position_reconciliation_failed = False
+            ctx.position_reconciliation_error = None
+            ctx.position_reconciliation_completed = True
+            ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
             LOGGER.info("POSITION_RECONCILE_SUCCESS", extra={"event": "POSITION_RECONCILE_SUCCESS"})
 
         except Exception as exc:
