@@ -258,8 +258,6 @@ def build_symbol_hydration_status(
         blockers.append("insufficient_bars")
         if mdm_bars < required:
             blockers.append("mdm_bars_missing")
-        if datahub_bars < required:
-            blockers.append("datahub_bars_missing")
         if runner_bars < required:
             blockers.append("runner_bars_missing")
         if indicator_bars < required:

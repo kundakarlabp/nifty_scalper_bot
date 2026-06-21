@@ -56,15 +56,17 @@ _READINESS_PRIORITY = [
     "kill_switch_active",
     "broker_auth_invalid",
     "broker_session_invalid",
+    "broker_balance_unavailable",
+    "position_reconciliation_failed",
+    "position_reconciliation_incomplete",
+    "unresolved_exit_position",
+    "unprotected_broker_position",
+    "risk_halt",
+    "daily_loss_limit",
     "market_closed",
     "exchange_holiday",
     "outside_session",
-    "risk_halt",
-    "daily_loss_limit",
     "broker_health_block",
-    "position_reconciliation_failed",
-    "unresolved_exit_position",
-    "unprotected_broker_position",
     "futures_history_missing",
     "context_exec_not_ready",
     "selected_contract_missing",
@@ -154,6 +156,8 @@ def normalize_readiness_blockers(
         canonical.append("broker_auth_invalid")
     if broker_state.get("broker_session_invalid"):
         canonical.append("broker_session_invalid")
+    if broker_state.get("broker_balance_unavailable") or broker_state.get("broker_balance_valid") is False:
+        canonical.append("broker_balance_unavailable")
     if risk_state.get("risk_halt"):
         canonical.append("risk_halt")
     if risk_state.get("daily_loss_limit"):
@@ -167,7 +171,7 @@ def normalize_readiness_blockers(
             canonical.append("market_closed")
     canonical = list(dict.fromkeys(canonical))
 
-    high_priority = {"emergency_stop_active", "kill_switch_active", "broker_auth_invalid", "broker_session_invalid"}
+    high_priority = {"emergency_stop_active", "kill_switch_active", "broker_auth_invalid", "broker_session_invalid", "broker_balance_unavailable", "position_reconciliation_failed", "position_reconciliation_incomplete", "unresolved_exit_position", "unprotected_broker_position"}
     has_high_priority = any(item in canonical for item in high_priority)
     market_blocker = "exchange_holiday" if "exchange_holiday" in canonical else "outside_session" if "outside_session" in canonical else "market_closed" if "market_closed" in canonical else None
     secondary: list[str] = []

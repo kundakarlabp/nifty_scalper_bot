@@ -2220,6 +2220,10 @@ class OrderManager:
         )
         if trace_id:
             self._last_trace_id = trace_id
+        broker = getattr(self, "_broker", None)
+        if bool(getattr(broker, "auth_invalid", False)):
+            self.set_last_skip_reason("broker_auth_invalid")
+            raise OrderPlacementError("broker_auth_invalid")
 
         def _log_order_decision(
             *,

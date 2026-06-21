@@ -19,6 +19,14 @@ class BrokerError(BotError):
     """Raised when broker integrations fail."""
 
 
+class BrokerAuthenticationError(BrokerError):
+    """Terminal broker authentication or session failure."""
+
+
+class BrokerBalanceUnavailableError(BrokerError):
+    """Broker account balance could not be obtained safely."""
+
+
 class OrderPlacementError(BrokerError):
     """Raised when order placement fails after retries or validation."""
 
@@ -36,6 +44,8 @@ __all__ = [
     "ConfigurationError",
     "RateLimitError",
     "BrokerError",
+    "BrokerAuthenticationError",
+    "BrokerBalanceUnavailableError",
     "OrderPlacementError",
     "DataStaleError",
     "WebSocketError",
