@@ -33,6 +33,7 @@ jobs:
             tests/core/test_deferred_basket_retry.py \
             tests/execution/test_order_manager_live_guard.py \
             tests/test_main_health_readiness.py \
-            tests/test_exception_identity.py
+            tests/test_exception_identity.py \
+            tests/core/test_runtime_safety_wiring.py
       - name: Full pytest suite
         run: python -m pytest -q

@@ -2599,6 +2599,18 @@ def get_telegram_notifier() -> TelegramEnhancedNotifier | None:
     return _HTTP_NOTIFIER
 
 
+@dataclass(frozen=True, slots=True)
+class ReconciliationResult:
+    success: bool
+    broker_positions_count: int
+    broker_open_orders_count: int
+    cancelled_zombie_orders: tuple[str, ...]
+    unresolved_symbols: tuple[str, ...]
+    unprotected_symbols: tuple[str, ...]
+    error: str | None
+    completed_at: datetime | None
+
+
 @dataclass(slots=True)
 class BotContext:
     """Container for all bot components."""
@@ -4438,6 +4450,43 @@ def apply_broker_auth_failure_to_context(
     ctx.execution_block_reason = "broker_auth_invalid"
 
 
+def attach_canonical_entry_execution_guard(ctx: Any) -> None:
+    """Attach the canonical live-entry guard to the production OrderManager."""
+    order_manager = getattr(ctx, "order_manager", None)
+    set_guard = getattr(order_manager, "set_entry_execution_guard", None)
+    if not callable(set_guard):
+        LOGGER.error("ENTRY_EXECUTION_GUARD_ATTACH_FAILED target=OrderManager reason=missing_setter")
+        return
+
+    def _canonical_entry_execution_guard() -> tuple[bool, str | None]:
+        if bool(getattr(ctx, "broker_auth_invalid", False)):
+            return False, "broker_auth_invalid"
+        if bool(getattr(ctx, "broker_session_invalid", False)):
+            return False, "broker_session_invalid"
+        if not bool(getattr(ctx, "broker_balance_valid", False)):
+            return False, "broker_balance_unavailable"
+        if bool(getattr(ctx, "position_reconciliation_failed", False)):
+            return False, "position_reconciliation_failed"
+        if not bool(getattr(ctx, "position_reconciliation_completed", False)):
+            return False, "position_reconciliation_incomplete"
+        if set(getattr(ctx, "unresolved_reconciliation_symbols", set()) or set()):
+            return False, "unresolved_exit_position"
+        if set(getattr(ctx, "unprotected_broker_positions", set()) or set()):
+            return False, "unprotected_broker_position"
+        decision = getattr(ctx, "readiness_decision", None)
+        if decision is None:
+            return False, "readiness_snapshot_missing"
+        if not bool(getattr(decision, "live_orders_armed", False)):
+            return False, str(getattr(decision, "primary_blocker", None) or "live_execution_not_armed")
+        return True, None
+
+    set_guard(_canonical_entry_execution_guard)
+    LOGGER.info(
+        "ENTRY_EXECUTION_GUARD_ATTACHED target=OrderManager",
+        extra={"event": "ENTRY_EXECUTION_GUARD_ATTACHED", "target": "OrderManager"},
+    )
+
+
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
@@ -6138,9 +6187,35 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bracket_manager_attached=bracket_manager_attached,
     )
     ensure_bot_context_runtime_fields(ctx)
+    with suppress(Exception):
+        setattr(ctx.market_data_manager, "data_hub", ctx.data_hub)
+    attach_canonical_entry_execution_guard(ctx)
+    app_loop = None
+    try:
+        app_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        app_loop = None
 
     def _on_broker_auth_failure(snapshot: Mapping[str, Any]) -> None:
         apply_broker_auth_failure_to_context(ctx, snapshot)
+        invalidate = getattr(ctx.market_data_manager, "invalidate_account_cache", None)
+        if callable(invalidate):
+            invalidate(reason="broker_auth_invalid")
+        ctx.live_orders_armed = False
+        ctx.execution_armed = False
+        ctx.trading_ready = False
+        ctx.broker_ready = False
+        if app_loop is not None:
+            def _publish_auth_failure() -> None:
+                asyncio.create_task(
+                    _recompute_and_push_runtime_readiness(ctx, reason="broker_auth_invalid")
+                )
+            try:
+                app_loop.call_soon_threadsafe(_publish_auth_failure)
+            except RuntimeError:
+                LOGGER.error(
+                    "BROKER_AUTH_READINESS_PUBLICATION_FAILED reason=event_loop_unavailable"
+                )
         reason = str(snapshot.get("reason") or "broker_auth_invalid")
         LOGGER.error(
             "BROKER_AUTH_INVALID_PROPAGATED reason=%s generation=%s",
@@ -8203,14 +8278,29 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
                 if not pd.isna(dt) and (pd.Timestamp.utcnow()-dt).total_seconds()<=limit:
                     return True
         return False
-    def _subscription_confirmed(sym: str | None) -> bool:
-        if not sym or mdm is None: return False
+    def _subscription_record(sym: str | None) -> Any:
+        if not sym or getattr(ctx, "data_hub", None) is None:
+            return None
+        getter = getattr(ctx.data_hub, "get_subscription_snapshot", None)
+        if not callable(getter):
+            return None
         try:
-            token = getattr(mdm, "_resolve_token_for_symbol", lambda _s: None)(sym) or getattr(mdm, "_symbol_to_token", {}).get(sym)
-            confirmed = getattr(mdm, "_confirmed_subscriptions", set()) or set()
-            return bool(token is not None and int(token) in confirmed)
+            return getter(sym)
         except Exception:
-            return False
+            return None
+
+    def _subscription_confirmed(sym: str | None) -> bool:
+        record = _subscription_record(sym)
+        state = getattr(record, "state", None)
+        value = getattr(state, "value", state)
+        return str(value or "").lower() in {"broker_confirmed", "live"}
+
+    def _subscription_live(sym: str | None) -> bool:
+        record = _subscription_record(sym)
+        state = getattr(record, "state", None)
+        value = getattr(state, "value", state)
+        return str(value or "").lower() == "live"
+
     def _subscription_or_live_tick(sym:str|None)->bool:
         sub=_subscription_confirmed(sym)
         if sub: return True
@@ -8370,8 +8460,14 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     pe_quote_fresh = bool(pe_status and (pe_status.live_tick_fresh or pe_status.tradable_quote))
     ce_bid_ask_complete = bool(ce_status and ce_status.tradable_quote)
     pe_bid_ask_complete = bool(pe_status and pe_status.tradable_quote)
-    ce_exec_ready = bool(ce_status and basket_hard_ready and ce_status.ready_for_execution)
-    pe_exec_ready = bool(pe_status and basket_hard_ready and pe_status.ready_for_execution)
+    ce_subscription_live = _subscription_live(selected_ce)
+    pe_subscription_live = _subscription_live(selected_pe)
+    ce_exec_ready = bool(
+        ce_status and basket_hard_ready and ce_status.ready_for_execution and ce_subscription_live
+    )
+    pe_exec_ready = bool(
+        pe_status and basket_hard_ready and pe_status.ready_for_execution and pe_subscription_live
+    )
     ce_eval_ready = bool(ce_status and ce_status.ready_for_evaluation and ce_bars >= option_eval_min_live_bars)
     pe_eval_ready = bool(pe_status and pe_status.ready_for_evaluation and pe_bars >= option_eval_min_live_bars)
     spot_ready = bool(spot_status and spot_status.ready_for_evaluation)
@@ -8392,7 +8488,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         except Exception:
             broker_connected = False
     else:
-        broker_connected = broker_components_present
+        broker_connected = False
     broker_ready = bool(
         broker_components_present
         and broker_connected
@@ -8422,6 +8518,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     if pe_status and not pe_status.tradable_quote: missing.append('selected_pe_quote_missing')
     if ce_status and not ce_status.depth_available: missing.append('selected_ce_depth_missing')
     if pe_status and not pe_status.depth_available: missing.append('selected_pe_depth_missing')
+    if selected_ce and not ce_subscription_live: missing.append('selected_ce_subscription_not_live')
+    if selected_pe and not pe_subscription_live: missing.append('selected_pe_subscription_not_live')
     if (ce_status and not ce_status.tradable_quote) or (pe_status and not pe_status.tradable_quote): missing.append('selected_option_bid_ask_missing')
     if not runner_running: missing.append('runner_not_running')
     if live_mode:
@@ -8429,6 +8527,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not ce_exec_ready and not selected_history_ready: missing.append('ce_exec_quote_or_history_not_ready')
         if not pe_exec_ready and not selected_history_ready: missing.append('pe_exec_quote_or_history_not_ready')
         if not context_exec_ready: missing.append('context_exec_not_ready')
+        if not callable(is_connected): missing.append("broker_connectivity_unknown")
         if not broker_ready: missing.append('broker_not_ready')
         if bool(getattr(ctx, "position_reconciliation_failed", False)):
             missing.append("position_reconciliation_failed")
@@ -11986,8 +12085,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                     extra={"event": "INDICATOR_READINESS_SYNC", "ready": indicator_ready},
                 )
 
-                ctx.subsystems_started = True
-                LOGGER.info("✅ All subsystems started.")
+                ctx.live_orders_armed = False
+                ctx.execution_armed = False
+                ctx.trading_ready = False
+                ctx.position_reconciliation_completed = False
+                LOGGER.info(
+                    "OBSERVATION_SUBSYSTEMS_STARTED live_orders_armed=false",
+                    extra={"event": "OBSERVATION_SUBSYSTEMS_STARTED", "live_orders_armed": False},
+                )
         except Exception as e:
             LOGGER.critical(f"Subsystem start failed: {e}")
 
@@ -12015,7 +12120,40 @@ async def startup_sequence(ctx: BotContext) -> None:
                     logger=LOGGER,
                 )
             except Exception as reconcile_exc:
-                LOGGER.error("reconcile_with_broker failed (non-fatal): %s", reconcile_exc)
+                ctx.position_reconciliation_completed = False
+                ctx.position_reconciliation_failed = True
+                ctx.position_reconciliation_error = str(reconcile_exc)
+                ctx.live_orders_armed = False
+                ctx.execution_armed = False
+                ctx.trading_ready = False
+                ctx.live_block_reason = "position_reconciliation_failed"
+                ctx.execution_block_reason = "position_reconciliation_failed"
+                LOGGER.error(
+                    "STARTUP_RECONCILIATION_FAILED process_liveness_preserved=true live_entry_execution_blocked=true error=%s",
+                    reconcile_exc,
+                    extra={
+                        "event": "STARTUP_RECONCILIATION_FAILED",
+                        "process_liveness_preserved": True,
+                        "live_entry_execution_blocked": True,
+                    },
+                )
+            startup_reconciliation = await run_startup_reconciliation(ctx)
+            if not startup_reconciliation.success:
+                LOGGER.error(
+                    "STARTUP_RECONCILIATION_FAILED process_liveness_preserved=true live_entry_execution_blocked=true error=%s",
+                    startup_reconciliation.error,
+                    extra={
+                        "event": "STARTUP_RECONCILIATION_FAILED",
+                        "process_liveness_preserved": True,
+                        "live_entry_execution_blocked": True,
+                    },
+                )
+            else:
+                ctx.subsystems_started = True
+                LOGGER.info(
+                    "LIVE_EXECUTION_STARTUP_RECONCILIATION_SUCCEEDED",
+                    extra={"event": "LIVE_EXECUTION_STARTUP_RECONCILIATION_SUCCEEDED"},
+                )
             # ────────────────────────────────────────────────────────────────
 
             async def _sync_loop():
@@ -12488,7 +12626,19 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             average_price=avg_price,
                             position_side=pos.side,
                         )
-                        protection_confirmed = bool(bm.is_symbol_managed(norm_symbol))
+                        protection_status = None
+                        get_protection = getattr(bm, "get_position_protection_status", None)
+                        if callable(get_protection):
+                            protection_status = get_protection(norm_symbol)
+                        expected_quantity = abs(int(pos.quantity))
+                        protection_confirmed = bool(
+                            protection_status is not None
+                            and getattr(protection_status, "managed", False)
+                            and getattr(protection_status, "stop_active", False)
+                            and int(getattr(protection_status, "protected_quantity", 0) or 0) == expected_quantity
+                            and str(getattr(protection_status, "position_side", "") or "") == str(pos.side)
+                            and not bool(getattr(protection_status, "exit_failed", False))
+                        )
                         if not protection_confirmed:
                             if hasattr(ctx, "unprotected_broker_positions"):
                                 ctx.unprotected_broker_positions.add(str(norm_symbol))
@@ -12578,6 +12728,56 @@ async def _reconcile_state(ctx: BotContext) -> None:
     # 3. SITUATION REPORT
     if ctx.order_manager:
         ctx.order_manager._log_status_report()
+
+
+
+async def run_startup_reconciliation(ctx: BotContext) -> ReconciliationResult:
+    """Canonical startup reconciliation result used by LIVE entry gating."""
+    try:
+        await _reconcile_state(ctx)
+        unresolved = tuple(sorted(getattr(ctx, "unresolved_reconciliation_symbols", set()) or set()))
+        unprotected = tuple(sorted(getattr(ctx, "unprotected_broker_positions", set()) or set()))
+        success = bool(
+            getattr(ctx, "position_reconciliation_completed", False)
+            and not getattr(ctx, "position_reconciliation_failed", False)
+            and not unresolved
+            and not unprotected
+        )
+        if not success:
+            ctx.position_reconciliation_completed = False
+            ctx.position_reconciliation_failed = True
+            ctx.live_orders_armed = False
+            ctx.execution_armed = False
+            ctx.trading_ready = False
+        return ReconciliationResult(
+            success=success,
+            broker_positions_count=len(getattr(ctx.position_manager, "get_open_positions", lambda: [])()),
+            broker_open_orders_count=0,
+            cancelled_zombie_orders=(),
+            unresolved_symbols=unresolved,
+            unprotected_symbols=unprotected,
+            error=None if success else (getattr(ctx, "position_reconciliation_error", None) or "startup_reconciliation_incomplete"),
+            completed_at=datetime.now(timezone.utc),
+        )
+    except Exception as exc:
+        ctx.position_reconciliation_completed = False
+        ctx.position_reconciliation_failed = True
+        ctx.position_reconciliation_error = str(exc)
+        ctx.live_orders_armed = False
+        ctx.execution_armed = False
+        ctx.trading_ready = False
+        ctx.live_block_reason = "position_reconciliation_failed"
+        ctx.execution_block_reason = "position_reconciliation_failed"
+        return ReconciliationResult(
+            success=False,
+            broker_positions_count=0,
+            broker_open_orders_count=0,
+            cancelled_zombie_orders=(),
+            unresolved_symbols=tuple(sorted(getattr(ctx, "unresolved_reconciliation_symbols", set()) or set())),
+            unprotected_symbols=tuple(sorted(getattr(ctx, "unprotected_broker_positions", set()) or set())),
+            error=str(exc),
+            completed_at=datetime.now(timezone.utc),
+        )
 
 
 def _close_all_positions(ctx: BotContext, *, reason: str) -> None:

@@ -106,3 +106,42 @@ async def test_auth_failure_clears_cache_and_propagates():
     with pytest.raises(BrokerAuthenticationError):
         await mdm.get_account_snapshot(force=True)
     assert mdm._account_snapshot == {}
+
+
+def test_sync_cached_balance_rejected_when_broker_auth_invalid():
+    broker = _SyncBroker(10.0)
+    mdm = MarketDataManager(broker, _WS())
+    assert mdm.get_available_balance(force=True) == 10.0
+    broker.auth_invalid = True
+    with pytest.raises(BrokerAuthenticationError):
+        mdm.get_available_balance(force=False)
+    assert mdm._account_snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_async_cached_balance_rejected_when_broker_auth_invalid():
+    broker = _AsyncBroker(10.0)
+    mdm = MarketDataManager(broker, _WS())
+    assert await mdm.refresh_available_balance(force=True) == 10.0
+    broker.auth_invalid = True
+    with pytest.raises(BrokerAuthenticationError):
+        await mdm.get_account_snapshot(force=False)
+    assert mdm._account_snapshot == {}
+
+
+def test_sync_generic_refresh_failure_clears_cache_and_raises_typed():
+    class Broker(_SyncBroker):
+        def get_available_balance(self, segment="equity"):
+            self.calls += 1
+            if self.calls == 1:
+                return 10.0
+            raise RuntimeError("boom")
+
+    broker = Broker()
+    mdm = MarketDataManager(broker, _WS())
+    assert mdm.get_available_balance(force=True) == 10.0
+    with pytest.raises(BrokerBalanceUnavailableError):
+        mdm.get_available_balance(force=True)
+    assert mdm._account_snapshot == {}
+    with pytest.raises(BrokerBalanceUnavailableError):
+        mdm.get_available_balance(force=False)

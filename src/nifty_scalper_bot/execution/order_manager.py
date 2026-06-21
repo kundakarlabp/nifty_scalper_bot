@@ -159,6 +159,13 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
     return (bid + ask) / 2.0
 
 
+class OrderIntent(str, Enum):
+    ENTRY = "entry"
+    EXIT = "exit"
+    PROTECTIVE = "protective"
+    EMERGENCY_EXIT = "emergency_exit"
+
+
 class OrderStatus(Enum):
     PENDING = "pending"
     SUBMITTED = "submitted"
@@ -2216,6 +2223,7 @@ class OrderManager:
         signal_id: str | None = None,
         strategy_name: str = "manual",
         trace_id: str | None = None,
+        intent: OrderIntent | str | None = None,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -2314,9 +2322,31 @@ class OrderManager:
         # ---------------------------------------------------------
         # 🛡️ DETECT EXIT vs ENTRY (must be BEFORE any guard)
         normalized_tag = (tag or "").lower()
-        is_system_exit = any(
-            x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
-        )
+        order_intent: OrderIntent
+        if intent is not None:
+            order_intent = intent if isinstance(intent, OrderIntent) else OrderIntent(str(intent).lower())
+        else:
+            inferred_exit = any(
+                x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
+            )
+            order_intent = OrderIntent.EXIT if inferred_exit else OrderIntent.ENTRY
+            self._logger.warning(
+                "ORDER_INTENT_INFERRED_LEGACY symbol=%s tag=%s inferred_intent=%s",
+                symbol,
+                tag,
+                order_intent.value,
+                extra={
+                    "event": "ORDER_INTENT_INFERRED_LEGACY",
+                    "symbol": symbol,
+                    "tag": tag,
+                    "intent": order_intent.value,
+                },
+            )
+        is_system_exit = order_intent in {
+            OrderIntent.EXIT,
+            OrderIntent.PROTECTIVE,
+            OrderIntent.EMERGENCY_EXIT,
+        }
 
         if not is_system_exit and self._bracket_manager is not None:
             has_unresolved_exit = getattr(self._bracket_manager, "has_unresolved_exit", None)
@@ -2405,7 +2435,11 @@ class OrderManager:
                 self._logger.warning("ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s", symbol)
                 _log_order_decision(allowed=False, block_reason="live_execution_safety_check_failed")
                 return None
-            if self._entry_execution_guard is not None:
+            if order_intent == OrderIntent.ENTRY:
+                if self._entry_execution_guard is None:
+                    self.set_last_skip_reason("entry_execution_guard_missing")
+                    _log_order_decision(allowed=False, block_reason="entry_execution_guard_missing")
+                    raise OrderPlacementError("entry_execution_guard_missing")
                 allowed, guard_reason = self._entry_execution_guard()
                 if not allowed:
                     reason_text = guard_reason or "entry_execution_guard_blocked"
@@ -3714,7 +3748,7 @@ class OrderManager:
                 self._last_order_api_error = None
             return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "place_order_rejected", details={"protected_price": price}, broker_attempted=bool(oid))
         try:
-            oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+            oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product, intent=OrderIntent.ENTRY)
         except Exception as exc:  # noqa: BLE001
             err = self._sanitize_broker_error(exc)
             self._last_order_api_error_type = type(exc).__name__
@@ -6356,6 +6390,7 @@ class OrderManager:
                 price=_exit_ltp,  # supply live LTP for accounting; None is safe
                 tag=tag,
                 check_risk=False,  # exits MUST never be blocked by risk-manager
+                intent=OrderIntent.EXIT,
             )
 
             if not exit_id:
@@ -12747,6 +12782,7 @@ class OrderManager:
                 trigger_price=trigger_price,  # ✅ Trigger Price
                 tag="safety_sl_hard",
                 variety="regular",
+                intent=OrderIntent.PROTECTIVE,
             )
             self._logger.info(
                 f"✅ Hard SL Placed: Trigger {trigger_price}, Limit {limit_price}"
@@ -12764,6 +12800,7 @@ class OrderManager:
                 price=tp_price,
                 tag="safety_tp_wide",
                 variety="regular",
+                intent=OrderIntent.PROTECTIVE,
             )
             self._logger.info(f"✅ Wide TP Placed: {tp_price}")
         except Exception as e:

@@ -99,6 +99,9 @@ _BLOCKER_ALIASES = {
     "strategy_runner_not_running": "strategy_not_ready",
     "eval_not_ready": "strategy_not_ready",
     "broker_not_ready": "broker_health_block",
+    "broker_connectivity_unknown": "broker_health_block",
+    "selected_ce_subscription_not_live": "selected_option_subscription_missing",
+    "selected_pe_subscription_not_live": "selected_option_subscription_missing",
 }
 
 

@@ -35,8 +35,13 @@ def make_ctx(mdm, live: bool = True):
         settings=SimpleNamespace(execution_mode='LIVE' if live else 'PAPER'),
         market_data_manager=mdm,
         strategy_runner=Runner(),
-        broker_client=object(),
+        broker_client=SimpleNamespace(is_connected=lambda: True),
         order_manager=object(),
+        data_hub=SimpleNamespace(
+            get_subscription_snapshot=lambda symbol: SimpleNamespace(
+                state=SimpleNamespace(value="live"), generation=1, updated_at=1.0
+            )
+        ),
         active_trading_universe={
             'spot_symbol': 'NSE:NIFTY',
             'selected_ce': 'NFO:CE',

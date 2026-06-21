@@ -362,6 +362,18 @@ class MockJournal:
     def set(self, key, value): pass
     def get(self, key): return None
 
+@dataclass(frozen=True, slots=True)
+class PositionProtectionStatus:
+    symbol: str
+    managed: bool
+    stop_active: bool
+    protected_quantity: int
+    position_side: str | None
+    exit_failed: bool
+    bracket_id: str | None
+    reason: str | None = None
+
+
 class BracketManager:
     """
     The 'Sniper' Engine.
@@ -2741,6 +2753,40 @@ class BracketManager:
     # --------------------------------------------------------------------------
     # 6. HOUSEKEEPING & UTILS
     # --------------------------------------------------------------------------
+
+
+    def get_position_protection_status(self, symbol: str) -> PositionProtectionStatus:
+        """Return immutable protection status for a broker position symbol."""
+        normalized = normalize_symbol(symbol) or symbol
+        with self._lock:
+            entry_ids = list(self._symbol_map.get(normalized, []))
+            if not entry_ids:
+                return PositionProtectionStatus(normalized, False, False, 0, None, False, None, "not_managed")
+            for entry_id in entry_ids:
+                bracket = self._brackets.get(entry_id)
+                if bracket is None:
+                    continue
+                exit_failed = bracket.exit_state in {
+                    BracketExitLifecycle.EXIT_REJECTED_FATAL.value,
+                    BracketExitLifecycle.EXIT_FAILED_ESCALATED.value,
+                }
+                stop_active = bool(
+                    bracket.active
+                    and bracket.remaining_quantity > 0
+                    and float(bracket.sl_trigger_price or 0.0) > 0.0
+                )
+                side = "LONG" if bracket.side == "BUY" else "SHORT" if bracket.side == "SELL" else bracket.side
+                return PositionProtectionStatus(
+                    symbol=normalized,
+                    managed=bool(bracket.active and bracket.remaining_quantity > 0),
+                    stop_active=stop_active,
+                    protected_quantity=abs(int(bracket.remaining_quantity or bracket.quantity or 0)),
+                    position_side=side,
+                    exit_failed=exit_failed,
+                    bracket_id=bracket.bracket_id,
+                    reason=None if stop_active and not exit_failed else "protection_incomplete",
+                )
+        return PositionProtectionStatus(normalized, False, False, 0, None, False, None, "bracket_missing")
 
     def is_symbol_managed(self, symbol: str) -> bool:
         """

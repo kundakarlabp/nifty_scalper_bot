@@ -1447,13 +1447,29 @@ class MarketDataManager:
             self._account_snapshot = {}
             self._account_updated_at = 0.0
 
+    def invalidate_account_cache(self, *, reason: str) -> None:
+        self._clear_account_cache()
+        self._logger.warning(
+            "MDM_ACCOUNT_CACHE_INVALIDATED reason=%s",
+            reason,
+            extra={"event": "MDM_ACCOUNT_CACHE_INVALIDATED", "reason": reason},
+        )
+
+    def _raise_if_broker_auth_invalid(self) -> None:
+        broker = getattr(self, "_broker_client", None) or getattr(self, "_broker", None)
+        if bool(getattr(broker, "auth_invalid", False)):
+            self._clear_account_cache()
+            raise BrokerAuthenticationError("broker_authentication_invalid")
+
     async def get_account_snapshot(self, *, force: bool = False) -> dict[str, Any]:
         """Return a non-stale broker account snapshot or raise a typed error."""
+        self._raise_if_broker_auth_invalid()
         now = time.time()
         with self._account_lock:
             cache_age = now - self._account_updated_at
             if self._account_snapshot and cache_age < self._account_cache_ttl and not force:
                 return dict(self._account_snapshot)
+        self._raise_if_broker_auth_invalid()
         try:
             available = await self._invoke_broker_async(
                 "get_available_balance", segment=self._account_segment
@@ -1506,11 +1522,13 @@ class MarketDataManager:
 
     def get_available_balance(self, *, force: bool = False) -> float | None:
         """Return a synchronous, non-stale available broker balance."""
+        self._raise_if_broker_auth_invalid()
         now = time.time()
         with self._account_lock:
             cache_age = now - self._account_updated_at
             if self._account_snapshot and cache_age < self._account_cache_ttl and not force:
                 return self._validate_account_balance(self._account_snapshot.get("available"))
+        self._raise_if_broker_auth_invalid()
         try:
             available = self._invoke_broker_sync(
                 "get_available_balance", segment=self._account_segment
@@ -1533,6 +1551,18 @@ class MarketDataManager:
         except BrokerBalanceUnavailableError:
             self._clear_account_cache()
             raise
+        except Exception as exc:  # noqa: BLE001
+            self._clear_account_cache()
+            self._logger.error(
+                "mdm_available_balance_refresh_failed",
+                extra={
+                    "event": "mdm_available_balance_refresh_failed",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise BrokerBalanceUnavailableError("broker_balance_refresh_failed") from exc
 
     # ------------------------------------------------------------------
     # Public API
@@ -9050,6 +9080,14 @@ class MarketDataManager:
                             "token": token,
                         },
                     )
+                    hub = getattr(self, "data_hub", None) or getattr(self, "_data_hub", None)
+                    mark_requested = getattr(hub, "mark_subscription_requested", None)
+                    if callable(mark_requested):
+                        mark_requested(
+                            symbol,
+                            token=int(token),
+                            reason="transport_subscribe_sent",
+                        )
                     if not hasattr(self._ws, "is_connected") or self._is_ws_connected():
                         self._dispatched_subscriptions.add(int(token))
                         self._logger.info(

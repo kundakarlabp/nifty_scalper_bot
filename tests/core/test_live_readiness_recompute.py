@@ -29,8 +29,13 @@ def _ctx(mdm):
         settings=SimpleNamespace(execution_mode='LIVE'),
         market_data_manager=mdm,
         strategy_runner=_Runner(),
-        broker_client=object(),
+        broker_client=SimpleNamespace(is_connected=lambda: True),
         order_manager=object(),
+        data_hub=SimpleNamespace(
+            get_subscription_snapshot=lambda symbol: SimpleNamespace(
+                state=SimpleNamespace(value="live"), generation=1, updated_at=1.0
+            )
+        ),
         active_trading_universe={},
     )
 
