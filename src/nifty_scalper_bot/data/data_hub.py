@@ -24,6 +24,8 @@ Safe-edit notes:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from enum import Enum
 import logging
 import os
 import re
@@ -51,6 +53,26 @@ LOGGER = logging.getLogger(__name__)
 Tick = Dict[str, Any]
 TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
+
+
+class SubscriptionState(str, Enum):
+    PENDING_TOKEN = "pending_token"
+    QUEUED = "queued"
+    REQUESTED = "requested"
+    BROKER_CONFIRMED = "broker_confirmed"
+    LIVE = "live"
+    FAILED = "failed"
+    UNSUBSCRIBED = "unsubscribed"
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionRecord:
+    symbol: str
+    token: int | None
+    state: SubscriptionState
+    generation: int
+    reason: str
+    updated_at: float
 
 
 class _EventBus:
@@ -165,6 +187,8 @@ class DataHub:
         self._symbol_aliases: dict[str, set[str]] = defaultdict(set)
         self._order_subscribers: list[OrderListener] = []
         self._mdm_subscribed_symbols: set[str] = set()
+        self._subscription_states: dict[str, SubscriptionRecord] = {}
+        self._subscription_generation = 0
         self._defer_live_symbol_subscriptions = bool(
             kwargs.get("defer_live_symbol_subscriptions", True)
         )
@@ -202,6 +226,55 @@ class DataHub:
 
         self._bind_to_mdm()
         self._restore_snapshots()
+
+    def _set_subscription_state(
+        self,
+        symbol: str,
+        state: SubscriptionState,
+        *,
+        reason: str,
+        token: int | None = None,
+    ) -> SubscriptionRecord:
+        normalized = canonical(symbol)
+        previous = self._subscription_states.get(normalized)
+        if previous is not None and previous.state == state and previous.token == token:
+            return previous
+        self._subscription_generation += 1
+        record = SubscriptionRecord(
+            symbol=normalized,
+            token=token,
+            state=state,
+            generation=self._subscription_generation,
+            reason=reason,
+            updated_at=float(self._clock()),
+        )
+        self._subscription_states[normalized] = record
+        LOGGER.info(
+            "SUBSCRIPTION_STATE_CHANGED symbol=%s token=%s previous=%s current=%s reason=%s generation=%s",
+            normalized,
+            token,
+            previous.state.value if previous else None,
+            state.value,
+            reason,
+            record.generation,
+            extra={
+                "event": "SUBSCRIPTION_STATE_CHANGED",
+                "symbol": normalized,
+                "token": token,
+                "previous": previous.state.value if previous else None,
+                "current": state.value,
+                "reason": reason,
+                "generation": record.generation,
+            },
+        )
+        return record
+
+    def get_subscription_state(self, symbol: str) -> SubscriptionState | None:
+        record = self._subscription_states.get(canonical(symbol))
+        return record.state if record is not None else None
+
+    def get_subscription_record(self, symbol: str) -> SubscriptionRecord | None:
+        return self._subscription_states.get(canonical(symbol))
 
     def _bind_to_mdm(self) -> None:
         attach_tick_bus = getattr(self._mdm, "attach_tick_bus", None)
@@ -918,6 +991,12 @@ class DataHub:
             if source in {"ws", "websocket", "stream"}:
                 self._last_ws_arrival[symbol] = now_ms
                 self._last_global_ws_arrival = now_ms
+                self._set_subscription_state(
+                    symbol,
+                    SubscriptionState.LIVE,
+                    reason="first_live_tick" if first_seen else "live_tick",
+                    token=token,
+                )
             elif source in {"poll", "rest"}:
                 self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
@@ -1057,6 +1136,11 @@ class DataHub:
     def _subscribe_symbol(self, symbol: str) -> None:
         trace_id = self._make_trace_id(symbol)
         if symbol.isdigit():
+            self._set_subscription_state(
+                symbol,
+                SubscriptionState.PENDING_TOKEN,
+                reason="symbol_is_token",
+            )
             LOGGER.info(
                 "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=false reason=symbol_is_token",
                 symbol,
@@ -1071,6 +1155,11 @@ class DataHub:
             )
             return
         if symbol in self._mdm_subscribed_symbols:
+            self._set_subscription_state(
+                symbol,
+                SubscriptionState.QUEUED,
+                reason="already_queued",
+            )
             LOGGER.info(
                 "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=true reason=already_subscribed",
                 symbol,
@@ -1088,20 +1177,20 @@ class DataHub:
         if callable(mdm_sub):
             mdm_sub(symbol, self.ingest_tick_sync)
             self._mdm_subscribed_symbols.add(symbol)
-            LOGGER.info(
-                "datahub_live_symbol_subscribed symbol=%s",
+            self._set_subscription_state(
                 symbol,
-                extra={"event": "datahub_live_symbol_subscribed", "symbol": symbol},
+                SubscriptionState.QUEUED,
+                reason="mdm_delegate_registered",
             )
             LOGGER.info(
-                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=true reason=mdm_subscribed",
+                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=false reason=queued_for_mdm",
                 symbol,
                 extra={
                     "event": "DATAHUB_LIVE_SUBSCRIBE",
                     "symbol": symbol,
                     "trace_id": trace_id,
-                    "subscribed": True,
-                    "reason": "mdm_subscribed",
+                    "subscribed": False,
+                    "reason": "queued_for_mdm",
                     "mdm_delegate_called": True,
                 },
             )
@@ -1122,6 +1211,11 @@ class DataHub:
                 },
             )
         else:
+            self._set_subscription_state(
+                symbol,
+                SubscriptionState.FAILED,
+                reason="mdm_no_subscribe_callable",
+            )
             LOGGER.warning(
                 "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=false reason=mdm_no_subscribe",
                 symbol,

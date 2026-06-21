@@ -38,6 +38,7 @@ import math
 import os
 
 from nifty_scalper_bot.config.env_utils import parse_int_env
+from nifty_scalper_bot.utils.errors import BrokerAuthenticationError
 import re
 from random import uniform
 import threading
@@ -1421,39 +1422,13 @@ class MarketDataManager:
         snapshot: dict[str, float] = {}
         response: Any | None = None
         try:
-            summary_fetcher = getattr(self._broker, "get_margin_summary", None)
-            if callable(summary_fetcher):
-                response = await summary_fetcher(segment=segment)
-                snapshot = _coerce_margin_summary(response)
-                if snapshot:
-                    self._logger.info(
-                        "Condition met: mdm_account_summary_used",
-                        extra={
-                            "event": "mdm_account_summary_used",
-                            "segment": segment,
-                        },
-                    )
-
-            if not snapshot:
-                margins_fetcher = getattr(self._broker, "get_margins", None)
-                if callable(margins_fetcher):
-                    response = await margins_fetcher(segment=segment)
-                    normalizer = getattr(
-                        self._broker, "_normalize_margin_payload", None
-                    )
-                    if callable(normalizer):
-                        normalized = normalizer(response, segment=segment)
-                        snapshot = _coerce_margin_summary(normalized)
-                    else:
-                        snapshot = _coerce_margin_summary(response)
-
-            if not snapshot:
-                balance_fetcher = getattr(self._broker, "get_available_balance", None)
-                if callable(balance_fetcher):
-                    available = await balance_fetcher(segment=segment)
-                    available_value = _coerce_positive_float(available)
-                    if available_value is not None:
-                        snapshot = {"available": float(available_value)}
+            balance_fetcher = getattr(self._broker, "get_available_balance", None)
+            if callable(balance_fetcher):
+                available = await balance_fetcher(segment=segment)
+                if available is not None:
+                    numeric_available = float(available)
+                    if math.isfinite(numeric_available) and numeric_available >= 0.0:
+                        snapshot = {"available": numeric_available}
 
             if snapshot:
                 with self._account_lock:
@@ -1475,6 +1450,11 @@ class MarketDataManager:
                 "mdm_account_snapshot_empty",
                 extra={"event": "mdm_account_snapshot_empty", "segment": segment},
             )
+        except BrokerAuthenticationError:
+            with self._account_lock:
+                self._account_snapshot = {}
+                self._account_updated_at = 0.0
+            raise
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in MarketDataManager.get_account_snapshot: %s",
@@ -1522,11 +1502,9 @@ class MarketDataManager:
                 if hasattr(broker, "get_available_balance"):
                     try:
                         live_balance = broker.get_available_balance(segment=segment)  # type: ignore[call-arg]
-                        numeric_live = (
-                            _coerce_positive_float(live_balance)
-                            if live_balance is not None
-                            else None
-                        )
+                        numeric_live = float(live_balance) if live_balance is not None else None
+                        if numeric_live is not None and not math.isfinite(numeric_live):
+                            numeric_live = None
                         if numeric_live is not None:
                             resolved_balance = float(numeric_live)
                             # [FIX] Throttled INFO log
@@ -1542,6 +1520,8 @@ class MarketDataManager:
                                 )
                                 self._last_balance_log_time = time.time()
                             return resolved_balance
+                    except BrokerAuthenticationError:
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         self._logger.error(
                             "mdm_available_balance_direct_error: %s",
@@ -1549,26 +1529,12 @@ class MarketDataManager:
                             extra={"event": "mdm_available_balance_direct_error"},
                             exc_info=exc,
                         )
-
-                if hasattr(broker, "get_margin_summary"):
-                    summary = broker.get_margin_summary(segment=segment)  # type: ignore[call-arg]
-                    if isinstance(summary, Mapping):
-                        flattened = _coerce_margin_summary(summary)
-                        for key in ("available", "available_cash", "cash", "net"):
-                            value = _coerce_positive_float(flattened.get(key))
-                            if value is not None:
-                                if time.time() - self._last_balance_log_time >= 60.0:
-                                    self._logger.debug(
-                                        "mdm_available_balance_resolved",
-                                        extra={
-                                            "event": "mdm_available_balance_resolved",
-                                            "key": key,
-                                            "balance": round(value, 2),
-                                            "source": "broker_margin",
-                                        },
-                                    )
-                                    self._last_balance_log_time = time.time()
-                                return float(value)
+                return None
+        except BrokerAuthenticationError:
+            with self._account_lock:
+                self._account_snapshot = {}
+                self._account_updated_at = 0.0
+            raise
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "mdm_available_balance_margin_error: %s",

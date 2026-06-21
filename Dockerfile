@@ -54,7 +54,7 @@ RUN mkdir -p /app/data \
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8000}/livez || exit 1
 
 # Create non-root user for security
 # NOTE: /app/data and /tmp/nifty_scalper_data are already chmod 777

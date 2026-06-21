@@ -30,7 +30,10 @@ def test_every_ctx_attribute_write_is_declared() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "BotContext":
             for stmt in node.body:
-                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                if (
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                ):
                     declared.add(stmt.target.id)
     defaults = set(BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS.keys())
     writes: set[str] = set()
@@ -44,6 +47,25 @@ def test_every_ctx_attribute_write_is_declared() -> None:
                     and target.value.id == "ctx"
                 ):
                     writes.add(target.attr)
+        if isinstance(node, ast.AnnAssign):
+            target = node.target
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "ctx"
+            ):
+                writes.add(target.attr)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "setattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "ctx"
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            writes.add(node.args[1].value)
     undeclared = sorted(writes - declared - defaults)
     assert not undeclared, (
         f"Undeclared ctx attribute writes (would raise AttributeError on the "
@@ -57,6 +79,21 @@ def test_basket_build_pending_spot_ltp_is_declared_field() -> None:
 
     field_names = {f.name for f in dataclasses.fields(BotContext)}
     assert "basket_build_pending_spot_ltp" in field_names
+
+
+def test_broker_and_reconciliation_fields_are_declared() -> None:
+    import dataclasses
+
+    field_names = {f.name for f in dataclasses.fields(BotContext)}
+    required = {
+        "position_reconciliation_started",
+        "position_reconciliation_completed",
+        "position_reconciliation_failed",
+        "position_reconciliation_error",
+        "broker_auth_invalid",
+        "broker_balance_valid",
+    }
+    assert required <= field_names
 
 
 def test_rearm_loop_does_not_write_private_ctx_flags() -> None:
