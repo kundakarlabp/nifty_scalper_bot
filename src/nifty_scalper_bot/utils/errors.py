@@ -15,7 +15,11 @@ class RateLimitError(BotError):
     """Raised when rate limit thresholds are exceeded."""
 
 
-class BrokerError(BotError):
+class OrderExecutionError(BotError):
+    """Base for execution and broker request errors."""
+
+
+class BrokerError(OrderExecutionError):
     """Raised when broker integrations fail."""
 
 
@@ -25,6 +29,10 @@ class BrokerAuthenticationError(BrokerError):
 
 class BrokerBalanceUnavailableError(BrokerError):
     """Broker account balance could not be obtained safely."""
+
+
+class BrokerReconciliationError(BrokerError):
+    """Broker position/order state could not be reconciled safely."""
 
 
 class OrderPlacementError(BrokerError):
@@ -43,9 +51,11 @@ __all__ = [
     "BotError",
     "ConfigurationError",
     "RateLimitError",
+    "OrderExecutionError",
     "BrokerError",
     "BrokerAuthenticationError",
     "BrokerBalanceUnavailableError",
+    "BrokerReconciliationError",
     "OrderPlacementError",
     "DataStaleError",
     "WebSocketError",

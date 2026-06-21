@@ -72,7 +72,9 @@ class SubscriptionRecord:
     state: SubscriptionState
     generation: int
     reason: str
+    source: str | None
     updated_at: float
+    first_live_tick_at: float | None = None
 
 
 class _EventBus:
@@ -234,6 +236,8 @@ class DataHub:
         *,
         reason: str,
         token: int | None = None,
+        source: str | None = None,
+        first_live_tick_at: float | None = None,
     ) -> SubscriptionRecord:
         normalized = canonical(symbol)
         previous = self._subscription_states.get(normalized)
@@ -246,7 +250,9 @@ class DataHub:
             state=state,
             generation=self._subscription_generation,
             reason=reason,
+            source=source,
             updated_at=float(self._clock()),
+            first_live_tick_at=first_live_tick_at if first_live_tick_at is not None else (previous.first_live_tick_at if previous else None),
         )
         self._subscription_states[normalized] = record
         LOGGER.info(
@@ -275,6 +281,15 @@ class DataHub:
 
     def get_subscription_record(self, symbol: str) -> SubscriptionRecord | None:
         return self._subscription_states.get(canonical(symbol))
+
+    def get_subscription_snapshot(self, symbol: str) -> SubscriptionRecord | None:
+        return self.get_subscription_record(symbol)
+
+    def mark_subscription_requested(self, symbol: str, *, token: int | None = None, reason: str = "subscribe_requested") -> SubscriptionRecord:
+        return self._set_subscription_state(symbol, SubscriptionState.REQUESTED, reason=reason, token=token, source="mdm")
+
+    def mark_subscription_confirmed(self, symbol: str, *, token: int | None = None, reason: str = "broker_confirmed") -> SubscriptionRecord:
+        return self._set_subscription_state(symbol, SubscriptionState.BROKER_CONFIRMED, reason=reason, token=token, source="broker")
 
     def _bind_to_mdm(self) -> None:
         attach_tick_bus = getattr(self._mdm, "attach_tick_bus", None)
@@ -996,6 +1011,8 @@ class DataHub:
                     SubscriptionState.LIVE,
                     reason="first_live_tick" if first_seen else "live_tick",
                     token=token,
+                    source=source,
+                    first_live_tick_at=mono_now if first_seen else None,
                 )
             elif source in {"poll", "rest"}:
                 self._last_poll_arrival[symbol] = now_ms
@@ -1161,14 +1178,14 @@ class DataHub:
                 reason="already_queued",
             )
             LOGGER.info(
-                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=true reason=already_subscribed",
+                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=false reason=already_queued",
                 symbol,
                 extra={
                     "event": "DATAHUB_LIVE_SUBSCRIBE",
                     "symbol": symbol,
                     "trace_id": trace_id,
-                    "subscribed": True,
-                    "reason": "already_subscribed",
+                    "subscribed": False,
+                    "reason": "already_queued",
                     "mdm_delegate_called": False,
                 },
             )

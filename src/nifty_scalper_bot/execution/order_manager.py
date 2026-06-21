@@ -113,6 +113,7 @@ OrderPlacementError = execution_exceptions.OrderPlacementError
 MarginCheckError = execution_exceptions.MarginCheckError
 OrderModificationError = execution_exceptions.OrderModificationError
 RiskBlockError = execution_exceptions.RiskBlockError
+EntryExecutionGuard = Callable[[], tuple[bool, str | None]]
 
 if TYPE_CHECKING:
     from journal.trade_journal import TradeJournal
@@ -914,6 +915,7 @@ class OrderManager:
         self._kill_switch_last_reset: dict[str, Any] | None = None
         self._missing_counts: dict[str, int] = {}
         self._last_order_decision: dict[str, Any] = {}
+        self._entry_execution_guard: EntryExecutionGuard | None = None
         self._margin_cache_max_age_seconds: int = max(1, int(os.getenv("MARGIN_CACHE_MAX_AGE_SECONDS", "120") or 120))
         self._allow_entry_with_stale_margin: bool = os.getenv("ALLOW_ENTRY_WITH_STALE_MARGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
         self._last_margin_refresh_ts: float | None = None
@@ -1977,6 +1979,11 @@ class OrderManager:
         # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
         return symbol
 
+
+    def set_entry_execution_guard(self, guard: EntryExecutionGuard | None) -> None:
+        """Set the final live-entry readiness guard used before broker submission."""
+        self._entry_execution_guard = guard
+
     def _round_to_tick(self, price: float, tick_size: float = 0.05) -> float:
         """
         ✅ Round price to nearest valid tick size.
@@ -2398,6 +2405,13 @@ class OrderManager:
                 self._logger.warning("ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s", symbol)
                 _log_order_decision(allowed=False, block_reason="live_execution_safety_check_failed")
                 return None
+            if self._entry_execution_guard is not None:
+                allowed, guard_reason = self._entry_execution_guard()
+                if not allowed:
+                    reason_text = guard_reason or "entry_execution_guard_blocked"
+                    self.set_last_skip_reason(reason_text)
+                    _log_order_decision(allowed=False, block_reason=reason_text)
+                    raise OrderPlacementError(reason_text)
 
         # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
         is_entry = (side == "BUY") and not is_system_exit

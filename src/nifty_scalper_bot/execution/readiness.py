@@ -104,16 +104,26 @@ _BLOCKER_ALIASES = {
 
 @dataclass(frozen=True, slots=True)
 class ReadinessDecision:
-    primary_blocker: str | None
-    blocker_list: list[str]
-    live_orders_armed: bool
-    evaluation_ready: bool
-    execution_ready: bool
-    human_reason: str
-    secondary_blockers: list[str] = field(default_factory=list)
+    generation: int = 0
+    calculated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    primary_blocker: str | None = None
+    blocker_list: tuple[str, ...] = ()
+    secondary_blockers: tuple[str, ...] = ()
+    live_orders_armed: bool = False
+    evaluation_ready: bool = False
+    execution_ready: bool = False
+    broker_ready: bool = False
+    reconciliation_ready: bool = False
+    market_state: str = "unknown"
+    human_reason: str = "not_evaluated"
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        if isinstance(self.calculated_at, datetime):
+            payload["calculated_at"] = self.calculated_at.astimezone(timezone.utc).isoformat()
+        payload["blocker_list"] = list(self.blocker_list)
+        payload["secondary_blockers"] = list(self.secondary_blockers)
+        return payload
 
 
 def _normalize_market_state_name(market_state: object) -> str:
@@ -193,11 +203,14 @@ def normalize_readiness_blockers(
     human = "ready" if primary is None else primary
     return ReadinessDecision(
         primary_blocker=primary,
-        blocker_list=ordered_visible,
-        secondary_blockers=ordered_secondary,
+        blocker_list=tuple(ordered_visible),
+        secondary_blockers=tuple(ordered_secondary),
         live_orders_armed=armed,
         evaluation_ready=bool(evaluation_ready and not primary),
         execution_ready=bool(execution_ready and not primary),
+        broker_ready=not any(item in canonical for item in {"broker_auth_invalid", "broker_session_invalid", "broker_balance_unavailable", "broker_health_block"}),
+        reconciliation_ready=not any(item in canonical for item in {"position_reconciliation_failed", "position_reconciliation_incomplete", "unresolved_exit_position", "unprotected_broker_position"}),
+        market_state=market_name or "unknown",
         human_reason=human,
     )
 

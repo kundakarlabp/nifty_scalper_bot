@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Syntax check
+        run: python -m compileall -q src
+      - name: Collect tests
+        run: python -m pytest --collect-only -q
+      - name: Focused production-safety tests
+        run: |
+          python -m pytest -q \
+            tests/data/test_zerodha_balance_logging.py \
+            tests/data/test_market_data_manager.py \
+            tests/data/test_market_data_manager_broker_boundary.py \
+            tests/data/test_datahub_subscription_state.py \
+            tests/core/test_startup_risk_balance.py \
+            tests/core/test_bot_context_attributes.py \
+            tests/core/test_deferred_basket_retry.py \
+            tests/execution/test_order_manager_live_guard.py \
+            tests/test_main_health_readiness.py \
+            tests/test_exception_identity.py
+      - name: Full pytest suite
+        run: python -m pytest -q

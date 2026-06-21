@@ -79,3 +79,27 @@ def test_auth_failure_callback_marks_context_fail_closed():
     assert ctx.trading_ready is False
     assert ctx.live_block_reason == "broker_auth_invalid"
     assert ctx.execution_block_reason == "broker_auth_invalid"
+
+@pytest.mark.parametrize("bad_balance", [float("nan"), float("inf"), -1.0])
+def test_live_risk_initial_balance_rejects_invalid_numbers(monkeypatch, bad_balance):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    settings = SimpleNamespace(execution_mode="LIVE")
+    config = SimpleNamespace(initial_balance=1_000_000.0)
+
+    with pytest.raises(BrokerBalanceUnavailableError):
+        _resolve_startup_risk_initial_balance(
+            settings=settings,
+            config=config,
+            startup_available_balance=bad_balance,
+        )
+
+
+def test_live_risk_initial_balance_accepts_zero(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    settings = SimpleNamespace(execution_mode="LIVE")
+    config = SimpleNamespace(initial_balance=1_000_000.0)
+    assert _resolve_startup_risk_initial_balance(
+        settings=settings,
+        config=config,
+        startup_available_balance=0.0,
+    ) == 0.0

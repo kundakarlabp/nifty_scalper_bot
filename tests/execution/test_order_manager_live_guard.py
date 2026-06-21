@@ -128,3 +128,43 @@ def test_auth_latch_blocks_order_before_broker(monkeypatch):
 
     assert broker.calls == 0
     assert om.get_last_skip_reason() == "broker_auth_invalid"
+
+
+def test_entry_execution_guard_blocks_entry_before_broker(monkeypatch):
+    from nifty_scalper_bot.utils.errors import OrderPlacementError
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    broker = _Broker(connected=True)
+    broker.calls = 0
+    broker.place_order = lambda **_kwargs: {"order_id": "OID"}
+    om = OrderManager(broker, _Positions(), _Limiter())
+    monkeypatch.setattr(om, "_validate_live_execution_safety", lambda: True)
+    om.set_entry_execution_guard(lambda: (False, "position_reconciliation_incomplete"))
+
+    with pytest.raises(OrderPlacementError, match="position_reconciliation_incomplete"):
+        om.place_order("NFO:NIFTY26MAY23750CE", "BUY", 75, stop_loss=90, take_profit=120)
+
+    assert broker.calls == 0
+    assert om.get_last_skip_reason() == "position_reconciliation_incomplete"
+
+
+def test_entry_execution_guard_does_not_block_protective_exit(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    broker = _Broker(connected=True)
+    broker.calls = 0
+
+    def _place_order(**_kwargs):
+        broker.calls += 1
+        return {"order_id": "OID"}
+
+    broker.place_order = _place_order
+    om = OrderManager(broker, _Positions(), _Limiter())
+    monkeypatch.setattr(om, "_validate_live_execution_safety", lambda: True)
+    om.set_entry_execution_guard(lambda: (False, "selected_option_subscription_missing"))
+
+    result = om.place_order("NFO:NIFTY26MAY23750CE", "SELL", 75, tag="protective_exit")
+
+    assert result == "OID"
+    assert broker.calls == 1

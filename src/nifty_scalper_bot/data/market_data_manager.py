@@ -31,14 +31,17 @@ import asyncio
 import inspect
 from collections import defaultdict, deque
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 import logging
 import math
 import os
 
 from nifty_scalper_bot.config.env_utils import parse_int_env
-from nifty_scalper_bot.utils.errors import BrokerAuthenticationError
+from nifty_scalper_bot.utils.errors import (
+    BrokerAuthenticationError,
+    BrokerBalanceUnavailableError,
+)
 import re
 from random import uniform
 import threading
@@ -48,6 +51,7 @@ from typing import (
     Callable,
     Deque,
     Iterable,
+    Literal,
     Mapping,
     Sequence,
     cast,
@@ -112,6 +116,18 @@ _COMPACT_EXPIRY_FORMATS: tuple[str, ...] = ("%d%b%Y", "%d%b%y")
 _NIFTY_FUT_RE = re.compile(r"^NIFTY\d{2}[A-Z]{3}FUT$")
 
 _logger = get_tracer_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class AccountBalanceSnapshot:
+    available: float
+    fetched_at: float
+    source: Literal["broker"]
+    valid: bool
+    stale: bool = False
+
+    def to_dict(self) -> dict[str, float | str | bool]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -1381,203 +1397,142 @@ class MarketDataManager:
 
     # ------------------------------------------------------------------
     # Broker account snapshot accessors
-    async def get_account_snapshot(self, *, force: bool = False) -> dict[str, float]:
-        """Return cached broker margin snapshot sourced via the MDM.
+    def _validate_account_balance(self, value: Any) -> float:
+        if value is None:
+            raise BrokerBalanceUnavailableError("broker_balance_missing")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise BrokerBalanceUnavailableError("broker_balance_non_numeric") from exc
+        if not math.isfinite(numeric):
+            raise BrokerBalanceUnavailableError("broker_balance_non_finite")
+        if numeric < 0.0:
+            raise BrokerBalanceUnavailableError("broker_balance_negative")
+        return numeric
 
-        Args:
-            force: Force refresh from the broker when ``True``.
+    async def _invoke_broker_async(self, method_name: str, /, **kwargs: Any) -> Any:
+        broker = getattr(self, "_broker_client", None) or getattr(self, "_broker", None)
+        if broker is None:
+            raise BrokerBalanceUnavailableError("broker_client_missing")
+        method = getattr(broker, method_name, None)
+        if not callable(method):
+            raise BrokerBalanceUnavailableError(f"broker_method_missing:{method_name}")
+        if inspect.iscoroutinefunction(method):
+            return await method(**kwargs)
+        result = await asyncio.to_thread(method, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
-        Returns:
-            dict[str, float]: Normalized margin snapshot keyed by broker fields.
+    def _invoke_broker_sync(self, method_name: str, /, **kwargs: Any) -> Any:
+        broker = getattr(self, "_broker_client", None) or getattr(self, "_broker", None)
+        if broker is None:
+            raise BrokerBalanceUnavailableError("broker_client_missing")
+        method = getattr(broker, method_name, None)
+        if not callable(method):
+            raise BrokerBalanceUnavailableError(f"broker_method_missing:{method_name}")
+        result = method(**kwargs)
+        if inspect.isawaitable(result):
+            if asyncio.iscoroutine(result):
+                result.close()
+            elif hasattr(result, "cancel"):
+                result.cancel()
+            raise BrokerBalanceUnavailableError(
+                f"async_broker_method_used_in_sync_context:{method_name}"
+            )
+        return result
 
-        Raises:
-            None.
-        """
+    def _clear_account_cache(self) -> None:
+        with self._account_lock:
+            self._account_snapshot = {}
+            self._account_updated_at = 0.0
 
-        self._logger.debug(
-            "Entered MarketDataManager.get_account_snapshot",
-            extra={"event": "mdm_account_snapshot_enter", "force": force},
-        )
-
+    async def get_account_snapshot(self, *, force: bool = False) -> dict[str, Any]:
+        """Return a non-stale broker account snapshot or raise a typed error."""
         now = time.time()
         with self._account_lock:
             cache_age = now - self._account_updated_at
-            cache_valid = (
-                bool(self._account_snapshot)
-                and cache_age < self._account_cache_ttl
-                and not force
-            )
-            if cache_valid:
-                self._logger.debug(
-                    "Condition met: mdm_account_cache_hit",
-                    extra={
-                        "event": "mdm_account_cache_hit",
-                        "age": round(cache_age, 2),
-                        "ttl": self._account_cache_ttl,
-                    },
-                )
+            if self._account_snapshot and cache_age < self._account_cache_ttl and not force:
                 return dict(self._account_snapshot)
-
-        segment = self._account_segment
-        snapshot: dict[str, float] = {}
-        response: Any | None = None
         try:
-            balance_fetcher = getattr(self._broker, "get_available_balance", None)
-            if callable(balance_fetcher):
-                available = await balance_fetcher(segment=segment)
-                if available is not None:
-                    numeric_available = float(available)
-                    if math.isfinite(numeric_available) and numeric_available >= 0.0:
-                        snapshot = {"available": numeric_available}
-
-            if snapshot:
-                with self._account_lock:
-                    self._account_snapshot = snapshot
-                    self._account_updated_at = time.time()
-                self._logger.info(
-                    "mdm_account_snapshot_updated",
-                    extra={
-                        "event": "mdm_account_snapshot_updated",
-                        "segment": segment,
-                        "available": snapshot.get("available"),
-                        "net": snapshot.get("net"),
-                        "used": snapshot.get("used"),
-                    },
-                )
-                return dict(snapshot)
-
-            self._logger.error(
-                "mdm_account_snapshot_empty",
-                extra={"event": "mdm_account_snapshot_empty", "segment": segment},
+            available = await self._invoke_broker_async(
+                "get_available_balance", segment=self._account_segment
             )
-        except BrokerAuthenticationError:
+            numeric_available = self._validate_account_balance(available)
+            snapshot_obj = AccountBalanceSnapshot(
+                available=numeric_available,
+                fetched_at=time.time(),
+                source="broker",
+                valid=True,
+                stale=False,
+            )
+            snapshot = dict(snapshot_obj.to_dict())
             with self._account_lock:
-                self._account_snapshot = {}
-                self._account_updated_at = 0.0
-            raise
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarketDataManager.get_account_snapshot: %s",
-                exc,
-                extra={"event": "mdm_account_snapshot_error", "segment": segment},
-                exc_info=exc,
-            )
-
-        with self._account_lock:
-            fallback = dict(self._account_snapshot)
-        if fallback:
+                self._account_snapshot = snapshot
+                self._account_updated_at = float(snapshot_obj.fetched_at)
             self._logger.info(
-                "Condition met: mdm_account_snapshot_fallback",
+                "mdm_account_snapshot_updated",
                 extra={
-                    "event": "mdm_account_snapshot_fallback",
-                    "segment": segment,
-                    "available": fallback.get("available"),
+                    "event": "mdm_account_snapshot_updated",
+                    "segment": self._account_segment,
+                    "available": numeric_available,
+                    "usable_for_execution": True,
                 },
             )
-        return fallback
-
-    def get_available_balance(self, *, force: bool = False) -> float | None:
-        """Return latest available margin balance from cached snapshot.
-
-        Args:
-            force: Force refresh of the underlying account snapshot when ``True``.
-
-        Returns:
-            float | None: Positive available margin balance when present.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered MarketDataManager.get_available_balance",
-            extra={"event": "mdm_available_balance_enter", "force": force},
-        )
-        try:
-            broker = getattr(self, "_broker_client", None) or getattr(
-                self, "_broker", None
-            )
-            if broker is not None:
-                segment = _resolve_account_segment()
-                if hasattr(broker, "get_available_balance"):
-                    try:
-                        live_balance = broker.get_available_balance(segment=segment)  # type: ignore[call-arg]
-                        numeric_live = float(live_balance) if live_balance is not None else None
-                        if numeric_live is not None and not math.isfinite(numeric_live):
-                            numeric_live = None
-                        if numeric_live is not None:
-                            resolved_balance = float(numeric_live)
-                            # [FIX] Throttled INFO log
-                            if time.time() - self._last_balance_log_time >= 60.0:
-                                self._logger.debug(
-                                    "mdm_available_balance_resolved",
-                                    extra={
-                                        "event": "mdm_available_balance_resolved",
-                                        "key": "available",
-                                        "balance": round(resolved_balance, 2),
-                                        "source": "broker_available",
-                                    },
-                                )
-                                self._last_balance_log_time = time.time()
-                            return resolved_balance
-                    except BrokerAuthenticationError:
-                        raise
-                    except Exception as exc:  # noqa: BLE001
-                        self._logger.error(
-                            "mdm_available_balance_direct_error: %s",
-                            exc,
-                            extra={"event": "mdm_available_balance_direct_error"},
-                            exc_info=exc,
-                        )
-                return None
+            return dict(snapshot)
         except BrokerAuthenticationError:
-            with self._account_lock:
-                self._account_snapshot = {}
-                self._account_updated_at = 0.0
+            self._clear_account_cache()
+            raise
+        except BrokerBalanceUnavailableError:
+            self._clear_account_cache()
             raise
         except Exception as exc:  # noqa: BLE001
+            self._clear_account_cache()
             self._logger.error(
-                "mdm_available_balance_margin_error: %s",
-                exc,
-                extra={"event": "mdm_available_balance_margin_error"},
-                exc_info=exc,
+                "mdm_account_snapshot_error",
+                extra={
+                    "event": "mdm_account_snapshot_error",
+                    "segment": self._account_segment,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
             )
+            raise BrokerBalanceUnavailableError("broker_balance_refresh_failed") from exc
 
-        snapshot = self.get_account_snapshot(force=force)
-        if not isinstance(snapshot, Mapping):
-            self._logger.error(
-                "mdm_available_balance_missing_snapshot",
-                extra={"event": "mdm_available_balance_missing_snapshot"},
+    async def refresh_available_balance(self, *, force: bool = False) -> float:
+        snapshot = await self.get_account_snapshot(force=force)
+        return self._validate_account_balance(snapshot.get("available"))
+
+    def get_available_balance(self, *, force: bool = False) -> float | None:
+        """Return a synchronous, non-stale available broker balance."""
+        now = time.time()
+        with self._account_lock:
+            cache_age = now - self._account_updated_at
+            if self._account_snapshot and cache_age < self._account_cache_ttl and not force:
+                return self._validate_account_balance(self._account_snapshot.get("available"))
+        try:
+            available = self._invoke_broker_sync(
+                "get_available_balance", segment=self._account_segment
             )
-            return None
-
-        candidate_keys = (
-            "available",
-            "available_cash",
-            "live_balance",
-            "cash",
-            "net",
-        )
-        for key in candidate_keys:
-            value = snapshot.get(key)
-            numeric = _coerce_positive_float(value)
-            if numeric is not None:
-                self._logger.debug(
-                    "mdm_available_balance_resolved",
-                    extra={
-                        "event": "mdm_available_balance_resolved",
-                        "key": key,
-                        "balance": round(numeric, 2),
-                        "source": "account_snapshot",
-                    },
-                )
-                return float(numeric)
-
-        self._logger.error(
-            "mdm_available_balance_unavailable",
-            extra={"event": "mdm_available_balance_unavailable"},
-        )
-        return None
+            numeric_available = self._validate_account_balance(available)
+            snapshot_obj = AccountBalanceSnapshot(
+                available=numeric_available,
+                fetched_at=time.time(),
+                source="broker",
+                valid=True,
+                stale=False,
+            )
+            with self._account_lock:
+                self._account_snapshot = dict(snapshot_obj.to_dict())
+                self._account_updated_at = float(snapshot_obj.fetched_at)
+            return numeric_available
+        except BrokerAuthenticationError:
+            self._clear_account_cache()
+            raise
+        except BrokerBalanceUnavailableError:
+            self._clear_account_cache()
+            raise
 
     # ------------------------------------------------------------------
     # Public API

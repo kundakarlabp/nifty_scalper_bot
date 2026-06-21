@@ -1248,6 +1248,7 @@ from nifty_scalper_bot.utils.env import (
 from nifty_scalper_bot.utils.errors import (
     BrokerAuthenticationError,
     BrokerBalanceUnavailableError,
+    BrokerReconciliationError,
     ConfigurationError,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled, setup_logging
@@ -2683,6 +2684,8 @@ class BotContext:
     broker_auth_invalid: bool = False
     broker_auth_error: str | None = None
     broker_auth_invalid_at: datetime | None = None
+    readiness_generation: int = 0
+    readiness_decision: Any | None = None
     broker_balance_valid: bool = False
     broker_balance_error: str | None = None
     last_valid_broker_balance: float | None = None
@@ -4406,8 +4409,10 @@ def _resolve_startup_risk_initial_balance(
                 "LIVE startup requires validated broker balance"
             )
         initial_balance = float(startup_available_balance)
-        if initial_balance != float(startup_available_balance):
-            raise ConfigurationError("live_risk_capital_must_equal_broker_balance")
+        if not math.isfinite(initial_balance):
+            raise BrokerBalanceUnavailableError("non_finite_live_broker_balance")
+        if initial_balance < 0.0:
+            raise BrokerBalanceUnavailableError("negative_live_broker_balance")
         return initial_balance
     return float(getattr(config, "initial_balance", 0.0) or 0.0)
 
@@ -8377,7 +8382,23 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     evaluation_ready=bool(data_hard_ready and runner_running)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
     market_open = get_market_state() == MarketState.OPEN
-    broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
+    broker_components_present = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
+    broker_connected = False
+    broker_client = getattr(ctx, "broker_client", None)
+    is_connected = getattr(broker_client, "is_connected", None)
+    if callable(is_connected):
+        try:
+            broker_connected = bool(is_connected())
+        except Exception:
+            broker_connected = False
+    else:
+        broker_connected = broker_components_present
+    broker_ready = bool(
+        broker_components_present
+        and broker_connected
+        and not bool(getattr(ctx, "broker_auth_invalid", False))
+        and not bool(getattr(ctx, "broker_session_invalid", False))
+    )
     execution_ready_by_symbol: dict[str, bool] = {}
     if selected_ce:
         execution_ready_by_symbol[str(selected_ce)] = bool(ce_exec_ready)
@@ -8457,20 +8478,34 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
             or bool(getattr(ctx, "position_reconciliation_completed", False))
         ),
     )
+    ctx.readiness_generation = int(getattr(ctx, "readiness_generation", 0) or 0) + 1
+    normalized_decision = replace(
+        normalized_decision,
+        generation=ctx.readiness_generation,
+        calculated_at=datetime.now(timezone.utc),
+        broker_ready=broker_ready,
+        reconciliation_ready=not (
+            bool(getattr(ctx, "position_reconciliation_failed", False))
+            or not bool(getattr(ctx, "position_reconciliation_completed", False))
+            or bool(getattr(ctx, "unprotected_broker_positions", set()))
+        ),
+        market_state=str(get_market_state().value if hasattr(get_market_state(), "value") else get_market_state()),
+    )
+    ctx.readiness_decision = normalized_decision
     live_orders_armed = bool(live_mode and normalized_decision.live_orders_armed)
     block_reason = None if live_orders_armed else f"execution_not_armed:{normalized_decision.primary_blocker or 'unknown'}"
     ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=evaluation_ready; ctx.live_block_reason=block_reason
     ctx.data_ready = bool(data_hard_ready)
     ctx.strategy_evaluation_ready = bool(evaluation_ready)
     ctx.trading_signal_ready = bool(evaluation_ready)
-    ctx.execution_armed = bool(live_orders_armed)
+    ctx.execution_armed = bool(normalized_decision.live_orders_armed)
     ctx.execution_block_reason = "market_closed" if (live_mode and not market_open and evaluation_ready) else block_reason
     ctx.market_open = bool(market_open)
     ctx.execution_ready_by_symbol = execution_ready_by_symbol
     ctx.selected_ce_exec_ready = bool(ce_exec_ready)
     ctx.selected_pe_exec_ready = bool(pe_exec_ready)
     ctx.context_exec_ready = bool(context_exec_ready)
-    ctx.broker_ready = bool(broker_ready)
+    ctx.broker_ready = bool(normalized_decision.broker_ready)
     LOGGER.info(
         "READINESS_BLOCKER_SUMMARY primary_blocker=%s blockers=%s secondary_blockers=%s data_hard_ready=%s evaluation_ready=%s execution_ready=%s live_orders_armed=%s",
         normalized_decision.primary_blocker,
@@ -12308,6 +12343,37 @@ def _should_reconcile_now(ctx: BotContext) -> bool:
         return True
 
 
+def _normalize_broker_positions_payload(raw: Any) -> list[Mapping[str, Any]]:
+    """Strictly normalize broker position payload; never fabricate emptiness."""
+    if raw is None:
+        raise BrokerReconciliationError("broker_positions_payload_missing")
+    if inspect.isawaitable(raw):
+        if asyncio.iscoroutine(raw):
+            raw.close()
+        elif hasattr(raw, "cancel"):
+            raw.cancel()
+        raise BrokerReconciliationError("broker_position_fetch_returned_awaitable")
+    if isinstance(raw, list):
+        if not all(isinstance(item, Mapping) for item in raw):
+            raise BrokerReconciliationError("broker_positions_payload_invalid_list")
+        return list(cast(list[Mapping[str, Any]], raw))
+    if isinstance(raw, Mapping):
+        if not raw:
+            raise BrokerReconciliationError("broker_positions_payload_empty_mapping")
+        if str(raw.get("status") or "").lower() == "error" or raw.get("error_type"):
+            raise BrokerReconciliationError("broker_positions_payload_error")
+        net = raw.get("net")
+        day = raw.get("day", [])
+        if not isinstance(net, list):
+            raise BrokerReconciliationError("broker_positions_payload_missing_net")
+        if day is not None and not isinstance(day, list):
+            raise BrokerReconciliationError("broker_positions_payload_invalid_day")
+        if not all(isinstance(item, Mapping) for item in net):
+            raise BrokerReconciliationError("broker_positions_payload_invalid_net")
+        return list(cast(list[Mapping[str, Any]], net))
+    raise BrokerReconciliationError("broker_positions_payload_invalid_type")
+
+
 async def _reconcile_state(ctx: BotContext) -> None:
     """
     Syncs local state with Broker (Orders & Positions).
@@ -12330,19 +12396,12 @@ async def _reconcile_state(ctx: BotContext) -> None:
             )
             try:
                 raw = _sync_broker.get_positions()
-                # Guard: if the resolved broker method is async it returns an awaitable
-                # (coroutine, Task, or Future) instead of positions.  Clean up the
-                # awaitable correctly and fall back to an empty result.
                 if inspect.isawaitable(raw):
-                    LOGGER.error(
-                        "get_positions() returned an awaitable in sync context – "
-                        "broker client wrapping is incorrect. Falling back to empty list."
-                    )
                     if asyncio.iscoroutine(raw):
-                        raw.close()          # suppress ResourceWarning on coroutines
+                        raw.close()
                     elif hasattr(raw, "cancel"):
-                        raw.cancel()         # cancel Tasks / Futures
-                    raw = {}
+                        raw.cancel()
+                    raise BrokerReconciliationError("broker_position_fetch_returned_awaitable")
             except Exception as _pos_err:
                 LOGGER.error(
                     "POSITION_RECONCILE_FAILED stage=broker_position_fetch error_type=%s error_message=%s",
@@ -12357,15 +12416,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
                     exc_info=True,
                 )
                 raise RuntimeError(f"broker_position_fetch_failed:{_pos_err}") from _pos_err
-            broker_positions: list[Mapping[str, Any]] = []
-            if isinstance(raw, list):
-                broker_positions = [p for p in raw if isinstance(p, Mapping)]
-            elif isinstance(raw, Mapping):
-                src = raw.get("net", raw)
-                if isinstance(src, list):
-                    broker_positions = [p for p in src if isinstance(p, Mapping)]
-                elif isinstance(src, Mapping):
-                    broker_positions = [src]
+            broker_positions = _normalize_broker_positions_payload(raw)
             if ctx.position_manager:
                 ctx.position_manager.synchronize_with_broker(broker_positions)
             return broker_positions
@@ -12433,13 +12484,23 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         )
                         om.guard_orphan_position(
                             symbol=norm_symbol,
-                            quantity=signed_qty,  # ✅ Now negative for SHORT
+                            quantity=signed_qty,
                             average_price=avg_price,
                             position_side=pos.side,
                         )
-                        ctx.unprotected_broker_position = False
+                        protection_confirmed = bool(bm.is_symbol_managed(norm_symbol))
+                        if not protection_confirmed:
+                            if hasattr(ctx, "unprotected_broker_positions"):
+                                ctx.unprotected_broker_positions.add(str(norm_symbol))
+                            ctx.unprotected_broker_position = True
+                            raise BrokerReconciliationError(
+                                f"orphan_protection_not_confirmed:{norm_symbol}"
+                            )
                         if hasattr(ctx, "unprotected_broker_positions"):
                             ctx.unprotected_broker_positions.discard(str(norm_symbol))
+                        ctx.unprotected_broker_position = bool(
+                            getattr(ctx, "unprotected_broker_positions", set())
+                        )
                         LOGGER.info(
                             "POSITION_ADOPTED_TO_BRACKET symbol=%s quantity=%s",
                             norm_symbol,

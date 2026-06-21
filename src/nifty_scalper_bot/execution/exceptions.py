@@ -1,18 +1,17 @@
-"""Execution exception hierarchy for granular error handling."""
+"""Execution exception hierarchy for granular error handling.
+
+Canonical execution/broker base classes live in ``utils.errors`` so imports from
+``nifty_scalper_bot.execution.exceptions`` and ``nifty_scalper_bot.utils.errors``
+refer to the same runtime class objects.
+"""
 
 from __future__ import annotations
 
-
-class OrderExecutionError(Exception):
-    """Base exception for all order execution failures."""
-
-
-class BrokerError(OrderExecutionError):
-    """Broker API errors (network, auth, rate limit, reject)."""
-
-
-class OrderPlacementError(OrderExecutionError):
-    """Order placement validation failed before reaching broker."""
+from nifty_scalper_bot.utils.errors import (
+    BrokerError,
+    OrderExecutionError,
+    OrderPlacementError,
+)
 
 
 class MarginCheckError(OrderPlacementError):
@@ -25,3 +24,13 @@ class OrderModificationError(OrderExecutionError):
 
 class RiskBlockError(OrderPlacementError):
     """Order blocked by risk manager gates."""
+
+
+__all__ = [
+    "OrderExecutionError",
+    "BrokerError",
+    "OrderPlacementError",
+    "MarginCheckError",
+    "OrderModificationError",
+    "RiskBlockError",
+]
