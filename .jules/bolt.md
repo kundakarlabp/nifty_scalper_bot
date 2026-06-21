@@ -1,0 +1,3 @@
+## 2024-05-24 - Pandas Timestamp Truncation Optimization
+**Learning:** `pandas.Timestamp.floor('1min')` has significant overhead due to frequency string parsing, offset calculations, and general DatetimeIndex logic under the hood. For single `Timestamp` objects, using `replace(second=0, microsecond=0, nanosecond=0)` bypasses this machinery and is significantly faster, which is crucial for high-frequency operations like market tick processing.
+**Action:** Replace `floor()` with `replace()` when truncating timestamps to fixed boundaries (like minutes) in performance-critical paths, especially inside high-frequency loops.
