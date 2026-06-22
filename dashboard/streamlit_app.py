@@ -7,8 +7,11 @@ submits broker orders or mutates trading state.
 
 from __future__ import annotations
 
+import csv
+import io
 import os
-from datetime import datetime
+import re
+from datetime import date, datetime, time
 from typing import Any
 
 import requests
@@ -40,6 +43,10 @@ st.markdown(
     </style>
     """,
     unsafe_allow_html=True,
+)
+
+_LOG_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) IST\s+(?P<message>.*)$"
 )
 
 
@@ -82,6 +89,57 @@ def _get_json(path: str) -> tuple[dict[str, Any] | None, str | None, int | None]
         return None, str(exc), status_code
     except ValueError as exc:
         return None, f"Invalid JSON response: {exc}", None
+
+
+def _market_hours_csv(selected_date: date) -> tuple[bytes | None, str | None, int]:
+    """Authenticate to admin, fetch recent logs, and export 09:15–15:30 IST rows."""
+    base_url = _base_url()
+    admin_password = _secret("BOT_ADMIN_PASSWORD")
+    if not base_url:
+        return None, "BOT_API_URL is not configured", 0
+    if not admin_password:
+        return None, "BOT_ADMIN_PASSWORD is not configured in Streamlit secrets", 0
+
+    session = requests.Session()
+    try:
+        login = session.post(
+            f"{base_url}/admin/login",
+            data={"password": admin_password},
+            timeout=10,
+            allow_redirects=False,
+        )
+        if login.status_code not in {302, 303} or not session.cookies.get("admin_session"):
+            return None, "Admin login failed. Check BOT_ADMIN_PASSWORD.", 0
+
+        response = session.get(
+            f"{base_url}/admin/logs/download",
+            params={"fmt": "txt", "lines": 20000},
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return None, f"Log download failed: {exc}", 0
+
+    start_at = datetime.combine(selected_date, time(9, 15))
+    end_at = datetime.combine(selected_date, time(15, 30))
+    rows: list[tuple[str, str]] = []
+
+    for raw_line in response.text.splitlines():
+        match = _LOG_RE.match(raw_line.strip())
+        if not match:
+            continue
+        try:
+            stamp = datetime.strptime(match.group("timestamp"), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if start_at <= stamp <= end_at:
+            rows.append((f"{stamp:%Y-%m-%d %H:%M:%S} IST", match.group("message")))
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["timestamp_ist", "message"])
+    writer.writerows(rows)
+    return output.getvalue().encode("utf-8-sig"), None, len(rows)
 
 
 def _label(value: Any, fallback: str = "—") -> str:
@@ -167,6 +225,36 @@ if blockers:
         st.warning(str(blocker))
 else:
     st.success("No reported blockers")
+
+st.subheader("Download market-hours logs")
+st.caption("Creates one CSV containing all available bot logs from 09:15 to 15:30 IST.")
+selected_log_date = st.date_input("Trading date", value=date.today(), max_value=date.today())
+
+if st.button("Prepare market-hours CSV", type="primary", use_container_width=True):
+    with st.spinner("Collecting and filtering logs…"):
+        csv_data, csv_error, row_count = _market_hours_csv(selected_log_date)
+    if csv_error:
+        st.session_state.pop("market_log_csv", None)
+        st.error(csv_error)
+    else:
+        st.session_state["market_log_csv"] = csv_data
+        st.session_state["market_log_date"] = selected_log_date.isoformat()
+        st.session_state["market_log_rows"] = row_count
+
+if st.session_state.get("market_log_csv") is not None:
+    export_date = st.session_state.get("market_log_date", selected_log_date.isoformat())
+    export_rows = int(st.session_state.get("market_log_rows", 0))
+    if export_rows:
+        st.success(f"CSV ready: {export_rows:,} log rows")
+    else:
+        st.warning("CSV is ready, but no timestamped logs were found in the selected market-hours window.")
+    st.download_button(
+        "⬇️ Download one CSV file",
+        data=st.session_state["market_log_csv"],
+        file_name=f"niftybot-market-logs-{export_date}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 with st.expander("Raw diagnostics"):
     st.write(
