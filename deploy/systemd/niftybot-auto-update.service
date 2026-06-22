@@ -1,0 +1,11 @@
+[Unit]
+Description=Update Nifty Scalper from GitHub safely
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/nifty_scalper_bot
+ExecStart=/home/ubuntu/nifty_scalper_bot/deploy/scripts/auto_update.sh
