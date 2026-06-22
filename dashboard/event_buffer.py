@@ -7,6 +7,7 @@ import time
 from collections import deque
 
 STAMP = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} IST)\]")
+SECRET = re.compile(r"(?i)(api[_ -]?key|api[_ -]?secret|access[_ -]?token|request[_ -]?token|password)\s*[:=]\s*\S+")
 EVENTS = ("SIGNAL","ORDER","FILLED","ENTRY","EXIT","TARGET","STOP","PNL","POSITION",
           "BROKER","AUTH","READY","BLOCKER","RISK","COOLDOWN","ERROR","FAIL","WARN",
           "DEGRADED","OPERATIONAL","STARTUP","SHUTDOWN")
@@ -16,7 +17,7 @@ def parse_event(line: str):
     match = STAMP.search(line)
     if not match:
         return None
-    message = line[match.end():].strip()
+    message = SECRET.sub(r"\1=[REDACTED]", line[match.end():].strip())
     upper = message.upper()
     if any(x in upper for x in IGNORE) or not any(x in upper for x in EVENTS):
         return None
@@ -51,7 +52,8 @@ class EventRing:
                 proc = subprocess.Popen(
                     ["journalctl","-u",self.service,"-n","1200","-f","--no-pager","-o","cat"],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
-                self.connected = True
+                with self.lock:
+                    self.connected = True
                 for line in proc.stdout or ():
                     event = parse_event(line)
                     if event:
@@ -62,8 +64,9 @@ class EventRing:
             except Exception:
                 pass
             finally:
-                self.connected = False
-                self.restarts += 1
+                with self.lock:
+                    self.connected = False
+                    self.restarts += 1
                 if proc and proc.poll() is None:
                     proc.terminate()
                 time.sleep(1.5)
