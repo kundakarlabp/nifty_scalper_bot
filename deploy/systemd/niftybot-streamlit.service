@@ -1,0 +1,22 @@
+[Unit]
+Description=Nifty Scalper Streamlit Operations Console
+After=network-online.target niftybot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/nifty_scalper_bot
+Environment=BOT_API_URL=http://127.0.0.1:8080
+Environment=BOT_SERVICE_NAME=niftybot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/nifty_scalper_bot/.streamlit-venv/bin/python -m streamlit run /home/ubuntu/nifty_scalper_bot/dashboard/operations_console.py --server.address=0.0.0.0 --server.port=8501 --browser.gatherUsageStats=false --server.headless=true
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
