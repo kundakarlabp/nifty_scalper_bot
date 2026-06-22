@@ -1,0 +1,39 @@
+name: Live Exit Safety CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Compile production source
+        run: python -m compileall -q src
+      - name: Focused live-money safety regression tests
+        run: |
+          python -m pytest -q \
+            tests/execution/test_live_exit_hardening.py \
+            tests/execution/test_bracket_exit_state_machine.py \
+            tests/execution/test_virtual_bracket_safety.py \
+            tests/execution/test_bracket_manager_reliability.py \
+            tests/execution/test_bracket_open_position_priority_and_protective_exit.py \
+            tests/execution/test_order_manager_trade_plan.py \
+            tests/strategies/test_trade_selector_logging_controls.py \
+            tests/test_execution_path_contract.py
+      - name: Full test suite
+        run: python -m pytest -q
