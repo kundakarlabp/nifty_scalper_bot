@@ -11,6 +11,7 @@ A read-only dashboard for checking the bot from an Android phone or desktop brow
 - Position reconciliation status
 - Current safety blockers
 - Raw health diagnostics
+- One-click CSV export of all available logs from 09:15 to 15:30 IST for a selected date
 
 The dashboard does not place, modify, or cancel orders.
 
@@ -45,7 +46,10 @@ Do not append `/admin`. The dashboard automatically calls:
 
 ```toml
 BOT_API_URL = "http://15.206.3.6:8080"
+BOT_ADMIN_PASSWORD = "YOUR_EXISTING_ADMIN_PASSWORD"
 ```
+
+`BOT_ADMIN_PASSWORD` is used only server-side by the Streamlit app to authenticate to the existing admin log-download endpoint. It is not displayed in the dashboard or browser.
 
 If a reverse proxy later protects the health endpoints with a bearer token, also add:
 
@@ -54,6 +58,20 @@ BOT_DASHBOARD_TOKEN = "replace-with-a-long-random-token"
 ```
 
 6. Deploy the Streamlit app.
+
+## Market-hours CSV download
+
+1. Open the Streamlit dashboard.
+2. Choose the trading date.
+3. Tap **Prepare market-hours CSV**.
+4. Tap **Download one CSV file**.
+
+The generated UTF-8 CSV contains:
+
+- `timestamp_ist`
+- `message`
+
+Only timestamped rows between **09:15:00 and 15:30:00 IST** are included. The dashboard requests up to the latest 20,000 available log lines from the existing admin service, then filters them by date and market hours.
 
 ## Android access
 
@@ -68,19 +86,21 @@ From the repository root:
 
 ```bash
 python -m pip install -r dashboard/requirements.txt
-BOT_API_URL=http://15.206.3.6:8080 streamlit run dashboard/streamlit_app.py
+BOT_API_URL=http://15.206.3.6:8080 BOT_ADMIN_PASSWORD='your-password' streamlit run dashboard/streamlit_app.py
 ```
 
 On Windows PowerShell:
 
 ```powershell
 $env:BOT_API_URL="http://15.206.3.6:8080"
+$env:BOT_ADMIN_PASSWORD="your-password"
 streamlit run dashboard/streamlit_app.py
 ```
 
 ## Security notes
 
 - Keep the dashboard read-only.
+- Never commit `BOT_ADMIN_PASSWORD` to GitHub; store it only in Streamlit Secrets.
 - Do not expose broker API keys, access tokens, Telegram tokens, or `.env` contents.
 - Prefer a private Streamlit deployment or place authentication in front of the app.
 - The current production endpoint uses plain HTTP on a public IP; migrate it to HTTPS before broader exposure.
