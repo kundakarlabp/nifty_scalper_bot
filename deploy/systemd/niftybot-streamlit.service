@@ -10,13 +10,17 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/nifty_scalper_bot
 Environment=BOT_API_URL=http://127.0.0.1:8080
 Environment=BOT_SERVICE_NAME=niftybot
+Environment=BOT_APP_DIR=/home/ubuntu/nifty_scalper_bot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/nifty_scalper_bot/.streamlit-venv/bin/python -m streamlit run /home/ubuntu/nifty_scalper_bot/dashboard/operations_console.py --server.address=0.0.0.0 --server.port=8501 --browser.gatherUsageStats=false --server.headless=true
+ExecStart=/home/ubuntu/nifty_scalper_bot/.streamlit-venv/bin/python -m streamlit run /home/ubuntu/nifty_scalper_bot/dashboard/operations_console.py --server.address=0.0.0.0 --server.port=8501 --browser.gatherUsageStats=false --server.headless=true --server.fileWatcherType=none --server.runOnSave=false
 Restart=always
-RestartSec=5
+RestartSec=3
 TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true
+MemoryMax=650M
+CPUAccounting=true
+MemoryAccounting=true
 
 [Install]
 WantedBy=multi-user.target
