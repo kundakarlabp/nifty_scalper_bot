@@ -1,0 +1,3 @@
+## 2025-02-26 - HTML Strings Hide Accessibility Issues
+**Learning:** Standard static analysis tools and UI linters (like ESLint or a11y checks) fail to parse or evaluate inline HTML strings embedded within Python backends (e.g., FastAPI's `HTMLResponse`). As a result, basic accessibility requirements—like `<label>` `for` attributes and `<input>` `id` bindings—are often missed when generating frontends this way.
+**Action:** Always manually verify the accessibility bindings (such as `for` on labels mapping to `id` on inputs, and `aria-label`s) when updating HTML string templates in Python backends, as automated tools won't catch these regressions.
