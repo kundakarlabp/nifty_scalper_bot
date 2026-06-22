@@ -14,9 +14,27 @@ A read-only dashboard for checking the bot from an Android phone or desktop brow
 
 The dashboard does not place, modify, or cancel orders.
 
+## Production bot endpoint
+
+The current bot admin page is:
+
+`http://15.206.3.6:8080/admin`
+
+For the Streamlit dashboard, use only the base URL:
+
+```toml
+BOT_API_URL = "http://15.206.3.6:8080"
+```
+
+Do not append `/admin`. The dashboard automatically calls:
+
+- `/livez`
+- `/readyz`
+- `/health/trading`
+
 ## Deploy on Streamlit Community Cloud
 
-1. Push/merge this folder to GitHub.
+1. Push or merge this folder to GitHub.
 2. Open Streamlit Community Cloud and create a new app.
 3. Select this repository and branch.
 4. Set the main file path to:
@@ -26,10 +44,8 @@ The dashboard does not place, modify, or cancel orders.
 5. In the app's **Secrets** section, add:
 
 ```toml
-BOT_API_URL = "https://YOUR-BOT-SERVICE.example.com"
+BOT_API_URL = "http://15.206.3.6:8080"
 ```
-
-The URL must be the public base URL of the running bot, without a trailing slash.
 
 If a reverse proxy later protects the health endpoints with a bearer token, also add:
 
@@ -52,13 +68,13 @@ From the repository root:
 
 ```bash
 python -m pip install -r dashboard/requirements.txt
-BOT_API_URL=http://localhost:8080 streamlit run dashboard/streamlit_app.py
+BOT_API_URL=http://15.206.3.6:8080 streamlit run dashboard/streamlit_app.py
 ```
 
 On Windows PowerShell:
 
 ```powershell
-$env:BOT_API_URL="http://localhost:8080"
+$env:BOT_API_URL="http://15.206.3.6:8080"
 streamlit run dashboard/streamlit_app.py
 ```
 
@@ -67,4 +83,5 @@ streamlit run dashboard/streamlit_app.py
 - Keep the dashboard read-only.
 - Do not expose broker API keys, access tokens, Telegram tokens, or `.env` contents.
 - Prefer a private Streamlit deployment or place authentication in front of the app.
+- The current production endpoint uses plain HTTP on a public IP; migrate it to HTTPS before broader exposure.
 - The current bot health endpoints reveal operational status but not broker credentials.
