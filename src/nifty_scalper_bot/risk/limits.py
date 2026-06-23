@@ -30,6 +30,7 @@ class RiskSwitches:
     max_consecutive_losses: int
     cooldown_minutes: float
     reset_hour_utc: int
+    max_day_profit: float = 0.0
     clock: Callable[[], datetime] = _now_utc
     _day_anchor: datetime = field(init=False, repr=False)
     _day_pnl: float = field(init=False, repr=False, default=0.0)
@@ -38,6 +39,7 @@ class RiskSwitches:
 
     def __post_init__(self) -> None:
         self.max_day_loss = max(0.0, float(self.max_day_loss))
+        self.max_day_profit = max(0.0, float(self.max_day_profit))
         self.max_consecutive_losses = max(0, int(self.max_consecutive_losses))
         self.cooldown_minutes = max(0.0, float(self.cooldown_minutes))
         self.reset_hour_utc = int(self.reset_hour_utc)
@@ -77,6 +79,8 @@ class RiskSwitches:
         self._reset_if_needed()
         if self.max_day_loss > 0 and self.day_loss() >= self.max_day_loss:
             return "Max day loss reached"
+        if self.max_day_profit > 0 and self.day_profit() >= self.max_day_profit:
+            return "Daily profit target reached"
         if (
             self.max_consecutive_losses > 0
             and self._consecutive_losses >= self.max_consecutive_losses
@@ -115,6 +119,9 @@ class RiskSwitches:
     def day_loss(self) -> float:
         pnl = self._day_pnl
         return max(-pnl, 0.0)
+
+    def day_profit(self) -> float:
+        return max(self._day_pnl, 0.0)
 
     def consecutive_losses(self) -> int:
         self._reset_if_needed()

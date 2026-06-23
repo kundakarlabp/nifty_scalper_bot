@@ -70,3 +70,46 @@ def test_day_reset_reinitialises_state() -> None:
 
     assert switches.day_loss() == pytest.approx(0.0)
     assert switches.consecutive_losses() == 0
+
+
+def test_day_profit_lock_triggers() -> None:
+    clock = Clock()
+    switches = RiskSwitches(
+        max_day_loss=0.0,
+        max_consecutive_losses=0,
+        cooldown_minutes=0.0,
+        reset_hour_utc=3,
+        max_day_profit=500.0,
+        clock=clock,
+    )
+    switches.record_pnl(300.0)
+    assert switches.breach_reason() is None  # below target
+    switches.record_pnl(250.0)
+    assert switches.day_profit() == pytest.approx(550.0)
+    assert switches.breach_reason() == "Daily profit target reached"
+
+
+def test_day_profit_lock_off_by_default() -> None:
+    clock = Clock()
+    switches = RiskSwitches(
+        max_day_loss=0.0,
+        max_consecutive_losses=0,
+        cooldown_minutes=0.0,
+        reset_hour_utc=3,
+        clock=clock,
+    )
+    switches.record_pnl(100000.0)  # huge profit
+    assert switches.breach_reason() is None  # no target set -> never locks
+
+
+def test_day_profit_resets_next_day() -> None:
+    clock = Clock()
+    switches = RiskSwitches(
+        max_day_loss=0.0, max_consecutive_losses=0, cooldown_minutes=0.0,
+        reset_hour_utc=3, max_day_profit=500.0, clock=clock,
+    )
+    switches.record_pnl(600.0)
+    assert switches.breach_reason() == "Daily profit target reached"
+    clock.advance(60 * 60 * 24)  # next day past reset
+    assert switches.day_profit() == pytest.approx(0.0)
+    assert switches.breach_reason() is None
