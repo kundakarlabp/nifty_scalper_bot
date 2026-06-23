@@ -6,6 +6,7 @@ import html
 import io
 import json
 import os
+import re
 import subprocess
 import time as clock
 from datetime import date, datetime, time
@@ -171,6 +172,47 @@ _TRADE_MARKERS = (
 
 def filter_trades_only(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return [r for r in rows if any(m.lower() in r["message"].lower() for m in _TRADE_MARKERS)]
+
+
+_PNL_RE = re.compile(r"\bpnl=(-?\d+(?:\.\d+)?)")
+
+
+def realized_pnl_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
+    """Aggregate realized P&L from BRACKET_CLOSED events in the given rows.
+
+    Each closed bracket logs `pnl=<rupees>`; sum them for the day's realized P&L,
+    with win/loss counts. Returns zeros when no closes are present yet.
+    """
+    total = 0.0
+    wins = losses = trades = 0
+    best = worst = None
+    for row in rows:
+        msg = row.get("message", "")
+        if "BRACKET_CLOSED" not in msg:
+            continue
+        m = _PNL_RE.search(msg)
+        if not m:
+            continue
+        try:
+            pnl = float(m.group(1))
+        except ValueError:
+            continue
+        total += pnl
+        trades += 1
+        if pnl >= 0:
+            wins += 1
+        else:
+            losses += 1
+        best = pnl if best is None else max(best, pnl)
+        worst = pnl if worst is None else min(worst, pnl)
+    return {
+        "total": round(total, 2),
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "best": best,
+        "worst": worst,
+    }
 
 
 def render_feed(rows: list[dict[str, str]]) -> str:
@@ -470,11 +512,31 @@ events = event_ring()
 
 
 def render_live_feed() -> None:
-    rows = filter_events(events.snapshot(), event_type, search_query)
+    snapshot = events.snapshot()
+    rows = filter_events(snapshot, event_type, search_query)
     if st.session_state.get("trades_only_view"):
         rows = filter_trades_only(rows)
     rows = rows[-event_limit:]
     stats = events.stats()
+
+    # Daily realized P&L (from BRACKET_CLOSED pnl= across the whole buffer, not just
+    # the visible window) so the day's running result is visible at a glance.
+    pnl = realized_pnl_summary(snapshot)
+    if pnl["trades"]:
+        win_rate = round(100.0 * pnl["wins"] / pnl["trades"])
+        pnl_cls = "good" if pnl["total"] >= 0 else "bad-text"
+        sign = "+" if pnl["total"] >= 0 else "−"
+        st.markdown(
+            '<div class="kpi-row" style="grid-template-columns:repeat(5,minmax(0,1fr))">'
+            f'<div class="kpi"><div class="kpi-label">Realized P&amp;L (today)</div>'
+            f'<div class="kpi-value {pnl_cls}">{sign}₹{abs(pnl["total"]):,.2f}</div></div>'
+            f'<div class="kpi"><div class="kpi-label">Closed trades</div><div class="kpi-value">{pnl["trades"]}</div></div>'
+            f'<div class="kpi"><div class="kpi-label">Win rate</div><div class="kpi-value">{win_rate}% ({pnl["wins"]}/{pnl["trades"]})</div></div>'
+            f'<div class="kpi"><div class="kpi-label">Best</div><div class="kpi-value good">+₹{(pnl["best"] or 0):,.0f}</div></div>'
+            f'<div class="kpi"><div class="kpi-label">Worst</div><div class="kpi-value bad-text">₹{(pnl["worst"] or 0):,.0f}</div></div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
     values = [
         ("Visible", len(rows)),
         ("Trades", sum(row["type"] == "TRADE" for row in rows)),
