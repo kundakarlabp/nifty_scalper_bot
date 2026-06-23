@@ -158,6 +158,21 @@ def filter_events(
     return rows
 
 
+# Markers for the "Trades only" view: entry, fill, exit, P&L, rejections — the
+# events that describe an actual trade lifecycle (mirrors the dashboard's
+# /admin/trades.json idea so trades can be reviewed without scrolling the feed).
+_TRADE_MARKERS = (
+    "ORDER_SENT", "Sending Order", "FILLED", "average_price", "EXIT",
+    "TRADE_ATTEMPT", "ORDER_REJECTED", "ORDER_BROKER_CONFIG_ERROR",
+    "BRACKET_EXIT", "EXIT_RECONCILED_FLAT", "EXIT_ESCALAT",
+    "EXIT_ESCALATION_MARKET_EXIT", "pnl", "SIGNAL_EXECUTION_RESULT",
+)
+
+
+def filter_trades_only(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [r for r in rows if any(m.lower() in r["message"].lower() for m in _TRADE_MARKERS)]
+
+
 def render_feed(rows: list[dict[str, str]]) -> str:
     if not rows:
         body = '<div class="feed-empty">Waiting for actionable events…</div>'
@@ -442,6 +457,12 @@ with st.container():
         )
         if control_columns[6].button("Refresh", use_container_width=True):
             st.rerun()
+    trades_only = st.toggle(
+        "Trades only (entries · exits · fills · P&L)",
+        value=False,
+        key="trades_only_view",
+        help="Show only the trade lifecycle events, hiding signal/system noise.",
+    )
 
 feed_column, rail_column = st.columns([3.35, 1.15], gap="medium")
 
@@ -449,7 +470,10 @@ events = event_ring()
 
 
 def render_live_feed() -> None:
-    rows = filter_events(events.snapshot(), event_type, search_query)[-event_limit:]
+    rows = filter_events(events.snapshot(), event_type, search_query)
+    if st.session_state.get("trades_only_view"):
+        rows = filter_trades_only(rows)
+    rows = rows[-event_limit:]
     stats = events.stats()
     values = [
         ("Visible", len(rows)),
@@ -558,6 +582,8 @@ with st.expander("History, review and CSV export", expanded=False):
         st.error(history_error)
     elif loaded_rows is not None:
         rows = filter_events(loaded_rows, history_type, history_query)
+        if st.checkbox("Trades only (entries · exits · fills · P&L)", key="history_trades_only"):
+            rows = filter_trades_only(rows)
         table_tab, preview_tab = st.tabs(["Structured table", "Event preview"])
         with table_tab:
             st.dataframe(
