@@ -224,6 +224,9 @@ class BracketState:
     close_source: str | None = None
     exit_price: float | None = None
     escalated_at: float | None = None
+    # True once the forced MARKET exit on escalation has been fired, so it happens
+    # exactly once per bracket (not every reconcile cycle).
+    _market_escalation_fired: bool = False
     _atr_warning_logged: bool = False
 
     @property
@@ -443,6 +446,7 @@ class BracketManager:
         self._exit_flat_confirmation_required = os.getenv("EXIT_FLAT_CONFIRMATION_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "on"}
         self._exit_unresolved_escalation_seconds = max(1.0, parse_float_env(os.getenv("EXIT_UNRESOLVED_ESCALATION_SECONDS"), 15.0))
         self._exit_continue_retry_after_escalation = os.getenv("EXIT_CONTINUE_RETRY_AFTER_ESCALATION", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self._exit_force_market_on_escalation = os.getenv("EXIT_FORCE_MARKET_ON_ESCALATION", "true").strip().lower() in {"1", "true", "yes", "on"}
         self._exit_protective_order_mode = str(os.getenv("EXIT_PROTECTIVE_ORDER_MODE", "MARKET") or "MARKET").strip().upper()
         self._exit_marketable_limit_slippage_ticks = max(0, parse_int_env(os.getenv("EXIT_MARKETABLE_LIMIT_SLIPPAGE_TICKS"), 5))
         self._exit_marketable_limit_max_slippage_pct = max(0.0, parse_float_env(os.getenv("EXIT_MARKETABLE_LIMIT_MAX_SLIPPAGE_PCT"), 2.0))
@@ -1678,9 +1682,73 @@ class BracketManager:
                 "remaining_qty": bracket.remaining_quantity,
                 "attempts": bracket.exit_attempt_count,
                 "last_error": bracket.last_exit_error,
-                "message": "⚠️ Exit unresolved. New entries frozen.",
+                "message": "⚠️ Exit unresolved. Forcing MARKET exit.",
             },
         )
+        # Escalation must actually FLATTEN the position, not just freeze. A stuck
+        # LIMIT exit (OPEN PENDING, never filling) previously left the position
+        # exposed for minutes while this method only logged. Cancel the dead
+        # pending order and fire ONE forced MARKET exit. Done outside the lock to
+        # avoid re-entrancy (place_order / cancel acquire their own locks).
+        if not self._exit_force_market_on_escalation:
+            return
+        if getattr(bracket, "_market_escalation_fired", False):
+            return
+        bracket._market_escalation_fired = True
+        stuck_order_id = bracket.exit_order_id or bracket.pending_exit_order_id
+        symbol = normalize_symbol(bracket.symbol)
+        qty = int(bracket.remaining_quantity or 0)
+        side = "SELL" if bracket.side == "BUY" else "BUY"
+
+        def _force_market_flatten() -> None:
+            # Cancel the unfilled pending limit so it can't fill alongside the market order.
+            if stuck_order_id:
+                try:
+                    self.order_manager.cancel_order(str(stuck_order_id))
+                    LOGGER.warning(
+                        "EXIT_ESCALATION_CANCELLED_STUCK_ORDER bracket_id=%s order_id=%s",
+                        bracket.bracket_id, stuck_order_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - cancel best-effort; still try market
+                    LOGGER.warning(
+                        "EXIT_ESCALATION_CANCEL_FAILED bracket_id=%s order_id=%s error=%s",
+                        bracket.bracket_id, stuck_order_id, exc,
+                    )
+            with self._lock:
+                bracket.exit_order_id = None
+                bracket.pending_exit_order_id = None
+            if not symbol or qty <= 0:
+                return
+            try:
+                order_id = self.order_manager.place_order(
+                    symbol=symbol, side=side, quantity=qty, order_type="MARKET",
+                    tag=f"EXIT_MKT_{bracket.bracket_id[:8]}", check_risk=False,
+                    product="MIS",
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.critical(
+                    "EXIT_ESCALATION_MARKET_EXIT_FAILED bracket_id=%s symbol=%s error=%s",
+                    bracket.bracket_id, symbol, exc,
+                )
+                return
+            if order_id:
+                with self._lock:
+                    bracket.exit_order_id = str(order_id)
+                    bracket.pending_exit_order_id = str(order_id)
+                LOGGER.critical(
+                    "EXIT_ESCALATION_MARKET_EXIT_SENT bracket_id=%s symbol=%s order_id=%s qty=%s",
+                    bracket.bracket_id, symbol, order_id, qty,
+                )
+            else:
+                LOGGER.critical(
+                    "EXIT_ESCALATION_MARKET_EXIT_NO_ORDER_ID bracket_id=%s symbol=%s",
+                    bracket.bracket_id, symbol,
+                )
+
+        try:
+            _force_market_flatten()
+        except Exception as exc:  # noqa: BLE001 - never let escalation raise
+            LOGGER.error("EXIT_ESCALATION_DISPATCH_FAILED bracket_id=%s error=%s", bracket.bracket_id, exc)
 
     def on_tick_event(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
