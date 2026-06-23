@@ -162,11 +162,25 @@ class RiskManager:
             day_loss_cap = min(pct_cap, abs_cap)
         else:
             day_loss_cap = max(pct_cap, abs_cap)
+        # Daily profit lock — symmetric to the day-loss cap. Configurable as a
+        # percent of balance and/or an absolute rupee amount. When both are set,
+        # use the smaller (lock in sooner); when one is set, use it; default 0=off.
+        profit_pct_cap = max(self.account_balance, 0.0) * (
+            self._daily_profit_target_pct() / 100.0
+        )
+        profit_abs_cap = max(
+            float(getattr(self.settings, "max_daily_profit_absolute", 0.0)), 0.0
+        )
+        if profit_pct_cap > 0 and profit_abs_cap > 0:
+            day_profit_cap = min(profit_pct_cap, profit_abs_cap)
+        else:
+            day_profit_cap = max(profit_pct_cap, profit_abs_cap)
         self._switches = RiskSwitches(
             max_day_loss=day_loss_cap,
             max_consecutive_losses=self.settings.max_consecutive_losses,
             cooldown_minutes=self.settings.loss_cooldown_seconds / 60.0,
             reset_hour_utc=self.settings.trading_day_reset_hour_utc,
+            max_day_profit=day_profit_cap,
         )
         self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
         self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
@@ -1287,6 +1301,13 @@ class RiskManager:
             self.settings,
             "daily_loss_pct",
             getattr(self.settings, "daily_pnl_cap_pct", 0.0),
+        )
+
+    def _daily_profit_target_pct(self) -> float:  # pragma: no cover
+        return getattr(
+            self.settings,
+            "daily_profit_pct",
+            getattr(self.settings, "daily_profit_target_pct", 0.0),
         )
 
 
