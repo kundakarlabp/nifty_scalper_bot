@@ -5329,6 +5329,11 @@ class StrategyRunner:
         original_sl = sl
         original_tp = tp
 
+        if signal.stop_loss is None or signal.stop_loss <= 0:
+            corrected = True  # a missing/invalid SL was replaced by the ATR default
+        if signal.take_profit is None or signal.take_profit <= 0:
+            corrected = True
+
         if entry_side == "BUY":  # LONG position
             # SL must be BELOW entry
             if sl >= entry_price:
@@ -5362,6 +5367,13 @@ class StrategyRunner:
         min_tp_distance = atr * 1.0
 
         if entry_side == "BUY":
+            # Guard against an SL that mirrored to an absurd value (e.g. an
+            # underlying-derived stop) leaving it at/near zero or further than the
+            # full premium below entry. Reset to a sane ATR/percent premium stop.
+            max_sl_distance = max(entry_price * 0.6, atr * 2.0)
+            if sl <= 0 or (entry_price - sl) > max_sl_distance:
+                sl = entry_price - min(max(atr * 1.5, entry_price * 0.1), max_sl_distance)
+                corrected = True
             if entry_price - sl < min_sl_distance:
                 sl = entry_price - min_sl_distance
                 corrected = True  # ✅ FIX 5
@@ -12339,10 +12351,30 @@ class StrategyRunner:
                 plan_source = "premium_stop_pct"
             else:
                 distance = stop_distance if stop_distance is not None and stop_distance > 0 else max(atr * 1.2, entry_price * 0.02, 1.0)
-                if explicit_stop is not None and explicit_stop > 0 and str(entry_side).upper() == "BUY":
+                # An explicit stop is only valid if it sits BELOW entry and within a
+                # sane premium range. Strategies sometimes derive the stop from the
+                # UNDERLYING (index ~24000) while the trade is on the option PREMIUM
+                # (~117); using that directly puts SL far above entry, which the
+                # bracket then rejects (protected_price_invalidates_bracket), killing
+                # valid entries. Accept the explicit stop only when it is below entry
+                # and no further than the entry premium away; otherwise fall back to a
+                # premium-distance stop.
+                explicit_ok = (
+                    explicit_stop is not None
+                    and explicit_stop > 0
+                    and str(entry_side).upper() == "BUY"
+                    and explicit_stop < entry_price
+                    and (entry_price - explicit_stop) <= entry_price  # SL not absurdly far (>100% premium)
+                )
+                if explicit_ok:
                     stop_loss = explicit_stop
                     plan_source = "explicit_premium_stop"
                 else:
+                    if explicit_stop is not None and explicit_stop > 0 and str(entry_side).upper() == "BUY":
+                        LOGGER.info(
+                            "EXPLICIT_STOP_REJECTED_OUT_OF_PREMIUM_RANGE symbol=%s entry=%.2f explicit_stop=%.2f -> using premium_stop_distance",
+                            getattr(signal, "symbol", "?"), entry_price, float(explicit_stop),
+                        )
                     stop_loss = entry_price - distance
                     plan_source = "premium_stop_distance"
                 risk = max(entry_price - float(stop_loss), max(atr * 0.8, 1.0))
