@@ -1239,7 +1239,7 @@ class OrderManager:
                 extra={"event": "MARGIN_PRIME_FAILED", "reason": reason, "error_type": type(exc).__name__},
             )
             return False
-        ok = bool(available is not None and available > 0 and source in {"mdm", "margin_cache_used"})
+        ok = bool(available is not None and available > 0 and source in {"mdm", "margin_cache_used", "risk"})
         self._logger.info(
             "MARGIN_PRIMED reason=%s ok=%s source=%s available=%s",
             reason, ok, source, available,
@@ -7660,6 +7660,13 @@ class OrderManager:
             with suppress(Exception):
                 balance = float(getattr(risk_manager, "current_balance", 0.0))
                 if math.isfinite(balance) and balance > 0:
+                    # A positive balance from the risk manager is a valid margin
+                    # reading. Record it as a success so broker-health freshness is
+                    # established; otherwise, when the MDM margin snapshot isn't
+                    # primed yet at startup, _last_margin_success_ts stays None
+                    # forever -> balance_stale=True / margin_age_s=None permanently
+                    # blocks live orders even though the broker is healthy.
+                    self._record_margin_refresh_success(balance, "risk")
                     return balance, "risk"
         return None, "unknown"
 
