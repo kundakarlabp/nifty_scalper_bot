@@ -17,3 +17,4 @@ data/*.db-shm
 
 compileall.log
 *.log
+test_venv/
