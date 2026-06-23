@@ -2582,16 +2582,44 @@ class BracketManager:
                 bracket.exit_price = exit_price
             bracket.updated_at = bracket.closed_at
             self._exit_cooldowns.pop(bracket.entry_order_id, None)
+        # Compute realized P&L so the log/event carries it (lets the dashboard and
+        # Streamlit terminal show daily P&L without re-deriving from the broker).
+        # Long option (BUY): (exit-entry)*qty; short: (entry-exit)*qty.
+        entry_px = bracket.entry_fill_price if bracket.entry_fill_price is not None else bracket.entry_price
+        exit_px = bracket.exit_price
+        filled_qty = int(bracket.quantity or 0)
+        realized_pnl: float | None = None
+        try:
+            if entry_px is not None and exit_px is not None and filled_qty > 0:
+                if bracket.side == "BUY":
+                    realized_pnl = round((float(exit_px) - float(entry_px)) * filled_qty, 2)
+                else:
+                    realized_pnl = round((float(entry_px) - float(exit_px)) * filled_qty, 2)
+        except Exception:  # noqa: BLE001 - never let P&L math break a close
+            realized_pnl = None
         LOGGER.info(
-            "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s",
+            "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s qty=%s entry=%s exit=%s pnl=%s",
             bracket.bracket_id,
             bracket.symbol,
             close_source,
+            bracket.side,
+            filled_qty,
+            entry_px,
+            exit_px,
+            realized_pnl,
         )
         self._log_bracket_event(
             "BRACKET_CLOSED",
             bracket,
-            meta={"close_source": close_source, "exit_order_id": bracket.exit_order_id},
+            meta={
+                "close_source": close_source,
+                "exit_order_id": bracket.exit_order_id,
+                "side": bracket.side,
+                "qty": filled_qty,
+                "entry": entry_px,
+                "exit": exit_px,
+                "pnl": realized_pnl,
+            },
         )
         self._notify_open_position_priority("close", bracket.symbol)
         hook = self._on_exit_complete_hook
