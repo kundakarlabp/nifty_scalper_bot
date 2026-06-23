@@ -59,11 +59,11 @@ header[data-testid="stHeader"]{display:none!important}
   padding:8px 10px 2px;margin-bottom:10px}
 .status-stack{display:grid;gap:9px}
 .status-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 12px}
-.card-title{font-size:.68rem;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-bottom:8px}
+.card-title{font-size:.72rem;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-bottom:8px}
 .state-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .state-item{background:#09111a;border:1px solid #1d2b3a;border-radius:8px;padding:8px}
-.state-label{font-size:.62rem;text-transform:uppercase;color:#74869a;letter-spacing:.06em}
-.state-value{font-size:.91rem;font-weight:760;color:var(--text);margin-top:2px;white-space:nowrap;
+.state-label{font-size:.66rem;text-transform:uppercase;color:#74869a;letter-spacing:.06em}
+.state-value{font-size:.95rem;font-weight:760;color:var(--text);margin-top:2px;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
 .good{color:var(--green)!important}.bad-text{color:var(--red)!important}
 .warn-text{color:var(--amber)!important}.info-text{color:var(--blue)!important}
@@ -73,17 +73,17 @@ header[data-testid="stHeader"]{display:none!important}
 .alert.bad{border-left:4px solid var(--red);background:#2b141a;color:#ffc3ca}
 .kpi-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:8px}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
-.kpi-label{font-size:.61rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.kpi-label{font-size:.65rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 .kpi-value{font-size:1.02rem;font-weight:780;color:var(--text);margin-top:2px}
 .feed-shell{background:#05090e;border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .feed-head{display:grid;grid-template-columns:146px 75px 1fr;gap:8px;padding:7px 10px;
   background:#0b141e;border-bottom:1px solid var(--line);font-size:.62rem;text-transform:uppercase;
-  letter-spacing:.07em;color:#708398;position:sticky;top:0;z-index:2}
+  letter-spacing:.07em;color:#8093a8;position:sticky;top:0;z-index:2}
 .feed{height:570px;overflow-y:auto;overscroll-behavior:contain}
 .ev{display:grid;grid-template-columns:146px 75px minmax(0,1fr);gap:8px;padding:6px 10px;
-  border-bottom:1px solid #142130;font:11.2px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace}
-.ev:hover{background:#0a121b}.ts{color:#718399}.msg{color:#c9d5e2;word-break:break-word}
-.badge{font-weight:800;font-size:10px}.ERROR{color:var(--red)}.WARNING{color:var(--amber)}
+  border-bottom:1px solid #142130;font:12.6px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
+.ev:hover{background:#0a121b}.ts{color:#8093a8}.msg{color:#d8e3ef;word-break:break-word}
+.badge{font-weight:800;font-size:11px}.ERROR{color:var(--red)}.WARNING{color:var(--amber)}
 .TRADE{color:var(--cyan)}.SIGNAL{color:var(--blue)}.RISK{color:var(--purple)}.SYSTEM{color:#aebdcc}
 .feed-empty{padding:22px;color:var(--muted);font:12px ui-monospace,monospace}
 .feed-foot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:7px 10px;
@@ -129,9 +129,15 @@ def event_ring() -> EventRing:
     return EventRing(SERVICE, max_events=3000)
 
 
+@st.cache_data(ttl=2.0, show_spinner=False)
 def get_json(path: str) -> dict[str, Any] | None:
+    # Cached briefly: render_status_rail calls /livez, /readyz and /health/trading
+    # every rerun. At a 2s auto-refresh with a 1.8s timeout each, an unreachable bot
+    # API would block the page for up to ~5s per cycle (the "latency/hang"). Caching
+    # for one refresh cycle keeps the terminal responsive regardless of bot-API state;
+    # the event feed (journald) is independent and always live.
     try:
-        response = http_session().get(API + path, timeout=1.8)
+        response = http_session().get(API + path, timeout=1.2)
         response.raise_for_status()
         value = response.json()
         return value if isinstance(value, dict) else None
@@ -265,6 +271,16 @@ def render_status_rail() -> None:
         or (readyz or {}).get("blockers")
         or []
     )
+    # Decouple from the status API: the event feed (journald) is independent of the
+    # bot's HTTP endpoints. If /livez is unreachable but events arrived in the last
+    # ~30s, the bot IS running — the status endpoint is just briefly unreachable
+    # (e.g. threadpool busy). Show that truthfully instead of a misleading "DOWN".
+    _fs = event_ring().stats()
+    _feed_fresh = bool(_fs.get("last_event")) and (clock.time() - _fs["last_event"]) < 30.0
+    api_up = livez is not None
+    process_alive = api_up or _feed_fresh
+    process_label = "UP" if api_up else ("LIVE (feed)" if _feed_fresh else "DOWN")
+    process_class = "good" if process_alive else "bad-text"
     engine_loaded = bool((livez or {}).get("bot_loaded"))
     execution_ready = bool((trading or {}).get("ready"))
     orders_armed = bool((trading or {}).get("live_orders_armed"))
@@ -275,8 +291,8 @@ def render_status_rail() -> None:
     system_html = (
         '<div class="status-card"><div class="card-title">Execution state</div>'
         '<div class="state-grid">'
-        + state_item("Process", "UP" if livez else "DOWN", "good" if livez else "bad-text")
-        + state_item("Engine", "LOADED" if engine_loaded else "STARTING", "good" if engine_loaded else "warn-text")
+        + state_item("Process", process_label, process_class)
+        + state_item("Engine", "LOADED" if engine_loaded else ("LIVE (feed)" if _feed_fresh and not api_up else "STARTING"), "good" if (engine_loaded or (_feed_fresh and not api_up)) else "warn-text")
         + state_item("Execution", "READY" if execution_ready else "BLOCKED", "good" if execution_ready else "bad-text")
         + state_item("Orders", "ARMED" if orders_armed else "OFF", "good" if orders_armed else "warn-text")
         + "</div></div>"
@@ -296,10 +312,16 @@ def render_status_rail() -> None:
             + "<br>".join(html.escape(str(item)) for item in blockers)
             + "</div>"
         )
-    elif livez:
+    elif api_up:
         alert = '<div class="alert ok"><b>Operational checks passed</b><br>No active blocker reported.</div>'
+    elif _feed_fresh:
+        alert = (
+            '<div class="alert warn"><b>Status API unreachable — bot is live</b><br>'
+            "Events are still streaming, so the engine is running; only the HTTP status "
+            "endpoint is briefly unreachable. Execution/broker fields below may be stale.</div>"
+        )
     else:
-        alert = '<div class="alert bad"><b>Bot API unreachable</b><br>Check the trading service.</div>'
+        alert = '<div class="alert bad"><b>Bot API unreachable & no recent events</b><br>Check the trading service.</div>'
 
     feed_stats = event_ring().stats()
     age = (
@@ -364,10 +386,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Theme palettes — overrides the :root variables defined in the base stylesheet so
+# the whole terminal recolors instantly. "Default dark" keeps the original look.
+_THEMES = {
+    "Default dark": {},
+    "Midnight (high contrast)": {
+        "--bg": "#02050a", "--panel": "#0a121d", "--panel2": "#0e1a28",
+        "--line": "#2b4562", "--text": "#f3f8ff", "--muted": "#9fb2c8",
+    },
+    "Slate": {
+        "--bg": "#0f1419", "--panel": "#171f29", "--panel2": "#1d2733",
+        "--line": "#2e3d4f", "--text": "#eef3f9", "--muted": "#94a6ba",
+    },
+    "Light": {
+        "--bg": "#f4f7fb", "--panel": "#ffffff", "--panel2": "#eef3f9",
+        "--line": "#d4deea", "--text": "#142231", "--muted": "#5a6b80",
+    },
+}
+_theme_choice = st.session_state.get("terminal_theme", "Default dark")
+_overrides = _THEMES.get(_theme_choice) or {}
+if _overrides:
+    _vars = ";".join(f"{k}:{v}" for k, v in _overrides.items())
+    st.markdown(f"<style>:root{{{_vars}}}</style>", unsafe_allow_html=True)
+
 with st.container():
     st.markdown('<div class="section-title">Live feed controls</div>', unsafe_allow_html=True)
     with st.container(border=True):
-        control_columns = st.columns([1.05, 1.15, 1.15, 2.1, 1.05, 0.8], gap="small")
+        control_columns = st.columns([1.0, 1.05, 1.05, 1.9, 0.95, 1.15, 0.75], gap="small")
         live_refresh = control_columns[0].toggle("Live", value=True)
         refresh_seconds = control_columns[1].selectbox(
             "Refresh",
@@ -388,7 +433,14 @@ with st.container():
             [50, 100, 200, 300, 500],
             index=2,
         )
-        if control_columns[5].button("Refresh", use_container_width=True):
+        _theme_keys = list(_THEMES.keys())
+        control_columns[5].selectbox(
+            "Theme",
+            _theme_keys,
+            index=_theme_keys.index(_theme_choice) if "terminal_theme" not in st.session_state else None,
+            key="terminal_theme",
+        )
+        if control_columns[6].button("Refresh", use_container_width=True):
             st.rerun()
 
 feed_column, rail_column = st.columns([3.35, 1.15], gap="medium")
