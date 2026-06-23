@@ -393,3 +393,47 @@ def test_kill_switch_blocks_within_cooldown_when_auto_reset_disabled(monkeypatch
     om._kill_switch_allow_auto_reset = False
     om._kill_switch_auto_reset_seconds = 1
     assert OrderManager.is_kill_switch_active(om) is True
+
+
+def test_risk_fallback_records_margin_success_clears_stale() -> None:
+    # Root cause of BROKER_HEALTH_LIVE_ORDERS_BLOCKED with balance_stale=True /
+    # margin_age_s=None: when the MDM margin snapshot isn't primed yet (returns
+    # None, no error), the risk_manager fallback returned a balance WITHOUT
+    # recording success, so _last_margin_success_ts stayed None forever and live
+    # orders were permanently blocked though the broker was healthy. A positive
+    # risk balance must record success.
+    om = OrderManager.__new__(OrderManager)
+    om._data_hub = SimpleNamespace(
+        refresh_margin_snapshot=lambda: None,
+        get_available_balance=lambda: None,  # MDM not primed yet
+    )
+    om._market_data = None
+    om._risk_manager = SimpleNamespace(current_balance=22792.35)
+    om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None, debug=lambda *a, **k: None)
+    om._last_margin_success_ts = None
+    om._last_margin_refresh_ts = None
+    om._last_margin_available_balance = None
+    om._last_margin_balance_source = None
+    om._last_margin_error_type = None
+    om._last_margin_error = None
+    om._margin_circuit_open = False
+    om._margin_circuit_until_ts = None
+
+    available, source = OrderManager._resolve_available_margin_raw(om)
+    assert available == 22792.35 and source == "risk"
+    assert om._last_margin_success_ts is not None, "risk balance must record margin success"
+
+    # broker-health snapshot must now report fresh, not stale -> live orders allowed
+    om._broker = SimpleNamespace(is_connected=True)
+    om._margin_cache_max_age_seconds = 120
+    om._allow_entry_with_stale_margin = False
+    om._last_order_api_error = None
+    om._last_order_api_error_type = None
+    om._last_broker_health_emit_ts = 0.0
+    om._last_broker_health_effect = "none"
+    om._last_broker_health_circuit_state = False
+    om._emit_broker_health_status = lambda **k: None
+    snap = OrderManager.get_broker_health_snapshot(om)
+    assert snap["balance_stale"] is False
+    assert snap["last_margin_success_age_s"] is not None
+    assert snap["trading_allowed_effect"] != "live_orders_blocked"
