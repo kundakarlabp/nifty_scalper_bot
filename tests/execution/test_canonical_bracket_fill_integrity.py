@@ -55,7 +55,11 @@ class _OrderManager:
         return None
 
 
-def _manager(*, fill_price: float = 100.0) -> tuple[CanonicalBracketManager, _OrderManager, _Broker]:
+def _manager(
+    *,
+    fill_price: float = 100.0,
+    sync_grace_seconds: float = 0.0,
+) -> tuple[CanonicalBracketManager, _OrderManager, _Broker]:
     broker = _Broker()
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
@@ -64,6 +68,7 @@ def _manager(*, fill_price: float = 100.0) -> tuple[CanonicalBracketManager, _Or
     manager._watchdog_thread.join(timeout=1.0)
     manager._exit_cancel_confirm_timeout_seconds = 0.01
     manager._exit_cancel_poll_interval_seconds = 0.001
+    manager._filled_position_sync_grace_seconds = sync_grace_seconds
     manager.register_virtual_bracket(
         order_id="entry-1",
         symbol=SYMBOL,
@@ -151,6 +156,55 @@ def test_confirmed_tp1_fill_keeps_residual_position_open_and_protected() -> None
     assert any(event == "PARTIAL_EXIT_CONFIRMED" for event, _ in events)
 
 
+def test_tp1_tick_submit_then_fill_reconciles_through_live_path() -> None:
+    manager, order_manager, broker = _manager()
+
+    manager.on_tick(SYMBOL, 110.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert len(order_manager.place_calls) == 1
+    assert bracket.exit_order_id == "exit-1"
+    assert bracket.exit_pending is True
+
+    broker.statuses["exit-1"] = {
+        "status": "COMPLETE",
+        "average_price": 110.05,
+    }
+    broker.positions = [{"symbol": SYMBOL, "quantity": 40}]
+    manager.on_tick(SYMBOL, 110.5)
+
+    assert bracket.remaining_quantity == 40
+    assert bracket.tp_levels[0].executed is True
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exit_pending is False
+    assert len(order_manager.place_calls) == 1
+
+
+def test_completed_order_waits_for_positions_endpoint_to_catch_up() -> None:
+    manager, order_manager, broker = _manager(sync_grace_seconds=5.0)
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-sync",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=65,
+        average_price=110.05,
+    )
+
+    assert manager._reconcile_exit_state(bracket, requested_by="sync_first") is False
+    assert bracket.exit_state == BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value
+    assert bracket.exit_order_id == "tp1-sync"
+    assert bracket.tp_levels[0].executed is False
+    assert order_manager.place_calls == []
+
+    broker.positions = [{"symbol": SYMBOL, "quantity": 40}]
+    assert manager._reconcile_exit_state(bracket, requested_by="sync_second") is False
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.remaining_quantity == 40
+    assert bracket.tp_levels[0].executed is True
+    assert bracket.exit_order_id is None
+
+
 def test_filled_full_exit_with_residual_never_closes_or_rearms() -> None:
     manager, order_manager, broker = _manager()
     close_calls: list[str] = []
@@ -171,7 +225,7 @@ def test_filled_full_exit_with_residual_never_closes_or_rearms() -> None:
     assert bracket.exit_state == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
     assert bracket.exit_pending is True
     assert bracket.position_flat_confirmed is False
-    assert bracket.exit_order_id is None
+    assert bracket.exit_order_id == "sl-exit"
     assert manager.has_unresolved_exit() is True
     assert close_calls == []
     assert order_manager.place_calls == []
