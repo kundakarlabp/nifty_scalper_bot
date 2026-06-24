@@ -124,3 +124,48 @@ def test_negative_available_cash_still_rejected() -> None:
     }
     with pytest.raises(Exception):
         client._normalize_margin_payload(payload, segment="equity")
+
+
+def test_parse_uses_live_balance_when_cash_is_zero() -> None:
+    """Zerodha reports available.cash=0 while real deployable margin is in
+    live_balance/net. The bot must use live_balance, not see a ₹0 balance
+    (dashboard 'BALANCE —' + broker-stale block + no trades)."""
+    client = _build_client()
+    payload: Mapping[str, Any] = {
+        "equity": {
+            "available": {"cash": 0.0, "live_balance": 16_248.60, "opening_balance": 16_000.0},
+            "utilised": {"debits": 0.0},
+            "net": 16_248.60,
+        }
+    }
+    summary = client._parse_account_margin_summary(payload, segment="equity")
+    assert summary["available"] == 16_248.60
+
+
+def test_parse_prefers_positive_cash_over_live_balance() -> None:
+    """When available.cash is positive it is the deployable balance and must win."""
+    client = _build_client()
+    payload: Mapping[str, Any] = {
+        "equity": {
+            "available": {"cash": 50_000.0, "live_balance": 48_000.0},
+            "utilised": {"debits": 0.0},
+            "net": 50_000.0,
+        }
+    }
+    summary = client._parse_account_margin_summary(payload, segment="equity")
+    assert summary["available"] == 50_000.0
+
+
+def test_parse_zero_everywhere_stays_zero() -> None:
+    """If both cash and live_balance are zero, available is genuinely zero
+    (sizing then correctly blocks via #668 — no synthetic margin)."""
+    client = _build_client()
+    payload: Mapping[str, Any] = {
+        "equity": {
+            "available": {"cash": 0.0, "live_balance": 0.0},
+            "utilised": {"debits": 0.0},
+            "net": 0.0,
+        }
+    }
+    summary = client._parse_account_margin_summary(payload, segment="equity")
+    assert summary["available"] == 0.0
