@@ -259,6 +259,24 @@ class HardenedBracketManager(_LegacyBracketManager):
                 "ltp": ltp,
             },
         )
+        # Notify Telegram on a meaningful trail move (throttled) so dynamic SL
+        # tightening is visible to the operator, not just in logs.
+        try:
+            notify = getattr(self, "_should_notify_trail", None)
+            emit = getattr(self, "_notify_event", None)
+            if callable(notify) and callable(emit) and notify(target.bracket_id, proposed, current):
+                emit(
+                    "TRAILING_SL_UPDATED",
+                    {
+                        "symbol": target.symbol,
+                        "old_sl": round(current, 2),
+                        "new_sl": round(proposed, 2),
+                        "tp": round(float(target.tp_trigger_price), 2),
+                        "reason": "adaptive_atr_trail",
+                    },
+                )
+        except Exception:  # noqa: BLE001 - notification must never break trailing
+            pass
         return True
 
     # ------------------------------------------------------------------
