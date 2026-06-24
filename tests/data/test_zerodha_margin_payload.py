@@ -94,3 +94,33 @@ def test_normalize_margin_payload_supports_available_cash() -> None:
     assert summary["available"] == pytest.approx(175_000.0)
     assert summary["net"] == pytest.approx(175_000.0)
 
+
+
+def test_negative_utilised_debits_does_not_fail_refresh() -> None:
+    """A negative utilised.debits (legit reversal/credit) must NOT fail the whole
+    balance refresh — it previously raised negative_margin_field and cascaded to
+    BROKER NOT READY."""
+    client = _build_client()
+    payload: Mapping[str, Any] = {
+        "equity": {
+            "available": {"cash": 16_248.60, "live_balance": 16_248.60},
+            "utilised": {"debits": -1_500.0, "exposure": 500.0},
+            "net": 16_248.60,
+        }
+    }
+    summary = client._normalize_margin_payload(payload, segment="equity")
+    assert summary["available"] == 16_248.60  # balance preserved
+    assert summary["used"] == -1_000.0  # -1500 + 500, negative debits honoured
+
+
+def test_negative_available_cash_still_rejected() -> None:
+    """Available (deployable) balance must remain strictly non-negative."""
+    client = _build_client()
+    payload: Mapping[str, Any] = {
+        "equity": {
+            "available": {"cash": -100.0},
+            "utilised": {"debits": 0.0},
+        }
+    }
+    with pytest.raises(Exception):
+        client._normalize_margin_payload(payload, segment="equity")
