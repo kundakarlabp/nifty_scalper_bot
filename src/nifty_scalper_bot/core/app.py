@@ -7904,10 +7904,18 @@ async def ensure_symbol_runtime_history(
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
     policy = resolve_history_policy(ctx, symbol, role=role, phase=phase, reason=reason)
+    # Block broker fetch for option-context history only when the market is
+    # genuinely CLOSED (pre/post/holiday). Previously this fired for any mode that
+    # was not exactly "OPEN" — including transient "UNKNOWN" around the open bell —
+    # which kept SMC permanently history-cold (broker_fetch_not_allowed) and unable
+    # to vote, artificially suppressing consensus. Allowing the fetch while live
+    # lets option-context strategies warm up.
+    _market_mode = get_runtime_market_mode()
+    _market_closed_for_fetch = _market_mode in {"PRE_MARKET", "POST_MARKET", "HOLIDAY"}
     if (
         str(policy.role) == "option_context"
         and str(policy.phase) != "recovery"
-        and get_runtime_market_mode() != "OPEN"
+        and _market_closed_for_fetch
         and bool(getattr(policy, "allow_broker_fetch", True))
     ):
         policy = replace(policy, allow_broker_fetch=False)
