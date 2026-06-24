@@ -1754,6 +1754,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
         available = _number("available.cash", cash_value)
         live_balance = _number("available.live_balance", available_map.get("live_balance"), required=False)
         opening_balance = _number("available.opening_balance", available_map.get("opening_balance"), required=False)
+        # Zerodha frequently reports available.cash=0 while the real deployable
+        # intraday margin sits in live_balance (and net). Keying off cash alone made
+        # the bot see a ₹0 balance (dashboard 'BALANCE —') and refuse to size/trade
+        # despite funded margin. When cash is non-positive but live_balance is
+        # positive, prefer live_balance as the usable available balance.
+        if available <= 0.0 and live_balance > 0.0:
+            available = live_balance
         used = 0.0
         for key in ("debits", "span", "exposure", "option_premium", "holding_sales"):
             value = utilised_map.get(key)
