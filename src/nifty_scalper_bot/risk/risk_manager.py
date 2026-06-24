@@ -183,7 +183,6 @@ class RiskManager:
             max_day_profit=day_profit_cap,
         )
         self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
-        self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
         self._m_cooldown = Gauge(
             "risk_cooldown_seconds", "Seconds remaining on enforced cooldown"
         )
@@ -472,11 +471,19 @@ class RiskManager:
         live = _is_live_execution_mode()
         fallback_value = 0.0 if live else 1_000_000.0
         try:
-            candidates = (
-                os.getenv("RISK__CAPITAL"),
-                os.getenv("RISK_CAPITAL"),
-                os.getenv("BACKTEST__CAPITAL"),
-            )
+            # In LIVE, only an explicit live-risk capital is honoured. BACKTEST__CAPITAL
+            # must never become a live balance even if it leaks into the prod env.
+            if live:
+                candidates = (
+                    os.getenv("RISK__CAPITAL"),
+                    os.getenv("RISK_CAPITAL"),
+                )
+            else:
+                candidates = (
+                    os.getenv("RISK__CAPITAL"),
+                    os.getenv("RISK_CAPITAL"),
+                    os.getenv("BACKTEST__CAPITAL"),
+                )
             for candidate in candidates:
                 if candidate is None:
                     continue
@@ -815,9 +822,13 @@ class RiskManager:
 
             allowed_risk = balance * (self.settings.per_trade_risk_pct / 100.0)
 
-            # ✅ FIX 5: Minimum risk allowance
+            # Minimum risk allowance — but it must never exceed the account balance
+            # itself. On a small account the ₹500 floor could otherwise be several
+            # times the balance, silently violating the risk-percent policy.
             min_risk = float(os.getenv("MIN_RISK_PER_TRADE", "500"))
             allowed_risk = max(allowed_risk, min_risk)
+            if allowed_risk > balance > 0:
+                allowed_risk = balance
 
             self._logger.info(
                 f"💰 Balance={balance:,.2f} | AllowedRisk={allowed_risk:.2f} | SL_Dist={sl_distance:.2f}"
