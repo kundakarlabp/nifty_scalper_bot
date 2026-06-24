@@ -686,6 +686,22 @@ class StrategyRunner:
         self._datahub_registered_symbols: set[str] = set()
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
+        # When broker sync prunes externally-closed positions (manual square-off /
+        # auto-square-off), drop their brackets so they are not re-adopted forever.
+        try:
+            if self._position_manager is not None and self._bracket_manager is not None and hasattr(self._position_manager, "set_on_symbols_flat"):
+                def _on_symbols_flat(symbols: list[str]) -> None:
+                    bm = self._bracket_manager
+                    if bm is None:
+                        return
+                    for _sym in symbols or []:
+                        try:
+                            bm.reconcile_symbol_flat(_sym)
+                        except Exception:  # noqa: BLE001
+                            continue
+                self._position_manager.set_on_symbols_flat(_on_symbols_flat)
+        except Exception:  # noqa: BLE001
+            pass
         self._symbol_source: MarketDataManager | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._legacy_tick_subscription_mode = os.getenv(

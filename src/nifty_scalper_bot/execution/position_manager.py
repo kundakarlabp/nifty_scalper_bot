@@ -511,6 +511,15 @@ class PositionManager:
         self.load_state()
         self._last_reconciled_state = copy.deepcopy(self._positions)
 
+    def set_on_symbols_flat(self, hook: Any | None) -> None:
+        """Attach a callback invoked with symbols pruned during broker sync.
+
+        Lets the runner forward externally-closed symbols (manual square-off /
+        auto-square-off) to the bracket manager so lingering brackets are dropped
+        instead of being re-adopted forever.
+        """
+        self._on_symbols_flat_hook = hook
+
     def set_broker_client(self, broker_client: Any | None) -> None:
         """Attach the broker client used for reconciliation.
 
@@ -1909,6 +1918,17 @@ class PositionManager:
             self._logger.info(
                 f"Sync: Pruned {len(removed_symbols)} positions not found in broker: {removed_symbols}"
             )
+            # Notify (e.g. bracket manager) that these symbols are flat at the
+            # broker, so lingering brackets are dropped rather than re-adopted.
+            hook = getattr(self, "_on_symbols_flat_hook", None)
+            if hook is not None:
+                try:
+                    hook(list(removed_symbols))
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in on_symbols_flat hook: %s", exc,
+                        extra={"event": "position_manager_flat_hook_error"},
+                    )
         
         if not old_keys and not new_keys:
             self._logger.debug("Sync: Broker and local state both empty.")
