@@ -27,6 +27,7 @@ jobs:
       - name: Focused live-money safety regression tests
         run: |
           python -m pytest -q \
+            tests/execution/test_fill_ledger.py \
             tests/execution/test_canonical_bracket_fill_integrity.py \
             tests/execution/test_live_exit_hardening.py \
             tests/execution/test_bracket_exit_state_machine.py \
