@@ -9861,7 +9861,19 @@ class StrategyRunner:
                 open_pos = self._position_manager.get_position(symbol)
                 if open_pos is not None:
                     strat = getattr(open_pos, "strategy", "") or "unknown"
-                    if "manual" in strat.lower() or "unknown" in strat.lower():
+                    # Only adopt if the symbol is genuinely unmanaged. get_position()
+                    # returns a broker-derived position whose `strategy` is always
+                    # "unknown", so the strat check alone re-fires adoption every
+                    # tick (orphan-adoption storm: 232 ORPHAN ATTACHED in 2 min).
+                    # Gate on the bracket manager's authoritative managed-state so a
+                    # position already wrapped in a protective bracket is skipped.
+                    already_managed = bool(
+                        self._bracket_manager
+                        and self._bracket_manager.is_symbol_managed(symbol)
+                    )
+                    if not already_managed and (
+                        "manual" in strat.lower() or "unknown" in strat.lower()
+                    ):
                         log_throttled(
                             self._logger,
                             f"orphan_guard_{symbol}",
