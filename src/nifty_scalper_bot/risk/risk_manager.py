@@ -458,8 +458,19 @@ class RiskManager:
         )
 
     def _resolve_env_balance_fallback(self) -> float:
-        """Return fallback balance sourced from environment configuration."""
-        fallback_value = 1_000_000.0
+        """Return fallback balance sourced from environment configuration.
+
+        In LIVE mode a synthetic default must NEVER be injected — sizing against a
+        fake balance (the old ₹10,00,000 default) can massively oversize positions
+        when the broker reports ₹0/invalid. So in live we honour ONLY an explicit
+        RISK__CAPITAL/RISK_CAPITAL the user set, and otherwise return 0.0, which the
+        arming/stale-balance logic treats as not-ready. Paper/backtest keep the
+        convenience default.
+        """
+        from nifty_scalper_bot.core.app import _is_live_execution_mode
+
+        live = _is_live_execution_mode()
+        fallback_value = 0.0 if live else 1_000_000.0
         try:
             candidates = (
                 os.getenv("RISK__CAPITAL"),
@@ -784,11 +795,21 @@ class RiskManager:
                     f"⚠️ SL distance too small, using minimum: {sl_distance:.2f}"
                 )
 
-            # ✅ FIX 4: Fallback account balance when 0 or negative
+            # Fallback account balance when 0 or negative — but NEVER inject a
+            # synthetic margin in LIVE mode (sizing against a fake balance can
+            # massively oversize). In live, leave balance at 0 so sizing yields no
+            # quantity and the order is blocked upstream; paper/backtest keep it.
             balance = self.account_balance
             if balance <= 0:
                 balance = getattr(self, "_cached_balance", 0.0)
             if balance <= 0:
+                from nifty_scalper_bot.core.app import _is_live_execution_mode
+
+                if _is_live_execution_mode():
+                    self._logger.error(
+                        "LIVE_SIZING_BLOCKED_NO_VALID_BALANCE balance<=0; refusing synthetic FALLBACK_MARGIN"
+                    )
+                    return 0
                 balance = float(os.getenv("FALLBACK_MARGIN", "100000"))
                 self._logger.warning(f"⚠️ Using FALLBACK_MARGIN: ₹{balance:,.2f}")
 

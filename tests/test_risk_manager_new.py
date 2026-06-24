@@ -290,3 +290,40 @@ def test_risk_state_stale_soft_block() -> None:
     assert allowed is False
     assert reasons == ("STALE",)
     assert risk.cooldown_remaining() == 0.0
+
+
+def test_live_mode_blocks_sizing_when_balance_invalid(monkeypatch) -> None:
+    # P0: in LIVE mode a 0/invalid balance must NOT size against a synthetic
+    # FALLBACK_MARGIN (the old ₹10L/₹1L default) — that massively oversizes.
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("RISK__CAPITAL", raising=False)
+    monkeypatch.delenv("RISK_CAPITAL", raising=False)
+    settings = RiskSettings(per_trade_risk_pct=1.0)
+    pm = DummyPositionManager(realized=0.0)
+    risk = _make_risk_manager(settings=settings, pm=pm, balance=0.0)
+    risk._cached_balance = 0.0
+    qty = risk.suggest_position_size(
+        side="BUY", price=120.0, stop_loss=110.0, atr=None, requested_quantity=150,
+    )
+    assert qty == 0, "live sizing must block on invalid balance, not use a synthetic margin"
+
+
+def test_live_env_balance_fallback_is_zero(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("RISK__CAPITAL", raising=False)
+    monkeypatch.delenv("RISK_CAPITAL", raising=False)
+    monkeypatch.delenv("BACKTEST__CAPITAL", raising=False)
+    settings = RiskSettings(per_trade_risk_pct=1.0)
+    pm = DummyPositionManager(realized=0.0)
+    risk = _make_risk_manager(settings=settings, pm=pm, balance=50_000.0)
+    assert risk._resolve_env_balance_fallback() == 0.0  # no synthetic default in live
+
+
+def test_paper_mode_keeps_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    monkeypatch.delenv("RISK__CAPITAL", raising=False)
+    settings = RiskSettings(per_trade_risk_pct=1.0)
+    pm = DummyPositionManager(realized=0.0)
+    risk = _make_risk_manager(settings=settings, pm=pm, balance=50_000.0)
+    assert risk._resolve_env_balance_fallback() == 1_000_000.0  # convenience default in paper
