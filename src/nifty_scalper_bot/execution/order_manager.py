@@ -7652,20 +7652,23 @@ class OrderManager:
                 )
                 return None, "margin_read_failed"
             else:
-                if available is not None and available > 0:
+                # Record freshness whenever the broker returns a VALID reading,
+                # even if it is zero. Staleness must mean "we haven't reached the
+                # broker recently" — not "the number was zero". Previously only a
+                # >0 balance recorded success, so a healthy broker returning a low/
+                # zero available balance left _last_margin_success_ts=None forever
+                # -> balance_stale=True / margin_age_s=None permanently blocked live
+                # orders (observed: BROKER_HEALTH_LIVE_ORDERS_BLOCKED for the whole
+                # session). Sizing still independently refuses qty on balance<=0
+                # (live), so recording a zero reading as fresh cannot oversize.
+                if available is not None and math.isfinite(float(available)) and float(available) >= 0:
                     self._record_margin_refresh_success(float(available), "mdm")
                     return float(available), "mdm"
         risk_manager = self._risk_manager
         if risk_manager is not None:
             with suppress(Exception):
                 balance = float(getattr(risk_manager, "current_balance", 0.0))
-                if math.isfinite(balance) and balance > 0:
-                    # A positive balance from the risk manager is a valid margin
-                    # reading. Record it as a success so broker-health freshness is
-                    # established; otherwise, when the MDM margin snapshot isn't
-                    # primed yet at startup, _last_margin_success_ts stays None
-                    # forever -> balance_stale=True / margin_age_s=None permanently
-                    # blocks live orders even though the broker is healthy.
+                if math.isfinite(balance) and balance >= 0:
                     self._record_margin_refresh_success(balance, "risk")
                     return balance, "risk"
         return None, "unknown"
