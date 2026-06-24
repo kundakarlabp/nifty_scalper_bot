@@ -48,3 +48,12 @@ async def test_smc_option_context_fetch_allowed_at_open() -> None:
         assert mode in {"PRE_MARKET", "POST_MARKET", "HOLIDAY"}
     for mode in ("OPEN", "UNKNOWN"):
         assert mode not in {"PRE_MARKET", "POST_MARKET", "HOLIDAY"}
+
+
+async def test_malformed_score_env_does_not_crash() -> None:
+    # #13: a malformed STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE must fall back
+    # to the default, not raise ValueError inside signal combination.
+    from nifty_scalper_bot.config.env_utils import parse_float_env
+    assert parse_float_env("high", 9.0) == 9.0
+    assert parse_float_env("", 9.0) == 9.0
+    assert parse_float_env("9.5", 9.0) == 9.5
