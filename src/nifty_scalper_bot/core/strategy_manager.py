@@ -4025,6 +4025,12 @@ class StrategyManager(_BaseStrategyManager):
             # exists to take. Allow it without the global scalp flag, since
             # selected_option is a stronger guarantee than mere near_atm.
             selected_option_scalp_allowed = bool(threshold_passed and selected_option and allow_selected_option)
+            # Single-vote (no consensus) is riskier, so a lone selected-option scalp
+            # must clear a high score floor (default 9.0) on top of the normal gates.
+            # This keeps single-vote trades to only the strongest signals.
+            selected_single_min = float(os.getenv("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", "9.0") or "9.0")
+            if selected_option_scalp_allowed and raw_trigger_score < selected_single_min:
+                selected_option_scalp_allowed = False
             scalp_fallback_allowed = bool((allow_scalp_single and threshold_passed) or selected_option_scalp_allowed)
             final_allowed = bool(high_conviction_allowed or scalp_fallback_allowed)
             approval_path_single = (
