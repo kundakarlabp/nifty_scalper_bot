@@ -2912,6 +2912,32 @@ class BracketManager:
         with self._lock:
             return self._brackets.get(entry_id)
 
+    def reconcile_symbol_flat(self, symbol: str) -> int:
+        """Drop all brackets for a symbol the broker now reports as flat.
+
+        Called when broker reconciliation finds a position closed externally
+        (manual square-off / Zerodha auto-square-off). Without this, a bracket
+        lingers as 'managed' after the underlying position is gone, so the bot
+        keeps trying to manage / re-adopt a phantom position (observed: the same
+        23950CE orphan re-adopted thousands of times). Returns count removed.
+        """
+        symbol = normalize_symbol(symbol)
+        with self._lock:
+            entry_ids = list(self._symbol_map.get(symbol, []))
+        removed = 0
+        for eid in entry_ids:
+            try:
+                self.unregister_bracket(eid)
+                removed += 1
+            except Exception:  # noqa: BLE001
+                continue
+        if removed:
+            LOGGER.info(
+                "BRACKET_RECONCILED_FLAT symbol=%s removed=%s reason=broker_position_closed",
+                symbol, removed,
+            )
+        return removed
+
     def unregister_bracket(self, entry_id: str) -> None:
         """Remove a bracket from memory and indices."""
         with self._lock:
