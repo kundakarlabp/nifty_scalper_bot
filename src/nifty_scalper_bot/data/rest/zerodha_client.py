@@ -1731,7 +1731,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if not isinstance(utilised_map, Mapping):
             utilised_map = {}
 
-        def _number(name: str, value: Any, *, required: bool = True) -> float:
+        def _number(name: str, value: Any, *, required: bool = True, allow_negative: bool = False) -> float:
             if value is None:
                 if required:
                     raise BrokerBalanceUnavailableError(f"missing_margin_field:{name}")
@@ -1742,7 +1742,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 raise BrokerBalanceUnavailableError(f"invalid_margin_field:{name}") from exc
             if not math.isfinite(parsed):
                 raise BrokerBalanceUnavailableError(f"non_finite_margin_field:{name}")
-            if parsed < 0.0:
+            if parsed < 0.0 and not allow_negative:
                 raise BrokerBalanceUnavailableError(f"negative_margin_field:{name}")
             return parsed
 
@@ -1758,7 +1758,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
         for key in ("debits", "span", "exposure", "option_premium", "holding_sales"):
             value = utilised_map.get(key)
             if value is not None:
-                used += _number(f"utilised.{key}", value, required=False)
+                # Utilised components can legitimately be negative (e.g. a debits
+                # reversal/credit). A negative utilised field must NOT fail the whole
+                # balance refresh (which previously cascaded to BROKER NOT READY).
+                used += _number(f"utilised.{key}", value, required=False, allow_negative=True)
         net_value = target.get("net")
         net = _number("net", net_value) if net_value is not None else available + used
         return {
