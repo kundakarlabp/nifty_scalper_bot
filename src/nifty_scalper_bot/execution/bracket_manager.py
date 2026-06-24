@@ -1101,6 +1101,30 @@ class BracketManager:
                     )
             
             # ✅ Activate only after explicit fill confirmation
+            # Post-fill reward:risk check. The real incident activated entry=223.90
+            # SL=214.61 TP=227.76 -> risk 9.29, reward 3.86, RR 0.42 (reward < risk),
+            # silently. Surface poor geometry loudly so it is auditable. We do NOT
+            # reject here (the position is already filled; rejecting would leave it
+            # unprotected) — but a sub-floor RR is logged CRITICAL for visibility.
+            try:
+                rr_risk = abs(fill_price - bracket.sl_trigger_price)
+                rr_reward = abs(bracket.tp_trigger_price - fill_price)
+                rr = (rr_reward / rr_risk) if rr_risk > 0 else 0.0
+                rr_floor = parse_float_env(os.getenv("MIN_BRACKET_RR"), 1.5)
+                if rr_risk <= 0 or rr_reward <= 0 or rr < rr_floor:
+                    LOGGER.critical(
+                        "BRACKET_RR_BELOW_FLOOR symbol=%s entry=%.2f sl=%.2f tp=%.2f risk=%.2f reward=%.2f rr=%.2f floor=%.2f",
+                        bracket.symbol, fill_price, bracket.sl_trigger_price,
+                        bracket.tp_trigger_price, rr_risk, rr_reward, rr, rr_floor,
+                    )
+                    self._notify_event(
+                        "BRACKET_RR_BELOW_FLOOR",
+                        {"symbol": bracket.symbol, "entry": round(fill_price, 2),
+                         "sl": round(bracket.sl_trigger_price, 2), "tp": round(bracket.tp_trigger_price, 2),
+                         "rr": round(rr, 2), "floor": rr_floor},
+                    )
+            except Exception:  # noqa: BLE001 - never let RR check block protection
+                pass
             bracket.active = True
             bracket.entry_confirmed = True
             bracket.entry_status = "ACTIVE"
@@ -2320,13 +2344,37 @@ class BracketManager:
                     raw = reference - buffer if side == "SELL" else reference + buffer
                     return "LIMIT", _round_to_tick(max(raw, tick_size), tick_size=tick_size), {"mode": "AGGRESSIVE_LIMIT", "bid": bid, "ask": ask, "ltp": ltp, "fallback": False}
         elif mode == "LIMIT" and bracket is not None:
-            current_ltp = float(bracket.last_ltp or bracket.entry_price or 0.0)
-            if current_ltp > 0:
-                max_slippage_pct = parse_float_env(os.getenv("EXIT_MAX_SLIPPAGE_PCT"), 2.0)
-                raw = current_ltp * (1 - max_slippage_pct / 100) if side == "SELL" else current_ltp * (1 + max_slippage_pct / 100)
-                return "LIMIT", _round_to_tick(max(raw, 0.05), tick_size=0.05), {"mode": "LIMIT", "bid": bid, "ask": ask, "ltp": current_ltp, "fallback": False}
-            mode = "MARKET"
-            fallback = True
+            # Profit-target exits (TP/TP1/TP2/trailing-profit) must NOT take the 2%
+            # downward concession used for generic limits — that converts a winning
+            # TP into a loss (real incident: TP latched, SELL LIMIT priced at
+            # ltp*0.98 = 224.35, cancelled, replacement filled at 222.30 => -₹104).
+            # Price profit exits at the executable bid (SELL) / ask (BUY) with only a
+            # small tick buffer; fall back to LTP minus a tick, never minus 2%.
+            is_profit_exit = any(
+                tok in str(reason or "").upper()
+                for tok in ("TP", "TAKE_PROFIT", "TRAILING_PROFIT", "TARGET")
+            )
+            if is_profit_exit:
+                bid, ask, ltp = self._extract_exit_quote(symbol)
+                tick_size = 0.05
+                reference = (bid if side == "SELL" else ask)
+                if reference is None or reference <= 0:
+                    reference = ltp if (ltp and ltp > 0) else float(bracket.last_ltp or 0.0)
+                if reference and reference > 0:
+                    tick_buffer = self._exit_marketable_limit_slippage_ticks * tick_size
+                    raw = reference - tick_buffer if side == "SELL" else reference + tick_buffer
+                    return "LIMIT", _round_to_tick(max(raw, tick_size), tick_size=tick_size), {"mode": "PROFIT_LIMIT", "bid": bid, "ask": ask, "ltp": ltp, "fallback": False}
+                # no usable quote -> fall through to MARKET (do not give 2% away)
+                mode = "MARKET"
+                fallback = True
+            else:
+                current_ltp = float(bracket.last_ltp or bracket.entry_price or 0.0)
+                if current_ltp > 0:
+                    max_slippage_pct = parse_float_env(os.getenv("EXIT_MAX_SLIPPAGE_PCT"), 2.0)
+                    raw = current_ltp * (1 - max_slippage_pct / 100) if side == "SELL" else current_ltp * (1 + max_slippage_pct / 100)
+                    return "LIMIT", _round_to_tick(max(raw, 0.05), tick_size=0.05), {"mode": "LIMIT", "bid": bid, "ask": ask, "ltp": current_ltp, "fallback": False}
+                mode = "MARKET"
+                fallback = True
         return mode, None, {"mode": "MARKET" if mode == "MARKET" else mode, "bid": bid, "ask": ask, "ltp": ltp, "fallback": fallback}
 
     def submit_exit_order(
