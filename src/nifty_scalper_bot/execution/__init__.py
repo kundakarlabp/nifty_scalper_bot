@@ -1,9 +1,9 @@
 """Canonical execution package exports and live-money safety hardening.
 
-Public import paths remain stable while the runtime bracket authority adds
-fill-integrity and durable confirmed-fill accounting. Import replacement is a
-compatibility bridge only; explicit composition-root construction follows after
-all lifecycle invariants are merged and proven.
+Public import paths remain stable while one runtime bracket authority applies
+fill integrity, durable LIVE accounting and compatible PAPER/SHADOW behaviour.
+Import replacement remains a temporary bridge until explicit composition-root
+construction is migrated.
 """
 
 from __future__ import annotations
@@ -29,13 +29,14 @@ from nifty_scalper_bot.execution.canonical_bracket_manager import (  # noqa: E40
 from nifty_scalper_bot.execution.ledger_bracket_manager import (  # noqa: E402
     LedgerBracketManager,
 )
+from nifty_scalper_bot.execution.runtime_bracket_manager import (  # noqa: E402
+    RuntimeBracketManager,
+)
 
 _bracket_module.AdaptiveTrailingController = HardenedAdaptiveTrailingController
-_bracket_module.BracketManager = LedgerBracketManager
-# Existing tests and external callers importing CanonicalBracketManager continue
-# to resolve to the single runtime authority during the compatibility stage.
-_canonical_module.CanonicalBracketManager = LedgerBracketManager
-CanonicalBracketManager = LedgerBracketManager
+_bracket_module.BracketManager = RuntimeBracketManager
+_canonical_module.CanonicalBracketManager = RuntimeBracketManager
+CanonicalBracketManager = RuntimeBracketManager
 
 
 __all__ = [
@@ -43,5 +44,6 @@ __all__ = [
     "HardenedAdaptiveTrailingController",
     "HardenedBracketManager",
     "LedgerBracketManager",
+    "RuntimeBracketManager",
     "_FillIntegrityBracketManager",
 ]
