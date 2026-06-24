@@ -13,6 +13,9 @@ from nifty_scalper_bot.execution.bracket_manager import (
     BracketExitLifecycle,
     BracketManager,
 )
+from nifty_scalper_bot.execution.canonical_bracket_manager import (
+    CanonicalBracketManager,
+)
 from nifty_scalper_bot.execution.hardened_adaptive_trailing import (
     HardenedAdaptiveTrailingController,
 )
@@ -131,7 +134,8 @@ def _make_stale_exit(manager: BracketManager) -> Any:
 
 
 def test_canonical_imports_use_hardened_implementations() -> None:
-    assert BracketManager is HardenedBracketManager
+    assert BracketManager is CanonicalBracketManager
+    assert issubclass(CanonicalBracketManager, HardenedBracketManager)
     assert AdaptiveTrailingController is HardenedAdaptiveTrailingController
 
 
