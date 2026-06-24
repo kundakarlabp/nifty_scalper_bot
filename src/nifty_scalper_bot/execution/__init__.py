@@ -1,12 +1,9 @@
 """Canonical execution package exports and live-money safety hardening.
 
-The public module paths remain unchanged. Import-time replacement keeps every
-existing caller on the single production execution path while applying the
-hardened implementations before any manager instance is constructed.
-
-The replacement mechanism is retained only for compatibility during staged
-canonicalisation.  ``CanonicalBracketManager`` is the sole runtime bracket
-class; later stages will construct it explicitly at the composition root.
+Public import paths remain stable while the runtime bracket authority adds
+fill-integrity and durable confirmed-fill accounting.  Import replacement is
+retained only as a compatibility bridge until composition-root construction is
+migrated in the final canonicalisation stage.
 """
 
 from __future__ import annotations
@@ -28,16 +25,17 @@ from nifty_scalper_bot.execution.hardened_bracket_manager import (  # noqa: E402
 from nifty_scalper_bot.execution.canonical_bracket_manager import (  # noqa: E402
     CanonicalBracketManager,
 )
+from nifty_scalper_bot.execution.ledger_bracket_manager import (  # noqa: E402
+    LedgerBracketManager,
+)
 
-# Preserve all established import paths, including
-# ``from ...execution.bracket_manager import BracketManager``.  There is one
-# runtime export: the canonical fill-integrity manager.
 _bracket_module.AdaptiveTrailingController = HardenedAdaptiveTrailingController
-_bracket_module.BracketManager = CanonicalBracketManager
+_bracket_module.BracketManager = LedgerBracketManager
 
 
 __all__ = [
     "CanonicalBracketManager",
     "HardenedAdaptiveTrailingController",
     "HardenedBracketManager",
+    "LedgerBracketManager",
 ]
