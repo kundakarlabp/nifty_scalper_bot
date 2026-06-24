@@ -1,0 +1,3 @@
+## 2026-06-24 - Accessibility Bindings in Python String Templates
+**Learning:** Standard UI a11y linters (like ESLint plugins) do not scan HTML embedded within Python string literals (e.g., FastAPI `HTMLResponse` templates). This means critical accessibility features, like `<label>` to `<input>` bindings via `for` and `id` attributes, can easily be missed.
+**Action:** When updating or reviewing HTML string templates in the Python backend, manually verify accessibility bindings (`for` attributes on `<label>` and matching `id` attributes on inputs/selects) to ensure full screen reader support and focus usability.
