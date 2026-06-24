@@ -23,6 +23,7 @@ def _leg(
     price: float,
     fees: float = 0.0,
     target: str | None = None,
+    recorded_at: float = 1_700_000_000.0,
 ) -> FillLeg:
     return FillLeg(
         fill_id=fill_id,
@@ -34,7 +35,7 @@ def _leg(
         price=price,
         fees=fees,
         target=target,
-        recorded_at=1_700_000_000.0 + len(fill_id),
+        recorded_at=recorded_at,
     )
 
 
@@ -233,6 +234,7 @@ def test_sqlite_reload_preserves_order_and_economics(tmp_path) -> None:
             side="BUY",
             quantity=65,
             price=100.0,
+            recorded_at=1_700_000_001.0,
         ),
         _leg(
             fill_id="tp1",
@@ -242,6 +244,7 @@ def test_sqlite_reload_preserves_order_and_economics(tmp_path) -> None:
             quantity=25,
             price=110.0,
             target="TP1",
+            recorded_at=1_700_000_002.0,
         ),
     ]
     for leg in legs:
