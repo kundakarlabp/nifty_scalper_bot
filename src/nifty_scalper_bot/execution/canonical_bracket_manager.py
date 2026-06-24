@@ -8,7 +8,7 @@ adds only fill-integrity invariants:
 * a confirmed TP1 fill resumes protection for the residual position;
 * any other FILLED/non-flat mismatch fails closed and blocks new entries.
 
-The compatibility inheritance is temporary.  Later stages will fold these
+The compatibility inheritance is temporary. Later stages will fold these
 invariants into the single explicit bracket implementation and remove runtime
 class replacement.
 """
@@ -16,6 +16,7 @@ class replacement.
 from __future__ import annotations
 
 from contextlib import suppress
+import os
 import time
 from typing import Any, Mapping
 
@@ -29,11 +30,24 @@ class CanonicalBracketManager(HardenedBracketManager):
     """Single runtime-exported bracket manager with strict fill reconciliation."""
 
     _FILLED_NONFLAT_PREFIX = "filled_exit_nonflat"
+    _FILLED_SYNC_PREFIX = "filled_exit_position_sync_pending"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Broker order status can lead the positions endpoint briefly.  Keep this
+        # bounded: we defer a decision, but never declare the position flat.
+        self._filled_position_sync_grace_seconds = max(
+            0.0,
+            _legacy.parse_float_env(
+                os.getenv("EXIT_FILLED_POSITION_SYNC_GRACE_SECONDS"),
+                1.5,
+            ),
+        )
+        super().__init__(*args, **kwargs)
 
     def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
         """Activate a confirmed entry and re-anchor every outstanding target.
 
-        The legacy implementation already re-anchors SL and the final TP.  This
+        The legacy implementation already re-anchors SL and the final TP. This
         wrapper captures planned partial targets before that call and applies the
         same proportional re-anchor exactly once.
         """
@@ -44,7 +58,9 @@ class CanonicalBracketManager(HardenedBracketManager):
         if before is not None:
             with self._lock:
                 planned_entry = float(before.entry_price or 0.0)
-                planned_targets = [float(target.price or 0.0) for target in before.tp_levels]
+                planned_targets = [
+                    float(target.price or 0.0) for target in before.tp_levels
+                ]
 
         super().confirm_entry_fill(order_id, fill_price)
 
@@ -122,7 +138,12 @@ class CanonicalBracketManager(HardenedBracketManager):
 
         payload = getter()
         if isinstance(payload, Mapping):
-            rows = payload.get("net") or payload.get("day") or payload.get("positions") or []
+            rows = (
+                payload.get("net")
+                or payload.get("day")
+                or payload.get("positions")
+                or []
+            )
         else:
             rows = payload
         if rows is None:
@@ -177,6 +198,70 @@ class CanonicalBracketManager(HardenedBracketManager):
                 return target
         return None
 
+    @staticmethod
+    def _clear_fill_sync_state(bracket: Any) -> None:
+        for name in (
+            "_filled_exit_sync_started_at",
+            "_filled_exit_sync_order_id",
+        ):
+            with suppress(AttributeError):
+                delattr(bracket, name)
+
+    def _fill_sync_grace_expired(self, bracket: Any, order_id: str) -> bool:
+        now = time.time()
+        previous_order = str(
+            getattr(bracket, "_filled_exit_sync_order_id", "") or ""
+        )
+        started_at = float(
+            getattr(bracket, "_filled_exit_sync_started_at", 0.0) or 0.0
+        )
+        if previous_order != order_id or started_at <= 0:
+            setattr(bracket, "_filled_exit_sync_order_id", order_id)
+            setattr(bracket, "_filled_exit_sync_started_at", now)
+            started_at = now
+        return (now - started_at) >= self._filled_position_sync_grace_seconds
+
+    def _defer_filled_position_sync(
+        self,
+        bracket: Any,
+        *,
+        residual_quantity: int | None,
+        order_id: str,
+        requested_by: str,
+    ) -> None:
+        with self._lock:
+            bracket.exit_in_progress = False
+            bracket.exit_pending = True
+            bracket.exit_executed = False
+            bracket.active = True
+            bracket.position_flat_confirmed = False
+            bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value
+            bracket.entry_status = bracket.exit_state
+            bracket.last_exit_error = (
+                f"{self._FILLED_SYNC_PREFIX}:"
+                f"residual={residual_quantity if residual_quantity is not None else 'unknown'}"
+            )
+            bracket.updated_at = time.time()
+
+        _legacy.LOGGER.warning(
+            "EXIT_FILLED_POSITION_SYNC_PENDING bracket_id=%s symbol=%s order_id=%s residual_qty=%s requested_by=%s grace_seconds=%.2f",
+            bracket.bracket_id,
+            bracket.symbol,
+            order_id,
+            residual_quantity,
+            requested_by,
+            self._filled_position_sync_grace_seconds,
+            extra={
+                "event": "EXIT_FILLED_POSITION_SYNC_PENDING",
+                "bracket_id": bracket.bracket_id,
+                "symbol": bracket.symbol,
+                "order_id": order_id,
+                "residual_qty": residual_quantity,
+                "requested_by": requested_by,
+                "grace_seconds": self._filled_position_sync_grace_seconds,
+            },
+        )
+
     def _resume_after_partial_target(
         self,
         bracket: Any,
@@ -218,6 +303,7 @@ class CanonicalBracketManager(HardenedBracketManager):
             bracket.updated_at = time.time()
             self._exit_order_open_since.pop(order_id, None)
             self._exit_rescue_attempts.pop(bracket.bracket_id, None)
+            self._clear_fill_sync_state(bracket)
 
         self._move_sl_to_breakeven(bracket)
         with suppress(Exception):
@@ -272,8 +358,7 @@ class CanonicalBracketManager(HardenedBracketManager):
         with self._lock:
             if residual_quantity is not None and residual_quantity > 0:
                 bracket.remaining_quantity = residual_quantity
-            bracket.exit_order_id = None
-            bracket.pending_exit_order_id = None
+            # Retain the completed order id for audit and later reconciliation.
             bracket.exit_in_progress = False
             bracket.exit_pending = True
             bracket.exit_executed = False
@@ -283,6 +368,7 @@ class CanonicalBracketManager(HardenedBracketManager):
             bracket.entry_status = bracket.exit_state
             bracket.last_exit_error = error
             bracket.escalated_at = bracket.escalated_at or now
+            # Prevent inherited escalation from sending a guessed extra market exit.
             bracket._market_escalation_fired = True
             bracket.updated_at = now
             if order_id:
@@ -329,6 +415,7 @@ class CanonicalBracketManager(HardenedBracketManager):
         if mismatch_latched and not order_id:
             residual = self._broker_position_quantity(bracket.symbol)
             if residual == 0:
+                self._clear_fill_sync_state(bracket)
                 self._close_bracket(
                     bracket,
                     close_source="filled_nonflat_reconciled_flat",
@@ -341,11 +428,15 @@ class CanonicalBracketManager(HardenedBracketManager):
                 status_payload = self._get_broker_order_status(str(order_id))
                 status = str((status_payload or {}).get("status") or "").strip().upper()
             except Exception:
-                return super()._reconcile_exit_state(bracket, requested_by=requested_by)
+                return super()._reconcile_exit_state(
+                    bracket,
+                    requested_by=requested_by,
+                )
 
             if status in _legacy._FILLED_STATUSES:
                 residual = self._broker_position_quantity(bracket.symbol)
                 if residual == 0:
+                    self._clear_fill_sync_state(bracket)
                     return super()._reconcile_exit_state(
                         bracket,
                         requested_by=requested_by,
@@ -366,6 +457,15 @@ class CanonicalBracketManager(HardenedBracketManager):
                 ):
                     return False
 
+                if not self._fill_sync_grace_expired(bracket, str(order_id)):
+                    self._defer_filled_position_sync(
+                        bracket,
+                        residual_quantity=residual,
+                        order_id=str(order_id),
+                        requested_by=requested_by,
+                    )
+                    return False
+
                 self._latch_filled_nonflat_mismatch(
                     bracket,
                     residual_quantity=residual,
@@ -374,7 +474,10 @@ class CanonicalBracketManager(HardenedBracketManager):
                 )
                 return False
 
-        return super()._reconcile_exit_state(bracket, requested_by=requested_by)
+        return super()._reconcile_exit_state(
+            bracket,
+            requested_by=requested_by,
+        )
 
     def _process_exit_state(
         self,
@@ -383,19 +486,15 @@ class CanonicalBracketManager(HardenedBracketManager):
         *,
         now: float,
     ) -> None:
-        """Keep a filled/non-flat mismatch frozen until broker truth becomes flat."""
+        """Keep a filled/non-flat mismatch frozen until broker truth is resolved."""
 
         if str(bracket.last_exit_error or "").startswith(self._FILLED_NONFLAT_PREFIX):
-            residual = self._broker_position_quantity(bracket.symbol)
-            if residual == 0:
-                self._close_bracket(
-                    bracket,
-                    close_source="filled_nonflat_reconciled_flat",
-                )
-            else:
+            self._reconcile_exit_state(
+                bracket,
+                requested_by="filled_nonflat_followup",
+            )
+            if bracket.exit_state != _legacy.BracketExitLifecycle.CLOSED.value:
                 with self._lock:
-                    if residual is not None and residual > 0:
-                        bracket.remaining_quantity = residual
                     self._log_exit_pending_summary_locked(bracket, now)
             return
         super()._process_exit_state(bracket, action, now=now)
@@ -438,22 +537,35 @@ class CanonicalBracketManager(HardenedBracketManager):
         )
 
         cancel_requested = self._cancel_exit_order(order_id)
-        terminal = self._wait_for_cancel_or_fill(order_id) if cancel_requested else "unconfirmed"
+        terminal = (
+            self._wait_for_cancel_or_fill(order_id)
+            if cancel_requested
+            else "unconfirmed"
+        )
         if terminal == "filled":
             with self._lock:
                 bracket.exit_in_progress = False
-            self._reconcile_exit_state(bracket, requested_by="stale_rescue_filled")
+            self._reconcile_exit_state(
+                bracket,
+                requested_by="stale_rescue_filled",
+            )
             return
         if self._safe_position_flat(bracket.symbol):
             with self._lock:
                 bracket.exit_in_progress = False
-            self._close_bracket(bracket, close_source="rescue_reconciled_flat")
+            self._close_bracket(
+                bracket,
+                close_source="rescue_reconciled_flat",
+            )
             return
         if terminal != "cancelled":
             with self._lock:
                 bracket.exit_in_progress = False
                 bracket.last_exit_error = "stale_exit_cancel_unconfirmed"
-                self._escalate_exit_locked(bracket, "stale_exit_cancel_unconfirmed")
+                self._escalate_exit_locked(
+                    bracket,
+                    "stale_exit_cancel_unconfirmed",
+                )
             return
 
         with self._lock:
@@ -461,7 +573,11 @@ class CanonicalBracketManager(HardenedBracketManager):
             bracket.exit_order_id = None
             bracket.pending_exit_order_id = None
             bracket.last_exit_error = None
-        self._submit_rescue_exit(bracket, qty=qty, prior_order_id=order_id)
+        self._submit_rescue_exit(
+            bracket,
+            qty=qty,
+            prior_order_id=order_id,
+        )
 
 
 __all__ = ["CanonicalBracketManager"]
