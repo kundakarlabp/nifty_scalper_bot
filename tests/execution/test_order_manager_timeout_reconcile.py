@@ -1,3 +1,9 @@
+from nifty_scalper_bot.execution.broker_rejects import (
+    BrokerReject,
+    RecoveryAction,
+    parse_broker_error,
+    recovery_decision,
+)
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 
 
@@ -149,3 +155,43 @@ def test_broker_tag_keeps_unique_suffix_with_long_tag(monkeypatch):
     oid = om.place_order('NFO:NIFTY26MAY23750CE', 'BUY', 1, order_type=OrderType.MARKET, stop_loss=10, signal_id='manual_1234abcd', tag='superlongtagname_with_extra_chars')
     assert oid == "OID1"
     assert str(captured["tag"]).endswith("1234abcd")
+
+
+async def test_broker_reject_classifier_covers_actionable_entry_failures():
+    cases = {
+        "Insufficient funds. Required margin is 12500": BrokerReject.INSUFFICIENT_FUNDS,
+        "Price is outside the allowed range": BrokerReject.PRICE_OUT_OF_RANGE,
+        "Trigger price should be lower than limit price": BrokerReject.TRIGGER_PRICE_INVALID,
+        "Order quantity exceeds freeze limit": BrokerReject.FREEZE_LIMIT,
+        "Quantity is not a multiple of lot size": BrokerReject.QUANTITY_INVALID,
+        "Invalid tradingsymbol": BrokerReject.INSTRUMENT_INVALID,
+        "Duplicate order request": BrokerReject.DUPLICATE_ORDER,
+        "Order cannot be modified because order is complete": BrokerReject.ORDER_STATE_INVALID,
+        "429 too many requests": BrokerReject.THROTTLED,
+        "504 gateway timeout": BrokerReject.TRANSIENT_BROKER,
+        "Invalid access token": BrokerReject.AUTHENTICATION,
+    }
+    for message, expected in cases.items():
+        assert parse_broker_error(message) is expected
+
+
+async def test_price_reject_requires_fresh_quote_and_reprice():
+    decision = recovery_decision("Price is outside the allowed range")
+    assert decision.retryable is True
+    assert decision.action is RecoveryAction.REFRESH_QUOTE_AND_REPRICE
+
+
+async def test_timeout_and_duplicate_ack_require_reconciliation_before_retry():
+    timeout = recovery_decision("504 gateway timeout")
+    duplicate = recovery_decision("Duplicate order request")
+    assert timeout.action is RecoveryAction.RECONCILE_ORDERBOOK
+    assert duplicate.action is RecoveryAction.RECONCILE_ORDERBOOK
+
+
+async def test_invalid_instrument_and_unknown_errors_are_terminal():
+    invalid = recovery_decision("Invalid tradingsymbol")
+    unknown = recovery_decision("unexpected broker response")
+    assert invalid.retryable is False
+    assert invalid.action is RecoveryAction.STOP_AND_ALERT
+    assert unknown.reason is BrokerReject.UNKNOWN
+    assert unknown.retryable is False
