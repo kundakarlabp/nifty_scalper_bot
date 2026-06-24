@@ -26,6 +26,7 @@ import threading
 from threading import RLock
 import time
 import json
+import logging
 import os
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from datetime import datetime, timezone 
