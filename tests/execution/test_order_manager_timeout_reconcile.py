@@ -175,17 +175,23 @@ async def test_broker_reject_classifier_covers_actionable_entry_failures():
         assert parse_broker_error(message) is expected
 
 
-async def test_price_reject_requires_fresh_quote_and_reprice():
+async def test_price_reject_requires_fresh_market_and_full_revalidation():
     decision = recovery_decision("Price is outside the allowed range")
     assert decision.retryable is True
-    assert decision.action is RecoveryAction.REFRESH_QUOTE_AND_REPRICE
+    assert decision.action is RecoveryAction.REFRESH_MARKET_AND_REVALIDATE
+    assert decision.reconcile_before_retry is False
+    assert decision.count_toward_kill_switch is False
 
 
 async def test_timeout_and_duplicate_ack_require_reconciliation_before_retry():
     timeout = recovery_decision("504 gateway timeout")
     duplicate = recovery_decision("Duplicate order request")
     assert timeout.action is RecoveryAction.RECONCILE_ORDERBOOK
+    assert timeout.reconcile_before_retry is True
+    assert timeout.count_toward_kill_switch is True
     assert duplicate.action is RecoveryAction.RECONCILE_ORDERBOOK
+    assert duplicate.reconcile_before_retry is True
+    assert duplicate.count_toward_kill_switch is False
 
 
 async def test_invalid_instrument_and_unknown_errors_are_terminal():
@@ -195,3 +201,4 @@ async def test_invalid_instrument_and_unknown_errors_are_terminal():
     assert invalid.action is RecoveryAction.STOP_AND_ALERT
     assert unknown.reason is BrokerReject.UNKNOWN
     assert unknown.retryable is False
+    assert unknown.count_toward_kill_switch is True
