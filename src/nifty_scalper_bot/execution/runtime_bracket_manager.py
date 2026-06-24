@@ -1,6 +1,6 @@
 """Runtime bracket authority with strict LIVE and compatible non-live closure.
 
-LIVE execution uses the durable ledger release gate.  PAPER/SHADOW/SIMULATION
+LIVE execution uses the durable ledger release gate. PAPER/SHADOW/SIMULATION
 retain legacy close and hook behaviour so tests, dry runs and dashboards do not
 lose functionality when broker fill identity is intentionally absent.
 """
@@ -31,6 +31,87 @@ class RuntimeBracketManager(LedgerBracketManager):
             or "false"
         ).lower() in {"1", "true", "yes", "on"}
         return mode == "LIVE" and live_flag
+
+    def confirm_partial_entry_fill(
+        self,
+        order_id: str,
+        filled_quantity: int,
+        fill_price: float,
+    ) -> bool:
+        """Arm protection for the final broker-confirmed partial entry quantity."""
+
+        bracket = self.get_bracket(order_id)
+        if bracket is None:
+            _legacy.LOGGER.critical(
+                "PARTIAL_ENTRY_BRACKET_MISSING order_id=%s qty=%s price=%s",
+                order_id,
+                filled_quantity,
+                fill_price,
+                extra={
+                    "event": "PARTIAL_ENTRY_BRACKET_MISSING",
+                    "order_id": order_id,
+                    "filled_quantity": filled_quantity,
+                },
+            )
+            return False
+        try:
+            quantity = int(filled_quantity)
+            price = float(fill_price)
+        except (TypeError, ValueError):
+            return False
+        if quantity <= 0 or price <= 0:
+            return False
+
+        with self._lock:
+            planned_quantity = int(bracket.quantity or 0)
+            if planned_quantity > 0:
+                quantity = min(quantity, planned_quantity)
+            bracket.quantity = quantity
+            bracket.remaining_quantity = quantity
+            allocation_left = quantity
+            retained_targets = []
+            for target in bracket.tp_levels:
+                allocated = min(int(target.quantity or 0), allocation_left)
+                if allocated <= 0:
+                    continue
+                target.quantity = allocated
+                retained_targets.append(target)
+                allocation_left -= allocated
+            bracket.tp_levels = retained_targets
+            bracket.updated_at = time.time()
+
+        self.confirm_entry_fill(order_id, price)
+        with suppress(Exception):
+            self.save_state()
+        _legacy.LOGGER.critical(
+            "PARTIAL_ENTRY_PROTECTED order_id=%s symbol=%s planned_qty=%s filled_qty=%s fill_price=%.2f",
+            order_id,
+            bracket.symbol,
+            planned_quantity,
+            quantity,
+            price,
+            extra={
+                "event": "PARTIAL_ENTRY_PROTECTED",
+                "order_id": order_id,
+                "symbol": bracket.symbol,
+                "planned_quantity": planned_quantity,
+                "filled_quantity": quantity,
+                "fill_price": price,
+            },
+        )
+        with suppress(Exception):
+            self._notify_event(
+                "PARTIAL_ENTRY_PROTECTED",
+                {
+                    "symbol": bracket.symbol,
+                    "planned_quantity": planned_quantity,
+                    "filled_quantity": quantity,
+                    "fill_price": round(price, 2),
+                    "sl": round(float(bracket.sl_trigger_price), 2),
+                    "tp": round(float(bracket.tp_trigger_price), 2),
+                },
+            )
+        return True
 
     def _close_bracket(
         self,
