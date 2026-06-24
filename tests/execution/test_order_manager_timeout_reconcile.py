@@ -1,9 +1,13 @@
+from datetime import time as dt_time
+import logging
+
 from nifty_scalper_bot.execution.broker_rejects import (
     BrokerReject,
     RecoveryAction,
     parse_broker_error,
     recovery_decision,
 )
+from nifty_scalper_bot.execution.exit_router import plan_and_send_exit
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 
 
@@ -202,3 +206,148 @@ async def test_invalid_instrument_and_unknown_errors_are_terminal():
     assert unknown.reason is BrokerReject.UNKNOWN
     assert unknown.retryable is False
     assert unknown.count_toward_kill_switch is True
+
+
+async def test_exit_router_preserves_product_after_mis_cutoff():
+    submitted: list[tuple[str, str, str]] = []
+
+    def submit(product: str, validity: str, variety: str):
+        submitted.append((product, validity, variety))
+        return True, "EXIT-1", None
+
+    result = plan_and_send_exit(
+        symbol="NFO:NIFTY26JUN25000CE",
+        quantity=65,
+        product="MIS",
+        now_time=dt_time(15, 26),
+        submit=submit,
+        logger=logging.getLogger("test.exit_router"),
+    )
+
+    assert submitted == [("MIS", "IOC", "regular")]
+    assert result.ok is True
+    assert result.order_id == "EXIT-1"
+    assert result.confirmed is False
+    assert result.reconciliation_required is True
+    assert result.attempts[0].is_amo is False
+
+
+async def test_exit_router_never_places_post_close_amo_opposite_order():
+    submitted: list[tuple[str, str, str]] = []
+
+    result = plan_and_send_exit(
+        symbol="NFO:NIFTY26JUN25000CE",
+        quantity=65,
+        product="MIS",
+        now_time=dt_time(15, 31),
+        submit=lambda product, validity, variety: (
+            submitted.append((product, validity, variety)) or True,
+            "UNSAFE-AMO",
+            None,
+        ),
+        logger=logging.getLogger("test.exit_router"),
+    )
+
+    assert result.ok is False
+    assert result.reason is BrokerReject.MARKET_CLOSED
+    assert submitted == []
+
+
+async def test_exit_router_reconciles_timeout_before_any_resubmission():
+    submissions = 0
+    reconciliations = 0
+
+    def submit(_product: str, _validity: str, _variety: str):
+        nonlocal submissions
+        submissions += 1
+        return False, None, "504 gateway timeout"
+
+    def reconcile(_symbol: str):
+        nonlocal reconciliations
+        reconciliations += 1
+        return True, "EXIT-RECOVERED"
+
+    result = plan_and_send_exit(
+        symbol="NFO:NIFTY26JUN25000CE",
+        quantity=65,
+        product="MIS",
+        now_time=dt_time(10, 30),
+        submit=submit,
+        reconcile=reconcile,
+        logger=logging.getLogger("test.exit_router"),
+        retry_max=3,
+    )
+
+    assert submissions == 1
+    assert reconciliations == 1
+    assert result.ok is True
+    assert result.order_id == "EXIT-RECOVERED"
+    assert result.reconciliation_required is True
+
+
+async def test_exit_router_does_not_blindly_retry_ambiguous_or_unknown_failure():
+    timeout_calls = 0
+    unknown_calls = 0
+
+    def timeout_submit(_product: str, _validity: str, _variety: str):
+        nonlocal timeout_calls
+        timeout_calls += 1
+        return False, None, "504 gateway timeout"
+
+    timeout_result = plan_and_send_exit(
+        symbol="NFO:NIFTY26JUN25000CE",
+        quantity=65,
+        product="MIS",
+        now_time=dt_time(10, 30),
+        submit=timeout_submit,
+        logger=logging.getLogger("test.exit_router"),
+        retry_max=3,
+    )
+
+    def unknown_submit(_product: str, _validity: str, _variety: str):
+        nonlocal unknown_calls
+        unknown_calls += 1
+        return False, None, "unexpected broker response"
+
+    unknown_result = plan_and_send_exit(
+        symbol="NFO:NIFTY26JUN25000CE",
+        quantity=65,
+        product="MIS",
+        now_time=dt_time(10, 30),
+        submit=unknown_submit,
+        logger=logging.getLogger("test.exit_router"),
+        retry_max=3,
+    )
+
+    assert timeout_calls == 1
+    assert timeout_result.reconciliation_required is True
+    assert unknown_calls == 1
+    assert unknown_result.reason is BrokerReject.UNKNOWN
+
+
+async def test_exit_router_only_marks_flat_when_confirmation_succeeds():
+    unconfirmed = plan_and_send_exit(
+        symbol="NFO:NIFTY26JUN25000CE",
+        quantity=65,
+        product="MIS",
+        now_time=dt_time(10, 30),
+        submit=lambda _p, _v, _r: (True, "EXIT-2", None),
+        confirm=lambda _order_id: False,
+        logger=logging.getLogger("test.exit_router"),
+    )
+    confirmed = plan_and_send_exit(
+        symbol="NFO:NIFTY26JUN25000CE",
+        quantity=65,
+        product="MIS",
+        now_time=dt_time(10, 30),
+        submit=lambda _p, _v, _r: (True, "EXIT-3", None),
+        confirm=lambda _order_id: True,
+        logger=logging.getLogger("test.exit_router"),
+    )
+
+    assert unconfirmed.ok is True
+    assert unconfirmed.confirmed is False
+    assert unconfirmed.reconciliation_required is True
+    assert confirmed.ok is True
+    assert confirmed.confirmed is True
+    assert confirmed.reconciliation_required is False
