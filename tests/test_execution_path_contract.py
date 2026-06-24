@@ -95,11 +95,9 @@ def test_bracket_exit_callback_is_full_close_only() -> None:
 
 
 async def test_runner_live_entry_uses_trade_plan_path_not_legacy_price_ladder() -> None:
-    """Prevent audits or refactors from confusing a side path with live entry."""
-
     runner_path = SRC_ROOT / "strategies" / "runner.py"
     tree = ast.parse(runner_path.read_text(encoding="utf-8"))
-    execute_order: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    execute_order = None
     for node in tree.body:
         if not isinstance(node, ast.ClassDef) or node.name != "StrategyRunner":
             continue
@@ -115,18 +113,22 @@ async def test_runner_live_entry_uses_trade_plan_path_not_legacy_price_ladder() 
         break
 
     assert execute_order is not None
+    string_constants = {
+        node.value
+        for node in ast.walk(execute_order)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
     called_attributes = {
         call.func.attr
         for call in ast.walk(execute_order)
         if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
     }
-    assert "submit_trade_plan_result" in called_attributes
+    assert "submit_trade_plan_result" in string_constants
+    assert "execute_market_order" not in string_constants
     assert "execute_market_order" not in called_attributes
 
 
 async def test_unused_lifecycle_engines_are_not_runtime_imports() -> None:
-    """Keep test-only lifecycle prototypes out of the production import graph."""
-
     forbidden_modules = {
         "nifty_scalper_bot.execution.dynamic_tp",
         "nifty_scalper_bot.execution.lifecycle_manager",
