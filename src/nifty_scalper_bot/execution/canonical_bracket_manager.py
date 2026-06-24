@@ -1,0 +1,467 @@
+"""Canonical runtime bracket manager for staged BO lifecycle consolidation.
+
+Stage 1 intentionally preserves the established hardened manager behaviour and
+adds only fill-integrity invariants:
+
+* confirmed entry slippage re-anchors every unexecuted target;
+* a broker FILLED exit cannot close local state while broker exposure remains;
+* a confirmed TP1 fill resumes protection for the residual position;
+* any other FILLED/non-flat mismatch fails closed and blocks new entries.
+
+The compatibility inheritance is temporary.  Later stages will fold these
+invariants into the single explicit bracket implementation and remove runtime
+class replacement.
+"""
+
+from __future__ import annotations
+
+from contextlib import suppress
+import time
+from typing import Any, Mapping
+
+from nifty_scalper_bot.execution import bracket_manager as _legacy
+from nifty_scalper_bot.execution.hardened_bracket_manager import (
+    HardenedBracketManager,
+)
+
+
+class CanonicalBracketManager(HardenedBracketManager):
+    """Single runtime-exported bracket manager with strict fill reconciliation."""
+
+    _FILLED_NONFLAT_PREFIX = "filled_exit_nonflat"
+
+    def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
+        """Activate a confirmed entry and re-anchor every outstanding target.
+
+        The legacy implementation already re-anchors SL and the final TP.  This
+        wrapper captures planned partial targets before that call and applies the
+        same proportional re-anchor exactly once.
+        """
+
+        before = self.get_bracket(order_id)
+        planned_entry = 0.0
+        planned_targets: list[float] = []
+        if before is not None:
+            with self._lock:
+                planned_entry = float(before.entry_price or 0.0)
+                planned_targets = [float(target.price or 0.0) for target in before.tp_levels]
+
+        super().confirm_entry_fill(order_id, fill_price)
+
+        bracket = self.get_bracket(order_id)
+        if bracket is None:
+            return
+        try:
+            confirmed_fill = float(fill_price or 0.0)
+        except (TypeError, ValueError):
+            return
+        if planned_entry <= 0 or confirmed_fill <= 0 or confirmed_fill == planned_entry:
+            return
+
+        ratio = confirmed_fill / planned_entry
+        changed: list[dict[str, object]] = []
+        with self._lock:
+            for index, target in enumerate(bracket.tp_levels):
+                if target.executed or index >= len(planned_targets):
+                    continue
+                old_price = planned_targets[index]
+                if old_price <= 0:
+                    continue
+                new_price = _legacy._round_to_tick(old_price * ratio)
+                if new_price <= 0 or new_price == float(target.price):
+                    continue
+                target.price = new_price
+                changed.append(
+                    {
+                        "name": str(target.name),
+                        "old_price": old_price,
+                        "new_price": new_price,
+                    }
+                )
+            if changed:
+                bracket.updated_at = time.time()
+
+        if not changed:
+            return
+        with suppress(Exception):
+            self.save_state()
+        _legacy.LOGGER.info(
+            "BRACKET_TARGETS_REANCHORED bracket_id=%s symbol=%s planned_entry=%.2f fill_price=%.2f targets=%s",
+            bracket.bracket_id,
+            bracket.symbol,
+            planned_entry,
+            confirmed_fill,
+            changed,
+            extra={
+                "event": "BRACKET_TARGETS_REANCHORED",
+                "bracket_id": bracket.bracket_id,
+                "symbol": bracket.symbol,
+                "planned_entry": planned_entry,
+                "fill_price": confirmed_fill,
+                "targets": changed,
+            },
+        )
+        with suppress(Exception):
+            self._notify_event(
+                "BRACKET_TARGETS_REANCHORED",
+                {
+                    "symbol": bracket.symbol,
+                    "planned_entry": round(planned_entry, 2),
+                    "fill_price": round(confirmed_fill, 2),
+                    "targets": changed,
+                },
+            )
+
+    def _broker_position_quantity(self, symbol: str) -> int | None:
+        """Return absolute broker net quantity, or ``None`` when truth is unknown."""
+
+        broker = getattr(getattr(self, "order_manager", None), "_broker", None)
+        getter = getattr(broker, "get_positions", None) if broker is not None else None
+        if not callable(getter):
+            return None
+
+        payload = getter()
+        if isinstance(payload, Mapping):
+            rows = payload.get("net") or payload.get("day") or payload.get("positions") or []
+        else:
+            rows = payload
+        if rows is None:
+            return None
+        try:
+            positions = list(rows)
+        except TypeError:
+            return None
+        if not positions:
+            return 0
+
+        target_symbol = _legacy.normalize_symbol(symbol)
+        matched = False
+        net_quantity = 0
+        for position in positions:
+            if not isinstance(position, Mapping):
+                continue
+            position_symbol = _legacy.normalize_symbol(
+                str(
+                    position.get("tradingsymbol")
+                    or position.get("symbol")
+                    or position.get("instrument")
+                    or ""
+                )
+            )
+            if position_symbol != target_symbol:
+                continue
+            matched = True
+            raw_quantity = position.get(
+                "quantity",
+                position.get("net_quantity", position.get("net", 0)),
+            )
+            try:
+                net_quantity += int(float(raw_quantity or 0))
+            except (TypeError, ValueError):
+                return None
+
+        if not matched:
+            # A non-empty broker response that omits the symbol is not sufficient
+            # proof of flatness; preserve the entry freeze until reconciliation.
+            return None
+        return abs(net_quantity)
+
+    @staticmethod
+    def _matching_partial_target(bracket: Any) -> Any | None:
+        reason = str(getattr(bracket, "exit_reason", "") or "").strip().upper()
+        for target in getattr(bracket, "tp_levels", []) or []:
+            if bool(getattr(target, "executed", False)):
+                continue
+            name = str(getattr(target, "name", "") or "").strip().upper()
+            if name and (reason.startswith(name) or f"{name} HIT" in reason):
+                return target
+        return None
+
+    def _resume_after_partial_target(
+        self,
+        bracket: Any,
+        *,
+        target: Any,
+        residual_quantity: int,
+        order_id: str,
+        status_payload: Mapping[str, Any],
+        requested_by: str,
+    ) -> bool:
+        previous_remaining = int(bracket.remaining_quantity or 0)
+        expected_residual = max(previous_remaining - int(target.quantity or 0), 0)
+        if residual_quantity >= previous_remaining or residual_quantity > expected_residual:
+            return False
+
+        fill_price = self._extract_status_price(status_payload)
+        filled_quantity = previous_remaining - residual_quantity
+        with self._lock:
+            target.executed = True
+            bracket.remaining_quantity = residual_quantity
+            bracket.exit_order_id = None
+            bracket.pending_exit_order_id = None
+            bracket.exit_pending = False
+            bracket.exit_in_progress = False
+            bracket.exit_executed = False
+            bracket.active = True
+            bracket.entry_confirmed = True
+            bracket.position_flat_confirmed = False
+            bracket.exit_state = _legacy.BracketExitLifecycle.OPEN_ACTIVE.value
+            bracket.entry_status = "ACTIVE"
+            bracket.last_exit_error = None
+            bracket.exit_reason = None
+            bracket.exit_triggered_at = None
+            bracket.exit_attempt_count = 0
+            bracket.last_exit_attempt_at = None
+            bracket.next_exit_attempt_at = None
+            bracket.escalated_at = None
+            bracket._market_escalation_fired = False
+            bracket.updated_at = time.time()
+            self._exit_order_open_since.pop(order_id, None)
+            self._exit_rescue_attempts.pop(bracket.bracket_id, None)
+
+        self._move_sl_to_breakeven(bracket)
+        with suppress(Exception):
+            self.save_state()
+        _legacy.LOGGER.info(
+            "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED bracket_id=%s symbol=%s target=%s filled_qty=%s remaining_qty=%s fill_price=%s requested_by=%s",
+            bracket.bracket_id,
+            bracket.symbol,
+            target.name,
+            filled_quantity,
+            residual_quantity,
+            fill_price,
+            requested_by,
+            extra={
+                "event": "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED",
+                "bracket_id": bracket.bracket_id,
+                "symbol": bracket.symbol,
+                "target": str(target.name),
+                "filled_qty": filled_quantity,
+                "remaining_qty": residual_quantity,
+                "fill_price": fill_price,
+                "requested_by": requested_by,
+            },
+        )
+        with suppress(Exception):
+            self._notify_event(
+                "PARTIAL_EXIT_CONFIRMED",
+                {
+                    "symbol": bracket.symbol,
+                    "target": str(target.name),
+                    "filled_qty": filled_quantity,
+                    "remaining_qty": residual_quantity,
+                    "fill_price": fill_price,
+                    "sl": round(float(bracket.sl_trigger_price), 2),
+                },
+            )
+        return True
+
+    def _latch_filled_nonflat_mismatch(
+        self,
+        bracket: Any,
+        *,
+        residual_quantity: int | None,
+        order_id: str | None,
+        requested_by: str,
+    ) -> None:
+        now = time.time()
+        error = (
+            f"{self._FILLED_NONFLAT_PREFIX}:"
+            f"residual={residual_quantity if residual_quantity is not None else 'unknown'}"
+        )
+        with self._lock:
+            if residual_quantity is not None and residual_quantity > 0:
+                bracket.remaining_quantity = residual_quantity
+            bracket.exit_order_id = None
+            bracket.pending_exit_order_id = None
+            bracket.exit_in_progress = False
+            bracket.exit_pending = True
+            bracket.exit_executed = False
+            bracket.active = True
+            bracket.position_flat_confirmed = False
+            bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+            bracket.entry_status = bracket.exit_state
+            bracket.last_exit_error = error
+            bracket.escalated_at = bracket.escalated_at or now
+            bracket._market_escalation_fired = True
+            bracket.updated_at = now
+            if order_id:
+                self._exit_order_open_since.pop(order_id, None)
+
+        with suppress(Exception):
+            self.save_state()
+        _legacy.LOGGER.critical(
+            "EXIT_FILLED_POSITION_MISMATCH bracket_id=%s symbol=%s order_id=%s residual_qty=%s requested_by=%s",
+            bracket.bracket_id,
+            bracket.symbol,
+            order_id,
+            residual_quantity,
+            requested_by,
+            extra={
+                "event": "EXIT_FILLED_POSITION_MISMATCH",
+                "bracket_id": bracket.bracket_id,
+                "symbol": bracket.symbol,
+                "order_id": order_id,
+                "residual_qty": residual_quantity,
+                "requested_by": requested_by,
+            },
+        )
+        with suppress(Exception):
+            self._notify_event(
+                "EXIT_FILLED_POSITION_MISMATCH",
+                {
+                    "symbol": bracket.symbol,
+                    "order_id": order_id,
+                    "remaining_qty": residual_quantity,
+                    "message": "Exit order filled but broker position remains. New entries are blocked pending reconciliation.",
+                },
+            )
+
+    def _reconcile_exit_state(self, bracket: Any, *, requested_by: str) -> bool:
+        """Reconcile filled exits without allowing optimistic local closure."""
+
+        with self._lock:
+            order_id = bracket.exit_order_id or bracket.pending_exit_order_id
+            mismatch_latched = str(bracket.last_exit_error or "").startswith(
+                self._FILLED_NONFLAT_PREFIX
+            )
+
+        if mismatch_latched and not order_id:
+            residual = self._broker_position_quantity(bracket.symbol)
+            if residual == 0:
+                self._close_bracket(
+                    bracket,
+                    close_source="filled_nonflat_reconciled_flat",
+                )
+                return True
+            return False
+
+        if order_id:
+            try:
+                status_payload = self._get_broker_order_status(str(order_id))
+                status = str((status_payload or {}).get("status") or "").strip().upper()
+            except Exception:
+                return super()._reconcile_exit_state(bracket, requested_by=requested_by)
+
+            if status in _legacy._FILLED_STATUSES:
+                residual = self._broker_position_quantity(bracket.symbol)
+                if residual == 0:
+                    return super()._reconcile_exit_state(
+                        bracket,
+                        requested_by=requested_by,
+                    )
+
+                target = self._matching_partial_target(bracket)
+                if (
+                    residual is not None
+                    and target is not None
+                    and self._resume_after_partial_target(
+                        bracket,
+                        target=target,
+                        residual_quantity=residual,
+                        order_id=str(order_id),
+                        status_payload=status_payload,
+                        requested_by=requested_by,
+                    )
+                ):
+                    return False
+
+                self._latch_filled_nonflat_mismatch(
+                    bracket,
+                    residual_quantity=residual,
+                    order_id=str(order_id),
+                    requested_by=requested_by,
+                )
+                return False
+
+        return super()._reconcile_exit_state(bracket, requested_by=requested_by)
+
+    def _process_exit_state(
+        self,
+        bracket: Any,
+        action: Mapping[str, Any],
+        *,
+        now: float,
+    ) -> None:
+        """Keep a filled/non-flat mismatch frozen until broker truth becomes flat."""
+
+        if str(bracket.last_exit_error or "").startswith(self._FILLED_NONFLAT_PREFIX):
+            residual = self._broker_position_quantity(bracket.symbol)
+            if residual == 0:
+                self._close_bracket(
+                    bracket,
+                    close_source="filled_nonflat_reconciled_flat",
+                )
+            else:
+                with self._lock:
+                    if residual is not None and residual > 0:
+                        bracket.remaining_quantity = residual
+                    self._log_exit_pending_summary_locked(bracket, now)
+            return
+        super()._process_exit_state(bracket, action, now=now)
+
+    def _rescue_stale_exit_order(
+        self,
+        bracket: Any,
+        *,
+        order_id: str,
+        qty: int,
+        status: str,
+    ) -> None:
+        """Cancel/replace stale exits without treating a non-flat fill as closure."""
+
+        with self._lock:
+            if bracket.exit_in_progress:
+                return
+            attempts = self._exit_rescue_attempts.get(bracket.bracket_id, 0)
+            if attempts >= self._exit_rescue_max_attempts:
+                self._escalate_exit_locked(bracket, "rescue_attempts_exhausted")
+                return
+            bracket.exit_in_progress = True
+            self._exit_rescue_attempts[bracket.bracket_id] = attempts + 1
+
+        _legacy.LOGGER.critical(
+            "EXIT_STALE_ORDER_RESCUE bracket_id=%s order_id=%s status=%s qty=%s rescue_attempt=%s",
+            bracket.bracket_id,
+            order_id,
+            status,
+            qty,
+            attempts + 1,
+            extra={
+                "event": "EXIT_STALE_ORDER_RESCUE",
+                "bracket_id": bracket.bracket_id,
+                "order_id": order_id,
+                "status": status,
+                "qty": qty,
+                "rescue_attempt": attempts + 1,
+            },
+        )
+
+        cancel_requested = self._cancel_exit_order(order_id)
+        terminal = self._wait_for_cancel_or_fill(order_id) if cancel_requested else "unconfirmed"
+        if terminal == "filled":
+            with self._lock:
+                bracket.exit_in_progress = False
+            self._reconcile_exit_state(bracket, requested_by="stale_rescue_filled")
+            return
+        if self._safe_position_flat(bracket.symbol):
+            with self._lock:
+                bracket.exit_in_progress = False
+            self._close_bracket(bracket, close_source="rescue_reconciled_flat")
+            return
+        if terminal != "cancelled":
+            with self._lock:
+                bracket.exit_in_progress = False
+                bracket.last_exit_error = "stale_exit_cancel_unconfirmed"
+                self._escalate_exit_locked(bracket, "stale_exit_cancel_unconfirmed")
+            return
+
+        with self._lock:
+            bracket.exit_in_progress = False
+            bracket.exit_order_id = None
+            bracket.pending_exit_order_id = None
+            bracket.last_exit_error = None
+        self._submit_rescue_exit(bracket, qty=qty, prior_order_id=order_id)
+
+
+__all__ = ["CanonicalBracketManager"]
