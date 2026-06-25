@@ -1,4 +1,15 @@
-"""Explicit runtime order manager composition."""
+"""File purpose:
+    Implement the single production order manager used by the trading runtime.
+
+Key responsibilities:
+    - Apply unresolved-exit entry blocking before broker submission.
+    - Run bounded entry recovery and finalize partial-entry reconciliation.
+    - Delegate unchanged order operations to ``order_manager_core``.
+
+Operational constraints:
+    - Protective exits must bypass entry blocking.
+    - Recovery must remain bounded and must not create duplicate broker orders.
+"""
 
 from __future__ import annotations
 
