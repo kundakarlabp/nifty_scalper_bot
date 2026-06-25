@@ -2,9 +2,11 @@
 
 ## Authoritative live path
 
-1. **Composition and startup**
-   - `src/nifty_scalper_bot/core/app.py`
-   - Constructs the market-data, strategy, execution, risk and notification components.
+1. **Release-verified startup**
+   - ASGI entry: `src/nifty_scalper_bot/deployment_main.py`
+   - Runtime composition: `src/nifty_scalper_bot/core/app.py`
+   - The embedded image SHA must match Railway's deployment SHA before the service binds its port.
+   - A low-frequency watchdog exits an instance after a confirmed newer GitHub `main` revision.
 
 2. **Market data and routing**
    - `data/market_data_manager.py`
@@ -14,10 +16,11 @@
    - `strategies/runner.py`
    - `StrategyRunner` validates strategy state and creates an immutable `TradePlan`.
    - The runner submits only through `OrderManager.submit_trade_plan_result()`.
-   - It must not call `place_order()`, `execute_market_order()` or dynamic-TP helpers directly.
+   - It must not call `place_order()` or any retired executor/processor directly.
 
 4. **Entry execution authority**
    - Public facade: `execution/order_manager.py`
+   - Core engine: `execution/order_manager_core.py`
    - Runtime owner: `execution/runtime_order_manager.py::RuntimeOrderManager`
    - Responsibilities:
      - preflight, spread, margin and risk validation;
@@ -29,6 +32,7 @@
 
 5. **Bracket and exit authority**
    - Public facade: `execution/bracket_manager.py`
+   - Core engine: `execution/bracket_core.py`
    - Composition owner: `execution/ownership.py::BoundBracketManager`
    - Responsibilities:
      - entry-fill re-anchoring;
@@ -42,6 +46,7 @@
 
 6. **Adaptive trailing authority**
    - Public facade: `execution/adaptive_trailing.py`
+   - Core controller: `execution/adaptive_trailing_core.py`
    - Runtime owner: `execution/hardened_adaptive_trailing.py::HardenedAdaptiveTrailingController`
    - The controller can tighten protection only; it cannot weaken an established stop.
 
@@ -70,26 +75,38 @@ TradePlan
 
 At every ambiguous broker state, new entries remain blocked until orders, fills and positions are reconciled.
 
-## Compatibility-only modules
+## Startup compatibility adapters
 
-These modules are retained to avoid breaking external imports, tests or older tooling. They are not independent production authorities:
+Two historical constructor names remain because `core/app.py` and operator components still accept them:
 
-- `execution/order_manager_legacy.py` — base implementation inherited by `RuntimeOrderManager`.
-- `execution/legacy_bracket_manager.py` — base implementation inherited by the canonical bracket chain.
-- `execution/adaptive_trailing_legacy.py` — base implementation inherited by the hardened trailing controller.
-- `execution/lifecycle_manager.py` — experimental standalone lifecycle API; not imported by production source.
-- `execution/safe_order_manager.py` — compatibility/testing wrapper; not constructed in production source.
-- OrderManager dynamic-TP helpers — compatibility API only; the live StrategyRunner does not call them.
+- `execution/safe_order_manager.py` delegates every order operation directly to the canonical `OrderManager`; it has no retry, throttle, regime, monitoring or order state machine.
+- `execution/lifecycle_manager.py` is a no-op shell; it does not subscribe to ticks, calculate targets, trail stops or submit exits.
 
-Compatibility modules may be deleted only after a release confirms that no external consumer imports them.
+They are not BO authorities and architecture tests reject any reintroduction of independent execution logic.
 
-## Forbidden runtime layers
+## Removed duplicate paths
 
-These removed layers must not appear in production imports:
+The following modules are deleted and forbidden from returning:
 
+- `order_manager_legacy.py`
+- `legacy_bracket_manager.py`
+- `adaptive_trailing_legacy.py`
+- `dynamic_tp.py`
+- `order_executor.py`
+- `order_processor.py`
+- `options_policy.py`
+- `entry_price.py`
 - `order_execution_hub.py`
 - `execution_router.py`
 - `preflight_validator.py`
+
+## Deployment freshness invariants
+
+- The Docker image embeds `RAILWAY_GIT_COMMIT_SHA` in `/app/.build_commit_sha`.
+- Strict Railway startup fails when the embedded and runtime commit identities differ or are missing.
+- `/releasez` reports the effective revision and watchdog status.
+- A confirmed GitHub `main` mismatch exits with code 42; transient GitHub/network failures do not stop trading.
+- Railway restarts failed instances and an optional post-CI deploy hook can trigger a fresh deployment.
 
 ## Engineering invariants
 
@@ -100,3 +117,4 @@ These removed layers must not appear in production imports:
 - No import-time replacement of runtime classes or methods.
 - No runner re-arm before broker-flat confirmation and durable close accounting.
 - Protective exits remain executable while new entries are blocked.
+- A stale image cannot arm live trading.
