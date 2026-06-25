@@ -5,18 +5,14 @@ import importlib
 from pathlib import Path
 
 import nifty_scalper_bot.execution as execution
-from nifty_scalper_bot.execution.adaptive_trailing import (
-    AdaptiveTrailingController,
-    LegacyAdaptiveTrailingController,
+from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
+from nifty_scalper_bot.execution.adaptive_trailing_core import (
+    AdaptiveTrailingController as CoreAdaptiveTrailingController,
 )
-from nifty_scalper_bot.execution.bracket_manager import (
-    BracketManager,
-    LegacyBracketManager,
-)
-from nifty_scalper_bot.execution.order_manager import (
-    LegacyOrderManager,
-    OrderManager,
-)
+from nifty_scalper_bot.execution.bracket_core import BracketManager as CoreBracketManager
+from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.order_manager import OrderManager
+from nifty_scalper_bot.execution.order_manager_core import OrderManager as CoreOrderManager
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,9 +53,9 @@ def test_public_runtime_has_one_owner_per_lifecycle_domain() -> None:
     assert execution.OrderManager is OrderManager
     assert execution.BracketManager is BracketManager
     assert execution.AdaptiveTrailingController is AdaptiveTrailingController
-    assert issubclass(OrderManager, LegacyOrderManager)
-    assert issubclass(BracketManager, LegacyBracketManager)
-    assert issubclass(AdaptiveTrailingController, LegacyAdaptiveTrailingController)
+    assert issubclass(OrderManager, CoreOrderManager)
+    assert issubclass(BracketManager, CoreBracketManager)
+    assert issubclass(AdaptiveTrailingController, CoreAdaptiveTrailingController)
 
 
 def test_execution_package_import_does_not_install_or_replace_runtime_methods() -> None:
@@ -72,8 +68,10 @@ def test_execution_package_import_does_not_install_or_replace_runtime_methods() 
     assert package.AdaptiveTrailingController is trailing_class
     source = (EXECUTION / "__init__.py").read_text(encoding="utf-8")
     assert "install_entry_recovery(" not in source
-    assert "AdaptiveTrailingController = HardenedAdaptiveTrailingController" not in source
     assert "_bracket_module.BracketManager" not in source
+    assert "LegacyOrderManager" not in source
+    assert "LegacyBracketManager" not in source
+    assert "LegacyAdaptiveTrailingController" not in source
 
 
 def test_runner_uses_only_canonical_entry_api() -> None:
@@ -106,17 +104,17 @@ def test_runtime_classes_own_required_methods_through_explicit_mro() -> None:
         assert callable(getattr(BracketManager, name, None)), name
 
 
-def test_compatibility_modules_are_imported_only_by_explicit_facades() -> None:
+def test_core_modules_are_imported_only_by_canonical_facades() -> None:
     allowed = {
-        "nifty_scalper_bot.execution.order_manager_legacy": {
+        "nifty_scalper_bot.execution.order_manager_core": {
             "order_manager.py",
             "runtime_order_manager.py",
         },
-        "nifty_scalper_bot.execution.legacy_bracket_manager": {
+        "nifty_scalper_bot.execution.bracket_core": {
             "bracket_manager.py",
             "ownership.py",
         },
-        "nifty_scalper_bot.execution.adaptive_trailing_legacy": {
+        "nifty_scalper_bot.execution.adaptive_trailing_core": {
             "adaptive_trailing.py",
         },
     }
@@ -130,25 +128,37 @@ def test_compatibility_modules_are_imported_only_by_explicit_facades() -> None:
     assert not offenders, offenders
 
 
-def test_experimental_lifecycle_manager_is_not_in_production_import_graph() -> None:
-    forbidden = "nifty_scalper_bot.execution.lifecycle_manager"
-    offenders: list[str] = []
-    for path in SRC.rglob("*.py"):
-        if path.name == "lifecycle_manager.py":
-            continue
-        if forbidden in _imports(path):
-            offenders.append(str(path.relative_to(ROOT)))
-    assert not offenders, offenders
+def test_retired_duplicate_bo_modules_are_absent() -> None:
+    retired = {
+        "order_manager_legacy.py",
+        "legacy_bracket_manager.py",
+        "adaptive_trailing_legacy.py",
+        "dynamic_tp.py",
+        "order_executor.py",
+        "order_processor.py",
+        "entry_price.py",
+    }
+    present = sorted(name for name in retired if (EXECUTION / name).exists())
+    assert not present, f"Retired BO modules still present: {present}"
+    assert (EXECUTION / "options_policy.py").exists()
 
 
-def test_safe_order_manager_is_not_constructed_in_production_source() -> None:
-    offenders: list[str] = []
-    for path in SRC.rglob("*.py"):
-        if path.name == "safe_order_manager.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id == "SafeOrderManager":
-                    offenders.append(str(path.relative_to(ROOT)))
-    assert not offenders, offenders
+def test_startup_compatibility_adapters_do_not_own_execution_logic() -> None:
+    safe_tree = ast.parse((EXECUTION / "safe_order_manager.py").read_text(encoding="utf-8"))
+    lifecycle_tree = ast.parse((EXECUTION / "lifecycle_manager.py").read_text(encoding="utf-8"))
+    safe_methods = {
+        node.name
+        for node in ast.walk(safe_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    lifecycle_methods = {
+        node.name
+        for node in ast.walk(lifecycle_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_chase_fill" not in safe_methods
+    assert "_check_rate_limit" not in safe_methods
+    assert "_monitor_loop" not in safe_methods
+    assert "_evaluate_tick" not in lifecycle_methods
+    assert "_monitor_loop" not in lifecycle_methods
+    assert "_execute_exit" not in lifecycle_methods

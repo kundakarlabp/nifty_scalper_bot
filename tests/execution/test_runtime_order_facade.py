@@ -9,7 +9,7 @@ from typing import Any
 
 import nifty_scalper_bot.execution as execution
 from nifty_scalper_bot.execution import order_manager
-from nifty_scalper_bot.execution import order_manager_legacy
+from nifty_scalper_bot.execution import order_manager_core
 from nifty_scalper_bot.execution.native_entry_gate import NO_BLOCK
 from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
 
@@ -45,7 +45,8 @@ def _manager(provider: Any | None = None) -> RuntimeOrderManager:
 def test_public_order_import_has_one_stable_runtime_identity() -> None:
     assert order_manager.OrderManager is RuntimeOrderManager
     assert execution.OrderManager is RuntimeOrderManager
-    assert order_manager.LegacyOrderManager is order_manager_legacy.OrderManager
+    assert issubclass(RuntimeOrderManager, order_manager_core.OrderManager)
+    assert not hasattr(order_manager, "LegacyOrderManager")
     assert RuntimeOrderManager.submit_trade_plan_result.__module__ == (
         "nifty_scalper_bot.execution.runtime_order_manager"
     )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from nifty_scalper_bot.execution import order_manager_legacy as _legacy
+from nifty_scalper_bot.execution import order_manager_core as _core
 from nifty_scalper_bot.execution.entry_recovery import (
     _finalize_partial_entry,
     _recover_submit,
@@ -16,7 +16,7 @@ from nifty_scalper_bot.execution.native_entry_gate import (
 )
 
 
-class RuntimeOrderManager(_legacy.OrderManager):
+class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
 
     def set_trade_plan_rebuilder(
@@ -36,8 +36,8 @@ class RuntimeOrderManager(_legacy.OrderManager):
     ) -> Any:
         return block_result(
             self,
-            _legacy,
-            _legacy.OrderManager.place_order,
+            _core,
+            _core.OrderManager.place_order,
             method_name,
             args,
             kwargs,
@@ -48,7 +48,7 @@ class RuntimeOrderManager(_legacy.OrderManager):
         if blocked is not NO_BLOCK:
             return blocked
         return _recover_submit(
-            _legacy.OrderManager.submit_trade_plan_result,
+            _core.OrderManager.submit_trade_plan_result,
             self,
             plan,
         )

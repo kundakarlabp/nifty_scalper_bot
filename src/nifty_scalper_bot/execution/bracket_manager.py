@@ -1,35 +1,23 @@
-"""Stable public bracket API with explicit runtime ownership.
-
-The historical implementation remains in ``legacy_bracket_manager``. Public
-state models and helpers are re-exported unchanged, while ``BracketManager`` is
-the bound runtime authority that configures the native OrderManager entry gate.
-"""
+"""Stable public bracket API with explicit runtime ownership."""
 
 from __future__ import annotations
 
-from nifty_scalper_bot.execution import legacy_bracket_manager as _legacy
+from nifty_scalper_bot.execution import bracket_core as _core
 
-for _name in dir(_legacy):
+for _name in dir(_core):
     if not _name.startswith("__"):
-        globals()[_name] = getattr(_legacy, _name)
+        globals()[_name] = getattr(_core, _name)
 
-LegacyBracketManager = _legacy.BracketManager
-
-from nifty_scalper_bot.execution.runtime_bracket_manager import (  # noqa: E402
-    RuntimeBracketManager,
-)
-from nifty_scalper_bot.execution.ownership import (  # noqa: E402
-    BoundBracketManager,
-)
+from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager  # noqa: E402
+from nifty_scalper_bot.execution.ownership import BoundBracketManager  # noqa: E402
 
 BracketManager = BoundBracketManager
 
 __all__ = sorted(
     {
-        *[name for name in dir(_legacy) if not name.startswith("_")],
+        *[name for name in dir(_core) if not name.startswith("_")],
         "BoundBracketManager",
         "BracketManager",
-        "LegacyBracketManager",
         "RuntimeBracketManager",
     }
 )
