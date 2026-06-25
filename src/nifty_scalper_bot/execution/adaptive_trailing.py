@@ -1,23 +1,16 @@
-"""Stable adaptive trailing API with one hardened runtime controller.
-
-The historical implementation is preserved in ``adaptive_trailing_legacy``.
-Public data structures and helpers remain available from this module, while
-``AdaptiveTrailingController`` resolves directly to the hardened controller.
-"""
+"""Stable adaptive trailing API with one hardened runtime controller."""
 
 from __future__ import annotations
 
-from nifty_scalper_bot.execution import adaptive_trailing_legacy as _legacy
+from nifty_scalper_bot.execution import adaptive_trailing_core as _core
 
-for _name in dir(_legacy):
+for _name in dir(_core):
     if not _name.startswith("__"):
-        globals()[_name] = getattr(_legacy, _name)
+        globals()[_name] = getattr(_core, _name)
 
-LegacyAdaptiveTrailingController = _legacy.AdaptiveTrailingController
-
-# Export the legacy base before importing the hardened subclass. The hardened
-# module can therefore import this partially initialized facade safely.
-AdaptiveTrailingController = LegacyAdaptiveTrailingController
+# Export the core base before importing the hardened subclass so the subclass can
+# safely import this partially initialized public facade.
+AdaptiveTrailingController = _core.AdaptiveTrailingController
 
 from nifty_scalper_bot.execution.hardened_adaptive_trailing import (  # noqa: E402
     HardenedAdaptiveTrailingController,
@@ -27,9 +20,8 @@ AdaptiveTrailingController = HardenedAdaptiveTrailingController
 
 __all__ = sorted(
     {
-        *[name for name in dir(_legacy) if not name.startswith("_")],
+        *[name for name in dir(_core) if not name.startswith("_")],
         "AdaptiveTrailingController",
         "HardenedAdaptiveTrailingController",
-        "LegacyAdaptiveTrailingController",
     }
 )
