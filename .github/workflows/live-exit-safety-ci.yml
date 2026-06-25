@@ -61,7 +61,7 @@ jobs:
       - name: Complete architecture and integration suite
         run: python -m pytest -q -x --tb=short tests/architecture tests/integration
       - name: Complete core suite
-        run: python -m pytest -q -x --tb=short tests/core
+        run: python tools/pytest_compact.py tests/core
       - name: Complete data suite
         run: python -m pytest -q -x --tb=short tests/data
       - name: Complete strategy suite
