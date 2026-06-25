@@ -24,10 +24,14 @@ jobs:
           python -m pip install -e '.[dev]'
       - name: Compile production source
         run: python -m compileall -q src
-      - name: Focused live-money safety regression tests
+      - name: Focused canonical BO and release regression tests
         run: |
           python -m pytest -q \
+            tests/architecture/test_canonical_bo_ownership.py \
+            tests/integration/test_canonical_bo_end_to_end.py \
+            tests/execution/test_runtime_order_facade.py \
             tests/execution/test_runtime_bracket_facade.py \
+            tests/execution/test_adaptive_trailing_facade.py \
             tests/execution/test_canonical_entry_recovery.py \
             tests/execution/test_fill_ledger.py \
             tests/execution/test_ledger_bracket_runtime.py \
@@ -38,7 +42,9 @@ jobs:
             tests/execution/test_bracket_manager_reliability.py \
             tests/execution/test_bracket_open_position_priority_and_protective_exit.py \
             tests/execution/test_order_manager_trade_plan.py \
-            tests/strategies/test_trade_selector_logging_controls.py \
+            tests/core/test_release_guard.py \
+            tests/test_deployment_release_guard.py \
+            tests/test_safe_order_manager.py \
             tests/test_execution_path_contract.py
       - name: Full test suite
         run: python -m pytest -q
