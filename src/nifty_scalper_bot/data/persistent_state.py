@@ -330,9 +330,11 @@ class PersistentStateDB:
         try:
             with self._lock:
                 query = "SELECT payload FROM fills ORDER BY id ASC"
+                params = ()
                 if limit is not None and limit > 0:
-                    query = f"{query} LIMIT {int(limit)}"
-                cursor = self._conn.execute(query)  # type: ignore[attr-defined]
+                    query = f"{query} LIMIT ?"
+                    params = (int(limit),)
+                cursor = self._conn.execute(query, params)  # type: ignore[attr-defined]
                 rows = cursor.fetchall()
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Failure in PersistentStateDB.load_fills: %s", exc)

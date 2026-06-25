@@ -2,3 +2,7 @@
 **Vulnerability:** The admin dashboard manually generates HTML strings and was embedding unsanitized user query parameters (`msg`, `contains`) directly into attributes and elements, allowing for Reflected Cross-Site Scripting (XSS).
 **Learning:** In applications that construct raw HTML directly (like `FastAPI`'s `HTMLResponse` combined with Python f-strings) rather than using a templating engine (like Jinja2) with auto-escaping, every user-controlled input must be manually sanitized.
 **Prevention:** Always use `html.escape()` when embedding user input (such as query strings or form data) into raw HTML strings to prevent XSS attacks.
+## 2025-02-27 - SQL Injection Risk with String Interpolated LIMIT
+**Vulnerability:** A potential SQL injection vulnerability in `PersistentStateDB.load_fills` where a string-interpolated variable (`LIMIT {int(limit)}`) was used for the LIMIT clause instead of a parameterized query. While the `int()` casting provided basic type safety, string concatenation in SQL queries is an insecure anti-pattern.
+**Learning:** SQLite supports parameterizing `LIMIT` and `OFFSET` clauses. Any dynamically constructed SQL, regardless of prior type-casting, must use the engine's built-in parameterization mechanisms (like the `?` placeholder) to prevent injection flaws and adhere to defensive programming standards.
+**Prevention:** Enforce the rule to strictly use parameterized queries for ALL user-provided or dynamic variables in SQL statements. Never use f-strings or string concatenation for SQL composition.
