@@ -1,15 +1,34 @@
 #!/usr/bin/env bash
-# File purpose: Install or refresh the lightweight Streamlit operations console.
-# Key responsibilities: Maintain the isolated dashboard venv, validate imports, install the systemd unit, and restart the console.
-# Operational constraints: The console is read-only and must remain isolated from the trading-engine Python environment.
+# File purpose: Install or refresh the independent admin and read-only review controls.
+# Key responsibilities: Preserve external settings, validate imports, install bounded services, and verify both ports.
+# Operational constraints: Never rewrite existing credentials; keep control requests isolated from the trading loop.
 set -euo pipefail
 
 APP_DIR="${BOT_APP_DIR:-/home/ubuntu/nifty_scalper_bot}"
 VENV_DIR="${APP_DIR}/.streamlit-venv"
-SERVICE_SOURCE="${APP_DIR}/deploy/systemd/niftybot-streamlit.service"
-SERVICE_TARGET="/etc/systemd/system/niftybot-streamlit.service"
+ENGINE_VENV="${APP_DIR}/.venv"
+ADMIN_SOURCE="${APP_DIR}/deploy/systemd/niftybot-admin.service"
+ADMIN_TARGET="/etc/systemd/system/niftybot-admin.service"
+REVIEW_SOURCE="${APP_DIR}/deploy/systemd/niftybot-streamlit.service"
+REVIEW_TARGET="/etc/systemd/system/niftybot-streamlit.service"
+ENV_FILE="${BOT_ENV_FILE:-/home/ubuntu/.config/niftybot/niftybot.env}"
+
+ensure_default() {
+  local key="$1" value="$2"
+  grep -qE "^${key}=" "$ENV_FILE" || printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+}
 
 cd "${APP_DIR}"
+mkdir -p "$(dirname "$ENV_FILE")"
+touch "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+ensure_default POST_MARKET_QUIET_MODE true
+ensure_default POST_MARKET_BASKET_REFRESH_SECONDS 1800
+ensure_default POST_MARKET_MARKET_DATA_SUMMARY_SECONDS 900
+ensure_default POST_MARKET_SUPPRESS_CANDLE_GAP_WARNINGS true
+ensure_default BOT_ADMIN_API_URL http://127.0.0.1:8081
+ensure_default BOT_ADMIN_PUBLIC_URL http://15.206.3.6:8081/admin
+ensure_default BOT_ADMIN_REVISION_CHECK_SECONDS 120
 
 if ! dpkg -s python3-venv >/dev/null 2>&1; then
   sudo apt-get update -qq
@@ -20,24 +39,48 @@ if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   python3 -m venv "${VENV_DIR}"
 fi
 
-"${VENV_DIR}/bin/python" -m pip install --quiet --upgrade pip
-"${VENV_DIR}/bin/python" -m pip install --quiet -r dashboard/requirements.txt
-"${VENV_DIR}/bin/python" -m py_compile dashboard/event_buffer.py dashboard/log_export.py dashboard/operations_console.py
-PYTHONPATH="${APP_DIR}" "${VENV_DIR}/bin/python" -c \
-  'from dashboard.event_buffer import deduplicate_events; from dashboard.log_export import window_epochs; assert callable(deduplicate_events); assert callable(window_epochs)'
+# Remove abandoned pip-rename metadata that produces the repeated
+# "Ignoring invalid distribution ~ifty-scalper-bot" warning.
+if [[ -x "${ENGINE_VENV}/bin/python" ]]; then
+  SITE="$(${ENGINE_VENV}/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+  find "$SITE" -maxdepth 1 -name '~*' -exec rm -rf -- {} + 2>/dev/null || true
+fi
 
-sudo install -m 0644 "${SERVICE_SOURCE}" "${SERVICE_TARGET}"
+PIP_NO_CACHE_DIR=1 "${VENV_DIR}/bin/python" -m pip install --quiet --upgrade pip
+PIP_NO_CACHE_DIR=1 "${VENV_DIR}/bin/python" -m pip install --quiet -r dashboard/requirements.txt
+
+PYTHONPATH="${APP_DIR}:${APP_DIR}/src" "${VENV_DIR}/bin/python" -m py_compile \
+  dashboard/superlite_events.py \
+  dashboard/superlite_console.py \
+  dashboard/log_export.py
+PYTHONPATH="${APP_DIR}/src:${APP_DIR}" "${ENGINE_VENV}/bin/python" -m py_compile \
+  src/nifty_scalper_bot/superlite_admin_core.py \
+  src/nifty_scalper_bot/superlite_admin.py
+PYTHONPATH="${APP_DIR}:${APP_DIR}/src" "${VENV_DIR}/bin/python" -c \
+  'from dashboard.superlite_events import parse_event; assert callable(parse_event)'
+PYTHONPATH="${APP_DIR}/src:${APP_DIR}" "${ENGINE_VENV}/bin/python" -c \
+  'from nifty_scalper_bot.superlite_admin import app; assert app is not None'
+
+sudo install -m 0644 "${ADMIN_SOURCE}" "${ADMIN_TARGET}"
+sudo install -m 0644 "${REVIEW_SOURCE}" "${REVIEW_TARGET}"
 sudo systemctl daemon-reload
-sudo systemctl enable --quiet niftybot-streamlit.service
-sudo systemctl restart niftybot-streamlit.service
+sudo systemctl enable --quiet niftybot-admin.service niftybot-streamlit.service
+sudo systemctl enable --quiet --now niftybot-autodeploy.timer
+sudo systemctl restart niftybot-admin.service niftybot-streamlit.service
 
-for _ in $(seq 1 20); do
-  if curl -fsS --max-time 2 http://127.0.0.1:8501/ >/dev/null 2>&1; then
-    echo "Streamlit console ready: http://15.206.3.6:8501"
-    exit 0
-  fi
+admin_ok=false
+review_ok=false
+for _ in $(seq 1 25); do
+  curl -fsS --max-time 2 http://127.0.0.1:8081/healthz >/dev/null 2>&1 && admin_ok=true
+  curl -fsS --max-time 2 http://127.0.0.1:8501/ >/dev/null 2>&1 && review_ok=true
+  [[ "$admin_ok" == true && "$review_ok" == true ]] && break
   sleep 1
 done
 
-sudo systemctl status niftybot-streamlit.service --no-pager -l || true
-exit 1
+if [[ "$admin_ok" != true || "$review_ok" != true ]]; then
+  sudo systemctl status niftybot-admin.service niftybot-streamlit.service --no-pager -l || true
+  exit 1
+fi
+
+echo "Admin controls ready: http://15.206.3.6:8081/admin"
+echo "Read-only review ready: http://15.206.3.6:8501"

@@ -1,0 +1,29 @@
+[Unit]
+Description=Nifty Bot Lightweight Admin Controls
+After=network-online.target niftybot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/nifty_scalper_bot
+EnvironmentFile=/home/ubuntu/.config/niftybot/niftybot.env
+Environment=BOT_API_URL=http://127.0.0.1:8080
+Environment=BOT_SERVICE_NAME=niftybot
+Environment=BOT_APP_DIR=/home/ubuntu/nifty_scalper_bot
+Environment=PYTHONPATH=/home/ubuntu/nifty_scalper_bot:/home/ubuntu/nifty_scalper_bot/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/nifty_scalper_bot/.venv/bin/python -m uvicorn nifty_scalper_bot.superlite_admin:app --host 0.0.0.0 --port 8081 --workers 1 --no-access-log
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+KillSignal=SIGINT
+PrivateTmp=true
+Nice=5
+CPUWeight=10
+MemoryHigh=100M
+MemoryMax=180M
+
+[Install]
+WantedBy=multi-user.target
