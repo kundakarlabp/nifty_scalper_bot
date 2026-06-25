@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # File purpose: Install or refresh the independent admin and read-only review controls.
-# Key responsibilities: Preserve external settings, validate imports, install the bounded service, and verify both ports.
-# Operational constraints: Never rewrite existing credentials; keep control requests fast and isolated from the trading loop.
-# Legacy marker: niftybot-dashboard-update is intentionally not installed; the validated timer remains authoritative.
+# Key responsibilities: Preserve external settings, validate imports, install bounded services, and verify both ports.
+# Operational constraints: Never rewrite existing credentials; keep control requests isolated from the trading loop.
 set -euo pipefail
 
 APP_DIR="${BOT_APP_DIR:-/home/ubuntu/nifty_scalper_bot}"
 VENV_DIR="${APP_DIR}/.streamlit-venv"
 ENGINE_VENV="${APP_DIR}/.venv"
-SERVICE_SOURCE="${APP_DIR}/deploy/systemd/niftybot-streamlit.service"
-SERVICE_TARGET="/etc/systemd/system/niftybot-streamlit.service"
+ADMIN_SOURCE="${APP_DIR}/deploy/systemd/niftybot-admin.service"
+ADMIN_TARGET="/etc/systemd/system/niftybot-admin.service"
+REVIEW_SOURCE="${APP_DIR}/deploy/systemd/niftybot-streamlit.service"
+REVIEW_TARGET="/etc/systemd/system/niftybot-streamlit.service"
 ENV_FILE="${BOT_ENV_FILE:-/home/ubuntu/.config/niftybot/niftybot.env}"
 
 ensure_default() {
@@ -27,6 +28,7 @@ ensure_default POST_MARKET_MARKET_DATA_SUMMARY_SECONDS 900
 ensure_default POST_MARKET_SUPPRESS_CANDLE_GAP_WARNINGS true
 ensure_default BOT_ADMIN_API_URL http://127.0.0.1:8081
 ensure_default BOT_ADMIN_PUBLIC_URL http://15.206.3.6:8081/admin
+ensure_default BOT_ADMIN_REVISION_CHECK_SECONDS 120
 
 if ! dpkg -s python3-venv >/dev/null 2>&1; then
   sudo apt-get update -qq
@@ -59,11 +61,12 @@ PYTHONPATH="${APP_DIR}:${APP_DIR}/src" "${VENV_DIR}/bin/python" -c \
 PYTHONPATH="${APP_DIR}/src:${APP_DIR}" "${ENGINE_VENV}/bin/python" -c \
   'from nifty_scalper_bot.superlite_admin import app; assert app is not None'
 
-sudo install -m 0644 "${SERVICE_SOURCE}" "${SERVICE_TARGET}"
+sudo install -m 0644 "${ADMIN_SOURCE}" "${ADMIN_TARGET}"
+sudo install -m 0644 "${REVIEW_SOURCE}" "${REVIEW_TARGET}"
 sudo systemctl daemon-reload
-sudo systemctl enable --quiet niftybot-streamlit.service
+sudo systemctl enable --quiet niftybot-admin.service niftybot-streamlit.service
 sudo systemctl enable --quiet --now niftybot-autodeploy.timer
-sudo systemctl restart niftybot-streamlit.service
+sudo systemctl restart niftybot-admin.service niftybot-streamlit.service
 
 admin_ok=false
 review_ok=false
@@ -75,7 +78,7 @@ for _ in $(seq 1 25); do
 done
 
 if [[ "$admin_ok" != true || "$review_ok" != true ]]; then
-  sudo systemctl status niftybot-streamlit.service --no-pager -l || true
+  sudo systemctl status niftybot-admin.service niftybot-streamlit.service --no-pager -l || true
   exit 1
 fi
 
