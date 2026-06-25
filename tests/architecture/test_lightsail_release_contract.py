@@ -1,0 +1,71 @@
+"""Architecture checks for the AWS Lightsail release and secret boundary."""
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _text(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_dotenv_is_not_tracked() -> None:
+    result = subprocess.run(
+        ["git", "ls-files", ".env"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == ""
+    assert ".env" in _text(".gitignore").splitlines()
+    assert (ROOT / ".env.example").is_file()
+
+
+def test_lightsail_uses_external_environment_file() -> None:
+    setup = _text("deploy/lightsail_setup.sh")
+    assert 'CONFIG_DIR="/home/ubuntu/.config/niftybot"' in setup
+    assert 'ENV_FILE="$CONFIG_DIR/niftybot.env"' in setup
+    assert "EnvironmentFile=$ENV_FILE" in setup
+    assert 'ln -sfn "$ENV_FILE" "$LEGACY_ENV"' in setup
+    assert "DEPLOYMENT_PLATFORM=aws_lightsail" in setup
+    assert "nifty_scalper_bot.main:app" in setup
+
+
+def test_release_runner_validates_and_rolls_back() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert 'flock -n 9' in release
+    assert "git worktree add" in release
+    assert "compileall" in release
+    assert "pytest" in release
+    assert '"bot_loaded"[[:space:]]*:[[:space:]]*true' in release
+    assert 'http://127.0.0.1:${PORT}/readyz' in release
+    assert 'git reset --hard --quiet "$BEFORE"' in release
+    assert 'sudo systemctl restart "$SERVICE"' in release
+
+
+def test_deploy_helpers_do_not_embed_credentials() -> None:
+    paths = (
+        "deploy/lightsail_setup.sh",
+        "deploy/lightsail_release.sh",
+        "deploy/scripts/update_and_deploy.sh",
+        "ops/redeploy.sh",
+    )
+    assignment = re.compile(
+        r"(?m)^(?:KITE|ZERODHA|BROKER)_(?:API_KEY|API_SECRET|ACCESS_TOKEN)=([^\s]*)$"
+    )
+    for path in paths:
+        text = _text(path)
+        for match in assignment.finditer(text):
+            assert match.group(1) == "", f"credential literal found in {path}"
+
+
+def test_legacy_redeploy_entrypoints_delegate_to_canonical_runner() -> None:
+    for path in ("deploy/scripts/update_and_deploy.sh", "ops/redeploy.sh"):
+        text = _text(path)
+        assert "deploy/lightsail_release.sh" in text
+        assert "git reset --hard origin/main" not in text
+        assert "docker build" not in text

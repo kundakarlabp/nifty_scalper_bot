@@ -1,82 +1,110 @@
-# Nifty Scalper Bot — Lightsail Setup (one time, then browser-only)
+# Nifty Scalper Bot — AWS Lightsail Operations
 
-You only use the terminal **once**. After this, you manage everything from a web
-dashboard in your browser — credentials, daily access token, logs, restart.
+AWS Lightsail is the production deployment authority for this bot. The trading
+engine runs as the `niftybot` systemd service on port `8080`.
 
-Your Lightsail static IP: **15.206.3.6** (this is what Zerodha must allowlist.)
+## Secret-storage boundary
 
----
+Production credentials are stored outside the Git checkout:
 
-## STEP 1 — Allowlist the IP on Zerodha (do this first, in your browser)
-
-1. Go to https://developers.kite.trade
-2. Open your app.
-3. In the **Allowed IPs** field, enter: `15.206.3.6`
-4. Save.
-
----
-
-## STEP 2 — Open the firewall for the dashboard (in Lightsail website)
-
-1. Lightsail → your instance **Ubuntu-2** → **Networking** tab.
-2. Under **IPv4 Firewall**, click **Add rule** and add BOTH:
-   - **HTTPS:** Custom / TCP / Port **443**  (secure dashboard — recommended)
-   - **Dashboard:** Custom / TCP / Port **8080**  (plain fallback)
-3. Save.
-
----
-
-## STEP 3 — One-time install (paste ONCE into the Lightsail terminal)
-
-Open the instance terminal ("Connect using SSH" button) and paste this whole block.
-It installs Python, downloads the bot, sets up the dashboard, adds HTTPS, and starts
-it as a background service that auto-restarts and survives reboots.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kundakarlabp/nifty_scalper_bot/main/deploy/lightsail_setup.sh | bash
+```text
+/home/ubuntu/.config/niftybot/niftybot.env
 ```
 
-When it finishes it prints your dashboard URL and admin password.
+The repository path `/home/ubuntu/nifty_scalper_bot/.env` is only a compatibility
+symlink to that external file. Git pulls, resets, validation worktrees, and code
+rollbacks therefore cannot overwrite broker or Telegram credentials.
 
----
+Never commit a populated `.env` file. `.env.example` is the only repository
+configuration template.
 
-## STEP 4 — Use the dashboard (browser, no terminal ever again)
+## One-time setup or migration
 
-Open the **secure** link the script printed: **https://15.206.3.6/admin**
-(A one-time browser warning appears because it is your own server's certificate —
-click **Advanced → Proceed**. Plain fallback: http://15.206.3.6:8080/admin)
+Run the setup script from the repository after preserving any existing local
+configuration:
 
-- Sign in with the admin password the script printed.
-- Enter your Zerodha API key, API secret, access token, Telegram details. Save.
-- Click **Restart Bot**.
+```bash
+cd /home/ubuntu/nifty_scalper_bot
+mkdir -p /home/ubuntu/.config/niftybot
 
-### Turning live trading ON/OFF (one click)
-At the top of the dashboard there is a **Live Trading** banner:
-- **OFF (SHADOW)** = analysing only, no real orders. You start here.
-- Click **Turn ON Live Trading** (it asks you to confirm) to place real orders.
-- Click **Switch to SHADOW** anytime to stop real trading instantly.
-The toggle sets both required settings together and restarts the bot for you.
+if [ -f .env ] && [ ! -L .env ]; then
+  cp -p .env /home/ubuntu/.config/niftybot/niftybot.env
+  chmod 600 /home/ubuntu/.config/niftybot/niftybot.env
+fi
 
-### Every morning (one step, in the browser)
-- Log in to Kite and copy the **request token** from the redirect URL
-  (the `request_token=...` part after you authorize).
-- Open the dashboard → **Daily Token** → paste it into **Request Token** →
-  **Update token & restart**. The bot fetches the access token automatically.
-  (If you already have an access token, paste that in the second box instead.)
+bash deploy/lightsail_setup.sh
+```
 
-### Automatic updates (no terminal ever)
-- Any change pushed to the GitHub repo is pulled to the server and the bot is
-  restarted **automatically within ~2 minutes** (a background timer does this).
-- You can also force it instantly: dashboard → **Update from GitHub**.
+The setup script:
 
-### Logs
-- The **Logs** page auto-refreshes (every 5s by default; selectable 3/5/10s or off).
-- Shows clean IST time + message only (host name, PID and UTC line removed).
-- Filter by text, choose line count, and Download as .txt/.json/.csv.
+- migrates the historic in-repository `.env` file;
+- installs the `niftybot` systemd unit;
+- points `EnvironmentFile` to the external configuration;
+- installs the validated release runner and two-minute update timer;
+- keeps the canonical runtime entrypoint
+  `nifty_scalper_bot.main:app`;
+- preserves the existing dashboard and Caddy reverse proxy.
 
----
+## Entering broker credentials
 
-## If something looks wrong
-- Dashboard won't open → re-check STEP 2 (port 8080 firewall rule).
-- Orders rejected with "No IPs configured" → re-check STEP 1 (IP `15.206.3.6` saved on Zerodha).
-- Need to re-run setup → it is safe to run STEP 3 again; it updates in place.
+Use the browser dashboard or edit the external environment file directly:
+
+```bash
+nano /home/ubuntu/.config/niftybot/niftybot.env
+```
+
+At minimum, the engine requires a non-empty broker API key and API secret. LIVE
+mode additionally requires a current access token and internally consistent flags:
+
+```text
+ENABLE_LIVE=true
+EXECUTION_MODE=LIVE
+```
+
+Start in SHADOW mode until `/livez` reports `bot_loaded: true`.
+
+## Deploying code
+
+Do not run `git reset --hard origin/main` or a plain `git pull` as the deployment
+procedure. Those commands do not install dependencies, restart the service, or
+verify that the engine loaded.
+
+Use the canonical release runner:
+
+```bash
+cd /home/ubuntu/nifty_scalper_bot
+bash deploy/lightsail_release.sh --force
+```
+
+The runner performs a locked, staged deployment:
+
+1. validates the external environment without printing secrets;
+2. fetches `origin/main`;
+3. creates a detached validation worktree;
+4. compiles production source and runs focused architecture/execution tests;
+5. installs the validated revision;
+6. restarts `niftybot`;
+7. requires `/livez` to report `bot_loaded: true`;
+8. additionally requires `/readyz` in LIVE mode;
+9. rolls code back if the new revision fails health validation.
+
+The automatic update timer runs the same release runner every two minutes.
+
+## Verification
+
+```bash
+sudo systemctl status niftybot --no-pager -l
+curl -i http://127.0.0.1:8080/livez
+curl -i http://127.0.0.1:8080/readyz
+sudo journalctl -u niftybot -n 200 --no-pager
+```
+
+Healthy engine loading requires:
+
+```json
+{"status":"alive","bot_loaded":true}
+```
+
+A `200` response from `/livez` with `bot_loaded:false` means only the web process
+is alive; the trading engine has not loaded. Treat that state as deployment
+failure, not success.
