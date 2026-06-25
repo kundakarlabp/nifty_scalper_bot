@@ -52,9 +52,9 @@ WORKDIR /app
 RUN mkdir -p /app/data \
     && chmod 777 /app/data
 
-# The release guard executes before the app binds this endpoint.
+# Local/container runtimes use the same default port as the ASGI command.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/releasez || exit 1
+    CMD curl -f http://localhost:${PORT:-8080}/releasez || exit 1
 
 RUN groupadd -r appuser && useradd -r -g appuser appuser \
     && chown -R appuser:appuser /app
