@@ -1,24 +1,33 @@
 # Nifty Scalper Bot — Canonical Trading Path
 
-## Authoritative live path
+## Authoritative production deployment
 
-1. **Release-verified startup**
-   - ASGI entry: `src/nifty_scalper_bot/deployment_main.py`
-   - Runtime composition: `src/nifty_scalper_bot/core/app.py`
-   - The embedded image SHA must match Railway's deployment SHA before the service binds its port.
-   - A low-frequency watchdog exits an instance after a confirmed newer GitHub `main` revision.
+1. **AWS Lightsail host**
+   - Production runs on one Ubuntu AWS Lightsail instance.
+   - Service owner: `niftybot.service` under `systemd`.
+   - Application directory: `/home/ubuntu/nifty_scalper_bot`.
+   - ASGI entrypoint: `nifty_scalper_bot.main:app` through Uvicorn.
+   - `deploy/lightsail_setup.sh` installs the service, HTTPS proxy, validated updater and automatic rollback.
+   - Railway configuration remains in the repository only as a compatibility artefact; it is not the production authority.
 
-2. **Market data and routing**
+2. **Validated release activation**
+   - `origin/main` is checked by the Lightsail systemd timer.
+   - A candidate revision is compiled and subjected to focused architecture and execution-path regression tests in an isolated git worktree.
+   - The active checkout is changed only after validation succeeds.
+   - The service must recover on `/livez`; otherwise the updater restores the previous commit and restarts it.
+   - Credentials and operator settings remain in the host-local `.env` and are never overwritten during deployment.
+
+3. **Market data and routing**
    - `data/market_data_manager.py`
    - `data/data_hub.py`
 
-3. **Signal generation**
+4. **Signal generation**
    - `strategies/runner.py`
    - `StrategyRunner` validates strategy state and creates an immutable `TradePlan`.
    - The runner submits only through `OrderManager.submit_trade_plan_result()`.
    - It must not call `place_order()` or any retired executor/processor directly.
 
-4. **Entry execution authority**
+5. **Entry execution authority**
    - Public facade: `execution/order_manager.py`
    - Core engine: `execution/order_manager_core.py`
    - Runtime owner: `execution/runtime_order_manager.py::RuntimeOrderManager`
@@ -31,7 +40,7 @@
      - actual fill quantity/VWAP hand-off to the bracket authority;
      - native unresolved-exit entry gate.
 
-5. **Bracket and exit authority**
+6. **Bracket and exit authority**
    - Public facade: `execution/bracket_manager.py`
    - Core engine: `execution/bracket_core.py`
    - Composition owner: `execution/ownership.py::BoundBracketManager`
@@ -45,15 +54,15 @@
      - fill-ledger persistence and exact scaled P&L;
      - release of the runner only after durable closure.
 
-6. **Adaptive trailing authority**
+7. **Adaptive trailing authority**
    - Public facade: `execution/adaptive_trailing.py`
    - Core controller: `execution/adaptive_trailing_core.py`
    - Runtime owner: `execution/hardened_adaptive_trailing.py::HardenedAdaptiveTrailingController`
    - The controller can tighten protection only; it cannot weaken an established stop.
 
-7. **Notifications and audit**
+8. **Notifications and audit**
    - `notifications/telegram_controller.py`
-   - journal, structured logs and the bracket fill ledger
+   - systemd journal, structured logs and the bracket fill ledger
    - Notifications consume persisted lifecycle transitions; they do not own state.
 
 ## Canonical BO state progression
@@ -78,45 +87,4 @@ At every ambiguous broker state, new entries remain blocked until orders, fills 
 
 ## Startup compatibility adapters
 
-Two historical constructor names remain because `core/app.py` and operator components still accept them:
-
-- `execution/safe_order_manager.py` delegates every order operation directly to the canonical `OrderManager`; it has no retry, throttle, regime, monitoring or order state machine.
-- `execution/lifecycle_manager.py` is a no-op shell; it does not subscribe to ticks, calculate targets, trail stops or submit exits.
-
-They are not BO authorities and architecture tests reject any reintroduction of independent execution logic.
-
-## Removed duplicate paths
-
-The following modules are deleted and forbidden from returning:
-
-- `order_manager_legacy.py`
-- `legacy_bracket_manager.py`
-- `adaptive_trailing_legacy.py`
-- `dynamic_tp.py`
-- `order_executor.py`
-- `order_processor.py`
-- `entry_price.py`
-- `order_execution_hub.py`
-- `execution_router.py`
-- `preflight_validator.py`
-
-## Deployment freshness invariants
-
-- The Docker image embeds `RAILWAY_GIT_COMMIT_SHA` in `/app/.build_commit_sha`.
-- Strict Railway startup fails when the embedded and runtime commit identities differ or are missing.
-- `/releasez` reports the effective revision and watchdog status.
-- Railway activates a deployment only after `/releasez` passes.
-- `overlapSeconds = 0` prevents simultaneous old and new trading instances.
-- A confirmed GitHub `main` mismatch exits with code 42; transient GitHub/network failures do not stop trading.
-- Railway restarts failed stale instances under the configured bounded retry policy.
-
-## Engineering invariants
-
-- One runner-facing entry API.
-- One entry state owner.
-- One bracket/exit state owner.
-- One adaptive trailing controller.
-- No import-time replacement of runtime classes or methods.
-- No runner re-arm before broker-flat confirmation and durable close accounting.
-- Protective exits remain executable while new entries are blocked.
-- A stale image cannot arm live trading.
+Compatibility adapters may preserve historical constructor or import shapes, but they must delegate to the canonical runtime owners above and must never create a second order, bracket, trailing or lifecycle authority.
