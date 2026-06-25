@@ -1,11 +1,11 @@
 """Fail-closed deployment freshness checks for the trading process.
 
 Railway exposes the source commit as ``RAILWAY_GIT_COMMIT_SHA`` during build and
-runtime.  The Docker image embeds that value.  Startup refuses to arm an image
-whose embedded commit differs from the deployment commit.  A low-frequency
-watchdog also compares the running commit with the configured GitHub branch and
-terminates the process after a confirmed mismatch, allowing the platform to
-restart or replace the stale instance.
+runtime. The Docker image embeds that value. Startup refuses to arm an image
+whose embedded commit differs from the deployment commit. A low-frequency
+daemon also compares the running commit with the configured GitHub branch and
+terminates the process after a confirmed mismatch, allowing Railway to replace
+or restart a stale instance.
 """
 
 from __future__ import annotations
@@ -16,18 +16,39 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
+import threading
+import time
 from typing import Any, Awaitable, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 LOGGER = logging.getLogger("nifty_scalper_bot.release_guard")
 _UNKNOWN = {"", "unknown", "none", "null", "unset", "not_set"}
+_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 def _truthy(value: object, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _safe_float(value: object, default: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return result if result > 0 else float(default)
+
+
+def _railway_runtime() -> bool:
+    return bool(
+        os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or os.getenv("RAILWAY_DEPLOYMENT_ID")
+    )
 
 
 def normalize_sha(value: object) -> str:
@@ -71,6 +92,13 @@ def _same_commit(left: str, right: str) -> bool:
     return left == right or left.startswith(right) or right.startswith(left)
 
 
+def _validated_repository(value: str) -> str:
+    repository = value.strip()
+    if not _REPOSITORY_RE.fullmatch(repository):
+        raise ValueError(f"Invalid GitHub repository identifier: {repository!r}")
+    return repository
+
+
 @dataclass(frozen=True, slots=True)
 class ReleaseSnapshot:
     build_sha: str
@@ -100,32 +128,22 @@ def build_release_snapshot(*, embedded_path: Path | None = None) -> ReleaseSnaps
         os.getenv("GIT_SHA"),
         os.getenv("RELEASE_ID"),
     )
-    railway_runtime = bool(
-        os.getenv("RAILWAY_PROJECT_ID")
-        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
-        or os.getenv("RAILWAY_DEPLOYMENT_ID")
-    )
-    strict = _truthy(
-        os.getenv("RELEASE_GUARD_STRICT"),
-        default=railway_runtime,
-    )
-    repository = (
+    strict = _truthy(os.getenv("RELEASE_GUARD_STRICT"), default=_railway_runtime())
+    repository = _validated_repository(
         os.getenv("RELEASE_GITHUB_REPOSITORY")
         or os.getenv("GITHUB_REPOSITORY")
         or "kundakarlabp/nifty_scalper_bot"
-    ).strip()
+    )
     branch = (
         os.getenv("RELEASE_WATCH_BRANCH")
         or os.getenv("RAILWAY_GIT_BRANCH")
         or "main"
     ).strip()
+    if not branch:
+        branch = "main"
     effective_sha = runtime_sha or build_sha
     fresh = bool(build_sha and runtime_sha and _same_commit(build_sha, runtime_sha))
-    if not runtime_sha and build_sha:
-        fresh = not strict
-    if runtime_sha and not build_sha:
-        fresh = not strict
-    if not runtime_sha and not build_sha:
+    if not build_sha or not runtime_sha:
         fresh = not strict
     return ReleaseSnapshot(
         build_sha=build_sha,
@@ -163,7 +181,9 @@ def fetch_remote_branch_sha(
     token: str | None = None,
     timeout: float = 5.0,
 ) -> str:
-    url = f"https://api.github.com/repos/{repository}/commits/{branch}"
+    repository = _validated_repository(repository)
+    encoded_branch = quote(branch, safe="")
+    url = f"https://api.github.com/repos/{repository}/commits/{encoded_branch}"
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "nifty-scalper-release-watchdog",
@@ -198,15 +218,63 @@ def remote_release_is_fresh(
         return None
     if fetcher is None:
         token = os.getenv("GITHUB_RELEASE_WATCH_TOKEN")
-        fetcher = lambda repository, branch: fetch_remote_branch_sha(  # noqa: E731
-            repository,
-            branch,
-            token=token,
-        )
+
+        def fetcher(repository: str, branch: str) -> str:
+            return fetch_remote_branch_sha(repository, branch, token=token)
+
     remote_sha = fetcher(snapshot.repository, snapshot.branch)
     if not remote_sha:
         return None
     return _same_commit(snapshot.effective_sha, remote_sha)
+
+
+def _watch_enabled() -> bool:
+    return _truthy(os.getenv("RELEASE_WATCH_ENABLED"), default=_railway_runtime())
+
+
+def start_release_watchdog_thread(
+    snapshot: ReleaseSnapshot,
+    *,
+    exit_process: Callable[[int], Any] = os._exit,
+    fetcher: Callable[[str, str], str] | None = None,
+    sleep: Callable[[float], Any] = time.sleep,
+) -> threading.Thread | None:
+    """Start one daemon that exits only after a confirmed remote SHA mismatch."""
+
+    if not _watch_enabled() or not snapshot.effective_sha:
+        return None
+    interval = max(
+        60.0,
+        _safe_float(os.getenv("RELEASE_WATCH_INTERVAL_SEC"), 120.0),
+    )
+    initial_delay = max(
+        5.0,
+        _safe_float(os.getenv("RELEASE_WATCH_INITIAL_DELAY_SEC"), 30.0),
+    )
+
+    def run() -> None:
+        sleep(initial_delay)
+        while True:
+            fresh = remote_release_is_fresh(snapshot, fetcher=fetcher)
+            if fresh is False:
+                LOGGER.critical(
+                    "STALE_DEPLOYMENT_DETECTED deployed_sha=%s repository=%s branch=%s exiting=42",
+                    snapshot.effective_sha[:12],
+                    snapshot.repository,
+                    snapshot.branch,
+                    extra={"event": "STALE_DEPLOYMENT_DETECTED", **snapshot.as_dict()},
+                )
+                exit_process(42)
+                return
+            sleep(interval)
+
+    thread = threading.Thread(
+        target=run,
+        name="release-freshness-watchdog",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 async def release_watchdog(
@@ -214,19 +282,23 @@ async def release_watchdog(
     *,
     exit_process: Callable[[int], Any] = os._exit,
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+    fetcher: Callable[[str, str], str] | None = None,
 ) -> None:
-    railway_runtime = bool(os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_ENVIRONMENT_NAME"))
-    enabled = _truthy(
-        os.getenv("RELEASE_WATCH_ENABLED"),
-        default=railway_runtime,
-    )
-    if not enabled or not snapshot.effective_sha:
+    """Async equivalent used by deterministic tests and non-threaded runtimes."""
+
+    if not _watch_enabled() or not snapshot.effective_sha:
         return
-    interval = max(60.0, float(os.getenv("RELEASE_WATCH_INTERVAL_SEC", "120") or 120.0))
-    initial_delay = max(5.0, float(os.getenv("RELEASE_WATCH_INITIAL_DELAY_SEC", "30") or 30.0))
+    interval = max(
+        60.0,
+        _safe_float(os.getenv("RELEASE_WATCH_INTERVAL_SEC"), 120.0),
+    )
+    initial_delay = max(
+        5.0,
+        _safe_float(os.getenv("RELEASE_WATCH_INITIAL_DELAY_SEC"), 30.0),
+    )
     await sleep(initial_delay)
     while True:
-        fresh = remote_release_is_fresh(snapshot)
+        fresh = remote_release_is_fresh(snapshot, fetcher=fetcher)
         if fresh is False:
             LOGGER.critical(
                 "STALE_DEPLOYMENT_DETECTED deployed_sha=%s repository=%s branch=%s exiting=42",
@@ -248,4 +320,5 @@ __all__ = [
     "normalize_sha",
     "release_watchdog",
     "remote_release_is_fresh",
+    "start_release_watchdog_thread",
 ]
