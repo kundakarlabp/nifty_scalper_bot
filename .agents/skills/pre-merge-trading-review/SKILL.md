@@ -38,12 +38,12 @@ Check:
 - selected CE/PE symbols and tokens are consistent with expiry and strike
 - subscriptions cover the executable option basket
 - FULL quote/depth metadata is preserved
-- polling fallback is labelled and cannot masquerade as full WebSocket data
+- polling fallback is labeled and cannot masquerade as full WebSocket data
 - missing ticks, OHLC, depth, or token resolution fail visibly
 
 ## 4. Strategy and backtest validity
 
-For strategy or optimisation changes, examine:
+For strategy or optimization changes, examine:
 
 - look-ahead bias
 - future-bar leakage
