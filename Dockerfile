@@ -1,3 +1,7 @@
+# File purpose: Build the production image for the release-verified trading service.
+# Key responsibilities: Install dependencies, embed the Railway commit SHA, run health checks, and start the verified ASGI entrypoint.
+# Operational constraints: Preserve the embedded revision and do not bypass deployment_main.py or /releasez.
+
 # Multi-stage build for optimized production image
 FROM python:3.11-slim as builder
 
