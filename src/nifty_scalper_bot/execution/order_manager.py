@@ -1,8 +1,13 @@
-"""Stable public order API with one explicit runtime manager.
+"""File purpose:
+    Provide the stable public order-execution API used by the strategy runner.
 
-The complete order engine lives in ``order_manager_core``. Public models, enums
-and helpers remain available from this module, while ``OrderManager`` resolves
-directly to ``RuntimeOrderManager``.
+Key responsibilities:
+    - Re-export public order models and helpers from ``order_manager_core``.
+    - Expose ``RuntimeOrderManager`` as the single production ``OrderManager``.
+
+Operational constraints:
+    - This facade must not add a second execution path or duplicate order state.
+    - Runtime recovery and entry gating remain owned by ``RuntimeOrderManager``.
 """
 
 from __future__ import annotations
