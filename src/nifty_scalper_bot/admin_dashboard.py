@@ -8,7 +8,8 @@ Password-protected. Provides, over HTTP:
   - auto-refreshing, cleaned log viewer (IST only, no PID/host noise) + downloads
   - one-click "Update from GitHub" (git pull + restart) and plain restart
 
-Security: every route requires ADMIN_PASSWORD. Serve behind the firewall.
+Security: no password — access is restricted by the host firewall / security group
+(IP allowlist). Serve behind the firewall.
 """
 from __future__ import annotations
 
@@ -17,16 +18,13 @@ import html
 import json
 import os
 import re
-import secrets
 import subprocess
-import threading
 import time
-from collections import deque
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
 
 router = APIRouter()
@@ -44,32 +42,6 @@ FIELDS: list[tuple[str, str, bool]] = [
     ("Telegram Chat ID", "TELEGRAM_CHAT_ID", False),
     ("Telegram Allowed ID", "TELEGRAM_ALLOWED_ID", False),
 ]
-
-_SESSIONS: dict[str, float] = {}  # token -> expiry epoch; bounded + expiring
-_SESSION_TTL = 86400.0
-_SESSION_MAX = 50
-
-
-def _session_valid(token: str) -> bool:
-    exp = _SESSIONS.get(token)
-    if exp is None:
-        return False
-    if time.time() > exp:
-        _SESSIONS.pop(token, None)
-        return False
-    return True
-
-
-def _session_add(token: str) -> None:
-    now = time.time()
-    # Drop expired, then cap size (oldest first) so this can't grow unbounded.
-    for t in [t for t, e in _SESSIONS.items() if e < now]:
-        _SESSIONS.pop(t, None)
-    if len(_SESSIONS) >= _SESSION_MAX:
-        for t in sorted(_SESSIONS, key=_SESSIONS.get)[: len(_SESSIONS) - _SESSION_MAX + 1]:
-            _SESSIONS.pop(t, None)
-    _SESSIONS[token] = now + _SESSION_TTL
-
 
 # ---------------- env helpers ----------------
 
@@ -118,12 +90,13 @@ def _write_env(updates: dict[str, str]) -> None:
 
 
 def _check_auth(request: Request) -> None:
-    if not _session_valid(request.cookies.get("admin_session", "")):
-        raise HTTPException(status_code=303, headers={"Location": "/admin/login"})
+    # Password protection removed — the admin dashboard is now open (serve it behind
+    # the host firewall / security group, which already restricts access by IP).
+    return None
 
 
 def _admin_password() -> str:
-    return (os.getenv("ADMIN_PASSWORD", "").strip() or _read_env().get("ADMIN_PASSWORD", "").strip())
+    return ""
 
 
 # ---------------- kite token exchange ----------------
@@ -180,63 +153,16 @@ def _tail_file(path: Path, lines: int, *, max_bytes: int = 2_000_000) -> str:
     return "\n".join(chunk.decode("utf-8", errors="replace").splitlines()[-lines:])
 
 
-# ── Super-lite logs: one background journalctl --follow streams into an
-# in-memory ring buffer; request handlers read from memory only. No per-request
-# subprocess, no disk storage — so a slow journal can never block the shared
-# threadpool or starve the trading engine.
-_RING_MAX = max(500, int(os.getenv("ADMIN_LOG_RING_LINES", "6000") or "6000"))
-_LOG_RING: "deque[str]" = deque(maxlen=_RING_MAX)
-_LOG_FOLLOWER_STARTED = False
-_LOG_FOLLOWER_LOCK = threading.Lock()
-
-
-def _log_follower_loop() -> None:
-    """Stream the service journal into the in-memory ring for the process life."""
-    while True:
-        try:
-            proc = subprocess.Popen(
-                [
-                    "journalctl", "-u", SERVICE_NAME,
-                    "-n", str(_RING_MAX), "-f", "--no-pager", "-o", "cat",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-            )
-            if proc.stdout is not None:
-                for line in proc.stdout:
-                    _LOG_RING.append(line.rstrip("\n"))
-        except Exception:
-            pass
-        # journalctl unavailable/exited: backfill from the log file if present,
-        # then wait briefly and re-attach.
-        try:
-            if LOG_PATH.exists():
-                for line in _tail_file(LOG_PATH, _RING_MAX).splitlines():
-                    _LOG_RING.append(line)
-        except Exception:
-            pass
-        time.sleep(2.0)
-
-
-def _ensure_log_follower() -> None:
-    global _LOG_FOLLOWER_STARTED
-    if _LOG_FOLLOWER_STARTED:
-        return
-    with _LOG_FOLLOWER_LOCK:
-        if _LOG_FOLLOWER_STARTED:
-            return
-        threading.Thread(
-            target=_log_follower_loop, name="admin-log-follower", daemon=True
-        ).start()
-        _LOG_FOLLOWER_STARTED = True
+# Super-lite logs: NO background follower thread and NO in-memory ring. Logs are
+# read on-demand only (download-on-click / occasional status), via a single short
+# journalctl call. Nothing streams or polls in the background, so the admin process
+# stays idle and cannot add load during market hours.
 
 
 def _gather_logs_window(
     lines: int, since: str, until: str, contains: str, clean: bool
 ) -> str:
-    """One-off journalctl for explicit time-window downloads (never polled)."""
+    """One-off journalctl read (used for downloads and occasional status)."""
     text = ""
     try:
         cmd = ["journalctl", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager", "-o", "cat"]
@@ -265,23 +191,8 @@ def _gather_logs_window(
 
 def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "", clean: bool = True) -> str:
     lines = max(50, min(int(lines or 400), 20000))
-    # Explicit time-window queries are manual download-only (never polled), so a
-    # one-off subprocess there is fine. Everything else — the polling Logs page,
-    # status, trades — is served straight from the in-memory ring with no
-    # subprocess and no disk access, so the request path never blocks.
-    if since or until:
-        return _gather_logs_window(lines, since, until, contains, clean)
-    _ensure_log_follower()
-    rows = list(_LOG_RING)
-    if clean:
-        rows = [c for c in (_clean_log_line(r) for r in rows) if c]
-    if contains:
-        n = contains.lower()
-        rows = [r for r in rows if n in r.lower()]
-    rows = rows[-lines:]
-    if not rows:
-        return "Waiting for logs…"
-    return "\n".join(rows)
+    # Single one-off subprocess; no background thread, no ring buffer.
+    return _gather_logs_window(lines, since, until, contains, clean)
 
 
 def _restart_service() -> None:
@@ -363,30 +274,7 @@ def _topbar(live_on: bool) -> str:
     pill = '<span class="pill on">● LIVE</span>' if live_on else '<span class="pill off">● SHADOW</span>'
     return (f'<div class=top><h1>⚡ Nifty Scalper Bot</h1>{pill}<span class=sp></span>'
             f'<a class="btn gray" href="/admin">Dashboard</a>'
-            f'<a class="btn blu" href="/admin/logs">Logs</a></div>')
-
-
-@router.get("/admin/login", response_class=HTMLResponse)
-def login_page(e: str = "") -> HTMLResponse:
-    err = '<div class="flash err">Wrong password</div>' if e else ""
-    body = f"""<div class=wrap style="max-width:380px;margin-top:12vh">
-    <div class=card><h2>Sign in</h2><p>Enter the admin password.</p>{err}
-    <form method=post action="/admin/login">
-    <input type=password name=password autofocus placeholder="Password">
-    <button type=submit style="width:100%">Sign in</button></form></div></div>"""
-    return HTMLResponse(_page(body))
-
-
-@router.post("/admin/login")
-def login(password: str = Form(...)) -> RedirectResponse:
-    expected = _admin_password()
-    if not expected or not secrets.compare_digest(password, expected):
-        return RedirectResponse("/admin/login?e=1", status_code=303)
-    token = secrets.token_urlsafe(32)
-    _session_add(token)
-    resp = RedirectResponse("/admin", status_code=303)
-    resp.set_cookie("admin_session", token, httponly=True, max_age=86400, samesite="lax")
-    return resp
+            f'<a class="btn blu" href="/admin/logs/download">Download Logs</a></div>')
 
 
 def _flash(request: Request) -> str:
@@ -522,66 +410,6 @@ def update_from_github(request: Request) -> RedirectResponse:
     return RedirectResponse(f"/admin?upd=err&msg={urllib.parse.quote(log[:120])}", status_code=303)
 
 
-@router.get("/admin/logs", response_class=HTMLResponse)
-def logs_page(request: Request, lines: int = 400, contains: str = "") -> HTMLResponse:
-    _check_auth(request)
-    qs = urllib.parse.urlencode({"lines": lines, "contains": contains})
-    body = f"""{_topbar(False)}<div class="wrap wide">
-    <div class=card><h2>Logs <span class=muted id=stamp></span> <span id=botstat class=badge style="margin-left:8px">checking…</span> <span id=cnt class=badge></span></h2>
-    <div class=grid>
-      <div><label>Lines</label><input id=lines value="{lines}"></div>
-      <div><label>Filter contains</label><input id=contains value="{html.escape(contains)}" placeholder="e.g. ORDER_SENT"></div>
-      <div><label>Auto-refresh</label>
-        <select id=auto style="width:100%;padding:11px;border-radius:9px;background:#0a1019;color:var(--fg);border:1px solid var(--bd)">
-          <option value=3>Every 3s</option><option value=5 selected>Every 5s</option>
-          <option value=10>Every 10s</option><option value=0>Off</option></select></div>
-      <button class=blu onclick="load()">Apply</button>
-    </div>
-    <div class=row style="margin-top:10px">
-      <button class=gray onclick="toggleScroll()" id=scrollbtn>Auto-scroll: ON</button>
-      <button class=gray onclick="box.scrollTop=box.scrollHeight">Jump to latest ↓</button>
-      <a class="btn gray" href="/admin/logs/download?fmt=txt&{qs}">Download .txt</a>
-      <a class="btn gray" href="/admin/logs/download?fmt=json&{qs}">Download .json</a>
-      <a class="btn gray" href="/admin/logs/download?fmt=csv&{qs}">Download .csv</a>
-    </div>
-    <pre id=box>Loading…</pre></div></div>
-    <script>
-    const box=document.getElementById('box'),stamp=document.getElementById('stamp'),
-          botstat=document.getElementById('botstat'),cnt=document.getElementById('cnt');
-    let timer=null, autoscroll=true;
-    function toggleScroll(){{autoscroll=!autoscroll;
-      document.getElementById('scrollbtn').textContent='Auto-scroll: '+(autoscroll?'ON':'OFF');}}
-    function colorize(t){{return t.split('\\n').map(function(l){{
-      var c=l.indexOf('❌')>=0||l.indexOf('Failure')>=0||l.indexOf('ERROR')>=0?'lg-err':
-            (l.indexOf('⚠')>=0||l.indexOf('WARN')>=0?'lg-warn':'lg-ok');
-      return '<span class="'+c+'">'+l.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span>';
-    }}).join('\\n');}}
-    async function status(){{
-      try{{const r=await fetch('/admin/status.json');const j=await r.json();
-        botstat.textContent=j.label; botstat.style.background=j.color+'22';
-        botstat.style.color=j.color; botstat.style.border='1px solid '+j.color+'66';
-      }}catch(e){{botstat.textContent='status?';}}
-    }}
-    async function load(){{
-      const ln=document.getElementById('lines').value, ct=document.getElementById('contains').value;
-      try{{const r=await fetch('/admin/logs.json?lines='+ln+'&contains='+encodeURIComponent(ct));
-        const j=await r.json(); const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
-        box.innerHTML=colorize(j.text);
-        cnt.textContent=(j.text.split('\\n').length)+' lines';
-        if(autoscroll&&atBottom)box.scrollTop=box.scrollHeight;
-        stamp.textContent='· updated '+new Date().toLocaleTimeString();
-      }}catch(e){{stamp.textContent='· refresh error';}}
-      status(); schedule();
-    }}
-    function schedule(){{if(timer)clearTimeout(timer);
-      const s=parseInt(document.getElementById('auto').value||'0',10);
-      if(s>0)timer=setTimeout(load,s*1000);}}
-    document.getElementById('auto').onchange=schedule;
-    load();
-    </script>"""
-    return HTMLResponse(_page(body))
-
-
 _STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3fb950"}
 
 
@@ -610,13 +438,6 @@ def status_json(request: Request) -> JSONResponse:
         label, color = "unknown", "#8b97a6"
     _STATUS_CACHE.update({"at": now, "label": label, "color": color})
     return JSONResponse({"label": label, "color": color})
-
-
-@router.get("/admin/logs.json")
-def logs_json(request: Request, lines: int = 400, contains: str = "") -> JSONResponse:
-    _check_auth(request)
-    text = _gather_logs(lines, contains=contains, clean=True)
-    return JSONResponse({"text": text})
 
 
 # Trade-relevant event markers — entry, fill, exit, P&L, rejections.

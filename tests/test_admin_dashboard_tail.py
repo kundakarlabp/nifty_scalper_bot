@@ -62,7 +62,7 @@ async def test_read_env_is_cached(tmp_path, monkeypatch) -> None:
     import nifty_scalper_bot.admin_dashboard as dash
 
     envf = tmp_path / ".env"
-    envf.write_text("ADMIN_PASSWORD=secret\n")
+    envf.write_text("KITE_API_KEY=secret\n")
     monkeypatch.setattr(dash, "ENV_PATH", envf)
     dash._ENV_CACHE.update({"at": 0.0, "data": {}})
 
@@ -73,24 +73,16 @@ async def test_read_env_is_cached(tmp_path, monkeypatch) -> None:
         return orig_read_text(self, *a, **k)
     monkeypatch.setattr(type(envf), "read_text", _counting_read_text)
 
-    assert dash._read_env()["ADMIN_PASSWORD"] == "secret"
+    assert dash._read_env()["KITE_API_KEY"] == "secret"
     dash._read_env(); dash._read_env()
     assert reads["n"] == 1, "env should be read from disk once, then cached"
 
 
-async def test_sessions_are_bounded_and_expire(monkeypatch) -> None:
-    # Session store must not grow unbounded (was a plain set that only ever grew).
+async def test_no_session_machinery_remains() -> None:
+    # Password / sessions were removed; the helpers must be gone.
     import nifty_scalper_bot.admin_dashboard as dash
-    dash._SESSIONS.clear()
-    for i in range(dash._SESSION_MAX + 20):
-        dash._session_add(f"tok{i}")
-    assert len(dash._SESSIONS) <= dash._SESSION_MAX
-
-    # expired token is rejected
-    dash._SESSIONS.clear()
-    dash._SESSIONS["old"] = 1.0  # far in the past
-    assert dash._session_valid("old") is False
-    assert "old" not in dash._SESSIONS  # cleaned on check
+    assert not hasattr(dash, "_session_add")
+    assert not hasattr(dash, "_SESSIONS")
 
 
 async def test_trades_json_filters_trade_events(tmp_path, monkeypatch) -> None:
@@ -121,37 +113,27 @@ async def test_app_uses_normalize_symbol_not_datahub_normalize() -> None:
     assert normalize_symbol("nfo:nifty2662324100ce") == "NFO:NIFTY2662324100CE"
 
 
-async def test_gather_logs_reads_ring_not_subprocess(monkeypatch) -> None:
-    # The Logs page / status / trades all call _gather_logs on a poll. It must
-    # read the in-memory ring with NO subprocess on the request path (the old
-    # per-call journalctl saturated the threadpool and hung the dashboard). Only
-    # an explicit since/until download does a one-off journalctl.
+async def test_gather_logs_uses_oneoff_subprocess(monkeypatch) -> None:
+    # Super-lite: no background follower, no ring. _gather_logs does a single
+    # one-off journalctl read on demand (download-on-click). No background thread
+    # runs during market hours, so the admin process can't add load.
     import nifty_scalper_bot.admin_dashboard as dash
 
-    monkeypatch.setattr(dash, "_LOG_FOLLOWER_STARTED", True, raising=False)
-    dash._LOG_RING.clear()
-    dash._LOG_RING.append("[2026-06-18 14:00:00 IST] ORDER_SENT x")
-
-    calls = {"n": 0}
+    assert not hasattr(dash, "_LOG_RING")
+    assert not hasattr(dash, "_log_follower_loop")
 
     class _O:
         returncode = 0
         stdout = "[2026-06-18 14:00:00 IST] ORDER_SENT x\n"
+
+    calls = {"n": 0}
 
     def _run(*a, **k):
         calls["n"] += 1
         return _O()
 
     monkeypatch.setattr(dash.subprocess, "run", _run)
-
-    a = dash._gather_logs(400)
-    b = dash._gather_logs(400)
-    c = dash._gather_logs(400)
-    assert calls["n"] == 0, "polled path must read the ring, never spawn journalctl"
-    assert a == b == c
-    assert "ORDER_SENT x" in a
-
-    # An explicit time-window download bypasses the ring and does a one-off call.
-    dash._gather_logs(400, since="2026-06-18")
+    out = dash._gather_logs(400)
     assert calls["n"] == 1
-    dash._LOG_RING.clear()
+    assert "ORDER_SENT x" in out
+
