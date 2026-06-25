@@ -20,31 +20,40 @@ jobs:
           cache: pip
       - name: Install project and test dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
       - name: Compile production source
         run: python -m compileall -q src
-      - name: Focused canonical BO and release regression tests
+      - name: Architecture and deployment freshness
         run: |
           python -m pytest -q \
             tests/architecture/test_canonical_bo_ownership.py \
-            tests/integration/test_canonical_bo_end_to_end.py \
+            tests/core/test_release_guard.py \
+            tests/test_deployment_release_guard.py \
+            tests/test_execution_path_contract.py
+      - name: Runtime facade ownership
+        run: |
+          python -m pytest -q \
             tests/execution/test_runtime_order_facade.py \
             tests/execution/test_runtime_bracket_facade.py \
             tests/execution/test_adaptive_trailing_facade.py \
+            tests/test_safe_order_manager.py
+      - name: Entry recovery and fill accounting
+        run: |
+          python -m pytest -q \
+            tests/integration/test_canonical_bo_end_to_end.py \
             tests/execution/test_canonical_entry_recovery.py \
             tests/execution/test_fill_ledger.py \
             tests/execution/test_ledger_bracket_runtime.py \
             tests/execution/test_canonical_bracket_fill_integrity.py \
+            tests/execution/test_order_manager_trade_plan.py
+      - name: Bracket and protective exit safety
+        run: |
+          python -m pytest -q \
             tests/execution/test_live_exit_hardening.py \
             tests/execution/test_bracket_exit_state_machine.py \
             tests/execution/test_virtual_bracket_safety.py \
             tests/execution/test_bracket_manager_reliability.py \
-            tests/execution/test_bracket_open_position_priority_and_protective_exit.py \
-            tests/execution/test_order_manager_trade_plan.py \
-            tests/core/test_release_guard.py \
-            tests/test_deployment_release_guard.py \
-            tests/test_safe_order_manager.py \
-            tests/test_execution_path_contract.py
+            tests/execution/test_bracket_open_position_priority_and_protective_exit.py
       - name: Full test suite
         run: python -m pytest -q
