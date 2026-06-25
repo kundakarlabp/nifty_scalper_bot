@@ -62,6 +62,14 @@ jobs:
         run: python -m pytest -q -x --tb=short tests/architecture tests/integration
       - name: Complete core suite
         run: python tools/pytest_compact.py tests/core
+      - name: Upload core-suite diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-suite-diagnostic
+          path: pytest-compact.log
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Complete data suite
         run: python -m pytest -q -x --tb=short tests/data
       - name: Complete strategy suite
