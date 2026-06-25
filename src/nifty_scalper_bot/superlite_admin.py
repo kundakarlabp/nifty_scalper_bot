@@ -5,8 +5,6 @@ import os
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -14,9 +12,10 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from nifty_scalper_bot import admin_dashboard as dashboard
 from nifty_scalper_bot.superlite_admin_core import (
     APP_DIR,
-    ENGINE_URL,
+    ENGINE_SERVICE,
     bounded_logs,
     read_env,
+    restart,
     same_origin,
     status_snapshot,
     write_env,
@@ -71,19 +70,6 @@ def _validated_update() -> tuple[bool, str]:
     return True, "remote revision refreshed; validated updater runs within two minutes"
 
 
-def _restart_engine() -> None:
-    request = urllib.request.Request(
-        ENGINE_URL + "/admin/restart",
-        data=b"",
-        method="POST",
-    )
-    try:
-        urllib.request.urlopen(request, timeout=0.8).close()
-    except (OSError, urllib.error.URLError):
-        # The connection commonly closes while systemd restarts the engine.
-        pass
-
-
 def _flash(request: Request) -> str:
     if request.query_params.get("upd") == "ok":
         return (
@@ -111,7 +97,7 @@ dashboard._read_env = read_env
 dashboard._write_env = write_env
 dashboard._git_update = _validated_update
 dashboard._gather_logs = _logs
-dashboard._restart_service = _restart_engine
+dashboard._restart_service = lambda: restart(ENGINE_SERVICE)
 dashboard._flash = _flash
 dashboard._CSS = STYLE
 dashboard.FIELDS = [(label, key, True) for label, key, _secret in dashboard.FIELDS]
