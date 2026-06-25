@@ -84,6 +84,7 @@ class EventRing:
         self.restarts = 0
         self.last_error: str | None = None
         self._terminal_seen: set[tuple[str, str]] = set()
+        self._terminal_order: deque[tuple[str, str]] = deque()
         threading.Thread(target=self._run, daemon=True, name="journal-event-tail").start()
 
     def _run(self) -> None:
@@ -104,7 +105,11 @@ class EventRing:
                             if key is not None and key in self._terminal_seen:
                                 continue
                             if key is not None:
+                                if len(self._terminal_order) >= self.capacity:
+                                    expired = self._terminal_order.popleft()
+                                    self._terminal_seen.discard(expired)
                                 self._terminal_seen.add(key)
+                                self._terminal_order.append(key)
                             if not self.rows or self.rows[-1] != event:
                                 self.rows.append(event)
                                 self.last_event = time.time()
