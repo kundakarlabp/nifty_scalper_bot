@@ -17,6 +17,7 @@ def _ind(bias, tick, buy, sell, **kw):
         "data_age_seconds": 0.1, "context_age_seconds": 1.0, "tick_age_ms": 100,
         "quote_depth_valid": True, "tradable_quote": True,
         "is_selected_option": True, "strike_distance_from_atm": 0,
+        "quote_update_version": 1,
     }
     d.update(kw)
     return d
@@ -48,20 +49,30 @@ def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat, caplog):
     assert rec.bias_invalidated_by_microstructure is False
 
 
-# B. Stale PE bias + CE candidate WITH confirming microstructure -> allowed
-def test_stale_pe_strong_micro_ce_allowed(monkeypatch, strat):
+# B. One strong snapshot cannot invalidate directional context
+def test_stale_pe_single_strong_micro_ce_blocked(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=400, sell=80))
-    assert sig.metadata["trigger_conditions_met"] is True
-    assert sig.metadata["bias_invalidated_by_microstructure"] is True
+    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
+    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=400, sell=80, quote_update_version=1))
+    assert sig.metadata["trigger_conditions_met"] is False
+    assert sig.metadata["bias_invalidated_by_microstructure"] is False
 
 
-# C. Reversal down: stale CE bias + PE candidate with confirming PE demand -> allowed
-def test_stale_ce_strong_micro_pe_allowed(monkeypatch, strat):
+# C. Reversal becomes eligible only after distinct persistent updates
+def test_stale_ce_strong_micro_pe_requires_persistence(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(strat, "NFO:NIFTY26MAY24000PE", _ind("CE", "UP", buy=400, sell=80))
-    assert sig.metadata["trigger_conditions_met"] is True
-    assert sig.metadata["bias_invalidated_by_microstructure"] is True
+    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
+    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
+    results = [
+        _eval(strat, "NFO:NIFTY26MAY24000PE", _ind("CE", "UP", buy=400, sell=80, quote_update_version=version))
+        for version in (1, 2, 3)
+    ]
+    assert results[0].metadata["trigger_conditions_met"] is False
+    assert results[1].metadata["trigger_conditions_met"] is False
+    assert results[2].metadata["trigger_conditions_met"] is True
+    assert results[2].metadata["bias_invalidated_by_microstructure"] is True
+    assert results[2].metadata["reversal_persistence_confirmed"] is True
 
 
 # D. Tick contradicts candidate side -> not invalidated -> blocked

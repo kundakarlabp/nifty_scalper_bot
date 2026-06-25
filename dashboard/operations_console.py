@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import requests
 import streamlit as st
 
-from event_buffer import EventRing, parse_event
+from event_buffer import EventRing, deduplicate_events, parse_event
 
 st.set_page_config(
     page_title="Nifty Scalper Terminal",
@@ -139,10 +139,13 @@ def get_json(path: str) -> dict[str, Any] | None:
     # the event feed (journald) is independent and always live.
     try:
         response = http_session().get(API + path, timeout=1.2)
-        response.raise_for_status()
         value = response.json()
-        return value if isinstance(value, dict) else None
-    except Exception:
+        if not isinstance(value, dict):
+            return None
+        value = dict(value)
+        value['_http_status'] = response.status_code
+        return value
+    except (requests.RequestException, ValueError):
         return None
 
 
@@ -266,11 +269,12 @@ def read_history(
         return [], str(exc)
     if result.returncode:
         return [], result.stderr.strip() or "journal query failed"
-    return [
+    rows = [
         event
         for line in result.stdout.splitlines()
         if (event := parse_event(line))
-    ], None
+    ]
+    return deduplicate_events(rows), None
 
 
 def csv_bytes(rows: list[dict[str, str]]) -> bytes:
@@ -341,9 +345,12 @@ def render_status_rail() -> None:
     engine_loaded = bool((livez or {}).get("bot_loaded"))
     execution_ready = bool((trading or {}).get("ready"))
     orders_armed = bool((trading or {}).get("live_orders_armed"))
-    broker_ready = bool(broker.get("ready"))
-    auth_invalid = bool(broker.get("auth_invalid"))
-    reconciled = bool(recon.get("completed"))
+    trading_available = trading is not None
+    broker_available = trading_available and bool(broker)
+    recon_available = trading_available and bool(recon)
+    broker_ready = bool(broker.get("ready")) if broker_available else None
+    auth_invalid = bool(broker.get("auth_invalid")) if broker_available else None
+    reconciled = bool(recon.get("completed")) if recon_available else None
 
     system_html = (
         '<div class="status-card"><div class="card-title">Execution state</div>'
@@ -357,10 +364,10 @@ def render_status_rail() -> None:
     broker_html = (
         '<div class="status-card"><div class="card-title">Broker & account</div>'
         '<div class="state-grid">'
-        + state_item("Broker", "READY" if broker_ready else "NOT READY", "good" if broker_ready else "bad-text")
-        + state_item("Balance", short_value(broker.get("balance")))
-        + state_item("Reconciled", "YES" if reconciled else "NO", "good" if reconciled else "warn-text")
-        + state_item("Authentication", "INVALID" if auth_invalid else "OK", "bad-text" if auth_invalid else "good")
+        + state_item("Broker", "UNKNOWN" if broker_ready is None else ("READY" if broker_ready else "NOT READY"), "warn-text" if broker_ready is None else ("good" if broker_ready else "bad-text"))
+        + state_item("Balance", short_value(broker.get("balance")) if broker_available else "UNKNOWN")
+        + state_item("Reconciled", "UNKNOWN" if reconciled is None else ("YES" if reconciled else "NO"), "warn-text" if reconciled is None else ("good" if reconciled else "warn-text"))
+        + state_item("Authentication", "UNKNOWN" if auth_invalid is None else ("INVALID" if auth_invalid else "OK"), "warn-text" if auth_invalid is None else ("bad-text" if auth_invalid else "good"))
         + "</div></div>"
     )
     if blockers:
@@ -400,6 +407,7 @@ def render_status_rail() -> None:
     state = updater_state()
     deploy_html = (
         '<div class="status-card"><div class="card-title">Deployment</div>'
+        f'<div class="deploy-row"><span class="deploy-key">Platform</span><span class="deploy-value">{html.escape(os.getenv("DEPLOYMENT_PLATFORM", "aws_lightsail"))}</span></div>'
         f'<div class="deploy-row"><span class="deploy-key">Running</span><span class="deploy-value">{html.escape(git_commit("HEAD"))}</span></div>'
         f'<div class="deploy-row"><span class="deploy-key">Remote main</span><span class="deploy-value">{html.escape(git_commit("origin/main"))}</span></div>'
         f'<div class="deploy-row"><span class="deploy-key">Updater</span><span class="deploy-value">{html.escape(str(state.get("state", "not configured")))}</span></div>'
@@ -561,7 +569,7 @@ def render_live_feed() -> None:
     st.markdown(
         '<div class="feed-foot">'
         f'<span>Follower: {"connected" if stats["connected"] else "reconnecting"}</span>'
-        f'<span>Buffer: {stats["size"]:,} / 3,000</span>'
+        f'<span>Buffer: {stats["size"]:,} / {int(stats.get("capacity") or 3000):,}</span>'
         f'<span>Updated: {datetime.now(IST):%I:%M:%S %p IST}</span>'
         "</div>",
         unsafe_allow_html=True,

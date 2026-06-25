@@ -260,3 +260,24 @@ def test_entry_blocked_on_high_iv(dependencies: tuple[Any, ...]) -> None:
     )
     assert placed is False
     assert len(order_manager.placed) == 0
+
+def test_live_mode_disables_noncanonical_premium_decay_entry(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    order_manager = _StubOrderManager()
+    strategy = PremiumDecayStrategy(
+        order_manager=order_manager,
+        risk_manager=_StubRiskManager(),
+        orchestrator=_StubOrchestrator(),
+        position_manager=_StubPositionManager(),
+    )
+    option_chain = [
+        _make_contract("NFO:NIFTY26JUN24000CE", "CE", 24000, 0.25),
+        _make_contract("NFO:NIFTY26JUN24000PE", "PE", 24000, -0.25),
+    ]
+    assert strategy.evaluate_entry(
+        underlying="NIFTY",
+        indicators={"atr": 10.0, "adx": 10.0},
+        option_chain=option_chain,
+        iv=0.20,
+    ) is False
+    assert order_manager.placed == []

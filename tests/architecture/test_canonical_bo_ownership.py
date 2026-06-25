@@ -162,3 +162,15 @@ def test_startup_compatibility_adapters_do_not_own_execution_logic() -> None:
     assert "_evaluate_tick" not in lifecycle_methods
     assert "_monitor_loop" not in lifecycle_methods
     assert "_execute_exit" not in lifecycle_methods
+
+def test_live_capable_strategies_do_not_bypass_trade_plan_execution() -> None:
+    offenders: list[str] = []
+    strategies_root = SRC / "strategies"
+    for path in strategies_root.rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        if ".place_order(" not in source:
+            continue
+        if path.name == "premium_decay.py" and "LIVE_CAPABLE = False" in source:
+            continue
+        offenders.append(str(path.relative_to(ROOT)))
+    assert not offenders, f"Live-capable strategy bypasses canonical TradePlan path: {offenders}"
