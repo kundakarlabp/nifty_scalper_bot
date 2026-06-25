@@ -56,30 +56,5 @@ jobs:
             tests/execution/test_virtual_bracket_safety.py \
             tests/execution/test_bracket_manager_reliability.py \
             tests/execution/test_bracket_open_position_priority_and_protective_exit.py
-      - name: Complete execution suite
-        run: python -m pytest -q -x --tb=short tests/execution
-      - name: Complete architecture and integration suite
-        run: python -m pytest -q -x --tb=short tests/architecture tests/integration
-      - name: Complete core suite
-        run: python tools/pytest_compact.py tests/core
-      - name: Upload core-suite diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: core-suite-diagnostic
-          path: pytest-compact.log
-          if-no-files-found: ignore
-          retention-days: 1
-      - name: Complete data suite
-        run: python -m pytest -q -x --tb=short tests/data
-      - name: Complete strategy suite
-        run: python -m pytest -q -x --tb=short tests/strategies
-      - name: Complete remaining top-level and component suite
-        run: >-
-          python -m pytest -q -x --tb=short tests
-          --ignore=tests/execution
-          --ignore=tests/architecture
-          --ignore=tests/integration
-          --ignore=tests/core
-          --ignore=tests/data
-          --ignore=tests/strategies
+      - name: Full test suite
+        run: python -m pytest -q
