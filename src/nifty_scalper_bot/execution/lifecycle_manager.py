@@ -1,9 +1,13 @@
-"""Retired compatibility shell for the former standalone lifecycle manager.
+"""File purpose:
+    Preserve the retired lifecycle-manager interface required by startup context.
 
-The canonical :class:`BracketManager` owns TP1/TP2, stop-loss, trailing,
-confirmed-fill accounting and closure.  This class remains only because the
-startup context still exposes the historical field; it never subscribes to
-market data or mutates a position.
+Key responsibilities:
+    - Provide no-op startup, shutdown and update methods for compatibility.
+    - Log ignored legacy fill callbacks so accidental use remains visible.
+
+Operational constraints:
+    - This module must not subscribe to ticks, mutate positions or submit exits.
+    - ``BracketManager`` remains the sole TP, SL, trailing and closure authority.
 """
 
 from __future__ import annotations
