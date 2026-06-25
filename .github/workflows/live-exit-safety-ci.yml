@@ -26,6 +26,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
       - name: Compile production and dashboard source
         run: python -m compileall -q src dashboard
       - name: Validate Lightsail deployment scripts
@@ -33,11 +34,12 @@ jobs:
           bash -n deploy/lightsail_setup.sh
           bash -n deploy/lightsail_release.sh
           bash -n deploy/scripts/install_streamlit_console.sh
-      - name: Dashboard export and event tests
+      - name: Dashboard export, event and render tests
         run: |
           python -m pytest -q \
             tests/dashboard/test_event_buffer_truth.py \
-            tests/dashboard/test_log_export.py
+            tests/dashboard/test_log_export.py \
+            tests/dashboard/test_console_smoke.py
       - name: File header standard
         run: python -m pytest -q tests/architecture/test_file_header_standard.py
       - name: Canonical BO ownership architecture
