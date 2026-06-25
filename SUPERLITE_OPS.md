@@ -8,4 +8,4 @@ bash deploy/lightsail_release.sh --force
 bash deploy/scripts/install_streamlit_console.sh
 ```
 
-The admin controls then run on port 8081 and the read-only review console on port 8501. Existing settings are preserved unless a field is explicitly replaced. The existing auto-deployment timer continues updating the main branch and restarts the combined control service.
+The admin controls then run on port 8081 and the read-only review console on port 8501. Existing settings are preserved unless a field is explicitly replaced. The validated auto-deployment timer continues updating the main branch; Streamlit is restarted by the release runner and the lightweight admin process reloads itself when the deployed revision changes.
