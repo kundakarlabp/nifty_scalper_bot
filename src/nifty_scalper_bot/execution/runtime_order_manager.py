@@ -2,11 +2,104 @@
 
 from __future__ import annotations
 
+from typing import Any, Callable
+
 from nifty_scalper_bot.execution import order_manager_legacy as _legacy
+from nifty_scalper_bot.execution.entry_recovery import (
+    _finalize_partial_entry,
+    _recover_submit,
+)
+from nifty_scalper_bot.execution.native_entry_gate import (
+    NO_BLOCK,
+    block_result,
+    configure_provider,
+)
 
 
 class RuntimeOrderManager(_legacy.OrderManager):
-    """Production order manager assembled through normal inheritance."""
+    """Production order manager with native recovery and entry gating."""
+
+    def set_trade_plan_rebuilder(
+        self,
+        callback: Callable[..., Any] | None,
+    ) -> None:
+        self._trade_plan_rebuilder = callback
+
+    def set_unresolved_exit_provider(self, provider: Any | None) -> None:
+        configure_provider(self, provider)
+
+    def _blocked(
+        self,
+        method_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        return block_result(
+            self,
+            _legacy,
+            _legacy.OrderManager.place_order,
+            method_name,
+            args,
+            kwargs,
+        )
+
+    def submit_trade_plan_result(self, plan: Any) -> Any:
+        blocked = self._blocked("submit_trade_plan_result", (plan,), {})
+        if blocked is not NO_BLOCK:
+            return blocked
+        return _recover_submit(
+            _legacy.OrderManager.submit_trade_plan_result,
+            self,
+            plan,
+        )
+
+    def submit_trade_plan(self, *args: Any, **kwargs: Any) -> Any:
+        blocked = self._blocked("submit_trade_plan", args, kwargs)
+        if blocked is not NO_BLOCK:
+            return blocked
+        return super().submit_trade_plan(*args, **kwargs)
+
+    def place_managed_order_result(self, *args: Any, **kwargs: Any) -> Any:
+        blocked = self._blocked("place_managed_order_result", args, kwargs)
+        if blocked is not NO_BLOCK:
+            return blocked
+        return super().place_managed_order_result(*args, **kwargs)
+
+    def place_managed_order(self, *args: Any, **kwargs: Any) -> Any:
+        blocked = self._blocked("place_managed_order", args, kwargs)
+        if blocked is not NO_BLOCK:
+            return blocked
+        return super().place_managed_order(*args, **kwargs)
+
+    def place_order(self, *args: Any, **kwargs: Any) -> Any:
+        blocked = self._blocked("place_order", args, kwargs)
+        if blocked is not NO_BLOCK:
+            return blocked
+        return super().place_order(*args, **kwargs)
+
+    def _update_from_response(
+        self,
+        order: Any,
+        payload: dict[str, Any],
+    ) -> Any:
+        updated = super()._update_from_response(order, payload)
+        try:
+            _finalize_partial_entry(self, updated, payload)
+        except Exception as exc:
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "error", None)
+            if callable(log):
+                log(
+                    "ENTRY_PARTIAL_FILL_RECONCILE_FAILED order_id=%s error=%s",
+                    getattr(order, "order_id", ""),
+                    exc,
+                    extra={
+                        "event": "ENTRY_PARTIAL_FILL_RECONCILE_FAILED",
+                        "order_id": getattr(order, "order_id", ""),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+        return updated
 
 
 __all__ = ["RuntimeOrderManager"]
