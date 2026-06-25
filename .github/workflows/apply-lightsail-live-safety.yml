@@ -7,6 +7,12 @@ on:
     paths:
       - scripts/apply_lightsail_live_safety.py
       - .github/workflows/apply-lightsail-live-safety.yml
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
   workflow_dispatch:
 
 permissions:
