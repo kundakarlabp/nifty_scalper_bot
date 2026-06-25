@@ -1,6 +1,10 @@
 """Independent low-overhead host for the existing Nifty admin controls."""
 from __future__ import annotations
 
+import os
+import subprocess
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -9,6 +13,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from nifty_scalper_bot import admin_dashboard as dashboard
 from nifty_scalper_bot.superlite_admin_core import (
+    APP_DIR,
     ENGINE_URL,
     bounded_logs,
     read_env,
@@ -19,6 +24,36 @@ from nifty_scalper_bot.superlite_admin_core import (
 from nifty_scalper_bot.superlite_admin_style import STYLE
 
 _ORIGINAL_FLASH = dashboard._flash
+
+
+def _revision() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(APP_DIR), "rev-parse", "HEAD"],
+            text=True,
+            timeout=1.5,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+_INITIAL_REVISION = _revision()
+
+
+def _watch_revision() -> None:
+    try:
+        interval = max(60, int(os.getenv("BOT_ADMIN_REVISION_CHECK_SECONDS", "120")))
+    except ValueError:
+        interval = 120
+    while True:
+        time.sleep(interval)
+        current = _revision()
+        if _INITIAL_REVISION and current and current != _INITIAL_REVISION:
+            os._exit(0)
+
+
+threading.Thread(target=_watch_revision, daemon=True, name="admin-revision-watch").start()
 
 
 def _guard(request: Request) -> None:
