@@ -24,13 +24,14 @@ jobs:
           python -m pip install -e '.[dev]' -q
       - name: Compile production source
         run: python -m compileall -q src
-      - name: Architecture and deployment freshness
-        run: |
-          python -m pytest -q \
-            tests/architecture/test_canonical_bo_ownership.py \
-            tests/core/test_release_guard.py \
-            tests/test_deployment_release_guard.py \
-            tests/test_execution_path_contract.py
+      - name: Canonical BO ownership architecture
+        run: python -m pytest -q tests/architecture/test_canonical_bo_ownership.py
+      - name: Release guard unit tests
+        run: python -m pytest -q tests/core/test_release_guard.py
+      - name: Deployment release wiring
+        run: python -m pytest -q tests/test_deployment_release_guard.py
+      - name: Execution path contract
+        run: python -m pytest -q tests/test_execution_path_contract.py
       - name: Runtime facade ownership
         run: |
           python -m pytest -q \
