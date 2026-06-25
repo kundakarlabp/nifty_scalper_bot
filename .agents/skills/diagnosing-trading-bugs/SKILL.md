@@ -36,7 +36,7 @@ The loop is acceptable only when it is:
 
 Do not start theorizing from code inspection alone when a red-capable loop can be built.
 
-## 2. Reproduce and minimise
+## 2. Reproduce and minimize
 
 Run the loop and confirm the same failure the user reported. Then remove inputs, modules, configuration, and steps one at a time until every remaining element is necessary.
 
@@ -93,7 +93,7 @@ Then:
 1. Observe the test fail.
 2. Apply the smallest architecture-consistent correction.
 3. Observe the test pass.
-4. Re-run the original unminimised reproduction.
+4. Re-run the original unminimized reproduction.
 5. Run the relevant focused suite and the repository-required validation commands.
 
 Do not create a parallel selector, hidden fallback, side-channel execution path, or broad exception suppression.
