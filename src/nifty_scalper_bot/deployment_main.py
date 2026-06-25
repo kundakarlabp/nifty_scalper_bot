@@ -1,9 +1,13 @@
-"""Release-verified ASGI entrypoint.
+"""File purpose:
+    Start the ASGI trading application only after verifying the deployed release.
 
-The release identity is verified before importing the trading application. This
-prevents a cached or mismatched image from binding the service port and arming
-orders. A daemon then stops an instance when GitHub ``main`` is confirmed to be
-newer than the running commit.
+Key responsibilities:
+    - Enforce embedded-versus-runtime commit identity before importing the app.
+    - Start the stale-release watchdog and expose the ``/releasez`` endpoint.
+
+Operational constraints:
+    - Trading code must not be imported before release verification succeeds.
+    - A stale or mismatched image must never bind the service port or arm orders.
 """
 
 from __future__ import annotations
