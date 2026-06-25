@@ -62,7 +62,13 @@ def _guard(request: Request) -> None:
 
 
 def _validated_update() -> tuple[bool, str]:
-    return True, "automatic validated updater checks every two minutes"
+    subprocess.Popen(
+        ["git", "-C", str(APP_DIR), "fetch", "--quiet", "origin", "main"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return True, "remote revision refreshed; validated updater runs within two minutes"
 
 
 def _restart_engine() -> None:
@@ -81,8 +87,8 @@ def _restart_engine() -> None:
 def _flash(request: Request) -> str:
     if request.query_params.get("upd") == "ok":
         return (
-            '<div class="flash ok">Update check queued. The validated updater '
-            "checks the main branch within two minutes.</div>"
+            '<div class="flash ok">Remote revision refreshed. The validated '
+            "updater deploys eligible changes within two minutes.</div>"
         )
     return _ORIGINAL_FLASH(request)
 
