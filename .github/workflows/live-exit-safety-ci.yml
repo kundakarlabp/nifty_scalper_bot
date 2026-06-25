@@ -56,5 +56,13 @@ jobs:
             tests/execution/test_virtual_bracket_safety.py \
             tests/execution/test_bracket_manager_reliability.py \
             tests/execution/test_bracket_open_position_priority_and_protective_exit.py
-      - name: Full test suite
-        run: python -m pytest -q -x --tb=short
+      - name: Complete execution suite
+        run: python -m pytest -q -x --tb=short tests/execution
+      - name: Complete architecture and integration suite
+        run: python -m pytest -q -x --tb=short tests/architecture tests/integration
+      - name: Complete remaining repository suite
+        run: >-
+          python -m pytest -q -x --tb=short tests
+          --ignore=tests/execution
+          --ignore=tests/architecture
+          --ignore=tests/integration
