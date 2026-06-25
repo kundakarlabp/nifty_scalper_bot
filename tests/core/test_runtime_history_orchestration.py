@@ -70,8 +70,8 @@ async def test_selected_option_priority_and_target() -> None:
 
 
 @pytest.mark.asyncio
-async def test_context_option_closed_market_suppresses_broker(monkeypatch) -> None:
-    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "CLOSED")
+async def test_context_option_post_market_suppresses_broker(monkeypatch) -> None:
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "POST_MARKET")
     mdm = MDM(); runner = Runner()
     result = await app.ensure_symbol_runtime_history(ctx(mdm, runner), "NFO:CTXCE", role="option_context", phase="dynamic_update", reason="t")
     assert result.failure_reason == "broker_fetch_not_allowed"
