@@ -1,3 +1,7 @@
+# File purpose: Configure Railway build, health-gated activation, draining, and restart behaviour.
+# Key responsibilities: Build from Dockerfile, activate only after /releasez passes, and prevent overlapping trading instances.
+# Operational constraints: overlapSeconds must remain zero and the healthcheck must continue to use the release-verified endpoint.
+
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"

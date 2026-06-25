@@ -1,10 +1,13 @@
-"""Compatibility adapter for the canonical :class:`OrderManager`.
+"""File purpose:
+    Preserve the historical ``SafeOrderManager`` constructor shape for startup code.
 
-Historically this module implemented a second order path with its own throttling,
-retry, monitoring and regime logic.  The canonical runtime now owns those
-concerns.  ``SafeOrderManager`` remains only because startup and operator
-components still accept that constructor shape; every execution operation is
-delegated to the single runtime ``OrderManager`` instance.
+Key responsibilities:
+    - Delegate monitoring, counters, skip reasons and order placement to ``OrderManager``.
+    - Keep operator-facing compatibility without owning execution state.
+
+Operational constraints:
+    - This adapter must not retry, throttle, reprice or submit an order independently.
+    - The canonical ``OrderManager`` remains the only execution authority.
 """
 
 from __future__ import annotations

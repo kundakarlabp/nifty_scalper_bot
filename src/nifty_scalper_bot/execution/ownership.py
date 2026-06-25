@@ -1,4 +1,14 @@
-"""Explicit execution ownership bindings."""
+"""File purpose:
+    Bind the canonical bracket authority to the canonical order-entry gate.
+
+Key responsibilities:
+    - Register the active bracket manager as the unresolved-exit provider.
+    - Preserve a compatibility fallback for noncanonical external test doubles.
+
+Operational constraints:
+    - Production wiring must use the native provider contract, not method replacement.
+    - Protective exits must remain executable while new entries are blocked.
+"""
 
 from __future__ import annotations
 
