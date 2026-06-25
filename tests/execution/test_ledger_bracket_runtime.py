@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from nifty_scalper_bot.execution.bracket_manager import BracketExitLifecycle
+from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
+
+
+SYMBOL = "NFO:NIFTY2662324050PE"
+
+
+class _Broker:
+    def __init__(self) -> None:
+        self.statuses: dict[str, dict[str, Any]] = {}
+        self.positions: list[dict[str, Any]] = [{"symbol": SYMBOL, "quantity": 65}]
+
+    def get_order_status(self, order_id: str) -> dict[str, Any]:
+        return dict(self.statuses.get(order_id, {"status": ""}))
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        return list(self.positions)
+
+    def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> bool:
+        payload = dict(self.statuses.get(order_id, {}))
+        payload["status"] = "CANCELLED"
+        self.statuses[order_id] = payload
+        return True
+
+
+class _OrderManager:
+    def __init__(self, broker: _Broker) -> None:
+        self._broker = broker
+        self._last_order_decision: dict[str, Any] = {}
+        self.place_calls: list[dict[str, Any]] = []
+
+    def place_order(self, **kwargs: Any) -> str:
+        self.place_calls.append(dict(kwargs))
+        order_id = f"exit-{len(self.place_calls)}"
+        self._broker.statuses[order_id] = {"status": "OPEN"}
+        return order_id
+
+    def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> bool:
+        return self._broker.cancel_order(order_id, *args, **kwargs)
+
+    def set_last_skip_reason(self, _reason: str) -> None:
+        return None
+
+
+def _manager(monkeypatch, tmp_path) -> tuple[LedgerBracketManager, _OrderManager, _Broker]:
+    monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "lifecycle.db"))
+    broker = _Broker()
+    order_manager = _OrderManager(broker)
+    manager = LedgerBracketManager(order_manager=order_manager)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager._filled_position_sync_grace_seconds = 0.0
+    manager._exit_reconcile_interval_seconds = 0.0
+    manager.register_virtual_bracket(
+        order_id="entry-1",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+        tp1_price=110.0,
+        tp1_qty=25,
+        activate_immediately=False,
+    )
+    return manager, order_manager, broker
+
+
+def _mark_filled_exit(
+    manager: LedgerBracketManager,
+    broker: _Broker,
+    *,
+    order_id: str,
+    reason: str,
+    price: float,
+    residual: int,
+) -> Any:
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_pending = True
+    bracket.exit_reason = reason
+    bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+    bracket.entry_status = bracket.exit_state
+    bracket.exit_order_id = order_id
+    bracket.pending_exit_order_id = order_id
+    bracket.exit_triggered_at = time.time()
+    broker.statuses[order_id] = {"status": "COMPLETE", "average_price": price}
+    broker.positions = [] if residual == 0 else [{"symbol": SYMBOL, "quantity": residual}]
+    return bracket
+
+
+def test_scaled_fills_persist_and_close_uses_exact_weighted_pnl(monkeypatch, tmp_path) -> None:
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    manager.confirm_entry_fill("entry-1", 100.0)
+
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="tp1-order",
+        reason="TP1 Hit (110.00)",
+        price=110.0,
+        residual=40,
+    )
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.remaining_quantity == 40
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+
+    ordering: list[str] = []
+    manager.save_state = lambda: ordering.append("save")  # type: ignore[method-assign]
+    manager.attach_on_exit_complete(lambda _symbol: ordering.append("hook"))
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="final-order",
+        reason="HARD_SL_BREACH",
+        price=95.0,
+        residual=0,
+    )
+    assert manager._reconcile_exit_state(bracket, requested_by="final") is True
+
+    assert manager._fill_ledger is not None
+    fills = manager._fill_ledger.load_fills(bracket.bracket_id)
+    assert [(fill.kind, fill.quantity, fill.price) for fill in fills] == [
+        ("ENTRY", 65, 100.0),
+        ("EXIT", 25, 110.0),
+        ("EXIT", 40, 95.0),
+    ]
+    pnl = manager._fill_ledger.realized_pnl(bracket.bracket_id)
+    assert pnl.gross_pnl == 50.0
+    assert pnl.complete is True
+    assert ordering == ["save", "hook"]
+    assert bracket.ledger_realized_pnl["gross_pnl"] == 50.0
+    assert manager.has_unresolved_exit() is False
+
+
+def test_duplicate_entry_callback_is_idempotent(monkeypatch, tmp_path) -> None:
+    manager, _order_manager, _broker = _manager(monkeypatch, tmp_path)
+    manager.confirm_entry_fill("entry-1", 100.0)
+    manager.confirm_entry_fill("entry-1", 100.0)
+    assert manager._fill_ledger is not None
+    fills = manager._fill_ledger.load_fills("entry-1")
+    assert len(fills) == 1
+    assert fills[0].fill_id == "ENTRY:entry-1"
+
+
+def test_partial_exit_persistence_failure_keeps_residual_protected_and_blocks_entries(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    manager.confirm_entry_fill("entry-1", 100.0)
+
+    class _FailingLedger:
+        def record_fill(self, _leg: Any) -> bool:
+            raise OSError("disk unavailable")
+
+    manager._fill_ledger = _FailingLedger()  # type: ignore[assignment]
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="tp1-failed-ledger",
+        reason="TP1 Hit (110.00)",
+        price=110.0,
+        residual=40,
+    )
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1-failure") is False
+    assert bracket.remaining_quantity == 40
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.sl_trigger_price == bracket.entry_price
+    assert manager.has_unresolved_exit() is True
+    assert bracket.bracket_id in manager._ledger_blocked
+
+
+def test_final_close_does_not_release_runner_when_ledger_is_incomplete(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    released: list[str] = []
+    manager.attach_on_exit_complete(released.append)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.entry_confirmed = True
+    bracket.active = True
+    bracket.entry_status = "ACTIVE"
+
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="final-without-entry-ledger",
+        reason="HARD_SL_BREACH",
+        price=95.0,
+        residual=0,
+    )
+    assert manager._reconcile_exit_state(bracket, requested_by="missing-entry") is True
+    assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
+    assert released == []
+    assert manager.has_unresolved_exit() is True
+
+
+def test_release_block_survives_manager_restart(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "restart.db"
+    monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(path))
+    broker = _Broker()
+    first = LedgerBracketManager(order_manager=_OrderManager(broker))
+    first._running = False
+    first._watchdog_thread.join(timeout=1.0)
+    first.register_virtual_bracket(
+        order_id="entry-restart",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+        activate_immediately=True,
+    )
+    bracket = first.get_bracket("entry-restart")
+    assert bracket is not None
+    first._block_ledger_release(bracket, reason="test_restart", payload={})
+
+    second = LedgerBracketManager(order_manager=_OrderManager(broker))
+    second._running = False
+    second._watchdog_thread.join(timeout=1.0)
+    assert bracket.bracket_id in second._ledger_blocked
+    assert second.has_unresolved_exit() is True
