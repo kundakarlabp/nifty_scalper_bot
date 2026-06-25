@@ -1,4 +1,14 @@
-"""Stable adaptive trailing API with one hardened runtime controller."""
+"""File purpose:
+    Provide the stable public API for adaptive stop-loss trailing.
+
+Key responsibilities:
+    - Re-export trailing models and helpers from ``adaptive_trailing_core``.
+    - Expose ``HardenedAdaptiveTrailingController`` as the production controller.
+
+Operational constraints:
+    - The public controller may tighten protection but must not weaken an active stop.
+    - This facade must not create a second trailing authority.
+"""
 
 from __future__ import annotations
 
