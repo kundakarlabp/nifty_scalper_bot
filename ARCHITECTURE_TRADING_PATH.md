@@ -22,6 +22,7 @@
    - Public facade: `execution/order_manager.py`
    - Core engine: `execution/order_manager_core.py`
    - Runtime owner: `execution/runtime_order_manager.py::RuntimeOrderManager`
+   - Internal policy helper: `execution/options_policy.py`
    - Responsibilities:
      - preflight, spread, margin and risk validation;
      - broker submission and acknowledgement reconciliation;
@@ -94,7 +95,6 @@ The following modules are deleted and forbidden from returning:
 - `dynamic_tp.py`
 - `order_executor.py`
 - `order_processor.py`
-- `options_policy.py`
 - `entry_price.py`
 - `order_execution_hub.py`
 - `execution_router.py`
