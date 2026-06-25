@@ -60,6 +60,10 @@ class OrderFlowStrategy(EliteStrategy):
             safe_float_env("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", 500.0),
         )
         elapsed_ms = max(0.0, now - float(state.get("started") or now)) * 1000.0
+        max_window_ms = max(min_persistence_ms, safe_float_env("ORDERFLOW_REVERSAL_MAX_WINDOW_MS", 3000.0))
+        if elapsed_ms > max_window_ms:
+            state.update({"count": 1, "started": now, "version": version})
+            return False
         return int(state.get("count") or 0) >= min_updates and elapsed_ms >= min_persistence_ms
 
     def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
@@ -272,7 +276,7 @@ class OrderFlowStrategy(EliteStrategy):
                         symbol=symbol,
                         side=side,
                         update_version=quote_update_version,
-                        fingerprint=(tick_age_ms, round(bid, 4), round(ask, 4), round(total_bid, 2), round(total_ask, 2)),
+                        fingerprint=(round(bid, 4), round(ask, 4), round(total_bid, 2), round(total_ask, 2), tick_direction),
                     )
                 )
             else:
@@ -442,6 +446,11 @@ class OrderFlowStrategy(EliteStrategy):
                 'negative_premium_flow_mode': 'hard' if clear_adverse_flow else 'soft',
                 'tick_age_ms': tick_age_ms,
                 'quote_update_version': quote_update_version,
+                 'quote_readiness_allowed': quote_readiness.allowed,
+                 'quote_readiness_reason': quote_readiness.reason,
+                 'real_ticks_last_60s': quote_readiness.real_ticks_last_60s,
+                 'real_tick_count_derived': quote_readiness.real_tick_count_derived,
+                 'reversal_persistence_confirmed': reversal_persistence_confirmed,
                 'selected_or_near_atm': selected_or_near_atm,
                 'bias_invalidated_by_microstructure': bias_invalidated_by_microstructure,
                 'microstructure_confirms_side': microstructure_confirms_side,
