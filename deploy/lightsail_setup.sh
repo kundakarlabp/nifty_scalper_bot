@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # File purpose: Provision and update the production AWS Lightsail host.
-# Key responsibilities: Install the service, migrate secrets outside Git, configure validated releases, and keep one systemd-owned process.
+# Key responsibilities: Install the trading service, read-only console, external secrets, and validated auto-deployer.
 # Operational constraints: Never store credentials in the repository; never restart onto an unvalidated revision; AWS Lightsail is the production authority.
 set -euo pipefail
 
@@ -10,19 +10,15 @@ CONFIG_DIR="/home/ubuntu/.config/niftybot"
 ENV_FILE="$CONFIG_DIR/niftybot.env"
 LEGACY_ENV="$APP_DIR/.env"
 SERVICE="niftybot"
+STREAMLIT_SERVICE="niftybot-streamlit"
 PORT="8080"
-STATUS_FILE="$APP_DIR/data/auto_update_status.json"
+STREAMLIT_PORT="8501"
 
-log() {
-  printf '[lightsail-setup] %s\n' "$*"
-}
+log() { printf '[lightsail-setup] %s\n' "$*"; }
 
 ensure_env_default() {
-  local key="$1"
-  local value="$2"
-  if ! grep -qE "^${key}=" "$ENV_FILE"; then
-    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
-  fi
+  local key="$1" value="$2"
+  if ! grep -qE "^${key}=" "$ENV_FILE"; then printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"; fi
 }
 
 log "Installing system packages"
@@ -82,14 +78,12 @@ ensure_env_default DEPLOYMENT_PLATFORM aws_lightsail
 ensure_env_default ALLOW_DEBUG_ENV false
 ensure_env_default PORT "$PORT"
 
-# Compatibility path for tools that still look for APP_DIR/.env. The target is
-# outside Git, so reset/pull operations cannot overwrite credentials.
 if [ -e "$LEGACY_ENV" ] && [ ! -L "$LEGACY_ENV" ]; then
   mv "$LEGACY_ENV" "$CONFIG_DIR/legacy.env.$(date +%Y%m%d_%H%M%S)"
 fi
 ln -sfn "$ENV_FILE" "$LEGACY_ENV"
 
-log "Creating Python environment"
+log "Creating trading-engine Python environment"
 cd "$APP_DIR"
 python3 -m venv .venv
 . .venv/bin/activate
@@ -97,7 +91,7 @@ python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -e .
 python -m pip install --quiet pytest python-multipart uvicorn fastapi
 
-log "Installing systemd service"
+log "Installing trading-engine systemd service"
 sudo tee /etc/systemd/system/${SERVICE}.service >/dev/null <<EOF_UNIT
 [Unit]
 Description=Nifty Scalper Bot
@@ -125,8 +119,8 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF_UNIT
 
-# Dashboard and release script may restart only the trading service.
-echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}, /bin/systemctl restart --no-block ${SERVICE}, /usr/bin/systemctl restart --no-block ${SERVICE}" | \
+# The deployment runner and browser dashboard may restart only these two services.
+echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}, /bin/systemctl restart --no-block ${SERVICE}, /usr/bin/systemctl restart --no-block ${SERVICE}, /bin/systemctl restart ${STREAMLIT_SERVICE}, /usr/bin/systemctl restart ${STREAMLIT_SERVICE}" | \
   sudo tee /etc/sudoers.d/niftybot >/dev/null
 sudo chmod 440 /etc/sudoers.d/niftybot
 
@@ -134,7 +128,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --quiet ${SERVICE}
 
 log "Installing validated auto-deployer"
-chmod +x "$APP_DIR/deploy/lightsail_release.sh"
+chmod +x "$APP_DIR/deploy/lightsail_release.sh" "$APP_DIR/deploy/scripts/install_streamlit_console.sh"
 sudo tee /etc/systemd/system/niftybot-autodeploy.service >/dev/null <<EOF_DEPLOY_SERVICE
 [Unit]
 Description=Validate and deploy Nifty Bot from GitHub
@@ -146,7 +140,9 @@ User=ubuntu
 Environment=BOT_APP_DIR=$APP_DIR
 Environment=BOT_ENV_FILE=$ENV_FILE
 Environment=BOT_SERVICE_NAME=$SERVICE
+Environment=BOT_STREAMLIT_SERVICE_NAME=$STREAMLIT_SERVICE
 Environment=PORT=$PORT
+Environment=BOT_STREAMLIT_PORT=$STREAMLIT_PORT
 ExecStart=$APP_DIR/deploy/lightsail_release.sh --auto
 EOF_DEPLOY_SERVICE
 
@@ -166,6 +162,9 @@ EOF_TIMER
 sudo systemctl daemon-reload
 sudo systemctl enable --quiet --now niftybot-autodeploy.timer
 sudo systemctl restart ${SERVICE}
+
+log "Installing lightweight Streamlit operations console"
+bash "$APP_DIR/deploy/scripts/install_streamlit_console.sh"
 
 log "Installing Caddy HTTPS reverse proxy"
 if ! command -v caddy >/dev/null 2>&1; then
@@ -190,10 +189,11 @@ sudo systemctl restart caddy || log "Caddy restart failed; HTTP remains availabl
 IP="$(curl -fsSL https://checkip.amazonaws.com 2>/dev/null || echo 'YOUR_STATIC_IP')"
 printf '\n============================================================\n'
 printf 'Setup complete.\n'
-printf 'Dashboard: https://%s/admin\n' "$IP"
-printf 'Fallback:  http://%s:%s/admin\n' "$IP" "$PORT"
-printf 'Environment: %s\n' "$ENV_FILE"
-printf 'Password:  %s\n' "${ADMIN_PW:-already configured}"
-printf 'Allow TCP 443 in Lightsail Networking. Port %s is required only for direct fallback access.\n' "$PORT"
+printf 'Operations console: http://%s:%s\n' "$IP" "$STREAMLIT_PORT"
+printf 'Admin dashboard:    https://%s/admin\n' "$IP"
+printf 'Admin fallback:     http://%s:%s/admin\n' "$IP" "$PORT"
+printf 'Environment:        %s\n' "$ENV_FILE"
+printf 'Password:           %s\n' "${ADMIN_PW:-already configured}"
+printf 'Allow TCP 443 and TCP %s in Lightsail Networking.\n' "$STREAMLIT_PORT"
 printf 'Add %s to the Zerodha allowed IP list.\n' "$IP"
 printf '============================================================\n'
