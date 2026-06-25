@@ -1,5 +1,5 @@
 [Unit]
-Description=Nifty Scalper Streamlit Operations Console
+Description=Nifty Scalper Superlite Operations Console
 After=network-online.target niftybot.service
 Wants=network-online.target
 
@@ -8,23 +8,25 @@ Type=simple
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/nifty_scalper_bot
+EnvironmentFile=/home/ubuntu/.config/niftybot/niftybot.env
 Environment=BOT_API_URL=http://127.0.0.1:8080
+Environment=BOT_ADMIN_API_URL=http://127.0.0.1:8081
 Environment=BOT_SERVICE_NAME=niftybot
 Environment=BOT_APP_DIR=/home/ubuntu/nifty_scalper_bot
 Environment=DEPLOYMENT_PLATFORM=aws_lightsail
-Environment=PYTHONPATH=/home/ubuntu/nifty_scalper_bot
+Environment=PYTHONPATH=/home/ubuntu/nifty_scalper_bot:/home/ubuntu/nifty_scalper_bot/src
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/nifty_scalper_bot/.streamlit-venv/bin/python -m streamlit run /home/ubuntu/nifty_scalper_bot/dashboard/operations_console.py --server.address=0.0.0.0 --server.port=8501 --browser.gatherUsageStats=false --server.headless=true --server.fileWatcherType=none --server.runOnSave=false --server.enableWebsocketCompression=false --server.maxUploadSize=10 --server.maxMessageSize=50 --client.toolbarMode=minimal
+ExecStart=/bin/bash -lc '/home/ubuntu/nifty_scalper_bot/.venv/bin/python -m uvicorn nifty_scalper_bot.superlite_admin:app --host 0.0.0.0 --port 8081 --workers 1 --no-access-log & exec /home/ubuntu/nifty_scalper_bot/.streamlit-venv/bin/python -m streamlit run /home/ubuntu/nifty_scalper_bot/dashboard/superlite_console.py --server.address=0.0.0.0 --server.port=8501 --browser.gatherUsageStats=false --server.headless=true --server.fileWatcherType=none --server.runOnSave=false --server.enableWebsocketCompression=false --server.maxUploadSize=5 --server.maxMessageSize=20 --client.toolbarMode=minimal'
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
 KillSignal=SIGINT
 NoNewPrivileges=true
 PrivateTmp=true
-Nice=5
-CPUWeight=20
-MemoryHigh=350M
-MemoryMax=500M
+Nice=7
+CPUWeight=15
+MemoryHigh=300M
+MemoryMax=420M
 
 [Install]
 WantedBy=multi-user.target
