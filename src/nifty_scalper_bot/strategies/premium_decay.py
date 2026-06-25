@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from datetime import datetime, time, timezone
 from typing import (
     Any,
@@ -109,7 +110,9 @@ class ShortStrangleState:
 
 
 class PremiumDecayStrategy:
-    """Implement a short strangle with theta capture risk management."""
+    """Backtest/paper short-strangle strategy; never a live execution authority."""
+
+    LIVE_CAPABLE = False
 
     def __init__(
         self,
@@ -198,6 +201,20 @@ class PremiumDecayStrategy:
                 'underlying': underlying,
             },
         )
+        execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        live_enabled = execution_mode == "LIVE" or str(
+            os.getenv("ENABLE_LIVE", os.getenv("ENABLE_LIVE_TRADING", "false"))
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if live_enabled:
+            self._logger.error(
+                "PREMIUM_DECAY_LIVE_DISABLED reason=noncanonical_multileg_execution",
+                extra={
+                    "event": "PREMIUM_DECAY_LIVE_DISABLED",
+                    "underlying": underlying,
+                    "reason": "noncanonical_multileg_execution",
+                },
+            )
+            return False
         try:
             if self._active is not None:
                 self._logger.info(

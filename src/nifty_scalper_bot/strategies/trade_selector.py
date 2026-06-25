@@ -8,6 +8,10 @@ import os
 from typing import Any
 
 from nifty_scalper_bot.config.env_utils import parse_int_env
+from nifty_scalper_bot.execution.quote_readiness import (
+    resolve_real_tick_count,
+    resolve_tick_age_ms,
+)
 from nifty_scalper_bot.risk.cost_model import passes_cost_edge_gate
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.strategies.option_signal import score_option_candidate
@@ -168,17 +172,22 @@ class TradeCandidateSelector:
                     atm_distance=atm_distance,
                 )
                 continue
-            tick_age_s = self._f(s.get('tick_age_s'))
+            tick_age_ms = resolve_tick_age_ms(s)
+            tick_age_s = None if tick_age_ms is None else tick_age_ms / 1000.0
             if tick_age_s is None or tick_age_s > max_age:
                 rejects['tick_stale'] += 1
-                self._log_reject("tick_stale", symbol, throttle_key_parts=("tick_stale", symbol, int(max_age)), tick_age_s=tick_age_s, max_age_s=max_age)
+                self._log_reject("tick_stale", symbol, throttle_key_parts=("tick_stale", symbol, int(max_age)), tick_age_s=tick_age_s, tick_age_ms=tick_age_ms, max_age_s=max_age)
                 continue
-            real_ticks = int(s.get('real_ticks_last_60s') or 0)
+            real_ticks, real_ticks_derived = resolve_real_tick_count(
+                s, tick_age_ms=tick_age_ms, max_age_ms=max_age * 1000.0, has_bid_ask=has_bid_ask
+            )
             if real_ticks < min_ticks:
                 rejects['insufficient_ticks'] += 1
-                self._log_reject("insufficient_ticks", symbol, throttle_key_parts=("insufficient_ticks", symbol, min_ticks), real_ticks_last_60s=real_ticks, min_ticks=min_ticks)
+                self._log_reject("insufficient_ticks", symbol, throttle_key_parts=("insufficient_ticks", symbol, min_ticks), real_ticks_last_60s=real_ticks, real_tick_count_derived=real_ticks_derived, min_ticks=min_ticks)
                 continue
             reasons = ['candidate_valid']
+            if real_ticks_derived:
+                reasons.append('real_tick_count_derived_from_fresh_ms_quote')
             if premium_dynamic_override:
                 reasons.append('premium_filter_dynamic_override')
             spread_pct: float | None = None

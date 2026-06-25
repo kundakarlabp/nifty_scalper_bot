@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
+from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import OrderFlowStrategyConfig
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
@@ -25,10 +27,40 @@ class OrderFlowStrategy(EliteStrategy):
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
+        self._reversal_confirmation: dict[str, dict[str, Any]] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicator keys. Raises: Exception."""
         return {'bid', 'ask', 'depth', 'tick_direction', 'buy_qty', 'sell_qty', 'direction_bias', 'spread_pct', 'atr'}
+
+    def _reversal_persistence_confirmed(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        update_version: object | None,
+        fingerprint: tuple[object, ...],
+    ) -> bool:
+        """Require distinct persistent updates before overriding direction bias."""
+        version = update_version if update_version is not None else fingerprint
+        now = time.monotonic()
+        state = self._reversal_confirmation.get(symbol)
+        if state is None or state.get("side") != side:
+            state = {"side": side, "count": 1, "started": now, "version": version}
+            self._reversal_confirmation[symbol] = state
+        elif state.get("version") != version:
+            state["count"] = int(state.get("count") or 0) + 1
+            state["version"] = version
+        try:
+            min_updates = max(2, int(os.getenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3") or 3))
+        except (TypeError, ValueError):
+            min_updates = 3
+        min_persistence_ms = max(
+            0.0,
+            safe_float_env("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", 500.0),
+        )
+        elapsed_ms = max(0.0, now - float(state.get("started") or now)) * 1000.0
+        return int(state.get("count") or 0) >= min_updates and elapsed_ms >= min_persistence_ms
 
     def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
@@ -50,9 +82,10 @@ class OrderFlowStrategy(EliteStrategy):
             trigger_max_spread_pct = safe_float_env('ORDERFLOW_MAX_SPREAD_PCT', 0.75) if is_live_mode else safe_float_env('ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', 12.0)
             context_min_score = float(os.getenv('ORDERFLOW_CONTEXT_MIN_SCORE', '4.0') or '4.0')
             require_tradable_quote_live = str(os.getenv('ORDERFLOW_REQUIRE_TRADABLE_QUOTE_LIVE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
-            tradable_quote = bool(indicators.get('tradable_quote', True))
-            quote_depth_valid = bool(indicators.get('quote_depth_valid', True))
-            tick_age_ms = float(indicators.get('tick_age_ms') or 0.0)
+            tradable_quote = False
+            quote_depth_valid = False
+            tick_age_ms: float | None = None
+            quote_update_version: object | None = None
             max_tick_age_ms = float(os.getenv('LIVE_MAX_TICK_AGE_MS', '2500') or '2500')
 
             if bid <= 0 or ask <= 0 or ask <= bid:
@@ -70,6 +103,29 @@ class OrderFlowStrategy(EliteStrategy):
             depth_available = bool(bids and asks)
             total_bid = sum(float(level.get('quantity', 0.0)) for level in bids[:5]) if depth_available else 0.0
             total_ask = sum(float(level.get('quantity', 0.0)) for level in asks[:5]) if depth_available else 0.0
+
+            quote_payload = dict(indicators)
+            quote_payload.update(
+                {
+                    "bid": bid,
+                    "ask": ask,
+                    "depth": depth,
+                    "depth_available": depth_available,
+                    "spread_pct": spread_pct,
+                }
+            )
+            quote_readiness = evaluate_execution_quote(
+                symbol,
+                quote_payload,
+                live_mode=is_live_mode,
+                max_tick_age_ms=max_tick_age_ms,
+                max_spread_pct=trigger_max_spread_pct,
+                require_depth=is_live_mode,
+            )
+            tradable_quote = quote_readiness.tradable_quote
+            quote_depth_valid = quote_readiness.depth_available
+            tick_age_ms = quote_readiness.tick_age_ms
+            quote_update_version = quote_readiness.quote_update_version
 
             if total_bid + total_ask <= 0:
                 allow_fallback = str(os.getenv('ORDERFLOW_ALLOW_LTP_TICK_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -146,7 +202,7 @@ class OrderFlowStrategy(EliteStrategy):
                     'premium_flow_direction': tick_direction,
                     'liquidity_score': 1.0,
                     'tick_age_ms': tick_age_ms,
-                    'quote_update_version': indicators.get('quote_update_version'),
+                    'quote_update_version': quote_update_version,
                 }
                 side_aligns = direction in {'CE', 'PE'} and direction == side
                 metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'tick_supports_direction': tick_supports})
@@ -207,7 +263,24 @@ class OrderFlowStrategy(EliteStrategy):
                     (side == 'CE' and depth_imbalance >= min_reversal_imbalance)
                     or (side == 'PE' and depth_imbalance <= -min_reversal_imbalance)
                 )
-            microstructure_confirms_side = bool(tick_supports and depth_available and imbalance_confirms)
+            raw_microstructure_confirms_side = bool(tick_supports and depth_available and imbalance_confirms)
+            reversal_persistence_confirmed = False
+            if bias_conflict and raw_microstructure_confirms_side:
+                reversal_persistence_confirmed = (
+                    not is_live_mode
+                    or self._reversal_persistence_confirmed(
+                        symbol=symbol,
+                        side=side,
+                        update_version=quote_update_version,
+                        fingerprint=(tick_age_ms, round(bid, 4), round(ask, 4), round(total_bid, 2), round(total_ask, 2)),
+                    )
+                )
+            else:
+                self._reversal_confirmation.pop(symbol, None)
+            microstructure_confirms_side = bool(
+                raw_microstructure_confirms_side
+                and (not is_live_mode or reversal_persistence_confirmed)
+            )
             bias_invalidated_by_microstructure = bool(bias_conflict and microstructure_confirms_side)
             side_alignment_ok = (direction not in {'CE', 'PE'}) or side_aligns or bias_invalidated_by_microstructure
             tick_direction_missing = tick_direction not in {'UP', 'DOWN', 'BUY', 'SELL'}
@@ -242,18 +315,6 @@ class OrderFlowStrategy(EliteStrategy):
                     selected_or_near_atm = False
             if is_live_mode and not selected_meta_available:
                 selected_or_near_atm = False
-            if bias_invalidated_by_microstructure:
-                LOGGER.info(
-                    'ORDERFLOW_STALE_BIAS_INVALIDATED symbol=%s side=%s stale_bias=%s '
-                    'depth_imbalance=%.3f tick_direction=%s score=%.2f',
-                    symbol, side, direction, depth_imbalance, tick_direction, strategy_score,
-                    extra={
-                        'event': 'ORDERFLOW_STALE_BIAS_INVALIDATED',
-                        'symbol': symbol, 'side': side, 'stale_bias': direction,
-                        'depth_imbalance': round(depth_imbalance, 4),
-                        'tick_direction': tick_direction, 'score': strategy_score,
-                    },
-                )
             trigger_conditions_met = bool(
                 allow_orderflow_trigger
                 and quote_depth_valid
@@ -267,16 +328,20 @@ class OrderFlowStrategy(EliteStrategy):
                 and direction_context_ok
                 and context_age_ok
                 and tick_supports
+                and quote_readiness.allowed
+                and tick_age_ms is not None
                 and tick_age_ms <= max_tick_age_ms
             )
             conflict_override_requested = bool(
-                not side_alignment_ok
+                not is_live_mode
+                and not side_alignment_ok
                 and strategy_score >= float(os.getenv('ORDERFLOW_CONFLICT_OVERRIDE_MIN_SCORE', '9.0') or '9.0')
                 and bool(quote_depth_valid)
                 and bool(depth_available)
                 and spread_pct <= trigger_max_spread_pct
                 and bool(context_age_ok)
                 and bool(tick_supports)
+                and tick_age_ms is not None
                 and tick_age_ms <= max_tick_age_ms
                 and bool(selected_or_near_atm)
             )
@@ -303,11 +368,13 @@ class OrderFlowStrategy(EliteStrategy):
             trigger_block_reason = ''
             if not allow_orderflow_trigger:
                 trigger_block_reason = 'trigger_role_disabled'
+            elif not quote_readiness.allowed:
+                trigger_block_reason = quote_readiness.reason
             elif not quote_depth_valid or not depth_available:
                 trigger_block_reason = 'quote_depth_missing'
             elif is_live_mode and require_tradable_quote_live and not tradable_quote:
                 trigger_block_reason = 'tradable_quote_false'
-            elif tick_age_ms > max_tick_age_ms:
+            elif tick_age_ms is None or tick_age_ms > max_tick_age_ms:
                 trigger_block_reason = 'tick_stale'
             elif tick_direction_missing:
                 trigger_block_reason = 'tick_direction_missing_or_neutral'
@@ -374,7 +441,7 @@ class OrderFlowStrategy(EliteStrategy):
                 'premium_flow_direction': tick_direction,
                 'negative_premium_flow_mode': 'hard' if clear_adverse_flow else 'soft',
                 'tick_age_ms': tick_age_ms,
-                'quote_update_version': indicators.get('quote_update_version'),
+                'quote_update_version': quote_update_version,
                 'selected_or_near_atm': selected_or_near_atm,
                 'bias_invalidated_by_microstructure': bias_invalidated_by_microstructure,
                 'microstructure_confirms_side': microstructure_confirms_side,
