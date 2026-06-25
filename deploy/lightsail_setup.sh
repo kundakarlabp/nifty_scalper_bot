@@ -27,10 +27,9 @@ log "Installing system packages"
 sudo apt-get update -y -qq
 sudo apt-get install -y -qq python3 python3-venv python3-pip git curl util-linux
 
-log "Synchronising repository"
+log "Preparing repository"
 if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" fetch --quiet origin main
-  git -C "$APP_DIR" reset --hard --quiet origin/main
 else
   git clone --quiet "$REPO" "$APP_DIR"
 fi
@@ -90,7 +89,6 @@ Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30
 KillSignal=SIGINT
-NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
@@ -145,6 +143,7 @@ fi
 
 write_status validating "validating \${AFTER:0:7}"
 CANDIDATE="/tmp/niftybot-candidate-\${AFTER:0:12}"
+git worktree prune
 rm -rf "\$CANDIDATE"
 git worktree add --detach --quiet "\$CANDIDATE" "\$AFTER"
 cleanup() {
