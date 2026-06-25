@@ -16,9 +16,9 @@ class BoundBracketManager(RuntimeBracketManager):
         if callable(setter):
             setter(self)
             with suppress(Exception):
-                from nifty_scalper_bot.execution import legacy_bracket_manager as legacy
+                from nifty_scalper_bot.execution import bracket_core
 
-                legacy.LOGGER.info(
+                bracket_core.LOGGER.info(
                     "UNRESOLVED_EXIT_NATIVE_GATE_BOUND",
                     extra={"event": "UNRESOLVED_EXIT_NATIVE_GATE_BOUND"},
                 )
