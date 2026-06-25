@@ -59,12 +59,6 @@ PYTHONPATH="${APP_DIR}/src:${APP_DIR}" "${ENGINE_VENV}/bin/python" -c \
   'from nifty_scalper_bot.superlite_admin import app; assert app is not None'
 
 sudo install -m 0644 "${SERVICE_SOURCE}" "${SERVICE_TARGET}"
-SYSTEMCTL="$(command -v systemctl)"
-printf 'ubuntu ALL=(root) NOPASSWD: %s start niftybot-autodeploy.service\n' "$SYSTEMCTL" | \
-  sudo tee /etc/sudoers.d/niftybot-dashboard-update >/dev/null
-sudo chmod 440 /etc/sudoers.d/niftybot-dashboard-update
-sudo visudo -cf /etc/sudoers.d/niftybot-dashboard-update >/dev/null
-
 sudo systemctl daemon-reload
 sudo systemctl enable --quiet niftybot-streamlit.service
 sudo systemctl enable --quiet --now niftybot-autodeploy.timer
