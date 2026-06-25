@@ -37,4 +37,4 @@ $pre-merge-trading-review Review this PR for live-trading and backtest validity 
 
 ## Source and adaptation
 
-The debugging, TDD, and codebase-design workflows are adapted from Matt Pocock's `mattpocock/skills` repository and tailored to this NIFTY options scalper. The source repository is MIT licensed. See `THIRD_PARTY_NOTICE.md` in this directory.
+The `diagnosing-trading-bugs`, TDD, and codebase-design workflows are adapted from Matt Pocock's `mattpocock/skills` repository and tailored to this NIFTY options scalper. The source repository is MIT licensed. See `THIRD_PARTY_NOTICE.md` in this directory.
