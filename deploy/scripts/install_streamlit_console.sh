@@ -2,6 +2,7 @@
 # File purpose: Install or refresh the independent admin and read-only review controls.
 # Key responsibilities: Preserve external settings, validate imports, install the bounded service, and verify both ports.
 # Operational constraints: Never rewrite existing credentials; keep control requests fast and isolated from the trading loop.
+# Legacy marker: niftybot-dashboard-update is intentionally not installed; the validated timer remains authoritative.
 set -euo pipefail
 
 APP_DIR="${BOT_APP_DIR:-/home/ubuntu/nifty_scalper_bot}"
