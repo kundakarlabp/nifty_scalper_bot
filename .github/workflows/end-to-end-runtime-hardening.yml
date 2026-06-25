@@ -1,0 +1,83 @@
+name: End-to-end runtime hardening
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: end-to-end-runtime-hardening-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  implement-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out implementation branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/end-to-end-runtime-hardening-20260625
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install streamlit -q
+
+      - name: Apply guarded migrations
+        run: |
+          python scripts/patch_orderflow_and_selector.py
+          python scripts/patch_strategy_boundaries_and_tests.py
+          python scripts/patch_dashboard_truth.py
+
+      - name: Compile production and dashboard sources
+        run: |
+          python -m compileall -q src dashboard
+          bash -n deploy/lightsail_setup.sh
+
+      - name: Run focused hardening tests
+        run: |
+          python -m pytest -q \
+            tests/execution/test_quote_readiness.py \
+            tests/strategies/test_order_flow_conflict_override.py \
+            tests/strategies/test_premium_decay_strategy.py \
+            tests/architecture/test_canonical_bo_ownership.py \
+            tests/dashboard/test_event_buffer_truth.py \
+            tests/strategies/test_runner_live_path_guards.py \
+            tests/integration/test_canonical_bo_end_to_end.py
+
+      - name: Run complete regression suite
+        run: python -m pytest -q
+
+      - name: Commit validated implementation
+        run: |
+          git config user.name 'Bhanu Bot'
+          git config user.email 'bot@nifty-scalper'
+          git add \
+            src/nifty_scalper_bot/execution/quote_readiness.py \
+            src/nifty_scalper_bot/strategies/elite_strategies/order_flow.py \
+            src/nifty_scalper_bot/strategies/trade_selector.py \
+            src/nifty_scalper_bot/strategies/premium_decay.py \
+            dashboard/event_buffer.py \
+            dashboard/operations_console.py \
+            tests/execution/test_quote_readiness.py \
+            tests/strategies/test_order_flow_conflict_override.py \
+            tests/strategies/test_premium_decay_strategy.py \
+            tests/architecture/test_canonical_bo_ownership.py \
+            tests/dashboard/test_event_buffer_truth.py
+          git commit -m 'fix: harden live quote gating and canonical runtime boundaries'
+          git push origin HEAD:fix/end-to-end-runtime-hardening-20260625
