@@ -1,6 +1,8 @@
 """Independent low-overhead host for the existing Nifty admin controls."""
 from __future__ import annotations
 
+import html
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
@@ -16,6 +18,8 @@ from nifty_scalper_bot.superlite_admin_core import (
 )
 from nifty_scalper_bot.superlite_admin_style import STYLE
 
+_ORIGINAL_FLASH = dashboard._flash
+
 
 def _guard(request: Request) -> None:
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
@@ -24,6 +28,15 @@ def _guard(request: Request) -> None:
 
 def _validated_update() -> tuple[bool, str]:
     return True, "automatic validated updater checks every two minutes"
+
+
+def _flash(request: Request) -> str:
+    if request.query_params.get("upd") == "ok":
+        return (
+            '<div class="flash ok">Update check queued. The validated updater '
+            "checks the main branch within two minutes.</div>"
+        )
+    return _ORIGINAL_FLASH(request)
 
 
 def _logs(
@@ -45,6 +58,7 @@ dashboard._write_env = write_env
 dashboard._git_update = _validated_update
 dashboard._gather_logs = _logs
 dashboard._restart_service = lambda: restart(ENGINE_SERVICE)
+dashboard._flash = _flash
 dashboard._CSS = STYLE
 dashboard.FIELDS = [(label, key, True) for label, key, _secret in dashboard.FIELDS]
 
