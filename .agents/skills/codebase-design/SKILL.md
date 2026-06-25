@@ -42,7 +42,7 @@ Respect these established seams:
 - `BracketManager`: protective exit state and decisions.
 - `PositionManager`: position and pending-order state.
 - broker clients: external broker adapters.
-- Telegram controller: operator interface and diagnostics.
+- `telegram_controller`: operator interface and diagnostics.
 
 Do not create duplicate selectors, parallel order paths, hidden history stores, or strategy-owned broker access.
 
