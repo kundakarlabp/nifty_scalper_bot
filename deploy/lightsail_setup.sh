@@ -45,7 +45,11 @@ if [ ! -f "$ENV_FILE" ]; then
     log "Migrated existing .env outside the Git checkout"
   else
     ADMIN_PW="$(python3 -c 'import secrets;print(secrets.token_urlsafe(18))')"
-    cat > "$ENV_FILE" <<EOF_ENV
+    if [ -f "$APP_DIR/.env.example" ]; then
+      cp "$APP_DIR/.env.example" "$ENV_FILE"
+      printf '\nADMIN_PASSWORD=%s\n' "$ADMIN_PW" >> "$ENV_FILE"
+    else
+      cat > "$ENV_FILE" <<EOF_ENV
 # Managed locally on the Lightsail host. Never commit or share this file.
 ADMIN_PASSWORD=$ADMIN_PW
 PORT=$PORT
@@ -63,7 +67,8 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_ALLOWED_ID=
 EOF_ENV
-    log "Created an execution-disabled environment file"
+    fi
+    log "Created an execution-disabled environment file from safe defaults"
   fi
 else
   log "Preserving external environment and credentials"
