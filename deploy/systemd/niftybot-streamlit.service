@@ -11,16 +11,20 @@ WorkingDirectory=/home/ubuntu/nifty_scalper_bot
 Environment=BOT_API_URL=http://127.0.0.1:8080
 Environment=BOT_SERVICE_NAME=niftybot
 Environment=BOT_APP_DIR=/home/ubuntu/nifty_scalper_bot
+Environment=DEPLOYMENT_PLATFORM=aws_lightsail
+Environment=PYTHONPATH=/home/ubuntu/nifty_scalper_bot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/nifty_scalper_bot/.streamlit-venv/bin/python -m streamlit run /home/ubuntu/nifty_scalper_bot/dashboard/operations_console.py --server.address=0.0.0.0 --server.port=8501 --browser.gatherUsageStats=false --server.headless=true --server.fileWatcherType=none --server.runOnSave=false
+ExecStart=/home/ubuntu/nifty_scalper_bot/.streamlit-venv/bin/python -m streamlit run /home/ubuntu/nifty_scalper_bot/dashboard/operations_console.py --server.address=0.0.0.0 --server.port=8501 --browser.gatherUsageStats=false --server.headless=true --server.fileWatcherType=none --server.runOnSave=false --server.enableWebsocketCompression=false --server.maxUploadSize=10 --server.maxMessageSize=50 --client.toolbarMode=minimal
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
+KillSignal=SIGINT
 NoNewPrivileges=true
 PrivateTmp=true
-MemoryMax=650M
-CPUAccounting=true
-MemoryAccounting=true
+Nice=5
+CPUWeight=20
+MemoryHigh=350M
+MemoryMax=500M
 
 [Install]
 WantedBy=multi-user.target
