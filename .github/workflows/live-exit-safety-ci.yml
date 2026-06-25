@@ -1,5 +1,5 @@
-# File purpose: Validate canonical BO safety, deployment freshness, and repository regressions.
-# Key responsibilities: Compile production code, run focused lifecycle checks, enforce file headers, and execute the full test suite.
+# File purpose: Validate canonical BO safety, AWS Lightsail deployment syntax, and repository regressions.
+# Key responsibilities: Compile production code, validate deployment scripts, run focused lifecycle checks, enforce file headers, and execute the full test suite.
 # Operational constraints: Focused safety gates and the complete suite must pass before merge.
 
 name: Live Exit Safety CI
@@ -28,6 +28,8 @@ jobs:
           python -m pip install -e '.[dev]' -q
       - name: Compile production source
         run: python -m compileall -q src
+      - name: Validate Lightsail deployment scripts
+        run: bash -n deploy/lightsail_setup.sh
       - name: File header standard
         run: python -m pytest -q tests/architecture/test_file_header_standard.py
       - name: Canonical BO ownership architecture
