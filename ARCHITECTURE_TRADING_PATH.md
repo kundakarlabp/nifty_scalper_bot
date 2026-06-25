@@ -105,8 +105,10 @@ The following modules are deleted and forbidden from returning:
 - The Docker image embeds `RAILWAY_GIT_COMMIT_SHA` in `/app/.build_commit_sha`.
 - Strict Railway startup fails when the embedded and runtime commit identities differ or are missing.
 - `/releasez` reports the effective revision and watchdog status.
+- Railway activates a deployment only after `/releasez` passes.
+- `overlapSeconds = 0` prevents simultaneous old and new trading instances.
 - A confirmed GitHub `main` mismatch exits with code 42; transient GitHub/network failures do not stop trading.
-- Railway restarts failed instances and an optional post-CI deploy hook can trigger a fresh deployment.
+- Railway restarts failed stale instances under the configured bounded retry policy.
 
 ## Engineering invariants
 
