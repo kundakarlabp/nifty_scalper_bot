@@ -50,14 +50,14 @@ Select the relevant invariants for every change:
 - Quote freshness and source are preserved.
 - FULL-depth data is not silently downgraded to LTP-only.
 - Contract selection remains owned by `InstrumentManager`.
-- History remains owned by the market-data manager.
+- History remains owned by `MarketDataManager`.
 
 ### Evaluation
 
 - A completed bar is not evaluated twice unless explicitly designed.
 - Stale context cannot silently override fresh option data.
 - Rejection and readiness blockers are specific and observable.
-- Signal output includes symbol, direction, score, entry, stop, target, reasons, and blockers.
+- Signal output includes symbol, direction, score, entry, stop-loss, target, reasons, and blockers.
 
 ### Risk and execution
 
