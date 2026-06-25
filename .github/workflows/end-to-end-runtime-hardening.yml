@@ -18,39 +18,101 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-
     steps:
-      - name: Check out implementation branch
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: fix/end-to-end-runtime-hardening-20260625
           fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-
-      - name: Install project and test dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
           python -m pip install streamlit -q
-
-      - name: Apply guarded migrations
+      - name: Apply final guarded refinements
         run: |
-          python scripts/patch_orderflow_and_selector.py
-          python scripts/patch_strategy_boundaries_and_tests.py
-          python scripts/patch_dashboard_truth.py
+          python - <<'PY'
+          from pathlib import Path
 
-      - name: Compile production and dashboard sources
+          def replace(path, old, new, sentinel=None):
+              target = Path(path)
+              text = target.read_text()
+              if sentinel and sentinel in text:
+                  return
+              if text.count(old) != 1:
+                  raise SystemExit(f"anchor drift in {path}: {old[:80]!r}")
+              target.write_text(text.replace(old, new, 1))
+
+          orderflow = 'src/nifty_scalper_bot/strategies/elite_strategies/order_flow.py'
+          replace(
+              orderflow,
+              '        elapsed_ms = max(0.0, now - float(state.get("started") or now)) * 1000.0\n        return int(state.get("count") or 0) >= min_updates and elapsed_ms >= min_persistence_ms\n',
+              '        elapsed_ms = max(0.0, now - float(state.get("started") or now)) * 1000.0\n        max_window_ms = max(min_persistence_ms, safe_float_env("ORDERFLOW_REVERSAL_MAX_WINDOW_MS", 3000.0))\n        if elapsed_ms > max_window_ms:\n            state.update({"count": 1, "started": now, "version": version})\n            return False\n        return int(state.get("count") or 0) >= min_updates and elapsed_ms >= min_persistence_ms\n',
+              'ORDERFLOW_REVERSAL_MAX_WINDOW_MS',
+          )
+          replace(
+              orderflow,
+              '                        fingerprint=(tick_age_ms, round(bid, 4), round(ask, 4), round(total_bid, 2), round(total_ask, 2)),\n',
+              '                        fingerprint=(round(bid, 4), round(ask, 4), round(total_bid, 2), round(total_ask, 2), tick_direction),\n',
+          )
+          replace(
+              orderflow,
+              "                 'quote_update_version': quote_update_version,\n                 'selected_or_near_atm': selected_or_near_atm,\n",
+              "                 'quote_update_version': quote_update_version,\n                 'quote_readiness_allowed': quote_readiness.allowed,\n                 'quote_readiness_reason': quote_readiness.reason,\n                 'real_ticks_last_60s': quote_readiness.real_ticks_last_60s,\n                 'real_tick_count_derived': quote_readiness.real_tick_count_derived,\n                 'reversal_persistence_confirmed': reversal_persistence_confirmed,\n                 'selected_or_near_atm': selected_or_near_atm,\n",
+              "'quote_readiness_allowed': quote_readiness.allowed",
+          )
+
+          events = 'dashboard/event_buffer.py'
+          replace(
+              events,
+              '        self._terminal_seen: set[tuple[str, str]] = set()\n',
+              '        self._terminal_seen: set[tuple[str, str]] = set()\n        self._terminal_order: deque[tuple[str, str]] = deque()\n',
+              'self._terminal_order',
+          )
+          replace(
+              events,
+              '                            if key is not None:\n                                self._terminal_seen.add(key)\n',
+              '                            if key is not None:\n                                if len(self._terminal_order) >= self.capacity:\n                                    expired = self._terminal_order.popleft()\n                                    self._terminal_seen.discard(expired)\n                                self._terminal_seen.add(key)\n                                self._terminal_order.append(key)\n',
+              'expired = self._terminal_order.popleft()',
+          )
+
+          console = 'dashboard/operations_console.py'
+          replace(
+              console,
+              '    execution_ready = bool((trading or {}).get("ready"))\n    orders_armed = bool((trading or {}).get("live_orders_armed"))\n    trading_available = trading is not None\n    broker_available = trading_available and bool(broker)\n    recon_available = trading_available and bool(recon)\n    broker_ready = bool(broker.get("ready")) if broker_available else None\n    auth_invalid = bool(broker.get("auth_invalid")) if broker_available else None\n    reconciled = bool(recon.get("completed")) if recon_available else None\n',
+              '    trading_available = trading is not None\n    execution_ready = bool(trading.get("ready")) if trading_available and "ready" in trading else None\n    orders_armed = bool(trading.get("live_orders_armed")) if trading_available and "live_orders_armed" in trading else None\n    broker_available = trading_available and bool(broker)\n    recon_available = trading_available and bool(recon)\n    broker_ready = bool(broker.get("ready")) if broker_available and "ready" in broker else None\n    auth_invalid = bool(broker.get("auth_invalid")) if broker_available and "auth_invalid" in broker else None\n    reconciled = bool(recon.get("completed")) if recon_available and "completed" in recon else None\n',
+              'execution_ready = bool(trading.get("ready")) if trading_available',
+          )
+          replace(
+              console,
+              '        + state_item("Execution", "READY" if execution_ready else "BLOCKED", "good" if execution_ready else "bad-text")\n        + state_item("Orders", "ARMED" if orders_armed else "OFF", "good" if orders_armed else "warn-text")\n',
+              '        + state_item("Execution", "UNKNOWN" if execution_ready is None else ("READY" if execution_ready else "BLOCKED"), "warn-text" if execution_ready is None else ("good" if execution_ready else "bad-text"))\n        + state_item("Orders", "UNKNOWN" if orders_armed is None else ("ARMED" if orders_armed else "OFF"), "warn-text" if orders_armed is None else ("good" if orders_armed else "warn-text"))\n',
+              'state_item("Execution", "UNKNOWN"',
+          )
+
+          test_path = Path('tests/strategies/test_order_flow_conflict_override.py')
+          text = test_path.read_text()
+          if 'test_same_unversioned_snapshot_does_not_accumulate_reversal_votes' not in text:
+              text += '''\n\ndef test_same_unversioned_snapshot_does_not_accumulate_reversal_votes(monkeypatch, strat):
+              monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+              monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
+              monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
+              results = [
+                  _eval(strat, "NFO:NIFTY26MAY24000PE", _ind("CE", "UP", buy=400, sell=80, quote_update_version=None, tick_age_ms=age))
+                  for age in (50, 100, 150)
+              ]
+              assert all(result.metadata["trigger_conditions_met"] is False for result in results)
+              assert all(result.metadata["reversal_persistence_confirmed"] is False for result in results)
+          '''
+              test_path.write_text(text)
+          PY
+      - name: Compile and run focused tests
         run: |
           python -m compileall -q src dashboard
           bash -n deploy/lightsail_setup.sh
-
-      - name: Run focused hardening tests
-        run: |
           python -m pytest -q \
             tests/execution/test_quote_readiness.py \
             tests/strategies/test_order_flow_conflict_override.py \
@@ -59,25 +121,12 @@ jobs:
             tests/dashboard/test_event_buffer_truth.py \
             tests/strategies/test_runner_live_path_guards.py \
             tests/integration/test_canonical_bo_end_to_end.py
-
       - name: Run complete regression suite
         run: python -m pytest -q
-
-      - name: Commit validated implementation
+      - name: Commit validated refinements
         run: |
           git config user.name 'Bhanu Bot'
           git config user.email 'bot@nifty-scalper'
-          git add \
-            src/nifty_scalper_bot/execution/quote_readiness.py \
-            src/nifty_scalper_bot/strategies/elite_strategies/order_flow.py \
-            src/nifty_scalper_bot/strategies/trade_selector.py \
-            src/nifty_scalper_bot/strategies/premium_decay.py \
-            dashboard/event_buffer.py \
-            dashboard/operations_console.py \
-            tests/execution/test_quote_readiness.py \
-            tests/strategies/test_order_flow_conflict_override.py \
-            tests/strategies/test_premium_decay_strategy.py \
-            tests/architecture/test_canonical_bo_ownership.py \
-            tests/dashboard/test_event_buffer_truth.py
-          git commit -m 'fix: harden live quote gating and canonical runtime boundaries'
+          git add src dashboard tests
+          git commit -m 'fix: finalize bounded reversal and truthful runtime status'
           git push origin HEAD:fix/end-to-end-runtime-hardening-20260625
