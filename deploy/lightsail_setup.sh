@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Nifty Scalper Bot — one-time Lightsail/Ubuntu setup.
-# Safe to re-run: updates code and restarts in place.
+# File purpose: Provision and update the production AWS Lightsail host.
+# Key responsibilities: Install the service, preserve credentials, validate new revisions, deploy atomically, and roll back failed releases.
+# Operational constraints: Never overwrite the existing .env, never restart onto an unvalidated revision, and keep one systemd-owned application process.
 set -euo pipefail
 
 REPO="https://github.com/kundakarlabp/nifty_scalper_bot.git"
@@ -8,12 +9,25 @@ APP_DIR="/home/ubuntu/nifty_scalper_bot"
 ENV_FILE="$APP_DIR/.env"
 SERVICE="niftybot"
 PORT="8080"
+STATUS_FILE="$APP_DIR/data/auto_update_status.json"
 
-echo "==> Installing system packages (Python, git)..."
+log() {
+  printf '[lightsail-setup] %s\n' "$*"
+}
+
+ensure_env_default() {
+  local key="$1"
+  local value="$2"
+  if ! grep -qE "^${key}=" "$ENV_FILE"; then
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+}
+
+log "Installing system packages"
 sudo apt-get update -y -qq
-sudo apt-get install -y -qq python3 python3-venv python3-pip git
+sudo apt-get install -y -qq python3 python3-venv python3-pip git curl util-linux
 
-echo "==> Fetching the bot code..."
+log "Synchronising repository"
 if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" fetch --quiet origin main
   git -C "$APP_DIR" reset --hard --quiet origin/main
@@ -21,45 +35,44 @@ else
   git clone --quiet "$REPO" "$APP_DIR"
 fi
 
-echo "==> Creating Python environment and installing dependencies..."
+log "Creating Python environment"
 cd "$APP_DIR"
 python3 -m venv .venv
 . .venv/bin/activate
-pip install --quiet --upgrade pip
-pip install --quiet -e .
-pip install --quiet python-multipart uvicorn fastapi
+python -m pip install --quiet --upgrade pip
+python -m pip install --quiet -e .
+python -m pip install --quiet pytest python-multipart uvicorn fastapi
 
-# --- .env: create on first run, preserve on re-run ---
 if [ ! -f "$ENV_FILE" ]; then
-  echo "==> Creating .env with safe defaults (you fill credentials in the dashboard)..."
+  log "Creating .env with disabled execution defaults"
   ADMIN_PW="$(python3 -c 'import secrets;print(secrets.token_urlsafe(9))')"
   cat > "$ENV_FILE" <<EOF
-# Filled in via the web dashboard. Do not share this file.
+# Managed locally on the Lightsail host. Do not commit or share this file.
 ADMIN_PASSWORD=$ADMIN_PW
 PORT=$PORT
 BOT_ENV_FILE=$ENV_FILE
 BOT_SERVICE_NAME=$SERVICE
 BOT_APP_DIR=$APP_DIR
-# Trading off until you enter credentials and turn it on in the dashboard:
+DEPLOYMENT_PLATFORM=aws_lightsail
 ENABLE_LIVE=false
 EXECUTION_MODE=SHADOW
-# Zerodha (enter in dashboard):
+ALLOW_DEBUG_ENV=false
 KITE_API_KEY=
 KITE_API_SECRET=
 KITE_ACCESS_TOKEN=
-# Telegram (optional, enter in dashboard):
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_ALLOWED_ID=
 EOF
   chmod 600 "$ENV_FILE"
 else
-  echo "==> Existing .env kept (credentials preserved)."
-  ADMIN_PW="$(grep -E '^ADMIN_PASSWORD=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+  log "Preserving existing .env and credentials"
+  ADMIN_PW="$(grep -E '^ADMIN_PASSWORD=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  ensure_env_default DEPLOYMENT_PLATFORM aws_lightsail
+  ensure_env_default ALLOW_DEBUG_ENV false
 fi
 
-# --- systemd service: auto-start, auto-restart, survives reboot ---
-echo "==> Installing background service..."
+log "Installing systemd service"
 sudo tee /etc/systemd/system/${SERVICE}.service >/dev/null <<EOF
 [Unit]
 Description=Nifty Scalper Bot
@@ -71,15 +84,20 @@ Type=simple
 User=ubuntu
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
+Environment=PYTHONUNBUFFERED=1
 ExecStart=$APP_DIR/.venv/bin/python -m uvicorn nifty_scalper_bot.main:app --host 0.0.0.0 --port $PORT
-Restart=always
+Restart=on-failure
 RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Allow the dashboard's restart button to run systemctl without a password.
+# Dashboard and updater may restart only this service.
 echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}, /bin/systemctl restart --no-block ${SERVICE}, /usr/bin/systemctl restart --no-block ${SERVICE}" | \
   sudo tee /etc/sudoers.d/niftybot >/dev/null
 sudo chmod 440 /etc/sudoers.d/niftybot
@@ -87,55 +105,133 @@ sudo chmod 440 /etc/sudoers.d/niftybot
 sudo systemctl daemon-reload
 sudo systemctl enable --quiet ${SERVICE}
 
-# --- Auto-deploy: pull from GitHub every 2 min; restart only if code changed ---
-echo "==> Installing GitHub auto-deploy timer..."
+log "Installing validated auto-deployer"
 sudo tee /usr/local/bin/niftybot-autodeploy.sh >/dev/null <<EOF
 #!/usr/bin/env bash
-set -e
-cd $APP_DIR
-BEFORE=\$(git rev-parse HEAD 2>/dev/null || echo none)
-git fetch --quiet origin main || exit 0
-AFTER=\$(git rev-parse origin/main 2>/dev/null || echo none)
-if [ "\$BEFORE" != "\$AFTER" ]; then
-  git reset --hard --quiet origin/main
-  $APP_DIR/.venv/bin/pip install --quiet -e . || true
-  sudo systemctl restart ${SERVICE}
-  logger -t niftybot-autodeploy "updated \$BEFORE -> \$AFTER and restarted"
+set -euo pipefail
+
+APP_DIR="$APP_DIR"
+SERVICE="$SERVICE"
+PORT="$PORT"
+STATUS_FILE="$STATUS_FILE"
+VENV="$APP_DIR/.venv"
+
+exec 9>/tmp/niftybot-autodeploy.lock
+flock -n 9 || exit 0
+cd "\$APP_DIR"
+mkdir -p "\$(dirname "\$STATUS_FILE")"
+
+write_status() {
+  local state="\$1"
+  local message="\$2"
+  local escaped
+  escaped="\$(printf '%s' "\$message" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  printf '{"state":"%s","message":"%s","updated_at":"%s"}\n' \
+    "\$state" "\$escaped" "\$(date -Is)" > "\$STATUS_FILE.tmp"
+  mv "\$STATUS_FILE.tmp" "\$STATUS_FILE"
+}
+
+BEFORE="\$(git rev-parse HEAD 2>/dev/null || echo none)"
+if ! git fetch --quiet origin main; then
+  write_status fetch_failed "git fetch failed"
+  exit 0
 fi
+AFTER="\$(git rev-parse origin/main 2>/dev/null || echo none)"
+
+if [ "\$BEFORE" = "\$AFTER" ]; then
+  write_status current "running \${BEFORE:0:7}"
+  exit 0
+fi
+
+write_status validating "validating \${AFTER:0:7}"
+CANDIDATE="/tmp/niftybot-candidate-\${AFTER:0:12}"
+rm -rf "\$CANDIDATE"
+git worktree add --detach --quiet "\$CANDIDATE" "\$AFTER"
+cleanup() {
+  git worktree remove --force "\$CANDIDATE" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+if ! PYTHONPATH="\$CANDIDATE/src" "\$VENV/bin/python" -m compileall -q "\$CANDIDATE/src"; then
+  write_status validation_failed "compile failed for \${AFTER:0:7}"
+  exit 0
+fi
+
+TARGETED_TESTS=(
+  tests/architecture/test_file_header_standard.py
+  tests/architecture/test_canonical_bo_ownership.py
+  tests/test_execution_path_contract.py
+  tests/execution/test_runtime_order_facade.py
+  tests/execution/test_runtime_bracket_facade.py
+  tests/integration/test_canonical_bo_end_to_end.py
+)
+EXISTING_TESTS=()
+for test_path in "\${TARGETED_TESTS[@]}"; do
+  [ -f "\$CANDIDATE/\$test_path" ] && EXISTING_TESTS+=("\$CANDIDATE/\$test_path")
+done
+if [ "\${#EXISTING_TESTS[@]}" -gt 0 ]; then
+  if ! PYTHONPATH="\$CANDIDATE/src" "\$VENV/bin/python" -m pytest -q "\${EXISTING_TESTS[@]}"; then
+    write_status validation_failed "focused tests failed for \${AFTER:0:7}"
+    exit 0
+  fi
+fi
+
+write_status deploying "deploying \${AFTER:0:7}"
+git reset --hard --quiet "\$AFTER"
+if ! "\$VENV/bin/python" -m pip install --quiet -e .; then
+  git reset --hard --quiet "\$BEFORE"
+  "\$VENV/bin/python" -m pip install --quiet -e . || true
+  write_status install_failed "install failed; restored \${BEFORE:0:7}"
+  exit 0
+fi
+
+sudo systemctl restart "\$SERVICE"
+for _ in \$(seq 1 15); do
+  if curl -fsS --max-time 2 "http://127.0.0.1:\$PORT/livez" >/dev/null; then
+    write_status deployed "deployed \${AFTER:0:7}"
+    logger -t niftybot-autodeploy "validated and deployed \$BEFORE -> \$AFTER"
+    exit 0
+  fi
+  sleep 2
+done
+
+git reset --hard --quiet "\$BEFORE"
+"\$VENV/bin/python" -m pip install --quiet -e . || true
+sudo systemctl restart "\$SERVICE"
+write_status rolled_back "health check failed; restored \${BEFORE:0:7}"
+logger -t niftybot-autodeploy "health check failed; restored \$AFTER -> \$BEFORE"
 EOF
 sudo chmod +x /usr/local/bin/niftybot-autodeploy.sh
-# allow the deploy script (run as ubuntu) to restart the service without password
-echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}, /bin/systemctl restart --no-block ${SERVICE}, /usr/bin/systemctl restart --no-block ${SERVICE}" | \
-  sudo tee /etc/sudoers.d/niftybot >/dev/null
-sudo chmod 440 /etc/sudoers.d/niftybot
 
 sudo tee /etc/systemd/system/niftybot-autodeploy.service >/dev/null <<EOF
 [Unit]
-Description=Nifty Bot auto-deploy from GitHub
+Description=Validate and deploy Nifty Bot from GitHub
+After=network-online.target
+
 [Service]
 Type=oneshot
 User=ubuntu
 ExecStart=/usr/local/bin/niftybot-autodeploy.sh
 EOF
+
 sudo tee /etc/systemd/system/niftybot-autodeploy.timer >/dev/null <<EOF
 [Unit]
-Description=Run Nifty Bot auto-deploy every 2 minutes
+Description=Check Nifty Bot releases every two minutes
+
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=2min
+Persistent=true
+
 [Install]
 WantedBy=timers.target
 EOF
+
 sudo systemctl daemon-reload
 sudo systemctl enable --quiet --now niftybot-autodeploy.timer
-
 sudo systemctl restart ${SERVICE}
 
-# --- HTTPS via Caddy reverse proxy (encrypts password/token in transit) ---
-# Caddy serves HTTPS on 443 with a self-signed local certificate and forwards
-# to the bot on 127.0.0.1:$PORT. Your browser will show a one-time "not trusted"
-# warning (expected for an IP-only self-signed cert) — click Advanced -> Proceed.
-echo "==> Installing Caddy for HTTPS..."
+log "Installing Caddy HTTPS reverse proxy"
 if ! command -v caddy >/dev/null 2>&1; then
   sudo apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
   curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -144,7 +240,6 @@ if ! command -v caddy >/dev/null 2>&1; then
   sudo apt-get install -y -qq caddy
 fi
 
-PUB_IP="$(curl -fsSL https://checkip.amazonaws.com 2>/dev/null || echo '')"
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 {
   auto_https disable_redirects
@@ -154,20 +249,14 @@ sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
   reverse_proxy 127.0.0.1:${PORT}
 }
 EOF
-sudo systemctl restart caddy || echo "   (Caddy restart issue — HTTP on ${PORT} still works)"
+sudo systemctl restart caddy || log "Caddy restart failed; HTTP remains available on port ${PORT}"
 
 IP="$(curl -fsSL https://checkip.amazonaws.com 2>/dev/null || echo 'YOUR_STATIC_IP')"
-echo ""
-echo "============================================================"
-echo " ✅ Setup complete."
-echo ""
-echo " Secure dashboard (recommended):  https://${IP}/admin"
-echo "   (one-time browser warning -> Advanced -> Proceed; it is your own server)"
-echo " Plain dashboard (fallback):       http://${IP}:${PORT}/admin"
-echo " Password:                         ${ADMIN_PW}"
-echo ""
-echo " Firewall: allow TCP 443 (for HTTPS) and TCP ${PORT} in Lightsail Networking."
-echo " Next: open the dashboard, enter Zerodha + Telegram details, Save,"
-echo " check logs look healthy in SHADOW, then use the Live Trading toggle."
-echo " Reminder: add ${IP} to Zerodha Allowed IPs (developers.kite.trade)."
-echo "============================================================"
+printf '\n============================================================\n'
+printf 'Setup complete.\n'
+printf 'Dashboard: https://%s/admin\n' "$IP"
+printf 'Fallback:  http://%s:%s/admin\n' "$IP" "$PORT"
+printf 'Password:  %s\n' "${ADMIN_PW:-already configured}"
+printf 'Allow TCP 443 in Lightsail Networking. Port %s is required only for direct fallback access.\n' "$PORT"
+printf 'Add %s to the Zerodha allowed IP list.\n' "$IP"
+printf '============================================================\n'
