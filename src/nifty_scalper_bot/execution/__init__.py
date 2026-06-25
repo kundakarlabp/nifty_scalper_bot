@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-from importlib import import_module
-
-
-_adaptive_module = import_module(f"{__name__}.adaptive_trailing")
-from nifty_scalper_bot.execution.hardened_adaptive_trailing import (
+from nifty_scalper_bot.execution.adaptive_trailing import (
+    AdaptiveTrailingController,
     HardenedAdaptiveTrailingController,
+    LegacyAdaptiveTrailingController,
 )
-
-_adaptive_module.AdaptiveTrailingController = HardenedAdaptiveTrailingController
-
 from nifty_scalper_bot.execution.bracket_manager import (
     BoundBracketManager,
     BracketManager,
@@ -33,6 +28,7 @@ CanonicalBracketManager = BracketManager
 
 
 __all__ = [
+    "AdaptiveTrailingController",
     "BoundBracketManager",
     "BracketManager",
     "CanonicalBracketManager",
@@ -40,6 +36,7 @@ __all__ = [
     "HardenedAdaptiveTrailingController",
     "HardenedBracketManager",
     "LedgerBracketManager",
+    "LegacyAdaptiveTrailingController",
     "LegacyBracketManager",
     "LegacyOrderManager",
     "OrderManager",
