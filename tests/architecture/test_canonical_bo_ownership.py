@@ -136,11 +136,11 @@ def test_retired_duplicate_bo_modules_are_absent() -> None:
         "dynamic_tp.py",
         "order_executor.py",
         "order_processor.py",
-        "options_policy.py",
         "entry_price.py",
     }
     present = sorted(name for name in retired if (EXECUTION / name).exists())
     assert not present, f"Retired BO modules still present: {present}"
+    assert (EXECUTION / "options_policy.py").exists()
 
 
 def test_startup_compatibility_adapters_do_not_own_execution_logic() -> None:
