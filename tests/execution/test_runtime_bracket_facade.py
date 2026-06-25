@@ -7,8 +7,8 @@ import sys
 from typing import Any
 
 import nifty_scalper_bot.execution as execution
+from nifty_scalper_bot.execution import bracket_core
 from nifty_scalper_bot.execution import bracket_manager
-from nifty_scalper_bot.execution import legacy_bracket_manager
 from nifty_scalper_bot.execution.ownership import BoundBracketManager
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 
@@ -35,8 +35,9 @@ def test_public_bracket_import_has_one_runtime_identity() -> None:
     assert execution.BracketManager is BoundBracketManager
     assert execution.CanonicalBracketManager is BoundBracketManager
     assert issubclass(BoundBracketManager, RuntimeBracketManager)
-    assert bracket_manager.LegacyBracketManager is legacy_bracket_manager.BracketManager
-    assert bracket_manager.BracketExitLifecycle is legacy_bracket_manager.BracketExitLifecycle
+    assert issubclass(BoundBracketManager, bracket_core.BracketManager)
+    assert bracket_manager.BracketExitLifecycle is bracket_core.BracketExitLifecycle
+    assert not hasattr(bracket_manager, "LegacyBracketManager")
 
 
 def test_importing_execution_package_does_not_replace_bracket_class() -> None:
@@ -73,7 +74,6 @@ print(json.dumps({
     "after": id(bm.BracketManager),
     "package": id(execution.BracketManager),
     "module": bm.BracketManager.__module__,
-    "legacy_module": bm.LegacyBracketManager.__module__,
 }))
 '''
     completed = subprocess.run(
@@ -85,4 +85,3 @@ print(json.dumps({
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
     assert payload["before"] == payload["after"] == payload["package"]
     assert payload["module"] == "nifty_scalper_bot.execution.ownership"
-    assert payload["legacy_module"] == "nifty_scalper_bot.execution.legacy_bracket_manager"
