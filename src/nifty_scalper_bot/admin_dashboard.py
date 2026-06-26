@@ -305,7 +305,7 @@ def dashboard(request: Request) -> HTMLResponse:
     for label, key, sec in FIELDS:
         v = env.get(key, "")
         shown = ("••••••••" if v else "") if sec else v
-        rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{shown}" placeholder="(unchanged)">'
+        rows += f'<label for="{key}">{label} <span class=badge>{key}</span></label><input id="{key}" name="{key}" value="{shown}" placeholder="(unchanged)">'
     body = f"""{_topbar(live_on)}<div class=wrap>{_flash(request)}
     <div class=card><h2>Live Trading</h2>
     <p>{'Placing REAL orders with REAL money.' if live_on else 'Analysing only — no real orders. Turn on when ready.'}</p>{toggle}</div>
@@ -313,8 +313,8 @@ def dashboard(request: Request) -> HTMLResponse:
     <div class=card><h2>Daily Token</h2>
     <p>Easiest: paste today's <b>request token</b> (from the Kite login redirect URL) and the bot will fetch the access token for you, then restart.</p>
     <form method=post action="/admin/token">
-    <label>Request Token (recommended)</label><input name="request_token" placeholder="paste request_token from login URL">
-    <label>…or Access Token (if you already have it)</label><input name="access_token" placeholder="paste access_token directly">
+    <label for="request_token">Request Token (recommended)</label><input id="request_token" name="request_token" placeholder="paste request_token from login URL">
+    <label for="access_token">…or Access Token (if you already have it)</label><input id="access_token" name="access_token" placeholder="paste access_token directly">
     <button class=blu type=submit>Update token &amp; restart</button></form></div>
 
     <div class=card><h2>Credentials &amp; Settings</h2>
