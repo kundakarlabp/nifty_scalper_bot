@@ -1,0 +1,3 @@
+## 2026-06-26 - Prevent DB Write Bottlenecks with executemany
+**Learning:** Repetitive single-row `conn.execute()` operations within tight loops over large datasets (like Zerodha instrument dumps) create significant N+1 query overhead in SQLite, severely degrading performance. Additionally, during development, generating massive binary database artifacts (e.g. `test.db`) for benchmarking can inadvertently bloat the repository if not explicitly ignored or cleaned up.
+**Action:** Always accumulate query parameters into a list and utilize `conn.executemany()` for bulk database inserts/upserts. Always aggressively wipe temporary testing files and databases immediately after validating the optimization.

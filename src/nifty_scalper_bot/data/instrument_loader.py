@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import csv
-import os
 import io
+import os
 import sqlite3
 import zipfile
 from contextlib import suppress
@@ -277,6 +277,7 @@ def upsert_instruments(
     )
     try:
         with conn:
+            insert_params = []
             for raw_row in rows:
                 processed += 1
                 if not isinstance(raw_row, dict):
@@ -352,7 +353,23 @@ def upsert_instruments(
                     if underlying
                     else _derive_underlying(tradingsymbol)
                 )
-                conn.execute(
+                insert_params.append(
+                    (
+                        token_int,
+                        exchange,
+                        tradingsymbol,
+                        lot_size,
+                        expiry_str,
+                        underlying_str,
+                        strike_value,
+                        opt_type,
+                        timestamp,
+                    )
+                )
+                stored += 1
+            if insert_params:
+                # ⚡ Bolt: Using executemany for batch insertion to improve DB write speed
+                conn.executemany(
                     """
                     INSERT INTO instruments(
                         token,
@@ -375,19 +392,8 @@ def upsert_instruments(
                         opt_type=excluded.opt_type,
                         updated_at=excluded.updated_at
                     """,
-                    (
-                        token_int,
-                        exchange,
-                        tradingsymbol,
-                        lot_size,
-                        expiry_str,
-                        underlying_str,
-                        strike_value,
-                        opt_type,
-                        timestamp,
-                    ),
+                    insert_params,
                 )
-                stored += 1
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in upsert_instruments: %s",
