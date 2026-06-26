@@ -34,7 +34,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Mapping, cast
+from typing import Any, Mapping, cast
 
 from nifty_scalper_bot.core.active_basket import pick_atm_option_symbols_from_basket
 from nifty_scalper_bot.core.history_roles import (
@@ -45,8 +45,10 @@ from nifty_scalper_bot.execution.readiness import (
     HydrationStatus,
     resolve_quote_bid_ask_spread,
 )
-from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import get_runtime_market_mode
+from nifty_scalper_bot.utils.logging import get_logger
+
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.core.app import BotContext
@@ -109,153 +111,11 @@ def _bar_timestamp(row: Any) -> datetime | None:
     return None
 
 
-def _quote_candidate_timestamp(candidate: Mapping[str, Any]) -> float:
-    """Return a comparable quote timestamp without treating missing time as fresh."""
-    for key in (
-        "timestamp_ms",
-        "last_tick_ts_ms",
-        "quote_timestamp_ms",
-        "exchange_timestamp",
-        "timestamp",
-        "received_at",
-    ):
-        value = candidate.get(key)
-        if value in (None, ""):
-            continue
-        try:
-            if isinstance(value, datetime):
-                return value.timestamp() * 1000.0
-            if isinstance(value, (int, float)):
-                numeric = float(value)
-                return numeric if numeric >= 1e11 else numeric * 1000.0
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.timestamp() * 1000.0
-        except (TypeError, ValueError, OverflowError):
-            continue
-    return 0.0
-
-
-def _quote_candidate_score(candidate: Mapping[str, Any]) -> tuple[int, int, int, int, float]:
-    """Rank cached quote candidates by executable evidence, then recency."""
-    bid, ask, _spread_pct, _source = resolve_quote_bid_ask_spread(candidate)
-    tradable = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
-    depth = candidate.get("depth")
-    buy = depth.get("buy") if isinstance(depth, Mapping) else None
-    sell = depth.get("sell") if isinstance(depth, Mapping) else None
-    two_sided_depth = bool(buy and sell)
-    explicit_tradable = candidate.get("tradable_quote") is True
-    has_ltp = False
-    for key in ("ltp", "last_price", "price", "close"):
-        try:
-            if float(candidate.get(key) or 0.0) > 0:
-                has_ltp = True
-                break
-        except (TypeError, ValueError):
-            continue
-    return (
-        int(tradable),
-        int(two_sided_depth),
-        int(explicit_tradable),
-        int(has_ltp),
-        _quote_candidate_timestamp(candidate),
-    )
-
-
-def _snapshot_to_quote(snapshot: Any) -> dict[str, Any]:
-    """Convert a mapping/dataclass snapshot into the canonical quote schema."""
-    if snapshot is None:
-        return {}
-    if isinstance(snapshot, Mapping):
-        return dict(snapshot)
-    keys = (
-        "symbol",
-        "ltp",
-        "last_price",
-        "bid",
-        "ask",
-        "best_bid",
-        "best_ask",
-        "spread_pct",
-        "depth_available",
-        "depth",
-        "tradable_quote",
-        "tick_age_s",
-        "tick_age_ms",
-        "timestamp",
-        "timestamp_ms",
-        "source",
-        "bid_ask_source",
-    )
-    return {key: getattr(snapshot, key, None) for key in keys}
-
-
-def _merge_cached_quote_candidates(
-    symbol: str,
-    candidates: list[tuple[str, Mapping[str, Any]]],
-) -> dict[str, Any]:
-    """Merge cached views while requiring real bid/ask proof for tradability.
-
-    DataHub and MDM can briefly expose different projections of the same FULL
-    websocket tick.  A DataHub projection containing only LTP plus
-    ``depth_available=True`` must not hide a richer MDM tick that still carries
-    ``depth.buy``/``depth.sell``.  Candidates are therefore ranked by actual
-    executable evidence.  Boolean flags alone never manufacture a quote.
-    """
-    usable = [(name, dict(value)) for name, value in candidates if isinstance(value, Mapping) and value]
-    if not usable:
-        return {}
-    usable.sort(key=lambda item: _quote_candidate_score(item[1]))
-    merged: dict[str, Any] = {}
-    sources: list[str] = []
-    for name, candidate in usable:
-        sources.append(name)
-        for key, value in candidate.items():
-            if value not in (None, "", [], {}):
-                merged[key] = value
-
-    bid, ask, spread_pct, bid_ask_source = resolve_quote_bid_ask_spread(merged)
-    valid_bid_ask = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
-    if valid_bid_ask:
-        merged.update(
-            {
-                "bid": bid,
-                "ask": ask,
-                "best_bid": bid,
-                "best_ask": ask,
-                "tradable_quote": True,
-                "bid_ask_source": bid_ask_source,
-            }
-        )
-        if spread_pct is not None:
-            merged["spread_pct"] = spread_pct
-    else:
-        merged["tradable_quote"] = False
-
-    depth = merged.get("depth")
-    buy = depth.get("buy") if isinstance(depth, Mapping) else None
-    sell = depth.get("sell") if isinstance(depth, Mapping) else None
-    merged["depth_available"] = bool(
-        (buy and sell)
-        or (valid_bid_ask and any(candidate.get("depth_available") is True for _, candidate in usable))
-    )
-    merged.setdefault("symbol", symbol)
-    merged["quote_cache_sources"] = list(dict.fromkeys(sources))
-    return merged
-
-
 def _get_cached_quote(ctx: BotContext, symbol: str) -> Mapping[str, Any]:
-    """Return the richest cached quote without pulling broker APIs."""
-    candidates: list[tuple[str, Mapping[str, Any]]] = []
-    seen_providers: set[int] = set()
-    for provider_name, provider in (
-        ("data_hub", getattr(ctx, "data_hub", None)),
-        ("datahub", getattr(ctx, "datahub", None)),
-    ):
-        if provider is None or id(provider) in seen_providers:
+    """Return cached quote/tick data without pulling broker APIs."""
+    for provider in (getattr(ctx, "data_hub", None), getattr(ctx, "datahub", None)):
+        if provider is None:
             continue
-        seen_providers.add(id(provider))
         fn = getattr(provider, "get_quote", None)
         if callable(fn):
             try:
@@ -267,37 +127,36 @@ def _get_cached_quote(ctx: BotContext, symbol: str) -> Mapping[str, Any]:
                     quote = None
             except Exception:
                 quote = None
-            if isinstance(quote, Mapping) and quote:
-                candidates.append((provider_name, quote))
-
+            if isinstance(quote, Mapping):
+                return quote
     mdm = getattr(ctx, "market_data_manager", None)
-    for name in ("get_latest_tick", "get_last_tick"):
+    for name in ("get_quote", "get_latest_tick", "get_last_tick"):
         fn = getattr(mdm, name, None)
         if callable(fn):
             try:
                 quote = fn(symbol)
             except Exception:
                 quote = None
-            if isinstance(quote, Mapping) and quote:
-                candidates.append((f"mdm.{name}", quote))
-
-    for cache_name in ("_latest_ticks", "_tick_cache"):
-        cache = getattr(mdm, cache_name, None)
-        if isinstance(cache, Mapping):
-            quote = cache.get(symbol)
-            if isinstance(quote, Mapping) and quote:
-                candidates.append((f"mdm.{cache_name}", quote))
-
+            if isinstance(quote, Mapping):
+                return quote
     snap_fn = getattr(mdm, "get_symbol_snapshot", None)
     if callable(snap_fn):
         try:
-            snapshot_quote = _snapshot_to_quote(snap_fn(symbol))
+            snap = snap_fn(symbol)
+            if snap is not None:
+                return {
+                    "ltp": getattr(snap, "ltp", None),
+                    "bid": getattr(snap, "bid", None),
+                    "ask": getattr(snap, "ask", None),
+                    "spread_pct": getattr(snap, "spread_pct", None),
+                    "depth_available": getattr(snap, "depth_available", None),
+                    "depth": getattr(snap, "depth", None),
+                    "tradable_quote": getattr(snap, "tradable_quote", None),
+                    "tick_age_s": getattr(snap, "tick_age_s", None),
+                }
         except Exception:
-            snapshot_quote = {}
-        if snapshot_quote:
-            candidates.append(("mdm.snapshot", snapshot_quote))
-
-    return _merge_cached_quote_candidates(symbol, candidates)
+            return {}
+    return {}
 
 
 def build_symbol_hydration_status(
@@ -366,7 +225,7 @@ def build_symbol_hydration_status(
     bid, ask, spread_pct, _source = resolve_quote_bid_ask_spread(dict(quote))
     depth = quote.get("depth") if isinstance(quote, Mapping) else None
     depth_available = bool(quote.get("depth_available") or depth)
-    tradable_quote = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
+    tradable_quote = bool(quote.get("tradable_quote") or (bid is not None and ask is not None and ask > bid))
     live_tick_fresh = False
     age_ms_fn = getattr(mdm, "symbol_data_age_ms", None)
     if callable(age_ms_fn):
@@ -483,7 +342,11 @@ def _hydration_status_map(ctx: BotContext, *, required_option_bars: int, require
     for sym, role in role_by_symbol.items():
         if not sym:
             continue
-        required = required_context_bars if role in {"spot", "futures_context"} else required_option_bars
+        required = (
+            required_context_bars
+            if role in {"spot", "futures_context"}
+            else required_option_bars
+        )
         statuses[sym] = build_symbol_hydration_status(ctx, sym, role, required)
     ctx.hydration_status_by_symbol = {sym: status.to_dict() for sym, status in statuses.items()}
     ctx.last_hydration_status_at = datetime.now(timezone.utc)
