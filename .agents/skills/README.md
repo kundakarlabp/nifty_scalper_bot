@@ -10,6 +10,7 @@ These skills are discovered automatically by Codex from `.agents/skills/` when C
 | `tdd-trading-changes` | Test-first implementation using one behavior slice at a time | `$tdd-trading-changes` |
 | `codebase-design` | Module/interface/seam design while preserving repository ownership | `$codebase-design` |
 | `pre-merge-trading-review` | Trading-specific code, backtest, risk, execution, and deployment review | `$pre-merge-trading-review` |
+| `session-worklog` | Durable record of decisions, changed files, validation, residual risk, and next action | `$session-worklog` |
 
 Codex may invoke a skill automatically when the request matches its description. Use `$skill-name` when you need to force a particular workflow.
 
@@ -28,7 +29,11 @@ $codebase-design Review whether reconnect recovery belongs in OrderManager or Po
 ```
 
 ```text
-$pre-merge-trading-review Review this PR for live-trading and backtest validity risks.
+$pre-merge-trading-review Review this PR for runtime and backtest validity risks.
+```
+
+```text
+$session-worklog Record the final decision, PR, validation evidence, and remaining rollout risk.
 ```
 
 ## Relationship to `AGENTS.md`
@@ -37,4 +42,6 @@ $pre-merge-trading-review Review this PR for live-trading and backtest validity 
 
 ## Source and adaptation
 
-The `diagnosing-trading-bugs`, TDD, and codebase-design workflows are adapted from Matt Pocock's `mattpocock/skills` repository and tailored to this NIFTY options scalper. The source repository is MIT licensed. See `THIRD_PARTY_NOTICE.md` in this directory.
+The diagnostic, TDD, and codebase-design workflows are adapted from Matt Pocock's `mattpocock/skills` repository and tailored to this NIFTY options scalper. `session-worklog` is vendored from `kundakarlabp/dr-bhanu-prasad` at source commit `c92ac30e6c2e2c7998fd8ebf2669f90b117151a3`.
+
+See `THIRD_PARTY_NOTICE.md` in this directory.
