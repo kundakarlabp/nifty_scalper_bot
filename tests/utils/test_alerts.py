@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from nifty_scalper_bot.utils.alerts import AlertDeduplicator
+from nifty_scalper_bot.utils.alerts import AlertDeduplicator, AlertLogHandler
 
 
 def test_alert_deduplicator_batches_noncritical() -> None:
@@ -98,3 +99,89 @@ def test_alert_deduplicator_flood_hold_suppresses_immediate_retries() -> None:
         outage_class="market_data.mapping_empty",
         now=base + timedelta(seconds=5),
     )
+
+
+def _warning_record(message: str, *, func: str = "_watchdog_loop") -> logging.LogRecord:
+    return logging.LogRecord(
+        name="nifty_scalper_bot.streaming.websocket_manager",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=(),
+        exc_info=None,
+        func=func,
+    )
+
+
+def test_alert_log_handler_collapses_dynamic_condition_repeats() -> None:
+    emitted: list[dict[str, str]] = []
+    now = [100.0]
+    handler = AlertLogHandler(
+        lambda payload: emitted.append(dict(payload)),
+        repeat_window_seconds=300.0,
+        clock=lambda: now[0],
+    )
+
+    handler.emit(
+        _warning_record(
+            "Condition met: websocket_pong_timeout age=17.22s threshold=10.00s"
+        )
+    )
+    now[0] = 101.0
+    handler.emit(
+        _warning_record(
+            "Condition met: websocket_pong_timeout age=17.29s threshold=10.00s"
+        )
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0]["key"].endswith(":websocket_pong_timeout")
+    assert "age=17.22s" in emitted[0]["message"]
+
+    now[0] = 401.0
+    handler.emit(
+        _warning_record(
+            "Condition met: websocket_pong_timeout age=18.01s threshold=10.00s"
+        )
+    )
+    assert len(emitted) == 2
+
+
+def test_alert_log_handler_keeps_distinct_conditions_from_same_function() -> None:
+    emitted: list[dict[str, str]] = []
+    handler = AlertLogHandler(
+        lambda payload: emitted.append(dict(payload)),
+        repeat_window_seconds=300.0,
+        clock=lambda: 100.0,
+    )
+
+    handler.emit(
+        _warning_record(
+            "Condition met: websocket_pong_timeout age=17.22s threshold=10.00s"
+        )
+    )
+    handler.emit(
+        _warning_record(
+            "Condition met: websocket_handshake_timeout age=31.00s threshold=30.00s"
+        )
+    )
+
+    assert len(emitted) == 2
+    assert emitted[0]["key"] != emitted[1]["key"]
+
+
+def test_alert_log_handler_does_not_hide_generic_warning_repeats() -> None:
+    emitted: list[dict[str, str]] = []
+    handler = AlertLogHandler(
+        lambda payload: emitted.append(dict(payload)),
+        repeat_window_seconds=300.0,
+        clock=lambda: 100.0,
+    )
+    record = _warning_record("broker response malformed", func="decode")
+
+    handler.emit(record)
+    handler.emit(record)
+
+    assert len(emitted) == 2
+    assert emitted[0]["key"].endswith(":decode")
