@@ -1,5 +1,5 @@
-# File purpose: Validate canonical BO safety, AWS Lightsail deployment syntax, dashboard code, and repository regressions.
-# Key responsibilities: Compile production and console code, validate deployment scripts, run focused lifecycle checks, enforce file headers, and execute the full test suite.
+# File purpose: Validate canonical BO safety, AWS Lightsail deployment syntax, dashboard code, agent tooling, and repository regressions.
+# Key responsibilities: Compile source, validate scripts, run focused lifecycle checks, enforce architecture contracts, and execute the full test suite.
 # Operational constraints: Focused safety gates and the complete suite must pass before merge.
 
 name: Live Exit Safety CI
@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -27,8 +29,19 @@ jobs:
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
-      - name: Compile production and dashboard source
-        run: python -m compileall -q src dashboard
+      - name: Compile production, dashboard and agent tooling
+        run: python -m compileall -q src dashboard scripts
+      - name: Validate agent context and test planning
+        run: |
+          python -m pytest -q tests/tools/test_agent_tooling.py
+          python scripts/agent_context.py \
+            --query "websocket readiness order timeout" \
+            --output /tmp/agent-context.md
+          test -s /tmp/agent-context.md
+          python scripts/agent_check.py \
+            --files scripts/agent_context.py scripts/agent_check.py \
+            --output /tmp/agent-check.md
+          test -s /tmp/agent-check.md
       - name: Validate Lightsail deployment scripts
         run: |
           bash -n deploy/lightsail_setup.sh
