@@ -10,7 +10,7 @@ from __future__ import annotations
 from contextlib import suppress
 import os
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import bracket_manager as _legacy
 from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
@@ -18,6 +18,159 @@ from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketMana
 
 class RuntimeBracketManager(LedgerBracketManager):
     """Final runtime export for the staged lifecycle implementation."""
+
+    def _block_ledger_release(
+        self,
+        bracket: Any,
+        *,
+        reason: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist enough identity to reconcile a ledger block after restart."""
+        release_payload = dict(payload or {})
+        release_payload.setdefault("symbol", str(bracket.symbol))
+        release_payload.setdefault("bracket_id", str(bracket.bracket_id))
+        release_payload.setdefault("exit_state", str(bracket.exit_state or ""))
+        release_payload.setdefault(
+            "remaining_quantity", int(bracket.remaining_quantity or 0)
+        )
+        super()._block_ledger_release(
+            bracket,
+            reason=reason,
+            payload=release_payload,
+        )
+
+    def _broker_all_positions_flat(self) -> bool | None:
+        """Return explicit all-account flatness, or ``None`` when unknowable."""
+        broker = getattr(getattr(self, "order_manager", None), "_broker", None)
+        getter = getattr(broker, "get_positions", None) if broker is not None else None
+        if not callable(getter):
+            return None
+        try:
+            payload = getter()
+        except Exception as exc:  # noqa: BLE001 - unknown must remain fail-closed
+            _legacy.LOGGER.error(
+                "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED error=%s",
+                exc,
+                extra={
+                    "event": "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return None
+
+        rows: Any = payload
+        if isinstance(payload, Mapping):
+            found_collection = False
+            for key in ("net", "positions", "day"):
+                if key in payload:
+                    rows = payload.get(key)
+                    found_collection = True
+                    break
+            if not found_collection:
+                return True if not payload else None
+        if rows is None:
+            return None
+        try:
+            positions = list(rows)
+        except TypeError:
+            return None
+        if not positions:
+            return True
+
+        for position in positions:
+            if not isinstance(position, Mapping):
+                return None
+            raw_quantity = position.get(
+                "quantity",
+                position.get("net_quantity", position.get("net")),
+            )
+            if raw_quantity is None:
+                return None
+            try:
+                quantity = int(float(raw_quantity or 0))
+            except (TypeError, ValueError):
+                return None
+            if quantity != 0:
+                return False
+        return True
+
+    def _retry_orphan_ledger_block(
+        self,
+        bracket_id: str,
+        details: Mapping[str, Any] | None,
+    ) -> bool:
+        """Clear a restart orphan only after authoritative broker-flat proof."""
+        payload = details.get("payload", {}) if isinstance(details, Mapping) else {}
+        payload = payload if isinstance(payload, Mapping) else {}
+        symbol = str(payload.get("symbol") or "").strip()
+
+        flat: bool | None
+        if symbol:
+            try:
+                quantity = self._broker_position_quantity(symbol)
+            except Exception as exc:  # noqa: BLE001 - unknown remains blocked
+                _legacy.LOGGER.error(
+                    "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED bracket_id=%s symbol=%s error=%s",
+                    bracket_id,
+                    symbol,
+                    exc,
+                    extra={
+                        "event": "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED",
+                        "bracket_id": str(bracket_id),
+                        "symbol": symbol,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                flat = None
+            else:
+                flat = None if quantity is None else quantity == 0
+        else:
+            # Legacy rows predate persisted symbol metadata. They may be released
+            # only when the broker authoritatively reports the entire account flat.
+            flat = self._broker_all_positions_flat()
+
+        if flat is not True:
+            _legacy.LOGGER.warning(
+                "FILL_LEDGER_ORPHAN_BLOCK_RETAINED bracket_id=%s symbol=%s broker_flat=%s",
+                bracket_id,
+                symbol or "unknown",
+                flat,
+                extra={
+                    "event": "FILL_LEDGER_ORPHAN_BLOCK_RETAINED",
+                    "bracket_id": str(bracket_id),
+                    "symbol": symbol or None,
+                    "broker_flat": flat,
+                },
+            )
+            return False
+
+        self._ledger_blocked.pop(str(bracket_id), None)
+        if self._release_store is not None:
+            with suppress(Exception):
+                self._release_store.clear(str(bracket_id))
+        _legacy.LOGGER.warning(
+            "FILL_LEDGER_ORPHAN_BLOCK_CLEARED bracket_id=%s symbol=%s",
+            bracket_id,
+            symbol or "account_flat",
+            extra={
+                "event": "FILL_LEDGER_ORPHAN_BLOCK_CLEARED",
+                "bracket_id": str(bracket_id),
+                "symbol": symbol or None,
+            },
+        )
+        return True
+
+    def _retry_blocked_releases(self) -> None:
+        """Retry live brackets and reconcile restart-orphaned ledger rows."""
+        for bracket_id in list(self._ledger_blocked):
+            bracket = self._find_bracket_by_id(bracket_id)
+            if bracket is not None:
+                self._retry_ledger_block(bracket)
+                continue
+            self._retry_orphan_ledger_block(
+                str(bracket_id), self._ledger_blocked.get(str(bracket_id))
+            )
 
     def _strict_ledger_release_required(self) -> bool:
         checker = getattr(self.order_manager, "is_live_mode", None)
