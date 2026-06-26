@@ -1,16 +1,30 @@
-# Repository Map
+# Repository map
 
-> Accurate as of the current `main`. Paths are relative to `src/nifty_scalper_bot/`.
-> For the non-negotiable runtime rules and the authoritative pipeline, see `AGENTS.md`.
+> Compact navigation map for ChatGPT, Copilot, and human reviewers. Paths under the runtime sections are relative to `src/nifty_scalper_bot/`.
 
-## Top-Level Layout
-- `src/nifty_scalper_bot/` – Production bot source (data, strategies, execution, risk, notifications, infra).
-- `tests/` – Unit/integration tests mirroring `src/`. Note: many sync tests are no-ops under the
-  current conftest hook — new/critical tests must be `async def` to actually execute.
-- `deploy/`, `ops/`, `scripts/` – Deployment, monitoring, and local helper tooling.
-- `docs/` – Reference documentation (this map, playbooks, prompts).
+## Fast start
 
-## Authoritative Runtime Path
+1. Read `docs/AGENT_START_HERE.md`.
+2. Use an exact error, event name, class, or function with `scripts/agent_context.py`.
+3. Fetch only the ranked files and their direct callers/tests.
+4. Read the full `AGENTS.md` before editing a high-risk runtime path.
+
+For owner-created issues titled `[Agent Context] ...`, GitHub Actions automatically adds a ranked context report.
+
+## Top-level layout
+
+| Path | Purpose |
+|---|---|
+| `src/nifty_scalper_bot/` | Production bot code |
+| `tests/` | Unit, architecture, integration, execution-safety, and deployment tests |
+| `dashboard/` | Streamlit operations console |
+| `deploy/`, `ops/` | AWS Lightsail and operational scripts |
+| `scripts/` | Repository tooling, including agent context and validation planning |
+| `.agents/skills/` | Task-specific debugging, TDD, design, review, and worklog workflows |
+| `docs/` | Architecture, operational, and agent-reference material |
+
+## Authoritative runtime path
+
 ```text
 core/app.py
 → data/market_data_manager.py
@@ -20,60 +34,129 @@ core/app.py
 → execution/bracket_manager.py
 → notifications/telegram_controller.py
 ```
-Do not bypass this flow with side-channel patches. Options are the only tradable
-instrument; spot is direction/context only; futures is optional volume/context.
 
-## Core Runtime Files (each carries a standardized module docstring)
-- `core/app.py` – Orchestrator. Builds BotContext, wires every subsystem, owns the
-  startup sequence and the readiness/arming SSOT.
-- `data/market_data_manager.py` (MDM) – **Sole owner** of ticks and OHLC history;
-  broker history fetch; tick fan-out via the message bus.
-- `data/data_hub.py` – Read facade over MDM (quotes/OHLC/OI/context). Owns no history;
-  selects no contracts.
-- `strategies/runner.py` – Event-driven evaluation loop; applies gates; hands accepted
-  signals to the order path; tracks runner/indicator history counts.
-- `execution/order_manager.py` – THE live order path: placement, retries, idempotency,
-  lifecycle against the broker.
-- `execution/bracket_manager.py` – Virtual (internal) SL/TP, ATR trailing, multi-target
-  exits, partial scaling, orphan resync.
-- `notifications/telegram_controller.py` – Operator console: command handlers, single-chat
-  auth, diagnostics, guarded controls, alerts.
+Do not bypass this flow. Options are the only tradable instruments. Spot is direction/context only; futures is optional context only.
 
-## Key Support Modules
-### Contracts & instruments
-- `core/instrument_manager.py` – Authoritative contract selection from the instrument dump
-  (futures/options/ATM). Token resolution.
-- `instruments/active_contracts.py` – Canonical symbol helpers and active NIFTY future
-  resolution from instruments.
+## Core ownership
 
-### Execution support
-- `execution/safe_order_manager.py` – Safety wrapper around OrderManager (guards/idempotency).
-- `execution/position_manager.py` – Position and pending-order state of record.
-- `execution/readiness.py` – Pure readiness/arming decision helpers used by the live gate.
-- `execution/order_executor.py` – Separate non-live executor. **NOT** the live order path.
+| File | Owns | Does not own |
+|---|---|---|
+| `core/app.py` | Wiring, startup sequence, readiness/arming source of truth | Contract selection, history storage, order placement |
+| `core/instrument_manager.py` | Contract selection and token resolution | Tick/history storage, strategy decisions |
+| `data/market_data_manager.py` | Tick cache, subscriptions, quotes/depth/OI, OHLC history and hydration | Contract selection, strategy logic |
+| `data/data_hub.py` | Read facade over active market data | Independent history or contract selection |
+| `data/candle_engine.py` | Tick-to-OHLC bars and bar readiness | Broker instruments |
+| `strategies/runner.py` | Evaluation loop, gates, signal-to-order handoff | Contract selection, broker history fetch, order placement |
+| `execution/order_manager.py` | Canonical live placement, retries, idempotency, order lifecycle | Signal generation and contract selection |
+| `execution/position_manager.py` | Position and pending-order state | Strategy scoring |
+| `execution/bracket_manager.py` | Virtual SL/TP, trailing, targets, partial exits and recovery | Entry decisions and separate placement path |
+| `notifications/telegram_controller.py` | Operator commands, authentication, diagnostics and alerts | Trading decisions and direct order ownership |
 
-### Strategy support
-- `core/strategy_manager.py` – Scores strategies and allocates between them.
-- `strategies/signal_generator.py` – Produces scored signals from indicators.
-- `strategies/indicators.py` – Technical indicator calculations.
-- `core/market_regime.py` – Market-regime detection and fan-out.
+`execution/order_executor.py` is non-live and is not the canonical live order path.
 
-### Data & streaming
-- `data/rest/zerodha_client.py` – Low-level Kite REST + websocket client.
-- `streaming/websocket_manager.py` – Hardened KiteTicker streaming.
-- `data/persistent_state.py` – Persisted runtime state.
+## Support modules
 
-### Risk, config, infra
-- `risk/risk_manager.py` – Risk guardrails and telemetry.
-- `config/settings.py` – Runtime settings facade.
-- `infra/metrics.py` – Metrics.
+### Contracts and symbols
+
+- `instruments/active_contracts.py` — canonical symbol helpers and active NIFTY future resolution.
+- `core/instrument_manager.py` — instrument dump, spot/future/options selection, symbol-token maps, ATM CE/PE basket.
+
+### Market data and streaming
+
+- `streaming/websocket_manager.py` — KiteTicker connection, callbacks, watchdog and reconnect behavior.
+- `data/rest/zerodha_client.py` — low-level broker REST/WebSocket integration.
+- `data/persistent_state.py` — persisted runtime state.
+- `data/candle_engine.py` — candle construction and readiness.
+
+### Strategy and market context
+
+- `core/strategy_manager.py` — strategy scoring and allocation.
+- `strategies/signal_generator.py` — scored signal production.
+- `strategies/indicators.py` — indicator calculations.
+- `core/market_regime.py` — market-regime detection and fan-out.
+
+### Execution and risk
+
+- `execution/safe_order_manager.py` — safety wrapper around OrderManager.
+- `execution/readiness.py` — pure readiness/arming helpers.
+- `execution/lifecycle_manager.py` — lifecycle coordination where used.
+- `execution/fill_ledger.py` — fill accounting and reconciliation where used.
+- `risk/risk_manager.py` — risk limits and telemetry.
+
+### Configuration and operations
+
+- `config/settings.py` — runtime settings facade.
+- `infra/metrics.py` — metrics.
+- `dashboard/operations_console.py` — operator dashboard.
+- `deploy/lightsail_release.sh` — staged Lightsail release path.
 
 ### Backtesting
-- `backtesting/backtest_engine.py` – Event-driven historical replay through strategies
-  with simulated fills/costs.
 
-## SSOT Invariants (read before editing the data/readiness path)
-- History is owned only by MDM. DataHub stores none; never gate readiness on DataHub bars.
-- Readiness gates on mdm/runner/indicator bar counts via the canonical functions in
-  `core/app.py` (`compute_history_readiness`, `compute_selected_option_history_readiness`).
-- Contract selection lives in InstrumentManager; MDM/DataHub/runner consume, never select.
+- `backtesting/backtest_engine.py` — event-driven historical replay with simulated fills and costs.
+
+## Source-to-test navigation
+
+| Symptom or change | Start with | Focused tests |
+|---|---|---|
+| WebSocket timeout, reconnect, missing ticks | `streaming/websocket_manager.py`, MDM, broker client | `tests/streaming/`, `tests/data/` |
+| Wrong symbol, expiry, ATM strike or token | InstrumentManager, active contracts | `tests/instruments/`, `tests/core/`, `tests/data/` |
+| Missing OHLC or readiness blocked | MDM, candle engine, app readiness, runner | `tests/data/`, `tests/core/`, `tests/strategies/` |
+| LTP-only quote, spread or depth issue | MDM, DataHub, quote models | `tests/data/`, execution/readiness tests |
+| Duplicate signal or same-bar evaluation | runner, signal generator, candle identity | `tests/strategies/`, `tests/core/` |
+| Risk/cooldown/capital blocker | risk manager, readiness, app | `tests/risk/`, `tests/core/` |
+| Duplicate/rejected/partial order | order manager, safe manager, position manager, fill ledger | `tests/execution/`, canonical integration tests |
+| SL/TP/trailing/restart issue | bracket manager, adaptive trailing, position/fill recovery | bracket and recovery tests under `tests/execution/` |
+| Telegram spam or command problem | telegram controller, alert utilities | `tests/notifications/`, utility tests |
+| Dashboard truth/export/rendering | dashboard modules | `tests/dashboard/` |
+| Lightsail release/startup | deploy scripts, release guard | deployment and release-guard tests |
+
+## High-risk paths
+
+```text
+src/nifty_scalper_bot/core/app.py
+src/nifty_scalper_bot/core/instrument_manager.py
+src/nifty_scalper_bot/data/market_data_manager.py
+src/nifty_scalper_bot/data/data_hub.py
+src/nifty_scalper_bot/streaming/websocket_manager.py
+src/nifty_scalper_bot/strategies/runner.py
+src/nifty_scalper_bot/risk/risk_manager.py
+src/nifty_scalper_bot/execution/order_manager.py
+src/nifty_scalper_bot/execution/position_manager.py
+src/nifty_scalper_bot/execution/bracket_manager.py
+src/nifty_scalper_bot/notifications/telegram_controller.py
+```
+
+Inspect direct call sites, state ownership, restart/reconnect behavior, and regression tests before editing these files.
+
+## Source-of-truth invariants
+
+- Contract selection lives in InstrumentManager.
+- MDM owns ticks, subscriptions, quote quality, and OHLC history.
+- DataHub is read-only and owns no duplicate history.
+- Readiness uses canonical app/MDM/runner/indicator state.
+- OrderManager is the canonical live placement path.
+- PositionManager owns position/pending state.
+- BracketManager owns protective-exit state.
+- Specific blocker reasons are required when trading is not ready.
+- Paper, shadow, and live modes remain separate.
+
+## Agent tooling
+
+Generate ranked repository context:
+
+```bash
+python scripts/agent_context.py --query "exact error or symbol" --output /tmp/agent-context.md
+```
+
+Generate a focused validation plan:
+
+```bash
+python scripts/agent_check.py --files path/to/changed.py --output /tmp/agent-check.md
+```
+
+Final validation remains:
+
+```bash
+python -m compileall -q src dashboard
+python -m pytest -q
+```

@@ -1,6 +1,10 @@
-# Repo-scoped Codex skills
+# Repository-scoped coding skills
 
-These skills are discovered automatically by Codex from `.agents/skills/` when Codex is launched anywhere inside this repository.
+These task-specific skills supplement the repository contract for ChatGPT, GitHub Copilot, Codex-compatible tools, and human reviewers.
+
+## Fast start
+
+Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`. For non-trivial work, generate ranked context with `scripts/agent_context.py` before opening many files.
 
 ## Installed skills
 
@@ -9,36 +13,24 @@ These skills are discovered automatically by Codex from `.agents/skills/` when C
 | `diagnosing-trading-bugs` | Deterministic diagnosis of runtime, data, signal, broker, and order-state failures | `$diagnosing-trading-bugs` |
 | `tdd-trading-changes` | Test-first implementation using one behavior slice at a time | `$tdd-trading-changes` |
 | `codebase-design` | Module/interface/seam design while preserving repository ownership | `$codebase-design` |
-| `pre-merge-trading-review` | Trading-specific code, backtest, risk, execution, and deployment review | `$pre-merge-trading-review` |
+| `pre-merge-trading-review` | Trading-specific code, backtest, risk, execution, deployment, and merge review | `$pre-merge-trading-review` |
 | `session-worklog` | Durable record of decisions, changed files, validation, residual risk, and next action | `$session-worklog` |
 
-Codex may invoke a skill automatically when the request matches its description. Use `$skill-name` when you need to force a particular workflow.
+Use a skill automatically when the request matches its description, or invoke it explicitly by name in compatible tools.
 
-## Examples
-
-```text
-$diagnosing-trading-bugs Diagnose why option ticks are present but readiness remains blocked.
-```
+## Typical sequence
 
 ```text
-$tdd-trading-changes Add idempotent handling for duplicate broker order updates.
+diagnosing-trading-bugs
+→ tdd-trading-changes
+→ codebase-design when an ownership decision is required
+→ pre-merge-trading-review
+→ session-worklog
 ```
 
-```text
-$codebase-design Review whether reconnect recovery belongs in OrderManager or PositionManager.
-```
+## Relationship to repository instructions
 
-```text
-$pre-merge-trading-review Review this PR for runtime and backtest validity risks.
-```
-
-```text
-$session-worklog Record the final decision, PR, validation evidence, and remaining rollout risk.
-```
-
-## Relationship to `AGENTS.md`
-
-`AGENTS.md` remains the repository-wide source of truth. These skills add task-specific execution workflows; they do not override architecture, safety, validation, or merge rules.
+`AGENTS.md` remains authoritative for architecture, trading safety, validation, and merge rules. The skill files provide detailed procedures and should be loaded only when relevant.
 
 ## Source and adaptation
 
