@@ -118,7 +118,7 @@ def test_alert_log_handler_collapses_dynamic_condition_repeats() -> None:
     emitted: list[dict[str, str]] = []
     now = [100.0]
     handler = AlertLogHandler(
-        lambda payload: emitted.append(dict(payload)),
+        lambda payload: emitted.append(payload),
         repeat_window_seconds=300.0,
         clock=lambda: now[0],
     )
@@ -151,7 +151,7 @@ def test_alert_log_handler_collapses_dynamic_condition_repeats() -> None:
 def test_alert_log_handler_keeps_distinct_conditions_from_same_function() -> None:
     emitted: list[dict[str, str]] = []
     handler = AlertLogHandler(
-        lambda payload: emitted.append(dict(payload)),
+        lambda payload: emitted.append(payload),
         repeat_window_seconds=300.0,
         clock=lambda: 100.0,
     )
@@ -174,7 +174,7 @@ def test_alert_log_handler_keeps_distinct_conditions_from_same_function() -> Non
 def test_alert_log_handler_does_not_hide_generic_warning_repeats() -> None:
     emitted: list[dict[str, str]] = []
     handler = AlertLogHandler(
-        lambda payload: emitted.append(dict(payload)),
+        lambda payload: emitted.append(payload),
         repeat_window_seconds=300.0,
         clock=lambda: 100.0,
     )
