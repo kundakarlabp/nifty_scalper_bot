@@ -22,6 +22,8 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     for line in raw.splitlines():
         if not line.strip():
             continue
+        if ":" not in line:
+            raise ValueError(f"Malformed frontmatter line (missing colon): {line}")
         key, value = line.split(":", 1)
         metadata[key.strip()] = value.strip()
     return metadata
