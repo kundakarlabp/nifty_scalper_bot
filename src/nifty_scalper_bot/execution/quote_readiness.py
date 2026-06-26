@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
+
 
 def _value(payload: Mapping[str, Any] | object | None, key: str) -> Any:
     if payload is None:
@@ -80,8 +82,16 @@ def resolve_real_tick_count(
             return max(0, int(raw)), False
         except (TypeError, ValueError):
             return 0, False
-    explicit_ms = _value(payload, "tick_age_ms") is not None or _value(payload, "quote_age_ms") is not None
-    if explicit_ms and tick_age_ms is not None and tick_age_ms <= max_age_ms and has_bid_ask:
+    explicit_ms = (
+        _value(payload, "tick_age_ms") is not None
+        or _value(payload, "quote_age_ms") is not None
+    )
+    if (
+        explicit_ms
+        and tick_age_ms is not None
+        and tick_age_ms <= max_age_ms
+        and has_bid_ask
+    ):
         return 1, True
     return 0, False
 
@@ -115,14 +125,23 @@ def evaluate_execution_quote(
     require_depth: bool,
     min_real_ticks_last_60s: int = 0,
 ) -> ExecutionQuoteReadiness:
-    """Return one canonical fail-closed quote verdict."""
-    bid = _float(payload, "bid", "best_bid")
-    ask = _float(payload, "ask", "best_ask")
-    has_bid_ask = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
+    """Return one canonical fail-closed quote verdict.
+
+    FULL Kite ticks commonly carry best prices only inside
+    ``depth.buy[0]``/``depth.sell[0]``.  Resolve those through the canonical
+    depth-aware helper before applying the execution gates.  This preserves
+    fail-closed behaviour: an absent, crossed, stale, wide, or one-sided book
+    remains non-tradable.
+    """
+    bid, ask, derived_spread_pct, _bid_ask_source = resolve_quote_bid_ask_spread(
+        payload
+    )
+    has_bid_ask = bool(
+        bid is not None and ask is not None and bid > 0 and ask > bid
+    )
     spread_pct = _float(payload, "spread_pct")
-    if spread_pct is None and has_bid_ask:
-        midpoint = ((bid or 0.0) + (ask or 0.0)) / 2.0
-        spread_pct = ((ask - bid) / midpoint * 100.0) if midpoint > 0 else None
+    if spread_pct is None:
+        spread_pct = derived_spread_pct
     tick_age_ms = resolve_tick_age_ms(payload)
     quote_version = resolve_quote_version(payload)
     depth = _value(payload, "depth")
