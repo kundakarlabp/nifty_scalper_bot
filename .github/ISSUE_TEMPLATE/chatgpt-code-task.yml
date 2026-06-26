@@ -1,0 +1,40 @@
+name: ChatGPT code task
+about: Generate a compact repository context report before code work
+title: "[Agent Context] "
+labels: []
+assignees:
+  - kundakarlabp
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Put the exact error message, symbol, module, or enhancement in the title. GitHub Actions will add a ranked context report.
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Describe the failure using sanitized information.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Likely area
+      options:
+        - Unknown
+        - Market data or WebSocket
+        - Contract selection or hydration
+        - Strategy or signal gating
+        - Risk or readiness
+        - Execution or bracket lifecycle
+        - Telegram or dashboard
+        - Deployment or configuration
+        - Performance or architecture
+    validations:
+      required: true
