@@ -17,8 +17,32 @@ from nifty_scalper_bot.utils.rate_limiter import LeakyBucket
 log = get_logger(__name__)
 
 _CONDITION_EVENT_RE = re.compile(
-    r"^\s*Condition met:\s*(?P<event>[A-Za-z0-9_.:-]+)"
+    r"^\s*Condition met:\s*(?P<event>[A-Za-z0-9_.:-]+)", re.IGNORECASE
 )
+_PERSISTENT_WARNING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"strategy evaluation stalled", re.IGNORECASE),
+        "strategy_evaluation_stalled",
+    ),
+    (
+        re.compile(
+            r"strategy eval genuinely stalled while ticks flowing", re.IGNORECASE
+        ),
+        "strategy_eval_ticks_flowing_stalled",
+    ),
+    (
+        re.compile(
+            r"websocket_degraded\s+code=1006|closing[_ ]handshake[_ ]timeout",
+            re.IGNORECASE,
+        ),
+        "websocket_degraded_1006",
+    ),
+    (
+        re.compile(r"websocket stale\.\s*reconnecting", re.IGNORECASE),
+        "websocket_tick_stale",
+    ),
+)
+_GENERIC_RECORD_EVENTS = {"", "app.log", "log", "warning", "error"}
 
 
 @dataclass(slots=True)
@@ -44,25 +68,12 @@ class AlertDeduplicator:
         bucket_capacity: int = 100,
         bucket_refill_seconds: float = 100.0,
     ) -> None:
-        """Initialise deduplicator with quiet window and rate limiter.
-
-        Args:
-            quiet_window: Duration suppressing duplicate immediate sends.
-            bucket_capacity: Burst capacity for immediate dispatch tokens.
-            bucket_refill_seconds: Seconds per token refill for immediate dispatch.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
         self._quiet_window = quiet_window
         refill_seconds = max(bucket_refill_seconds, 1.0)
         refill_rate = max(1.0 / refill_seconds, 0.01)
         self._bucket = LeakyBucket(
-            capacity=bucket_capacity, refill_rate_per_sec=refill_rate
+            capacity=bucket_capacity,
+            refill_rate_per_sec=refill_rate,
         )
         self._last_seen: MutableMapping[str, datetime] = {}
         self._last_severity: MutableMapping[str, str] = {}
@@ -79,21 +90,7 @@ class AlertDeduplicator:
         recovery: bool = False,
         now: datetime | None = None,
     ) -> bool:
-        """Return ``True`` when an alert should dispatch immediately.
-
-        Args:
-            key: Deduplication key for the alert source.
-            severity: Severity string (info|warning|critical).
-            hint_immediate: Caller preference for immediate delivery.
-            now: Optional override for the current timestamp.
-
-        Returns:
-            ``True`` when the alert should bypass aggregation.
-
-        Raises:
-            None.
-        """
-
+        """Return ``True`` when an alert should dispatch immediately."""
         try:
             moment = now or datetime.now(timezone.utc)
             normalized_key = str(key)
@@ -101,29 +98,28 @@ class AlertDeduplicator:
             normalized_outage = (outage_class or "").strip().lower()
             family_key = self._family_key(normalized_key)
             last_seen = self._last_seen.get(normalized_key)
-            quiet_elapsed = False
-            if last_seen is not None:
-                quiet_elapsed = moment - last_seen >= self._quiet_window
+            quiet_elapsed = bool(
+                last_seen is not None
+                and moment - last_seen >= self._quiet_window
+            )
             family_seen = self._last_seen.get(family_key)
-            family_quiet_elapsed = False
-            if family_seen is not None:
-                family_quiet_elapsed = moment - family_seen >= self._quiet_window
+            family_quiet_elapsed = bool(
+                family_seen is not None
+                and moment - family_seen >= self._quiet_window
+            )
 
             flood_hold_until = self._flood_hold_until.get(family_key)
-            if (
-                flood_hold_until is not None
-                and moment < flood_hold_until
-                and not recovery
-            ):
+            if flood_hold_until is not None and moment < flood_hold_until and not recovery:
                 self._last_seen[normalized_key] = moment
                 self._last_seen[family_key] = moment
                 return False
 
             immediate_requested = hint_immediate or normalized_severity == "critical"
-            severity_changed = self._last_severity.get(family_key) != normalized_severity
-            outage_changed = (
-                bool(normalized_outage)
-                and self._last_outage_class.get(family_key) != normalized_outage
+            severity_changed = (
+                self._last_severity.get(family_key) != normalized_severity
+            )
+            outage_changed = bool(normalized_outage) and (
+                self._last_outage_class.get(family_key) != normalized_outage
             )
             if recovery:
                 immediate_requested = True
@@ -132,49 +128,31 @@ class AlertDeduplicator:
                 immediate_requested = True
 
             if immediate_requested:
-                if (
+                eligible = (
                     last_seen is None
                     or family_seen is None
                     or quiet_elapsed
                     or family_quiet_elapsed
                     or severity_changed
                     or outage_changed
-                ):
-                    if self._acquire_token():
-                        self._last_seen[normalized_key] = moment
-                        self._last_seen[family_key] = moment
-                        self._last_severity[family_key] = normalized_severity
-                        if normalized_outage:
-                            self._last_outage_class[family_key] = normalized_outage
-                        if recovery:
-                            self._flood_hold_until.pop(family_key, None)
-                        return True
+                )
+                if eligible and self._acquire_token():
                     self._last_seen[normalized_key] = moment
                     self._last_seen[family_key] = moment
-                    log.debug(
-                        "Alert token bucket exhausted; aggregating",
-                        extra={
-                            "event": "alert_token_exhausted",
-                            "key": normalized_key,
-                        },
-                    )
-                    return False
+                    self._last_severity[family_key] = normalized_severity
+                    if normalized_outage:
+                        self._last_outage_class[family_key] = normalized_outage
+                    if recovery:
+                        self._flood_hold_until.pop(family_key, None)
+                    return True
                 self._last_seen[normalized_key] = moment
                 self._last_seen[family_key] = moment
-                log.debug(
-                    "Alert immediate suppressed within quiet window",
-                    extra={
-                        "event": "alert_immediate_suppressed",
-                        "key": normalized_key,
-                    },
-                )
                 return False
 
             if last_seen is None:
                 self._last_seen[normalized_key] = moment
                 self._last_seen[family_key] = moment
                 return False
-
             if quiet_elapsed and self._acquire_token():
                 self._last_seen[normalized_key] = moment
                 self._last_seen[family_key] = moment
@@ -182,19 +160,10 @@ class AlertDeduplicator:
                 if normalized_outage:
                     self._last_outage_class[family_key] = normalized_outage
                 return True
-
             self._last_seen[normalized_key] = moment
             self._last_seen[family_key] = moment
-            if quiet_elapsed:
-                log.debug(
-                    "Alert quiet window reached; aggregating",
-                    extra={
-                        "event": "alert_quiet_window_aggregate",
-                        "key": normalized_key,
-                    },
-                )
             return False
-        except Exception as exc:  # noqa: BLE001 - defensive catch
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in AlertDeduplicator.should_immediate: %s",
                 exc,
@@ -203,10 +172,13 @@ class AlertDeduplicator:
             return hint_immediate
 
     def mark_flood_limited(
-        self, key: str, *, now: datetime | None = None, hold_for: timedelta | None = None
+        self,
+        key: str,
+        *,
+        now: datetime | None = None,
+        hold_for: timedelta | None = None,
     ) -> None:
-        """Record send flood-control and suppress immediate retries for family."""
-
+        """Suppress immediate retries for an alert family after flood control."""
         moment = now or datetime.now(timezone.utc)
         family_key = self._family_key(str(key))
         effective_hold = (
@@ -216,23 +188,11 @@ class AlertDeduplicator:
         )
         hold_until = moment + effective_hold
         self._flood_hold_until[family_key] = hold_until
-        # Apply hold to all severities under the family to stop critical bypass spam.
         for severity in ("critical", "warning", "info"):
             self._flood_hold_until[f"{family_key}:{severity}"] = hold_until
 
     def prune(self, *, now: datetime | None = None) -> None:
-        """Drop dedupe entries older than the quiet window.
-
-        Args:
-            now: Optional override for the current timestamp.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Drop expired dedupe and flood-control entries."""
         try:
             moment = now or datetime.now(timezone.utc)
             threshold = moment - self._quiet_window
@@ -248,7 +208,7 @@ class AlertDeduplicator:
             ]
             for key in expired:
                 self._flood_hold_until.pop(key, None)
-        except Exception as exc:  # noqa: BLE001 - defensive catch
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in AlertDeduplicator.prune: %s",
                 exc,
@@ -256,21 +216,10 @@ class AlertDeduplicator:
             )
 
     def snapshot(self) -> dict[str, str]:
-        """Return a shallow snapshot of dedupe state for diagnostics.
-
-        Args:
-            None.
-
-        Returns:
-            Mapping of dedupe keys to ISO-8601 timestamps.
-
-        Raises:
-            None.
-        """
-
+        """Return a shallow snapshot of dedupe state."""
         try:
             return {key: value.isoformat() for key, value in self._last_seen.items()}
-        except Exception as exc:  # noqa: BLE001 - defensive catch
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in AlertDeduplicator.snapshot: %s",
                 exc,
@@ -279,24 +228,12 @@ class AlertDeduplicator:
             return {}
 
     def _acquire_token(self) -> bool:
-        """Attempt to reserve a rate-limit token for immediate dispatch.
-
-        Args:
-            None.
-
-        Returns:
-            ``True`` when a token is acquired, else ``False``.
-
-        Raises:
-            None.
-        """
-
         try:
             self._bucket.acquire(timeout=0.01)
             return True
         except RateLimitError:
             return False
-        except Exception as exc:  # noqa: BLE001 - defensive catch
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in AlertDeduplicator._acquire_token: %s",
                 exc,
@@ -306,23 +243,20 @@ class AlertDeduplicator:
 
     @staticmethod
     def _family_key(key: str) -> str:
-        """Collapse alert keys into outage-family buckets."""
-
         normalized = str(key or "").strip().lower()
         if normalized.startswith("market_data."):
             parts = normalized.split(".")
             if len(parts) >= 3:
-                return ".".join(parts[:2]) + f".{parts[2]}"
+                return ".".join(parts[:3])
         return normalized.split(":", 1)[0] if ":" in normalized else normalized
 
 
 class AlertLogHandler(logging.Handler):
-    """Bridge warning/error log records into alert queue events.
+    """Bridge warning/error records into Telegram with semantic throttling.
 
-    Repeated ``Condition met: <event>`` records are collapsed before they enter
-    Telegram's queue. Dynamic fields such as ``age=`` therefore do not create a
-    new notification for every watchdog cycle. The original application log is
-    untouched, and the same condition may notify again after the repeat window.
+    Persistent watchdog messages often include changing ages or counters. They
+    are assigned stable event identities and throttled before queue insertion,
+    while unmatched warnings remain fully visible.
     """
 
     def __init__(
@@ -331,94 +265,102 @@ class AlertLogHandler(logging.Handler):
         *,
         exclude: Iterable[str] | None = None,
         repeat_window_seconds: float = 300.0,
+        persistent_repeat_window_seconds: float = 900.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        """Configure handler with callback and optional exclusions.
-
-        Args:
-            emit_callback: Callable invoked with alert payload mapping.
-            exclude: Optional iterable of logger names to suppress.
-            repeat_window_seconds: Cooldown for the same semantic condition.
-            clock: Monotonic clock override for deterministic tests.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
         super().__init__(level=logging.WARNING)
         self._emit = emit_callback
         self._exclude = set(exclude or [])
         self._exclude.add(__name__)
         self._repeat_window_seconds = max(0.0, float(repeat_window_seconds))
+        self._persistent_repeat_window_seconds = max(
+            self._repeat_window_seconds,
+            float(persistent_repeat_window_seconds),
+        )
         self._clock = clock or time.monotonic
-        self._last_condition_emit: MutableMapping[str, float] = {}
-        self._condition_lock = Lock()
+        self._last_semantic_emit: MutableMapping[str, float] = {}
+        self._semantic_lock = Lock()
 
     @staticmethod
     def _condition_event(message: str) -> str | None:
-        """Return the semantic condition name embedded in a log message."""
-
         match = _CONDITION_EVENT_RE.match(str(message or ""))
         if match is None:
             return None
         event = match.group("event").strip().lower()
         return event or None
 
-    def _allow_condition_emit(self, signature: str) -> bool:
-        """Return whether a semantic condition is outside its repeat window."""
+    @staticmethod
+    def _persistent_warning_event(message: str) -> str | None:
+        text = str(message or "")
+        for pattern, event in _PERSISTENT_WARNING_PATTERNS:
+            if pattern.search(text):
+                return event
+        return None
 
-        if self._repeat_window_seconds <= 0.0:
+    @staticmethod
+    def _structured_event(record: logging.LogRecord) -> str | None:
+        event = str(getattr(record, "event", "") or "").strip().lower()
+        if event in _GENERIC_RECORD_EVENTS:
+            return None
+        return event or None
+
+    def _semantic_event(
+        self,
+        record: logging.LogRecord,
+        message: str,
+    ) -> tuple[str | None, bool]:
+        persistent = self._persistent_warning_event(message)
+        if persistent is not None:
+            return persistent, True
+        condition = self._condition_event(message)
+        if condition is not None:
+            return condition, False
+        structured = self._structured_event(record)
+        if structured is not None:
+            return structured, False
+        return None, False
+
+    def _allow_semantic_emit(self, signature: str, window_seconds: float) -> bool:
+        if window_seconds <= 0.0:
             return True
         try:
             now = float(self._clock())
-        except Exception:  # noqa: BLE001 - alert delivery must remain fail-open
+        except Exception:  # noqa: BLE001
             return True
-        with self._condition_lock:
-            last = self._last_condition_emit.get(signature)
-            if last is not None and now - last < self._repeat_window_seconds:
+        with self._semantic_lock:
+            last = self._last_semantic_emit.get(signature)
+            if last is not None and now - last < window_seconds:
                 return False
-            self._last_condition_emit[signature] = now
-            cutoff = now - max(self._repeat_window_seconds * 4.0, 60.0)
+            self._last_semantic_emit[signature] = now
+            cutoff = now - max(window_seconds * 4.0, 60.0)
             stale = [
                 key
-                for key, emitted_at in self._last_condition_emit.items()
+                for key, emitted_at in self._last_semantic_emit.items()
                 if emitted_at < cutoff
             ]
             for key in stale:
-                self._last_condition_emit.pop(key, None)
+                self._last_semantic_emit.pop(key, None)
             return True
 
     def emit(self, record: logging.LogRecord) -> None:  # noqa: D401
-        """Format record and forward to the alert callback.
-
-        Args:
-            record: Log record forwarded from the logging framework.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        if record.name in self._exclude:
-            return
-        if record.levelno < logging.WARNING:
+        if record.name in self._exclude or record.levelno < logging.WARNING:
             return
         try:
             message = record.getMessage()
-        except Exception:  # noqa: BLE001 - defensive formatting
+        except Exception:  # noqa: BLE001
             message = str(record.msg)
         severity = "critical" if record.levelno >= logging.ERROR else "warning"
         func = getattr(record, "funcName", "") or "unknown"
-        condition_event = self._condition_event(message)
+        semantic_event, persistent = self._semantic_event(record, message)
         key = f"log:{record.name}:{record.levelno}:{func}"
-        if condition_event is not None:
-            key = f"{key}:{condition_event}"
-            if not self._allow_condition_emit(key):
+        if semantic_event is not None:
+            key = f"{key}:{semantic_event}"
+            window = (
+                self._persistent_repeat_window_seconds
+                if persistent
+                else self._repeat_window_seconds
+            )
+            if not self._allow_semantic_emit(key, window):
                 return
         payload = {
             "key": key,
@@ -427,7 +369,7 @@ class AlertLogHandler(logging.Handler):
         }
         try:
             self._emit(payload)
-        except Exception as exc:  # noqa: BLE001 - defensive catch
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in AlertLogHandler.emit: %s",
                 exc,
