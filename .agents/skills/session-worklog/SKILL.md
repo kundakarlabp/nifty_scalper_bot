@@ -1,6 +1,6 @@
 ---
 name: session-worklog
-description: Create a compact durable worklog after substantial medical, research, document, software, or operational work so future chats can recover goals, decisions, artifacts, validation, unresolved risks, and next actions without replaying the entire conversation.
+description: Create a compact durable worklog after substantial software, trading, research, or operational work so future chats can recover goals, decisions, artifacts, validation, unresolved risks, and next actions without replaying the entire conversation.
 ---
 
 # Session Worklog
@@ -15,7 +15,7 @@ Preserve high-value continuity while avoiding noisy transcripts. Use after multi
 - current status
 - key decisions and rationale
 - authoritative sources or files used
-- files, branches, PRs, documents, or datasets changed
+- files, branches, PRs, configurations, or datasets changed
 - validation performed and exact result
 - unresolved questions, risks, and blockers
 - single next action
@@ -25,7 +25,7 @@ Preserve high-value continuity while avoiding noisy transcripts. Use after multi
 - hidden reasoning or verbose chronological narration
 - temporary hypotheses that were disproved
 - credentials, access tokens, private keys, or secrets
-- patient names, identifiers, images, or other protected health information
+- real account numbers, broker session material, positions, financial details, or identifiable trading records
 - unsupported claims of completion
 - duplicated material already present in authoritative project documents
 
@@ -67,7 +67,7 @@ Preserve high-value continuity while avoiding noisy transcripts. Use after multi
 
 ## Validation
 
-Before saving, confirm that the entry contains no secrets or patient identifiers and that every completion statement is supported by recorded evidence.
+Before saving, confirm that the entry contains no secrets or real account data and that every completion statement is supported by recorded evidence.
 
 ## Failure and uncertainty handling
 
