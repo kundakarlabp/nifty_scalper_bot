@@ -1,0 +1,1 @@
+Regression coverage is implemented in test_alerts.py for semantic condition cooldown, distinct condition keys, and generic warning pass-through.
