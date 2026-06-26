@@ -33,7 +33,7 @@ jobs:
         run: python -m compileall -q src dashboard scripts
       - name: Validate agent context and test planning
         run: |
-          python -m pytest -q tests/tools/test_agent_tooling.py
+          python -m pytest -q tests/tools
           python scripts/agent_context.py \
             --query "websocket readiness order timeout" \
             --output /tmp/agent-context.md
