@@ -1,0 +1,42 @@
+# File purpose: Build a compact repository context report for agent debugging requests.
+# Key responsibilities: Rank source files, symbols, tests, and validation commands from an owner-created issue title.
+# Operational constraints: Read repository files only and never execute trading runtime code.
+
+name: Agent Context Builder
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  context:
+    if: github.actor == github.repository_owner && startsWith(github.event.issue.title, '[Agent Context]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build report
+        env:
+          AGENT_QUERY: ${{ github.event.issue.title }}
+        run: python scripts/agent_context.py --query "$AGENT_QUERY" --output agent-context.md
+      - name: Publish report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('agent-context.md', 'utf8').slice(0, 65000);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
