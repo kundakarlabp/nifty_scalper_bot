@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from typing import Callable, Iterable, Mapping, MutableMapping
 
 from nifty_scalper_bot.utils.errors import RateLimitError
@@ -12,6 +15,10 @@ from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.rate_limiter import LeakyBucket
 
 log = get_logger(__name__)
+
+_CONDITION_EVENT_RE = re.compile(
+    r"^\s*Condition met:\s*(?P<event>[A-Za-z0-9_.:-]+)"
+)
 
 
 @dataclass(slots=True)
@@ -202,7 +209,11 @@ class AlertDeduplicator:
 
         moment = now or datetime.now(timezone.utc)
         family_key = self._family_key(str(key))
-        effective_hold = hold_for if hold_for is not None and hold_for > self._quiet_window else self._quiet_window
+        effective_hold = (
+            hold_for
+            if hold_for is not None and hold_for > self._quiet_window
+            else self._quiet_window
+        )
         hold_until = moment + effective_hold
         self._flood_hold_until[family_key] = hold_until
         # Apply hold to all severities under the family to stop critical bypass spam.
@@ -231,7 +242,9 @@ class AlertDeduplicator:
                 self._last_severity.pop(key, None)
                 self._last_outage_class.pop(key, None)
             expired = [
-                key for key, hold_until in self._flood_hold_until.items() if hold_until < moment
+                key
+                for key, hold_until in self._flood_hold_until.items()
+                if hold_until < moment
             ]
             for key in expired:
                 self._flood_hold_until.pop(key, None)
@@ -304,19 +317,29 @@ class AlertDeduplicator:
 
 
 class AlertLogHandler(logging.Handler):
-    """Bridge warning/error log records into alert queue events."""
+    """Bridge warning/error log records into alert queue events.
+
+    Repeated ``Condition met: <event>`` records are collapsed before they enter
+    Telegram's queue. Dynamic fields such as ``age=`` therefore do not create a
+    new notification for every watchdog cycle. The original application log is
+    untouched, and the same condition may notify again after the repeat window.
+    """
 
     def __init__(
         self,
         emit_callback: Callable[[Mapping[str, str]], None],
         *,
         exclude: Iterable[str] | None = None,
+        repeat_window_seconds: float = 300.0,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         """Configure handler with callback and optional exclusions.
 
         Args:
             emit_callback: Callable invoked with alert payload mapping.
             exclude: Optional iterable of logger names to suppress.
+            repeat_window_seconds: Cooldown for the same semantic condition.
+            clock: Monotonic clock override for deterministic tests.
 
         Returns:
             None.
@@ -329,6 +352,44 @@ class AlertLogHandler(logging.Handler):
         self._emit = emit_callback
         self._exclude = set(exclude or [])
         self._exclude.add(__name__)
+        self._repeat_window_seconds = max(0.0, float(repeat_window_seconds))
+        self._clock = clock or time.monotonic
+        self._last_condition_emit: MutableMapping[str, float] = {}
+        self._condition_lock = Lock()
+
+    @staticmethod
+    def _condition_event(message: str) -> str | None:
+        """Return the semantic condition name embedded in a log message."""
+
+        match = _CONDITION_EVENT_RE.match(str(message or ""))
+        if match is None:
+            return None
+        event = match.group("event").strip().lower()
+        return event or None
+
+    def _allow_condition_emit(self, signature: str) -> bool:
+        """Return whether a semantic condition is outside its repeat window."""
+
+        if self._repeat_window_seconds <= 0.0:
+            return True
+        try:
+            now = float(self._clock())
+        except Exception:  # noqa: BLE001 - alert delivery must remain fail-open
+            return True
+        with self._condition_lock:
+            last = self._last_condition_emit.get(signature)
+            if last is not None and now - last < self._repeat_window_seconds:
+                return False
+            self._last_condition_emit[signature] = now
+            cutoff = now - max(self._repeat_window_seconds * 4.0, 60.0)
+            stale = [
+                key
+                for key, emitted_at in self._last_condition_emit.items()
+                if emitted_at < cutoff
+            ]
+            for key in stale:
+                self._last_condition_emit.pop(key, None)
+            return True
 
     def emit(self, record: logging.LogRecord) -> None:  # noqa: D401
         """Format record and forward to the alert callback.
@@ -353,7 +414,12 @@ class AlertLogHandler(logging.Handler):
             message = str(record.msg)
         severity = "critical" if record.levelno >= logging.ERROR else "warning"
         func = getattr(record, "funcName", "") or "unknown"
+        condition_event = self._condition_event(message)
         key = f"log:{record.name}:{record.levelno}:{func}"
+        if condition_event is not None:
+            key = f"{key}:{condition_event}"
+            if not self._allow_condition_emit(key):
+                return
         payload = {
             "key": key,
             "message": message,
