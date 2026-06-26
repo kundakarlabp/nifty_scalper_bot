@@ -70,7 +70,8 @@ class CandleEngine:
         validated = tick if isinstance(tick, Tick) else validate_tick(dict(tick))
         payload = validated.to_dict()
         timestamp = pd.Timestamp(timestamp)
-        minute = timestamp.floor('1min')
+        # ⚡ Bolt: Replace expensive .floor("1min") with faster .replace() for 1-min bucketing
+        minute = timestamp.replace(second=0, microsecond=0, nanosecond=0)
 
         if self._last_tick_ts is not None:
             last_ts = pd.to_datetime(self._last_tick_ts, utc=True, errors='coerce')
