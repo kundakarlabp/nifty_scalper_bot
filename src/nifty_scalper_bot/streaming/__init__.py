@@ -11,6 +11,14 @@ All streamers feed MarketDataManager, which re-emits into DataHub (SSOT).
 from .polling_streamer import PollingStreamer
 from .stream_supervisor import StreamHealth, StreamSupervisor
 from .websocket_manager import WebSocketManager
+from nifty_scalper_bot.utils.runtime_session_guards import (
+    install_websocket_market_calendar_guard,
+)
+
+# Direct and package imports both execute this module before exposing the
+# transport class, so every runtime instance receives the canonical holiday
+# gate without making the top-level package import side-effectful.
+install_websocket_market_calendar_guard()
 
 __all__ = [
     "PollingStreamer",
