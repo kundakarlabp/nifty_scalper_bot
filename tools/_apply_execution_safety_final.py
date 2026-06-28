@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import subprocess
+import sys
 import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +41,26 @@ def replace_method(path: str, class_name: str, method_name: str, replacement: st
     rendered = textwrap.indent(textwrap.dedent(replacement).strip("\n"), "    ") + "\n"
     lines[target.lineno - 1 : target.end_lineno] = [rendered]
     _write(path, "".join(lines))
+
+
+def install_validation_dependencies() -> None:
+    """Match the repository's standard CI dependency set."""
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-e", ".[dev]", "-q"],
+        cwd=ROOT,
+    )
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            "dashboard/requirements.txt",
+            "-q",
+        ],
+        cwd=ROOT,
+    )
 
 
 def patch_zerodha_positions() -> None:
@@ -170,6 +192,7 @@ def patch_cache_test() -> None:
 
 
 def main() -> None:
+    install_validation_dependencies()
     patch_zerodha_positions()
     patch_cache_test()
 
