@@ -1,10 +1,14 @@
-from __future__ import annotations
+from pathlib import Path
+import ast
 
-from scripts._execution_patch_utils import assert_parses, replace_once
-
-POSITION = "src/nifty_scalper_bot/execution/position_manager.py"
-
-replace_once(POSITION, "import json\n", "import json\nimport math\n")
-
-assert_parses(POSITION)
+path = Path("src/nifty_scalper_bot/execution/position_manager.py")
+text = path.read_text(encoding="utf-8")
+head = "\n".join(text.splitlines()[:40])
+if "import math" not in head:
+    anchor = "import json\n"
+    if anchor not in text:
+        raise RuntimeError("position manager import anchor missing")
+    text = text.replace(anchor, anchor + "import math\n", 1)
+    path.write_text(text, encoding="utf-8")
+ast.parse(text, filename=str(path))
 print("patched execution integration follow-up")
