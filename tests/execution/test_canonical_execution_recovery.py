@@ -61,7 +61,8 @@ def test_production_facade_restores_bracket_automatically(
     assert recovered._market_escalation_fired is True
     assert recovered._filled_exit_sync_order_id == "exit-1"
     assert restored._exit_rescue_attempts[recovered.bracket_id] == 1
-    assert restored._state_storage_durable is True
+    assert restored._state_storage_path == str(tmp_path / "virtual_brackets.json")
+    assert restored._state_storage_durable is False
 
 
 def test_corrupt_snapshot_is_rejected_as_one_unit_and_freezes_entries(
