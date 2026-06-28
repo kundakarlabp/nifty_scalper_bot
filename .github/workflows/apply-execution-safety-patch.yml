@@ -33,6 +33,7 @@ jobs:
       - name: Apply anchored source changes
         run: |
           python tools/_apply_execution_safety_patch.py
+          python tools/_apply_execution_safety_followup.py
           python - <<'PY'
           from pathlib import Path
 
@@ -59,7 +60,8 @@ jobs:
             tests/execution/test_margin_clamp.py \
             tests/execution/test_virtual_bracket_safety.py \
             tests/execution/test_live_exit_hardening.py \
-            tests/execution/test_external_close_reconcile.py
+            tests/execution/test_external_close_reconcile.py \
+            tests/data/test_zerodha_rest_cache_fallback.py
 
       - name: Run full test suite
         run: pytest -q
@@ -67,6 +69,7 @@ jobs:
       - name: Remove temporary patch machinery
         run: |
           rm tools/_apply_execution_safety_patch.py
+          rm tools/_apply_execution_safety_followup.py
           rm .github/workflows/apply-execution-safety-patch.yml
 
       - name: Commit validated source and tests
