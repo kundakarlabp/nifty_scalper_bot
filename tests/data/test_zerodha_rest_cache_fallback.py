@@ -42,10 +42,10 @@ def test_get_orders_returns_cached_on_failure(
     assert result == [{"order_id": "abc123"}]
 
 
-def test_get_positions_returns_cached_on_failure(
+def test_get_positions_rejects_cache_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Use cached positions when REST fetch fails."""
+    """A cached exposure snapshot must not become reconciliation authority."""
 
     client = _build_client()
     now = 1_000.0
@@ -60,9 +60,8 @@ def test_get_positions_returns_cached_on_failure(
         raise BrokerError("boom")
 
     monkeypatch.setattr(client, "_execute_with_retry", _raise)
-    result = client.get_positions()
-
-    assert result == [{"tradingsymbol": "NIFTY"}]
+    with pytest.raises(BrokerError, match="boom"):
+        client.get_positions()
 
 
 def test_get_account_margins_returns_cached_on_failure(

@@ -1317,7 +1317,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
             raise
 
     def get_positions(self) -> list[dict[str, Any]]:
-        """Return Zerodha positions (Log-Silent if empty)."""
+        """Return one authoritative Zerodha net-position snapshot.
+
+        Position reconciliation never falls back to cache: a failed or malformed
+        broker response is unknown exposure, not confirmed flatness.
+        """
         LOGGER.debug(
             "Entered ZerodhaKiteClient.get_positions",
             extra={"event": "zerodha_get_positions_start"},
@@ -1334,23 +1338,21 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         "GET", endpoint, operation_label=label, with_retry=False
                     )
                 )
-                payload = response.get("data")
-                normalized: list[dict[str, Any]] = []
+            payload = response.get("data")
+            if not isinstance(payload, Mapping):
+                raise BrokerError("Malformed positions response: data object missing")
+            net_positions = payload.get("net")
+            if not isinstance(net_positions, list):
+                raise BrokerError("Malformed positions response: data.net list missing")
 
-            # Case A: Payload is a Dict (net/day keys)
-            if isinstance(payload, dict):
-                for key in ("net", "day"):
-                    positions = payload.get(key)
-                    if isinstance(positions, list):
-                        normalized = cast(list[dict[str, Any]], positions)
-                        if normalized:  # If found valid list, stop looking
-                            break
+            normalized: list[dict[str, Any]] = []
+            for index, row in enumerate(net_positions):
+                if not isinstance(row, Mapping):
+                    raise BrokerError(
+                        f"Malformed positions response: data.net[{index}] is not an object"
+                    )
+                normalized.append(dict(row))
 
-            # Case B: Payload is a List (direct)
-            elif isinstance(payload, list):
-                normalized = cast(list[dict[str, Any]], payload)
-
-            # [FIX] Consolidated Logging for all cases
             if normalized:
                 LOGGER.info(
                     "zerodha_positions_fetch_success count=%d",
@@ -1366,7 +1368,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 payload=list(normalized),
                 updated_at=self._log_time_fn(),
             )
-
             return normalized
 
         try:
@@ -1384,9 +1385,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 extra={"event": "zerodha_get_positions_error"},
                 exc_info=exc,
             )
-            cached = self._load_rest_cache(self._positions_cache, label=label)
-            if cached is not None:
-                return cast(list[dict[str, Any]], cached)
             raise
 
     def get_holdings(self) -> list[dict]:

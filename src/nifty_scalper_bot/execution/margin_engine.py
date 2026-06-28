@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time
 from typing import Any, Literal, Mapping
 
@@ -12,7 +12,7 @@ from nifty_scalper_bot.utils.logging import get_logger
 OrderSide = Literal["BUY", "SELL"]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class MarginInputs:
     """Immutable inputs required for pre-trade margin assessment."""
 
@@ -152,13 +152,11 @@ class MarginEngine:
         effective_balance = (
             available_margin if available_margin > 0 else fallback_balance
         )
-        original_balance = inputs.balance
-        inputs.balance = effective_balance
-        try:
-            order_type = self._resolve_order_type(inputs.ist_now, inputs.product)
-            max_units = self._max_qty_from_risk(inputs)
-        finally:
-            inputs.balance = original_balance
+        effective_inputs = replace(inputs, balance=effective_balance)
+        order_type = self._resolve_order_type(
+            effective_inputs.ist_now, effective_inputs.product
+        )
+        max_units = self._max_qty_from_risk(effective_inputs)
         raw_lot = max(1, int(inputs.lot_size))
         min_lot_qty = raw_lot * max(1, int(inputs.min_lots_per_trade))
         max_lot_qty = raw_lot * max(int(inputs.max_lots_per_trade), 0)

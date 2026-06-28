@@ -775,7 +775,9 @@ class PositionManager:
         restore_applied = False
         if fallback is not None:
             try:
-                self._positions = copy.deepcopy(dict(fallback))
+                restored_positions = copy.deepcopy(dict(fallback))
+                with self._lock:
+                    self._positions = restored_positions
                 restore_applied = True
             except Exception as exc:  # noqa: BLE001 - defensive revert guard
                 self._logger.error(
@@ -902,7 +904,8 @@ class PositionManager:
         payloads: list[Mapping[str, object]] = []
         try:
             try:
-                previous_positions = copy.deepcopy(self._positions)
+                with self._lock:
+                    previous_positions = copy.deepcopy(self._positions)
             except Exception as exc:  # noqa: BLE001 - defensive snapshot guard
                 self._logger.error(
                     "Failure in reconcile_now snapshot: %s",
@@ -947,16 +950,55 @@ class PositionManager:
                 )
                 return False
             if response is None:
-                payloads = []
-            elif isinstance(response, Mapping):
-                payloads.append(cast(Mapping[str, object], response))
-            elif isinstance(response, Iterable) and not isinstance(
-                response, (str, bytes)
-            ):
-                for item in response:
-                    if isinstance(item, Mapping):
-                        payloads.append(cast(Mapping[str, object], item))
+                reason_token = canonical("payload_missing")
+                self._logger.warning(
+                    "Position reconciliation returned no authoritative snapshot",
+                    extra={"event": "position_reconcile_failed", "reason": reason_token},
+                )
+                self._handle_reconcile_failure(
+                    reason=reason_token,
+                    error=None,
+                    payload_count=0,
+                    previous_positions=previous_positions,
+                )
+                return False
+            if isinstance(response, Mapping):
+                rows: object | None = None
+                for container_key in ("net", "positions", "day"):
+                    if container_key in response:
+                        rows = response.get(container_key)
+                        break
+                if rows is None and any(
+                    key in response
+                    for key in ("tradingsymbol", "symbol", "instrument")
+                ):
+                    rows = [response]
+                if rows is None or isinstance(rows, (str, bytes, Mapping)):
+                    reason_token = canonical("payload_shape")
+                    self._handle_reconcile_failure(
+                        reason=reason_token,
+                        error=None,
+                        payload_count=0,
+                        previous_positions=previous_positions,
+                    )
+                    return False
+                try:
+                    raw_rows = list(cast(Iterable[object], rows))
+                except TypeError as exc:
+                    reason_token = canonical("payload_shape")
+                    self._handle_reconcile_failure(
+                        reason=reason_token,
+                        error=exc,
+                        payload_count=0,
+                        previous_positions=previous_positions,
+                    )
+                    return False
+            elif isinstance(response, Iterable) and not isinstance(response, (str, bytes)):
+                raw_rows = list(cast(Iterable[object], response))
             else:
+                raw_rows = []
+
+            if not isinstance(response, (Mapping, Iterable)) or isinstance(response, (str, bytes)):
                 reason_token = canonical("payload_type")
                 self._logger.warning(
                     "Position reconciliation returned unsupported payload %s",
@@ -973,6 +1015,17 @@ class PositionManager:
                     previous_positions=previous_positions,
                 )
                 return False
+            for item in raw_rows:
+                if not isinstance(item, Mapping):
+                    reason_token = canonical("payload_row_type")
+                    self._handle_reconcile_failure(
+                        reason=reason_token,
+                        error=None,
+                        payload_count=len(payloads),
+                        previous_positions=previous_positions,
+                    )
+                    return False
+                payloads.append(cast(Mapping[str, object], item))
             try:
                 self.synchronize_with_broker(payloads)
             except Exception as exc:  # noqa: BLE001 - defensive sync guard
@@ -1311,28 +1364,29 @@ class PositionManager:
         self.save_state()
         return position
 
-    def update_from_order(self, order) -> None:
-        """
-        CRITICAL FIX: Allows OrderManager to sync state without crashing.
-        Used by _adopt_orphan_position AND _generate_adjustment_order.
-        """
-        if order.status == "FILLED":
-            self.update_position(
-                symbol=order.symbol,
-                qty=order.filled_quantity,
-                price=order.average_price,
-                side=order.side,
-                product="MIS"  # Defaulting to MIS for safety
-            )
+    def update_from_order(self, order: Order) -> None:
+        """Apply a confirmed local :class:`Order` through the normal fill lifecycle."""
+        if not isinstance(order, Order):
+            raise TypeError("update_from_order requires position_manager.Order")
+        if order.status != "FILLED":
+            return
+        if order.filled_quantity <= 0:
+            raise ValueError("filled order has no filled quantity")
+        fill_price = order.fill_price
+        if fill_price is None or float(fill_price) <= 0:
+            raise ValueError("filled order has no valid fill_price")
+        with self._lock:
+            self._orders.setdefault(order.order_id, order)
+        self.update_order_status(order.order_id, "FILLED", fill_price=float(fill_price))
 
     def update_position_price(self, symbol: str, current_price: float) -> None:
-        """Update the mark price of an open position."""
-
-        position = self._positions.get(symbol.upper())
-        if position is None:
-            return  # ✅ FIX: Silently ignore ticks for symbols we don't hold
-        
-        position.current_price = float(current_price)
+        """Update the mark price of an open position under the state lock."""
+        symbol_key = symbol.upper()
+        with self._lock:
+            position = self._positions.get(symbol_key)
+            if position is None:
+                return
+            position.current_price = float(current_price)
         self.save_state()
 
     def get_position(self, symbol: str) -> Position | None:
@@ -1524,30 +1578,25 @@ class PositionManager:
         return [order for order in orders if order.status not in self.FINAL_STATUSES]
 
     def save_state(self) -> None:
-        """Persist positions and orders to disk."""
-
-        state = {
-            "positions": [position.to_dict() for position in self._positions.values()],
-            "orders": [order.to_dict() for order in self._orders.values()],
-            "daily_realized_pnl": self._daily_realized_pnl,
-            "active_contracts": [
-                contract.to_dict() for contract in self._active_contracts.values()
-            ],
-        }
+        """Persist one coherent positions/orders snapshot to disk."""
+        with self._lock:
+            state = {
+                "positions": [position.to_dict() for position in self._positions.values()],
+                "orders": [order.to_dict() for order in self._orders.values()],
+                "daily_realized_pnl": self._daily_realized_pnl,
+                "active_contracts": [
+                    contract.to_dict() for contract in self._active_contracts.values()
+                ],
+            }
+            reconciled_snapshot = copy.deepcopy(self._positions)
         try:
             _atomic_write_json(self._state_path, state)
-        except Exception as exc:  # noqa: BLE001 - handled upstream
+        except Exception as exc:  # noqa: BLE001 - handled by callers/diagnostics
             self._logger.error("Failed to save position state: %s", exc)
             return
         self._persist_positions_snapshot()
-        try:
-            self._last_reconciled_state = copy.deepcopy(self._positions)
-        except Exception as exc:  # noqa: BLE001 - defensive snapshot guard
-            self._logger.error(
-                "Failure in save_state snapshot: %s",
-                exc,
-                extra={"event": "position_reconcile_snapshot_failed"},
-            )
+        with self._lock:
+            self._last_reconciled_state = reconciled_snapshot
         self._maybe_flush_persistent_state()
 
     def load_state(self) -> None:
@@ -1649,7 +1698,7 @@ class PositionManager:
                 "Failure in _restore_from_persistent_manager positions: %s",
                 exc,
             )
-            payloads = []
+            return
         self.restore_positions(payloads)
         try:
             orders_payloads = manager.load_open_orders()
@@ -1703,168 +1752,149 @@ class PositionManager:
         self._persistent_state = manager
 
     def restore_positions(self, payloads: Iterable[Mapping[str, Any]]) -> None:
-        """Restore open positions from persisted *payloads*.
-
-        Args:
-            payloads: Iterable of serialised position dictionaries.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Restore a validated persisted snapshot, including an explicit empty state."""
         self._logger.debug(
             "Entered restore_positions",
             extra={"event": "position_manager_restore"},
         )
+        try:
+            items = list(payloads)
+        except TypeError as exc:
+            raise ValueError("persisted position snapshot is not iterable") from exc
+
         rebuilt: Dict[str, Position] = {}
-        for item in payloads:
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                raise ValueError(f"persisted position row {index} is not a mapping")
             try:
                 position = Position.from_dict(cast(Mapping[str, Any], item))
             except (KeyError, TypeError, ValueError) as exc:
-                self._logger.error("Failure in restore_positions: %s", exc)
-                continue
+                raise ValueError(f"invalid persisted position row {index}") from exc
             rebuilt[position.symbol.upper()] = position
-        if not rebuilt:
-            self._logger.info(
-                "Condition met: restore_positions_empty",
-                extra={"event": "position_manager_restore_empty"},
-            )
-            return
-        self._positions = rebuilt
+
+        with self._lock:
+            self._positions = rebuilt
         self._logger.info(
             "Condition met: restore_positions_applied",
-            extra={
-                "event": "position_manager_restore_applied",
-                "count": len(rebuilt),
-            },
+            extra={"event": "position_manager_restore_applied", "count": len(rebuilt)},
         )
         self.save_state()
 
+    @staticmethod
     def _safe_get_net_qty(record: Mapping[str, object]) -> int:
-        """
-        🚨 CRITICAL FIX: Safely extract net quantity with explicit None checks.
-    
-        Python's 'or' chain evaluates 0 as falsy:
-            0 or 65 = 65  ← WRONG!
-    
-        We need explicit None checks because 0 is a VALID quantity (position closed).
-        """
-        # Check net quantity fields FIRST with explicit None check
-        for key in ("net_qty", "net_quantity", "netQuantity", "net"):
-            val = record.get(key)
-            if val is not None:  # Explicit None check - 0 is valid!
-                try:
-                    return int(float(val))
-                except (ValueError, TypeError):
-                    continue
-    
-        # Only fallback to 'quantity' if ALL net keys are genuinely missing
-        # This is the dangerous fallback that caused the infinite loop
-        qty_val = record.get("quantity")
-        if qty_val is not None:
+        """Return broker net quantity without converting missing/invalid data to flat."""
+        quantity_keys = ("net_qty", "net_quantity", "netQuantity", "net", "quantity")
+        found = False
+        for key in quantity_keys:
+            if key not in record:
+                continue
+            found = True
+            value = record.get(key)
+            if value is None or isinstance(value, bool):
+                continue
             try:
-                return int(float(qty_val))
-            except (ValueError, TypeError):
-                pass
-    
-        return 0
+                return int(float(value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid broker quantity field {key}={value!r}") from exc
+        if not found:
+            raise ValueError("broker position quantity field missing")
+        raise ValueError("broker position quantity is null or invalid")
     
 
     def synchronize_with_broker(
         self, broker_positions: Sequence[Mapping[str, object]]
     ) -> None:
-        """
-        Align local positions with broker-provided *broker_positions*.
-        Optimized for robustness, atomic updates, and error handling.
+        """Atomically apply a fully validated broker position snapshot.
+
+        An explicit, valid empty sequence is authoritative flat state. Missing,
+        malformed, partially decoded, or internally inconsistent snapshots raise and
+        leave the last-known-good local state untouched.
         """
         self._logger.debug(
             "Entered synchronize_with_broker",
             extra={"event": "position_manager_sync"},
         )
-
         try:
-            payloads = list(broker_positions or [])
-        except Exception as exc:
-            self._logger.error(
-                "Failure in synchronize_with_broker input validation: %s",
-                exc,
-                extra={"event": "position_manager_sync_error"},
-                exc_info=True,
-            )
-            return
-
-        reconciled: Dict[str, Position] = {}
+            payloads = list(broker_positions)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("broker position snapshot is not iterable") from exc
 
         with self._lock:
-            existing_positions = dict(self._positions)
+            existing_positions = copy.deepcopy(self._positions)
 
-        # Helper to safely extract floats from multiple possible keys
-        def _get_float(record: Mapping, keys: list[str], default: float = 0.0) -> float:
-            for k in keys:
-                if val := record.get(k):
-                    try:
-                        return float(val)
-                    except (ValueError, TypeError):
-                        continue
-            return default
+        def _get_float(
+            record: Mapping[str, object],
+            keys: Sequence[str],
+            *,
+            default: float = 0.0,
+        ) -> float:
+            for key in keys:
+                if key not in record or record.get(key) is None:
+                    continue
+                value = record.get(key)
+                try:
+                    return float(cast(Any, value))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"invalid broker numeric field {key}={value!r}") from exc
+            return float(default)
 
-        for record in payloads:
+        reconciled: Dict[str, Position] = {}
+        snapshot_realized_pnl = 0.0
+        snapshot_realized_seen = False
+
+        for index, record in enumerate(payloads):
             if not isinstance(record, Mapping):
-                continue
+                raise ValueError(f"broker position row {index} is not a mapping")
 
             raw_symbol = (
                 record.get("tradingsymbol")
                 or record.get("symbol")
                 or record.get("instrument")
-                or ""
             )
-            symbol = str(raw_symbol).strip().upper()
-            if not symbol or not is_strategy_instrument(symbol):
+            symbol = str(raw_symbol or "").strip().upper()
+            if not symbol:
+                raise ValueError(f"broker position row {index} has no symbol")
+            if not is_strategy_instrument(symbol):
                 continue
 
             product = str(record.get("product") or "").strip().upper()
             if product != "MIS":
+                if symbol in existing_positions:
+                    raise ValueError(
+                        f"managed broker position {symbol} has unexpected product {product or 'missing'}"
+                    )
                 continue
 
-            try:
-                quantity = PositionManager._safe_get_net_qty(record)
-            except Exception as exc:
-                self._logger.error(
-                    "Failure decoding broker quantity for %s: %s",
-                    symbol,
-                    exc,
-                    extra={"event": "position_manager_sync_qty_error"},
-                    exc_info=True,
-                )
-                continue
+            quantity = self._safe_get_net_qty(record)
+            realized_pnl = _get_float(record, ("realised", "realized"), default=0.0)
+            if "realised" in record or "realized" in record:
+                snapshot_realized_seen = True
+                snapshot_realized_pnl += realized_pnl
 
             if quantity == 0:
                 continue
 
             side: Side = "LONG" if quantity > 0 else "SHORT"
             abs_quantity = abs(quantity)
-
-            # 3. Price & PnL Extraction
-            entry_price = _get_float(record, ["average_price", "avg_price", "price", "buy_price"])
-            current_price = _get_float(record, ["last_price", "ltp", "close", "sell_price"], default=entry_price)
-            realized_pnl = _get_float(record, ["realized", "pnl", "m2m", "realised"])
-
-            # Sanity check: Ensure prices are positive if possible
+            entry_price = _get_float(
+                record,
+                ("average_price", "avg_price", "price", "buy_price"),
+            )
+            current_price = _get_float(
+                record,
+                ("last_price", "ltp", "close", "sell_price"),
+                default=entry_price,
+            )
             if entry_price <= 0.0 and current_price > 0.0:
                 entry_price = current_price
             if current_price <= 0.0 and entry_price > 0.0:
                 current_price = entry_price
+            if entry_price <= 0.0 or current_price <= 0.0:
+                raise ValueError(f"broker position {symbol} has no valid price")
 
-            # 4. Construct Position Object
+            existing = existing_positions.get(symbol)
             try:
-                # Check if we have an existing position to preserve metadata
-                existing = existing_positions.get(symbol)
-
                 if existing is None:
-                    # Import NEW position
                     position = self._create_position(
                         symbol=symbol,
                         quantity=abs_quantity,
@@ -1875,10 +1905,12 @@ class PositionManager:
                         source="broker_sync",
                     )
                     self._logger.info(
-                        f"Sync: Imported NEW {side} position: {symbol} x {abs_quantity}"
+                        "Sync: Imported NEW %s position: %s x %s",
+                        side,
+                        symbol,
+                        abs_quantity,
                     )
                 else:
-                    # Update EXISTING position
                     position = self._update_position(
                         position=existing,
                         quantity=abs_quantity,
@@ -1888,69 +1920,50 @@ class PositionManager:
                         realized_pnl=realized_pnl,
                         source="broker_sync",
                     )
-                
-                reconciled[symbol] = position
-
             except Exception as exc:
-                self._logger.error(
-                    "Failure applying broker snapshot for %s: %s",
-                    symbol,
-                    exc,
-                    extra={"event": "position_manager_sync_apply_error"},
-                    exc_info=True,
-                )
-                continue
+                raise ValueError(f"failed to apply broker position {symbol}") from exc
+            reconciled[symbol] = position
 
-        # 5. Atomic Reconciliation & Persistence
         with self._lock:
-            old_keys = set(self._positions.keys())
-            new_keys = set(reconciled.keys())
-            
-            # Identify what changed
+            old_keys = set(self._positions)
+            new_keys = set(reconciled)
             removed_symbols = sorted(old_keys - new_keys)
             added_symbols = sorted(new_keys - old_keys)
-            
-            # The Swap
             self._positions = reconciled
+            if snapshot_realized_seen:
+                self._daily_realized_pnl = float(snapshot_realized_pnl)
 
-        # 6. Logging & Saving (Outside Lock)
         if removed_symbols:
             self._logger.info(
-                f"Sync: Pruned {len(removed_symbols)} positions not found in broker: {removed_symbols}"
+                "Sync: Pruned %s positions not found in broker: %s",
+                len(removed_symbols),
+                removed_symbols,
             )
-            # Notify (e.g. bracket manager) that these symbols are flat at the
-            # broker, so lingering brackets are dropped rather than re-adopted.
             hook = getattr(self, "_on_symbols_flat_hook", None)
             if hook is not None:
                 try:
                     hook(list(removed_symbols))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001 - observer isolation
                     self._logger.error(
-                        "Failure in on_symbols_flat hook: %s", exc,
+                        "Failure in on_symbols_flat hook: %s",
+                        exc,
                         extra={"event": "position_manager_flat_hook_error"},
                     )
-        
-        if not old_keys and not new_keys:
+
+        if not old_keys and not new_keys and not snapshot_realized_seen:
             self._logger.debug("Sync: Broker and local state both empty.")
             return
 
-        try:
-            self.save_state()
-            self._logger.info(
-                "Sync: Completed successfully.",
-                extra={
-                    "total_managed": len(self._positions),
-                    "added": len(added_symbols),
-                    "removed": len(removed_symbols)
-                }
-            )
-        except Exception as exc:
-            self._logger.error(
-                "Failure persisting synchronized positions: %s",
-                exc,
-                extra={"event": "position_manager_sync_persist_error"},
-                exc_info=True,
-            )
+        self.save_state()
+        self._logger.info(
+            "Sync: Completed successfully.",
+            extra={
+                "total_managed": len(reconciled),
+                "added": len(added_symbols),
+                "removed": len(removed_symbols),
+                "realized_pnl_authoritative": snapshot_realized_seen,
+            },
+        )
 
     def _create_position(
         self,

@@ -74,14 +74,15 @@ class ExecutionPolicy:
     peg_k: float = 0.25
     retry_steps: int = 3
     timeout_sec: float = 4.0
-    max_spread_pct: float = 0.015
+    max_spread_pct: float | None = 0.015
     clock: Callable[[], float] | None = None
 
     def __post_init__(self) -> None:
         self.retry_steps = max(1, int(self.retry_steps))
         self.peg_k = max(0.0, float(self.peg_k))
         self.timeout_sec = max(0.5, float(self.timeout_sec))
-        self.max_spread_pct = max(0.0, float(self.max_spread_pct))
+        if self.max_spread_pct is not None:
+            self.max_spread_pct = max(0.0, float(self.max_spread_pct))
         if self.clock is None:
             from time import time
 
@@ -121,7 +122,10 @@ class ExecutionPolicy:
         if mid > 0:
             spread_pct = spread / mid
         effective_max_spread_pct = self._effective_max_spread_pct(normalized, last_price, mid)
-        if effective_max_spread_pct and spread_pct > effective_max_spread_pct:
+        if (
+            effective_max_spread_pct is not None
+            and spread_pct > effective_max_spread_pct
+        ):
             raise OrderPlacementError(
                 f"Spread too wide ({spread_pct:.3f} > {effective_max_spread_pct:.3f})"
             )
@@ -135,8 +139,12 @@ class ExecutionPolicy:
             limit_prices=tuple(prices), spread_pct=spread_pct, step_timeout=step_timeout
         )
 
-    def _effective_max_spread_pct(self, symbol: str, last_price: float, mid: float) -> float:
-        base = float(self.max_spread_pct or 0.0)
+    def _effective_max_spread_pct(
+        self, symbol: str, last_price: float, mid: float
+    ) -> float | None:
+        if self.max_spread_pct is None:
+            return None
+        base = float(self.max_spread_pct)
         upper = symbol.upper()
         is_option = upper.endswith("CE") or upper.endswith("PE")
         if not is_option:
