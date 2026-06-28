@@ -1,0 +1,3 @@
+## 2025-01-20 - Ensure label-input a11y bindings in Python HTML string templates
+**Learning:** Standard UI accessibility linters do not scan Python string literals. In standard web frameworks, a `<label>` missing a `for` attribute and an `<input>` missing an `id` might get caught, but inside a backend framework returning `HTMLResponse` directly (like `admin_dashboard.py` in this case), it is a silent issue.
+**Action:** When working on backends that render HTML directly via strings or f-strings (e.g. FastAPI `HTMLResponse`), manually check for missing `for` on labels and `id` on inputs, as standard tooling usually misses these gaps. Use parameterized `id` strings (e.g. `id="{key}"`) when generating forms dynamically.

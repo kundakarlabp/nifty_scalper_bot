@@ -250,7 +250,8 @@ label{display:block;font-size:12px;color:var(--mut);margin:12px 0 5px}
 input{width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--bd);background:#0a1019;color:var(--fg);font-size:15px}
 input:focus{outline:none;border-color:var(--blu)}
 .badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#0a1019;color:var(--mut);border:1px solid var(--bd)}
-button,.btn{margin-top:14px;padding:11px 16px;border:0;border-radius:9px;background:var(--grn);color:#fff;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+button,.btn{margin-top:14px;padding:11px 16px;border:0;border-radius:9px;background:var(--grn);color:#fff;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block;transition:filter 0.2s}
+button:hover,.btn:hover{filter:brightness(1.1)} button:focus-visible,.btn:focus-visible{outline:2px solid var(--blu);outline-offset:2px}
 button.blu,.btn.blu{background:var(--blu)} button.amb,.btn.amb{background:var(--amb)} button.red,.btn.red{background:var(--red)}
 button.gray,.btn.gray{background:#30363d}
 .row{display:flex;gap:10px;flex-wrap:wrap} .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;align-items:end}
@@ -305,7 +306,7 @@ def dashboard(request: Request) -> HTMLResponse:
     for label, key, sec in FIELDS:
         v = env.get(key, "")
         shown = ("••••••••" if v else "") if sec else v
-        rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{shown}" placeholder="(unchanged)">'
+        rows += f'<label for="{key}">{label} <span class=badge>{key}</span></label><input id="{key}" name="{key}" value="{shown}" placeholder="(unchanged)">'
     body = f"""{_topbar(live_on)}<div class=wrap>{_flash(request)}
     <div class=card><h2>Live Trading</h2>
     <p>{'Placing REAL orders with REAL money.' if live_on else 'Analysing only — no real orders. Turn on when ready.'}</p>{toggle}</div>
@@ -313,8 +314,8 @@ def dashboard(request: Request) -> HTMLResponse:
     <div class=card><h2>Daily Token</h2>
     <p>Easiest: paste today's <b>request token</b> (from the Kite login redirect URL) and the bot will fetch the access token for you, then restart.</p>
     <form method=post action="/admin/token">
-    <label>Request Token (recommended)</label><input name="request_token" placeholder="paste request_token from login URL">
-    <label>…or Access Token (if you already have it)</label><input name="access_token" placeholder="paste access_token directly">
+    <label for="request_token">Request Token (recommended)</label><input id="request_token" name="request_token" placeholder="paste request_token from login URL">
+    <label for="access_token">…or Access Token (if you already have it)</label><input id="access_token" name="access_token" placeholder="paste access_token directly">
     <button class=blu type=submit>Update token &amp; restart</button></form></div>
 
     <div class=card><h2>Credentials &amp; Settings</h2>
