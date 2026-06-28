@@ -145,6 +145,8 @@ class ExecutionPolicy:
         if self.max_spread_pct is None:
             return None
         base = float(self.max_spread_pct)
+        if base == 0.0:
+            return 0.0
         upper = symbol.upper()
         is_option = upper.endswith("CE") or upper.endswith("PE")
         if not is_option:

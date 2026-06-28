@@ -129,63 +129,21 @@ class CanonicalBracketManager(HardenedBracketManager):
             )
 
     def _broker_position_quantity(self, symbol: str) -> int | None:
-        """Return absolute broker net quantity, or ``None`` when truth is unknown."""
-
-        broker = getattr(getattr(self, "order_manager", None), "_broker", None)
-        getter = getattr(broker, "get_positions", None) if broker is not None else None
-        if not callable(getter):
-            return None
-
-        payload = getter()
-        if isinstance(payload, Mapping):
-            rows = (
-                payload.get("net")
-                or payload.get("day")
-                or payload.get("positions")
-                or []
-            )
-        else:
-            rows = payload
-        if rows is None:
-            return None
+        """Return absolute broker quantity, or ``None`` when exposure is unknown."""
         try:
-            positions = list(rows)
-        except TypeError:
-            return None
-        if not positions:
-            return 0
-
-        target_symbol = _legacy.normalize_symbol(symbol)
-        matched = False
-        net_quantity = 0
-        for position in positions:
-            if not isinstance(position, Mapping):
-                continue
-            position_symbol = _legacy.normalize_symbol(
-                str(
-                    position.get("tradingsymbol")
-                    or position.get("symbol")
-                    or position.get("instrument")
-                    or ""
-                )
+            return self._authoritative_position_quantity(symbol)
+        except Exception as exc:  # noqa: BLE001
+            _legacy.LOGGER.error(
+                "BROKER_POSITION_QUANTITY_UNKNOWN symbol=%s error=%s",
+                _legacy.normalize_symbol(symbol),
+                exc,
+                extra={
+                    "event": "BROKER_POSITION_QUANTITY_UNKNOWN",
+                    "symbol": _legacy.normalize_symbol(symbol),
+                    "error_type": type(exc).__name__,
+                },
             )
-            if position_symbol != target_symbol:
-                continue
-            matched = True
-            raw_quantity = position.get(
-                "quantity",
-                position.get("net_quantity", position.get("net", 0)),
-            )
-            try:
-                net_quantity += int(float(raw_quantity or 0))
-            except (TypeError, ValueError):
-                return None
-
-        if not matched:
-            # A non-empty broker response that omits the symbol is not sufficient
-            # proof of flatness; preserve the entry freeze until reconciliation.
             return None
-        return abs(net_quantity)
 
     @staticmethod
     def _matching_partial_target(bracket: Any) -> Any | None:
@@ -200,26 +158,20 @@ class CanonicalBracketManager(HardenedBracketManager):
 
     @staticmethod
     def _clear_fill_sync_state(bracket: Any) -> None:
-        for name in (
-            "_filled_exit_sync_started_at",
-            "_filled_exit_sync_order_id",
-        ):
-            with suppress(AttributeError):
-                delattr(bracket, name)
+        bracket._filled_exit_sync_started_at = 0.0
+        bracket._filled_exit_sync_order_id = None
 
     def _fill_sync_grace_expired(self, bracket: Any, order_id: str) -> bool:
         now = time.time()
-        previous_order = str(
-            getattr(bracket, "_filled_exit_sync_order_id", "") or ""
-        )
-        started_at = float(
-            getattr(bracket, "_filled_exit_sync_started_at", 0.0) or 0.0
-        )
-        if previous_order != order_id or started_at <= 0:
-            setattr(bracket, "_filled_exit_sync_order_id", order_id)
-            setattr(bracket, "_filled_exit_sync_started_at", now)
-            started_at = now
-        return (now - started_at) >= self._filled_position_sync_grace_seconds
+        if (
+            bracket._filled_exit_sync_order_id != order_id
+            or bracket._filled_exit_sync_started_at <= 0
+        ):
+            bracket._filled_exit_sync_order_id = order_id
+            bracket._filled_exit_sync_started_at = now
+        return (
+            now - bracket._filled_exit_sync_started_at
+        ) >= self._filled_position_sync_grace_seconds
 
     def _defer_filled_position_sync(
         self,

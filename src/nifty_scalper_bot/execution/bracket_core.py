@@ -53,6 +53,11 @@ from typing import (
 from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
+from nifty_scalper_bot.execution.position_snapshot import (
+    PositionSnapshot,
+    PositionSnapshotError,
+    decode_position_snapshot,
+)
 # --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
 try:
     from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
@@ -246,6 +251,9 @@ class BracketState:
     _ledger_pending_exit_price: float | None = None
     _ledger_pending_exit_target: str | None = None
     _ledger_release_hook_fired: bool = False
+    _filled_exit_sync_started_at: float = 0.0
+    _filled_exit_sync_order_id: str | None = None
+    _last_exit_reconcile_at: float = 0.0
 
     @property
     def bracket_id(self) -> str:
@@ -349,6 +357,11 @@ class BracketState:
             "ledger_pending_exit_price": self._ledger_pending_exit_price,
             "ledger_pending_exit_target": self._ledger_pending_exit_target,
             "ledger_release_hook_fired": self._ledger_release_hook_fired,
+            "market_escalation_fired": self._market_escalation_fired,
+            "last_exit_summary_at": self.last_exit_summary_at,
+            "filled_exit_sync_started_at": self._filled_exit_sync_started_at,
+            "filled_exit_sync_order_id": self._filled_exit_sync_order_id,
+            "last_exit_reconcile_at": self._last_exit_reconcile_at,
         }
 
 
@@ -406,23 +419,17 @@ class BracketManager:
         market_data: Any = None,
         trade_journal: "TradeJournal | None" = None,
     ):
-        """Initialize bracket manager runtime dependencies. Args: order_manager, indicator_engine, market_data; Returns: None; Raises: None."""
+        """Initialize the canonical bracket runtime and recover durable state first."""
         self.order_manager = order_manager
         self._trade_journal = trade_journal
         self._brackets: Dict[str, BracketState] = {}
-        # Reverse Index: Map broker order IDs/Symbol to entry IDs
         self._order_to_entry: Dict[str, str] = {}
-        self._symbol_map: Dict[str, List[str]] = {}  # Fast lookup: Symbol -> [Entry IDs]
-        
-        # --- ATR & Trailing Setup ---
+        self._symbol_map: Dict[str, List[str]] = {}
         self._indicator_engine = indicator_engine
         self._market_data = market_data
         self._atr_provider = None
         if SafeATRProvider and indicator_engine:
-            # Initialize Safe Provider with 60s cache validity
             self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
-            
-        # Store active trailing controllers: {entry_order_id: Controller}
         self._trailing_controllers: Dict[str, Any] = {}
         self._recent_ticks: Dict[str, deque] = {}
         self._max_tick_history = 20
@@ -430,12 +437,9 @@ class BracketManager:
         self._orphan_retry_last_attempt: Dict[str, float] = {}
         self._exit_executor: Callable[[str, int], Any] | None = None
         self._trailing_controller_factory: Callable[[BracketState], Any] | None = None
-        # FIX S10-2: hook fired when bracket fully closes — lets runner clear orchestrator direction lock
         self._on_exit_complete_hook: Callable[[str], None] | None = None
         self._on_position_open_priority_hook: Callable[[str], None] | None = None
         self._on_position_closed_priority_hook: Callable[[str], None] | None = None
-    
-        # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
         self._last_price_cache: Dict[str, float] = {}
         self._exit_cooldowns: Dict[str, float] = {}
@@ -447,16 +451,18 @@ class BracketManager:
         self._lock = _RLOCK_CLASS()
         self._reconcile_lock = threading.Lock()
         self._running = True
-        
-        # Configuration
+        self._persistence_degraded_reason: str | None = None
+        self._recovery_degraded_reason: str | None = None
+        self._last_persist_success_at: float | None = None
+        self._state_storage_path: str | None = None
+        self._state_storage_durable = False
+
         self._auto_reduce_sl = True
         self._pending_entry_reconcile_after_sec = max(
             1.0,
             parse_float_env(os.getenv("BRACKET_PENDING_ENTRY_RECONCILE_AFTER_SEC"), 5.0),
         )
-        self._stale_cleanup_age = 86400  # 24 hours
-        # Cache tiered-trailing thresholds once at startup — avoids os.getenv()
-        # on every tick (100-300 ticks/sec × N active brackets = hot path).
+        self._stale_cleanup_age = 86400
         self._trail_tier1_pct = parse_float_env(os.getenv("TRAIL_TIER1_PCT"), 1.0)
         self._trail_tier2_pct = parse_float_env(os.getenv("TRAIL_TIER2_PCT"), 2.0)
         self._trail_tier3_pct = parse_float_env(os.getenv("TRAIL_TIER3_PCT"), 4.0)
@@ -465,9 +471,9 @@ class BracketManager:
         self._exit_max_retry_attempts = max(1, parse_int_env(os.getenv("EXIT_MAX_RETRY_ATTEMPTS"), 4))
         self._exit_retry_backoffs = self._parse_exit_backoffs(os.getenv("EXIT_RETRY_BACKOFF_SECONDS", "1,2,5"))
         self._exit_fatal_error_patterns = tuple(
-            p.strip().lower()
-            for p in os.getenv("EXIT_RETRY_FATAL_ERROR_PATTERNS", "").split(",")
-            if p.strip()
+            value.strip().lower()
+            for value in os.getenv("EXIT_RETRY_FATAL_ERROR_PATTERNS", "").split(",")
+            if value.strip()
         )
         self._exit_reconcile_interval_seconds = max(0.25, parse_float_env(os.getenv("EXIT_POSITION_RECONCILE_INTERVAL_SECONDS"), 1.0))
         self._exit_flat_confirmation_required = os.getenv("EXIT_FLAT_CONFIRMATION_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -478,9 +484,16 @@ class BracketManager:
         self._exit_marketable_limit_slippage_ticks = max(0, parse_int_env(os.getenv("EXIT_MARKETABLE_LIMIT_SLIPPAGE_TICKS"), 5))
         self._exit_marketable_limit_max_slippage_pct = max(0.0, parse_float_env(os.getenv("EXIT_MARKETABLE_LIMIT_MAX_SLIPPAGE_PCT"), 2.0))
         self._exit_fallback_to_market_on_quote_missing = _env_bool("EXIT_FALLBACK_TO_MARKET_ON_QUOTE_MISSING", True)
+
+        if _env_bool("BRACKET_AUTO_RESTORE", True):
+            try:
+                self.load_state()
+            except Exception as exc:  # noqa: BLE001
+                self._mark_persistence_degraded("startup_restore_failed", exc)
+
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
-            name='bracket-watchdog',
+            name="bracket-watchdog",
             daemon=True,
         )
         self._watchdog_thread.start()
@@ -499,7 +512,9 @@ class BracketManager:
         return values or [1.0, 2.0, 5.0]
 
     def has_unresolved_exit(self) -> bool:
-        """Return True while any bracket exit is unresolved and new entries must freeze."""
+        """Return whether persistence, recovery, or an exit lifecycle blocks entries."""
+        if self._persistence_degraded_reason or self._recovery_degraded_reason:
+            return True
         unresolved = {
             BracketExitLifecycle.EXIT_TRIGGERED.value,
             BracketExitLifecycle.EXIT_ORDER_PENDING.value,
@@ -509,17 +524,28 @@ class BracketManager:
         }
         with self._lock:
             return any(
-                b.remaining_quantity > 0 and (b.exit_pending or b.exit_state in unresolved)
-                for b in self._brackets.values()
+                bracket.remaining_quantity > 0
+                and (bracket.exit_pending or bracket.exit_state in unresolved)
+                for bracket in self._brackets.values()
             )
 
     def get_first_unresolved_exit_bracket_id(self) -> str | None:
-        """Return one unresolved bracket id for diagnostics and entry-freeze logs."""
+        """Return the first recovery blocker or unresolved bracket identifier."""
+        if self._persistence_degraded_reason:
+            return f"persistence:{self._persistence_degraded_reason}"
+        if self._recovery_degraded_reason:
+            return f"recovery:{self._recovery_degraded_reason}"
         with self._lock:
-            for b in self._brackets.values():
-                if b.remaining_quantity > 0 and (b.exit_pending or b.exit_state.startswith("EXIT_")):
-                    if b.exit_state not in {BracketExitLifecycle.EXIT_FILLED.value, BracketExitLifecycle.EXIT_RECONCILED_FLAT.value, BracketExitLifecycle.CLOSED.value}:
-                        return b.bracket_id
+            for bracket in self._brackets.values():
+                if bracket.remaining_quantity <= 0:
+                    continue
+                if bracket.exit_pending or bracket.exit_state.startswith("EXIT_"):
+                    if bracket.exit_state not in {
+                        BracketExitLifecycle.EXIT_FILLED.value,
+                        BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
+                        BracketExitLifecycle.CLOSED.value,
+                    }:
+                        return bracket.bracket_id
         return None
 
     def attach_exit_executor(self, executor: Callable[[str, int], Any] | None) -> None:
@@ -2629,28 +2655,21 @@ class BracketManager:
         return None
 
     def _position_flat_for_symbol(self, symbol: str) -> bool:
-        broker = getattr(self.order_manager, "_broker", None)
-        if broker is None:
-            return not self._exit_flat_confirmation_required
-        getter = getattr(broker, "get_positions", None)
-        if not callable(getter):
-            return not self._exit_flat_confirmation_required
-        positions = getter() or []
-        target = normalize_symbol(symbol)
-        seen = False
-        for pos in positions:
-            psym = normalize_symbol(str(pos.get("tradingsymbol") or pos.get("symbol") or pos.get("instrument") or ""))
-            if psym and psym != target:
-                continue
-            if psym == target:
-                seen = True
-            qty = pos.get("quantity", pos.get("net_quantity", pos.get("net", 0)))
-            try:
-                if abs(int(float(qty or 0))) > 0:
-                    return False
-            except (TypeError, ValueError):
-                return False
-        return True if seen or positions == [] else False
+        """Return flatness only from the canonical authoritative snapshot."""
+        try:
+            return self._authoritative_position_quantity(symbol) == 0
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "EXIT_POSITION_SNAPSHOT_INVALID symbol=%s error=%s",
+                normalize_symbol(symbol),
+                exc,
+                extra={
+                    "event": "EXIT_POSITION_SNAPSHOT_INVALID",
+                    "symbol": normalize_symbol(symbol),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return False
 
     def _close_bracket(self, bracket: BracketState, *, close_source: str, exit_price: float | None = None) -> None:
         with self._lock:
@@ -2770,28 +2789,11 @@ class BracketManager:
         )
 
     def _verify_position_closed(self, symbol: str) -> bool:
-        """Return true only when a valid broker snapshot authoritatively proves flatness."""
+        """Return true only when a complete authoritative snapshot proves flatness."""
         normalized = normalize_symbol(symbol)
-        broker = getattr(self.order_manager, "_broker", None)
-        if broker is None:
-            LOGGER.error(
-                "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=broker_missing",
-                normalized,
-                extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": normalized},
-            )
-            return False
-        getter = getattr(broker, "get_positions", None)
-        if not callable(getter):
-            LOGGER.error(
-                "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=get_positions_missing",
-                normalized,
-                extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": normalized},
-            )
-            return False
-
         try:
-            response = getter()
-        except Exception as exc:  # noqa: BLE001 - unknown exposure must fail closed
+            return self._authoritative_position_quantity(normalized) == 0
+        except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "POSITION_FLAT_VERIFY_FAILED symbol=%s error=%s",
                 normalized,
@@ -2803,69 +2805,6 @@ class BracketManager:
                 },
             )
             return False
-
-        if response is None:
-            LOGGER.error(
-                "POSITION_FLAT_VERIFY_INVALID symbol=%s reason=missing_snapshot",
-                normalized,
-                extra={"event": "POSITION_FLAT_VERIFY_INVALID", "symbol": normalized},
-            )
-            return False
-
-        if isinstance(response, Mapping):
-            rows: object | None = None
-            for key in ("net", "positions"):
-                if key in response:
-                    rows = response.get(key)
-                    break
-            if rows is None and any(
-                key in response for key in ("symbol", "tradingsymbol", "instrument")
-            ):
-                rows = [response]
-        else:
-            rows = response
-
-        if isinstance(rows, (str, bytes, Mapping)) or rows is None:
-            return False
-        try:
-            positions = list(rows)
-        except TypeError:
-            return False
-
-        for index, position in enumerate(positions):
-            if not isinstance(position, Mapping):
-                LOGGER.error(
-                    "POSITION_FLAT_VERIFY_INVALID symbol=%s reason=row_type index=%s",
-                    normalized,
-                    index,
-                    extra={"event": "POSITION_FLAT_VERIFY_INVALID", "symbol": normalized},
-                )
-                return False
-            raw_symbol = (
-                position.get("symbol")
-                or position.get("tradingsymbol")
-                or position.get("instrument")
-            )
-            if not raw_symbol:
-                return False
-            position_symbol = normalize_symbol(str(raw_symbol))
-            quantity_key = next(
-                (
-                    key
-                    for key in ("quantity", "net_quantity", "net_qty", "netQuantity")
-                    if key in position
-                ),
-                None,
-            )
-            if quantity_key is None:
-                return False
-            try:
-                quantity = int(float(position.get(quantity_key)))
-            except (TypeError, ValueError):
-                return False
-            if position_symbol == normalized and quantity != 0:
-                return False
-        return True
 
     def _market_fallback_exit(
         self,
@@ -3135,52 +3074,257 @@ class BracketManager:
     # ----------------------------------------------------------------
     # 💾 PERSISTENCE LAYER (Add to BracketManager)
     # ----------------------------------------------------------------
+    def _is_live_execution(self) -> bool:
+        checker = getattr(self.order_manager, "is_live_mode", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:  # noqa: BLE001
+                pass
+        mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        enabled = str(
+            os.getenv("ENABLE_LIVE") or os.getenv("ENABLE_LIVE_TRADING") or "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        return mode == "LIVE" and enabled
+
+
+    def _mark_persistence_degraded(
+        self,
+        reason: str,
+        error: Exception | None = None,
+    ) -> None:
+        self._persistence_degraded_reason = str(reason)
+        LOGGER.critical(
+            "BRACKET_PERSISTENCE_DEGRADED reason=%s path=%s error=%s",
+            reason,
+            self._state_storage_path,
+            error,
+            extra={
+                "event": "BRACKET_PERSISTENCE_DEGRADED",
+                "reason": str(reason),
+                "path": self._state_storage_path,
+                "error_type": type(error).__name__ if error is not None else None,
+            },
+        )
+        self._notify_event(
+            "BRACKET_PERSISTENCE_DEGRADED",
+            {
+                "reason": str(reason),
+                "path": self._state_storage_path,
+                "message": "Protective exits continue; new entries are frozen until durable state is healthy.",
+            },
+        )
+
+
+    def _clear_persistence_degraded(self) -> None:
+        self._persistence_degraded_reason = None
+        self._last_persist_success_at = time.time()
+
+
+    def _authoritative_position_snapshot(self) -> PositionSnapshot:
+        broker = getattr(self.order_manager, "_broker", None)
+        getter = getattr(broker, "get_positions", None) if broker is not None else None
+        if not callable(getter):
+            raise PositionSnapshotError("broker get_positions is unavailable")
+        return decode_position_snapshot(getter())
+
+
+    def _authoritative_position_quantity(self, symbol: str) -> int:
+        snapshot = self._authoritative_position_snapshot()
+        return abs(int(snapshot.quantity_for(normalize_symbol(symbol))))
+    def _decode_restored_bracket(
+        self,
+        entry_id: str,
+        payload: Mapping[str, Any],
+    ) -> BracketState:
+        def finite_float(name: str, value: object, minimum: float = 0.0) -> float:
+            try:
+                result = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{entry_id}: invalid {name}") from exc
+            if not math.isfinite(result) or result < minimum:
+                raise ValueError(f"{entry_id}: invalid {name}")
+            return result
+
+        stored_id = str(payload.get("entry_order_id") or entry_id).strip()
+        if stored_id != str(entry_id):
+            raise ValueError(f"{entry_id}: entry id mismatch")
+        symbol = normalize_symbol(str(payload.get("symbol") or ""))
+        if not symbol:
+            raise ValueError(f"{entry_id}: symbol missing")
+        quantity = int(payload.get("quantity") or 0)
+        remaining = int(payload.get("remaining_quantity", quantity) or 0)
+        if quantity <= 0 or remaining < 0 or remaining > quantity:
+            raise ValueError(f"{entry_id}: invalid quantity state")
+        trailing_config = payload.get("trailing_config") or {}
+        if not isinstance(trailing_config, Mapping):
+            raise ValueError(f"{entry_id}: invalid trailing config")
+        raw_targets = payload.get("tp_levels") or []
+        if isinstance(raw_targets, (str, bytes, Mapping)):
+            raise ValueError(f"{entry_id}: invalid target list")
+        targets: list[TargetLevel] = []
+        for index, raw_target in enumerate(raw_targets):
+            if not isinstance(raw_target, Mapping):
+                raise ValueError(f"{entry_id}: invalid target {index}")
+            target_qty = int(raw_target.get("quantity") or 0)
+            target_price = finite_float("target price", raw_target.get("price"))
+            if target_qty <= 0 or target_qty > quantity or target_price <= 0:
+                raise ValueError(f"{entry_id}: invalid target {index}")
+            targets.append(
+                TargetLevel(
+                    price=target_price,
+                    quantity=target_qty,
+                    executed=bool(raw_target.get("executed", False)),
+                    name=str(raw_target.get("name") or "TP"),
+                )
+            )
+        entry_price = finite_float("entry price", payload.get("entry_price"))
+        state = BracketState(
+            entry_order_id=stored_id,
+            symbol=symbol,
+            side=str(payload.get("side") or ""),
+            quantity=quantity,
+            entry_price=entry_price,
+            sl_trigger_price=finite_float("stop loss", payload.get("sl_trigger_price", 0.0)),
+            tp_trigger_price=finite_float("take profit", payload.get("tp_trigger_price", 0.0)),
+            remaining_quantity=remaining,
+            tp_levels=targets,
+            is_virtual=bool(payload.get("is_virtual", True)),
+            active=bool(payload.get("active", True)),
+            trailing_enabled=bool(payload.get("trailing_enabled", False)),
+            trailing_config=dict(trailing_config),
+            virtual_sl_id=str(payload.get("virtual_sl_id") or f"vsl_{stored_id}"),
+            highest_ltp=finite_float("highest ltp", payload.get("highest_ltp", entry_price)),
+            lowest_ltp=finite_float("lowest ltp", payload.get("lowest_ltp", entry_price)),
+            last_ltp=finite_float("last ltp", payload.get("last_ltp", entry_price)),
+            previous_ltp=finite_float(
+                "previous ltp",
+                payload.get("previous_ltp", payload.get("last_ltp", entry_price)),
+            ),
+            tag=payload.get("tag"),
+            created_at=finite_float("created at", payload.get("created_at", time.time())),
+            updated_at=finite_float("updated at", payload.get("updated_at", time.time())),
+            exit_executed=bool(payload.get("exit_executed", False)),
+            pending_exit_order_id=payload.get("pending_exit_order_id"),
+            exit_in_progress=bool(payload.get("exit_in_progress", False)),
+            entry_confirmed=bool(payload.get("entry_confirmed", payload.get("active", True))),
+            monitoring_only=bool(payload.get("monitoring_only", False)),
+            entry_status=str(
+                payload.get("entry_status")
+                or ("ACTIVE" if payload.get("active", True) else "PENDING_ENTRY")
+            ),
+            exit_state=str(
+                payload.get("exit_state")
+                or (
+                    BracketExitLifecycle.OPEN_ACTIVE.value
+                    if payload.get("active", True)
+                    else BracketExitLifecycle.OPEN_PENDING_FILL.value
+                )
+            ),
+            exit_order_id=payload.get("exit_order_id") or payload.get("pending_exit_order_id"),
+            entry_fill_price=payload.get("entry_fill_price"),
+            exit_reason=payload.get("exit_reason"),
+            exit_triggered_at=payload.get("exit_triggered_at"),
+            exit_attempt_count=int(payload.get("exit_attempt_count", 0) or 0),
+            last_exit_attempt_at=payload.get("last_exit_attempt_at"),
+            last_exit_error=payload.get("last_exit_error"),
+            exit_pending=bool(payload.get("exit_pending", False)),
+            next_exit_attempt_at=payload.get("next_exit_attempt_at"),
+            last_exit_summary_at=float(payload.get("last_exit_summary_at", 0.0) or 0.0),
+            closed_at=payload.get("closed_at"),
+            position_flat_confirmed=bool(payload.get("position_flat_confirmed", False)),
+            close_source=payload.get("close_source"),
+            exit_price=payload.get("exit_price"),
+            escalated_at=payload.get("escalated_at"),
+            _market_escalation_fired=bool(payload.get("market_escalation_fired", False)),
+            _atr_warning_logged=bool(payload.get("atr_warning_logged", False)),
+            ledger_realized_pnl=payload.get("ledger_realized_pnl"),
+            _ledger_pending_entry_price=payload.get("ledger_pending_entry_price"),
+            _ledger_pending_exit_order_id=payload.get("ledger_pending_exit_order_id"),
+            _ledger_pending_exit_quantity=int(payload.get("ledger_pending_exit_quantity", 0) or 0),
+            _ledger_pending_exit_price=payload.get("ledger_pending_exit_price"),
+            _ledger_pending_exit_target=payload.get("ledger_pending_exit_target"),
+            _ledger_release_hook_fired=bool(payload.get("ledger_release_hook_fired", False)),
+            _filled_exit_sync_started_at=float(payload.get("filled_exit_sync_started_at", 0.0) or 0.0),
+            _filled_exit_sync_order_id=payload.get("filled_exit_sync_order_id"),
+            _last_exit_reconcile_at=float(payload.get("last_exit_reconcile_at", 0.0) or 0.0),
+        )
+        return state
     def _get_storage_path(self) -> Path:
-        """Get storage path with DATA_DIR support for Railway.
-        
-        ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback.
-        """
-        import os
-        
-        data_dir = os.getenv("DATA_DIR", "data")
-        path = Path(data_dir) / "virtual_brackets.json"
-        
-        # Test if we can write to this directory
+        """Return durable state storage; ephemeral fallback is forbidden in LIVE."""
+        configured = Path(os.getenv("DATA_DIR", "data")) / "virtual_brackets.json"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            test_file = path.parent / ".write_test"
-            test_file.write_text("test")
-            test_file.unlink()
-        except (PermissionError, OSError):
-            # ✅ FIX: Fallback to /tmp
-            path = Path("/tmp") / "virtual_brackets.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            LOGGER.warning("Using /tmp fallback for brackets: %s", path)
-        
-        return path
+            configured.parent.mkdir(parents=True, exist_ok=True)
+            probe = configured.parent / f".bracket_write_test_{os.getpid()}"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            durable = not str(configured.parent.resolve()).startswith("/tmp")
+            if self._is_live_execution() and not durable:
+                raise OSError("LIVE bracket state cannot use ephemeral /tmp storage")
+            self._state_storage_path = str(configured)
+            self._state_storage_durable = durable
+            return configured
+        except (OSError, PermissionError) as exc:
+            if self._is_live_execution():
+                self._state_storage_path = str(configured)
+                self._state_storage_durable = False
+                raise OSError(f"durable bracket storage unavailable: {configured}") from exc
+            fallback = Path("/tmp") / "virtual_brackets.json"
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            self._state_storage_path = str(fallback)
+            self._state_storage_durable = False
+            LOGGER.warning(
+                "BRACKET_STORAGE_EPHEMERAL_FALLBACK path=%s error=%s",
+                fallback,
+                exc,
+                extra={"event": "BRACKET_STORAGE_EPHEMERAL_FALLBACK", "path": str(fallback)},
+            )
+            return fallback
 
     def save_state(self) -> None:
-        """Atomically persist one coherent bracket snapshot and journal it."""
-        with self._lock:
-            payload = {
-                entry_id: bracket.to_dict()
-                for entry_id, bracket in self._brackets.items()
-            }
-            snapshots = list(self._brackets.values())
-        path = self._get_storage_path()
-        temp_path = path.with_suffix(
-            f"{path.suffix}.tmp.{threading.get_ident()}.{time.time_ns()}"
-        )
+        """Atomically persist one versioned coherent bracket snapshot."""
+        temp_path: Path | None = None
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            path = self._get_storage_path()
+            with self._lock:
+                payload = {
+                    "schema_version": 2,
+                    "saved_at": time.time(),
+                    "brackets": {
+                        entry_id: bracket.to_dict()
+                        for entry_id, bracket in self._brackets.items()
+                    },
+                    "exit_rescue_attempts": dict(
+                        getattr(self, "_exit_rescue_attempts", {})
+                    ),
+                    "exit_order_open_since": dict(
+                        getattr(self, "_exit_order_open_since", {})
+                    ),
+                }
+                snapshots = list(self._brackets.values())
+            temp_path = path.with_suffix(
+                f"{path.suffix}.tmp.{threading.get_ident()}.{time.time_ns()}"
+            )
             with open(temp_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_path, path)
-        except Exception:
-            with suppress(OSError):
-                temp_path.unlink()
+            try:
+                directory_fd = os.open(str(path.parent), os.O_RDONLY)
+            except OSError:
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            self._clear_persistence_degraded()
+        except Exception as exc:
+            if temp_path is not None:
+                with suppress(OSError):
+                    temp_path.unlink()
+            self._mark_persistence_degraded("snapshot_write_failed", exc)
             raise
 
         for bracket in snapshots:
@@ -3194,150 +3338,116 @@ class BracketManager:
                     "remaining_quantity": bracket.remaining_quantity,
                     "exit_executed": bracket.exit_executed,
                     "pending_exit_order_id": bracket.pending_exit_order_id,
+                    "storage_durable": self._state_storage_durable,
                 },
             )
 
-    def load_state(self) -> None:
-        """Restore brackets from disk on startup."""
+    def load_state(self) -> bool:
+        """Restore a complete bracket snapshot atomically before watchdog startup."""
         path = self._get_storage_path()
         if not path.exists():
             LOGGER.info("No bracket state file found - starting fresh")
-            return
-
+            return False
         try:
-            with open(path, "r") as f:
-                data = json.load(f)
-            
-            if not isinstance(data, Mapping):
+            decoded = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(decoded, Mapping):
                 raise ValueError("bracket state payload must be an object")
-            restored_count = 0
-            with self._lock:
-                self._brackets.clear()
-                self._order_to_entry.clear()
-                self._symbol_map.clear()
-                self._trailing_controllers.clear()
-                for eid, d in data.items():
+            if "brackets" in decoded:
+                version = int(decoded.get("schema_version", 0) or 0)
+                if version not in {1, 2}:
+                    raise ValueError(f"unsupported bracket state schema {version}")
+                records = decoded.get("brackets")
+                rescue_attempts = decoded.get("exit_rescue_attempts") or {}
+                open_since = decoded.get("exit_order_open_since") or {}
+            else:
+                records = decoded
+                rescue_attempts = {}
+                open_since = {}
+            if not isinstance(records, Mapping):
+                raise ValueError("bracket records must be an object")
+            if not isinstance(rescue_attempts, Mapping) or not isinstance(open_since, Mapping):
+                raise ValueError("bracket recovery maps are invalid")
+
+            temp_brackets: Dict[str, BracketState] = {}
+            temp_order_map: Dict[str, str] = {}
+            temp_symbol_map: Dict[str, List[str]] = {}
+            temp_controllers: Dict[str, Any] = {}
+            controller_errors: list[str] = []
+            for raw_entry_id, record in records.items():
+                entry_id = str(raw_entry_id).strip()
+                if not entry_id or not isinstance(record, Mapping):
+                    raise ValueError(f"invalid bracket record {raw_entry_id!r}")
+                bracket = self._decode_restored_bracket(entry_id, record)
+                temp_brackets[entry_id] = bracket
+                temp_order_map[entry_id] = entry_id
+                temp_symbol_map.setdefault(bracket.symbol, []).append(entry_id)
+                if bracket.trailing_enabled:
                     try:
-                        # Restore TargetLevels
-                        tp_levels = []
-                        for tl_data in d.get("tp_levels", []):
-                            tp_levels.append(TargetLevel(
-                                price=tl_data["price"],
-                                quantity=tl_data["quantity"],
-                                executed=tl_data.get("executed", False),
-                                name=tl_data.get("name", "TP")
-                            ))
-                        
-                        # Reconstruct BracketState with CORRECT parameters
-                        b = BracketState(
-                            entry_order_id=eid,                                    # ✅ FIXED: was entry_id
-                            symbol=d["symbol"],
-                            quantity=d["quantity"],
-                            entry_price=d["entry_price"],
-                            side=d["side"],
-                            sl_trigger_price=d["sl_trigger_price"],                # ✅ FIXED: was stop_loss
-                            tp_trigger_price=d["tp_trigger_price"],                # ✅ FIXED: was take_profit
-                            remaining_quantity=d.get("remaining_quantity", d["quantity"]),
-                            tp_levels=tp_levels,
-                            trailing_enabled=d.get("trailing_enabled", False),
-                            trailing_config=d.get("trailing_config", {}),
-                            created_at=d.get("created_at", time.time()),
-                            updated_at=d.get("updated_at", time.time()),
-                            highest_ltp=d.get("highest_ltp", d["entry_price"]),
-                            lowest_ltp=d.get("lowest_ltp", d["entry_price"]),
-                            last_ltp=d.get("last_ltp", d["entry_price"]),
-                            previous_ltp=d.get("previous_ltp", d.get("last_ltp", d["entry_price"])),
-                            tag=d.get("tag")
-                        )
-                        
-                        # Set active state AFTER construction
-                        b.active = d.get("active", True)
-                        b.exit_executed = bool(d.get("exit_executed", False))
-                        b.pending_exit_order_id = d.get("pending_exit_order_id")
-                        b.exit_order_id = d.get("exit_order_id") or b.pending_exit_order_id
-                        b.entry_fill_price = d.get("entry_fill_price")
-                        b.exit_reason = d.get("exit_reason")
-                        b.exit_triggered_at = d.get("exit_triggered_at")
-                        b.exit_attempt_count = int(d.get("exit_attempt_count", 0) or 0)
-                        b.last_exit_attempt_at = d.get("last_exit_attempt_at")
-                        b.last_exit_error = d.get("last_exit_error")
-                        b.exit_pending = bool(d.get("exit_pending", False))
-                        b.next_exit_attempt_at = d.get("next_exit_attempt_at")
-                        b.closed_at = d.get("closed_at")
-                        b.position_flat_confirmed = bool(d.get("position_flat_confirmed", False))
-                        b.close_source = d.get("close_source")
-                        b.exit_price = d.get("exit_price")
-                        b.escalated_at = d.get("escalated_at")
-                        b.exit_state = str(d.get("exit_state") or (BracketExitLifecycle.OPEN_ACTIVE.value if b.active else BracketExitLifecycle.OPEN_PENDING_FILL.value))
-                        b.exit_in_progress = bool(d.get("exit_in_progress", False))
-                        b.entry_confirmed = bool(d.get("entry_confirmed", b.active))
-                        b.monitoring_only = bool(d.get("monitoring_only", False))
-                        b.entry_status = str(
-                            d.get(
-                                "entry_status",
-                                "ACTIVE" if b.entry_confirmed and b.active else "PENDING_ENTRY",
+                        if self._trailing_controller_factory is not None:
+                            temp_controllers[entry_id] = self._trailing_controller_factory(bracket)
+                        elif (
+                            bracket.trailing_config.get("mode") == "ATR"
+                            and self._atr_provider
+                            and AdaptiveTrailingController
+                        ):
+                            mult = float(bracket.trailing_config.get("mult", 1.5) or 1.5)
+                            spec = TrailingSpec(trail_by=20.0, step=0.25, activation=0.3)
+                            temp_controllers[entry_id] = AdaptiveTrailingController(
+                                symbol=bracket.symbol,
+                                side="LONG" if bracket.side == "BUY" else "SHORT",
+                                entry=bracket.entry_price,
+                                sl_order_id=bracket.virtual_sl_id,
+                                variety="virtual",
+                                spec=spec,
+                                get_ltp=lambda _symbol, _b=bracket: _b.last_ltp,
+                                modify_order=self._virtual_modify_sl,
+                                atr_provider=self._atr_provider,
+                                journal=MockJournal(),
+                                atr_multiplier=mult,
                             )
+                    except Exception as exc:  # noqa: BLE001
+                        controller_errors.append(
+                            f"{entry_id}:{type(exc).__name__}:{exc}"
                         )
-                        b._atr_warning_logged = bool(d.get("atr_warning_logged", False))
-                        b.ledger_realized_pnl = d.get("ledger_realized_pnl")
-                        b._ledger_pending_entry_price = d.get("ledger_pending_entry_price")
-                        b._ledger_pending_exit_order_id = d.get("ledger_pending_exit_order_id")
-                        b._ledger_pending_exit_quantity = int(d.get("ledger_pending_exit_quantity", 0) or 0)
-                        b._ledger_pending_exit_price = d.get("ledger_pending_exit_price")
-                        b._ledger_pending_exit_target = d.get("ledger_pending_exit_target")
-                        b._ledger_release_hook_fired = bool(d.get("ledger_release_hook_fired", False))
-                        b.virtual_sl_id = f"vsl_{eid}"
-                        
-                        # Register bracket
-                        self._brackets[eid] = b
-                        self._order_to_entry[eid] = eid
-                        
-                        # Update symbol map
-                        if b.symbol not in self._symbol_map:
-                            self._symbol_map[b.symbol] = []
-                        self._symbol_map[b.symbol].append(eid)
-                        
-                        # Restore trailing controller if needed
-                        if b.trailing_enabled and b.trailing_config.get("mode") == "ATR":
-                            if self._atr_provider and AdaptiveTrailingController:
-                                try:
-                                    mult = b.trailing_config.get("mult", 1.5)
-                                    spec = TrailingSpec(
-                                        trail_by=20.0,
-                                        step=0.25,
-                                        activation=0.3
-                                    )
-                                    ctrl = AdaptiveTrailingController(
-                                        symbol=b.symbol,
-                                        side="LONG" if b.side == "BUY" else "SHORT",
-                                        entry=b.entry_price,
-                                        sl_order_id=b.virtual_sl_id,
-                                        variety="virtual",
-                                        spec=spec,
-                                        get_ltp=lambda s, _b=b: _b.last_ltp,
-                                        modify_order=self._virtual_modify_sl,
-                                        atr_provider=self._atr_provider,
-                                        journal=MockJournal(),
-                                        atr_multiplier=mult
-                                    )
-                                    self._trailing_controllers[eid] = ctrl
-                                    LOGGER.debug(f"🧠 Restored controller for {b.symbol}")
-                                except Exception as e:
-                                    LOGGER.warning(f"Failed to restore controller for {b.symbol}: {e}")
-                        
-                        restored_count += 1
-                        
-                    except Exception as e:
-                        LOGGER.error(f"Failed to restore bracket {eid}: {e}")
-                        continue
-            
-            LOGGER.info(f"♻️ Restored {restored_count} virtual brackets from disk")
-            
-            # ✅ CRITICAL: Resubscribe to market data
+
+            parsed_rescue = {str(key): int(value) for key, value in rescue_attempts.items()}
+            parsed_open_since = {str(key): float(value) for key, value in open_since.items()}
+            with self._lock:
+                self._brackets = temp_brackets
+                self._order_to_entry = temp_order_map
+                self._symbol_map = temp_symbol_map
+                self._trailing_controllers = temp_controllers
+                if hasattr(self, "_exit_rescue_attempts"):
+                    self._exit_rescue_attempts = parsed_rescue
+                if hasattr(self, "_exit_order_open_since"):
+                    self._exit_order_open_since = parsed_open_since
+            self._clear_persistence_degraded()
+            self._recovery_degraded_reason = None
+            if controller_errors:
+                self._recovery_degraded_reason = "trailing_controller_restore_failed"
+                LOGGER.critical(
+                    "BRACKET_TRAILING_RESTORE_DEGRADED errors=%s",
+                    controller_errors,
+                    extra={
+                        "event": "BRACKET_TRAILING_RESTORE_DEGRADED",
+                        "errors": controller_errors,
+                    },
+                )
+            LOGGER.info(
+                "BRACKET_STATE_RESTORED count=%s path=%s",
+                len(temp_brackets),
+                path,
+                extra={
+                    "event": "BRACKET_STATE_RESTORED",
+                    "count": len(temp_brackets),
+                    "path": str(path),
+                },
+            )
             self._resubscribe_restored_brackets()
-            
-        except Exception as e:
-            LOGGER.error(f"Failed to load bracket state: {e}", exc_info=True)
+            return True
+        except Exception as exc:
+            self._mark_persistence_degraded("snapshot_restore_failed", exc)
+            raise
 
 
     def _resubscribe_restored_brackets(self) -> None:
