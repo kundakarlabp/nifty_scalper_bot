@@ -15,6 +15,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      BRACKET_AUTO_RESTORE: "false"
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +72,13 @@ jobs:
             tests/execution/test_runtime_bracket_facade.py \
             tests/execution/test_adaptive_trailing_facade.py \
             tests/test_safe_order_manager.py
+      - name: Canonical execution restart and exposure recovery
+        env:
+          BRACKET_AUTO_RESTORE: "true"
+        run: |
+          python -m pytest -q \
+            tests/execution/test_canonical_execution_recovery.py \
+            tests/execution/test_execution_safety_audit_fixes.py
       - name: Entry recovery and fill accounting
         run: |
           python -m pytest -q \
