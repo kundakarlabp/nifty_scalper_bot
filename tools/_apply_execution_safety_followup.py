@@ -46,8 +46,8 @@ def patch_position_manager() -> None:
     path = "src/nifty_scalper_bot/execution/position_manager.py"
     replace_once(
         path,
-        """        with self._lock:\n            existing_positions = dict(self._positions)\n\n    def _get_float(\n""",
-        """        with self._lock:\n            existing_positions = copy.deepcopy(self._positions)\n\n    def _get_float(\n""",
+        """        with self._lock:\n            existing_positions = dict(self._positions)\n\n        def _get_float(\n""",
+        """        with self._lock:\n            existing_positions = copy.deepcopy(self._positions)\n\n        def _get_float(\n""",
     )
     replace_once(
         path,
