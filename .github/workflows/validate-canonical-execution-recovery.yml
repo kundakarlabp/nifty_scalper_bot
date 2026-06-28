@@ -1,0 +1,76 @@
+name: Validate Canonical Execution Recovery
+
+on:
+  push:
+    branches:
+      - fix/canonical-execution-recovery-20260628
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Apply anchored execution patches
+        run: |
+          python -m scripts.patch_bracket_core_a
+          python -m scripts.patch_bracket_core_b
+          python -m scripts.patch_position_manager_a
+          python -m scripts.patch_position_manager_b
+          python -m scripts.patch_execution_followups
+      - name: Remove temporary patch scripts from candidate tree
+        run: |
+          rm -f scripts/_execution_patch_utils.py
+          rm -f scripts/patch_bracket_core_a.py
+          rm -f scripts/patch_bracket_core_b.py
+          rm -f scripts/patch_position_manager_a.py
+          rm -f scripts/patch_position_manager_b.py
+          rm -f scripts/patch_execution_followups.py
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Compile and check diff
+        run: |
+          git diff --check
+          python -m compileall -q src dashboard scripts tests
+      - name: Focused canonical execution tests
+        env:
+          BRACKET_AUTO_RESTORE: "true"
+        run: |
+          python -m pytest -q tests/execution/test_canonical_execution_recovery.py tests/execution/test_execution_safety_audit_fixes.py tests/execution/test_runtime_bracket_facade.py tests/execution/test_canonical_bracket_fill_integrity.py tests/execution/test_ledger_bracket_runtime.py tests/execution/test_live_exit_hardening.py
+      - name: Architecture and path tests
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: |
+          python -m pytest -q tests/architecture/test_canonical_bo_ownership.py tests/test_execution_path_contract.py tests/execution/test_runtime_order_facade.py tests/execution/test_bracket_exit_state_machine.py tests/execution/test_virtual_bracket_safety.py tests/execution/test_bracket_manager_reliability.py tests/execution/test_bracket_open_position_priority_and_protective_exit.py
+      - name: Full suite
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: python -m pytest -q
+      - name: Package validated files
+        run: |
+          mkdir -p /tmp/candidate/src/nifty_scalper_bot/execution
+          mkdir -p /tmp/candidate/tests/execution
+          mkdir -p /tmp/candidate/.github/workflows
+          cp src/nifty_scalper_bot/execution/bracket_core.py /tmp/candidate/src/nifty_scalper_bot/execution/
+          cp src/nifty_scalper_bot/execution/canonical_bracket_manager.py /tmp/candidate/src/nifty_scalper_bot/execution/
+          cp src/nifty_scalper_bot/execution/runtime_bracket_manager.py /tmp/candidate/src/nifty_scalper_bot/execution/
+          cp src/nifty_scalper_bot/execution/position_manager.py /tmp/candidate/src/nifty_scalper_bot/execution/
+          cp src/nifty_scalper_bot/execution/execution_policy.py /tmp/candidate/src/nifty_scalper_bot/execution/
+          cp .github/workflows/live-exit-safety-ci.yml /tmp/candidate/.github/workflows/
+          cp tests/execution/test_execution_safety_audit_fixes.py /tmp/candidate/tests/execution/
+          cp tests/execution/test_canonical_execution_recovery.py /tmp/candidate/tests/execution/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canonical-execution-candidate
+          path: /tmp/candidate
+          if-no-files-found: error
