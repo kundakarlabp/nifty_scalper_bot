@@ -21,13 +21,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Apply anchored execution patches
-        run: |
-          python -m scripts.patch_bracket_core_a
-          python -m scripts.patch_bracket_core_b
-          python -m scripts.patch_position_manager_a
-          python -m scripts.patch_position_manager_b
-          python -m scripts.patch_execution_followups
+      - name: Patch bracket runtime core
+        run: python -m scripts.patch_bracket_core_a
+      - name: Patch bracket recovery persistence
+        run: python -m scripts.patch_bracket_core_b
+      - name: Patch atomic position reconciliation
+        run: python -m scripts.patch_position_manager_a
+      - name: Patch realised PnL and spread policy
+        run: python -m scripts.patch_position_manager_b
+      - name: Patch CI integration
+        run: python -m scripts.patch_execution_followups
       - name: Remove temporary patch scripts from candidate tree
         run: |
           rm -f scripts/_execution_patch_utils.py
