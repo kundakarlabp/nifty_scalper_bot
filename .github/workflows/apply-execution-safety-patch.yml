@@ -47,6 +47,12 @@ jobs:
           fi
 
           if [ "$status" -eq 0 ]; then
+            python tools/_apply_execution_safety_final.py >> /tmp/execution-safety/patch.log 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then status=$rc; failed_stage="final-patch"; fi
+          fi
+
+          if [ "$status" -eq 0 ]; then
             python - <<'PY' >> /tmp/execution-safety/patch.log 2>&1
           from pathlib import Path
           path = Path("src/nifty_scalper_bot/execution/bracket_core.py")
@@ -122,6 +128,7 @@ jobs:
 
           rm tools/_apply_execution_safety_patch.py
           rm tools/_apply_execution_safety_followup.py
+          rm tools/_apply_execution_safety_final.py
           rm .github/workflows/apply-execution-safety-patch.yml
           rm -f .ci/execution-safety-patch-failure.md
           git add -A
