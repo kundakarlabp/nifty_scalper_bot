@@ -6,8 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from nifty_scalper_bot.execution import BracketManager
 from nifty_scalper_bot.execution import bracket_core
-from nifty_scalper_bot.execution.bracket_core import BracketManager, BracketState
+from nifty_scalper_bot.execution.bracket_core import BracketState
 from nifty_scalper_bot.execution.execution_policy import ExecutionPolicy
 from nifty_scalper_bot.execution.margin_engine import MarginInputs
 from nifty_scalper_bot.execution.position_manager import Order, Position, PositionManager
@@ -163,7 +164,6 @@ def test_bracket_state_is_written_and_restored_with_ledger_recovery_fields(tmp_p
 
     restored = BracketManager(order_manager=SimpleNamespace())
     _stop(restored)
-    restored.load_state()
     restored_bracket = restored.get_bracket("entry-1")
     assert restored_bracket is not None
     assert restored_bracket._ledger_pending_exit_order_id == "exit-1"
@@ -252,8 +252,8 @@ class _Hub:
 def test_zero_spread_limit_is_strict_and_none_explicitly_disables_guard() -> None:
     quote = {"best_bid": 100.0, "best_ask": 101.0}
     with pytest.raises(OrderPlacementError):
-        ExecutionPolicy(_Hub(quote), max_spread_pct=0.0).build_plan("NSE:NIFTY", "BUY")
-    plan = ExecutionPolicy(_Hub(quote), max_spread_pct=None).build_plan("NSE:NIFTY", "BUY")
+        ExecutionPolicy(_Hub(quote), max_spread_pct=0.0).build_plan(SYMBOL, "BUY")
+    plan = ExecutionPolicy(_Hub(quote), max_spread_pct=None).build_plan(SYMBOL, "BUY")
     assert plan.spread_pct > 0
 
 

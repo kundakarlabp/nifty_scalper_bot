@@ -42,13 +42,9 @@ class RuntimeBracketManager(LedgerBracketManager):
 
     def _broker_all_positions_flat(self) -> bool | None:
         """Return explicit all-account flatness, or ``None`` when unknowable."""
-        broker = getattr(getattr(self, "order_manager", None), "_broker", None)
-        getter = getattr(broker, "get_positions", None) if broker is not None else None
-        if not callable(getter):
-            return None
         try:
-            payload = getter()
-        except Exception as exc:  # noqa: BLE001 - unknown must remain fail-closed
+            return self._authoritative_position_snapshot().all_flat
+        except Exception as exc:  # noqa: BLE001
             _legacy.LOGGER.error(
                 "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED error=%s",
                 exc,
@@ -58,42 +54,6 @@ class RuntimeBracketManager(LedgerBracketManager):
                 },
             )
             return None
-
-        rows: Any = payload
-        if isinstance(payload, Mapping):
-            found_collection = False
-            for key in ("net", "positions", "day"):
-                if key in payload:
-                    rows = payload.get(key)
-                    found_collection = True
-                    break
-            if not found_collection:
-                return True if not payload else None
-        if rows is None:
-            return None
-        try:
-            positions = list(rows)
-        except TypeError:
-            return None
-        if not positions:
-            return True
-
-        for position in positions:
-            if not isinstance(position, Mapping):
-                return None
-            raw_quantity = position.get(
-                "quantity",
-                position.get("net_quantity", position.get("net")),
-            )
-            if raw_quantity is None:
-                return None
-            try:
-                quantity = int(float(raw_quantity or 0))
-            except (TypeError, ValueError):
-                return None
-            if quantity != 0:
-                return False
-        return True
 
     def _retry_orphan_ledger_block(
         self,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import threading
 import time
@@ -23,6 +24,10 @@ from typing import (
 )
 
 from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.execution.position_snapshot import (
+    PositionSnapshotError,
+    decode_position_snapshot,
+)
 from nifty_scalper_bot.options.strike_selector import SelectedContract
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
@@ -489,6 +494,8 @@ class PositionManager:
         self._processed_order_ids: set[str] = set()
         self._max_processed_ids = 1000  # Limit memory usage
         self._daily_realized_pnl: float = 0.0
+        self._local_realized_pnl: float = 0.0
+        self._broker_realized_pnl: float | None = None
         self._active_contracts: Dict[str, ActiveContract] = {}
         self._contract_index: Dict[str, str] = {}
         self._persistent_state: PersistentStateManager | None = None
@@ -720,25 +727,7 @@ class PositionManager:
         payload_count: int,
         previous_positions: Mapping[str, Position] | None,
     ) -> None:
-        """Record reconciliation failure, revert state, and trigger notifications.
-
-        Args:
-            reason: Categorical reason for the failure.
-            error: Optional exception raised during reconciliation.
-            payload_count: Number of broker payloads processed.
-            previous_positions: Snapshot used to restore known-good state.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _handle_reconcile_failure",
-            extra={"event": "position_reconcile_failure", "reason": reason},
-        )
+        """Record failure without replacing newer local fill/position state."""
         self._last_reconcile_attempt = _now()
         self._consecutive_reconcile_failures += 1
         self._last_reconcile_error = str(error) if error is not None else reason
@@ -756,69 +745,32 @@ class PositionManager:
                 stage="apply",
                 outcome=reason_token,
             )
-        except Exception as metrics_exc:  # noqa: BLE001 - defensive metric guard
+        except Exception as metrics_exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in reconcile failure metrics: %s",
                 metrics_exc,
                 extra={"event": "position_reconcile_metric_failure"},
             )
-        fallback = (
-            previous_positions
-            if previous_positions is not None
-            else self._last_reconciled_state
-        )
-        fallback_source = (
-            "previous_attempt"
-            if previous_positions is not None
-            else ("last_reconciled" if self._last_reconciled_state else "unavailable")
-        )
-        restore_applied = False
-        if fallback is not None:
-            try:
-                restored_positions = copy.deepcopy(dict(fallback))
-                with self._lock:
-                    self._positions = restored_positions
-                restore_applied = True
-            except Exception as exc:  # noqa: BLE001 - defensive revert guard
-                self._logger.error(
-                    "Failure in _handle_reconcile_failure revert: %s",
-                    exc,
-                    extra={"event": "position_reconcile_revert_failed"},
-                )
-        if restore_applied:
-            self._logger.info(
-                "Condition met: position_reconcile_state_restored",
-                extra={
-                    "event": "position_reconcile_state_restored",
-                    "source": fallback_source,
-                    "count": len(self._positions),
-                },
-            )
-            try:
-                self.save_state()
-            except Exception as exc:  # noqa: BLE001 - defensive persistence guard
-                self._logger.error(
-                    "Failure in _handle_reconcile_failure persist: %s",
-                    exc,
-                    extra={"event": "position_reconcile_persist_failed"},
-                )
+        with self._lock:
+            preserved_count = len(self._positions)
         retry_delay = self._compute_retry_delay()
-        event_payload: dict[str, object] = {
+        payload: dict[str, object] = {
             "reason": reason_token,
             "failures": self._consecutive_reconcile_failures,
             "retry_sec": retry_delay,
             "count": payload_count,
             "timestamp": self._last_reconcile_attempt.isoformat(),
+            "restored": False,
+            "source": "current_state_preserved",
+            "preserved_count": preserved_count,
         }
-        event_payload["restored"] = restore_applied
-        event_payload["source"] = fallback_source
         if error is not None:
-            event_payload["error"] = str(error)
+            payload["error"] = str(error)
         try:
             _POSITION_RECONCILE_EVENTS.labels("failed").inc()
-        except Exception:  # noqa: BLE001 - optional metrics backend
+        except Exception:  # noqa: BLE001
             pass
-        self._notify_reconcile_event("position_reconcile_failed", event_payload)
+        self._notify_reconcile_event("position_reconcile_failed", payload)
         self._schedule_retry_after_failure(retry_delay)
 
     def _handle_reconcile_success(self, payload_count: int) -> None:
@@ -884,197 +836,70 @@ class PositionManager:
         self._notify_reconcile_event("position_reconcile_ok", event_payload)
 
     def reconcile_now(self) -> bool:
-        """Synchronize local positions with the broker immediately.
-
-        Args:
-            None.
-
-        Returns:
-            ``True`` when reconciliation succeeded, otherwise ``False``.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered reconcile_now",
-            extra={"event": "position_reconcile_enter"},
-        )
-        previous_positions: Dict[str, Position] | None = None
-        payloads: list[Mapping[str, object]] = []
-        try:
-            try:
-                with self._lock:
-                    previous_positions = copy.deepcopy(self._positions)
-            except Exception as exc:  # noqa: BLE001 - defensive snapshot guard
-                self._logger.error(
-                    "Failure in reconcile_now snapshot: %s",
-                    exc,
-                    extra={"event": "position_reconcile_snapshot_failed"},
-                )
-            fetcher = self._resolve_broker_position_fetcher()
-            if fetcher is None:
-                reason_token = canonical("fetcher_missing")
-                self._logger.warning(
-                    "Position reconciliation skipped (fetcher unavailable)",
-                    extra={
-                        "event": "position_reconcile_failed",
-                        "reason": reason_token,
-                    },
-                )
-                self._handle_reconcile_failure(
-                    reason=reason_token,
-                    error=None,
-                    payload_count=0,
-                    previous_positions=previous_positions,
-                )
-                return False
-            try:
-                response = fetcher()
-            except Exception as exc:  # noqa: BLE001 - defensive broker call
-                reason_token = canonical("fetch_error")
-                self._logger.warning(
-                    "Position reconciliation fetch failed: %s",
-                    exc,
-                    extra={
-                        "event": "position_reconcile_failed",
-                        "reason": reason_token,
-                    },
-                    exc_info=exc,
-                )
-                self._handle_reconcile_failure(
-                    reason=reason_token,
-                    error=exc,
-                    payload_count=0,
-                    previous_positions=previous_positions,
-                )
-                return False
-            if response is None:
-                reason_token = canonical("payload_missing")
-                self._logger.warning(
-                    "Position reconciliation returned no authoritative snapshot",
-                    extra={"event": "position_reconcile_failed", "reason": reason_token},
-                )
-                self._handle_reconcile_failure(
-                    reason=reason_token,
-                    error=None,
-                    payload_count=0,
-                    previous_positions=previous_positions,
-                )
-                return False
-            if isinstance(response, Mapping):
-                rows: object | None = None
-                for container_key in ("net", "positions", "day"):
-                    if container_key in response:
-                        rows = response.get(container_key)
-                        break
-                if rows is None and any(
-                    key in response
-                    for key in ("tradingsymbol", "symbol", "instrument")
-                ):
-                    rows = [response]
-                if rows is None or isinstance(rows, (str, bytes, Mapping)):
-                    reason_token = canonical("payload_shape")
-                    self._handle_reconcile_failure(
-                        reason=reason_token,
-                        error=None,
-                        payload_count=0,
-                        previous_positions=previous_positions,
-                    )
-                    return False
-                try:
-                    raw_rows = list(cast(Iterable[object], rows))
-                except TypeError as exc:
-                    reason_token = canonical("payload_shape")
-                    self._handle_reconcile_failure(
-                        reason=reason_token,
-                        error=exc,
-                        payload_count=0,
-                        previous_positions=previous_positions,
-                    )
-                    return False
-            elif isinstance(response, Iterable) and not isinstance(response, (str, bytes)):
-                raw_rows = list(cast(Iterable[object], response))
-            else:
-                raw_rows = []
-
-            if not isinstance(response, (Mapping, Iterable)) or isinstance(response, (str, bytes)):
-                reason_token = canonical("payload_type")
-                self._logger.warning(
-                    "Position reconciliation returned unsupported payload %s",
-                    type(response),
-                    extra={
-                        "event": "position_reconcile_failed",
-                        "reason": reason_token,
-                    },
-                )
-                self._handle_reconcile_failure(
-                    reason=reason_token,
-                    error=None,
-                    payload_count=0,
-                    previous_positions=previous_positions,
-                )
-                return False
-            for item in raw_rows:
-                if not isinstance(item, Mapping):
-                    reason_token = canonical("payload_row_type")
-                    self._handle_reconcile_failure(
-                        reason=reason_token,
-                        error=None,
-                        payload_count=len(payloads),
-                        previous_positions=previous_positions,
-                    )
-                    return False
-                payloads.append(cast(Mapping[str, object], item))
-            try:
-                self.synchronize_with_broker(payloads)
-            except Exception as exc:  # noqa: BLE001 - defensive sync guard
-                reason_token = canonical("apply_error")
-                self._logger.warning(
-                    "Position reconciliation apply failed: %s",
-                    exc,
-                    extra={
-                        "event": "position_reconcile_failed",
-                        "reason": reason_token,
-                    },
-                    exc_info=exc,
-                )
-                self._handle_reconcile_failure(
-                    reason=reason_token,
-                    error=exc,
-                    payload_count=len(payloads),
-                    previous_positions=previous_positions,
-                )
-                return False
-            reason_token = canonical("ok")
-            self._logger.info(
-                "Condition met: position_reconcile_ok",
-                extra={
-                    "event": "position_reconcile_ok",
-                    "count": len(payloads),
-                    "reason": reason_token,
-                },
+        """Fetch and atomically apply one authoritative broker snapshot."""
+        payload_count = 0
+        fetcher = self._resolve_broker_position_fetcher()
+        if fetcher is None:
+            self._handle_reconcile_failure(
+                reason=canonical("fetcher_missing"),
+                error=None,
+                payload_count=0,
+                previous_positions=None,
             )
-            self._handle_reconcile_success(len(payloads))
-            return True
-        except Exception as exc:  # noqa: BLE001 - defensive outer guard
-            reason_token = canonical("unexpected_error")
+            return False
+        try:
+            response = fetcher()
+            snapshot = decode_position_snapshot(response)
+        except Exception as exc:  # noqa: BLE001
+            reason = canonical(
+                "payload_invalid" if isinstance(exc, PositionSnapshotError) else "fetch_error"
+            )
             self._logger.warning(
-                "Unexpected error during reconcile_now: %s",
+                "Position reconciliation snapshot failed: %s",
                 exc,
-                extra={
-                    "event": "position_reconcile_failed",
-                    "reason": reason_token,
-                },
+                extra={"event": "position_reconcile_failed", "reason": reason},
                 exc_info=exc,
             )
             self._handle_reconcile_failure(
-                reason=reason_token,
+                reason=reason,
                 error=exc,
-                payload_count=len(payloads),
-                previous_positions=previous_positions,
+                payload_count=0,
+                previous_positions=None,
             )
             return False
+
+        payloads = snapshot.raw_rows()
+        payload_count = len(payloads)
+        try:
+            self.synchronize_with_broker(payloads)
+        except Exception as exc:  # noqa: BLE001
+            reason = canonical("apply_error")
+            self._logger.warning(
+                "Position reconciliation apply failed: %s",
+                exc,
+                extra={"event": "position_reconcile_failed", "reason": reason},
+                exc_info=exc,
+            )
+            self._handle_reconcile_failure(
+                reason=reason,
+                error=exc,
+                payload_count=payload_count,
+                previous_positions=None,
+            )
+            return False
+
+        self._logger.info(
+            "POSITION_RECONCILE_OK count=%s source=%s",
+            payload_count,
+            snapshot.source,
+            extra={
+                "event": "position_reconcile_ok",
+                "count": payload_count,
+                "source": snapshot.source,
+            },
+        )
+        self._handle_reconcile_success(payload_count)
+        return True
 
     def reconcile_periodic(
         self,
@@ -1304,12 +1129,8 @@ class PositionManager:
         trailing_stop_distance: float | None = None,
         order_id: str | None = None,
     ) -> Position:
-        """Open a new position, raising if one already exists for ``symbol``."""
-
+        """Open a position under the same lock used by broker reconciliation."""
         symbol_key = symbol.upper()
-        if self.has_position(symbol_key):
-            raise ValueError(f"Position already exists for {symbol_key}")
-
         position = Position(
             symbol=symbol_key,
             side=_normalize_side(str(side)),
@@ -1322,7 +1143,10 @@ class PositionManager:
             trailing_stop_distance=trailing_stop_distance,
             order_id=order_id,
         )
-        self._positions[symbol_key] = position
+        with self._lock:
+            if symbol_key in self._positions:
+                raise ValueError(f"Position already exists for {symbol_key}")
+            self._positions[symbol_key] = position
         self._logger.info("Opened %s position for %s", position.side, symbol_key)
         self.save_state()
         return position
@@ -1334,21 +1158,22 @@ class PositionManager:
         reason: str,
         close_time: datetime | None = None,
     ) -> Position:
-        """Close an existing position and compute realized PnL."""
-
+        """Close a position atomically and retain conservative realised P&L."""
         symbol_key = symbol.upper()
-        position = self._positions.get(symbol_key)
-        if position is None:
-            raise ValueError(f"No open position for {symbol_key}")
-
-        qty = position.quantity
-        realized = self._calculate_realized_pnl(
-            position.side, position.entry_price, float(exit_price), qty
-        )
-        position.realized_pnl += realized
-        self._daily_realized_pnl += realized
-        position.current_price = float(exit_price)
-        position.quantity = 0
+        with self._lock:
+            position = self._positions.get(symbol_key)
+            if position is None:
+                raise ValueError(f"No open position for {symbol_key}")
+            qty = position.quantity
+            realized = self._calculate_realized_pnl(
+                position.side, position.entry_price, float(exit_price), qty
+            )
+            position.realized_pnl += realized
+            self._local_realized_pnl += realized
+            self._refresh_realized_pnl_locked()
+            position.current_price = float(exit_price)
+            position.quantity = 0
+            del self._positions[symbol_key]
         closed_at = close_time or _now()
         self._logger.info(
             "Closed %s position for %s at %.2f (%s) due to %s [PnL=%.2f]",
@@ -1359,7 +1184,6 @@ class PositionManager:
             reason,
             realized,
         )
-        del self._positions[symbol_key]
         self.clear_active_contract_by_symbol(symbol_key)
         self.save_state()
         return position
@@ -1435,10 +1259,16 @@ class PositionManager:
             sum(position.unrealized_pnl for position in self._positions.values())
         )
 
+    def _refresh_realized_pnl_locked(self) -> None:
+        """Use the most conservative confirmed P&L for capital-protection gates."""
+        candidates = [float(self._local_realized_pnl)]
+        if self._broker_realized_pnl is not None:
+            candidates.append(float(self._broker_realized_pnl))
+        self._daily_realized_pnl = min(candidates)
     def get_realized_pnl(self) -> float:
-        """Return the accumulated realized profit and loss for the day."""
-
-        return self._daily_realized_pnl
+        """Return conservative realised P&L used by capital-protection gates."""
+        with self._lock:
+            return float(self._daily_realized_pnl)
 
     def add_pending_order(
         self,
@@ -1584,6 +1414,8 @@ class PositionManager:
                 "positions": [position.to_dict() for position in self._positions.values()],
                 "orders": [order.to_dict() for order in self._orders.values()],
                 "daily_realized_pnl": self._daily_realized_pnl,
+                "local_realized_pnl": self._local_realized_pnl,
+                "broker_realized_pnl": self._broker_realized_pnl,
                 "active_contracts": [
                     contract.to_dict() for contract in self._active_contracts.values()
                 ],
@@ -1662,7 +1494,16 @@ class PositionManager:
 
         self._active_contracts = contracts
         self._contract_index = index
-        self._daily_realized_pnl = float(payload.get("daily_realized_pnl", 0.0))
+        legacy_daily = float(payload.get("daily_realized_pnl", 0.0))
+        self._local_realized_pnl = float(
+            payload.get("local_realized_pnl", legacy_daily)
+        )
+        broker_realized = payload.get("broker_realized_pnl")
+        self._broker_realized_pnl = (
+            None if broker_realized is None else float(broker_realized)
+        )
+        with self._lock:
+            self._refresh_realized_pnl_locked()
         try:
             self._last_reconciled_state = copy.deepcopy(self._positions)
         except Exception as exc:  # noqa: BLE001 - defensive snapshot guard
@@ -1804,25 +1645,10 @@ class PositionManager:
     def synchronize_with_broker(
         self, broker_positions: Sequence[Mapping[str, object]]
     ) -> None:
-        """Atomically apply a fully validated broker position snapshot.
+        """Validate and atomically replace managed positions from broker truth."""
+        snapshot = decode_position_snapshot(broker_positions)
 
-        An explicit, valid empty sequence is authoritative flat state. Missing,
-        malformed, partially decoded, or internally inconsistent snapshots raise and
-        leave the last-known-good local state untouched.
-        """
-        self._logger.debug(
-            "Entered synchronize_with_broker",
-            extra={"event": "position_manager_sync"},
-        )
-        try:
-            payloads = list(broker_positions)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("broker position snapshot is not iterable") from exc
-
-        with self._lock:
-            existing_positions = copy.deepcopy(self._positions)
-
-        def _get_float(
+        def get_float(
             record: Mapping[str, object],
             keys: Sequence[str],
             *,
@@ -1831,73 +1657,64 @@ class PositionManager:
             for key in keys:
                 if key not in record or record.get(key) is None:
                     continue
-                value = record.get(key)
                 try:
-                    return float(cast(Any, value))
+                    value = float(cast(Any, record.get(key)))
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(f"invalid broker numeric field {key}={value!r}") from exc
+                    raise ValueError(
+                        f"invalid broker numeric field {key}={record.get(key)!r}"
+                    ) from exc
+                if not math.isfinite(value):
+                    raise ValueError(
+                        f"invalid broker numeric field {key}={record.get(key)!r}"
+                    )
+                return value
             return float(default)
 
-        reconciled: Dict[str, Position] = {}
-        seen_symbols: set[str] = set()
-        snapshot_realized_pnl = 0.0
-        snapshot_realized_seen = False
-
-        for index, record in enumerate(payloads):
-            if not isinstance(record, Mapping):
-                raise ValueError(f"broker position row {index} is not a mapping")
-
-            raw_symbol = (
-                record.get("tradingsymbol")
-                or record.get("symbol")
-                or record.get("instrument")
-            )
-            symbol = str(raw_symbol or "").strip().upper()
-            if not symbol:
-                raise ValueError(f"broker position row {index} has no symbol")
-            if not is_strategy_instrument(symbol):
-                continue
-
-            product = str(record.get("product") or "").strip().upper()
-            if product != "MIS":
-                if symbol in existing_positions:
-                    raise ValueError(
-                        f"managed broker position {symbol} has unexpected product {product or 'missing'}"
-                    )
-                continue
-            if symbol in seen_symbols:
-                raise ValueError(f"duplicate broker position row for {symbol}")
-            seen_symbols.add(symbol)
-
-            quantity = self._safe_get_net_qty(record)
-            realized_pnl = _get_float(record, ("realised", "realized"), default=0.0)
-            if "realised" in record or "realized" in record:
-                snapshot_realized_seen = True
-                snapshot_realized_pnl += realized_pnl
-
-            if quantity == 0:
-                continue
-
-            side: Side = "LONG" if quantity > 0 else "SHORT"
-            abs_quantity = abs(quantity)
-            entry_price = _get_float(
-                record,
-                ("average_price", "avg_price", "price", "buy_price"),
-            )
-            current_price = _get_float(
-                record,
-                ("last_price", "ltp", "close", "sell_price"),
-                default=entry_price,
-            )
-            if entry_price <= 0.0 and current_price > 0.0:
-                entry_price = current_price
-            if current_price <= 0.0 and entry_price > 0.0:
-                current_price = entry_price
-            if entry_price <= 0.0 or current_price <= 0.0:
-                raise ValueError(f"broker position {symbol} has no valid price")
-
-            existing = existing_positions.get(symbol)
-            try:
+        with self._lock:
+            existing_positions = copy.deepcopy(self._positions)
+            reconciled: Dict[str, Position] = {}
+            snapshot_realized_pnl = 0.0
+            snapshot_realized_seen = False
+            for row in snapshot.rows:
+                record = row.raw
+                symbol = row.symbol
+                if not is_strategy_instrument(symbol):
+                    continue
+                product = str(record.get("product") or "").strip().upper()
+                if product != "MIS":
+                    if symbol in existing_positions:
+                        raise ValueError(
+                            f"managed broker position {symbol} has unexpected product "
+                            f"{product or 'missing'}"
+                        )
+                    continue
+                quantity = row.quantity
+                realized_pnl = get_float(
+                    record, ("realised", "realized"), default=0.0
+                )
+                if "realised" in record or "realized" in record:
+                    snapshot_realized_seen = True
+                    snapshot_realized_pnl += realized_pnl
+                if quantity == 0:
+                    continue
+                side: Side = "LONG" if quantity > 0 else "SHORT"
+                abs_quantity = abs(quantity)
+                entry_price = get_float(
+                    record,
+                    ("average_price", "avg_price", "price", "buy_price"),
+                )
+                current_price = get_float(
+                    record,
+                    ("last_price", "ltp", "close", "sell_price"),
+                    default=entry_price,
+                )
+                if entry_price <= 0.0 and current_price > 0.0:
+                    entry_price = current_price
+                if current_price <= 0.0 and entry_price > 0.0:
+                    current_price = entry_price
+                if entry_price <= 0.0 or current_price <= 0.0:
+                    raise ValueError(f"broker position {symbol} has no valid price")
+                existing = existing_positions.get(symbol)
                 if existing is None:
                     position = self._create_position(
                         symbol=symbol,
@@ -1907,12 +1724,6 @@ class PositionManager:
                         current_price=current_price,
                         realized_pnl=realized_pnl,
                         source="broker_sync",
-                    )
-                    self._logger.info(
-                        "Sync: Imported NEW %s position: %s x %s",
-                        side,
-                        symbol,
-                        abs_quantity,
                     )
                 else:
                     position = self._update_position(
@@ -1924,44 +1735,40 @@ class PositionManager:
                         realized_pnl=realized_pnl,
                         source="broker_sync",
                     )
-            except Exception as exc:
-                raise ValueError(f"failed to apply broker position {symbol}") from exc
-            reconciled[symbol] = position
+                reconciled[symbol] = position
 
-        with self._lock:
             old_keys = set(self._positions)
             new_keys = set(reconciled)
             removed_symbols = sorted(old_keys - new_keys)
             added_symbols = sorted(new_keys - old_keys)
             self._positions = reconciled
             if snapshot_realized_seen:
-                self._daily_realized_pnl = float(snapshot_realized_pnl)
+                self._broker_realized_pnl = float(snapshot_realized_pnl)
+                self._refresh_realized_pnl_locked()
 
         if removed_symbols:
-            self._logger.info(
-                "Sync: Pruned %s positions not found in broker: %s",
-                len(removed_symbols),
-                removed_symbols,
-            )
             hook = getattr(self, "_on_symbols_flat_hook", None)
             if hook is not None:
                 try:
                     hook(list(removed_symbols))
-                except Exception as exc:  # noqa: BLE001 - observer isolation
+                except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in on_symbols_flat hook: %s",
                         exc,
                         extra={"event": "position_manager_flat_hook_error"},
                     )
-
         if not old_keys and not new_keys and not snapshot_realized_seen:
-            self._logger.debug("Sync: Broker and local state both empty.")
             return
-
         self.save_state()
         self._logger.info(
-            "Sync: Completed successfully.",
+            "POSITION_SYNC_COMMITTED total=%s added=%s removed=%s "
+            "realized_authoritative=%s",
+            len(reconciled),
+            len(added_symbols),
+            len(removed_symbols),
+            snapshot_realized_seen,
             extra={
+                "event": "POSITION_SYNC_COMMITTED",
                 "total_managed": len(reconciled),
                 "added": len(added_symbols),
                 "removed": len(removed_symbols),
