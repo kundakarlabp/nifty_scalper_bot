@@ -317,3 +317,45 @@ def test_zerodha_authoritative_empty_net_does_not_fall_back_to_day_rows() -> Non
         }
     )
     assert client.get_positions() == []
+
+
+def test_flat_verification_rejects_missing_and_malformed_snapshots() -> None:
+    for response in (None, [None], [{"symbol": SYMBOL}], [{"quantity": 0}]):
+        broker = SimpleNamespace(get_positions=lambda response=response: response)
+        manager = BracketManager(order_manager=SimpleNamespace(_broker=broker))
+        _stop(manager)
+        assert manager._verify_position_closed(SYMBOL) is False
+
+
+def test_flat_verification_accepts_only_valid_explicit_flat_snapshot() -> None:
+    broker = SimpleNamespace(
+        get_positions=lambda: [
+            {"symbol": SYMBOL, "quantity": 0},
+            {"symbol": "NFO:NIFTY2662324000CE", "quantity": 65},
+        ]
+    )
+    manager = BracketManager(order_manager=SimpleNamespace(_broker=broker))
+    _stop(manager)
+    assert manager._verify_position_closed(SYMBOL) is True
+
+    broker.get_positions = lambda: [{"symbol": SYMBOL, "quantity": 65}]
+    assert manager._verify_position_closed(SYMBOL) is False
+
+
+def test_duplicate_managed_position_rows_reject_snapshot_atomically(tmp_path) -> None:
+    manager = _position_manager(tmp_path)
+    original = manager.get_position(SYMBOL)
+    assert original is not None
+    original_price = original.current_price
+    duplicate = {
+        "symbol": SYMBOL,
+        "product": "MIS",
+        "quantity": 65,
+        "average_price": 100.0,
+        "last_price": 150.0,
+    }
+    with pytest.raises(ValueError, match="duplicate broker position"):
+        manager.synchronize_with_broker([duplicate, dict(duplicate)])
+    preserved = manager.get_position(SYMBOL)
+    assert preserved is not None
+    assert preserved.current_price == pytest.approx(original_price)

@@ -2770,41 +2770,102 @@ class BracketManager:
         )
 
     def _verify_position_closed(self, symbol: str) -> bool:
-        """Verify broker position closure. Args: symbol; Returns: bool; Raises: none."""
-        try:
-            broker = getattr(self.order_manager, '_broker', None)
-            if broker is None:
-                LOGGER.error(
-                    "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=broker_missing",
-                    symbol,
-                    extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": symbol},
-                )
-                return False
-            getter = getattr(broker, 'get_positions', None)
-            if not callable(getter):
-                LOGGER.error(
-                    "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=get_positions_missing",
-                    symbol,
-                    extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": symbol},
-                )
-                return False
-            positions = getter() or []
-            normalized = normalize_symbol(symbol)
-            for pos in positions:
-                if not isinstance(pos, Mapping):
-                    continue
-                pos_symbol = normalize_symbol(str(pos.get('symbol') or pos.get('tradingsymbol') or ''))
-                if pos_symbol != normalized:
-                    continue
-                qty = pos.get('quantity')
-                if qty is None:
-                    qty = pos.get('net_quantity')
-                if abs(int(float(qty or 0))) > 0:
-                    return False
-            return True
-        except Exception as e:
-            LOGGER.error('Failure in _verify_position_closed: %s', e)
+        """Return true only when a valid broker snapshot authoritatively proves flatness."""
+        normalized = normalize_symbol(symbol)
+        broker = getattr(self.order_manager, "_broker", None)
+        if broker is None:
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=broker_missing",
+                normalized,
+                extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": normalized},
+            )
             return False
+        getter = getattr(broker, "get_positions", None)
+        if not callable(getter):
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=get_positions_missing",
+                normalized,
+                extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": normalized},
+            )
+            return False
+
+        try:
+            response = getter()
+        except Exception as exc:  # noqa: BLE001 - unknown exposure must fail closed
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_FAILED symbol=%s error=%s",
+                normalized,
+                exc,
+                extra={
+                    "event": "POSITION_FLAT_VERIFY_FAILED",
+                    "symbol": normalized,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return False
+
+        if response is None:
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_INVALID symbol=%s reason=missing_snapshot",
+                normalized,
+                extra={"event": "POSITION_FLAT_VERIFY_INVALID", "symbol": normalized},
+            )
+            return False
+
+        if isinstance(response, Mapping):
+            rows: object | None = None
+            for key in ("net", "positions"):
+                if key in response:
+                    rows = response.get(key)
+                    break
+            if rows is None and any(
+                key in response for key in ("symbol", "tradingsymbol", "instrument")
+            ):
+                rows = [response]
+        else:
+            rows = response
+
+        if isinstance(rows, (str, bytes, Mapping)) or rows is None:
+            return False
+        try:
+            positions = list(rows)
+        except TypeError:
+            return False
+
+        for index, position in enumerate(positions):
+            if not isinstance(position, Mapping):
+                LOGGER.error(
+                    "POSITION_FLAT_VERIFY_INVALID symbol=%s reason=row_type index=%s",
+                    normalized,
+                    index,
+                    extra={"event": "POSITION_FLAT_VERIFY_INVALID", "symbol": normalized},
+                )
+                return False
+            raw_symbol = (
+                position.get("symbol")
+                or position.get("tradingsymbol")
+                or position.get("instrument")
+            )
+            if not raw_symbol:
+                return False
+            position_symbol = normalize_symbol(str(raw_symbol))
+            quantity_key = next(
+                (
+                    key
+                    for key in ("quantity", "net_quantity", "net_qty", "netQuantity")
+                    if key in position
+                ),
+                None,
+            )
+            if quantity_key is None:
+                return False
+            try:
+                quantity = int(float(position.get(quantity_key)))
+            except (TypeError, ValueError):
+                return False
+            if position_symbol == normalized and quantity != 0:
+                return False
+        return True
 
     def _market_fallback_exit(
         self,

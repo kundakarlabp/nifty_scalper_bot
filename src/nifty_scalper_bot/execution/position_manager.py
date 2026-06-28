@@ -1839,6 +1839,7 @@ class PositionManager:
             return float(default)
 
         reconciled: Dict[str, Position] = {}
+        seen_symbols: set[str] = set()
         snapshot_realized_pnl = 0.0
         snapshot_realized_seen = False
 
@@ -1864,6 +1865,9 @@ class PositionManager:
                         f"managed broker position {symbol} has unexpected product {product or 'missing'}"
                     )
                 continue
+            if symbol in seen_symbols:
+                raise ValueError(f"duplicate broker position row for {symbol}")
+            seen_symbols.add(symbol)
 
             quantity = self._safe_get_net_qty(record)
             realized_pnl = _get_float(record, ("realised", "realized"), default=0.0)
@@ -2096,15 +2100,21 @@ class PositionManager:
         return position
 
     def _persist_positions_snapshot(self) -> None:
+        """Persist position and order snapshots captured from one locked state instant."""
         manager = self._persistent_state
         if manager is None:
             return
-        snapshot = [position.to_dict() for position in self._positions.values()]
-        current_symbols: set[str] = set()
-        for entry in snapshot:
-            symbol_value = str(entry.get("symbol", "")).strip().upper()
-            if symbol_value:
-                current_symbols.add(symbol_value)
+        with self._lock:
+            position_snapshot = [
+                position.to_dict() for position in self._positions.values()
+            ]
+            order_snapshot = [order.to_dict() for order in self._orders.values()]
+
+        current_symbols = {
+            str(entry.get("symbol", "")).strip().upper()
+            for entry in position_snapshot
+            if str(entry.get("symbol", "")).strip()
+        }
         try:
             stored = manager.load_positions()
         except Exception as exc:  # noqa: BLE001
@@ -2115,7 +2125,7 @@ class PositionManager:
             for item in stored
             if isinstance(item, Mapping)
         }
-        for entry in snapshot:
+        for entry in position_snapshot:
             try:
                 manager.save_position(entry)
             except Exception as exc:  # noqa: BLE001
@@ -2129,7 +2139,13 @@ class PositionManager:
                 self._logger.error(
                     "Failure in _persist_positions_snapshot remove: %s", exc
                 )
-        self._persist_order_snapshots(manager)
+        for payload in order_snapshot:
+            try:
+                manager.save_order(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "Failure in _persist_positions_snapshot order save: %s", exc
+                )
         try:
             manager.flush()
         except Exception as exc:  # noqa: BLE001
