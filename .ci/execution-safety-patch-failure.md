@@ -1,18 +1,33 @@
 # Execution safety validation failure
 
-Failed stage: followup
+Failed stage: full-tests
 Exit status: 1
 
 ## patch
 ```text
-Traceback (most recent call last):
-  File "/home/runner/work/nifty_scalper_bot/nifty_scalper_bot/tools/_apply_execution_safety_followup.py", line 224, in <module>
-    main()
-  File "/home/runner/work/nifty_scalper_bot/nifty_scalper_bot/tools/_apply_execution_safety_followup.py", line 218, in main
-    patch_position_manager()
-  File "/home/runner/work/nifty_scalper_bot/nifty_scalper_bot/tools/_apply_execution_safety_followup.py", line 47, in patch_position_manager
-    replace_once(
-  File "/home/runner/work/nifty_scalper_bot/nifty_scalper_bot/tools/_apply_execution_safety_followup.py", line 41, in replace_once
-    raise RuntimeError(f"{path}: expected one anchor, found {count}: {old[:100]!r}")
-RuntimeError: src/nifty_scalper_bot/execution/position_manager.py: expected one anchor, found 0: '        with self._lock:\n            existing_positions = dict(self._positions)\n\n    def _get_float('
+```
+
+## compile
+```text
+```
+
+## focused
+```text
+.............................................                            [100%]
+```
+
+## full
+```text
+
+==================================== ERRORS ====================================
+____________ ERROR collecting tests/dashboard/test_console_smoke.py ____________
+ImportError while importing test module '/home/runner/work/nifty_scalper_bot/nifty_scalper_bot/tests/dashboard/test_console_smoke.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests/dashboard/test_console_smoke.py:5: in <module>
+    from streamlit.testing.v1 import AppTest
+E   ModuleNotFoundError: No module named 'streamlit'
+=========================== short test summary info ============================
+ERROR tests/dashboard/test_console_smoke.py
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
 ```
