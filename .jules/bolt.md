@@ -1,0 +1,3 @@
+## 2024-05-24 - Pandas Frequency Resolution Overhead in Hot Loops
+**Learning:** In high-frequency data pipelines (like tick processing in scalper bots), pandas `.floor('1min')` incurs significant CPU overhead because it forces string parsing (`'1min'`), dynamic frequency resolution, and creation of pandas DateOffset objects for every single tick.
+**Action:** When truncating `pd.Timestamp` to a specific boundary (like minute or hour) in performance-critical paths, bypass pandas frequency methods and manipulate the timestamp directly using `.replace(second=0, microsecond=0, nanosecond=0)`. This performs an order of magnitude faster and yields the exact same logical result.
