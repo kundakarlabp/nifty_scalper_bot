@@ -63,6 +63,9 @@ def test_get_positions_rejects_cache_on_failure(
     with pytest.raises(BrokerError, match="boom"):
         client.get_positions()
 
+    assert client._positions_cache is not None
+    assert client._positions_cache.payload == [{"tradingsymbol": "NIFTY"}]
+
 
 def test_get_account_margins_returns_cached_on_failure(
     monkeypatch: pytest.MonkeyPatch,
