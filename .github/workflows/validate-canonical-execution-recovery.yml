@@ -1,6 +1,9 @@
 name: Validate Canonical Execution Recovery
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - fix/canonical-execution-recovery-20260628
