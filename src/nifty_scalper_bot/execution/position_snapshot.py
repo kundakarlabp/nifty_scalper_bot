@@ -33,7 +33,7 @@ class PositionSnapshotRow:
 
     symbol: str
     quantity: int
-    raw: Mapping[str, Any]
+    raw: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
