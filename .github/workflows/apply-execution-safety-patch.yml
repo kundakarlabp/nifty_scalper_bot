@@ -13,73 +13,117 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Check out branch
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install project and test dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
           python -m pip install pytest pytest-asyncio
 
-      - name: Apply anchored source changes
+      - name: Apply, validate, and publish result
+        shell: bash
         run: |
-          python tools/_apply_execution_safety_patch.py
-          python tools/_apply_execution_safety_followup.py
-          python - <<'PY'
-          from pathlib import Path
+          set +e
+          mkdir -p /tmp/execution-safety
+          status=0
+          failed_stage=""
 
+          python tools/_apply_execution_safety_patch.py > /tmp/execution-safety/patch.log 2>&1
+          rc=$?
+          if [ "$rc" -ne 0 ]; then status=$rc; failed_stage="patch"; fi
+
+          if [ "$status" -eq 0 ]; then
+            python tools/_apply_execution_safety_followup.py >> /tmp/execution-safety/patch.log 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then status=$rc; failed_stage="followup"; fi
+          fi
+
+          if [ "$status" -eq 0 ]; then
+            python - <<'PY' >> /tmp/execution-safety/patch.log 2>&1
+          from pathlib import Path
           path = Path("src/nifty_scalper_bot/execution/bracket_core.py")
           source = path.read_text(encoding="utf-8")
           anchor = "from __future__ import annotations\n\n"
-          replacement = "from __future__ import annotations\n\nfrom contextlib import suppress\n"
           if "from contextlib import suppress" not in source:
               if source.count(anchor) != 1:
                   raise RuntimeError("bracket_core future-import anchor changed")
-              source = source.replace(anchor, replacement, 1)
+              source = source.replace(
+                  anchor,
+                  "from __future__ import annotations\n\nfrom contextlib import suppress\n",
+                  1,
+              )
               path.write_text(source, encoding="utf-8")
           PY
+            rc=$?
+            if [ "$rc" -ne 0 ]; then status=$rc; failed_stage="import-fix"; fi
+          fi
 
-      - name: Compile source
-        run: python -m compileall -q src
+          if [ "$status" -eq 0 ]; then
+            python -m compileall -q src > /tmp/execution-safety/compile.log 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then status=$rc; failed_stage="compile"; fi
+          fi
 
-      - name: Run focused execution safety tests
-        run: |
-          pytest -q \
-            tests/execution/test_execution_safety_audit_fixes.py \
-            tests/execution/test_execution_policy.py \
-            tests/execution/test_margin_engine.py \
-            tests/execution/test_margin_clamp.py \
-            tests/execution/test_virtual_bracket_safety.py \
-            tests/execution/test_live_exit_hardening.py \
-            tests/execution/test_external_close_reconcile.py \
-            tests/data/test_zerodha_rest_cache_fallback.py
+          if [ "$status" -eq 0 ]; then
+            pytest -q \
+              tests/execution/test_execution_safety_audit_fixes.py \
+              tests/execution/test_execution_policy.py \
+              tests/execution/test_margin_engine.py \
+              tests/execution/test_margin_clamp.py \
+              tests/execution/test_virtual_bracket_safety.py \
+              tests/execution/test_live_exit_hardening.py \
+              tests/execution/test_external_close_reconcile.py \
+              tests/data/test_zerodha_rest_cache_fallback.py \
+              > /tmp/execution-safety/focused.log 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then status=$rc; failed_stage="focused-tests"; fi
+          fi
 
-      - name: Run full test suite
-        run: pytest -q
+          if [ "$status" -eq 0 ]; then
+            pytest -q > /tmp/execution-safety/full.log 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then status=$rc; failed_stage="full-tests"; fi
+          fi
 
-      - name: Remove temporary patch machinery
-        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "$status" -ne 0 ]; then
+            git restore --worktree --staged src tests 2>/dev/null || true
+            mkdir -p .ci
+            {
+              echo "# Execution safety validation failure"
+              echo
+              echo "Failed stage: ${failed_stage}"
+              echo "Exit status: ${status}"
+              for log in patch compile focused full; do
+                if [ -f "/tmp/execution-safety/${log}.log" ]; then
+                  echo
+                  echo "## ${log}"
+                  echo '```text'
+                  tail -n 300 "/tmp/execution-safety/${log}.log"
+                  echo '```'
+                fi
+              done
+            } > .ci/execution-safety-patch-failure.md
+            git add .ci/execution-safety-patch-failure.md
+            git commit -m "ci: record execution patch failure [skip ci]"
+            git push origin HEAD:fix/execution-safety-guardrails-20260628
+            exit "$status"
+          fi
+
           rm tools/_apply_execution_safety_patch.py
           rm tools/_apply_execution_safety_followup.py
           rm .github/workflows/apply-execution-safety-patch.yml
-
-      - name: Commit validated source and tests
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .ci/execution-safety-patch-failure.md
           git add -A
-          if git diff --cached --quiet; then
-            echo "No source changes to commit"
-            exit 1
-          fi
           git commit -m "fix(execution): harden state reconciliation and bracket recovery"
           git push origin HEAD:fix/execution-safety-guardrails-20260628
