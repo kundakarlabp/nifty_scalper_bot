@@ -22,6 +22,7 @@ Safe-edit notes:
 """
 from __future__ import annotations
 
+from contextlib import suppress
 import threading
 from threading import RLock
 import time
@@ -160,6 +161,15 @@ class TargetLevel:
     executed: bool = False
     name: str = "TP"
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe target snapshot."""
+        return {
+            "price": float(self.price),
+            "quantity": int(self.quantity),
+            "executed": bool(self.executed),
+            "name": str(self.name),
+        }
+
 
 @dataclass
 class BracketState:
@@ -229,6 +239,13 @@ class BracketState:
     # exactly once per bracket (not every reconcile cycle).
     _market_escalation_fired: bool = False
     _atr_warning_logged: bool = False
+    ledger_realized_pnl: dict[str, Any] | None = None
+    _ledger_pending_entry_price: float | None = None
+    _ledger_pending_exit_order_id: str | None = None
+    _ledger_pending_exit_quantity: int = 0
+    _ledger_pending_exit_price: float | None = None
+    _ledger_pending_exit_target: str | None = None
+    _ledger_release_hook_fired: bool = False
 
     @property
     def bracket_id(self) -> str:
@@ -267,6 +284,7 @@ class BracketState:
         return self.trailing_config
 
     def __post_init__(self):
+        self.side = _normalize_bracket_side(self.side)
         # Auto-initialize state fields if not set
         if self.remaining_quantity == 0:
             self.remaining_quantity = self.quantity
@@ -297,6 +315,7 @@ class BracketState:
             "trailing_config": self.trailing_config,
             "highest_ltp": self.highest_ltp,
             "lowest_ltp": self.lowest_ltp,
+            "last_ltp": self.last_ltp,
             "tag": self.tag,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -323,6 +342,13 @@ class BracketState:
             "exit_price": self.exit_price,
             "escalated_at": self.escalated_at,
             "atr_warning_logged": self._atr_warning_logged,
+            "ledger_realized_pnl": self.ledger_realized_pnl,
+            "ledger_pending_entry_price": self._ledger_pending_entry_price,
+            "ledger_pending_exit_order_id": self._ledger_pending_exit_order_id,
+            "ledger_pending_exit_quantity": self._ledger_pending_exit_quantity,
+            "ledger_pending_exit_price": self._ledger_pending_exit_price,
+            "ledger_pending_exit_target": self._ledger_pending_exit_target,
+            "ledger_release_hook_fired": self._ledger_release_hook_fired,
         }
 
 
@@ -888,6 +914,7 @@ class BracketManager:
             None.
         """
         symbol = normalize_symbol(symbol)
+        side = _normalize_bracket_side(side)
         if symbol in self.active_brackets:
             LOGGER.info(
                 "Condition met: bracket_symbol_already_active",
@@ -1045,12 +1072,18 @@ class BracketManager:
                 try:
                     METRICS.brackets_created.inc()
                 except Exception as exc:
-                    LOGGER.exception(
-                        '[CRITICAL FAILURE]',
-                        extra={'event': 'bracket_manager_metrics_increment_error'},
-                        exc_info=True,
+                    LOGGER.error(
+                        "BRACKET_METRICS_INCREMENT_FAILED order_id=%s symbol=%s error=%s",
+                        order_id,
+                        symbol,
+                        exc,
+                        extra={
+                            "event": "bracket_manager_metrics_increment_error",
+                            "order_id": order_id,
+                            "symbol": symbol,
+                            "error_type": type(exc).__name__,
+                        },
                     )
-                    raise
             
             # ✅ FIX: Persist immediately so we don't lose this if we crash now
             self.save_state()
@@ -1160,9 +1193,19 @@ class BracketManager:
             # Persist state
             try:
                 self.save_state()
-            except Exception as e:
-                LOGGER.exception("Unhandled exception", exc_info=True)
-                raise
+            except Exception as exc:
+                LOGGER.critical(
+                    "BRACKET_ACTIVATION_PERSIST_FAILED order_id=%s symbol=%s error=%s",
+                    order_id,
+                    bracket.symbol,
+                    exc,
+                    extra={
+                        "event": "BRACKET_ACTIVATION_PERSIST_FAILED",
+                        "order_id": order_id,
+                        "symbol": bracket.symbol,
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
     # --------------------------------------------------------------------------
     # 2. MARKET DATA INGESTION (NEW)
@@ -1206,16 +1249,8 @@ class BracketManager:
     # --------------------------------------------------------------------------
 
     def on_tick(self, symbol: str, ltp: float) -> None:
+        """Process one tick through trailing and hard SL/TP evaluation."""
         symbol = normalize_symbol(symbol)
-        """
-        Ultra-low-latency tick processing.
-        
-        ✅ WORLD-CLASS OPTIMIZATIONS:
-        - Minimal lock scope (snapshot only)
-        - No lock during exit evaluation
-        - Batch exit firing
-        - Atomic LTP updates
-        """
         # ═══════════════════════════════════════════════════════════
         # FAST PATH: Early exit checks (no lock needed)
         # ═══════════════════════════════════════════════════════════
@@ -2098,8 +2133,7 @@ class BracketManager:
         return None
 
     def _get_current_atr(self, symbol: str) -> float:
-        """Get current ATR from provider or cache."""
-        # Try safe provider first
+        """Return current ATR, falling back to the validated local cache."""
         if self._atr_provider:
             try:
                 atr_value = None
@@ -2110,21 +2144,25 @@ class BracketManager:
                     atr_value = getattr(snapshot, "value", snapshot)
                 if atr_value is not None and float(atr_value) > 0:
                     return float(atr_value)
-            except Exception as e:
-                LOGGER.exception("Unhandled exception", exc_info=True)
-                raise
-        
-        # Fallback to local cache with type-safe normalization.
+            except Exception as exc:  # noqa: BLE001 - hot path must retain SL/TP checks
+                self._log_throttled(
+                    "warning",
+                    f"atr_provider_failure_{symbol}",
+                    30.0,
+                    "ATR_PROVIDER_FAILED_USING_CACHE symbol=%s error_type=%s error=%s",
+                    symbol,
+                    type(exc).__name__,
+                    exc,
+                )
+
         atr_raw = self._current_atr.get(symbol, 0.0)
-        if isinstance(atr_raw, dict):
-            atr_val = atr_raw.get("value")
-        elif isinstance(atr_raw, (int, float)):
-            atr_val = float(atr_raw)
-        else:
-            atr_val = None
-        if not atr_val or atr_val <= 0:
+        if isinstance(atr_raw, Mapping):
+            atr_raw = atr_raw.get("value", 0.0)
+        try:
+            atr_value = float(atr_raw or 0.0)
+        except (TypeError, ValueError):
             return 0.0
-        return float(atr_val)
+        return atr_value if math.isfinite(atr_value) and atr_value > 0 else 0.0
 
     def _calculate_momentum(self, symbol: str) -> float:
         """
@@ -2732,31 +2770,102 @@ class BracketManager:
         )
 
     def _verify_position_closed(self, symbol: str) -> bool:
-        """Verify broker position closure. Args: symbol; Returns: bool; Raises: none."""
-        try:
-            broker = getattr(self.order_manager, '_broker', None)
-            if broker is None:
-                return True
-            getter = getattr(broker, 'get_positions', None)
-            if not callable(getter):
-                return True
-            positions = getter() or []
-            normalized = normalize_symbol(symbol)
-            for pos in positions:
-                if not isinstance(pos, Mapping):
-                    continue
-                pos_symbol = normalize_symbol(str(pos.get('symbol') or pos.get('tradingsymbol') or ''))
-                if pos_symbol != normalized:
-                    continue
-                qty = pos.get('quantity')
-                if qty is None:
-                    qty = pos.get('net_quantity')
-                if abs(int(float(qty or 0))) > 0:
-                    return False
-            return True
-        except Exception as e:
-            LOGGER.error('Failure in _verify_position_closed: %s', e)
+        """Return true only when a valid broker snapshot authoritatively proves flatness."""
+        normalized = normalize_symbol(symbol)
+        broker = getattr(self.order_manager, "_broker", None)
+        if broker is None:
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=broker_missing",
+                normalized,
+                extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": normalized},
+            )
             return False
+        getter = getattr(broker, "get_positions", None)
+        if not callable(getter):
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_UNAVAILABLE symbol=%s reason=get_positions_missing",
+                normalized,
+                extra={"event": "POSITION_FLAT_VERIFY_UNAVAILABLE", "symbol": normalized},
+            )
+            return False
+
+        try:
+            response = getter()
+        except Exception as exc:  # noqa: BLE001 - unknown exposure must fail closed
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_FAILED symbol=%s error=%s",
+                normalized,
+                exc,
+                extra={
+                    "event": "POSITION_FLAT_VERIFY_FAILED",
+                    "symbol": normalized,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return False
+
+        if response is None:
+            LOGGER.error(
+                "POSITION_FLAT_VERIFY_INVALID symbol=%s reason=missing_snapshot",
+                normalized,
+                extra={"event": "POSITION_FLAT_VERIFY_INVALID", "symbol": normalized},
+            )
+            return False
+
+        if isinstance(response, Mapping):
+            rows: object | None = None
+            for key in ("net", "positions"):
+                if key in response:
+                    rows = response.get(key)
+                    break
+            if rows is None and any(
+                key in response for key in ("symbol", "tradingsymbol", "instrument")
+            ):
+                rows = [response]
+        else:
+            rows = response
+
+        if isinstance(rows, (str, bytes, Mapping)) or rows is None:
+            return False
+        try:
+            positions = list(rows)
+        except TypeError:
+            return False
+
+        for index, position in enumerate(positions):
+            if not isinstance(position, Mapping):
+                LOGGER.error(
+                    "POSITION_FLAT_VERIFY_INVALID symbol=%s reason=row_type index=%s",
+                    normalized,
+                    index,
+                    extra={"event": "POSITION_FLAT_VERIFY_INVALID", "symbol": normalized},
+                )
+                return False
+            raw_symbol = (
+                position.get("symbol")
+                or position.get("tradingsymbol")
+                or position.get("instrument")
+            )
+            if not raw_symbol:
+                return False
+            position_symbol = normalize_symbol(str(raw_symbol))
+            quantity_key = next(
+                (
+                    key
+                    for key in ("quantity", "net_quantity", "net_qty", "netQuantity")
+                    if key in position
+                ),
+                None,
+            )
+            if quantity_key is None:
+                return False
+            try:
+                quantity = int(float(position.get(quantity_key)))
+            except (TypeError, ValueError):
+                return False
+            if position_symbol == normalized and quantity != 0:
+                return False
+        return True
 
     def _market_fallback_exit(
         self,
@@ -3044,16 +3153,36 @@ class BracketManager:
             test_file.unlink()
         except (PermissionError, OSError):
             # ✅ FIX: Fallback to /tmp
-            path = Path(os.getenv("DATA_DIR", "data")) / "virtual_brackets.json"
+            path = Path("/tmp") / "virtual_brackets.json"
             path.parent.mkdir(parents=True, exist_ok=True)
-            LOGGER.warning(f"⚠️ Using /tmp fallback for brackets: {path}")
+            LOGGER.warning("Using /tmp fallback for brackets: %s", path)
         
         return path
 
     def save_state(self) -> None:
-        """Publish bracket snapshots asynchronously. Args: None; Returns: None; Raises: None."""
+        """Atomically persist one coherent bracket snapshot and journal it."""
         with self._lock:
+            payload = {
+                entry_id: bracket.to_dict()
+                for entry_id, bracket in self._brackets.items()
+            }
             snapshots = list(self._brackets.values())
+        path = self._get_storage_path()
+        temp_path = path.with_suffix(
+            f"{path.suffix}.tmp.{threading.get_ident()}.{time.time_ns()}"
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        except Exception:
+            with suppress(OSError):
+                temp_path.unlink()
+            raise
+
         for bracket in snapshots:
             self._log_bracket_event(
                 "BRACKET_SNAPSHOT",
@@ -3079,8 +3208,14 @@ class BracketManager:
             with open(path, "r") as f:
                 data = json.load(f)
             
+            if not isinstance(data, Mapping):
+                raise ValueError("bracket state payload must be an object")
             restored_count = 0
             with self._lock:
+                self._brackets.clear()
+                self._order_to_entry.clear()
+                self._symbol_map.clear()
+                self._trailing_controllers.clear()
                 for eid, d in data.items():
                     try:
                         # Restore TargetLevels
@@ -3144,6 +3279,13 @@ class BracketManager:
                             )
                         )
                         b._atr_warning_logged = bool(d.get("atr_warning_logged", False))
+                        b.ledger_realized_pnl = d.get("ledger_realized_pnl")
+                        b._ledger_pending_entry_price = d.get("ledger_pending_entry_price")
+                        b._ledger_pending_exit_order_id = d.get("ledger_pending_exit_order_id")
+                        b._ledger_pending_exit_quantity = int(d.get("ledger_pending_exit_quantity", 0) or 0)
+                        b._ledger_pending_exit_price = d.get("ledger_pending_exit_price")
+                        b._ledger_pending_exit_target = d.get("ledger_pending_exit_target")
+                        b._ledger_release_hook_fired = bool(d.get("ledger_release_hook_fired", False))
                         b.virtual_sl_id = f"vsl_{eid}"
                         
                         # Register bracket
@@ -3172,7 +3314,7 @@ class BracketManager:
                                         sl_order_id=b.virtual_sl_id,
                                         variety="virtual",
                                         spec=spec,
-                                        get_ltp=lambda s: b.last_ltp,
+                                        get_ltp=lambda s, _b=b: _b.last_ltp,
                                         modify_order=self._virtual_modify_sl,
                                         atr_provider=self._atr_provider,
                                         journal=MockJournal(),
