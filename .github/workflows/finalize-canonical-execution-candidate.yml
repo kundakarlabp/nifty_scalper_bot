@@ -1,0 +1,56 @@
+name: Finalize Canonical Execution Candidate
+
+on:
+  push:
+    branches:
+      - fix/canonical-execution-recovery-20260628
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/canonical-execution-recovery-20260628
+          fetch-depth: 20
+      - name: Apply previously validated source transformations
+        run: |
+          python -m scripts.patch_bracket_core_a
+          python -m scripts.patch_bracket_core_b
+          python -m scripts.patch_position_manager_a
+          python -m scripts.patch_position_manager_b
+          python scripts/patch_execution_followups.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/nifty_scalper_bot/execution/canonical_bracket_manager.py')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace('    @staticmethod\n    @staticmethod\n    def _clear_fill_sync_state', '    @staticmethod\n    def _clear_fill_sync_state', 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Remove all temporary staging machinery
+        run: |
+          rm -rf scripts/_execution_patch_utils
+          rm -f scripts/_execution_patch_utils.py
+          rm -f scripts/patch_bracket_core_a.py
+          rm -f scripts/patch_bracket_core_b.py
+          rm -f scripts/patch_position_manager_a.py
+          rm -f scripts/patch_position_manager_b.py
+          rm -f scripts/patch_execution_followups.py
+          rm -f scripts/patch_position_math_import.py
+          rm -f .github/workflows/validate-canonical-execution-recovery.yml
+          rm -f .github/workflows/finalize-canonical-execution-candidate.yml
+      - name: Check generated source
+        run: |
+          git diff --check
+          python -m compileall -q src dashboard scripts tests
+      - name: Commit validated candidate
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(execution): canonicalize recovery and broker exposure"
+          git push origin HEAD:fix/canonical-execution-recovery-20260628
