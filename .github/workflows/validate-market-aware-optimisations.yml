@@ -1,0 +1,55 @@
+name: Validate Market-Aware Optimisations
+
+on:
+  pull_request:
+  push:
+    branches:
+      - feat/market-aware-execution-optimisations-20260629
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Apply anchored source changes
+        run: python scripts/apply_market_aware_optimisations.py
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Compile and diff check
+        run: |
+          git diff --check
+          python -m compileall -q src dashboard scripts tests
+      - name: Focused market-aware tests
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: |
+          python -m pytest -q tests/strategies/test_market_aware_optimisations.py tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_market_aware_time_stop.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py
+      - name: Execution safety regression tests
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: |
+          python -m pytest -q tests/test_execution_path_contract.py tests/execution/test_runtime_order_facade.py tests/execution/test_runtime_bracket_facade.py tests/execution/test_bracket_exit_state_machine.py tests/execution/test_virtual_bracket_safety.py tests/execution/test_live_exit_hardening.py
+      - name: Full repository suite
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: python -m pytest -q
+      - name: Package validated candidate
+        run: |
+          mkdir -p /tmp/candidate
+          cp -R src tests /tmp/candidate/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: market-aware-candidate
+          path: /tmp/candidate
+          if-no-files-found: error
