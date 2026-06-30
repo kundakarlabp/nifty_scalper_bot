@@ -11,6 +11,7 @@ from contextlib import suppress
 import csv
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import io
 import json
 import logging
@@ -71,6 +72,41 @@ T = TypeVar("T")
 
 LOGGER = get_logger(__name__)
 _BROKER_SYNC_LOCK = threading.Lock()
+KITE_EXCHANGE_TIMEZONE = ZoneInfo("Asia/Kolkata")
+KITE_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _format_kite_datetime(value: datetime | str) -> str:
+    """Format Kite historical request datetimes in exchange-local wall time.
+
+    Kite expects timezone-naive date strings for the Indian exchange session.
+    Aware datetimes are converted to Asia/Kolkata before formatting. Existing
+    naive datetimes are interpreted as already exchange-local to preserve legacy
+    callers that intentionally pass local wall-clock values. Non-empty strings
+    are preserved because KiteConnect accepts the same serialized form.
+    """
+    if isinstance(value, str):
+        formatted = value.strip()
+        if not formatted:
+            raise BrokerError("Historical datetime string must be non-empty")
+        return formatted
+    if not isinstance(value, datetime):
+        raise BrokerError("Historical datetime must be a datetime or non-empty string")
+    local_value = value
+    if value.tzinfo is not None and value.utcoffset() is not None:
+        local_value = value.astimezone(KITE_EXCHANGE_TIMEZONE)
+    return local_value.strftime(KITE_DATETIME_FORMAT)
+
+
+def _normalize_historical_token(instrument_token: object) -> int:
+    """Return a positive integer Kite historical token or raise BrokerError."""
+    try:
+        token = int(instrument_token)
+    except (TypeError, ValueError) as exc:
+        raise BrokerError("Historical instrument token must be a positive integer") from exc
+    if token <= 0:
+        raise BrokerError("Historical instrument token must be a positive integer")
+    return token
 
 
 @dataclass(frozen=True)
@@ -288,14 +324,23 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 if value is not None:
                     fragments.append(str(value))
         text = " ".join(fragments).lower()
+        if isinstance(payload, Mapping):
+            error_type = str(payload.get("error_type") or "").strip().lower()
+            if error_type in {
+                "tokenexception",
+                "sessionexception",
+                "authenticationexception",
+            }:
+                return True
+            if error_type == "inputexception":
+                return False
         auth_tokens = (
-            "tokenexception",
-            "invalidtoken",
             "incorrect api_key",
             "incorrect access_token",
+            "invalid access_token",
             "invalid session",
+            "session expired",
             "token expired",
-            "permission denied",
             "authentication failed",
             "unauthorized",
         )
@@ -1178,16 +1223,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
         KiteConnect-compatible historical data fetcher.
         Required by MarketDataManager/Runner backfill logic.
         """
-        # 1. Format Dates (Handle datetime objects vs strings)
-        if isinstance(from_date, datetime):
-            from_date = from_date.strftime("%Y-%m-%d %H:%M:%S")
-        if isinstance(to_date, datetime):
-            to_date = to_date.strftime("%Y-%m-%d %H:%M:%S")
+        token = _normalize_historical_token(instrument_token)
+        from_value = _format_kite_datetime(from_date)
+        to_value = _format_kite_datetime(to_date)
 
         # 2. Build Parameters
         params = {
-            "from": from_date,
-            "to": to_date,
+            "from": from_value,
+            "to": to_value,
             "continuous": 1 if continuous else 0,
             "oi": 1 if oi else 0,
         }
@@ -1197,7 +1240,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         response = self._ensure_json(
             self._make_request(
                 "GET",
-                f"/instruments/historical/{instrument_token}/{interval}",
+                f"/instruments/historical/{token}/{interval}",
                 params=params,
             )
         )
@@ -2825,13 +2868,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
             error_text=message,
         ):
             self._mark_authentication_invalid(message)
-        error: Exception
         if status in {400, 404} and expect_order_response:
-            error = OrderPlacementError(message)
-
-        if status == 400:
-            # LOG THE FULL PAYLOAD IF POSSIBLE
-            LOGGER.error(f"🛑 Zerodha 400 Bad Request: {message}")
+            error: Exception = OrderPlacementError(message)
         elif status == 401:
             error = ConfigurationError("Zerodha authentication failed")
         elif status == 403:

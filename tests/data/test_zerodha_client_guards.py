@@ -1,9 +1,19 @@
 """Tests for Zerodha client option-only guardrails."""
 
+from datetime import datetime, timedelta, timezone
+
+import httpx
 import pytest
 
-from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
-from nifty_scalper_bot.utils.errors import BrokerError
+from nifty_scalper_bot.data.rest.zerodha_client import (
+    ZerodhaKiteClient,
+    _format_kite_datetime,
+)
+from nifty_scalper_bot.utils.errors import (
+    BrokerError,
+    ConfigurationError,
+    OrderPlacementError,
+)
 
 
 class _ResolverStub:
@@ -210,3 +220,165 @@ def test_margins_success_does_not_override_quote_api_denied(
     status = client.quote_api_status_snapshot()
     assert status["error"] == "access_denied"
     client._client.close()
+
+
+def test_historical_data_accepts_positive_integer_and_serializes_utc_to_ist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_client()
+    captured = {}
+
+    def fake_request(method: str, path: str, params=None, **_kwargs):  # noqa: ANN001
+        captured.update(method=method, path=path, params=dict(params or {}))
+        return {"data": {"candles": []}}
+
+    monkeypatch.setattr(client, "_make_request", fake_request)
+    monkeypatch.setattr(client, "_ensure_json", lambda payload: payload)
+    monkeypatch.setattr(client, "_acquire_bucket", lambda _bucket: None)
+
+    rows = client.historical_data(
+        12345,
+        datetime(2026, 6, 29, 6, 25, tzinfo=timezone.utc),
+        datetime(2026, 6, 29, 6, 30, tzinfo=timezone.utc),
+        "minute",
+    )
+
+    assert rows == []
+    assert captured["path"] == "/instruments/historical/12345/minute"
+    assert captured["params"]["from"] == "2026-06-29 11:55:00"
+    assert captured["params"]["to"] == "2026-06-29 12:00:00"
+    client._client.close()
+
+
+def test_historical_data_accepts_numeric_string_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_client()
+    captured = {}
+
+    def fake_request(_method: str, path: str, params=None, **_kwargs):  # noqa: ANN001
+        captured["path"] = path
+        return {"data": {"candles": []}}
+
+    monkeypatch.setattr(client, "_make_request", fake_request)
+    monkeypatch.setattr(client, "_ensure_json", lambda payload: payload)
+    monkeypatch.setattr(client, "_acquire_bucket", lambda _bucket: None)
+
+    client.historical_data(
+        "12345",
+        "2026-06-29 09:15:00",
+        "2026-06-29 09:16:00",
+        "minute",
+    )
+
+    assert captured["path"] == "/instruments/historical/12345/minute"
+    client._client.close()
+
+
+@pytest.mark.parametrize(
+    "bad_token",
+    ["NFO:NIFTY26JUNFUT", "NSE:NIFTY", "None", "", None, 0, -1, "12x"],
+)
+def test_historical_data_rejects_invalid_token_before_http(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_token: object,
+) -> None:
+    client = _make_client()
+    calls = []
+    monkeypatch.setattr(client, "_make_request", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(
+        client, "_acquire_bucket", lambda _bucket: calls.append("bucket")
+    )
+
+    with pytest.raises(BrokerError, match="positive integer"):
+        client.historical_data(  # type: ignore[arg-type]
+            bad_token,
+            "2026-06-29 09:15:00",
+            "2026-06-29 09:16:00",
+            "minute",
+        )
+
+    assert calls == []
+    client._client.close()
+
+
+def test_format_kite_datetime_timezone_cases() -> None:
+    assert (
+        _format_kite_datetime(datetime(2026, 6, 29, 6, 25, tzinfo=timezone.utc))
+        == "2026-06-29 11:55:00"
+    )
+    assert (
+        _format_kite_datetime(
+            datetime(
+                2026,
+                6,
+                29,
+                11,
+                55,
+                tzinfo=timezone(timedelta(hours=5, minutes=30)),
+            )
+        )
+        == "2026-06-29 11:55:00"
+    )
+    assert (
+        _format_kite_datetime(
+            datetime(2026, 6, 29, 2, 25, tzinfo=timezone(timedelta(hours=-4)))
+        )
+        == "2026-06-29 11:55:00"
+    )
+    assert _format_kite_datetime(datetime(2026, 6, 29, 11, 55)) == "2026-06-29 11:55:00"
+    assert _format_kite_datetime("2026-06-29 11:55:00") == "2026-06-29 11:55:00"
+    with pytest.raises(BrokerError):
+        _format_kite_datetime("   ")
+
+
+@pytest.mark.parametrize(
+    ("status", "expect_order", "exc_type", "text"),
+    [
+        (400, False, BrokerError, "bad input"),
+        (400, True, OrderPlacementError, "bad input"),
+        (404, True, OrderPlacementError, "bad input"),
+        (401, False, ConfigurationError, "authentication failed"),
+        (403, False, ConfigurationError, "access denied"),
+        (429, False, BrokerError, "rate limit"),
+        (500, False, BrokerError, "server exploded"),
+    ],
+)
+def test_raise_for_status_maps_errors_without_unboundlocal(
+    status: int,
+    expect_order: bool,
+    exc_type: type[Exception],
+    text: str,
+) -> None:
+    client = _make_client()
+    response = httpx.Response(
+        status,
+        json={"message": "bad input" if status != 500 else "server exploded"},
+        request=httpx.Request("GET", "https://kite.test/x"),
+    )
+
+    with pytest.raises(exc_type) as err:
+        client._raise_for_status(response, expect_order)
+
+    assert text in str(err.value).lower()
+    client._client.close()
+
+
+def test_authentication_classifier_requires_strong_evidence() -> None:
+    assert ZerodhaKiteClient._is_authentication_failure(
+        status_code=None, payload={"error_type": "TokenException"}, error_text=""
+    )
+    assert ZerodhaKiteClient._is_authentication_failure(
+        status_code=None, payload={"message": "invalid session"}, error_text=""
+    )
+    assert ZerodhaKiteClient._is_authentication_failure(
+        status_code=None, payload={"message": "incorrect access_token"}, error_text=""
+    )
+    assert not ZerodhaKiteClient._is_authentication_failure(
+        status_code=None,
+        payload={"error_type": "InputException", "message": "invalid instrument token"},
+        error_text="",
+    )
+    assert not ZerodhaKiteClient._is_authentication_failure(
+        status_code=None, payload={"message": "invalid token"}, error_text=""
+    )

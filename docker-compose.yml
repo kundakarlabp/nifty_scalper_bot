@@ -22,12 +22,12 @@ services:
       # Persist logs locally (optional)
       - ./logs:/app/logs
       - ./ops/monitoring/prometheus_multiproc:/tmp/prometheus
-    command: ["python", "-m", "nifty_scalper_bot.app"]
+    command: ["python", "-m", "uvicorn", "nifty_scalper_bot.deployment_main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
     ports:
       - "8000:8000"
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/readyz"]
       interval: 15s
       timeout: 5s
       retries: 4

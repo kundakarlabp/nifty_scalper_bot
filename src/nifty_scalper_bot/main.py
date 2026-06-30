@@ -9,11 +9,13 @@ Production Entrypoint
 """
 
 import asyncio
-from contextlib import asynccontextmanager
 import logging
 import os
-from pathlib import Path
+import socket
 import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -35,9 +37,9 @@ def _load_env_file() -> None:
     """Load .env defaults only. Args: none. Returns: None. Raises: none."""
     search_paths = [
         Path.cwd() / ".env",
-        Path('/app/.env'),
-        Path(__file__).resolve().parents[3] / '.env',
-        Path(__file__).resolve().parents[2] / '.env',
+        Path("/app/.env"),
+        Path(__file__).resolve().parents[3] / ".env",
+        Path(__file__).resolve().parents[2] / ".env",
     ]
 
     loaded_from: Path | None = None
@@ -52,18 +54,18 @@ def _load_env_file() -> None:
     if loaded_from is not None:
         print(f"✅ ENV FILE FOUND (defaults only): {loaded_from}", flush=True)
     else:
-        print('⚠️ WARNING: No .env file found! Using system env vars only.', flush=True)
+        print("⚠️ WARNING: No .env file found! Using system env vars only.", flush=True)
 
     effective_keys = [
-        'ENABLE_LIVE',
-        'ENABLE_LIVE_TRADING',
-        'EXECUTION_MODE',
-        'ORDERS__ENABLE_LIVE',
-        'PAPER__ENABLED',
-        'PAPER_MODE',
-        'SHADOW_MODE',
-        'DATA_DIR',
-        'PORT',
+        "ENABLE_LIVE",
+        "ENABLE_LIVE_TRADING",
+        "EXECUTION_MODE",
+        "ORDERS__ENABLE_LIVE",
+        "PAPER__ENABLED",
+        "PAPER_MODE",
+        "SHADOW_MODE",
+        "DATA_DIR",
+        "PORT",
     ]
     for key in effective_keys:
         print(f"   🔧 {key} = {os.getenv(key, 'NOT_SET')}", flush=True)
@@ -88,14 +90,32 @@ try:
     if _PROM_DIR is not None:
         print(f"✅ PROMETHEUS_MULTIPROC_DIR={_PROM_DIR}", flush=True)
     else:
-        print("⚠️ PROMETHEUS_MULTIPROC_DIR unavailable — metrics in-process only", flush=True)
+        print(
+            "⚠️ PROMETHEUS_MULTIPROC_DIR unavailable — metrics in-process only",
+            flush=True,
+        )
 except Exception as _prom_exc:  # pragma: no cover - defensive
     print(f"⚠️ Prometheus dir setup failed: {_prom_exc}", flush=True)
 
 logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
+STARTUP_INSTANCE_ID = os.getenv("STARTUP_INSTANCE_ID") or uuid4().hex
+STARTUP_HOSTNAME = socket.gethostname()
+STARTUP_BUILD_SHA = (
+    os.getenv("RAILWAY_GIT_COMMIT_SHA")
+    or os.getenv("GIT_COMMIT_SHA")
+    or os.getenv("SOURCE_VERSION")
+    or "unknown"
+)
+_BOT_START_GUARD = False
 
-print("🚀 PYTHON START: Initializing...", flush=True)
+print(
+    "🚀 PYTHON START: Initializing "
+    f"startup_instance={STARTUP_INSTANCE_ID} "
+    f"pid={os.getpid()} hostname={STARTUP_HOSTNAME} "
+    f"build_sha={STARTUP_BUILD_SHA}",
+    flush=True,
+)
 
 
 # -------------------------------------------------------
@@ -109,8 +129,24 @@ async def lifespan(app: FastAPI):
     app.state.bot_error = None
     app.state.bot_started = False
     app.state.bot_starting = False
+    app.state.startup_instance_id = STARTUP_INSTANCE_ID
+    app.state.startup_pid = os.getpid()
+    app.state.startup_hostname = STARTUP_HOSTNAME
+    app.state.startup_build_sha = STARTUP_BUILD_SHA
 
     async def run_bot_background():
+        global _BOT_START_GUARD
+        if _BOT_START_GUARD:
+            LOG.error(
+                "Duplicate trading-engine startup blocked "
+                "startup_instance=%s pid=%s hostname=%s build_sha=%s",
+                STARTUP_INSTANCE_ID,
+                os.getpid(),
+                STARTUP_HOSTNAME,
+                STARTUP_BUILD_SHA,
+            )
+            return
+        _BOT_START_GUARD = True
         try:
             print("⏳ BACKGROUND: Waiting 5s for Server Port Bind...", flush=True)
             await asyncio.sleep(5)
@@ -139,20 +175,20 @@ async def lifespan(app: FastAPI):
             app.state.bot_started = False
             app.state.bot_starting = False
             print(f"⚠️ BOT STARTUP WARNING: {exc}", flush=True)
-            warmup_tokens = ('WARMING_UP', 'DATA_WARMUP', 'HISTORICAL_READY')
+            warmup_tokens = ("WARMING_UP", "DATA_WARMUP", "HISTORICAL_READY")
             is_warmup_like = any(token in str(exc).upper() for token in warmup_tokens)
             if is_warmup_like:
                 LOG.info(
-                    'run_bot_background warmup continuation: %s',
+                    "run_bot_background warmup continuation: %s",
                     exc,
                 )
                 LOG.warning(
-                    'Condition met: bot entered warmup mode after startup delay'
+                    "Condition met: bot entered warmup mode after startup delay"
                 )
             else:
-                LOG.error('Failure in run_bot_background: %s', exc, exc_info=exc)
+                LOG.error("Failure in run_bot_background: %s", exc, exc_info=exc)
                 LOG.warning(
-                    'Condition met: bot entered degraded mode after startup failure'
+                    "Condition met: bot entered degraded mode after startup failure"
                 )
 
     task = safe_task(run_bot_background())
@@ -163,7 +199,7 @@ async def lifespan(app: FastAPI):
             task.cancel()
         if app.state.bot:
             await app.state.bot.stop()
-    except Exception as e:
+    except Exception:
         __import__("logging").getLogger(__name__).exception(
             "[CRITICAL] unhandled exception", exc_info=True
         )
@@ -184,9 +220,11 @@ app.state.bot_starting = False
 # non-technical operation on a plain VM. Routes are password-protected.
 try:
     from nifty_scalper_bot.admin_dashboard import router as _admin_router
+
     app.include_router(_admin_router)
 except Exception as _admin_exc:  # noqa: BLE001
     import logging as _logging
+
     _logging.getLogger(__name__).warning("admin dashboard not mounted: %s", _admin_exc)
 
 
@@ -195,6 +233,10 @@ def root():
     return {
         "status": "online",
         "service": "Nifty Scalper Bot",
+        "startup_instance_id": STARTUP_INSTANCE_ID,
+        "pid": os.getpid(),
+        "hostname": STARTUP_HOSTNAME,
+        "build_sha": STARTUP_BUILD_SHA,
     }
 
 
@@ -347,7 +389,9 @@ def health_trading():
             },
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
-                "completed": bool(getattr(ctx, "position_reconciliation_completed", False)),
+                "completed": bool(
+                    getattr(ctx, "position_reconciliation_completed", False)
+                ),
                 "failed": bool(getattr(ctx, "position_reconciliation_failed", False)),
                 "error": getattr(ctx, "position_reconciliation_error", None),
                 "unprotected_positions": sorted(

@@ -27,7 +27,7 @@ readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'  # No Color
 
 # Application settings
-readonly APP_MODULE="nifty_scalper_bot.app"
+readonly APP_MODULE="nifty_scalper_bot.deployment_main:app"
 readonly APP_PORT="${PORT:-8080}"
 readonly APP_HOST="0.0.0.0"
 readonly WORKERS="${WORKERS:-1}"
@@ -321,7 +321,7 @@ health_check() {
     while [[ $attempt -le $max_attempts ]]; do
         log INFO "Health check attempt $attempt/$max_attempts..."
         
-        if curl -sf "http://localhost:$APP_PORT/health" >/dev/null 2>&1 || \
+        if curl -sf "http://localhost:$APP_PORT/readyz" >/dev/null 2>&1 || \
            curl -sf "http://localhost:$APP_PORT/" >/dev/null 2>&1; then
             log SUCCESS "Application is responding to HTTP requests"
             return 0

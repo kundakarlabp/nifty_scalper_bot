@@ -38,7 +38,7 @@ import math
 import os
 
 from nifty_scalper_bot.config.env_utils import parse_int_env
-from nifty_scalper_bot.utils.errors import BrokerAuthenticationError
+from nifty_scalper_bot.utils.errors import BrokerAuthenticationError, BrokerError
 import re
 from random import uniform
 import threading
@@ -9823,8 +9823,16 @@ class MarketDataManager:
                         extra={"event": "HYDRATION_FETCH_RESOLVE_FAILED", "symbol": symbol, "exception_type": type(exc).__name__, "exception_message": str(exc)},
                     )
 
+        if not token or int(token) <= 0:
+            self._logger.error(
+                "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=history_token_missing",
+                symbol, token, interval,
+                extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "history_token_missing"},
+            )
+            return []
+
         if not self._broker:
-            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s returned_rows=0 error=broker_unavailable", symbol, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "returned_rows": 0, "error": "broker_unavailable"})
+            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=broker_unavailable", symbol, token, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "broker_unavailable"})
             return []
 
         candidates = ["historical_data", "get_historical_data", "history", "get_history"]
@@ -9840,30 +9848,25 @@ class MarketDataManager:
             if fetcher:
                 break
         if not callable(fetcher):
-            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s returned_rows=0 error=history_capability_missing", symbol, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "returned_rows": 0, "error": "history_capability_missing"})
+            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=history_capability_missing", symbol, token, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "history_capability_missing"})
             return []
 
         now = datetime.now(timezone.utc)
-        attempt_specs: list[tuple[str, object, int]] = []
-        if token:
-            attempt_specs.append(("token", int(token), int(days)))
-        if exchange and tradingsymbol:
-            attempt_specs.append(("exchange_tradingsymbol", f"{exchange}:{tradingsymbol}", int(days)))
-        if token:
-            attempt_specs.append(("token_wide", int(token), max(int(days), 5)))
-        if exchange and tradingsymbol:
-            attempt_specs.append(("exchange_tradingsymbol_wide", f"{exchange}:{tradingsymbol}", max(int(days), 5)))
-        if token:
-            attempt_specs.append(("token_previous_day", int(token), 1))
+        attempt_specs: list[tuple[str, int, int]] = [
+            ("token", int(token), int(days)),
+        ]
+        wide_days = max(int(days), 5)
+        if wide_days != int(days):
+            attempt_specs.append(("token_wide", int(token), wide_days))
 
         last_error: str | None = None
         for attempt_name, instrument_key, lookback_days in attempt_specs:
             to_date = now
             from_date = to_date - timedelta(days=max(1, int(lookback_days)))
             self._logger.info(
-                "HYDRATION_FETCH_ATTEMPT symbol=%s token=%s tradingsymbol=%s exchange=%s from_dt=%s to_dt=%s interval=%s required_bars=%s attempt=%s",
-                symbol, token, tradingsymbol, exchange, from_date.isoformat(), to_date.isoformat(), interval, None, attempt_name,
-                extra={"event": "HYDRATION_FETCH_ATTEMPT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "interval": interval, "attempt": attempt_name},
+                "HYDRATION_FETCH_ATTEMPT symbol=%s instrument_token=%s tradingsymbol=%s exchange=%s from_dt=%s to_dt=%s timezone=%s interval=%s required_bars=%s attempt=%s",
+                symbol, instrument_key, tradingsymbol, exchange, from_date.isoformat(), to_date.isoformat(), "UTC", interval, None, attempt_name,
+                extra={"event": "HYDRATION_FETCH_ATTEMPT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "interval": interval, "attempt": attempt_name},
             )
             try:
                 lock = getattr(self, "_canonical_history_lock", None) or getattr(self, "_history_lock", None)
@@ -9896,21 +9899,29 @@ class MarketDataManager:
                     symbol, token, tradingsymbol, exchange, interval, attempt_name, len(rows), len(deduped),
                     deduped[0]["timestamp"].isoformat() if deduped else None,
                     deduped[-1]["timestamp"].isoformat() if deduped else None, None, None,
-                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "returned_rows": len(rows), "accepted_rows": len(deduped)},
+                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "returned_rows": len(rows), "accepted_rows": len(deduped), "failure_category": None},
                 )
                 if deduped:
                     return deduped
+            except BrokerAuthenticationError:
+                self._logger.error(
+                    "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=0 accepted_rows=0 failure_category=history_authentication_failed",
+                    symbol, instrument_key, tradingsymbol, exchange, interval, attempt_name,
+                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "returned_rows": 0, "accepted_rows": 0, "exception_type": "BrokerAuthenticationError", "failure_category": "history_authentication_failed"},
+                )
+                raise
             except Exception as exc:  # noqa: BLE001 - broker boundary with structured failure
                 last_error = str(exc)
+                failure_category = "broker_input_error" if isinstance(exc, (BrokerError, ValueError, TypeError)) else "history_http_failure"
                 self._logger.warning(
-                    "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=0 accepted_rows=0 exception_type=%s exception_message=%s",
-                    symbol, token, tradingsymbol, exchange, interval, attempt_name, type(exc).__name__, str(exc),
-                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "returned_rows": 0, "accepted_rows": 0, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=0 accepted_rows=0 exception_type=%s exception_message=%s failure_category=%s",
+                    symbol, instrument_key, tradingsymbol, exchange, interval, attempt_name, type(exc).__name__, str(exc), failure_category,
+                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "returned_rows": 0, "accepted_rows": 0, "exception_type": type(exc).__name__, "exception_message": str(exc), "failure_category": failure_category},
                 )
         self._logger.error(
             "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s returned_rows=0 accepted_rows=0 exception_message=%s",
             symbol, token, tradingsymbol, exchange, interval, last_error,
-            extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "exception_message": last_error},
+            extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "exception_message": last_error, "failure_category": "history_empty_or_failed"},
         )
         return []
 

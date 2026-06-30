@@ -519,7 +519,14 @@ def compute_selected_option_history_readiness(
     blocker: str | None = None
     if not both_ready:
         if selected_ce and selected_pe:
-            blocker = "selected_option_history_cold"
+            ce_ready = bool(ce and ce.minimum_ready)
+            pe_ready = bool(pe and pe.minimum_ready)
+            if not ce_ready and pe_ready:
+                blocker = "selected_ce_history_cold"
+            elif ce_ready and not pe_ready:
+                blocker = "selected_pe_history_cold"
+            else:
+                blocker = "selected_option_history_cold"
         else:
             blocker = "selected_option_not_set"
     return SelectedOptionHistoryReadiness(selected_ce, selected_pe, ce, pe, both_ready, blocker)
