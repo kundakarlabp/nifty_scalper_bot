@@ -129,6 +129,33 @@ async def test_historical_fetch_without_token_makes_no_broker_call() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_token", ["NFO:NIFTY26JUNFUT", None, 0, -1])
+async def test_historical_fetch_invalid_token_values_do_not_call_broker(
+    bad_token: object,
+) -> None:
+    broker = _Broker({12345: [_row()]})
+    mdm = _mdm(broker)
+    mdm._token_by_symbol = {"NFO:NIFTY26MAY23300CE": bad_token}
+
+    rows = await mdm.fetch_history("NFO:NIFTY26MAY23300CE", "minute", 2)
+
+    assert rows == []
+    assert broker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_historical_fetch_numeric_string_token_is_converted() -> None:
+    broker = _Broker({12345: [_row()]})
+    mdm = _mdm(broker)
+    mdm._token_by_symbol = {"NFO:NIFTY26MAY23300CE": "12345"}
+
+    rows = await mdm.fetch_history("NFO:NIFTY26MAY23300CE", "minute", 2)
+
+    assert len(rows) == 1
+    assert [call[0] for call in broker.calls] == [12345]
+
+
+@pytest.mark.asyncio
 async def test_historical_fetch_reraises_authentication_failure() -> None:
     broker = _Broker(exc=BrokerAuthenticationError("invalid session"))
     mdm = _mdm(broker)

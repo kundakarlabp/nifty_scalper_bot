@@ -2870,10 +2870,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
             self._mark_authentication_invalid(message)
         if status in {400, 404} and expect_order_response:
             error: Exception = OrderPlacementError(message)
-        elif status == 401:
-            error = ConfigurationError("Zerodha authentication failed")
-        elif status == 403:
-            error = ConfigurationError("Zerodha access denied")
         elif status == 429:
             error = BrokerError("Zerodha rate limit exceeded")
         else:

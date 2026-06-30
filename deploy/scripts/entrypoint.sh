@@ -321,8 +321,8 @@ health_check() {
     while [[ $attempt -le $max_attempts ]]; do
         log INFO "Health check attempt $attempt/$max_attempts..."
         
-        if curl -sf "http://localhost:$APP_PORT/readyz" >/dev/null 2>&1 || \
-           curl -sf "http://localhost:$APP_PORT/" >/dev/null 2>&1; then
+        if curl -sf "http://localhost:$APP_PORT/releasez" >/dev/null 2>&1 || \
+           curl -sf "http://localhost:$APP_PORT/livez" >/dev/null 2>&1; then
             log SUCCESS "Application is responding to HTTP requests"
             return 0
         fi

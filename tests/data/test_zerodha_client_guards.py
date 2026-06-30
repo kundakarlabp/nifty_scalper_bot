@@ -10,8 +10,8 @@ from nifty_scalper_bot.data.rest.zerodha_client import (
     _format_kite_datetime,
 )
 from nifty_scalper_bot.utils.errors import (
+    BrokerAuthenticationError,
     BrokerError,
-    ConfigurationError,
     OrderPlacementError,
 )
 
@@ -338,8 +338,8 @@ def test_format_kite_datetime_timezone_cases() -> None:
         (400, False, BrokerError, "bad input"),
         (400, True, OrderPlacementError, "bad input"),
         (404, True, OrderPlacementError, "bad input"),
-        (401, False, ConfigurationError, "authentication failed"),
-        (403, False, ConfigurationError, "access denied"),
+        (401, False, BrokerAuthenticationError, "authentication invalid"),
+        (403, False, BrokerAuthenticationError, "authentication invalid"),
         (429, False, BrokerError, "rate limit"),
         (500, False, BrokerError, "server exploded"),
     ],
@@ -361,6 +361,47 @@ def test_raise_for_status_maps_errors_without_unboundlocal(
         client._raise_for_status(response, expect_order)
 
     assert text in str(err.value).lower()
+    if status in {401, 403}:
+        assert client.auth_invalid is True
+        with pytest.raises(BrokerAuthenticationError):
+            client._raise_if_authentication_latched()
+    else:
+        assert client.auth_invalid is False
+    client._client.close()
+
+
+def test_input_exception_invalid_instrument_token_does_not_latch_auth() -> None:
+    client = _make_client()
+    response = httpx.Response(
+        400,
+        json={
+            "error_type": "InputException",
+            "message": "invalid instrument token",
+        },
+        request=httpx.Request("GET", "https://kite.test/x"),
+    )
+
+    with pytest.raises(BrokerError) as err:
+        client._raise_for_status(response, False)
+
+    assert "invalid instrument token" in str(err.value).lower()
+    assert client.auth_invalid is False
+    client._client.close()
+
+
+def test_generic_invalid_token_message_does_not_latch_auth() -> None:
+    client = _make_client()
+    response = httpx.Response(
+        400,
+        json={"message": "invalid token"},
+        request=httpx.Request("GET", "https://kite.test/x"),
+    )
+
+    with pytest.raises(BrokerError) as err:
+        client._raise_for_status(response, False)
+
+    assert "invalid token" in str(err.value).lower()
+    assert client.auth_invalid is False
     client._client.close()
 
 

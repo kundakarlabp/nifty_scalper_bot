@@ -9823,16 +9823,33 @@ class MarketDataManager:
                         extra={"event": "HYDRATION_FETCH_RESOLVE_FAILED", "symbol": symbol, "exception_type": type(exc).__name__, "exception_message": str(exc)},
                     )
 
-        if not token or int(token) <= 0:
+        try:
+            token_int = int(token) if token is not None else 0
+        except (TypeError, ValueError):
+            token_int = 0
+
+        if token_int <= 0:
             self._logger.error(
-                "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=history_token_missing",
-                symbol, token, interval,
-                extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "history_token_missing"},
+                "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s "
+                "interval=%s returned_rows=0 accepted_rows=0 "
+                "failure_category=history_token_missing",
+                symbol,
+                token,
+                interval,
+                extra={
+                    "event": "HYDRATION_FETCH_RESULT",
+                    "symbol": symbol,
+                    "instrument_token": token,
+                    "interval": interval,
+                    "returned_rows": 0,
+                    "accepted_rows": 0,
+                    "failure_category": "history_token_missing",
+                },
             )
             return []
 
         if not self._broker:
-            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=broker_unavailable", symbol, token, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "broker_unavailable"})
+            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=broker_unavailable", symbol, token_int, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token_int, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "broker_unavailable"})
             return []
 
         candidates = ["historical_data", "get_historical_data", "history", "get_history"]
@@ -9848,16 +9865,16 @@ class MarketDataManager:
             if fetcher:
                 break
         if not callable(fetcher):
-            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=history_capability_missing", symbol, token, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "history_capability_missing"})
+            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=history_capability_missing", symbol, token_int, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token_int, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "history_capability_missing"})
             return []
 
         now = datetime.now(timezone.utc)
         attempt_specs: list[tuple[str, int, int]] = [
-            ("token", int(token), int(days)),
+            ("token", token_int, int(days)),
         ]
         wide_days = max(int(days), 5)
         if wide_days != int(days):
-            attempt_specs.append(("token_wide", int(token), wide_days))
+            attempt_specs.append(("token_wide", token_int, wide_days))
 
         last_error: str | None = None
         for attempt_name, instrument_key, lookback_days in attempt_specs:
@@ -9896,7 +9913,7 @@ class MarketDataManager:
                 deduped.sort(key=lambda item: item["timestamp"])
                 self._logger.info(
                     "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=%s accepted_rows=%s first_ts=%s last_ts=%s exception_type=%s exception_message=%s",
-                    symbol, token, tradingsymbol, exchange, interval, attempt_name, len(rows), len(deduped),
+                    symbol, token_int, tradingsymbol, exchange, interval, attempt_name, len(rows), len(deduped),
                     deduped[0]["timestamp"].isoformat() if deduped else None,
                     deduped[-1]["timestamp"].isoformat() if deduped else None, None, None,
                     extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "returned_rows": len(rows), "accepted_rows": len(deduped), "failure_category": None},
@@ -9920,8 +9937,8 @@ class MarketDataManager:
                 )
         self._logger.error(
             "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s returned_rows=0 accepted_rows=0 exception_message=%s",
-            symbol, token, tradingsymbol, exchange, interval, last_error,
-            extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "exception_message": last_error, "failure_category": "history_empty_or_failed"},
+            symbol, token_int, tradingsymbol, exchange, interval, last_error,
+            extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token_int, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "exception_message": last_error, "failure_category": "history_empty_or_failed"},
         )
         return []
 

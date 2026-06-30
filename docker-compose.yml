@@ -27,7 +27,7 @@ services:
       - "8000:8000"
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/readyz"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/releasez"]
       interval: 15s
       timeout: 5s
       retries: 4

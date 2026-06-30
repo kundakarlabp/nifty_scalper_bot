@@ -13,7 +13,7 @@ import logging
 import os
 import socket
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -123,6 +123,91 @@ print(
 # -------------------------------------------------------
 
 
+def _try_acquire_bot_start_guard() -> bool:
+    """Acquire process-local trading-engine startup guard if available."""
+
+    global _BOT_START_GUARD
+    if _BOT_START_GUARD:
+        return False
+    _BOT_START_GUARD = True
+    return True
+
+
+def _release_bot_start_guard() -> None:
+    """Release process-local trading-engine startup guard."""
+
+    global _BOT_START_GUARD
+    _BOT_START_GUARD = False
+
+
+async def _run_bot_background(
+    app: FastAPI,
+    *,
+    startup_delay: float = 5.0,
+    app_factory=None,
+) -> None:
+    """Start the trading engine once for a FastAPI process lifespan."""
+
+    if not _try_acquire_bot_start_guard():
+        LOG.error(
+            "Duplicate trading-engine startup blocked "
+            "startup_instance=%s pid=%s hostname=%s build_sha=%s",
+            STARTUP_INSTANCE_ID,
+            os.getpid(),
+            STARTUP_HOSTNAME,
+            STARTUP_BUILD_SHA,
+        )
+        return
+
+    try:
+        print("⏳ BACKGROUND: Waiting 5s for Server Port Bind...", flush=True)
+        await asyncio.sleep(startup_delay)
+        app.state.bot_starting = True
+
+        print("📦 BACKGROUND: Importing Trading Engine...", flush=True)
+        if app_factory is None:
+            from nifty_scalper_bot.core.app import NiftyScalperApp
+
+            app_factory = NiftyScalperApp
+
+        print("🤖 BACKGROUND: Initializing Bot...", flush=True)
+        bot = app_factory()
+        app.state.bot = bot
+
+        print("▶️ BACKGROUND: Starting Trading Loop...", flush=True)
+        await bot.start()
+        app.state.bot_started = True
+        app.state.bot_starting = False
+
+        print("🟢 BACKGROUND: Bot fully operational", flush=True)
+
+    except asyncio.CancelledError:
+        print("🛑 BACKGROUND: Task Cancelled", flush=True)
+        raise
+
+    except Exception as exc:
+        app.state.bot_error = str(exc)
+        app.state.bot_started = False
+        app.state.bot_starting = False
+        print(f"⚠️ BOT STARTUP WARNING: {exc}", flush=True)
+        warmup_tokens = ("WARMING_UP", "DATA_WARMUP", "HISTORICAL_READY")
+        is_warmup_like = any(token in str(exc).upper() for token in warmup_tokens)
+        if is_warmup_like:
+            LOG.info(
+                "run_bot_background warmup continuation: %s",
+                exc,
+            )
+            LOG.warning("Condition met: bot entered warmup mode after startup delay")
+        else:
+            LOG.error("Failure in run_bot_background: %s", exc, exc_info=exc)
+            LOG.warning(
+                "Condition met: bot entered degraded mode after startup failure"
+            )
+
+    finally:
+        _release_bot_start_guard()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.bot = None
@@ -134,76 +219,20 @@ async def lifespan(app: FastAPI):
     app.state.startup_hostname = STARTUP_HOSTNAME
     app.state.startup_build_sha = STARTUP_BUILD_SHA
 
-    async def run_bot_background():
-        global _BOT_START_GUARD
-        if _BOT_START_GUARD:
-            LOG.error(
-                "Duplicate trading-engine startup blocked "
-                "startup_instance=%s pid=%s hostname=%s build_sha=%s",
-                STARTUP_INSTANCE_ID,
-                os.getpid(),
-                STARTUP_HOSTNAME,
-                STARTUP_BUILD_SHA,
-            )
-            return
-        _BOT_START_GUARD = True
-        try:
-            print("⏳ BACKGROUND: Waiting 5s for Server Port Bind...", flush=True)
-            await asyncio.sleep(5)
-            app.state.bot_starting = True
-
-            print("📦 BACKGROUND: Importing Trading Engine...", flush=True)
-            from nifty_scalper_bot.core.app import NiftyScalperApp
-
-            print("🤖 BACKGROUND: Initializing Bot...", flush=True)
-            bot = NiftyScalperApp()
-            app.state.bot = bot
-
-            print("▶️ BACKGROUND: Starting Trading Loop...", flush=True)
-            await bot.start()
-            app.state.bot_started = True
-            app.state.bot_starting = False
-
-            print("🟢 BACKGROUND: Bot fully operational", flush=True)
-
-        except asyncio.CancelledError:
-            print("🛑 BACKGROUND: Task Cancelled", flush=True)
-            raise
-
-        except Exception as exc:
-            app.state.bot_error = str(exc)
-            app.state.bot_started = False
-            app.state.bot_starting = False
-            print(f"⚠️ BOT STARTUP WARNING: {exc}", flush=True)
-            warmup_tokens = ("WARMING_UP", "DATA_WARMUP", "HISTORICAL_READY")
-            is_warmup_like = any(token in str(exc).upper() for token in warmup_tokens)
-            if is_warmup_like:
-                LOG.info(
-                    "run_bot_background warmup continuation: %s",
-                    exc,
-                )
-                LOG.warning(
-                    "Condition met: bot entered warmup mode after startup delay"
-                )
-            else:
-                LOG.error("Failure in run_bot_background: %s", exc, exc_info=exc)
-                LOG.warning(
-                    "Condition met: bot entered degraded mode after startup failure"
-                )
-
-    task = safe_task(run_bot_background())
+    task = safe_task(_run_bot_background(app))
     yield
 
     try:
         if not task.done():
             task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         if app.state.bot:
             await app.state.bot.stop()
     except Exception:
         __import__("logging").getLogger(__name__).exception(
             "[CRITICAL] unhandled exception", exc_info=True
         )
-        raise
 
 
 # -------------------------------------------------------
