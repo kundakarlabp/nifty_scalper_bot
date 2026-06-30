@@ -452,13 +452,29 @@ def readyz():
         )
 
     blockers = _context_blockers(ctx)
+    execution_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper()
+    enable_live = os.getenv("ENABLE_LIVE", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    live_mode = enable_live and execution_mode == "LIVE"
+    if live_mode:
+        auth_state = _structured_runtime_status(ctx).get("broker_authentication", "unknown")
+        if auth_state == "invalid":
+            blockers.insert(0, "broker_authentication_invalid")
+        elif auth_state != "authenticated":
+            blockers.insert(0, "broker_authentication_unknown")
+    blockers = list(dict.fromkeys(blockers))
     operational_blockers = [
         blocker
         for blocker in blockers
         if blocker not in _NON_OPERATIONAL_READYZ_BLOCKERS
     ]
     ready = (
-        not bool(getattr(ctx, "broker_auth_invalid", False))
+        (not live_mode or _structured_runtime_status(ctx).get("broker_authentication") == "authenticated")
+        and not bool(getattr(ctx, "broker_auth_invalid", False))
         and bool(getattr(ctx, "broker_balance_valid", False))
         and bool(getattr(ctx, "position_reconciliation_completed", False))
         and not bool(getattr(ctx, "position_reconciliation_failed", False))

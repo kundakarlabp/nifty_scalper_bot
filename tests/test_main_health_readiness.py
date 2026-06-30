@@ -278,3 +278,58 @@ def test_health_trading_structured_status_and_unknown_auth():
     assert body["broker"]["authentication"] == "unknown"
     assert body["broker"]["authenticated"] is False
     assert body["tick_pressure"]["pending_ticks"] == 2
+
+
+def test_readyz_live_requires_authenticated_broker(monkeypatch):
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    ctx = _ctx(
+        broker_auth_verified=True,
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot_started = True
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    response = main.readyz()
+    body = _json(response)
+
+    assert response.status_code == 200
+    assert body["ready"] is True
+
+
+def test_readyz_live_blocks_unknown_broker_authentication(monkeypatch):
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    ctx = _ctx(
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot_started = True
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    response = main.readyz()
+    body = _json(response)
+
+    assert response.status_code == 503
+    assert body["primary_blocker"] == "broker_authentication_unknown"
+    assert "broker_authentication_unknown" in body["blockers"]
+
+
+def test_readyz_live_blocks_invalid_broker_authentication(monkeypatch):
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    ctx = _ctx(
+        broker_auth_invalid=True,
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot_started = True
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    response = main.readyz()
+    body = _json(response)
+
+    assert response.status_code == 503
+    assert body["primary_blocker"] == "broker_authentication_invalid"
+    assert "broker_authentication_invalid" in body["blockers"]

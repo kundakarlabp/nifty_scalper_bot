@@ -62,6 +62,19 @@ def test_lightsail_release_migrates_existing_systemd_entrypoint_safely() -> None
     )[0]
     assert "EnvironmentFile" not in migration_block
     assert "ExecStart=" in migration_block
+    assert "SYSTEMD_ENTRYPOINT_MIGRATED=true" in migration_block
+    assert "sudo systemctl daemon-reload" in migration_block
+
+
+def test_lightsail_migration_forces_restart_before_healthy_no_change_exit() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    migration_call = release.index("migrate_systemd_entrypoint")
+    force_restart = release.index('FORCE_RESTART=true', migration_call)
+    healthy_no_change = release.index('if [ "$BEFORE" = "$AFTER" ]', force_restart)
+    assert migration_call < force_restart < healthy_no_change
+    candidate_index = release.index("CANDIDATE=", healthy_no_change)
+    no_change_block = release[healthy_no_change:candidate_index]
+    assert '[ "$FORCE_RESTART" = false ]' in no_change_block
 
 
 def test_deploy_helpers_do_not_embed_credentials() -> None:

@@ -85,6 +85,30 @@ def reconciliation_display_label(value: object, reconciliation: dict) -> str:
     return "UNKNOWN"
 
 
+def trading_ready_status(status: dict) -> bool:
+    mode = str(status.get("mode") or status.get("execution_mode") or "").upper()
+    blockers = [str(value) for value in status.get("blockers", []) if str(value).strip()]
+    return (
+        mode == "LIVE"
+        and bool(status.get("live_orders_armed"))
+        and status.get("broker_authenticated") == "authenticated"
+        and status.get("reconciled") is True
+        and not blockers
+    )
+
+
+def engine_display_status(status: dict) -> str:
+    if status.get("engine_http_responsive") is False:
+        return status.get("engine_http_status") or "ENGINE HTTP UNRESPONSIVE"
+    if not status.get("engine_loaded"):
+        return status.get("engine_http_status") or "BOT NOT LOADED"
+    if trading_ready_status(status):
+        return "ENGINE UP, TRADING READY"
+    if status.get("operational_ready"):
+        return "ENGINE UP, OPERATIONAL"
+    return "ENGINE UP, TRADING BLOCKED"
+
+
 def feed_html(rows: list[dict[str, str]]) -> str:
     if not rows:
         return '<div class="feed"><div class="row"><span></span><span></span><span class="muted">No matching actionable events.</span></div></div>'
@@ -137,13 +161,7 @@ def render() -> None:
     selected = status.get("selected") or {}
     pnl_total, closed = pnl_summary(rows_all)
     primary = status.get("primary_blocker") or next((b for b in status.get("blockers", []) if b), "—")
-    engine_status = status.get("engine_http_status") or ("ENGINE UP" if status.get("engine_loaded") else "BOT NOT LOADED")
-    if status.get("engine_http_responsive") is False:
-        engine_status = status.get("engine_http_status") or "ENGINE HTTP UNRESPONSIVE"
-    elif status.get("engine_loaded") and status.get("operational_ready"):
-        engine_status = "ENGINE UP, TRADING READY"
-    elif status.get("engine_loaded"):
-        engine_status = "ENGINE UP, TRADING BLOCKED"
+    engine_status = engine_display_status(status)
     broker_state = status.get("broker_authenticated")
     broker_label = broker_display_label(broker_state)
     recon_state = status.get("reconciled")
