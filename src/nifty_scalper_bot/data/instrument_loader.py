@@ -276,83 +276,100 @@ def upsert_instruments(
         )
     )
     try:
+        parameters = []
+        for raw_row in rows:
+            processed += 1
+            if not isinstance(raw_row, dict):
+                skipped += 1
+                continue
+            tradingsymbol = (
+                str(raw_row.get("tradingsymbol") or raw_row.get("symbol") or "")
+                .strip()
+                .upper()
+            )
+            if not tradingsymbol:
+                skipped += 1
+                continue
+            exchange = str(raw_row.get("exchange") or "").strip().upper()
+            if exchange != "NFO":
+                skipped += 1
+                continue
+            segment = str(raw_row.get("segment") or "").strip().upper()
+            symbol_name = str(raw_row.get("name") or "").strip().upper()
+            if only_index_options:
+                if segment != "NFO-OPT":
+                    skipped += 1
+                    continue
+                if not any(
+                    symbol_name.startswith(prefix) for prefix in allowed_prefixes
+                ):
+                    skipped += 1
+                    continue
+            if tradingsymbol.endswith("FUT"):
+                skipped += 1
+                continue
+            opt_type = _sanitize_opt_type(raw_row, tradingsymbol)
+            if opt_type not in {"CE", "PE"}:
+                skipped += 1
+                continue
+            token_value = (
+                raw_row.get("instrument_token")
+                or raw_row.get("token")
+                or raw_row.get("instrumenttoken")
+            )
+            token_text = (
+                str(token_value).strip() if token_value not in {None, ""} else ""
+            )
+            try:
+                token_int = int(float(token_text))
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            lot_size_raw = (
+                raw_row.get("lot_size")
+                or raw_row.get("lotsize")
+                or raw_row.get("lotSize")
+            )
+            lot_size_text = (
+                str(lot_size_raw).strip() if lot_size_raw not in {None, ""} else ""
+            )
+            try:
+                lot_size = max(1, int(float(lot_size_text)))
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            expiry = raw_row.get("expiry")
+            expiry_str = str(expiry).strip() if expiry else None
+            strike_raw = raw_row.get("strike") or raw_row.get("strike_price")
+            strike_value: int | None = None
+            if strike_raw not in {None, ""}:
+                strike_text = str(strike_raw).strip()
+                with suppress(Exception):
+                    strike_value = int(round(float(strike_text)))
+            underlying = raw_row.get("name")
+            underlying_str = (
+                str(underlying).strip().upper()
+                if underlying
+                else _derive_underlying(tradingsymbol)
+            )
+            parameters.append(
+                (
+                    token_int,
+                    exchange,
+                    tradingsymbol,
+                    lot_size,
+                    expiry_str,
+                    underlying_str,
+                    strike_value,
+                    opt_type,
+                    timestamp,
+                )
+            )
+            stored += 1
+
         with conn:
-            for raw_row in rows:
-                processed += 1
-                if not isinstance(raw_row, dict):
-                    skipped += 1
-                    continue
-                tradingsymbol = (
-                    str(raw_row.get("tradingsymbol") or raw_row.get("symbol") or "")
-                    .strip()
-                    .upper()
-                )
-                if not tradingsymbol:
-                    skipped += 1
-                    continue
-                exchange = str(raw_row.get("exchange") or "").strip().upper()
-                if exchange != "NFO":
-                    skipped += 1
-                    continue
-                segment = str(raw_row.get("segment") or "").strip().upper()
-                symbol_name = str(raw_row.get("name") or "").strip().upper()
-                if only_index_options:
-                    if segment != "NFO-OPT":
-                        skipped += 1
-                        continue
-                    if not any(
-                        symbol_name.startswith(prefix) for prefix in allowed_prefixes
-                    ):
-                        skipped += 1
-                        continue
-                if tradingsymbol.endswith("FUT"):
-                    skipped += 1
-                    continue
-                opt_type = _sanitize_opt_type(raw_row, tradingsymbol)
-                if opt_type not in {"CE", "PE"}:
-                    skipped += 1
-                    continue
-                token_value = (
-                    raw_row.get("instrument_token")
-                    or raw_row.get("token")
-                    or raw_row.get("instrumenttoken")
-                )
-                token_text = (
-                    str(token_value).strip() if token_value not in {None, ""} else ""
-                )
-                try:
-                    token_int = int(float(token_text))
-                except (TypeError, ValueError):
-                    skipped += 1
-                    continue
-                lot_size_raw = (
-                    raw_row.get("lot_size")
-                    or raw_row.get("lotsize")
-                    or raw_row.get("lotSize")
-                )
-                lot_size_text = (
-                    str(lot_size_raw).strip() if lot_size_raw not in {None, ""} else ""
-                )
-                try:
-                    lot_size = max(1, int(float(lot_size_text)))
-                except (TypeError, ValueError):
-                    skipped += 1
-                    continue
-                expiry = raw_row.get("expiry")
-                expiry_str = str(expiry).strip() if expiry else None
-                strike_raw = raw_row.get("strike") or raw_row.get("strike_price")
-                strike_value: int | None = None
-                if strike_raw not in {None, ""}:
-                    strike_text = str(strike_raw).strip()
-                    with suppress(Exception):
-                        strike_value = int(round(float(strike_text)))
-                underlying = raw_row.get("name")
-                underlying_str = (
-                    str(underlying).strip().upper()
-                    if underlying
-                    else _derive_underlying(tradingsymbol)
-                )
-                conn.execute(
+            if parameters:
+                conn.executemany(
                     """
                     INSERT INTO instruments(
                         token,
@@ -375,19 +392,8 @@ def upsert_instruments(
                         opt_type=excluded.opt_type,
                         updated_at=excluded.updated_at
                     """,
-                    (
-                        token_int,
-                        exchange,
-                        tradingsymbol,
-                        lot_size,
-                        expiry_str,
-                        underlying_str,
-                        strike_value,
-                        opt_type,
-                        timestamp,
-                    ),
+                    parameters,
                 )
-                stored += 1
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in upsert_instruments: %s",
