@@ -507,6 +507,8 @@ def health_trading():
     if not live_orders_armed and not primary:
         primary = "startup_pipeline_incomplete"
         blockers = blockers or [primary]
+    structured_status = _structured_runtime_status(ctx)
+    auth_state = structured_status.get("broker_authentication", "unknown")
     return JSONResponse(
         status_code=200,
         content={
@@ -515,10 +517,11 @@ def health_trading():
             "live_orders_armed": live_orders_armed and not blockers,
             "primary_blocker": primary,
             "blockers": [b for b in blockers if b],
-            **_structured_runtime_status(ctx),
+            **structured_status,
             "broker": {
                 "ready": bool(getattr(ctx, "broker_ready", False)),
-                "authenticated": not bool(getattr(ctx, "broker_auth_invalid", False)),
+                "authentication": auth_state,
+                "authenticated": auth_state == "authenticated",
                 "auth_invalid": bool(getattr(ctx, "broker_auth_invalid", False)),
                 "balance_valid": bool(getattr(ctx, "broker_balance_valid", False)),
                 "balance": getattr(ctx, "last_valid_broker_balance", None),

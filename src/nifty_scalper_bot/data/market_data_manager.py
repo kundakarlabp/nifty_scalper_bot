@@ -412,6 +412,7 @@ class MarketDataManager:
         self._cached_open_position_symbols: set[str] = set()
         self._cached_selected_option_symbols: set[str] = set()
         self._cached_near_atm_symbols: set[str] = set()
+        self._cached_spot_future_symbols: set[str] = set()
         self._tick_consumer_task: asyncio.Task[None] | None = None
         self._pending_tick_lock = threading.Lock()
         self._pending_tick_queues: dict[str, Deque[dict[str, Any]]] = defaultdict(deque)
@@ -4956,6 +4957,7 @@ class MarketDataManager:
         self._cached_open_position_symbols = set()
         self._cached_selected_option_symbols = set()
         self._cached_near_atm_symbols = set()
+        self._cached_spot_future_symbols = set()
 
     def set_position_manager(self, position_manager: Any | None) -> None:
         """Attach position manager for read-only tick-priority decisions only."""
@@ -5037,6 +5039,21 @@ class MarketDataManager:
             if str(symbol or "").strip().upper().endswith(("CE", "PE"))
         }
 
+    def _spot_future_context_symbol_set(self) -> set[str]:
+        """Return NIFTY spot and committed active-future context symbols protected from coalescing."""
+        basket = getattr(self, "_active_contract_basket", None)
+        symbols = {"NSE:NIFTY"}
+        spot = self._basket_value(basket, "spot_symbol", None) if basket is not None else None
+        if spot:
+            symbols.add(self._canonical_symbol(str(spot)))
+        future = self._basket_value(basket, "futures_symbol", None) if basket is not None else None
+        if not future:
+            future = self.get_active_nifty_future_symbol_cached()
+        future_canonical = canonical_nifty_future_symbol(future) if future else None
+        if future_canonical:
+            symbols.add(future_canonical)
+        return {symbol for symbol in symbols if symbol}
+
     def _resolve_tick_symbol_for_priority(self, tick: Mapping[str, Any]) -> str:
         """Resolve canonical tick symbol for priority/coalescing."""
         raw_symbol = str(tick.get("symbol") or "").strip()
@@ -5055,8 +5072,8 @@ class MarketDataManager:
                     return self._canonical_symbol(str(mapped))
         return "UNKNOWN"
 
-    def _get_priority_context_sets(self) -> tuple[set[str], set[str], set[str]]:
-        """Return cached open/selected/near-ATM symbol sets for hot tick path."""
+    def _get_priority_context_sets(self) -> tuple[set[str], set[str], set[str], set[str]]:
+        """Return cached open/selected/near-ATM/spot-future symbol sets for hot tick path."""
         now = time.monotonic()
         cached_at = float(getattr(self, "_priority_context_cached_at", 0.0) or 0.0)
         if cached_at > 0.0 and (now - cached_at) <= float(getattr(self, "_priority_context_ttl_s", 0.25) or 0.25):
@@ -5064,24 +5081,29 @@ class MarketDataManager:
                 set(getattr(self, "_cached_open_position_symbols", set()) or set()),
                 set(getattr(self, "_cached_selected_option_symbols", set()) or set()),
                 set(getattr(self, "_cached_near_atm_symbols", set()) or set()),
+                set(getattr(self, "_cached_spot_future_symbols", set()) or set()),
             )
         open_symbols = self._open_position_symbol_set()
         selected_symbols = self._selected_option_symbol_set()
         near_atm_symbols = self._near_atm_symbol_set()
+        spot_future_symbols = self._spot_future_context_symbol_set()
         self._cached_open_position_symbols = set(open_symbols)
         self._cached_selected_option_symbols = set(selected_symbols)
         self._cached_near_atm_symbols = set(near_atm_symbols)
+        self._cached_spot_future_symbols = set(spot_future_symbols)
         self._priority_context_cached_at = now
-        return set(open_symbols), set(selected_symbols), set(near_atm_symbols)
+        return set(open_symbols), set(selected_symbols), set(near_atm_symbols), set(spot_future_symbols)
 
     def _tick_priority(self, symbol: str) -> tuple[int, str]:
         """Return lower-is-higher priority for tick fan-out."""
         canonical = self._canonical_symbol(symbol) if symbol and symbol != "UNKNOWN" else symbol
-        open_symbols, selected_symbols, near_atm_symbols = self._get_priority_context_sets()
+        open_symbols, selected_symbols, near_atm_symbols, spot_future_symbols = self._get_priority_context_sets()
         if canonical in open_symbols:
             return 0, "open_position"
         if canonical in selected_symbols:
             return 1, "selected_option"
+        if canonical in spot_future_symbols:
+            return 2, "spot_future_context"
         if canonical in near_atm_symbols:
             return 2, "near_atm"
         return 3, "context_or_far"

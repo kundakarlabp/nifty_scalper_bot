@@ -15,14 +15,15 @@ class _OM:
         return True
 
 
-def _mgr_with_bracket(captured: list):
+def _mgr_with_bracket(captured: list, monkeypatch, tmp_path, order_id: str):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
     mgr = BracketManager(order_manager=_OM())
     mgr._notify_event = lambda name, meta=None: captured.append((name, meta))  # type: ignore
     mgr.register_virtual_bracket(
-        order_id="e1", symbol="NFO:NIFTY26JUN23950CE", side="BUY",
+        order_id=order_id, symbol="NFO:NIFTY26JUN23950CE", side="BUY",
         qty=65, price=216.35, sl=210.0, tp=230.0,
     )
-    b = mgr._brackets["e1"]
+    b = mgr._brackets[order_id]
     b.last_ltp = 220.0
     mgr._trail_notify_sl.clear()
     mgr._trail_notify_at.clear()
@@ -30,10 +31,10 @@ def _mgr_with_bracket(captured: list):
     return mgr, b
 
 
-async def test_trail_ratchet_emits_telegram_event() -> None:
+def test_trail_ratchet_emits_telegram_event(monkeypatch, tmp_path) -> None:
     cap: list = []
-    mgr, b = _mgr_with_bracket(cap)
-    ok = mgr._virtual_modify_sl("vsl_e1", 215.0)  # BUY: 210 < 215 < ltp 220
+    mgr, b = _mgr_with_bracket(cap, monkeypatch, tmp_path, "e1-trail")
+    ok = mgr._virtual_modify_sl("vsl_e1-trail", 215.0)  # BUY: 210 < 215 < ltp 220
     assert ok is True
     assert b.sl_trigger_price == 215.0
     trail = [c for c in cap if c[0] == "TRAILING_SL_UPDATED"]
@@ -42,11 +43,11 @@ async def test_trail_ratchet_emits_telegram_event() -> None:
     assert trail[0][1]["new_sl"] == 215.0
 
 
-async def test_trail_ratchet_monotonic_rejects_backward_move() -> None:
+def test_trail_ratchet_monotonic_rejects_backward_move(monkeypatch, tmp_path) -> None:
     cap: list = []
-    mgr, b = _mgr_with_bracket(cap)
+    mgr, b = _mgr_with_bracket(cap, monkeypatch, tmp_path, "e1-backward")
     # BUY SL can only move UP; a lower proposed SL is rejected (no notify)
-    ok = mgr._virtual_modify_sl("vsl_e1", 205.0)
+    ok = mgr._virtual_modify_sl("vsl_e1-backward", 205.0)
     assert ok is False
     assert b.sl_trigger_price == 210.0
     assert not [c for c in cap if c[0] == "TRAILING_SL_UPDATED"]

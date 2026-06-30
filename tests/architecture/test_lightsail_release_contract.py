@@ -52,6 +52,18 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert 'sudo systemctl restart "$SERVICE"' in release
 
 
+def test_lightsail_release_migrates_existing_systemd_entrypoint_safely() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert "migrate_systemd_entrypoint" in release
+    assert "nifty_scalper_bot.deployment_main:app" in release
+    assert "sudo systemctl daemon-reload" in release
+    migration_block = release.split("migrate_systemd_entrypoint", 1)[1].split(
+        "restart_streamlit", 1
+    )[0]
+    assert "EnvironmentFile" not in migration_block
+    assert "ExecStart=" in migration_block
+
+
 def test_deploy_helpers_do_not_embed_credentials() -> None:
     paths = (
         "deploy/lightsail_setup.sh",

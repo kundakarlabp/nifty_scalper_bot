@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -154,6 +155,27 @@ def bounded_logs(lines: int = 400, contains: str = "") -> str:
     return "\n".join(rows)
 
 
+def _parse_status_timestamp(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 def _update_state() -> dict[str, Any]:
     try:
         value = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
@@ -164,11 +186,17 @@ def _update_state() -> dict[str, Any]:
     state = str(data.get("state") or "").lower()
     if state in transient:
         timeout = float(os.getenv("BOT_UPDATER_STALE_TIMEOUT_SECONDS", "900") or 900)
-        raw_ts = data.get("updated_ts") or data.get("ts") or data.get("timestamp")
-        try:
-            age = time.time() - float(raw_ts)
-        except (TypeError, ValueError):
-            age = timeout + 1
+        raw_ts = data.get("updated_at") or data.get("updated_ts") or data.get("ts") or data.get("timestamp")
+        parsed_ts = _parse_status_timestamp(raw_ts)
+        if parsed_ts is None:
+            stale = dict(data)
+            stale["previous_state"] = data.get("state")
+            stale["state"] = "stale_interrupted"
+            stale["stale"] = True
+            stale["stale_reason"] = "malformed_timestamp"
+            stale["stale_after_seconds"] = timeout
+            return stale
+        age = time.time() - parsed_ts
         if age > timeout:
             stale = dict(data)
             stale["previous_state"] = data.get("state")
@@ -217,7 +245,11 @@ def status_snapshot() -> dict[str, Any]:
         "operational_ready": bool(livez.get("bot_loaded")) and engine_http_responsive and not operational_blockers,
         "evaluation_ready": bool(trading.get("evaluation_ready") or trading.get("ready")) if engine_http_responsive else None,
         "live_orders_armed": bool(trading.get("live_orders_armed")) if engine_http_responsive else False,
-        "broker_authenticated": (trading.get("broker") or {}).get("authenticated", (trading.get("broker") or {}).get("ready")) if engine_http_responsive else None,
+        "broker_authenticated": (
+            trading.get("broker_authentication")
+            or (trading.get("broker") or {}).get("authentication")
+            or "unknown"
+        ) if engine_http_responsive else "unknown",
         "reconciled": (trading.get("reconciliation") or {}).get("completed") if engine_http_responsive else None,
         "mode": str(mode.get("execution_mode") or ("ENGINE HTTP TIMEOUT" if not engine_http_responsive else "UNKNOWN")).upper(),
         "broker": trading.get("broker") or {},

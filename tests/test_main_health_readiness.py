@@ -275,4 +275,6 @@ def test_health_trading_structured_status_and_unknown_auth():
     assert body["selected"] == {"atm": 24000, "ce": "NFO:CE", "pe": "NFO:PE"}
     assert body["history"]["ce"] == {"mdm": 30, "runner": 30, "indicator": 30}
     assert body["broker_authentication"] == "unknown"
+    assert body["broker"]["authentication"] == "unknown"
+    assert body["broker"]["authenticated"] is False
     assert body["tick_pressure"]["pending_ticks"] == 2

@@ -93,6 +93,41 @@ wait_for_service() {
   return 1
 }
 
+migrate_systemd_entrypoint() {
+  local unit_path="/etc/systemd/system/${SERVICE}.service"
+  local canonical_exec="ExecStart=${VENV}/bin/python -m uvicorn nifty_scalper_bot.deployment_main:app --host 0.0.0.0 --port ${PORT}"
+  if [ ! -f "$unit_path" ]; then
+    return 0
+  fi
+  if grep -Fqx "$canonical_exec" "$unit_path" 2>/dev/null; then
+    return 0
+  fi
+  if ! grep -q '^ExecStart=' "$unit_path" 2>/dev/null; then
+    log "WARNING: $unit_path has no ExecStart; skipping entrypoint migration"
+    return 0
+  fi
+  sudo python3 - "$unit_path" "$canonical_exec" <<'PY_MIGRATE'
+import sys
+from pathlib import Path
+unit = Path(sys.argv[1])
+canonical = sys.argv[2]
+text = unit.read_text(encoding="utf-8")
+lines = text.splitlines()
+out = []
+changed = False
+for line in lines:
+    if line.startswith("ExecStart=") and not changed:
+        out.append(canonical)
+        changed = True
+    else:
+        out.append(line)
+if changed:
+    unit.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+PY_MIGRATE
+  sudo systemctl daemon-reload
+  log "migrated $SERVICE ExecStart to deployment_main:app; EnvironmentFile preserved"
+}
+
 restart_streamlit() {
   if ! systemctl is-enabled --quiet "$STREAMLIT_SERVICE" 2>/dev/null; then
     return 0
@@ -124,6 +159,7 @@ if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
   cp -p "$APP_DIR/.env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
 fi
 validate_environment
+migrate_systemd_entrypoint
 
 BEFORE="$(git rev-parse HEAD)"
 write_status fetching "checking origin/main from ${BEFORE:0:7}"

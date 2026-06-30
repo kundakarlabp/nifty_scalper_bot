@@ -13,3 +13,6 @@ def test_streamlit_console_renders_without_script_exception(monkeypatch) -> None
     app = AppTest.from_file(str(ROOT / "dashboard" / "superlite_console.py"))
     app.run(timeout=15)
     assert not app.exception
+    rendered = "\n".join(str(markdown.value) for markdown in app.markdown)
+    assert "ADMIN API UNREACHABLE" in rendered
+    assert "UNKNOWN" in rendered

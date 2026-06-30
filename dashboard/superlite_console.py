@@ -69,6 +69,22 @@ def card(label: str, value: object, css: str = "") -> str:
     return f'<div class="card"><div class="label">{html.escape(label)}</div><div class="value {css}">{html.escape(str(value))}</div></div>'
 
 
+def broker_display_label(value: object) -> str:
+    if value == "authenticated":
+        return "YES/READY"
+    if value == "invalid":
+        return "NO/FAILED"
+    return "UNKNOWN"
+
+
+def reconciliation_display_label(value: object, reconciliation: dict) -> str:
+    if value is True:
+        return "YES/READY"
+    if bool(reconciliation.get("failed")):
+        return "NO/FAILED"
+    return "UNKNOWN"
+
+
 def feed_html(rows: list[dict[str, str]]) -> str:
     if not rows:
         return '<div class="feed"><div class="row"><span></span><span></span><span class="muted">No matching actionable events.</span></div></div>'
@@ -129,9 +145,9 @@ def render() -> None:
     elif status.get("engine_loaded"):
         engine_status = "ENGINE UP, TRADING BLOCKED"
     broker_state = status.get("broker_authenticated")
-    broker_label = "YES/READY" if broker_state in {True, "authenticated"} else ("NO/FAILED" if broker_state in {False, "invalid"} else "UNKNOWN")
+    broker_label = broker_display_label(broker_state)
     recon_state = status.get("reconciled")
-    recon_label = "YES/READY" if recon_state is True else ("NO/FAILED" if recon.get("failed") else "UNKNOWN")
+    recon_label = reconciliation_display_label(recon_state, recon)
     st.markdown(
         '<div class="cards">'
         + card("Engine", engine_status, "ok" if status.get("operational_ready") else "warn")
