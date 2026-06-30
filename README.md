@@ -679,3 +679,19 @@ of 3 seconds.
 ```env
 RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS=5
 ```
+
+### Production tick pressure and health semantics
+
+Runtime tick ingress is owned by `MarketDataManager`. WebSocket callbacks do not process candles directly and do not schedule one coroutine per tick. Protected symbols (open positions, selected CE/PE, NIFTY spot and active context) are preserved in ordered bounded queues; low-priority far/context symbols may be coalesced under pressure with explicit accounting. `tick_pressure.unexplained_loss` must remain zero.
+
+`DataHub` is the read facade and bounded snapshot owner for quotes/orders/positions. Quotes are updated in memory immediately and flushed as rate-limited snapshots. Orders and positions are queued for immediate durable persistence. `HubStore` remains the single JSON-safe serialization owner.
+
+`/livez` is liveness only. Trading readiness and blockers are reported by `/health/trading` and `/trading/status`, including selected CE/PE/ATM, selected-option bar counts, required execution bars, broker authentication state, reconciliation state, event-loop lag, and tick-pressure counters.
+
+Useful defaults:
+
+- `MDM_TICK_DRAIN_BATCH=100`
+- `MDM_TICK_DRAIN_BUDGET_SECONDS=0.008`
+- `DATAHUB_QUOTE_CHECKPOINT_INTERVAL_SECONDS=15`
+- `EVENT_LOOP_LAG_WARN_MS=500`
+- `BOT_UPDATER_STALE_TIMEOUT_SECONDS=900`

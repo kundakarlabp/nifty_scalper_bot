@@ -119,6 +119,17 @@ startup
 → pass only valid option signals to risk/execution
 ```
 
+### Runtime overload invariants
+
+- Never perform full-state persistence on every tick.
+- Never schedule one coroutine/Future per tick from the WebSocket callback.
+- Never silently lose open-position, selected-option, NIFTY spot, or active-futures ticks.
+- Do not hold producer locks while processing candles, sorting large batches, resolving symbols expensively, or dispatching callbacks.
+- MarketDataManager owns bounded tick ingress and candle construction.
+- DataHub owns read-facade state and bounded quote/order/position snapshots only.
+- `/livez` is liveness only, not trading readiness.
+- Blocked readiness must always include a precise primary blocker.
+
 ### WebSocket and polling rules
 
 * WebSocket should be the primary source of live ticks where available.

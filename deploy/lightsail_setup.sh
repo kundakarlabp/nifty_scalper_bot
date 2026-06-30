@@ -108,7 +108,7 @@ Environment=BOT_ENV_FILE=$ENV_FILE
 Environment=BOT_SERVICE_NAME=$SERVICE
 Environment=BOT_APP_DIR=$APP_DIR
 Environment=DEPLOYMENT_PLATFORM=aws_lightsail
-ExecStart=$APP_DIR/.venv/bin/python -m uvicorn nifty_scalper_bot.main:app --host 0.0.0.0 --port $PORT
+ExecStart=$APP_DIR/.venv/bin/python -m uvicorn nifty_scalper_bot.deployment_main:app --host 0.0.0.0 --port $PORT
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30

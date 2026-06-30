@@ -38,8 +38,10 @@ def _get_json(path: str) -> dict:
         with urllib.request.urlopen(ADMIN_API + path, timeout=1.4) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else {}
+    except TimeoutError:
+        return {"engine_http_status": "ADMIN API UNREACHABLE"}
     except (OSError, ValueError, urllib.error.URLError):
-        return {}
+        return {"engine_http_status": "ADMIN API UNREACHABLE"}
 
 
 @st.cache_data(ttl=6, show_spinner=False)
@@ -65,6 +67,46 @@ def recent_events(lines: int = 650) -> list[dict[str, str]]:
 
 def card(label: str, value: object, css: str = "") -> str:
     return f'<div class="card"><div class="label">{html.escape(label)}</div><div class="value {css}">{html.escape(str(value))}</div></div>'
+
+
+def broker_display_label(value: object) -> str:
+    if value == "authenticated":
+        return "YES/READY"
+    if value == "invalid":
+        return "NO/FAILED"
+    return "UNKNOWN"
+
+
+def reconciliation_display_label(value: object, reconciliation: dict) -> str:
+    if value is True:
+        return "YES/READY"
+    if bool(reconciliation.get("failed")):
+        return "NO/FAILED"
+    return "UNKNOWN"
+
+
+def trading_ready_status(status: dict) -> bool:
+    mode = str(status.get("mode") or status.get("execution_mode") or "").upper()
+    blockers = [str(value) for value in status.get("blockers", []) if str(value).strip()]
+    return (
+        mode == "LIVE"
+        and bool(status.get("live_orders_armed"))
+        and status.get("broker_authenticated") == "authenticated"
+        and status.get("reconciled") is True
+        and not blockers
+    )
+
+
+def engine_display_status(status: dict) -> str:
+    if status.get("engine_http_responsive") is False:
+        return status.get("engine_http_status") or "ENGINE HTTP UNRESPONSIVE"
+    if not status.get("engine_loaded"):
+        return status.get("engine_http_status") or "BOT NOT LOADED"
+    if trading_ready_status(status):
+        return "ENGINE UP, TRADING READY"
+    if status.get("operational_ready"):
+        return "ENGINE UP, OPERATIONAL"
+    return "ENGINE UP, TRADING BLOCKED"
 
 
 def feed_html(rows: list[dict[str, str]]) -> str:
@@ -118,13 +160,19 @@ def render() -> None:
     recon = status.get("reconciliation") or {}
     selected = status.get("selected") or {}
     pnl_total, closed = pnl_summary(rows_all)
+    primary = status.get("primary_blocker") or next((b for b in status.get("blockers", []) if b), "—")
+    engine_status = engine_display_status(status)
+    broker_state = status.get("broker_authenticated")
+    broker_label = broker_display_label(broker_state)
+    recon_state = status.get("reconciled")
+    recon_label = reconciliation_display_label(recon_state, recon)
     st.markdown(
         '<div class="cards">'
-        + card("Engine", "UP" if status.get("engine_loaded") else "DOWN", "ok" if status.get("engine_loaded") else "bad")
-        + card("Operational", "READY" if status.get("operational_ready") else "BLOCKED", "ok" if status.get("operational_ready") else "warn")
+        + card("Engine", engine_status, "ok" if status.get("operational_ready") else "warn")
+        + card("Primary blocker", primary, "warn" if primary != "—" else "ok")
         + card("Mode", status.get("mode") or "UNKNOWN", "ok" if status.get("live_orders_armed") else "warn")
-        + card("Broker", "READY" if broker.get("ready") else "UNKNOWN", "ok" if broker.get("ready") else "warn")
-        + card("Reconciled", "YES" if recon.get("completed") else "NO", "ok" if recon.get("completed") else "warn")
+        + card("Broker", broker_label, "ok" if broker_label.startswith("YES") else "warn")
+        + card("Reconciled", recon_label, "ok" if recon_label.startswith("YES") else "warn")
         + '</div><div class="cards">'
         + card("Visible events", len(rows))
         + card("Trade events", sum(row.get("type") == "TRADE" for row in rows))

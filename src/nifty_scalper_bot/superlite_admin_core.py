@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -111,8 +112,15 @@ def _http_json(path: str) -> dict[str, Any]:
         with urllib.request.urlopen(ENGINE_URL + path, timeout=1.2) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else {}
-    except (OSError, ValueError, urllib.error.URLError):
-        return {}
+    except TimeoutError:
+        return {"_error": "ENGINE HTTP TIMEOUT"}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return {"_error": "ENGINE HTTP TIMEOUT"}
+        return {"_error": "ENGINE HTTP UNRESPONSIVE"}
+    except (OSError, ValueError):
+        return {"_error": "ENGINE HTTP UNRESPONSIVE"}
 
 
 def _git_ref(ref: str) -> str:
@@ -147,12 +155,64 @@ def bounded_logs(lines: int = 400, contains: str = "") -> str:
     return "\n".join(rows)
 
 
+def _parse_status_timestamp(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 def _update_state() -> dict[str, Any]:
     try:
         value = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
+        data = value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
+    transient = {"fetching", "validating", "deploying", "restarting"}
+    state = str(data.get("state") or "").lower()
+    if state in transient:
+        timeout = float(os.getenv("BOT_UPDATER_STALE_TIMEOUT_SECONDS", "900") or 900)
+        raw_ts = data.get("updated_at") or data.get("updated_ts") or data.get("ts") or data.get("timestamp")
+        parsed_ts = _parse_status_timestamp(raw_ts)
+        if parsed_ts is None:
+            stale = dict(data)
+            stale["previous_state"] = data.get("state")
+            stale["state"] = "stale_interrupted"
+            stale["stale"] = True
+            stale["stale_reason"] = "malformed_timestamp"
+            stale["stale_after_seconds"] = timeout
+            return stale
+        age = time.time() - parsed_ts
+        if age > timeout:
+            stale = dict(data)
+            stale["previous_state"] = data.get("state")
+            stale["state"] = "stale_interrupted"
+            stale["stale"] = True
+            stale["stale_after_seconds"] = timeout
+            return stale
+    return data
+
+
+def _service_process_known() -> bool | None:
+    try:
+        result = subprocess.run(["systemctl", "is-active", "--quiet", ENGINE_SERVICE], timeout=1.0, check=False)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def status_snapshot() -> dict[str, Any]:
@@ -162,7 +222,8 @@ def status_snapshot() -> dict[str, Any]:
     livez = _http_json("/livez")
     trading = _http_json("/health/trading")
     mode = _http_json("/trading/status")
-    blockers = [str(value) for value in trading.get("blockers") or []]
+    engine_http_responsive = not any((payload or {}).get("_error") for payload in (livez, trading, mode))
+    blockers = [str(value) for value in trading.get("blockers") or [] if str(value).strip()]
     execution_only = {"not_live_mode", "market_closed", "exchange_holiday", "outside_session"}
     operational_blockers = [value for value in blockers if value not in execution_only]
     recent = bounded_logs(180)
@@ -173,17 +234,30 @@ def status_snapshot() -> dict[str, Any]:
             pair = {"ce": match.group(1), "pe": match.group(2), "atm": match.group(3)}
             break
     running, remote = _git_ref("HEAD"), _git_ref("origin/main")
+    structured_selected = trading.get("selected") or trading.get("selected_options") or mode.get("selected") or mode.get("selected_options") or {}
     data = {
-        "process_up": bool(livez),
-        "engine_loaded": bool(livez.get("bot_loaded")),
-        "operational_ready": bool(livez.get("bot_loaded")) and not operational_blockers,
-        "live_orders_armed": bool(trading.get("live_orders_armed")),
-        "mode": str(mode.get("execution_mode") or "UNKNOWN").upper(),
+        "service_process_known": _service_process_known(),
+        "process_up": bool(livez) and engine_http_responsive,
+        "engine_http_responsive": engine_http_responsive,
+        "engine_http_status": "RESPONSIVE" if engine_http_responsive else (livez.get("_error") or trading.get("_error") or mode.get("_error") or "ENGINE HTTP UNRESPONSIVE"),
+        "bot_loaded": bool(livez.get("bot_loaded")) if engine_http_responsive else None,
+        "engine_loaded": bool(livez.get("bot_loaded")) if engine_http_responsive else False,
+        "operational_ready": bool(livez.get("bot_loaded")) and engine_http_responsive and not operational_blockers,
+        "evaluation_ready": bool(trading.get("evaluation_ready") or trading.get("ready")) if engine_http_responsive else None,
+        "live_orders_armed": bool(trading.get("live_orders_armed")) if engine_http_responsive else False,
+        "broker_authenticated": (
+            trading.get("broker_authentication")
+            or (trading.get("broker") or {}).get("authentication")
+            or "unknown"
+        ) if engine_http_responsive else "unknown",
+        "reconciled": (trading.get("reconciliation") or {}).get("completed") if engine_http_responsive else None,
+        "mode": str(mode.get("execution_mode") or ("ENGINE HTTP TIMEOUT" if not engine_http_responsive else "UNKNOWN")).upper(),
         "broker": trading.get("broker") or {},
         "reconciliation": trading.get("reconciliation") or {},
+        "primary_blocker": trading.get("primary_blocker") or (blockers[0] if blockers else None),
         "blockers": blockers,
         "operational_blockers": operational_blockers,
-        "selected": pair,
+        "selected": structured_selected or pair,
         "running": running,
         "remote": remote,
         "stale": running not in {"—", ""} and remote not in {"—", ""} and running != remote,

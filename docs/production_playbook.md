@@ -133,3 +133,40 @@ Adopt these practices incrementally to keep the system safe, observable, and rea
 - Closed-market conditions are expected, not subsystem failures. Off-hours basket
   retries should wait for the next useful market event instead of polling live
   depth repeatedly.
+
+## Runtime overload and control-plane diagnostics
+
+The production engine must keep `/livez` as a lightweight process/event-loop liveness probe. It does not query the broker and must not wait for trading readiness. Use:
+
+```bash
+curl -fsS http://127.0.0.1:8080/livez
+curl -fsS http://127.0.0.1:8080/health/trading
+curl -fsS http://127.0.0.1:8080/trading/status
+```
+
+`/health/trading` and `/trading/status` expose selected CE/PE/ATM, selected-option MDM/runner/indicator bar counts, the required execution-history minimum, tick-pressure counters, event-loop lag, broker authentication state, reconciliation state, and the primary blocker. A blocked bot is expected to remain fail-closed until these structured fields show every genuine gate is satisfied.
+
+Tick overload diagnosis:
+
+1. Check `event_loop_lag_ms` and `tick_pressure.pending_ticks` from `/livez` or `/health/trading`.
+2. Inspect `tick_pressure.unexplained_loss`; it must be zero.
+3. If `dropped_by_reason` grows, identify whether drops are far-context pressure drops or protected-symbol drops.
+4. Protected/open-position and selected-option ticks must remain ordered under normal load; far context may be coalesced under pressure.
+
+Persistence diagnosis:
+
+- Quote updates are immediately visible in memory and snapshot persistence is rate-limited.
+- Orders and positions are queued for immediate durable persistence on the serialized DataHub persistence worker.
+- On shutdown the app stops tick intake, drains pending ticks, flushes quotes/orders/positions, and then closes owned storage.
+
+Safe restart sequence:
+
+```bash
+sudo systemctl restart niftybot
+sudo systemctl restart niftybot-admin.service
+sudo systemctl restart niftybot-streamlit.service
+curl -fsS http://127.0.0.1:8080/livez
+curl -fsS http://127.0.0.1:8081/admin/api/status
+```
+
+The updater status file expires transient states such as `fetching`, `validating`, and `deploying` after `BOT_UPDATER_STALE_TIMEOUT_SECONDS` and reports `stale_interrupted` while preserving the previous state/message for diagnosis.

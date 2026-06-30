@@ -32,7 +32,7 @@ def test_lightsail_uses_external_environment_file() -> None:
     assert "EnvironmentFile=$ENV_FILE" in setup
     assert 'ln -sfn "$ENV_FILE" "$LEGACY_ENV"' in setup
     assert "DEPLOYMENT_PLATFORM=aws_lightsail" in setup
-    assert "nifty_scalper_bot.main:app" in setup
+    assert "nifty_scalper_bot.deployment_main:app" in setup
 
 
 def test_release_runner_validates_and_rolls_back() -> None:
@@ -41,10 +41,40 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "git worktree add" in release
     assert "compileall" in release
     assert "pytest" in release
+    assert "tests/data/test_datahub_bounded_persistence.py" in release
+    assert "tests/data/test_mdm_tick_coalescing.py" in release
+    assert "tests/test_mdm_event_loop_consumer.py" in release
+    assert "dashboard/superlite_console.py" in release
+    assert "dashboard/operations_console.py" not in release
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*true' in release
-    assert 'http://127.0.0.1:${PORT}/readyz' in release
+    assert 'http://127.0.0.1:${PORT}/livez' in release
     assert 'git reset --hard --quiet "$BEFORE"' in release
     assert 'sudo systemctl restart "$SERVICE"' in release
+
+
+def test_lightsail_release_migrates_existing_systemd_entrypoint_safely() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert "migrate_systemd_entrypoint" in release
+    assert "nifty_scalper_bot.deployment_main:app" in release
+    assert "sudo systemctl daemon-reload" in release
+    migration_block = release.split("migrate_systemd_entrypoint", 1)[1].split(
+        "restart_streamlit", 1
+    )[0]
+    assert "EnvironmentFile" not in migration_block
+    assert "ExecStart=" in migration_block
+    assert "SYSTEMD_ENTRYPOINT_MIGRATED=true" in migration_block
+    assert "sudo systemctl daemon-reload" in migration_block
+
+
+def test_lightsail_migration_forces_restart_before_healthy_no_change_exit() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    migration_call = release.index("migrate_systemd_entrypoint")
+    force_restart = release.index('FORCE_RESTART=true', migration_call)
+    healthy_no_change = release.index('if [ "$BEFORE" = "$AFTER" ]', force_restart)
+    assert migration_call < force_restart < healthy_no_change
+    candidate_index = release.index("CANDIDATE=", healthy_no_change)
+    no_change_block = release[healthy_no_change:candidate_index]
+    assert '[ "$FORCE_RESTART" = false ]' in no_change_block
 
 
 def test_deploy_helpers_do_not_embed_credentials() -> None:

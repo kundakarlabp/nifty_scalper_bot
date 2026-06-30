@@ -412,7 +412,28 @@ class MarketDataManager:
         self._cached_open_position_symbols: set[str] = set()
         self._cached_selected_option_symbols: set[str] = set()
         self._cached_near_atm_symbols: set[str] = set()
+        self._cached_spot_future_symbols: set[str] = set()
         self._tick_consumer_task: asyncio.Task[None] | None = None
+        self._pending_tick_lock = threading.Lock()
+        self._pending_tick_queues: dict[str, Deque[dict[str, Any]]] = defaultdict(deque)
+        self._pending_far_ticks: dict[str, dict[str, Any]] = {}
+        self._tick_drain_scheduled = False
+        self._tick_drain_task: asyncio.Task[None] | None = None
+        self._tick_drain_stopping = False
+        self._tick_drain_batch_size = self._parse_int_env("MDM_TICK_DRAIN_BATCH", default=100, minimum=10)
+        self._tick_drain_budget_s = self._parse_float_env("MDM_TICK_DRAIN_BUDGET_SECONDS", default=0.008, minimum=0.001)
+        self._tick_drain_callbacks_scheduled = 0
+        self._tick_drain_callbacks_completed = 0
+        self._tick_pending_max_seen = 0
+        self._tick_coalesced_total = 0
+        self._tick_submitted_total = 0
+        self._tick_processed_total = 0
+        self._tick_dropped_total = 0
+        self._tick_coalesced_by_priority: dict[str, int] = defaultdict(int)
+        self._tick_dropped_by_reason: dict[str, int] = defaultdict(int)
+        self._tick_dropped_by_priority: dict[str, int] = defaultdict(int)
+        self._tick_max_active_drains = 0
+        self._tick_active_drains = 0
         # Fallback worker thread for when no asyncio loop is registered
         # (e.g. early boot, polling-only mode).  Isolates the WS thread
         # from any processing work — the WS callback must only enqueue.
@@ -1254,6 +1275,13 @@ class MarketDataManager:
                 self._ws.stop()
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("ws.stop() raised: %s", exc)
+        self._tick_drain_stopping = True
+        if self._tick_drain_task is not None:
+            try:
+                self._tick_drain_task.cancel()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("tick drain cancel raised: %s", exc)
+            self._tick_drain_task = None
         if self._tick_consumer_task is not None:
             try:
                 self._tick_consumer_task.cancel()
@@ -4906,10 +4934,7 @@ class MarketDataManager:
                 self._logger.info(
                     "MDM_TICK_CONSUMER_STARTED reason=%s",
                     reason,
-                    extra={
-                        "event": "MDM_TICK_CONSUMER_STARTED",
-                        "reason": reason,
-                    },
+                    extra={"event": "MDM_TICK_CONSUMER_STARTED", "reason": reason},
                 )
 
         if not loop.is_running():
@@ -4932,6 +4957,7 @@ class MarketDataManager:
         self._cached_open_position_symbols = set()
         self._cached_selected_option_symbols = set()
         self._cached_near_atm_symbols = set()
+        self._cached_spot_future_symbols = set()
 
     def set_position_manager(self, position_manager: Any | None) -> None:
         """Attach position manager for read-only tick-priority decisions only."""
@@ -5013,6 +5039,21 @@ class MarketDataManager:
             if str(symbol or "").strip().upper().endswith(("CE", "PE"))
         }
 
+    def _spot_future_context_symbol_set(self) -> set[str]:
+        """Return NIFTY spot and committed active-future context symbols protected from coalescing."""
+        basket = getattr(self, "_active_contract_basket", None)
+        symbols = {"NSE:NIFTY"}
+        spot = self._basket_value(basket, "spot_symbol", None) if basket is not None else None
+        if spot:
+            symbols.add(self._canonical_symbol(str(spot)))
+        future = self._basket_value(basket, "futures_symbol", None) if basket is not None else None
+        if not future:
+            future = self.get_active_nifty_future_symbol_cached()
+        future_canonical = canonical_nifty_future_symbol(future) if future else None
+        if future_canonical:
+            symbols.add(future_canonical)
+        return {symbol for symbol in symbols if symbol}
+
     def _resolve_tick_symbol_for_priority(self, tick: Mapping[str, Any]) -> str:
         """Resolve canonical tick symbol for priority/coalescing."""
         raw_symbol = str(tick.get("symbol") or "").strip()
@@ -5031,8 +5072,8 @@ class MarketDataManager:
                     return self._canonical_symbol(str(mapped))
         return "UNKNOWN"
 
-    def _get_priority_context_sets(self) -> tuple[set[str], set[str], set[str]]:
-        """Return cached open/selected/near-ATM symbol sets for hot tick path."""
+    def _get_priority_context_sets(self) -> tuple[set[str], set[str], set[str], set[str]]:
+        """Return cached open/selected/near-ATM/spot-future symbol sets for hot tick path."""
         now = time.monotonic()
         cached_at = float(getattr(self, "_priority_context_cached_at", 0.0) or 0.0)
         if cached_at > 0.0 and (now - cached_at) <= float(getattr(self, "_priority_context_ttl_s", 0.25) or 0.25):
@@ -5040,24 +5081,29 @@ class MarketDataManager:
                 set(getattr(self, "_cached_open_position_symbols", set()) or set()),
                 set(getattr(self, "_cached_selected_option_symbols", set()) or set()),
                 set(getattr(self, "_cached_near_atm_symbols", set()) or set()),
+                set(getattr(self, "_cached_spot_future_symbols", set()) or set()),
             )
         open_symbols = self._open_position_symbol_set()
         selected_symbols = self._selected_option_symbol_set()
         near_atm_symbols = self._near_atm_symbol_set()
+        spot_future_symbols = self._spot_future_context_symbol_set()
         self._cached_open_position_symbols = set(open_symbols)
         self._cached_selected_option_symbols = set(selected_symbols)
         self._cached_near_atm_symbols = set(near_atm_symbols)
+        self._cached_spot_future_symbols = set(spot_future_symbols)
         self._priority_context_cached_at = now
-        return set(open_symbols), set(selected_symbols), set(near_atm_symbols)
+        return set(open_symbols), set(selected_symbols), set(near_atm_symbols), set(spot_future_symbols)
 
     def _tick_priority(self, symbol: str) -> tuple[int, str]:
         """Return lower-is-higher priority for tick fan-out."""
         canonical = self._canonical_symbol(symbol) if symbol and symbol != "UNKNOWN" else symbol
-        open_symbols, selected_symbols, near_atm_symbols = self._get_priority_context_sets()
+        open_symbols, selected_symbols, near_atm_symbols, spot_future_symbols = self._get_priority_context_sets()
         if canonical in open_symbols:
             return 0, "open_position"
         if canonical in selected_symbols:
             return 1, "selected_option"
+        if canonical in spot_future_symbols:
+            return 2, "spot_future_context"
         if canonical in near_atm_symbols:
             return 2, "near_atm"
         return 3, "context_or_far"
@@ -5209,8 +5255,19 @@ class MarketDataManager:
 
 
     async def push_tick(self, raw_tick: dict[str, Any]) -> None:
-        """Queue one raw websocket tick for deterministic consumption without blocking WS callbacks."""
+        """Queue one raw websocket tick through the supported bounded ingress path."""
         payload = dict(raw_tick)
+        payload.setdefault("_enqueued_monotonic", time.monotonic())
+        loop = self._main_loop
+        if loop is None or not loop.is_running():
+            try:
+                loop = asyncio.get_running_loop()
+                self._main_loop = loop
+            except RuntimeError:
+                loop = None
+        if loop is not None and loop.is_running():
+            self._enqueue_latest_tick_for_drain(payload, loop)
+            return
         if not self._put_priority_tick_nowait(self._tick_queue, payload):
             self._tick_queue_dropped += 1
         self._emit_priority_summaries_if_due()
@@ -5233,10 +5290,7 @@ class MarketDataManager:
 
         loop = self._main_loop
         if loop is not None and loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(self.push_tick(tick_payload), loop)
-            except Exception as exc:  # pragma: no cover — defensive
-                self._logger.debug("WS enqueue via loop failed: %s", exc)
+            self._enqueue_latest_tick_for_drain(tick_payload, loop)
             return
 
         # No event loop available — ensure a worker thread exists so WS
@@ -5255,6 +5309,230 @@ class MarketDataManager:
             self._emit_priority_summaries_if_due()
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
+
+
+    def _resolve_tick_key_and_priority(self, tick: dict[str, Any]) -> tuple[str | None, int, str, str]:
+        """Resolve tick routing metadata before taking the pending-drain lock."""
+        if not isinstance(tick, dict):
+            return None, 99, "malformed", "not_mapping"
+        symbol = str(tick.get("symbol") or "").strip()
+        token_raw = tick.get("instrument_token") or tick.get("token")
+        if symbol:
+            canonical_symbol = self._canonical_symbol(symbol)
+        elif token_raw is not None:
+            try:
+                token = int(token_raw)
+            except (TypeError, ValueError):
+                return None, 99, "malformed", "bad_token"
+            with self._lock:
+                mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
+            if not mapped:
+                return None, 99, "unmapped", "unmapped_token"
+            canonical_symbol = self._canonical_symbol(str(mapped))
+            tick.setdefault("symbol", canonical_symbol)
+        else:
+            return None, 99, "malformed", "missing_symbol_token"
+        priority, bucket = self._tick_priority(canonical_symbol)
+        return canonical_symbol, priority, bucket, "ok"
+
+    def _pending_count_locked(self) -> int:
+        return sum(len(q) for q in self._pending_tick_queues.values()) + len(self._pending_far_ticks)
+
+    def _record_tick_drop(self, bucket: str, reason: str) -> None:
+        self._tick_dropped_total += 1
+        self._tick_dropped_by_reason[reason] += 1
+        self._tick_dropped_by_priority[bucket] += 1
+        self._tick_queue_priority_drops[bucket] += 1
+
+    def _schedule_tick_drain_locked(self, loop: asyncio.AbstractEventLoop) -> None:
+        if self._tick_drain_scheduled or self._tick_drain_stopping:
+            return
+        self._tick_drain_scheduled = True
+        self._tick_drain_callbacks_scheduled += 1
+
+        def _start() -> None:
+            task = getattr(self, "_tick_drain_task", None)
+            if task is not None and not task.done():
+                return
+            self._tick_drain_task = loop.create_task(self._drain_latest_ticks())
+
+        try:
+            loop.call_soon_threadsafe(_start)
+        except Exception as exc:  # pragma: no cover - loop closed race
+            self._tick_drain_scheduled = False
+            self._logger.warning("MDM_TICK_DRAIN_SCHEDULE_FAILED error=%r", exc)
+
+    def _enqueue_latest_tick_for_drain(self, tick: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+        key, priority, bucket, reason = self._resolve_tick_key_and_priority(tick)
+        with self._pending_tick_lock:
+            self._tick_submitted_total += 1
+            if key is None:
+                self._record_tick_drop(bucket, reason)
+                return
+            tick["_mdm_priority"] = priority
+            tick["_mdm_priority_bucket"] = bucket
+            if priority <= 2:
+                self._pending_tick_queues[key].append(tick)
+                self._bus_priority_counts[bucket] += 1
+                if priority == 0:
+                    self._log_open_position_priority_if_needed(key)
+            else:
+                if key in self._pending_far_ticks:
+                    self._tick_coalesced_total += 1
+                    self._tick_coalesced_by_priority[bucket] += 1
+                    self._tick_queue_priority_coalesced[bucket] += 1
+                self._pending_far_ticks[key] = tick
+                self._bus_priority_counts[bucket] += 1
+            pending = self._pending_count_locked()
+            if pending > self._tick_pending_max_seen:
+                self._tick_pending_max_seen = pending
+            while pending > self._tick_queue_maxsize and self._pending_far_ticks:
+                # Backpressure is absorbed by low-priority far/context ticks first.
+                # Protected open-position/selected/spot/futures ticks are not dropped
+                # here because they affect candles and protective exits.
+                _k, dropped = self._pending_far_ticks.popitem()
+                self._record_tick_drop(
+                    str(dropped.get("_mdm_priority_bucket") or "context_or_far"),
+                    "pending_limit_far",
+                )
+                pending = self._pending_count_locked()
+            self._schedule_tick_drain_locked(loop)
+
+    def _pop_pending_tick_batch(self) -> list[dict[str, Any]]:
+        batch: list[dict[str, Any]] = []
+        with self._pending_tick_lock:
+            if self._pending_count_locked() <= 0:
+                self._tick_drain_scheduled = False
+                return []
+            for _ in range(self._tick_drain_batch_size):
+                selected_key = None
+                selected_priority = 99
+                for key, queue in self._pending_tick_queues.items():
+                    if not queue:
+                        continue
+                    priority = int(queue[0].get("_mdm_priority", 99))
+                    if priority < selected_priority:
+                        selected_key = key
+                        selected_priority = priority
+                        if priority == 0:
+                            break
+                if selected_key is not None:
+                    queue = self._pending_tick_queues[selected_key]
+                    batch.append(queue.popleft())
+                    if not queue:
+                        self._pending_tick_queues.pop(selected_key, None)
+                    continue
+                if self._pending_far_ticks:
+                    _key, tick = self._pending_far_ticks.popitem()
+                    batch.append(tick)
+                    continue
+                break
+            return batch
+
+
+    def _requeue_unprocessed_ticks(self, ticks: list[dict[str, Any]]) -> None:
+        if not ticks:
+            return
+        resolved = [(raw, *self._resolve_tick_key_and_priority(raw)) for raw in reversed(ticks)]
+        with self._pending_tick_lock:
+            for raw, key, priority, bucket, reason in resolved:
+                if key is None:
+                    self._record_tick_drop(bucket, reason)
+                    continue
+                if int(raw.get("_mdm_priority", priority)) <= 2:
+                    self._pending_tick_queues[key].appendleft(raw)
+                else:
+                    self._pending_far_ticks[key] = raw
+
+    async def _drain_latest_ticks(self) -> None:
+        with self._pending_tick_lock:
+            self._tick_active_drains += 1
+            self._tick_max_active_drains = max(self._tick_max_active_drains, self._tick_active_drains)
+        try:
+            while True:
+                start = time.monotonic()
+                batch = self._pop_pending_tick_batch()
+                if not batch:
+                    return
+                for index, raw in enumerate(batch):
+                    try:
+                        self._process_queued_tick(raw)
+                        self._tick_processed_total += 1
+                    except asyncio.CancelledError:
+                        self._requeue_unprocessed_ticks([raw, *batch[index + 1:]])
+                        raise
+                    except Exception as exc:
+                        self._record_tick_drop(str(raw.get("_mdm_priority_bucket") or "unknown"), "process_error")
+                        self._logger.error("MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True)
+                    if time.monotonic() - start >= self._tick_drain_budget_s:
+                        self._requeue_unprocessed_ticks(batch[index + 1:])
+                        break
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            with self._pending_tick_lock:
+                self._tick_active_drains = max(0, self._tick_active_drains - 1)
+                has_more = self._pending_count_locked() > 0
+                self._tick_drain_scheduled = False
+                self._tick_drain_callbacks_completed += 1
+                loop = self._main_loop
+                if has_more and not self._tick_drain_stopping and loop is not None and loop.is_running():
+                    self._schedule_tick_drain_locked(loop)
+
+    async def drain_pending_ticks(self, *, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._pending_tick_lock:
+                pending = self._pending_count_locked()
+                task = self._tick_drain_task
+            if pending <= 0:
+                return
+            if task is not None and not task.done():
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    raise TimeoutError("tick drain did not finish before timeout")
+                await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+            else:
+                loop = self._main_loop
+                if loop is None or not loop.is_running():
+                    return
+                with self._pending_tick_lock:
+                    self._schedule_tick_drain_locked(loop)
+            await asyncio.sleep(0)
+
+    async def stop_tick_drain(self, *, timeout: float = 5.0) -> None:
+        self._tick_drain_stopping = True
+        task = getattr(self, "_tick_drain_task", None)
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            except TimeoutError:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        self._tick_drain_task = None
+
+    def get_tick_pressure_stats(self) -> dict[str, Any]:
+        with self._pending_tick_lock:
+            pending = self._pending_count_locked()
+            return {
+                "submitted_total": self._tick_submitted_total,
+                "processed_total": self._tick_processed_total,
+                "coalesced_total": self._tick_coalesced_total,
+                "dropped_total": self._tick_dropped_total,
+                "unexplained_loss": self._tick_submitted_total - self._tick_processed_total - self._tick_coalesced_total - self._tick_dropped_total - pending,
+                "pending_ticks": pending,
+                "pending_max_seen": self._tick_pending_max_seen,
+                "coalesced_by_priority": dict(self._tick_coalesced_by_priority),
+                "dropped_by_reason": dict(self._tick_dropped_by_reason),
+                "dropped_by_priority": dict(self._tick_dropped_by_priority),
+                "drain_callbacks_scheduled": self._tick_drain_callbacks_scheduled,
+                "drain_callbacks_completed": self._tick_drain_callbacks_completed,
+                "active_drains": self._tick_active_drains,
+                "max_active_drains": self._tick_max_active_drains,
+                "drain_scheduled": self._tick_drain_scheduled,
+            }
 
     def _ensure_tick_worker(self) -> None:
         """Start the fallback drain thread once, on first need."""

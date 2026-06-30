@@ -17,7 +17,7 @@ class _OM:
         return True
 
 
-async def test_reconcile_symbol_flat_drops_bracket() -> None:
+def test_reconcile_symbol_flat_drops_bracket() -> None:
     mgr = BracketManager(order_manager=_OM())
     sym = "NFO:NIFTY26JUN23950CE"
     mgr.attach_orphan_position(symbol=sym, side="BUY", qty=65, entry_price=216.35)
@@ -27,22 +27,22 @@ async def test_reconcile_symbol_flat_drops_bracket() -> None:
     assert mgr.is_symbol_managed(sym) is False
 
 
-async def test_reconcile_symbol_flat_noop_when_unmanaged() -> None:
+def test_reconcile_symbol_flat_noop_when_unmanaged() -> None:
     mgr = BracketManager(order_manager=_OM())
     assert mgr.reconcile_symbol_flat("NFO:NIFTY26JUN24000CE") == 0
 
 
-async def test_position_manager_flat_hook_fires_on_prune() -> None:
+def test_position_manager_flat_hook_fires_on_prune() -> None:
     from nifty_scalper_bot.execution.position_manager import PositionManager
     pm = PositionManager.__new__(PositionManager)
-    import threading, logging
+    import logging
+    import threading
     pm._lock = threading.RLock()
     pm._logger = logging.getLogger("test")
     pm._positions = {}
     fired = []
     pm.set_on_symbols_flat(lambda syms: fired.extend(syms))
     # seed a local position, then sync against an EMPTY broker snapshot (closed)
-    from nifty_scalper_bot.execution.position_manager import Position  # type: ignore
     # minimal stub position object
     class _P:
         symbol = "NFO:NIFTY26JUN23950CE"

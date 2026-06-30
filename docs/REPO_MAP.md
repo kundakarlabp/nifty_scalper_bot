@@ -160,3 +160,18 @@ Final validation remains:
 python -m compileall -q src dashboard
 python -m pytest -q
 ```
+
+## Runtime pressure ownership map
+
+- `data/market_data_manager.py`: owns bounded WebSocket tick ingress, protected-symbol ordering, low-priority coalescing/drop accounting, tick-pressure stats, and candle construction.
+- `data/data_hub.py`: owns read-facade quote state plus bounded snapshot persistence for quotes/orders/positions; it must not select contracts or own history.
+- `storage/hub_store.py`: owns JSON-safe conversion and SQLite snapshot storage.
+- `main.py`: owns lightweight `/livez`, structured `/health/trading` and `/trading/status`, and event-loop lag reporting.
+- `superlite_admin_core.py` and `dashboard/superlite_console.py`: own explicit admin/Streamlit status presentation and recovery from engine/admin timeouts.
+
+Source-to-test navigation:
+
+- Tick pressure: `tests/data/test_mdm_tick_coalescing.py`, `tests/test_mdm_event_loop_consumer.py`.
+- Snapshot persistence: `tests/data/test_datahub_bounded_persistence.py`.
+- Health/admin status: `tests/test_main_health_readiness.py`, `tests/dashboard/test_superlite_admin_core.py`.
+- Deployment wiring: `tests/architecture/test_lightsail_release_contract.py`, `tests/dashboard/test_console_smoke.py`.

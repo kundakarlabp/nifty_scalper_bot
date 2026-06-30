@@ -17,6 +17,7 @@ STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
 FORCE_RESTART=false
 AUTO_MODE=false
+SYSTEMD_ENTRYPOINT_MIGRATED=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -93,6 +94,45 @@ wait_for_service() {
   return 1
 }
 
+migrate_systemd_entrypoint() {
+  local unit_path="/etc/systemd/system/${SERVICE}.service"
+  local canonical_exec="ExecStart=${VENV}/bin/python -m uvicorn nifty_scalper_bot.deployment_main:app --host 0.0.0.0 --port ${PORT}"
+  if [ ! -f "$unit_path" ]; then
+    SYSTEMD_ENTRYPOINT_MIGRATED=false
+    return 0
+  fi
+  if grep -Fqx "$canonical_exec" "$unit_path" 2>/dev/null; then
+    SYSTEMD_ENTRYPOINT_MIGRATED=false
+    return 0
+  fi
+  if ! grep -q '^ExecStart=' "$unit_path" 2>/dev/null; then
+    log "WARNING: $unit_path has no ExecStart; skipping entrypoint migration"
+    SYSTEMD_ENTRYPOINT_MIGRATED=false
+    return 0
+  fi
+  sudo python3 - "$unit_path" "$canonical_exec" <<'PY_MIGRATE'
+import sys
+from pathlib import Path
+unit = Path(sys.argv[1])
+canonical = sys.argv[2]
+text = unit.read_text(encoding="utf-8")
+lines = text.splitlines()
+out = []
+changed = False
+for line in lines:
+    if line.startswith("ExecStart=") and not changed:
+        out.append(canonical)
+        changed = True
+    else:
+        out.append(line)
+if changed:
+    unit.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+PY_MIGRATE
+  sudo systemctl daemon-reload
+  SYSTEMD_ENTRYPOINT_MIGRATED=true
+  log "migrated $SERVICE ExecStart to deployment_main:app; EnvironmentFile preserved"
+}
+
 restart_streamlit() {
   if ! systemctl is-enabled --quiet "$STREAMLIT_SERVICE" 2>/dev/null; then
     return 0
@@ -102,7 +142,7 @@ restart_streamlit() {
   else
     # Existing hosts may not yet have the expanded sudoers rule. The process is
     # owned by ubuntu and Restart=always, so TERM safely asks systemd to relaunch it.
-    pkill -TERM -u "$(id -u)" -f 'streamlit run .*/dashboard/operations_console.py' 2>/dev/null || true
+    pkill -TERM -u "$(id -u)" -f 'streamlit run .*/dashboard/superlite_console.py' 2>/dev/null || true
   fi
   for _ in $(seq 1 20); do
     curl -fsS --max-time 2 "http://127.0.0.1:${STREAMLIT_PORT}/" >/dev/null 2>&1 && return 0
@@ -124,6 +164,10 @@ if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
   cp -p "$APP_DIR/.env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
 fi
 validate_environment
+migrate_systemd_entrypoint
+if [ "$SYSTEMD_ENTRYPOINT_MIGRATED" = true ]; then
+  FORCE_RESTART=true
+fi
 
 BEFORE="$(git rev-parse HEAD)"
 write_status fetching "checking origin/main from ${BEFORE:0:7}"
@@ -149,7 +193,7 @@ PYTHONPATH="$CANDIDATE/src" "$VENV/bin/python" -m compileall -q "$CANDIDATE/src"
 "$VENV/bin/python" -m py_compile \
   "$CANDIDATE/dashboard/event_buffer.py" \
   "$CANDIDATE/dashboard/log_export.py" \
-  "$CANDIDATE/dashboard/operations_console.py" || {
+  "$CANDIDATE/dashboard/superlite_console.py" || {
   write_status validation_failed "dashboard compile failed for ${AFTER:0:7}"; exit 1;
 }
 
@@ -163,6 +207,12 @@ TARGETED_TESTS=(
   tests/integration/test_canonical_bo_end_to_end.py
   tests/dashboard/test_event_buffer_truth.py
   tests/dashboard/test_log_export.py
+  tests/data/test_datahub_bounded_persistence.py
+  tests/data/test_mdm_tick_coalescing.py
+  tests/test_mdm_event_loop_consumer.py
+  tests/core/test_selected_option_exec_min_regression.py
+  tests/dashboard/test_superlite_admin_core.py
+  tests/execution/test_external_close_reconcile.py
 )
 EXISTING_TESTS=()
 for test_path in "${TARGETED_TESTS[@]}"; do

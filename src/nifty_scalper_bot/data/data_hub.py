@@ -31,7 +31,7 @@ import os
 import re
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from math import sqrt
 
@@ -173,6 +173,16 @@ class DataHub:
         self._event_bus = kwargs.get("event_bus")
         self._message_bus = kwargs.get("message_bus") or kwargs.get("event_bus")
         self._lock = threading.RLock()
+        self._quote_checkpoint_interval_s = float(os.getenv("DATAHUB_QUOTE_CHECKPOINT_INTERVAL_SECONDS", "15"))
+        self._quote_checkpoint_dirty = False
+        self._quote_checkpoint_deadline = 0.0
+        self._persist_cv = threading.Condition()
+        self._persist_queue: deque[tuple[str, dict[str, Any]]] = deque()
+        self._persist_latest: dict[str, dict[str, Any]] = {}
+        self._persist_inflight_kind: str | None = None
+        self._persist_closed = False
+        self._persist_worker = threading.Thread(target=self._persistence_worker_loop, name="datahub-persist", daemon=True)
+        self._persist_worker.start()
 
         self._ticks: Dict[int, Tick] = {}
         self._quotes: Dict[str, Tick] = {}
@@ -404,18 +414,139 @@ class DataHub:
             LOGGER.debug("%s symbol=%s", event, symbol, extra={"event": event, "symbol": symbol_key})
 
     def checkpoint(self) -> None:
+        """Schedule all snapshots; shutdown calls flush_and_close for synchronous drain."""
+        self.checkpoint_quotes(force=True)
+        self.checkpoint_orders()
+        self.checkpoint_positions()
+
+    def _save_snapshot(self, kind: str, payload: dict[str, Any]) -> None:
+        if self._store is None:
+            return
+        self._store.save_snapshot(kind, payload)
+
+    def _snapshot_quotes_unlocked(self) -> dict[str, Any]:
+        return {k: dict(v) for k, v in self._quotes.items()}
+
+    def _snapshot_orders_unlocked(self) -> dict[str, Any]:
+        return {k: dict(v) for k, v in self._orders.items()}
+
+    def _snapshot_positions_unlocked(self) -> dict[str, Any]:
+        return {str(k): dict(v) for k, v in self._positions.items()}
+
+    def _enqueue_snapshot(self, kind: str, payload: dict[str, Any]) -> None:
+        with self._persist_cv:
+            if self._persist_closed:
+                LOGGER.warning("DATAHUB_PERSIST_REJECTED_AFTER_CLOSE kind=%s", kind)
+                return
+            self._persist_latest[kind] = payload
+            if kind not in {queued_kind for queued_kind, _ in self._persist_queue}:
+                self._persist_queue.append((kind, payload))
+            self._persist_cv.notify()
+
+    def _persistence_worker_loop(self) -> None:
+        while True:
+            with self._persist_cv:
+                while not self._persist_queue and not self._persist_closed:
+                    self._persist_cv.wait(timeout=0.5)
+                if not self._persist_queue and self._persist_closed:
+                    return
+                kind, _payload = self._persist_queue.popleft()
+                payload = self._persist_latest.pop(kind, _payload)
+                self._persist_inflight_kind = kind
+            try:
+                self._save_snapshot(kind, payload)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "DATAHUB_SNAPSHOT_SAVE_FAILED kind=%s error=%r",
+                    kind,
+                    exc,
+                    extra={"event": "DATAHUB_SNAPSHOT_SAVE_FAILED", "kind": kind, "error": repr(exc)},
+                )
+                if kind == "quotes":
+                    with self._lock:
+                        self._quote_checkpoint_dirty = True
+                        self._quote_checkpoint_deadline = self._monotonic() + self._quote_checkpoint_interval_s
+            finally:
+                with self._persist_cv:
+                    self._persist_inflight_kind = None
+                    self._persist_cv.notify_all()
+
+    def _mark_quotes_dirty(self) -> None:
+        self._quote_checkpoint_dirty = True
+        if self._quote_checkpoint_deadline <= 0.0:
+            self._quote_checkpoint_deadline = self._monotonic() + self._quote_checkpoint_interval_s
+
+    def checkpoint_quotes(self, *, force: bool = False, wait: bool = False) -> None:
         if self._store is None:
             return
         with self._lock:
-            quotes = to_json_safe({k: dict(v) for k, v in self._quotes.items()})
-            orders = to_json_safe({k: dict(v) for k, v in self._orders.items()})
-            positions = to_json_safe({str(k): dict(v) for k, v in self._positions.items()})
-        try:
-            self._store.save_snapshot("quotes", quotes)
-            self._store.save_snapshot("orders", orders)
-            self._store.save_snapshot("positions", positions)
-        except Exception as exc:
-            LOGGER.warning("DATAHUB_CHECKPOINT_FAILED error=%r", exc)
+            if not force and not self._quote_checkpoint_dirty:
+                return
+            if not force and self._monotonic() < self._quote_checkpoint_deadline:
+                return
+            payload = self._snapshot_quotes_unlocked()
+            self._quote_checkpoint_dirty = False
+            self._quote_checkpoint_deadline = 0.0
+        self._enqueue_snapshot("quotes", payload)
+        if wait:
+            self.flush_persistence(timeout=10.0)
+
+    def checkpoint_orders(self) -> None:
+        if self._store is None:
+            return
+        with self._lock:
+            payload = self._snapshot_orders_unlocked()
+        self._enqueue_snapshot("orders", payload)
+
+    def checkpoint_positions(self) -> None:
+        if self._store is None:
+            return
+        with self._lock:
+            payload = self._snapshot_positions_unlocked()
+        self._enqueue_snapshot("positions", payload)
+
+    def flush_persistence(self, *, timeout: float = 10.0) -> bool:
+        deadline = self._monotonic() + max(0.0, timeout)
+        with self._persist_cv:
+            while self._persist_queue or self._persist_inflight_kind is not None:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    LOGGER.warning(
+                        "DATAHUB_PERSISTENCE_FLUSH_TIMEOUT pending=%d inflight=%s",
+                        len(self._persist_queue),
+                        self._persist_inflight_kind,
+                    )
+                    return False
+                self._persist_cv.wait(timeout=min(remaining, 0.25))
+        return True
+
+    def close(self) -> None:
+        self.checkpoint_quotes(force=True)
+        self.checkpoint_orders()
+        self.checkpoint_positions()
+        self.flush_persistence(timeout=float(os.getenv("DATAHUB_CLOSE_TIMEOUT_SECONDS", "10") or 10))
+        with self._persist_cv:
+            if self._persist_closed:
+                return
+            self._persist_closed = True
+            self._persist_cv.notify_all()
+        self._persist_worker.join(timeout=float(os.getenv("DATAHUB_CLOSE_TIMEOUT_SECONDS", "10") or 10))
+        if self._persist_worker.is_alive():
+            LOGGER.warning("DATAHUB_PERSISTENCE_WORKER_STOP_TIMEOUT")
+
+    shutdown = close
+
+    def quote_checkpoint_inflight(self) -> bool:
+        with self._persist_cv:
+            return self._persist_inflight_kind == "quotes"
+
+    def persistence_status(self) -> dict[str, Any]:
+        with self._persist_cv:
+            return {
+                "pending": len(self._persist_queue),
+                "inflight": self._persist_inflight_kind,
+                "closed": self._persist_closed,
+            }
 
     def reset_warmup(self) -> None:
         self._start_mono = self._monotonic()
@@ -588,7 +719,7 @@ class DataHub:
             new_positions[self._position_key(normalized)] = normalized
         with self._lock:
             self._positions = new_positions
-        self.checkpoint()
+        self.checkpoint_positions()
         LOGGER.debug("Positions replaced in DataHub | count=%s", len(self._positions))
 
     def get_positions(self) -> dict:
@@ -605,12 +736,12 @@ class DataHub:
             return
         with self._lock:
             self._positions[self._position_key(normalized)] = normalized
-        self.checkpoint()
+        self.checkpoint_positions()
 
     def clear_positions(self) -> None:
         with self._lock:
             self._positions = {}
-        self.checkpoint()
+        self.checkpoint_positions()
 
     def _normalize_order(self, order: dict[str, Any]) -> dict[str, Any] | None:
         order_id = str(order.get("order_id") or "").strip()
@@ -671,7 +802,7 @@ class DataHub:
                 callback(dict(normalized))
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error("order_listener_failed: %s", exc)
-        self.checkpoint()
+        self.checkpoint_orders()
 
     def upsert_order(self, order: dict[str, Any]) -> None:
         self.ingest_order_update(order)
@@ -1053,7 +1184,8 @@ class DataHub:
                 callback(dict(canonical_tick))
             except Exception as exc:  # noqa: BLE001
                 self._log_listener_failure(exc)
-        self.checkpoint()
+        self._mark_quotes_dirty()
+        self.checkpoint_quotes()
 
     def ingest_tick_sync(self, tick: Tick) -> None:
         self._ingest_tick_impl(tick)
