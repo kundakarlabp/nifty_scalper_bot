@@ -8,17 +8,18 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - optional dependency
+    pd = None
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - optional dependency
+    np = None
+
 
 def to_json_safe(value: Any) -> Any:
-    try:
-        import pandas as pd
-    except Exception:
-        pd = None
-
-    try:
-        import numpy as np
-    except Exception:
-        np = None
 
     if value is None or isinstance(value, (str, int, float, bool)):
         return value

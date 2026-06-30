@@ -63,3 +63,36 @@ def test_shadow_closed_market_is_still_operational(monkeypatch) -> None:
     assert status["operational_ready"] is True
     assert status["live_orders_armed"] is False
     assert status["operational_blockers"] == []
+
+
+def test_engine_http_timeout_is_explicit_and_structured_status_wins(monkeypatch) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    def fake_json(path: str):
+        if path == "/livez":
+            return {"_error": "ENGINE HTTP TIMEOUT"}
+        if path == "/health/trading":
+            return {
+                "selected": {"ce": "NFO:CE", "pe": "NFO:PE", "atm": 24000},
+                "blockers": [""],
+            }
+        return {"execution_mode": "LIVE"}
+
+    monkeypatch.setattr(core, "_http_json", fake_json)
+    monkeypatch.setattr(core, "_git_ref", lambda _ref: "abc1234")
+    monkeypatch.setattr(
+        core,
+        "bounded_logs",
+        lambda *_args, **_kwargs: (
+            "CONTRACT_SSOT_ATM_PAIR_SELECTED "
+            "selected_ce=OLD selected_pe=OLD atm_strike=1"
+        ),
+    )
+    monkeypatch.setattr(core, "_update_state", lambda: {"state": "current"})
+    core.STATUS_CACHE.update({"at": 0.0, "data": {}})
+
+    status = core.status_snapshot()
+    assert status["engine_http_responsive"] is False
+    assert status["engine_http_status"] == "ENGINE HTTP TIMEOUT"
+    assert status["mode"] == "LIVE"
+    assert status["selected"] == {"ce": "NFO:CE", "pe": "NFO:PE", "atm": 24000}

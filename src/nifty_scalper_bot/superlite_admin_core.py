@@ -111,8 +111,15 @@ def _http_json(path: str) -> dict[str, Any]:
         with urllib.request.urlopen(ENGINE_URL + path, timeout=1.2) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else {}
-    except (OSError, ValueError, urllib.error.URLError):
-        return {}
+    except TimeoutError:
+        return {"_error": "ENGINE HTTP TIMEOUT"}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return {"_error": "ENGINE HTTP TIMEOUT"}
+        return {"_error": "ENGINE HTTP UNRESPONSIVE"}
+    except (OSError, ValueError):
+        return {"_error": "ENGINE HTTP UNRESPONSIVE"}
 
 
 def _git_ref(ref: str) -> str:
@@ -162,6 +169,7 @@ def status_snapshot() -> dict[str, Any]:
     livez = _http_json("/livez")
     trading = _http_json("/health/trading")
     mode = _http_json("/trading/status")
+    engine_http_responsive = not any((payload or {}).get("_error") for payload in (livez, trading, mode))
     blockers = [str(value) for value in trading.get("blockers") or []]
     execution_only = {"not_live_mode", "market_closed", "exchange_holiday", "outside_session"}
     operational_blockers = [value for value in blockers if value not in execution_only]
@@ -173,17 +181,25 @@ def status_snapshot() -> dict[str, Any]:
             pair = {"ce": match.group(1), "pe": match.group(2), "atm": match.group(3)}
             break
     running, remote = _git_ref("HEAD"), _git_ref("origin/main")
+    structured_selected = trading.get("selected") or trading.get("selected_options") or mode.get("selected") or mode.get("selected_options") or {}
     data = {
-        "process_up": bool(livez),
-        "engine_loaded": bool(livez.get("bot_loaded")),
-        "operational_ready": bool(livez.get("bot_loaded")) and not operational_blockers,
-        "live_orders_armed": bool(trading.get("live_orders_armed")),
-        "mode": str(mode.get("execution_mode") or "UNKNOWN").upper(),
+        "service_process_known": True,
+        "process_up": bool(livez) and engine_http_responsive,
+        "engine_http_responsive": engine_http_responsive,
+        "engine_http_status": "RESPONSIVE" if engine_http_responsive else (livez.get("_error") or trading.get("_error") or mode.get("_error") or "ENGINE HTTP UNRESPONSIVE"),
+        "bot_loaded": bool(livez.get("bot_loaded")) if engine_http_responsive else None,
+        "engine_loaded": bool(livez.get("bot_loaded")) if engine_http_responsive else False,
+        "operational_ready": bool(livez.get("bot_loaded")) and engine_http_responsive and not operational_blockers,
+        "evaluation_ready": bool(trading.get("evaluation_ready") or trading.get("ready")) if engine_http_responsive else None,
+        "live_orders_armed": bool(trading.get("live_orders_armed")) if engine_http_responsive else False,
+        "broker_authenticated": (trading.get("broker") or {}).get("authenticated", (trading.get("broker") or {}).get("ready")) if engine_http_responsive else None,
+        "reconciled": (trading.get("reconciliation") or {}).get("completed") if engine_http_responsive else None,
+        "mode": str(mode.get("execution_mode") or ("ENGINE HTTP TIMEOUT" if not engine_http_responsive else "UNKNOWN")).upper(),
         "broker": trading.get("broker") or {},
         "reconciliation": trading.get("reconciliation") or {},
         "blockers": blockers,
         "operational_blockers": operational_blockers,
-        "selected": pair,
+        "selected": structured_selected or pair,
         "running": running,
         "remote": remote,
         "stale": running not in {"—", ""} and remote not in {"—", ""} and running != remote,

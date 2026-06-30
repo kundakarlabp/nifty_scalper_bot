@@ -7943,6 +7943,13 @@ async def ensure_symbol_runtime_history(
 
     if required_bars is not None or target_bars is not None:
         req_requested = int(required_bars) if required_bars is not None else policy.required_bars
+        if str(policy.role) == "selected_option" and req_requested < int(policy.required_bars):
+            LOGGER.info(
+                "HISTORY_REQUIRED_BARS_RAISED_TO_EXEC_MIN symbol=%s role=%s requested=%s effective=%s",
+                symbol, policy.role, req_requested, policy.required_bars,
+                extra={"event": "HISTORY_REQUIRED_BARS_RAISED_TO_EXEC_MIN", "symbol": symbol, "role": policy.role, "requested": req_requested, "effective": policy.required_bars},
+            )
+            req_requested = int(policy.required_bars)
         # A large required override without explicit deep mode is clamped to the
         # normal role cap (never a silent deep fetch).
         if not wants_deep and req_requested > policy.role_cap:

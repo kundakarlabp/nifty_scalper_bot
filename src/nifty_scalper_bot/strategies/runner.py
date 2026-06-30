@@ -7407,6 +7407,24 @@ class StrategyRunner:
             pe_symbol = self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
             ce_history = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
             pe_history = len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
+            def _mdm_count(sym):
+                try:
+                    return len(self._market_data.get_ohlc_bars(sym) or []) if sym else 0
+                except Exception:
+                    return 0
+            def _runner_count(sym):
+                try:
+                    return int(self.runner_history_count(sym)) if sym else 0
+                except Exception:
+                    return 0
+            ce_mdm_history = _mdm_count(ce_symbol)
+            pe_mdm_history = _mdm_count(pe_symbol)
+            ce_runner_history = _runner_count(ce_symbol)
+            pe_runner_history = _runner_count(pe_symbol)
+            required_execution_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+            primary_blocker = str(universe_reason or self._runtime_readiness_reason or "")
+            if not bool(self._runtime_live_orders_armed) and not primary_blocker:
+                primary_blocker = "startup_pipeline_incomplete"
             _last_tick_map = getattr(self._market_data, "_last_tick_time", {}) or {}
             ce_tick_age = int(max(0.0, (time.time() - float(_last_tick_map.get(ce_symbol, 0.0) or 0.0)) * 1000.0)) if ce_symbol and _last_tick_map.get(ce_symbol) else None
             pe_tick_age = int(max(0.0, (time.time() - float(_last_tick_map.get(pe_symbol, 0.0) or 0.0)) * 1000.0)) if pe_symbol and _last_tick_map.get(pe_symbol) else None
@@ -7420,9 +7438,23 @@ class StrategyRunner:
                 "trading_allowed": bool(self._runtime_evaluation_ready),
                 "diagnostic_allowed": True,
                 "live_orders_armed": bool(self._runtime_live_orders_armed),
-                "live_block_reason": universe_reason or self._runtime_readiness_reason,
+                "live_block_reason": primary_blocker,
+                "primary_blocker": primary_blocker,
+                "selected_ce": ce_symbol,
+                "selected_pe": pe_symbol,
                 "selected_ce_symbol": ce_symbol,
                 "selected_pe_symbol": pe_symbol,
+                "selected_ce_mdm_bars": ce_mdm_history,
+                "selected_ce_runner_bars": ce_runner_history,
+                "selected_ce_indicator_bars": ce_history,
+                "selected_pe_mdm_bars": pe_mdm_history,
+                "selected_pe_runner_bars": pe_runner_history,
+                "selected_pe_indicator_bars": pe_history,
+                "required_execution_bars": required_execution_bars,
+                "broker_authenticated": not bool(getattr(getattr(self, "_market_data", None), "broker_auth_invalid", False)),
+                "reconciled": getattr(self, "_position_reconciliation_completed", None),
+                "event_loop_lag_ms": round(float(getattr(self._market_data, "_event_loop_lag_seconds", 0.0) or 0.0) * 1000.0, 3),
+                "build_sha": os.getenv("GIT_COMMIT_SHA") or os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown",
                 "ce_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(ce_symbol, False)) if ce_symbol else False,
                 "pe_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(pe_symbol, False)) if pe_symbol else False,
                 "ce_quote_ready": bool(self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0)) if ce_symbol else False,
@@ -7446,7 +7478,7 @@ class StrategyRunner:
                 "live_universe_ready": universe_ready,
                 "order_manager_block_reason": order_manager_block_reason,
             }
-            _snap_reason = str(self._runtime_readiness_reason or "")
+            _snap_reason = primary_blocker
             _snap_state = (
                 bool(self._runtime_evaluation_ready),
                 bool(self._runtime_live_orders_armed),

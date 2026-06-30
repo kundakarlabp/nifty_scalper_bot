@@ -72,6 +72,7 @@ class HubStore:
     def append_wal(self, kind: str, entry_key: str, payload: MappingPayload) -> None:
         """Append an entry to the write-ahead log."""
 
+        # HubStore is the single JSON-safe serialization owner for snapshots.
         encoded = json.dumps(to_json_safe(payload), ensure_ascii=False, default=str)
         with self._lock:
             self._conn.execute(
@@ -108,6 +109,7 @@ class HubStore:
     def save_snapshot(self, kind: str, payload: MappingPayload) -> None:
         """Persist the latest snapshot for *kind*."""
 
+        # HubStore is the single JSON-safe serialization owner for snapshots.
         encoded = json.dumps(to_json_safe(payload), ensure_ascii=False, default=str)
         with self._lock:
             self._conn.execute(

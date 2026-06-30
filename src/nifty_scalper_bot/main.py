@@ -108,6 +108,39 @@ STARTUP_BUILD_SHA = (
     or "unknown"
 )
 _BOT_START_GUARD = False
+_EVENT_LOOP_LAG_MS = 0.0
+
+
+async def _event_loop_lag_monitor(app: FastAPI) -> None:
+    global _EVENT_LOOP_LAG_MS
+    threshold_ms = float(os.getenv("EVENT_LOOP_LAG_WARN_MS", "500") or 500)
+    interval_s = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "0.5") or 0.5)
+    last_warn = 0.0
+    loop = asyncio.get_running_loop()
+    expected = loop.time() + interval_s
+    while True:
+        await asyncio.sleep(interval_s)
+        now = loop.time()
+        lag_ms = max(0.0, (now - expected) * 1000.0)
+        _EVENT_LOOP_LAG_MS = lag_ms
+        expected = now + interval_s
+        if lag_ms >= threshold_ms and now - last_warn >= 30.0:
+            last_warn = now
+            pending = None
+            quote_inflight = None
+            try:
+                ctx = _latest_context()
+                mdm = getattr(ctx, "market_data_manager", None) if ctx is not None else None
+                stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
+                if callable(stats_fn):
+                    pending = (stats_fn() or {}).get("pending_ticks")
+                datahub = getattr(ctx, "data_hub", None) if ctx is not None else None
+                inflight_fn = getattr(datahub, "quote_checkpoint_inflight", None)
+                if callable(inflight_fn):
+                    quote_inflight = inflight_fn()
+            except Exception:
+                pass
+            LOG.warning("EVENT_LOOP_LAG_HIGH lag_ms=%.1f tick_pending=%s quote_checkpoint_inflight=%s", lag_ms, pending, quote_inflight)
 
 print(
     "🚀 PYTHON START: Initializing "
@@ -138,6 +171,39 @@ def _release_bot_start_guard() -> None:
 
     global _BOT_START_GUARD
     _BOT_START_GUARD = False
+_EVENT_LOOP_LAG_MS = 0.0
+
+
+async def _event_loop_lag_monitor(app: FastAPI) -> None:
+    global _EVENT_LOOP_LAG_MS
+    threshold_ms = float(os.getenv("EVENT_LOOP_LAG_WARN_MS", "500") or 500)
+    interval_s = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "0.5") or 0.5)
+    last_warn = 0.0
+    loop = asyncio.get_running_loop()
+    expected = loop.time() + interval_s
+    while True:
+        await asyncio.sleep(interval_s)
+        now = loop.time()
+        lag_ms = max(0.0, (now - expected) * 1000.0)
+        _EVENT_LOOP_LAG_MS = lag_ms
+        expected = now + interval_s
+        if lag_ms >= threshold_ms and now - last_warn >= 30.0:
+            last_warn = now
+            pending = None
+            quote_inflight = None
+            try:
+                ctx = _latest_context()
+                mdm = getattr(ctx, "market_data_manager", None) if ctx is not None else None
+                stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
+                if callable(stats_fn):
+                    pending = (stats_fn() or {}).get("pending_ticks")
+                datahub = getattr(ctx, "data_hub", None) if ctx is not None else None
+                inflight_fn = getattr(datahub, "quote_checkpoint_inflight", None)
+                if callable(inflight_fn):
+                    quote_inflight = inflight_fn()
+            except Exception:
+                pass
+            LOG.warning("EVENT_LOOP_LAG_HIGH lag_ms=%.1f tick_pending=%s quote_checkpoint_inflight=%s", lag_ms, pending, quote_inflight)
 
 
 async def _run_bot_background(
@@ -220,13 +286,15 @@ async def lifespan(app: FastAPI):
     app.state.startup_build_sha = STARTUP_BUILD_SHA
 
     task = safe_task(_run_bot_background(app))
+    lag_task = safe_task(_event_loop_lag_monitor(app))
     yield
 
     try:
-        if not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        for running_task in (task, lag_task):
+            if not running_task.done():
+                running_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await running_task
         if app.state.bot:
             await app.state.bot.stop()
     except Exception:
@@ -276,7 +344,12 @@ def health():
 
 @app.get("/livez")
 def livez():
-    return {"status": "alive", "bot_loaded": app.state.bot is not None}
+    return {
+        "status": "alive",
+        "bot_loaded": app.state.bot is not None,
+        "engine_http_responsive": True,
+        "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
+    }
 
 
 def _latest_context():
@@ -398,9 +471,10 @@ def health_trading():
     execution_ready = bool(
         getattr(decision, "execution_ready", getattr(ctx, "execution_armed", False))
     )
-    primary = getattr(decision, "primary_blocker", None) or (
-        blockers[0] if blockers else None
-    )
+    primary = getattr(decision, "primary_blocker", None) or (blockers[0] if blockers else None)
+    if not live_orders_armed and not primary:
+        primary = "startup_pipeline_incomplete"
+        blockers = blockers or [primary]
     return JSONResponse(
         status_code=200,
         content={
@@ -411,6 +485,7 @@ def health_trading():
             "blockers": blockers,
             "broker": {
                 "ready": bool(getattr(ctx, "broker_ready", False)),
+                "authenticated": not bool(getattr(ctx, "broker_auth_invalid", False)),
                 "auth_invalid": bool(getattr(ctx, "broker_auth_invalid", False)),
                 "balance_valid": bool(getattr(ctx, "broker_balance_valid", False)),
                 "balance": getattr(ctx, "last_valid_broker_balance", None),
@@ -496,6 +571,9 @@ def trading_status():
         "enable_live": enable_live,
         "execution_mode": exec_mode,
         "will_trade": enable_live and exec_mode.upper() == "LIVE",
+        "engine_http_responsive": True,
+        "bot_loaded": app.state.bot is not None,
+        "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
         "bot_status": (
             "running"
             if app.state.bot

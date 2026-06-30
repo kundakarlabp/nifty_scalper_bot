@@ -413,6 +413,15 @@ class MarketDataManager:
         self._cached_selected_option_symbols: set[str] = set()
         self._cached_near_atm_symbols: set[str] = set()
         self._tick_consumer_task: asyncio.Task[None] | None = None
+        self._pending_tick_lock = threading.Lock()
+        self._latest_pending_ticks: dict[str, dict[str, Any]] = {}
+        self._tick_drain_scheduled = False
+        self._tick_drain_batch_size = self._parse_int_env("MDM_TICK_DRAIN_BATCH", default=100, minimum=10)
+        self._tick_drain_budget_s = self._parse_float_env("MDM_TICK_DRAIN_BUDGET_SECONDS", default=0.008, minimum=0.001)
+        self._tick_drain_callbacks_scheduled = 0
+        self._tick_drain_callbacks_completed = 0
+        self._tick_pending_max_seen = 0
+        self._tick_coalesced_total = 0
         # Fallback worker thread for when no asyncio loop is registered
         # (e.g. early boot, polling-only mode).  Isolates the WS thread
         # from any processing work — the WS callback must only enqueue.
@@ -4902,12 +4911,13 @@ class MarketDataManager:
         def _start() -> None:
             task = getattr(self, "_tick_consumer_task", None)
             if task is None or task.done():
-                self._tick_consumer_task = loop.create_task(self._consume_ticks())
+                # Runtime WS ingress uses a coalesced latest-tick drain, not one queue item per tick.
+                self._tick_consumer_task = None
                 self._logger.info(
-                    "MDM_TICK_CONSUMER_STARTED reason=%s",
+                    "MDM_TICK_COALESCED_DRAIN_READY reason=%s",
                     reason,
                     extra={
-                        "event": "MDM_TICK_CONSUMER_STARTED",
+                        "event": "MDM_TICK_COALESCED_DRAIN_READY",
                         "reason": reason,
                     },
                 )
@@ -5233,10 +5243,7 @@ class MarketDataManager:
 
         loop = self._main_loop
         if loop is not None and loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(self.push_tick(tick_payload), loop)
-            except Exception as exc:  # pragma: no cover — defensive
-                self._logger.debug("WS enqueue via loop failed: %s", exc)
+            self._enqueue_latest_tick_for_drain(tick_payload, loop)
             return
 
         # No event loop available — ensure a worker thread exists so WS
@@ -5255,6 +5262,93 @@ class MarketDataManager:
             self._emit_priority_summaries_if_due()
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
+
+
+    def _pending_tick_key(self, tick: dict[str, Any]) -> str:
+        symbol = tick.get("symbol")
+        if symbol:
+            try:
+                return self._canonical_symbol(str(symbol))
+            except Exception:
+                return str(symbol)
+        token = tick.get("instrument_token") or tick.get("token")
+        return f"token:{token}" if token is not None else f"anon:{id(tick)}"
+
+    def _enqueue_latest_tick_for_drain(self, tick: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+        key = self._pending_tick_key(tick)
+        with self._pending_tick_lock:
+            if key in self._latest_pending_ticks:
+                self._tick_coalesced_total += 1
+            self._latest_pending_ticks[key] = tick
+            pending = len(self._latest_pending_ticks)
+            if pending > self._tick_pending_max_seen:
+                self._tick_pending_max_seen = pending
+            if self._tick_drain_scheduled:
+                return
+            self._tick_drain_scheduled = True
+            self._tick_drain_callbacks_scheduled += 1
+        try:
+            loop.call_soon_threadsafe(lambda: loop.create_task(self._drain_latest_ticks()))
+        except Exception as exc:  # pragma: no cover - defensive
+            with self._pending_tick_lock:
+                self._tick_drain_scheduled = False
+            self._logger.debug("WS coalesced drain schedule failed: %s", exc)
+
+    def _pop_pending_tick_batch(self) -> list[dict[str, Any]]:
+        batch: list[tuple[tuple[int, str], str, dict[str, Any]]] = []
+        with self._pending_tick_lock:
+            items = list(self._latest_pending_ticks.items())
+            if not items:
+                self._tick_drain_scheduled = False
+                return []
+            for key, tick in items:
+                symbol = tick.get("symbol")
+                if not symbol:
+                    token = tick.get("instrument_token") or tick.get("token")
+                    with self._lock:
+                        symbol = self._symbol_by_token.get(int(token)) if token is not None else None
+                priority = self._tick_priority(str(symbol or "UNKNOWN"))
+                batch.append((priority, key, tick))
+            batch.sort(key=lambda item: item[0])
+            selected = batch[: self._tick_drain_batch_size]
+            for _, key, _ in selected:
+                self._latest_pending_ticks.pop(key, None)
+            return [tick for _, _, tick in selected]
+
+    async def _drain_latest_ticks(self) -> None:
+        start = time.monotonic()
+        try:
+            while True:
+                for raw in self._pop_pending_tick_batch():
+                    try:
+                        self._process_queued_tick(raw)
+                    except Exception as exc:
+                        self._logger.error("MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True)
+                    if time.monotonic() - start >= self._tick_drain_budget_s:
+                        await asyncio.sleep(0)
+                        start = time.monotonic()
+                        break
+                with self._pending_tick_lock:
+                    has_more = bool(self._latest_pending_ticks)
+                    if not has_more:
+                        self._tick_drain_scheduled = False
+                        self._tick_drain_callbacks_completed += 1
+                        return
+                await asyncio.sleep(0)
+        finally:
+            with self._pending_tick_lock:
+                if self._latest_pending_ticks and not self._tick_drain_scheduled:
+                    self._tick_drain_scheduled = True
+
+    def get_tick_pressure_stats(self) -> dict[str, Any]:
+        with self._pending_tick_lock:
+            return {
+                "pending_ticks": len(self._latest_pending_ticks),
+                "pending_max_seen": self._tick_pending_max_seen,
+                "coalesced_total": self._tick_coalesced_total,
+                "drain_callbacks_scheduled": self._tick_drain_callbacks_scheduled,
+                "drain_callbacks_completed": self._tick_drain_callbacks_completed,
+            }
 
     def _ensure_tick_worker(self) -> None:
         """Start the fallback drain thread once, on first need."""
