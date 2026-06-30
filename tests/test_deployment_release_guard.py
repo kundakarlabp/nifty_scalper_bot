@@ -37,3 +37,20 @@ def test_railway_activates_only_release_verified_instance() -> None:
 
 def test_redundant_double_deploy_workflow_is_absent() -> None:
     assert not Path(".github/workflows/railway-redeploy.yml").exists()
+
+
+def test_compose_and_entrypoint_use_liveness_not_trading_readiness() -> None:
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    entrypoint = Path("deploy/scripts/entrypoint.sh").read_text(encoding="utf-8")
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "http://localhost:8080/releasez" in compose
+    assert "http://localhost:8080/readyz" not in compose
+    assert 'APP_MODULE="nifty_scalper_bot.deployment_main:app"' in entrypoint
+    assert 'curl -sf "http://localhost:$APP_PORT/releasez"' in entrypoint
+    assert 'curl -sf "http://localhost:$APP_PORT/livez"' in entrypoint
+    assert 'curl -sf "http://localhost:$APP_PORT/readyz"' not in entrypoint
+    assert "${PORT:-8080}" in dockerfile
+    assert '"--port", "8080"' in compose
+    assert "nifty_scalper_bot.app" not in compose
+    assert "nifty_scalper_bot.app" not in entrypoint

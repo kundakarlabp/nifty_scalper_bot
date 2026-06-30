@@ -48,20 +48,20 @@ async def test_ce_cold_blocker_present() -> None:
     ctx = _ctx(10, 60)
     r = app.compute_selected_option_history_readiness(ctx, "NFO:NIFTY2661623300CE", "NFO:NIFTY2661623300PE")
     assert r.both_ready is False
-    assert r.blocker == "selected_option_history_cold"
+    assert r.blocker == "selected_ce_history_cold"
 
 
 async def test_pe_cold_blocker_present() -> None:
     ctx = _ctx(60, 5)
     r = app.compute_selected_option_history_readiness(ctx, "NFO:NIFTY2661623300CE", "NFO:NIFTY2661623300PE")
     assert r.both_ready is False
-    assert r.blocker == "selected_option_history_cold"
+    assert r.blocker == "selected_pe_history_cold"
 
 
 async def test_blocker_clears_after_counts_ready() -> None:
     cold = _ctx(10, 60)
     r1 = app.compute_selected_option_history_readiness(cold, "NFO:NIFTY2661623300CE", "NFO:NIFTY2661623300PE")
-    assert r1.blocker == "selected_option_history_cold"
+    assert r1.blocker == "selected_ce_history_cold"
     warm = _ctx(60, 60)
     r2 = app.compute_selected_option_history_readiness(warm, "NFO:NIFTY2661623300CE", "NFO:NIFTY2661623300PE")
     # Fresh computation, no stale carry-forward.

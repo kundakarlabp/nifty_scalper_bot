@@ -1,5 +1,8 @@
+import asyncio
 import json
 from types import SimpleNamespace
+
+import pytest
 
 from nifty_scalper_bot import main
 
@@ -95,3 +98,148 @@ def test_health_trading_exposes_canonical_context():
     assert body["broker"]["balance"] == 16_436.10
     assert body["reconciliation"]["failed"] is True
     assert body["reconciliation"]["unprotected_positions"] == ["NFO:NIFTY26MAY23750CE"]
+
+
+class _DummyBot:
+    def __init__(self, *, event=None, fail: Exception | None = None) -> None:
+        self.event = event
+        self.fail = fail
+        self.started = False
+        self.stopped = False
+
+    async def start(self) -> None:
+        self.started = True
+        if self.fail is not None:
+            raise self.fail
+        if self.event is not None:
+            await self.event.wait()
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+def _app_state() -> SimpleNamespace:
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            bot=None,
+            bot_error=None,
+            bot_started=False,
+            bot_starting=False,
+        )
+    )
+
+
+async def test_duplicate_startup_guard_blocks_simultaneous_start(monkeypatch):
+    main._release_bot_start_guard()
+    event = asyncio.Event()
+    created: list[_DummyBot] = []
+
+    def factory() -> _DummyBot:
+        bot = _DummyBot(event=event)
+        created.append(bot)
+        return bot
+
+    app1 = _app_state()
+    app2 = _app_state()
+    first = asyncio.create_task(
+        main._run_bot_background(app1, startup_delay=0, app_factory=factory)
+    )
+    await asyncio.sleep(0)
+    second = asyncio.create_task(
+        main._run_bot_background(app2, startup_delay=0, app_factory=factory)
+    )
+    await asyncio.sleep(0.01)
+
+    assert len(created) == 1
+    assert app2.state.bot is None
+
+    event.set()
+    await first
+    await second
+    assert main._BOT_START_GUARD is False
+
+
+async def test_startup_guard_allows_later_start_after_exit():
+    main._release_bot_start_guard()
+    created = 0
+
+    def factory() -> _DummyBot:
+        nonlocal created
+        created += 1
+        return _DummyBot()
+
+    await main._run_bot_background(_app_state(), startup_delay=0, app_factory=factory)
+    await main._run_bot_background(_app_state(), startup_delay=0, app_factory=factory)
+
+    assert created == 2
+    assert main._BOT_START_GUARD is False
+
+
+async def test_startup_failure_resets_guard():
+    main._release_bot_start_guard()
+
+    def fail_factory() -> _DummyBot:
+        return _DummyBot(fail=RuntimeError("boom"))
+
+    app = _app_state()
+    await main._run_bot_background(app, startup_delay=0, app_factory=fail_factory)
+
+    assert app.state.bot_error == "boom"
+    assert main._BOT_START_GUARD is False
+
+    later = _app_state()
+    await main._run_bot_background(
+        later, startup_delay=0, app_factory=lambda: _DummyBot()
+    )
+    assert later.state.bot_started is True
+
+
+async def test_startup_cancellation_resets_guard():
+    main._release_bot_start_guard()
+    event = asyncio.Event()
+    task = asyncio.create_task(
+        main._run_bot_background(
+            _app_state(), startup_delay=0, app_factory=lambda: _DummyBot(event=event)
+        )
+    )
+    await asyncio.sleep(0.01)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert main._BOT_START_GUARD is False
+
+
+async def test_lifespan_restart_not_permanently_blocked_after_shutdown(monkeypatch):
+    main._release_bot_start_guard()
+    started = 0
+
+    async def fake_runner(app):
+        nonlocal started
+        if not main._try_acquire_bot_start_guard():
+            return
+        try:
+            started += 1
+        finally:
+            main._release_bot_start_guard()
+
+    monkeypatch.setattr(main, "_run_bot_background", fake_runner)
+
+    async with main.lifespan(_app_state()):
+        await asyncio.sleep(0)
+    async with main.lifespan(_app_state()):
+        await asyncio.sleep(0)
+
+    assert started == 2
+    assert main._BOT_START_GUARD is False
+
+
+def test_livez_returns_200_while_readyz_can_be_503() -> None:
+    setup_function()
+
+    live = main.livez()
+    ready = main.readyz()
+
+    assert live["status"] == "alive"
+    assert ready.status_code == 503
