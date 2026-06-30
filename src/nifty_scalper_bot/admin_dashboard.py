@@ -305,7 +305,7 @@ def dashboard(request: Request) -> HTMLResponse:
     for label, key, sec in FIELDS:
         v = env.get(key, "")
         shown = ("••••••••" if v else "") if sec else v
-        rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{shown}" placeholder="(unchanged)">'
+        rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{html.escape(str(shown))}" placeholder="(unchanged)">'
     body = f"""{_topbar(live_on)}<div class=wrap>{_flash(request)}
     <div class=card><h2>Live Trading</h2>
     <p>{'Placing REAL orders with REAL money.' if live_on else 'Analysing only — no real orders. Turn on when ready.'}</p>{toggle}</div>
