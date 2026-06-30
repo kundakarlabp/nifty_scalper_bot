@@ -102,7 +102,7 @@ restart_streamlit() {
   else
     # Existing hosts may not yet have the expanded sudoers rule. The process is
     # owned by ubuntu and Restart=always, so TERM safely asks systemd to relaunch it.
-    pkill -TERM -u "$(id -u)" -f 'streamlit run .*/dashboard/operations_console.py' 2>/dev/null || true
+    pkill -TERM -u "$(id -u)" -f 'streamlit run .*/dashboard/superlite_console.py' 2>/dev/null || true
   fi
   for _ in $(seq 1 20); do
     curl -fsS --max-time 2 "http://127.0.0.1:${STREAMLIT_PORT}/" >/dev/null 2>&1 && return 0
@@ -149,7 +149,7 @@ PYTHONPATH="$CANDIDATE/src" "$VENV/bin/python" -m compileall -q "$CANDIDATE/src"
 "$VENV/bin/python" -m py_compile \
   "$CANDIDATE/dashboard/event_buffer.py" \
   "$CANDIDATE/dashboard/log_export.py" \
-  "$CANDIDATE/dashboard/operations_console.py" || {
+  "$CANDIDATE/dashboard/superlite_console.py" || {
   write_status validation_failed "dashboard compile failed for ${AFTER:0:7}"; exit 1;
 }
 
@@ -163,6 +163,12 @@ TARGETED_TESTS=(
   tests/integration/test_canonical_bo_end_to_end.py
   tests/dashboard/test_event_buffer_truth.py
   tests/dashboard/test_log_export.py
+  tests/data/test_datahub_bounded_persistence.py
+  tests/data/test_mdm_tick_coalescing.py
+  tests/test_mdm_event_loop_consumer.py
+  tests/core/test_selected_option_exec_min_regression.py
+  tests/dashboard/test_superlite_admin_core.py
+  tests/execution/test_external_close_reconcile.py
 )
 EXISTING_TESTS=()
 for test_path in "${TARGETED_TESTS[@]}"; do

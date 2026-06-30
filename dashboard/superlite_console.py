@@ -38,8 +38,10 @@ def _get_json(path: str) -> dict:
         with urllib.request.urlopen(ADMIN_API + path, timeout=1.4) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else {}
+    except TimeoutError:
+        return {"engine_http_status": "ADMIN API UNREACHABLE"}
     except (OSError, ValueError, urllib.error.URLError):
-        return {}
+        return {"engine_http_status": "ADMIN API UNREACHABLE"}
 
 
 @st.cache_data(ttl=6, show_spinner=False)
@@ -118,13 +120,25 @@ def render() -> None:
     recon = status.get("reconciliation") or {}
     selected = status.get("selected") or {}
     pnl_total, closed = pnl_summary(rows_all)
+    primary = status.get("primary_blocker") or next((b for b in status.get("blockers", []) if b), "—")
+    engine_status = status.get("engine_http_status") or ("ENGINE UP" if status.get("engine_loaded") else "BOT NOT LOADED")
+    if status.get("engine_http_responsive") is False:
+        engine_status = status.get("engine_http_status") or "ENGINE HTTP UNRESPONSIVE"
+    elif status.get("engine_loaded") and status.get("operational_ready"):
+        engine_status = "ENGINE UP, TRADING READY"
+    elif status.get("engine_loaded"):
+        engine_status = "ENGINE UP, TRADING BLOCKED"
+    broker_state = status.get("broker_authenticated")
+    broker_label = "YES/READY" if broker_state in {True, "authenticated"} else ("NO/FAILED" if broker_state in {False, "invalid"} else "UNKNOWN")
+    recon_state = status.get("reconciled")
+    recon_label = "YES/READY" if recon_state is True else ("NO/FAILED" if recon.get("failed") else "UNKNOWN")
     st.markdown(
         '<div class="cards">'
-        + card("Engine", "UP" if status.get("engine_loaded") else "DOWN", "ok" if status.get("engine_loaded") else "bad")
-        + card("Operational", "READY" if status.get("operational_ready") else "BLOCKED", "ok" if status.get("operational_ready") else "warn")
+        + card("Engine", engine_status, "ok" if status.get("operational_ready") else "warn")
+        + card("Primary blocker", primary, "warn" if primary != "—" else "ok")
         + card("Mode", status.get("mode") or "UNKNOWN", "ok" if status.get("live_orders_armed") else "warn")
-        + card("Broker", "READY" if broker.get("ready") else "UNKNOWN", "ok" if broker.get("ready") else "warn")
-        + card("Reconciled", "YES" if recon.get("completed") else "NO", "ok" if recon.get("completed") else "warn")
+        + card("Broker", broker_label, "ok" if broker_label.startswith("YES") else "warn")
+        + card("Reconciled", recon_label, "ok" if recon_label.startswith("YES") else "warn")
         + '</div><div class="cards">'
         + card("Visible events", len(rows))
         + card("Trade events", sum(row.get("type") == "TRADE" for row in rows))

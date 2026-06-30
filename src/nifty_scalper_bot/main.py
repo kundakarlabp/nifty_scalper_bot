@@ -108,40 +108,6 @@ STARTUP_BUILD_SHA = (
     or "unknown"
 )
 _BOT_START_GUARD = False
-_EVENT_LOOP_LAG_MS = 0.0
-
-
-async def _event_loop_lag_monitor(app: FastAPI) -> None:
-    global _EVENT_LOOP_LAG_MS
-    threshold_ms = float(os.getenv("EVENT_LOOP_LAG_WARN_MS", "500") or 500)
-    interval_s = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "0.5") or 0.5)
-    last_warn = 0.0
-    loop = asyncio.get_running_loop()
-    expected = loop.time() + interval_s
-    while True:
-        await asyncio.sleep(interval_s)
-        now = loop.time()
-        lag_ms = max(0.0, (now - expected) * 1000.0)
-        _EVENT_LOOP_LAG_MS = lag_ms
-        expected = now + interval_s
-        if lag_ms >= threshold_ms and now - last_warn >= 30.0:
-            last_warn = now
-            pending = None
-            quote_inflight = None
-            try:
-                ctx = _latest_context()
-                mdm = getattr(ctx, "market_data_manager", None) if ctx is not None else None
-                stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
-                if callable(stats_fn):
-                    pending = (stats_fn() or {}).get("pending_ticks")
-                datahub = getattr(ctx, "data_hub", None) if ctx is not None else None
-                inflight_fn = getattr(datahub, "quote_checkpoint_inflight", None)
-                if callable(inflight_fn):
-                    quote_inflight = inflight_fn()
-            except Exception:
-                pass
-            LOG.warning("EVENT_LOOP_LAG_HIGH lag_ms=%.1f tick_pending=%s quote_checkpoint_inflight=%s", lag_ms, pending, quote_inflight)
-
 print(
     "🚀 PYTHON START: Initializing "
     f"startup_instance={STARTUP_INSTANCE_ID} "
@@ -174,7 +140,7 @@ def _release_bot_start_guard() -> None:
 _EVENT_LOOP_LAG_MS = 0.0
 
 
-async def _event_loop_lag_monitor(app: FastAPI) -> None:
+async def _event_loop_lag_monitor() -> None:
     global _EVENT_LOOP_LAG_MS
     threshold_ms = float(os.getenv("EVENT_LOOP_LAG_WARN_MS", "500") or 500)
     interval_s = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "0.5") or 0.5)
@@ -190,20 +156,30 @@ async def _event_loop_lag_monitor(app: FastAPI) -> None:
         if lag_ms >= threshold_ms and now - last_warn >= 30.0:
             last_warn = now
             pending = None
+            drain_state = None
             quote_inflight = None
+            persistence_state = None
             try:
                 ctx = _latest_context()
                 mdm = getattr(ctx, "market_data_manager", None) if ctx is not None else None
                 stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
                 if callable(stats_fn):
-                    pending = (stats_fn() or {}).get("pending_ticks")
+                    stats = stats_fn() or {}
+                    pending = stats.get("pending_ticks")
+                    drain_state = {
+                        "scheduled": stats.get("drain_scheduled"),
+                        "active": stats.get("active_drains"),
+                    }
                 datahub = getattr(ctx, "data_hub", None) if ctx is not None else None
                 inflight_fn = getattr(datahub, "quote_checkpoint_inflight", None)
                 if callable(inflight_fn):
                     quote_inflight = inflight_fn()
+                status_fn = getattr(datahub, "persistence_status", None)
+                if callable(status_fn):
+                    persistence_state = status_fn()
             except Exception:
                 pass
-            LOG.warning("EVENT_LOOP_LAG_HIGH lag_ms=%.1f tick_pending=%s quote_checkpoint_inflight=%s", lag_ms, pending, quote_inflight)
+            LOG.warning("EVENT_LOOP_LAG_HIGH lag_ms=%.1f tick_pending=%s drain_state=%s quote_checkpoint_inflight=%s persistence_state=%s", lag_ms, pending, drain_state, quote_inflight, persistence_state)
 
 
 async def _run_bot_background(
@@ -286,7 +262,7 @@ async def lifespan(app: FastAPI):
     app.state.startup_build_sha = STARTUP_BUILD_SHA
 
     task = safe_task(_run_bot_background(app))
-    lag_task = safe_task(_event_loop_lag_monitor(app))
+    lag_task = safe_task(_event_loop_lag_monitor())
     yield
 
     try:
@@ -395,6 +371,62 @@ _NON_OPERATIONAL_READYZ_BLOCKERS = {
 }
 
 
+def _symbol_bar_counts(ctx, symbol):  # noqa: ANN001
+    if not symbol:
+        return {"mdm": 0, "runner": 0, "indicator": 0}
+    mdm = getattr(ctx, "market_data_manager", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    try:
+        mdm_count = int(mdm.ohlc_count(symbol)) if callable(getattr(mdm, "ohlc_count", None)) else len(mdm.get_ohlc_bars(symbol) or [])
+    except Exception:
+        mdm_count = 0
+    try:
+        runner_count = int(runner.runner_history_count(symbol)) if callable(getattr(runner, "runner_history_count", None)) else 0
+    except Exception:
+        runner_count = 0
+    try:
+        indicator_count = int(runner.indicator_history_count(symbol)) if callable(getattr(runner, "indicator_history_count", None)) else 0
+    except Exception:
+        indicator_count = 0
+    return {"mdm": mdm_count, "runner": runner_count, "indicator": indicator_count}
+
+
+def _structured_runtime_status(ctx):  # noqa: ANN001
+    basket = getattr(ctx, "active_contract_basket", None) or {}
+    def _get(key):
+        return basket.get(key) if isinstance(basket, dict) else getattr(basket, key, None)
+    selected_ce = getattr(ctx, "selected_ce", None) or _get("selected_ce")
+    selected_pe = getattr(ctx, "selected_pe", None) or _get("selected_pe")
+    selected = {"atm": getattr(ctx, "atm_strike", None) or _get("atm_strike"), "ce": selected_ce, "pe": selected_pe}
+    required = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+    mdm = getattr(ctx, "market_data_manager", None)
+    stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
+    tick_pressure = stats_fn() if callable(stats_fn) else {}
+    auth_state = "unknown"
+    if bool(getattr(ctx, "broker_auth_verified", False) or getattr(ctx, "broker_authenticated", False)):
+        auth_state = "authenticated"
+    if bool(getattr(ctx, "broker_auth_invalid", False) or getattr(ctx, "broker_session_invalid", False)):
+        auth_state = "invalid"
+    return {
+        "selected": selected,
+        "history": {
+            "required_execution_bars": required,
+            "ce": _symbol_bar_counts(ctx, selected_ce),
+            "pe": _symbol_bar_counts(ctx, selected_pe),
+        },
+        "state": {
+            "startup_ready": bool(getattr(ctx, "startup_ready", getattr(ctx, "data_hard_ready", False))),
+            "data_hard_ready": bool(getattr(ctx, "data_hard_ready", False)),
+            "evaluation_ready": bool(getattr(ctx, "evaluation_ready", False)),
+            "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False)),
+        },
+        "broker_authentication": auth_state,
+        "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
+        "tick_pressure": tick_pressure,
+        "build_sha": STARTUP_BUILD_SHA,
+    }
+
+
 @app.get("/readyz")
 def readyz():
     if app.state.bot_error:
@@ -482,7 +514,8 @@ def health_trading():
             "ready": execution_ready and not blockers,
             "live_orders_armed": live_orders_armed and not blockers,
             "primary_blocker": primary,
-            "blockers": blockers,
+            "blockers": [b for b in blockers if b],
+            **_structured_runtime_status(ctx),
             "broker": {
                 "ready": bool(getattr(ctx, "broker_ready", False)),
                 "authenticated": not bool(getattr(ctx, "broker_auth_invalid", False)),
@@ -567,6 +600,8 @@ def trading_status():
     enable_live = os.getenv("ENABLE_LIVE", "false").lower() == "true"
     exec_mode = os.getenv("EXECUTION_MODE", "SHADOW")
 
+    ctx = _latest_context()
+    structured = _structured_runtime_status(ctx) if ctx is not None else {}
     return {
         "enable_live": enable_live,
         "execution_mode": exec_mode,
@@ -574,6 +609,7 @@ def trading_status():
         "engine_http_responsive": True,
         "bot_loaded": app.state.bot is not None,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
+        **structured,
         "bot_status": (
             "running"
             if app.state.bot

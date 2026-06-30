@@ -157,9 +157,34 @@ def bounded_logs(lines: int = 400, contains: str = "") -> str:
 def _update_state() -> dict[str, Any]:
     try:
         value = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
+        data = value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
+    transient = {"fetching", "validating", "deploying", "restarting"}
+    state = str(data.get("state") or "").lower()
+    if state in transient:
+        timeout = float(os.getenv("BOT_UPDATER_STALE_TIMEOUT_SECONDS", "900") or 900)
+        raw_ts = data.get("updated_ts") or data.get("ts") or data.get("timestamp")
+        try:
+            age = time.time() - float(raw_ts)
+        except (TypeError, ValueError):
+            age = timeout + 1
+        if age > timeout:
+            stale = dict(data)
+            stale["previous_state"] = data.get("state")
+            stale["state"] = "stale_interrupted"
+            stale["stale"] = True
+            stale["stale_after_seconds"] = timeout
+            return stale
+    return data
+
+
+def _service_process_known() -> bool | None:
+    try:
+        result = subprocess.run(["systemctl", "is-active", "--quiet", ENGINE_SERVICE], timeout=1.0, check=False)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def status_snapshot() -> dict[str, Any]:
@@ -170,7 +195,7 @@ def status_snapshot() -> dict[str, Any]:
     trading = _http_json("/health/trading")
     mode = _http_json("/trading/status")
     engine_http_responsive = not any((payload or {}).get("_error") for payload in (livez, trading, mode))
-    blockers = [str(value) for value in trading.get("blockers") or []]
+    blockers = [str(value) for value in trading.get("blockers") or [] if str(value).strip()]
     execution_only = {"not_live_mode", "market_closed", "exchange_holiday", "outside_session"}
     operational_blockers = [value for value in blockers if value not in execution_only]
     recent = bounded_logs(180)
@@ -183,7 +208,7 @@ def status_snapshot() -> dict[str, Any]:
     running, remote = _git_ref("HEAD"), _git_ref("origin/main")
     structured_selected = trading.get("selected") or trading.get("selected_options") or mode.get("selected") or mode.get("selected_options") or {}
     data = {
-        "service_process_known": True,
+        "service_process_known": _service_process_known(),
         "process_up": bool(livez) and engine_http_responsive,
         "engine_http_responsive": engine_http_responsive,
         "engine_http_status": "RESPONSIVE" if engine_http_responsive else (livez.get("_error") or trading.get("_error") or mode.get("_error") or "ENGINE HTTP UNRESPONSIVE"),
@@ -197,6 +222,7 @@ def status_snapshot() -> dict[str, Any]:
         "mode": str(mode.get("execution_mode") or ("ENGINE HTTP TIMEOUT" if not engine_http_responsive else "UNKNOWN")).upper(),
         "broker": trading.get("broker") or {},
         "reconciliation": trading.get("reconciliation") or {},
+        "primary_blocker": trading.get("primary_blocker") or (blockers[0] if blockers else None),
         "blockers": blockers,
         "operational_blockers": operational_blockers,
         "selected": structured_selected or pair,

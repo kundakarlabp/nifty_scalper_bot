@@ -64,3 +64,33 @@ def test_datahub_orders_and_positions_persist_immediately_and_shutdown_flushes_q
     assert "NFO:NIFTY26JUN24000CE" in latest["quotes"]
     assert "o1" in latest["orders"]
     assert latest["positions"]
+
+
+def test_quote_checkpoint_failure_marks_dirty_for_retry(caplog):
+    class FlakyStore(Store):
+        def __init__(self):
+            super().__init__()
+            self.fail = True
+        def save_snapshot(self, kind, payload):
+            if kind == "quotes" and self.fail:
+                self.fail = False
+                raise RuntimeError("boom")
+            return super().save_snapshot(kind, payload)
+
+    store = FlakyStore()
+    hub = DataHub(MDM(), store=store)
+    hub.ingest_tick_sync(_tick(1))
+    hub.checkpoint_quotes(force=True, wait=True)
+    assert hub._quote_checkpoint_dirty is True
+    hub.checkpoint_quotes(force=True, wait=True)
+    assert any(kind == "quotes" for kind, _ in store.saved)
+    hub.close()
+
+
+def test_datahub_close_is_idempotent():
+    store = Store()
+    hub = DataHub(MDM(), store=store)
+    hub.ingest_tick_sync(_tick(2))
+    hub.close()
+    hub.close()
+    assert any(kind == "quotes" for kind, _ in store.saved)

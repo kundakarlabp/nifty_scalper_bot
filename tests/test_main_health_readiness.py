@@ -243,3 +243,36 @@ def test_livez_returns_200_while_readyz_can_be_503() -> None:
 
     assert live["status"] == "alive"
     assert ready.status_code == 503
+
+
+def test_health_trading_structured_status_and_unknown_auth():
+    class MDM:
+        def get_tick_pressure_stats(self):
+            return {"pending_ticks": 2, "active_drains": 0}
+        def get_ohlc_bars(self, symbol):
+            return [{}] * 30
+    class Runner:
+        def runner_history_count(self, symbol): return 30
+        def indicator_history_count(self, symbol): return 30
+    ctx = _ctx(
+        blockers=(),
+        primary_blocker=None,
+        execution_ready=True,
+        live_orders_armed=False,
+        broker_ready=True,
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+        selected_ce="NFO:CE",
+        selected_pe="NFO:PE",
+        atm_strike=24000,
+        market_data_manager=MDM(),
+        strategy_runner=Runner(),
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+    response = main.health_trading()
+    body = _json(response)
+    assert body["primary_blocker"] == "startup_pipeline_incomplete"
+    assert body["selected"] == {"atm": 24000, "ce": "NFO:CE", "pe": "NFO:PE"}
+    assert body["history"]["ce"] == {"mdm": 30, "runner": 30, "indicator": 30}
+    assert body["broker_authentication"] == "unknown"
+    assert body["tick_pressure"]["pending_ticks"] == 2

@@ -32,7 +32,7 @@ def test_lightsail_uses_external_environment_file() -> None:
     assert "EnvironmentFile=$ENV_FILE" in setup
     assert 'ln -sfn "$ENV_FILE" "$LEGACY_ENV"' in setup
     assert "DEPLOYMENT_PLATFORM=aws_lightsail" in setup
-    assert "nifty_scalper_bot.main:app" in setup
+    assert "nifty_scalper_bot.deployment_main:app" in setup
 
 
 def test_release_runner_validates_and_rolls_back() -> None:
@@ -41,8 +41,13 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "git worktree add" in release
     assert "compileall" in release
     assert "pytest" in release
+    assert "tests/data/test_datahub_bounded_persistence.py" in release
+    assert "tests/data/test_mdm_tick_coalescing.py" in release
+    assert "tests/test_mdm_event_loop_consumer.py" in release
+    assert "dashboard/superlite_console.py" in release
+    assert "dashboard/operations_console.py" not in release
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*true' in release
-    assert 'http://127.0.0.1:${PORT}/readyz' in release
+    assert 'http://127.0.0.1:${PORT}/livez' in release
     assert 'git reset --hard --quiet "$BEFORE"' in release
     assert 'sudo systemctl restart "$SERVICE"' in release
 

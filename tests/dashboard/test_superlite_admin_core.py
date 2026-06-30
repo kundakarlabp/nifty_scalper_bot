@@ -65,7 +65,7 @@ def test_shadow_closed_market_is_still_operational(monkeypatch) -> None:
     assert status["operational_blockers"] == []
 
 
-def test_engine_http_timeout_is_explicit_and_structured_status_wins(monkeypatch) -> None:
+def test_engine_timeout_status_wins(monkeypatch) -> None:
     import nifty_scalper_bot.superlite_admin_core as core
 
     def fake_json(path: str):
@@ -96,3 +96,34 @@ def test_engine_http_timeout_is_explicit_and_structured_status_wins(monkeypatch)
     assert status["engine_http_status"] == "ENGINE HTTP TIMEOUT"
     assert status["mode"] == "LIVE"
     assert status["selected"] == {"ce": "NFO:CE", "pe": "NFO:PE", "atm": 24000}
+
+
+def test_blank_blockers_and_stale_updater(monkeypatch, tmp_path) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    status_file = tmp_path / "status.json"
+    status_file.write_text(
+        '{"state":"deploying","updated_ts":1,"message":"deploying old"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(core, "STATUS_PATH", status_file)
+    monkeypatch.setenv("BOT_UPDATER_STALE_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(core, "_service_process_known", lambda: None)
+
+    def fake_json(path: str):
+        if path == "/livez":
+            return {"bot_loaded": True}
+        if path == "/health/trading":
+            return {"blockers": ["", "selected_option_history_cold", ""]}
+        return {"execution_mode": "PAPER"}
+
+    monkeypatch.setattr(core, "_http_json", fake_json)
+    monkeypatch.setattr(core, "_git_ref", lambda _ref: "abc1234")
+    monkeypatch.setattr(core, "bounded_logs", lambda *_args, **_kwargs: "")
+    core.STATUS_CACHE.update({"at": 0.0, "data": {}})
+
+    status = core.status_snapshot()
+    assert status["blockers"] == ["selected_option_history_cold"]
+    assert status["service_process_known"] is None
+    assert status["updater"]["state"] == "stale_interrupted"
+    assert status["updater"]["previous_state"] == "deploying"
