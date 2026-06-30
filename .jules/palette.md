@@ -1,0 +1,3 @@
+## 2025-02-24 - Accessibility bindings in Python string templates
+**Learning:** Standard a11y linters and HTML checkers often miss missing accessibility bindings (`for` and `id` attributes on `<label>` and `<input>`) when they are embedded within Python string templates or f-strings (like FastAPI's `HTMLResponse`).
+**Action:** Always manually verify the presence and matching of `for` attributes on `<label>` tags and `id` attributes on `<input>` tags when updating or reviewing HTML string templates in Python backends.
