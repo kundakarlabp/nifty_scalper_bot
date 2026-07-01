@@ -75,3 +75,12 @@ def test_superlite_services_are_independent_and_bounded():
     assert "MemoryMax=180M" in admin
     assert "dashboard/superlite_console.py" in review
     assert "MemoryMax=320M" in review
+
+
+def test_readiness_and_candle_warnings_are_not_trade_events() -> None:
+    from dashboard.superlite_events import parse_event
+
+    readiness = parse_event("[2026-07-01 09:10:00 IST] ORDER_READINESS_REJECTED reason=selected_option_quote_missing")
+    candle = parse_event("[2026-07-01 09:11:00 IST] Dropping out-of-order candle symbol=NFO:X")
+    assert readiness is not None and readiness["type"] != "TRADE"
+    assert candle is not None and candle["type"] != "TRADE"

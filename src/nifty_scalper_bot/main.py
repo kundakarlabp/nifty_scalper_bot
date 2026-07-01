@@ -407,6 +407,7 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
         auth_state = "authenticated"
     if bool(getattr(ctx, "broker_auth_invalid", False) or getattr(ctx, "broker_session_invalid", False)):
         auth_state = "invalid"
+    reconciliation_completed = bool(getattr(ctx, "position_reconciliation_completed", False)) and auth_state == "authenticated"
     return {
         "selected": selected,
         "history": {
@@ -472,11 +473,13 @@ def readyz():
         for blocker in blockers
         if blocker not in _NON_OPERATIONAL_READYZ_BLOCKERS
     ]
+    auth_state = _structured_runtime_status(ctx).get("broker_authentication")
     ready = (
-        (not live_mode or _structured_runtime_status(ctx).get("broker_authentication") == "authenticated")
+        (not live_mode or auth_state == "authenticated")
         and not bool(getattr(ctx, "broker_auth_invalid", False))
         and bool(getattr(ctx, "broker_balance_valid", False))
         and bool(getattr(ctx, "position_reconciliation_completed", False))
+        and (not live_mode or auth_state == "authenticated")
         and not bool(getattr(ctx, "position_reconciliation_failed", False))
         and not operational_blockers
     )
@@ -545,9 +548,7 @@ def health_trading():
             },
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
-                "completed": bool(
-                    getattr(ctx, "position_reconciliation_completed", False)
-                ),
+                "completed": reconciliation_completed,
                 "failed": bool(getattr(ctx, "position_reconciliation_failed", False)),
                 "error": getattr(ctx, "position_reconciliation_error", None),
                 "unprotected_positions": sorted(

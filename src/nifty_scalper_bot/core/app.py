@@ -9335,6 +9335,8 @@ async def startup_sequence(ctx: BotContext) -> None:
     configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
     if configured_mode not in {"LIVE", "PAPER", "SHADOW"}:
         configured_mode = "SHADOW"
+    if configured_mode == "LIVE" and not bool(getattr(ctx.settings, "enable_live", False)):
+        configured_mode = "SHADOW"
     ctx.live_orders_armed = False
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP" if configured_mode == "LIVE" else configured_mode
@@ -9599,7 +9601,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
             spot_wait_seconds = float(os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "8"))
             mode = str(getattr(ctx, "effective_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
-            live_mode = mode == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).lower() in {"1", "true", "yes", "on"}
+            live_mode = mode == "LIVE" and bool(getattr(ctx.settings, "enable_live", False))
             try:
                 spot_price = await _wait_for_ws_spot_proof(
                     ctx, timeout=spot_wait_seconds

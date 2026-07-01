@@ -426,6 +426,13 @@ class LedgerBracketManager(CanonicalBracketManager):
 
         gross_pnl = ledger_pnl.gross_pnl if ledger_pnl is not None else None
         net_pnl = ledger_pnl.net_pnl if ledger_pnl is not None else None
+        if gross_pnl is None and resolved_price is not None:
+            entry_price = getattr(bracket, "entry_fill_price", None) or getattr(bracket, "entry_price", None)
+            try:
+                side_mult = -1.0 if str(getattr(bracket, "side", "BUY")).upper() == "SELL" else 1.0
+                gross_pnl = round((float(resolved_price) - float(entry_price)) * int(bracket.quantity or 0) * side_mult, 2)
+            except (TypeError, ValueError):
+                gross_pnl = None
         _legacy.LOGGER.info(
             "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s qty=%s entry=%s exit=%s pnl=%s net_pnl=%s ledger_complete=%s",
             bracket.bracket_id,

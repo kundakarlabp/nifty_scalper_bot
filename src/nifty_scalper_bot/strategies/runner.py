@@ -1426,12 +1426,9 @@ class StrategyRunner:
             self._data_phase[normalized] = "HYDRATION"
             self._symbol_states.setdefault(normalized, SymbolState.DISCOVERED)
             self._set_symbol_hydration_state(normalized, SymbolState.HYDRATING)
-            # FIX (2026-02-27): Initialize _last_bar_ts for dynamically-added symbols.
-            # Options arrive via add_symbol() not mark_ready(), so _last_bar_ts is never
-            # set.  PHASE 9 sees None → "bar_not_finalized" → _mark_symbol_unready →
-            # HYDRATING → PHASE 7 blocks all future ticks → permanent lockout for options.
-            if normalized not in self._last_bar_ts:
-                self._last_bar_ts[normalized] = datetime.now(timezone.utc)
+            # _last_bar_ts is intentionally not seeded here. It represents only a
+            # genuinely accepted closed candle; newly added symbols use explicit
+            # hydration/readiness state until their first real bar is ingested.
             # Update tracked universe snapshot only when membership changes.
             self._universe_controller.update(self._active_symbols)
 
@@ -3443,7 +3440,10 @@ class StrategyRunner:
             except Exception:
                 order_manager_live = False
         mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-        env_live_enabled = _env_truthy("ENABLE_LIVE_TRADING") or _env_truthy("ENABLE_LIVE")
+        if "ENABLE_LIVE_TRADING" in os.environ:
+            env_live_enabled = _env_truthy("ENABLE_LIVE_TRADING")
+        else:
+            env_live_enabled = _env_truthy("ENABLE_LIVE")
         paper_enabled = _env_truthy("PAPER__ENABLED") or _env_truthy("PAPER_MODE")
         shadow_mode_enabled = _env_truthy("SHADOW_MODE")
         is_live_mode = mode == "LIVE" and env_live_enabled and not paper_enabled and not shadow_mode_enabled and (order_manager_live is not False)
@@ -4399,8 +4399,8 @@ class StrategyRunner:
                     self._bar_builders[normalized] = OneMinuteBarBuilder()
 
                 # 4. Set High-Water Mark (Prevent dropping first live tick)
-                if normalized not in self._last_bar_ts:
-                    self._last_bar_ts[normalized] = datetime.now(timezone.utc)
+                # Do not fabricate _last_bar_ts for dynamic symbols; it is set
+                # only by accepted historical/live candles.
 
                 # FIX: _symbol_has_valid_data checked MDM._ohlc_builder (live ticks only —
                 # always empty at startup) → valid_symbols=[] → EXECUTION_ENABLED never set
@@ -10966,33 +10966,14 @@ class StrategyRunner:
                         last_eval = getattr(state, "_last_strategy_eval", None)
                         last_bar_ts = self._last_bar_ts.get(symbol)
                         if last_bar_ts is None:
-                            log_throttled(
-                                self._logger,
-                                f"bar_ts_init_{symbol}",
-                                f"⚙️  Seeding _last_bar_ts for {symbol} (first eval tick)",
-                                interval_sec=60.0,
-                                level=logging.INFO,
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="bar_ts_missing_waiting_for_closed_candle",
+                                allowed=False,
+                                trace_id=trace_id,
                             )
-                            self._last_bar_ts[symbol] = now
-                            last_bar_ts = now
-                            if first_hydrated_eval:
-                                pending_eval_bar_ts = now
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="phase9",
-                                    reason="bar_ts_initialized_initial_hydrated_eval_continues",
-                                    allowed=True,
-                                    trace_id=trace_id,
-                                )
-                            else:
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="phase9",
-                                    reason="bar_ts_initialized_retry_next_tick",
-                                    allowed=False,
-                                    trace_id=trace_id,
-                                )
-                                return
+                            return
                         # ✅ FIX K: Same-bar-skip for options with no live bars.
                         # When _symbol_history is empty (no live bars ever completed),
                         # _last_bar_ts[symbol] is the last HYDRATION bar timestamp —

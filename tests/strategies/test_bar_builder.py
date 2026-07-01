@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBarBuilder
 
@@ -28,3 +28,24 @@ def test_one_minute_bar_builder_finalises_bar() -> None:
     assert flushed.open == 102.0
     assert flushed.close == 103.0
     assert flushed.volume == 10
+
+
+def test_late_tick_cannot_rewind_active_bar() -> None:
+    builder = OneMinuteBarBuilder()
+    base = datetime(2026, 1, 2, 9, 15, 30, tzinfo=timezone.utc)
+    assert builder.update(100.0, 1, base) is None
+    assert builder.update(90.0, 1, base - timedelta(minutes=1)) is None
+    closed = builder.update(101.0, 1, base + timedelta(minutes=1))
+    assert closed is not None
+    assert closed.start == base.replace(second=0, microsecond=0)
+    assert closed.open == 100.0
+    assert closed.low == 100.0
+
+
+def test_bar_timestamp_is_utc_minute_bucket_not_first_tick_second() -> None:
+    builder = OneMinuteBarBuilder()
+    tick_ts = datetime(2026, 1, 2, 9, 15, 42, tzinfo=timezone.utc)
+    builder.update(100.0, 1, tick_ts)
+    closed = builder.update(101.0, 1, tick_ts + timedelta(seconds=18))
+    assert closed is not None
+    assert closed.timestamp == datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)

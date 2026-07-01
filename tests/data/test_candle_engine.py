@@ -176,3 +176,32 @@ def test_repair_with_backfill_merges_existing_and_recent() -> None:
     )
     assert len(merged) == 3
     assert float(merged.iloc[-1]["close"]) == 202.5
+
+
+def test_candle_engine_flush_is_idempotent() -> None:
+    engine = CandleEngine()
+    ts = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
+    engine.on_tick(_tick(ts, 100.0))
+    first = engine.flush()
+    second = engine.flush()
+    assert first is not None
+    assert second is None
+    assert len(engine.get_df()) == 1
+
+
+def test_candle_engine_equal_duplicate_is_noop_and_older_rejected() -> None:
+    engine = CandleEngine()
+    ts = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
+    engine.on_tick(_tick(ts, 100.0))
+    assert engine.flush() is not None
+    engine.current_candle = {"timestamp": pd.Timestamp(ts), "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 1.0}
+    assert engine.flush() is None
+    assert len(engine.get_df()) == 1
+    engine.current_candle = {"timestamp": pd.Timestamp(ts - timedelta(minutes=1)), "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0, "volume": 1.0}
+    from nifty_scalper_bot.data.source import DataIntegrityError
+    try:
+        engine.flush()
+    except DataIntegrityError:
+        pass
+    else:
+        raise AssertionError("older candle should be rejected")

@@ -219,6 +219,17 @@ class CandleBuilder:
         if active is None:
             # First tick for this symbol
             self._active[sym] = _init_candle(sym, minute, tick.ltp, tick.volume)
+        elif minute < pd.Timestamp(active["timestamp"]):
+            _DROPPED_TICKS.increment()
+            log_throttled(
+                LOGGER,
+                f"tick_late_bucket:{sym}",
+                f"tick_out_of_order symbol={sym} tick_minute={minute.isoformat()} current_minute={pd.Timestamp(active['timestamp']).isoformat()} total_dropped={_DROPPED_TICKS.value}",
+                interval_sec=30.0,
+                level=logging.DEBUG,
+                extra={"event": "tick_out_of_order", "symbol": sym, "tick_ts": ts.isoformat(), "tick_minute": minute.isoformat(), "last_ts": last.isoformat() if last is not None else None, "source": "candle_builder", "total_dropped": _DROPPED_TICKS.value},
+            )
+            return None
         elif minute > pd.Timestamp(active["timestamp"]):
             # Bucket boundary crossed → finalize
             closed = _finalize(active)
@@ -332,7 +343,24 @@ class CandleStore:
         with self._lock:
             if candle.symbol not in self._store:
                 self._store[candle.symbol] = deque(maxlen=self._maxlen)
-            self._store[candle.symbol].append(candle)
+            buf = self._store[candle.symbol]
+            if buf:
+                last_ts = pd.Timestamp(buf[-1].timestamp).floor("1min")
+                incoming_ts = pd.Timestamp(candle.timestamp).floor("1min")
+                if incoming_ts == last_ts:
+                    return
+                if incoming_ts < last_ts:
+                    _DROPPED_CANDLES.increment()
+                    log_throttled(
+                        LOGGER,
+                        f"candle_store_out_of_order:{candle.symbol}",
+                        f"candle_store_out_of_order symbol={candle.symbol} incoming_ts={incoming_ts.isoformat()} last_ts={last_ts.isoformat()} source=candle_store",
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                        extra={"event": "candle_store_out_of_order", "symbol": candle.symbol, "incoming_ts": incoming_ts.isoformat(), "last_ts": last_ts.isoformat(), "source": "candle_store", "total_dropped": _DROPPED_CANDLES.value},
+                    )
+                    raise DataIntegrityError("candle store timestamps must be monotonic")
+            buf.append(candle)
 
     def get(self, symbol: str) -> list[Candle]:
         with self._lock:
@@ -350,7 +378,7 @@ class CandleStore:
         with self._lock:
             if symbol in self._store and len(self._store[symbol]) > 0:
                 return  # already seeded — never overwrite
-            buf: deque[Candle] = deque(maxlen=self._maxlen)
+            by_minute: dict[pd.Timestamp, Candle] = {}
             for row in bars:
                 try:
                     ts_raw = row.get("timestamp") or row.get("date")
@@ -367,10 +395,12 @@ class CandleStore:
                         volume=float(row.get("volume") or 0),
                     )
                     if not _check_ohlc(c):
+                        LOGGER.warning("candle_store_seed_rejected", extra={"event": "candle_store_seed_rejected", "symbol": symbol, "incoming_ts": c.timestamp.isoformat(), "source": "seed", "reason": "ohlc_invalid"})
                         continue
-                    buf.append(c)
-                except Exception:
-                    continue
+                    by_minute[c.timestamp] = c
+                except (TypeError, ValueError, DataIntegrityError) as exc:
+                    LOGGER.warning("candle_store_seed_rejected", extra={"event": "candle_store_seed_rejected", "symbol": symbol, "source": "seed", "reason": type(exc).__name__})
+            buf: deque[Candle] = deque((by_minute[key] for key in sorted(by_minute)), maxlen=self._maxlen)
             self._store[symbol] = buf
         LOGGER.info(
             "candle_store_seeded",
