@@ -261,8 +261,10 @@ class LedgerBracketManager(CanonicalBracketManager):
         bracket = self.get_bracket(order_id)
         ledger_ok = True
         if bracket is not None:
-            tag_text = str(getattr(bracket, "tag", "") or "").upper()
-            if "EXIT" in tag_text or "REDUCE" in tag_text:
+            entry_intent = str(
+                getattr(bracket, "entry_order_intent", "ENTRY") or "ENTRY"
+            ).upper()
+            if entry_intent not in {"ENTRY", "SCALE_IN", "REVERSAL"}:
                 super().confirm_entry_fill(order_id, fill_price)
                 return
             try:

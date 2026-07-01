@@ -211,6 +211,9 @@ class BracketState:
     
     # Metadata
     tag: str | None = None
+    entry_order_intent: str = "ENTRY"
+    trade_lifecycle_id: str | None = None
+    linked_exit_order_ids: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     exit_executed: bool = False
@@ -1028,6 +1031,8 @@ class BracketManager:
                 ),
                 entry_fill_price=price if activate_immediately else None,
                 tag=tag,
+                entry_order_intent=normalized_intent or "ENTRY",
+                trade_lifecycle_id=order_id,
                 trailing_config=t_config,
                 virtual_sl_id=f"vsl_{order_id}"
             )
@@ -1148,18 +1153,20 @@ class BracketManager:
             if not bracket:
                 LOGGER.warning(f"⚠️ No bracket found for order {order_id}")
                 return
-            tag_text = str(getattr(bracket, "tag", "") or "").upper()
-            if "EXIT" in tag_text or "REDUCE" in tag_text:
+            entry_intent = str(
+                getattr(bracket, "entry_order_intent", "ENTRY") or "ENTRY"
+            ).upper()
+            if entry_intent not in {"ENTRY", "SCALE_IN", "REVERSAL"}:
                 LOGGER.error(
-                    "BRACKET_ENTRY_FILL_REJECTED_FOR_EXIT_ORDER order_id=%s symbol=%s tag=%s",
+                    "BRACKET_ENTRY_FILL_REJECTED_FOR_EXIT_ORDER order_id=%s symbol=%s intent=%s",
                     order_id,
                     bracket.symbol,
-                    getattr(bracket, "tag", ""),
+                    entry_intent,
                     extra={
                         "event": "BRACKET_ENTRY_FILL_REJECTED_FOR_EXIT_ORDER",
                         "order_id": order_id,
                         "symbol": bracket.symbol,
-                        "tag": getattr(bracket, "tag", ""),
+                        "intent": entry_intent,
                     },
                 )
                 return

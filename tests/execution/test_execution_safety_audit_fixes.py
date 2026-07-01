@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -279,6 +280,10 @@ def test_partial_fills_apply_only_cumulative_delta(tmp_path) -> None:
         "partial-entry",
         {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 100.0},
     )
+    partial_position = manager.get_position(SYMBOL)
+    assert partial_position is not None
+    assert partial_position.quantity == 25
+
     manager.apply_broker_order_update(
         "partial-entry",
         {"status": "COMPLETE", "filled_quantity": 65, "average_price": 100.0},
@@ -287,6 +292,123 @@ def test_partial_fills_apply_only_cumulative_delta(tmp_path) -> None:
     position = manager.get_position(SYMBOL)
     assert position is not None
     assert position.quantity == 65
+
+
+def test_partial_exit_fill_reduces_only_cumulative_delta(tmp_path) -> None:
+    manager = _position_manager(tmp_path)
+    manager.add_pending_order(
+        "partial-exit", SYMBOL, "SELL", 65, 99.0, "MARKET", intent="EXIT"
+    )
+
+    manager.apply_broker_order_update(
+        "partial-exit",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 99.0},
+    )
+    partial_position = manager.get_position(SYMBOL)
+    assert partial_position is not None
+    assert partial_position.quantity == 40
+
+    manager.apply_broker_order_update(
+        "partial-exit",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 99.0},
+    )
+
+    assert manager.get_position(SYMBOL) is None
+    assert manager.get_realized_pnl() == pytest.approx((99.0 - 100.0) * 65)
+
+
+def test_simultaneous_duplicate_complete_update_is_single_lifecycle_mutation(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        "duplicate-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY"
+    )
+    payload = {"status": "COMPLETE", "filled_quantity": 65, "average_price": 100.0}
+
+    threads = [
+        threading.Thread(
+            target=manager.apply_broker_order_update,
+            args=("duplicate-entry", payload),
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.quantity == 65
+    assert manager._terminal_orders["duplicate-entry"].lifecycle_resolved is True
+
+
+def test_unresolved_terminal_exit_is_retained_for_reconciliation(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        "unresolved-exit", SYMBOL, "SELL", 65, 99.0, "MARKET", intent="EXIT"
+    )
+
+    manager.apply_broker_order_update(
+        "unresolved-exit",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 99.0},
+    )
+
+    assert manager.get_position(SYMBOL) is None
+    assert "unresolved-exit" in manager._orders
+    assert "unresolved-exit" in manager._unresolved_terminal_orders
+    metadata = manager._terminal_orders["unresolved-exit"]
+    assert metadata.lifecycle_resolved is False
+    assert metadata.accounting_finalized is False
+    assert manager.unresolved_terminal_summary()["count"] == 1
+
+
+def test_new_entry_same_symbol_after_previous_trade_uses_distinct_lifecycle(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order("entry-a", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+    manager.apply_broker_order_update(
+        "entry-a",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 100.0},
+    )
+    manager.add_pending_order("exit-a", SYMBOL, "SELL", 65, 101.0, "MARKET", intent="EXIT")
+    manager.apply_broker_order_update(
+        "exit-a",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 101.0},
+    )
+    assert manager.get_position(SYMBOL) is None
+
+    manager.add_pending_order("entry-b", SYMBOL, "BUY", 65, 102.0, "MARKET", intent="ENTRY")
+    manager.apply_broker_order_update(
+        "entry-b",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 102.0},
+    )
+
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.order_id == "entry-b"
+    assert position.quantity == 65
+    assert manager._orders.get("entry-b") is None
+    assert manager._terminal_orders["entry-a"].trade_lifecycle_id != manager._terminal_orders["entry-b"].trade_lifecycle_id
+
+
+def test_status_regression_after_filled_is_noop(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        "regression-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY"
+    )
+    manager.apply_broker_order_update(
+        "regression-entry",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 100.0},
+    )
+
+    manager.apply_broker_order_update(
+        "regression-entry",
+        {"status": "OPEN", "filled_quantity": 65, "average_price": 100.0},
+    )
+
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.quantity == 65
+    assert manager._terminal_orders["regression-entry"].normalized_status == "FILLED"
 
 
 def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> None:
@@ -307,6 +429,30 @@ def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> N
     )
 
     assert manager.get_bracket("exit-order") is None
+
+
+def test_exit_tag_text_is_not_authoritative_for_entry_bracket(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = BracketManager(order_manager=SimpleNamespace())
+    _stop(manager)
+
+    manager.register_virtual_bracket(
+        order_id="entry-tagged-exit",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+        tag="strategy-text-mentions-exit",
+        intent="ENTRY",
+    )
+    manager.confirm_entry_fill("entry-tagged-exit", 100.5)
+
+    bracket = manager.get_bracket("entry-tagged-exit")
+    assert bracket is not None
+    assert bracket.entry_order_intent == "ENTRY"
+    assert bracket.active is True
 
 
 def _stop(manager: BracketManager) -> None:

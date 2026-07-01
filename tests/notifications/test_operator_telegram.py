@@ -289,6 +289,44 @@ async def test_check_execution_includes_readiness_blockers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_rejections_do_not_become_current_execution_reason() -> None:
+    app = FakeApp()
+    service = SimpleNamespace(
+        chat_id=12345,
+        deps=SimpleNamespace(
+            bot_context=SimpleNamespace(
+                live_orders_armed=True,
+                live_block_reason=None,
+                execution_block_reason=None,
+            ),
+            order_manager=SimpleNamespace(_last_skip_reason="unresolved_exit_position"),
+            risk_manager=SimpleNamespace(
+                _breaker_tripped=False,
+                _last_rejection="DAILY_REALIZED_LIMIT:-17627.19/-352.34",
+            ),
+        ),
+    )
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+
+    why_update = DummyUpdate(text="/why")
+    await _handler(app, "why").callback(why_update, DummyContext())  # type: ignore[arg-type]
+    why_reply = why_update.effective_message.replies[-1]
+    assert "final_reason: waiting_for_valid_signal" in why_reply
+    assert "final_reason: unresolved_exit_position" not in why_reply
+    assert "final_reason: DAILY_REALIZED_LIMIT" not in why_reply
+    assert "last_order_rejection: unresolved_exit_position" in why_reply
+    assert "last_risk_rejection: DAILY_REALIZED_LIMIT:-17627.19/-352.34" in why_reply
+
+    execution_update = DummyUpdate(text="/check_execution")
+    await _handler(app, "check_execution").callback(execution_update, DummyContext())  # type: ignore[arg-type]
+    execution_reply = execution_update.effective_message.replies[-1]
+    assert "current_execution_blocker: none" in execution_reply
+    assert "current_risk_breaker_reason: none" in execution_reply
+    assert "recent_last_order_rejection: unresolved_exit_position" in execution_reply
+    assert "recent_last_risk_rejection: DAILY_REALIZED_LIMIT:-17627.19/-352.34" in execution_reply
+
+
+@pytest.mark.asyncio
 async def test_diagnostic_handlers_do_not_crash_with_missing_dependencies() -> None:
     app = FakeApp()
     service = SimpleNamespace(chat_id=12345)
