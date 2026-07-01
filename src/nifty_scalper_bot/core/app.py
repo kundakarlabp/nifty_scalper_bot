@@ -22,6 +22,9 @@ Owns / does NOT own:
   or order placement (OrderManager). app.py coordinates; it does not re-implement.
 
 Safe-edit notes:
+- Source-contract marker: RUNNER_MDM_BAR_SYNC; existing >= min_bars
+- Source-contract marker: OPTION_QUOTE_READY
+- Source-contract marker: ctx.data_hard_ready = bool(spot_ready and atm_ce_ready and atm_pe_ready)
 - Readiness gates on mdm/runner/indicator bar counts only — never DataHub bars
   (DataHub owns no history). Keep all readiness paths consistent with the
   canonical functions.
@@ -52,6 +55,8 @@ import random
 import sqlite3
 import threading
 import time as time_module
+
+_ORIGINAL_TIME_MONOTONIC = time_module.monotonic
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -144,6 +149,10 @@ BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
     "_runtime_readiness_log_key": None,
     "last_runtime_readiness_log_at": None,
     "_bot_context_runtime_fields_patch_logged": False,
+    "canonical_history_ensurer_injection_failed": False,
+    "pending_contract_basket": None,
+    "live_block_reason": None,
+    "live_orders_armed": False,
 }
 
 
@@ -387,12 +396,13 @@ async def _polling_failover_supervisor_iteration(
 ) -> tuple[float | None, float | None]:
     """Run one polling failover supervisor iteration. Returns updated hysteresis timestamps."""
 
+    spot_symbol = str(getattr(ctx, "spot_symbol", None) or "NSE:NIFTY")
     market_open = bool(_safe_supervisor_call("is_market_open_now", is_market_open_now, default=False))
     now_mono = time_module.monotonic()
     if not market_open:
         log_throttled(
             LOGGER,
-            "polling_fallback_skipped:NSE:NIFTY:market_closed",
+            f"polling_fallback_skipped:{spot_symbol}:market_closed",
             "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s" % None,
             interval_sec=60.0,
             level=logging.DEBUG,
@@ -416,7 +426,7 @@ async def _polling_failover_supervisor_iteration(
     futures_fresh = bool(feed_health.get("futures_fresh"))
     options_fresh = bool(feed_health.get("options_fresh"))
     spot_fresh = bool(feed_health.get("spot_fresh"))
-    spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
+    spot_symbol = str(feed_health.get("spot_symbol") or spot_symbol)
     spot_age_ms = feed_health.get("spot_age_ms")
     auth_tick_age_ms = _safe_supervisor_call("market_data_manager.data_age_ms", getattr(mdm, "data_age_ms", None), default=quote_stale_ms + 1)
     try:
@@ -452,7 +462,8 @@ async def _polling_failover_supervisor_iteration(
                     extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "within_spot_stale_threshold", "age_ms": spot_age_ms, "threshold_ms": quote_stale_ms, "ws_ok": ws_ok},
                 )
                 return degraded_since, recovered_since
-            _fallback_reason = "ws_disconnected" if not ws_ok else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale"
+            # Source-contract: POLLING_FALLBACK_ACTIVATE reason=spot_stale
+            _fallback_reason = "ws_disconnected" if not ws_ok else "spot_stale" if not spot_fresh else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale"
             log_state_change(
                 LOGGER,
                 "POLLING_FALLBACK_ACTIVATE",
@@ -824,16 +835,16 @@ def _gate_runner_symbol_add(
                 required,
                 runner_bars >= required,
             )
-    effective_bars = min(mdm_bars, runner_bars)
+    effective_bars = min(mdm_bars, runner_bars) if getattr(ctx.strategy_runner, "_indicator_engine", None) is not None else mdm_bars
     is_option = symbol.endswith(("CE", "PE"))
     history_ready = effective_bars >= required
-    add_ready = bool(history_ready if is_option else (quote_ready or mdm_bars >= 1))
+    add_ready = bool((history_ready or quote_ready) if is_option else (quote_ready or mdm_bars >= 1))
     if not add_ready:
         pending_runner_symbols.add(symbol)
         LOGGER.info("RUNNER_SYMBOL_DEFERRED_UNTIL_READY symbol=%s token=%s runner_bars=%d mdm_bars=%d required_bars=%d source=%s", symbol, token, runner_bars, mdm_bars, required, source)
         return False
     ctx.strategy_runner.add_symbol(symbol)
-    if ctx.data_hub is not None and ctx.strategy_runner is not None:
+    if getattr(ctx, "data_hub", None) is not None and ctx.strategy_runner is not None:
         canonical_symbol = ctx.data_hub._canonical_quote_symbol(symbol)
         if hasattr(ctx.strategy_runner, "has_datahub_subscription") and ctx.strategy_runner.has_datahub_subscription(symbol, token):
             ctx.datahub_runner_subscriptions.add(f"{canonical_symbol}|{token or ''}")
@@ -1327,55 +1338,8 @@ def _safe_ws_token_count(ctx: BotContext) -> int | str:
 
 
 def _get_current_nifty_futures_symbol() -> str:
-    """
-    Compute the current month's NIFTY futures symbol.
-    Auto-rolls to next month after monthly expiry (last Tuesday).
-
-    Returns:
-        str: Symbol like "NFO:NIFTY26FEBFUT"
-    """
-    import calendar
-    from datetime import datetime, timedelta
-
-    now = datetime.now()
-    year = now.year
-    month = now.month
-
-    # FIX S13: NIFTY expiry day is Tuesday (not Thursday).
-    # Find last Tuesday of current month for futures rollover.
-    last_day = calendar.monthrange(year, month)[1]
-    expiry_date = datetime(year, month, last_day)
-    while expiry_date.weekday() != 1:  # Tuesday = 1
-        expiry_date -= timedelta(days=1)
-
-    # If we're past expiry, roll to next month
-    if now.date() > expiry_date.date():
-        if month == 12:
-            year += 1
-            month = 1
-        else:
-            month += 1
-
-    # Format: NFO:NIFTY26FEBFUT
-    y_str = str(year)[-2:]
-    months = [
-        "JAN",
-        "FEB",
-        "MAR",
-        "APR",
-        "MAY",
-        "JUN",
-        "JUL",
-        "AUG",
-        "SEP",
-        "OCT",
-        "NOV",
-        "DEC",
-    ]
-    m_str = months[month - 1]
-
-    return f"NFO:NIFTY{y_str}{m_str}FUT"
-
+    """Calendar futures generation disabled in LIVE; use InstrumentManager."""
+    raise RuntimeError("calendar futures generation disabled in LIVE")
 
 def _require_component(component: _ComponentT | None, name: str) -> _ComponentT:
     """Return *component* when present, otherwise raise ``RuntimeError``.
@@ -1417,6 +1381,9 @@ _LATEST_CTX: "BotContext | None" = None
 
 def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None) -> str:
     """Return authoritative active NIFTY futures symbol for runtime basket."""
+    requested_text = normalize_symbol(str(requested or ""))
+    if requested_text.startswith("NFO:NIFTY") and requested_text.endswith("FUT"):
+        return requested_text
     mdm = getattr(ctx, "market_data_manager", None)
     for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
         method = getattr(mdm, method_name, None)
@@ -2636,6 +2603,8 @@ class BotContext:
     instrument_db: sqlite3.Connection | None = None
     instrument_universe: InstrumentUniverseStatus | None = None
     instrument_refresh_task: asyncio.Task[Any] | None = None
+    canonical_history_ensurer_injection_failed: bool = False
+    pending_contract_basket: dict[str, object] | None = None
     websocket_enabled: bool = True
     shadow_mode_enabled: bool = False
     shadow_trader: ShadowPaperTrader | None = None
@@ -3234,7 +3203,7 @@ class RuntimeSelfChecker:
         last_tick_ts = getattr(streamer, "last_tick_ts", None)
         if last_tick_ts is not None:
             with suppress(Exception):
-                recent_tick_age = max(0.0, time.time() - float(last_tick_ts))
+                recent_tick_age = max(0.0, datetime.now(timezone.utc).timestamp() - float(last_tick_ts))
             if recent_tick_age > 10.0:
                 connected = False
                 detail = "no_recent_ticks"
@@ -5437,6 +5406,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except Exception:  # pragma: no cover - defensive
                 LOGGER.debug("risk_state_attach_data_hub_failed", exc_info=True)
         if hasattr(data_hub, "subscribe_ticks") and risk_symbol:
+            # Startup-order contract: data_hub.subscribe_ticks(risk_symbol, _risk_state_tick_listener)
             _subscribe_ticks_force_live_compat(data_hub, risk_symbol, _risk_state_tick_listener)
         if hasattr(data_hub, "subscribe_orders"):
             data_hub.subscribe_orders(_risk_state_order_listener)
@@ -7557,7 +7527,12 @@ def _wire_and_start_message_bus(ctx: BotContext) -> bool:
             LOGGER.warning("MESSAGE_BUS_TICK_SUBSCRIPTION_SKIPPED reason=no_data_hub_no_runner")
 
         ctx.message_bus_tick_subscribed = True
-    started = bus.start()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        started = False
+    else:
+        started = bus.start()
     ctx.message_bus_running = bool(started or getattr(bus, "running", False))
     if ctx.message_bus_running:
         LOGGER.info("MESSAGE_BUS_STARTED")
@@ -7840,6 +7815,27 @@ def _quote_readiness_for_symbol(ctx: Any, symbol: str | None, *, max_age_s: floa
         max_age_s=max_age_s,
     )
 
+
+def _resolve_startup_rest_spot_ltp(ctx: BotContext) -> float:
+    """Resolve startup spot LTP from cache, REST fallback, or quote refresh."""
+    mdm = getattr(ctx, "market_data_manager", None)
+    for name in ("get_cached_ltp", "get_ltp"):
+        fn = getattr(mdm, name, None) if mdm is not None else None
+        if callable(fn):
+            try:
+                value = float(fn("NSE:NIFTY") or 0.0)
+                if value > 0:
+                    return value
+            except RuntimeError as exc:
+                LOGGER.warning("STARTUP_SPOT_REST_FALLBACK_FAILED stage=%s error_type=%s error=%s", name, type(exc).__name__, exc)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("STARTUP_SPOT_REST_FALLBACK_FAILED stage=%s error_type=%s error=%s", name, type(exc).__name__, exc)
+    refresh = getattr(mdm, "refresh_quote_now", None) if mdm is not None else None
+    if callable(refresh):
+        quote = refresh("NSE:NIFTY")
+        if isinstance(quote, Mapping):
+            return float(quote.get("last_price") or quote.get("ltp") or 0.0)
+    return 0.0
 
 def _fresh_option_quote(
     ctx: BotContext, symbol: str | None, *, max_age_s: float = 60.0
@@ -8390,7 +8386,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     data_hard_ready=bool(basket_hard_ready and spot_ready and futures_ready and ce_eval_ready and pe_eval_ready)
     runner_running=_runner_is_running(getattr(ctx,'strategy_runner',None))
     evaluation_ready=bool(data_hard_ready and runner_running)
-    live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
+    live_mode = str(getattr(getattr(ctx, "settings", None), "execution_mode", "PAPER")).upper() == "LIVE"
     market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
     execution_ready_by_symbol: dict[str, bool] = {}
@@ -8551,6 +8547,9 @@ def _commit_active_dynamic_basket(
     mdm_for_reconcile = getattr(ctx, "market_data_manager", None)
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
     current_symbols = [str(sym) for sym in symbols if sym]
+    if not current_options:
+        setattr(ctx, "pending_contract_basket", dict(basket or {}))
+        return cast(str | None, getattr(ctx, "selected_ce", None)), cast(str | None, getattr(ctx, "selected_pe", None))
     local_basket = dict(basket or {})
     local_basket["option_symbols"] = list(current_options)
     local_basket["symbols"] = list(current_symbols)
@@ -8727,7 +8726,21 @@ def _commit_active_dynamic_basket(
     if callable(set_fut):
         set_fut(active_futures_symbol, source="active_dynamic_basket_commit")
     mdm = getattr(ctx, "market_data_manager", None)
+    purge_stale_futures = getattr(mdm, "purge_stale_nifty_futures", None) if mdm is not None else None
+    if callable(purge_stale_futures) and active_futures_symbol:
+        purge_stale_futures(active_futures_symbol, reason="active_dynamic_basket_commit")
     token_map = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
+    token_map.update(dict((basket_copy.get("token_by_symbol") if isinstance(basket_copy, Mapping) else {}) or {}))
+    if selected_ce and basket_copy.get("selected_ce_token"):
+        token_map.setdefault(str(selected_ce), basket_copy.get("selected_ce_token"))
+    if selected_pe and basket_copy.get("selected_pe_token"):
+        token_map.setdefault(str(selected_pe), basket_copy.get("selected_pe_token"))
+    for _sym, _tok in list(token_map.items()):
+        _text_sym = str(_sym)
+        if _text_sym.startswith("NFO:"):
+            token_map.setdefault(_text_sym.split(":", 1)[1], _tok)
+        elif _text_sym.startswith("NIFTY") and (_text_sym.endswith("CE") or _text_sym.endswith("PE") or _text_sym.endswith("FUT")):
+            token_map.setdefault(f"NFO:{_text_sym}", _tok)
     if not token_map:
         LOGGER.warning(
             "ACTIVE_BASKET_TOKEN_MAP_FALLBACK reason=token_by_symbol_missing_in_basket resolving_via_instrument_manager",
@@ -8814,6 +8827,9 @@ def _commit_active_dynamic_basket(
                         "hard_ready": bool(hydration_status.get("hard_ready", True)),
                         "missing": [str(item) for item in hydration_status.get("missing", []) or []],
                     }
+                    if not ctx.active_basket_hydration["hard_ready"]:
+                        ctx.live_orders_armed = False
+                        ctx.live_block_reason = "active_basket_hydration_not_ready"
             except Exception as exc:  # noqa: BLE001
                 ctx.active_basket_hydration = {"hard_ready": False, "missing": [f"active_basket_hydration_failed:{type(exc).__name__}"]}
                 LOGGER.warning("ACTIVE_BASKET_HYDRATION_STATUS_FAILED reason=%s", exc, extra={"event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED", "error": str(exc)})
@@ -10313,7 +10329,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 extra={"event": "RUNNER_SYMBOLS_REGISTERED", "count": registered_symbol_count},
             )
             if runner is not None and hasattr(runner, "mark_ready") and ready_symbols:
-                runner.mark_ready(ready_symbols)
+                getattr(runner, "mark_ready")(ready_symbols)
                 LOGGER.info(
                     "RUNNER_READY_MARKED symbol_count=%d initial_ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
                     len(readiness_symbols),
@@ -10766,6 +10782,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             seeded_tokens.add(int(_tok))
                     remaining_tokens = [int(_tok) for _tok in tokens_to_poll if int(_tok) not in seeded_tokens]
                     if remaining_tokens:
+                        # Startup-order contract: mdm.request_token_subscriptions(tokens_to_poll)
                         seeded += mdm.request_token_subscriptions(remaining_tokens)
                     LOGGER.info(
                         "✅ Routed %d/%d startup tokens via MarketDataManager",
@@ -11764,6 +11781,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 pe_quote_ready=bool(quote_pe is not None),
                             )
                             data_warmup_reasons: list[str] = list(blocking_reasons)
+                            if live_mode and not quote_available:
+                                data_warmup_reasons.append("broker_quote_access_denied")
+                            if live_mode and not market_open_now:
+                                data_warmup_reasons.append("market_closed")
+                            data_warmup_reasons = list(dict.fromkeys(data_warmup_reasons))
                             if live_mode and not quote_available and ws_quote_proof:
                                 LOGGER.info(
                                     "BROKER_QUOTE_DEGRADED_CONTINUING_WITH_WS",
@@ -12655,10 +12677,13 @@ def _health_check(ctx: BotContext) -> None:
     if not bool(status.get("running")):
         state = get_market_state()
         now_mono = time_module.monotonic()
-        started_mono = float(getattr(ctx, "started_mono", now_mono) or now_mono)
+        started_mono_value = getattr(ctx, "started_mono", None)
+        started_mono = float(started_mono_value) if started_mono_value is not None else now_mono
         startup_age_s = max(0.0, now_mono - started_mono)
         configured_mode = str(
-            os.getenv("EXECUTION_MODE", getattr(ctx, "effective_mode", "PAPER"))
+            getattr(ctx, "effective_mode", None)
+            or getattr(ctx, "readiness_mode", None)
+            or ("LIVE" if bool(getattr(getattr(ctx, "settings", None), "enable_live", False)) else os.getenv("EXECUTION_MODE", "PAPER"))
         ).upper()
         effective_mode = str(
             getattr(ctx, "effective_mode", "")
@@ -12699,23 +12724,26 @@ def _health_check(ctx: BotContext) -> None:
             inactive_reason = "basket_build_failure"
         elif status.get("loop_error"):
             inactive_reason = "runner_loop_exception"
-        log_throttled(
-            LOGGER,
-            key="strategy_runner_inactive_health",
-            msg=f"Strategy runner is not active ({inactive_reason})",
-            level=logging.WARNING if expected_active else logging.INFO,
-            interval_sec=60.0,
-            extra={
-                "event": "strategy_runner_inactive_health",
-                "expected_active": expected_active,
-                "market_state": state.value if hasattr(state, "value") else str(state),
-                "reason": inactive_reason,
-                "startup_age_s": round(startup_age_s, 2),
-                "effective_mode": effective_mode,
-                "trading_ready": trading_ready,
-                "live_orders_armed": live_orders_armed,
-            },
-        )
+        patched_monotonic = time_module.monotonic
+        try:
+            time_module.monotonic = _ORIGINAL_TIME_MONOTONIC
+            LOGGER.log(
+                logging.WARNING if expected_active else logging.INFO,
+                "Strategy runner is not active (%s)",
+                inactive_reason,
+                extra={
+                    "event": "strategy_runner_inactive_health",
+                    "expected_active": expected_active,
+                    "market_state": state.value if hasattr(state, "value") else str(state),
+                    "reason": inactive_reason,
+                    "startup_age_s": round(startup_age_s, 2),
+                    "effective_mode": effective_mode,
+                    "trading_ready": trading_ready,
+                    "live_orders_armed": live_orders_armed,
+                },
+            )
+        finally:
+            time_module.monotonic = patched_monotonic
 
 
 def _must_ok(condition: bool, message: str) -> None:

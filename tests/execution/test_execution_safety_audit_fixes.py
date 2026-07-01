@@ -339,7 +339,8 @@ def test_simultaneous_duplicate_complete_update_is_single_lifecycle_mutation(tmp
     position = manager.get_position(SYMBOL)
     assert position is not None
     assert position.quantity == 65
-    assert manager._terminal_orders["duplicate-entry"].lifecycle_resolved is True
+    assert manager._terminal_orders["duplicate-entry"].fill_recorded is True
+    assert manager._terminal_orders["duplicate-entry"].lifecycle_resolved is False
 
 
 def test_unresolved_terminal_exit_is_retained_for_reconciliation(tmp_path) -> None:
@@ -360,6 +361,46 @@ def test_unresolved_terminal_exit_is_retained_for_reconciliation(tmp_path) -> No
     assert metadata.lifecycle_resolved is False
     assert metadata.accounting_finalized is False
     assert manager.unresolved_terminal_summary()["count"] == 1
+
+
+def test_variable_average_partial_entry_uses_incremental_notional(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order("avg-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+
+    manager.apply_broker_order_update(
+        "avg-entry",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 100.0},
+    )
+    manager.apply_broker_order_update(
+        "avg-entry",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 102.0},
+    )
+
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.quantity == 65
+    assert position.entry_price == pytest.approx(102.0)
+    order = manager._terminal_orders["avg-entry"]
+    assert order.cumulative_filled_quantity == 65
+
+
+def test_variable_average_partial_exit_uses_incremental_notional(tmp_path) -> None:
+    manager = _position_manager(tmp_path)
+    manager.add_pending_order(
+        "avg-exit", SYMBOL, "SELL", 65, 99.0, "MARKET", intent="EXIT"
+    )
+
+    manager.apply_broker_order_update(
+        "avg-exit",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 99.0},
+    )
+    manager.apply_broker_order_update(
+        "avg-exit",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 98.0},
+    )
+
+    assert manager.get_position(SYMBOL) is None
+    assert manager.get_realized_pnl() == pytest.approx((98.0 - 100.0) * 65)
 
 
 def test_new_entry_same_symbol_after_previous_trade_uses_distinct_lifecycle(tmp_path) -> None:
@@ -386,7 +427,7 @@ def test_new_entry_same_symbol_after_previous_trade_uses_distinct_lifecycle(tmp_
     assert position is not None
     assert position.order_id == "entry-b"
     assert position.quantity == 65
-    assert manager._orders.get("entry-b") is None
+    assert manager._orders.get("entry-b") is not None
     assert manager._terminal_orders["entry-a"].trade_lifecycle_id != manager._terminal_orders["entry-b"].trade_lifecycle_id
 
 
@@ -410,6 +451,63 @@ def test_status_regression_after_filled_is_noop(tmp_path) -> None:
     assert position.quantity == 65
     assert manager._terminal_orders["regression-entry"].normalized_status == "FILLED"
 
+
+
+def test_duplicate_and_invalid_cumulative_updates_do_not_mutate_position(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order("bad-partial", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+    manager.apply_broker_order_update(
+        "bad-partial",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 100.0},
+    )
+    manager.apply_broker_order_update(
+        "bad-partial",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 100.0},
+    )
+    manager.apply_broker_order_update(
+        "bad-partial",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 20, "average_price": 100.0},
+    )
+    manager.apply_broker_order_update(
+        "bad-partial",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 30, "average_price": -1.0},
+    )
+
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.quantity == 25
+    assert position.entry_price == pytest.approx(100.0)
+
+
+def test_resolved_terminal_eviction_preserves_unresolved_records(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager._max_terminal_orders = 1
+    manager.add_pending_order("unresolved", SYMBOL, "SELL", 65, 99.0, "MARKET", intent="EXIT")
+    manager.apply_broker_order_update(
+        "unresolved",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 99.0},
+    )
+    manager._terminal_orders["resolved-a"] = manager._terminal_orders["unresolved"]
+    manager._terminal_orders["resolved-a"].lifecycle_resolved = True
+
+    manager._evict_old_terminal_orders()
+
+    assert "unresolved" in manager._terminal_orders
+    assert "unresolved" in manager._unresolved_terminal_orders
+
+
+def test_pnl_reconciliation_mismatch_exposes_entry_blocker(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager._local_realized_pnl = 100.0
+    manager._broker_realized_pnl = -50.0
+    with manager._lock:
+        manager._refresh_realized_pnl_locked()
+
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert snapshot["pnl_reconciliation_status"] == "mismatch"
+    assert snapshot["local_confirmed_realized"] == pytest.approx(100.0)
+    assert snapshot["broker_realized_snapshot"] == pytest.approx(-50.0)
+    assert manager.current_pnl_reconciliation_blocker() == "pnl_reconciliation_mismatch"
 
 def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))

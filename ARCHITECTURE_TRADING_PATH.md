@@ -87,4 +87,12 @@ At every ambiguous broker state, new entries remain blocked until orders, fills 
 
 ## Startup compatibility adapters
 
+### Compatibility-only modules
+
 Compatibility adapters may preserve historical constructor or import shapes, but they must delegate to the canonical runtime owners above and must never create a second order, bracket, trailing or lifecycle authority.
+
+## Forbidden runtime layers
+
+Retired executor, processor or compatibility modules must not place live orders,
+register live brackets, own trailing stops, mutate positions, or become a second
+runtime lifecycle authority.

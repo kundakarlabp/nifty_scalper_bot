@@ -117,10 +117,12 @@ class RiskSwitches:
 
     # Accessors ----------------------------------------------------------
     def day_loss(self) -> float:
+        self._reset_if_needed()
         pnl = self._day_pnl
         return max(-pnl, 0.0)
 
     def day_profit(self) -> float:
+        self._reset_if_needed()
         return max(self._day_pnl, 0.0)
 
     def consecutive_losses(self) -> int:

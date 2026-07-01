@@ -166,8 +166,8 @@ class Signal:
     quantity: int
     confidence: float  # 0.0 to 1.0
     reason: str  # Human-readable explanation
-    stop_loss: float | None
-    take_profit: float | None
+    stop_loss: float | None = None
+    take_profit: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     tradable: bool = True
     source: str = "runner"
@@ -1277,7 +1277,7 @@ class StrategyManager:
         self._index_cache_log_ts: float | None = None
         self._signal_arbitrator = SignalArbitrator()
 
-        raw_config = config if config else (strategies[0].config if strategies else {})
+        raw_config = config if config else (getattr(strategies[0], "config", {}) if strategies else {})
         self._config = raw_config
         # ✅ FIX: Log which strategies are loaded
         strategy_names = [s.name for s in self._strategies]

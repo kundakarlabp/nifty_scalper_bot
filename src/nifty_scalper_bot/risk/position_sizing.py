@@ -75,6 +75,8 @@ class PositionSizer:
         risk_amount = equity * risk_per_trade_pct * max(0.5, min(1.2, confidence)) * max(0.5, regime_multiplier)
         raw_qty = int(risk_amount // per_unit_risk)
         qty = (raw_qty // lot_size) * lot_size
+        if raw_qty > 0 and qty == 0:
+            qty = lot_size
         cap_lots = 1 if equity <= 30000 and confidence < 0.9 else max_lots
         qty = min(qty, cap_lots * lot_size)
         max_margin_qty = int(available_margin // max(margin_per_lot, 1.0)) * lot_size

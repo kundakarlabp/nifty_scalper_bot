@@ -933,15 +933,15 @@ class InstrumentSettings(BaseSettings):
 class Settings:
     """Aggregate runtime configuration consumed by infrastructure modules."""
 
-    app: AppConfig
-    enable_live: bool
-    orders: OrderSettings
-    risk: RiskSettings
-    streamer: StreamerSettings
-    shadow: ShadowSettings
-    notifications: NotificationSettings
-    session_allow_out_of_hours: bool
-    allow_offmarket_trading: bool
+    app: AppConfig = field(default_factory=load_from_env)
+    enable_live: bool = False
+    orders: OrderSettings = field(default_factory=OrderSettings)
+    risk: RiskSettings = field(default_factory=RiskSettings)
+    streamer: StreamerSettings = field(default_factory=StreamerSettings)
+    shadow: ShadowSettings = field(default_factory=ShadowSettings)
+    notifications: NotificationSettings = field(default_factory=NotificationSettings)
+    session_allow_out_of_hours: bool = False
+    allow_offmarket_trading: bool = False
     paper_mode: bool = False
     ws_allow_offhours: bool = False
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)

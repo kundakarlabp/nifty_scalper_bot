@@ -354,6 +354,26 @@ def _runtime_snapshot(service: Any) -> dict[str, Any]:
             "_last_skip_reason",
         ),
     )
+    unresolved_terminal_summary = {}
+    summary_getter = getattr(position_manager, "unresolved_terminal_summary", None)
+    if callable(summary_getter):
+        summary = _safe_call(summary_getter)
+        if isinstance(summary, Mapping):
+            unresolved_terminal_summary = dict(summary)
+    pnl_snapshot = {}
+    pnl_getter = getattr(position_manager, "pnl_reconciliation_snapshot", None)
+    if callable(pnl_getter):
+        pnl_raw = _safe_call(pnl_getter)
+        if isinstance(pnl_raw, Mapping):
+            pnl_snapshot = dict(pnl_raw)
+    current_pnl_reconciliation_blocker = None
+    pnl_blocker_getter = getattr(
+        position_manager, "current_pnl_reconciliation_blocker", None
+    )
+    if callable(pnl_blocker_getter):
+        current_pnl_reconciliation_blocker = _safe_call(pnl_blocker_getter)
+    if current_pnl_reconciliation_blocker and not current_execution_blocker:
+        current_execution_blocker = str(current_pnl_reconciliation_blocker)
 
     snap: dict[str, Any] = {
         "mode": _first_attr(ctx, ("mode", "trading_mode", "effective_mode")) or getattr(service, "mode", None),
@@ -373,6 +393,9 @@ def _runtime_snapshot(service: Any) -> dict[str, Any]:
         "current_execution_blocker": current_execution_blocker,
         "current_risk_breaker": current_risk_breaker,
         "current_risk_breaker_reason": current_risk_breaker_reason,
+        "current_readiness_blocker": live_block_reason,
+        "current_pnl_reconciliation_blocker": current_pnl_reconciliation_blocker,
+        "pnl_reconciliation": pnl_snapshot,
         "execution_ready_by_symbol": _first_attr(ctx, ("execution_ready_by_symbol",)) or _first_attr(runner, ("runtime_execution_ready_by_symbol", "_runtime_execution_ready_by_symbol")),
         "selected_ce_exec_ready": _first_attr(ctx, ("selected_ce_exec_ready", "ce_exec_ready")),
         "selected_pe_exec_ready": _first_attr(ctx, ("selected_pe_exec_ready", "pe_exec_ready")),
@@ -398,6 +421,9 @@ def _runtime_snapshot(service: Any) -> dict[str, Any]:
         "bracket_manager": bracket_manager,
         "bracket_manager_attached": _first_attr(ctx, ("bracket_manager_attached",)) if _first_attr(ctx, ("bracket_manager_attached",)) is not None else bracket_manager is not None,
         "unresolved_exit": _first_attr(bracket_manager, ("has_unresolved_exit", "unresolved_exit", "get_first_unresolved_exit_bracket_id")),
+        "current_unresolved_exit": _first_attr(bracket_manager, ("has_unresolved_exit", "unresolved_exit", "get_first_unresolved_exit_bracket_id")),
+        "unresolved_terminal_count": unresolved_terminal_summary.get("count"),
+        "oldest_unresolved_terminal_age_s": unresolved_terminal_summary.get("oldest_age_s"),
         "active_basket": basket,
         "active_symbol_tokens": _first_attr(ctx, ("active_symbol_tokens",)) or _first_attr(mdm, ("active_symbol_tokens", "symbol_tokens")),
         "websocket_subscribed_tokens": _first_attr(websocket, ("subscribed_tokens", "tokens", "get_subscribed_tokens")),
@@ -561,6 +587,7 @@ def _why_reason(snap: Mapping[str, Any]) -> str | None:
     for key in (
         "live_block_reason",
         "current_execution_blocker",
+        "current_pnl_reconciliation_blocker",
         "execution_block_reason",
         "current_risk_breaker_reason",
         "last_signal_reason",
@@ -611,7 +638,10 @@ async def cmd_why(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) ->
         "execution:\n"
         f"  broker_ready: {_bool(snap.get('broker_ready'))}\n"
         f"  current_execution_blocker: {_value(snap.get('current_execution_blocker'), 'none')}\n"
+        f"  current_pnl_reconciliation_blocker: {_value(snap.get('current_pnl_reconciliation_blocker'), 'none')}\n"
         f"  current_risk_breaker_reason: {_value(snap.get('current_risk_breaker_reason'), 'none')}\n"
+        f"  unresolved_terminal_count: {_value(snap.get('unresolved_terminal_count'), '0')}\n"
+        f"  oldest_unresolved_terminal_age_s: {_value(snap.get('oldest_unresolved_terminal_age_s'), 'none')}\n"
         "recent_history:\n"
         f"  last_risk_rejection: {_value(snap.get('last_risk_rejection'), 'none')}\n"
         f"  last_order_rejection: {_value(snap.get('last_order_rejection'), 'none')}\n"
@@ -694,7 +724,10 @@ async def cmd_check_execution(update: Update, _: ContextTypes.DEFAULT_TYPE, serv
         "broker_ready": _bool(snap.get("broker_ready")),
         "risk_breaker": snap.get("risk_breaker") if snap.get("risk_breaker") is not None else _component_state("RiskManager", snap.get("risk")),
         "current_execution_blocker": snap.get("current_execution_blocker") or "none",
+        "current_pnl_reconciliation_blocker": snap.get("current_pnl_reconciliation_blocker") or "none",
         "current_risk_breaker_reason": snap.get("current_risk_breaker_reason") or "none",
+        "unresolved_terminal_count": snap.get("unresolved_terminal_count") or 0,
+        "oldest_unresolved_terminal_age_s": snap.get("oldest_unresolved_terminal_age_s") or "none",
         "daily_trades": snap.get("daily_trades"),
         "max_trades_per_day": snap.get("max_trades_per_day"),
         "midday_pause": _format_gate(snap.get("midday_pause")),

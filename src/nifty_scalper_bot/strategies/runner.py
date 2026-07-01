@@ -5901,7 +5901,11 @@ class StrategyRunner:
             for attempt in range(max_attempts):
                 try:
                     plan = TradePlan(symbol=symbol, side=side, quantity=normalized_qty, entry_price=order_price, stop_loss=stop_loss, take_profit=take_profit, strategy_name="runner", tag=f"runner_{side.lower()}", allow_market_entry=False)
-                    order_id = self._order_manager.submit_trade_plan(plan)
+                    if hasattr(self._order_manager, "submit_trade_plan_result"):
+                        submit_result = self._order_manager.submit_trade_plan_result(plan)
+                        order_id = submit_result.order_id if submit_result.accepted else ""
+                    else:
+                        order_id = self._order_manager.submit_trade_plan(plan)
                     break
                 except Exception as exc:
                     if attempt >= (max_attempts - 1):

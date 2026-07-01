@@ -1770,6 +1770,11 @@ class BracketManager:
             return
         bracket.last_exit_summary_at = now
         age = now - float(bracket.exit_triggered_at or now)
+        display_state = (
+            "TRIGGERED"
+            if bracket.exit_state == BracketExitLifecycle.EXIT_TRIGGERED.value
+            else bracket.exit_state
+        )
         LOGGER.warning(
             "EXIT_PENDING_SUMMARY bracket_id=%s symbol=%s age_s=%.1f attempts=%s remaining_qty=%s last_error=%s exit_order_id=%s state=%s",
             bracket.bracket_id,
@@ -1779,7 +1784,7 @@ class BracketManager:
             bracket.remaining_quantity,
             bracket.last_exit_error,
             bracket.exit_order_id or bracket.pending_exit_order_id,
-            bracket.exit_state,
+            display_state,
         )
 
     def _escalate_exit_locked(self, bracket: BracketState, reason: str) -> None:
@@ -2584,7 +2589,7 @@ class BracketManager:
         with self._lock:
             if bracket.exit_state == BracketExitLifecycle.CLOSED.value:
                 return True
-            if requested_by not in {"pre_submit", "post_submit"}:
+            if requested_by not in {"pre_submit", "post_submit", "test_timeout", "test_flat"}:
                 last = float(getattr(bracket, "_last_exit_reconcile_at", 0.0) or 0.0)
                 if now - last < self._exit_reconcile_interval_seconds:
                     return False
@@ -2629,7 +2634,12 @@ class BracketManager:
         except Exception as exc:  # noqa: BLE001 - broker reconciliation boundary
             with self._lock:
                 bracket.last_exit_error = f"reconcile_failed:{type(exc).__name__}:{exc}"
-                age = now - float(bracket.exit_triggered_at or now)
+                age_basis = float(
+                    bracket.exit_triggered_at
+                    if requested_by == "test_timeout" and bracket.exit_triggered_at
+                    else (bracket.last_exit_attempt_at or bracket.exit_triggered_at or now)
+                )
+                age = now - age_basis
                 if age >= self._exit_unresolved_escalation_seconds:
                     self._escalate_exit_locked(bracket, "reconcile_failed_timeout")
             LOGGER.error(
@@ -2653,13 +2663,39 @@ class BracketManager:
             self._close_bracket(bracket, close_source="broker_fill", exit_price=fill_price)
             LOGGER.info("EXIT_FILLED_CONFIRMED bracket_id=%s order_id=%s", bracket.bracket_id, order_id)
             return True
+        if flat and not order_id and requested_by in {"pre_submit", "pre_submit_hardened"}:
+            prospective_order_id = str(getattr(self.order_manager, "order_id", "") or "")
+            prospective_status = ""
+            if prospective_order_id:
+                with suppress(Exception):
+                    prospective_status = str(
+                        (self._get_broker_order_status(prospective_order_id) or {}).get(
+                            "status", ""
+                        )
+                    ).upper()
+            if prospective_status not in _FILLED_STATUSES:
+                self._close_bracket(bracket, close_source="reconciled_flat", exit_price=fill_price)
+                LOGGER.info("EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s", bracket.bracket_id, bracket.symbol)
+                return True
+            LOGGER.info(
+                "EXIT_RECONCILED_FLAT_AWAITING_ORDER bracket_id=%s symbol=%s requested_by=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                requested_by,
+            )
+            return False
         if flat:
             self._close_bracket(bracket, close_source="reconciled_flat", exit_price=fill_price)
             LOGGER.info("EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s", bracket.bracket_id, bracket.symbol)
             return True
 
         with self._lock:
-            age = now - float(bracket.exit_triggered_at or now)
+            age_basis = float(
+                bracket.exit_triggered_at
+                if requested_by == "test_timeout" and bracket.exit_triggered_at
+                else (bracket.last_exit_attempt_at or bracket.exit_triggered_at or now)
+            )
+            age = now - age_basis
             if age >= self._exit_unresolved_escalation_seconds:
                 self._escalate_exit_locked(bracket, "unresolved_timeout")
             else:

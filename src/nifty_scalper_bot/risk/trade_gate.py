@@ -27,7 +27,8 @@ class TradeGate:
         for key, expected in checks:
             if state.get(key, expected) != expected:
                 return GateResult(False, key, state)
-        if float(state.get('daily_loss', 0.0)) <= -abs(float(state.get('max_daily_loss', 0.0))):
+        max_daily_loss = abs(float(state.get('max_daily_loss', 0.0)))
+        if max_daily_loss > 0 and float(state.get('daily_loss', 0.0)) <= -max_daily_loss:
             return GateResult(False, 'daily_loss_limit', state)
         if decision.symbol and decision.symbol in set(state.get('open_symbols', [])):
             return GateResult(False, 'duplicate_symbol_position', state)

@@ -367,6 +367,7 @@ class TerminalOrderMetadata:
     side: OrderSide | None = None
     trade_lifecycle_id: str | None = None
     linked_entry_order_id: str | None = None
+    exit_lifecycle_state: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -387,6 +388,7 @@ class TerminalOrderMetadata:
             "side": self.side,
             "trade_lifecycle_id": self.trade_lifecycle_id,
             "linked_entry_order_id": self.linked_entry_order_id,
+            "exit_lifecycle_state": self.exit_lifecycle_state,
         }
 
     @staticmethod
@@ -428,6 +430,97 @@ class TerminalOrderMetadata:
                 if payload.get("linked_entry_order_id") is not None
                 else None
             ),
+            exit_lifecycle_state=(
+                str(payload["exit_lifecycle_state"])
+                if payload.get("exit_lifecycle_state") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(slots=True)
+class FillApplicationResult:
+    """Explicit result of applying one broker fill delta."""
+
+    fill_recorded: bool = False
+    position_applied: bool = False
+    bracket_applied: bool = False
+    pnl_applied: bool = False
+    accounting_finalized: bool = False
+    lifecycle_resolved: bool = False
+    quantity_delta: int = 0
+    delta_fill_price: float | None = None
+    reason: str | None = None
+
+
+@dataclass(slots=True)
+class ExitLifecycleRecord:
+    """Durable per-symbol EXIT/REDUCE lifecycle tombstone."""
+
+    symbol: str
+    exit_order_id: str
+    linked_entry_order_id: str | None
+    trade_lifecycle_id: str | None
+    bracket_id: str | None
+    expected_exit_side: OrderSide
+    expected_exit_quantity: int
+    state: str = "EXIT_PENDING"
+    submitted_at: datetime = field(default_factory=_now)
+    broker_flat_at: datetime | None = None
+    final_fill_price: float | None = None
+    finalized_at: datetime | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "exit_order_id": self.exit_order_id,
+            "linked_entry_order_id": self.linked_entry_order_id,
+            "trade_lifecycle_id": self.trade_lifecycle_id,
+            "bracket_id": self.bracket_id,
+            "expected_exit_side": self.expected_exit_side,
+            "expected_exit_quantity": self.expected_exit_quantity,
+            "state": self.state,
+            "submitted_at": self.submitted_at.isoformat(),
+            "broker_flat_at": self.broker_flat_at.isoformat() if self.broker_flat_at else None,
+            "final_fill_price": self.final_fill_price,
+            "finalized_at": self.finalized_at.isoformat() if self.finalized_at else None,
+        }
+
+    @staticmethod
+    def from_dict(payload: Mapping[str, Any]) -> "ExitLifecycleRecord":
+        return ExitLifecycleRecord(
+            symbol=str(payload["symbol"]),
+            exit_order_id=str(payload["exit_order_id"]),
+            linked_entry_order_id=(
+                str(payload["linked_entry_order_id"])
+                if payload.get("linked_entry_order_id") is not None
+                else None
+            ),
+            trade_lifecycle_id=(
+                str(payload["trade_lifecycle_id"])
+                if payload.get("trade_lifecycle_id") is not None
+                else None
+            ),
+            bracket_id=(
+                str(payload["bracket_id"])
+                if payload.get("bracket_id") is not None
+                else None
+            ),
+            expected_exit_side=_normalize_order_side(str(payload["expected_exit_side"])),
+            expected_exit_quantity=_to_int(payload.get("expected_exit_quantity", 0)),
+            state=str(payload.get("state") or "EXIT_PENDING"),
+            submitted_at=datetime.fromisoformat(str(payload["submitted_at"])),
+            broker_flat_at=(
+                datetime.fromisoformat(str(payload["broker_flat_at"]))
+                if payload.get("broker_flat_at") is not None
+                else None
+            ),
+            final_fill_price=_to_optional_float(payload.get("final_fill_price")),
+            finalized_at=(
+                datetime.fromisoformat(str(payload["finalized_at"]))
+                if payload.get("finalized_at") is not None
+                else None
+            ),
         )
 
 
@@ -454,8 +547,11 @@ class Order:
     pre_order_quantity: int = 0
     terminal_at: datetime | None = None
     applied_filled_quantity: int = 0
+    applied_cumulative_notional: float = 0.0
+    last_cumulative_average_price: float | None = None
     trade_lifecycle_id: str | None = None
     linked_entry_order_id: str | None = None
+    pre_order_entry_price: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the order for JSON persistence."""
@@ -480,8 +576,11 @@ class Order:
             "pre_order_quantity": self.pre_order_quantity,
             "terminal_at": self.terminal_at.isoformat() if self.terminal_at else None,
             "applied_filled_quantity": self.applied_filled_quantity,
+            "applied_cumulative_notional": self.applied_cumulative_notional,
+            "last_cumulative_average_price": self.last_cumulative_average_price,
             "trade_lifecycle_id": self.trade_lifecycle_id,
             "linked_entry_order_id": self.linked_entry_order_id,
+            "pre_order_entry_price": self.pre_order_entry_price,
         }
 
     @staticmethod
@@ -533,6 +632,12 @@ class Order:
                 else None
             ),
             applied_filled_quantity=_to_int(payload.get("applied_filled_quantity", 0)),
+            applied_cumulative_notional=_to_float(
+                payload.get("applied_cumulative_notional", 0.0)
+            ),
+            last_cumulative_average_price=_to_optional_float(
+                payload.get("last_cumulative_average_price")
+            ),
             trade_lifecycle_id=(
                 str(payload["trade_lifecycle_id"])
                 if payload.get("trade_lifecycle_id") is not None
@@ -543,6 +648,7 @@ class Order:
                 if payload.get("linked_entry_order_id") is not None
                 else None
             ),
+            pre_order_entry_price=_to_optional_float(payload.get("pre_order_entry_price")),
         )
 
 
@@ -682,6 +788,7 @@ class PositionManager:
         self._orders: Dict[str, Order] = {}
         self._terminal_orders: dict[str, TerminalOrderMetadata] = {}
         self._unresolved_terminal_orders: dict[str, TerminalOrderMetadata] = {}
+        self._exit_lifecycles: dict[str, ExitLifecycleRecord] = {}
         self._max_terminal_orders = 5000  # Limit persisted idempotency history.
         self._daily_realized_pnl: float = 0.0
         self._local_realized_pnl: float = 0.0
@@ -1526,6 +1633,32 @@ class PositionManager:
         with self._lock:
             return float(self._daily_realized_pnl)
 
+    def pnl_reconciliation_snapshot(self) -> dict[str, object]:
+        """Return current confirmed P&L authority and mismatch details."""
+
+        with self._lock:
+            return {
+                "local_confirmed_realized": float(self._local_realized_pnl),
+                "local_provisional_realized": float(
+                    self._local_provisional_realized_pnl
+                ),
+                "broker_realized_snapshot": self._broker_realized_pnl,
+                "authoritative_realized": float(self._authoritative_realized_pnl),
+                "pnl_authority": self._pnl_authority,
+                "pnl_reconciliation_status": self._pnl_reconciliation_status,
+                "pnl_snapshot_at": (
+                    self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None
+                ),
+            }
+
+    def current_pnl_reconciliation_blocker(self) -> str | None:
+        """Block new entries when confirmed local and broker P&L disagree."""
+
+        with self._lock:
+            if self._pnl_reconciliation_status == "mismatch":
+                return "pnl_reconciliation_mismatch"
+            return None
+
     def add_pending_order(
         self,
         order_id: str,
@@ -1602,8 +1735,21 @@ class PositionManager:
                 if existing_position is not None and normalized_intent in ("EXIT", "REDUCE")
                 else None
             ),
+            pre_order_entry_price=(
+                existing_position.entry_price if existing_position is not None else None
+            ),
         )
         self._orders[order.order_id] = order
+        if normalized_intent in ("EXIT", "REDUCE"):
+            self._exit_lifecycles[order.order_id] = ExitLifecycleRecord(
+                symbol=symbol_key,
+                exit_order_id=order.order_id,
+                linked_entry_order_id=order.linked_entry_order_id,
+                trade_lifecycle_id=order.trade_lifecycle_id,
+                bracket_id=order.bracket_id,
+                expected_exit_side=order.side,
+                expected_exit_quantity=order.quantity,
+            )
         self._persist_order_state(order)
         self.save_state()
 
@@ -1637,6 +1783,25 @@ class PositionManager:
                 extra={"event": "order_already_processed", "order_id": order_id}
             )
             return
+        incoming_status = normalize_broker_order_status(status)
+        if (
+            terminal_record is not None
+            and terminal_record.normalized_status in self.FINAL_STATUSES
+            and incoming_status not in self.FINAL_STATUSES
+        ):
+            self._logger.warning(
+                "Ignoring terminal order status regression for %s: %s -> %s",
+                order_id,
+                terminal_record.normalized_status,
+                incoming_status,
+                extra={
+                    "event": "order_status_regression_ignored",
+                    "order_id": order_id,
+                    "from_status": terminal_record.normalized_status,
+                    "to_status": incoming_status,
+                },
+            )
+            return
         
         order = self._orders.get(order_id)
         if order is None:
@@ -1648,8 +1813,7 @@ class PositionManager:
             return
 
         try:
-            broker_status = normalize_broker_order_status(status)
-            order.status = broker_status or _normalize_status(str(status))
+            order.status = incoming_status or _normalize_status(str(status))
         except ValueError:
             self._logger.warning(
                 "Ignoring unsupported status '%s' for order %s", status, order_id
@@ -1659,42 +1823,39 @@ class PositionManager:
         if fill_price is not None:
             order.fill_price = float(fill_price)
 
-        fill_recorded = False
-        position_applied = False
-        pnl_applied = False
-        accounting_finalized = False
-        lifecycle_applied = False
+        fill_result = FillApplicationResult()
         if order.status in ("PARTIALLY_FILLED", "FILLED") and order.fill_price is not None:
             if order.filled_quantity <= 0:
                 order.filled_quantity = order.quantity
-            lifecycle_applied = self._handle_filled_order(order)
-            fill_recorded = lifecycle_applied
-            position_applied = lifecycle_applied
-            is_exit = order.intent in ("EXIT", "REDUCE")
-            pnl_applied = lifecycle_applied and is_exit
-            accounting_finalized = lifecycle_applied and is_exit and order.status == "FILLED"
+            fill_result = self._handle_filled_order(order)
         if order.status == "FILLED" and order.fill_price is not None:
+            existing_terminal = self._terminal_orders.get(order_id)
+            if existing_terminal is not None and not fill_result.fill_recorded:
+                return
             order.terminal_at = _now()
             self._terminal_orders[order_id] = TerminalOrderMetadata(
                 terminal_at=order.terminal_at,
                 normalized_status=order.status,
                 cumulative_filled_quantity=order.filled_quantity,
                 average_fill_price=order.fill_price,
-                lifecycle_applied=lifecycle_applied,
-                accounting_finalized=accounting_finalized,
+                lifecycle_applied=fill_result.fill_recorded,
+                accounting_finalized=fill_result.accounting_finalized,
                 terminal_update_seen=True,
-                fill_recorded=fill_recorded,
-                position_applied=position_applied,
-                bracket_applied=False,
-                pnl_applied=pnl_applied,
-                lifecycle_resolved=(
-                    lifecycle_applied and (accounting_finalized or order.intent == "ENTRY")
-                ),
+                fill_recorded=fill_result.fill_recorded,
+                position_applied=fill_result.position_applied,
+                bracket_applied=fill_result.bracket_applied,
+                pnl_applied=fill_result.pnl_applied,
+                lifecycle_resolved=fill_result.lifecycle_resolved,
                 symbol=order.symbol,
                 intent=order.intent,
                 side=order.side,
                 trade_lifecycle_id=order.trade_lifecycle_id,
                 linked_entry_order_id=order.linked_entry_order_id,
+                exit_lifecycle_state=(
+                    self._exit_lifecycles[order_id].state
+                    if order_id in self._exit_lifecycles
+                    else None
+                ),
             )
             if not self._terminal_orders[order_id].lifecycle_resolved:
                 self._unresolved_terminal_orders[order_id] = self._terminal_orders[order_id]
@@ -1705,7 +1866,7 @@ class PositionManager:
                 extra={
                     "event": "order_terminal_recorded",
                     "order_id": order_id,
-                    "lifecycle_applied": lifecycle_applied,
+                    "lifecycle_applied": fill_result.position_applied or fill_result.pnl_applied,
                 }
             )
             self._evict_old_terminal_orders()
@@ -1790,6 +1951,10 @@ class PositionManager:
                 "unresolved_terminal_orders": {
                     order_id: metadata.to_dict()
                     for order_id, metadata in self._unresolved_terminal_orders.items()
+                },
+                "exit_lifecycles": {
+                    order_id: lifecycle.to_dict()
+                    for order_id, lifecycle in self._exit_lifecycles.items()
                 },
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
@@ -1919,6 +2084,21 @@ class PositionManager:
                 if not metadata.lifecycle_resolved
             }
         self._unresolved_terminal_orders = restored_unresolved
+        exit_lifecycles_raw = payload.get("exit_lifecycles", {})
+        restored_exit_lifecycles: dict[str, ExitLifecycleRecord] = {}
+        if isinstance(exit_lifecycles_raw, Mapping):
+            for order_id, lifecycle in exit_lifecycles_raw.items():
+                if not isinstance(lifecycle, Mapping):
+                    continue
+                try:
+                    restored_exit_lifecycles[str(order_id)] = (
+                        ExitLifecycleRecord.from_dict(
+                            cast(Mapping[str, Any], lifecycle)
+                        )
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    self._logger.error("Skipping invalid exit lifecycle: %s", exc)
+        self._exit_lifecycles = restored_exit_lifecycles
         contracts: Dict[str, ActiveContract] = {}
         index: Dict[str, str] = {}
         for item in payload.get("active_contracts", []):
@@ -2193,6 +2373,27 @@ class PositionManager:
             new_keys = set(reconciled)
             removed_symbols = sorted(old_keys - new_keys)
             added_symbols = sorted(new_keys - old_keys)
+            now = _now()
+            for order in self._orders.values():
+                if (
+                    order.symbol in removed_symbols
+                    and order.intent in ("EXIT", "REDUCE")
+                    and order.status not in self.FINAL_STATUSES
+                ):
+                    lifecycle = self._exit_lifecycles.get(order.order_id)
+                    if lifecycle is None:
+                        lifecycle = ExitLifecycleRecord(
+                            symbol=order.symbol,
+                            exit_order_id=order.order_id,
+                            linked_entry_order_id=order.linked_entry_order_id,
+                            trade_lifecycle_id=order.trade_lifecycle_id,
+                            bracket_id=order.bracket_id,
+                            expected_exit_side=order.side,
+                            expected_exit_quantity=order.quantity,
+                        )
+                        self._exit_lifecycles[order.order_id] = lifecycle
+                    lifecycle.state = "BROKER_FLAT_AWAITING_FILL"
+                    lifecycle.broker_flat_at = now
             self._positions = reconciled
             if snapshot_realized_seen:
                 self._broker_realized_pnl = float(snapshot_realized_pnl)
@@ -2488,13 +2689,29 @@ class PositionManager:
         if overflow <= 0:
             return
         ordered = sorted(
-            self._terminal_orders.items(),
+            (
+                (order_id, metadata)
+                for order_id, metadata in self._terminal_orders.items()
+                if metadata.lifecycle_resolved
+                and order_id not in self._unresolved_terminal_orders
+            ),
             key=lambda item: (item[1].terminal_at, item[0]),
         )
         for order_id, _metadata in ordered[:overflow]:
             self._terminal_orders.pop(order_id, None)
 
-    def _persist_fill(self, order: Order, quantity: int, fill_price: float) -> None:
+    def _persist_fill(
+        self,
+        order: Order,
+        quantity: int,
+        fill_price: float,
+        *,
+        lifecycle_applied: bool,
+        accounting_finalized: bool,
+        pnl_applied: bool = False,
+        position_applied: bool = False,
+        lifecycle_resolved: bool = False,
+    ) -> None:
         """Persist executed fill metadata to durable storage.
 
         Args:
@@ -2547,8 +2764,15 @@ class PositionManager:
             "broker_order_timestamp": timestamp_iso,
             "exchange_timestamp": timestamp_iso,
             "exchange_update_timestamp": timestamp_iso,
-            "lifecycle_applied": True,
-            "accounting_finalized": True,
+            "applied_cumulative_notional": float(
+                order.applied_cumulative_notional + (float(fill_price) * int(quantity))
+            ),
+            "last_cumulative_average_price": order.fill_price,
+            "lifecycle_applied": bool(lifecycle_applied),
+            "position_applied": bool(position_applied),
+            "pnl_applied": bool(pnl_applied),
+            "accounting_finalized": bool(accounting_finalized),
+            "lifecycle_resolved": bool(lifecycle_resolved),
         }
         linked_symbol = getattr(order, "linked_position_symbol", None)
         if linked_symbol:
@@ -2631,41 +2855,123 @@ class PositionManager:
 
     # Internal helpers -------------------------------------------------
 
-    def _handle_filled_order(self, order: Order) -> bool:
+    def _handle_filled_order(self, order: Order) -> FillApplicationResult:
         symbol_key = order.symbol
         cumulative_qty = (
             order.quantity if order.filled_quantity == 0 else order.filled_quantity
         )
-        qty = int(cumulative_qty) - int(order.applied_filled_quantity or 0)
-        qty = abs(qty)
+        cumulative_qty = int(cumulative_qty)
+        previous_qty = int(order.applied_filled_quantity or 0)
+        qty = cumulative_qty - previous_qty
         if qty <= 0:
             self._logger.warning(
-                "Ignoring zero-quantity fill for order %s", order.order_id
+                "Ignoring non-incremental fill for order %s", order.order_id
             )
-            return False
+            return FillApplicationResult(reason="non_incremental_cumulative_quantity")
 
-        fill_price = order.fill_price
-        if fill_price is None:
-            self._logger.warning("Missing fill price for order %s", order.order_id)
-            return False
+        cumulative_avg = order.fill_price
+        if cumulative_avg is None or not math.isfinite(float(cumulative_avg)) or float(cumulative_avg) <= 0:
+            self._logger.warning("Missing/invalid cumulative fill price for order %s", order.order_id)
+            return FillApplicationResult(reason="invalid_cumulative_average_price")
+
+        new_cumulative_notional = cumulative_qty * float(cumulative_avg)
+        delta_notional = new_cumulative_notional - float(order.applied_cumulative_notional or 0.0)
+        if delta_notional <= 0 or not math.isfinite(delta_notional):
+            self._logger.warning(
+                "Ignoring invalid cumulative notional for order %s", order.order_id
+            )
+            return FillApplicationResult(reason="invalid_cumulative_notional")
+        fill_price = delta_notional / qty
+        if not math.isfinite(fill_price) or fill_price <= 0:
+            self._logger.warning("Invalid delta fill price for order %s", order.order_id)
+            return FillApplicationResult(reason="invalid_delta_fill_price")
 
         side = order.side
         intent = _normalize_intent(order.intent)
+        is_terminal = order.status == "FILLED"
+
+        def mark_applied() -> None:
+            order.applied_filled_quantity += qty
+            order.applied_cumulative_notional = new_cumulative_notional
+            order.last_cumulative_average_price = float(cumulative_avg)
+
         if not self.has_position(symbol_key):
+            if intent in ("EXIT", "REDUCE"):
+                entry_price = order.pre_order_entry_price
+                if entry_price is None or entry_price <= 0:
+                    self._logger.warning(
+                        "Exit fill while flat is retained until linked entry price is available",
+                        extra={
+                            "event": "exit_fill_without_entry_price",
+                            "order_id": order.order_id,
+                            "symbol": symbol_key,
+                            "intent": intent,
+                        },
+                    )
+                    return FillApplicationResult(
+                        quantity_delta=qty,
+                        delta_fill_price=fill_price,
+                        reason="linked_entry_price_missing",
+                    )
+                self._persist_fill(
+                    order,
+                    qty,
+                    fill_price,
+                    lifecycle_applied=True,
+                    position_applied=False,
+                    pnl_applied=True,
+                    accounting_finalized=is_terminal,
+                    lifecycle_resolved=is_terminal,
+                )
+                position_side = order.pre_order_position_side or (
+                    "LONG" if side == "SELL" else "SHORT"
+                )
+                realized = self._calculate_realized_pnl(
+                    position_side,
+                    float(entry_price),
+                    fill_price,
+                    min(qty, order.pre_order_quantity or qty),
+                )
+                self._local_realized_pnl += realized
+                with self._lock:
+                    self._refresh_realized_pnl_locked()
+                lifecycle = self._exit_lifecycles.get(order.order_id)
+                if lifecycle is not None:
+                    lifecycle.final_fill_price = float(cumulative_avg)
+                    lifecycle.state = "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
+                    if is_terminal:
+                        lifecycle.finalized_at = _now()
+                mark_applied()
+                return FillApplicationResult(
+                    fill_recorded=True,
+                    position_applied=False,
+                    bracket_applied=False,
+                    pnl_applied=True,
+                    accounting_finalized=is_terminal,
+                    lifecycle_resolved=is_terminal,
+                    quantity_delta=qty,
+                    delta_fill_price=fill_price,
+                    reason="exit_fill_finalized_after_broker_flat" if is_terminal else "exit_partial_after_broker_flat",
+                )
+
             if intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
                 self._logger.warning(
                     "Ignoring %s %s fill while flat; explicit entry intent required",
                     intent,
                     side,
                     extra={
-                        "event": "exit_fill_without_position",
+                        "event": "ambiguous_fill_quarantined",
                         "order_id": order.order_id,
                         "symbol": symbol_key,
                         "side": side,
                         "intent": intent,
                     },
                 )
-                return False
+                return FillApplicationResult(
+                    quantity_delta=qty,
+                    delta_fill_price=fill_price,
+                    reason="ambiguous_fill_quarantined",
+                )
             paired_exit = next(
                 (
                     metadata
@@ -2689,13 +2995,44 @@ class PositionManager:
                 None,
             )
             if intent in ("ENTRY", "SCALE_IN") and side == "BUY" and paired_exit:
-                self._persist_fill(order, qty, fill_price)
+                if paired_exit.pnl_applied and paired_exit.accounting_finalized:
+                    self._persist_fill(
+                        order,
+                        qty,
+                        fill_price,
+                        lifecycle_applied=True,
+                        position_applied=False,
+                        pnl_applied=False,
+                        accounting_finalized=True,
+                        lifecycle_resolved=True,
+                    )
+                    mark_applied()
+                    return FillApplicationResult(
+                        fill_recorded=True,
+                        position_applied=False,
+                        pnl_applied=False,
+                        accounting_finalized=True,
+                        lifecycle_resolved=True,
+                        quantity_delta=qty,
+                        delta_fill_price=fill_price,
+                        reason="historical_entry_fill_recorded_after_finalized_exit",
+                    )
+                self._persist_fill(
+                    order,
+                    qty,
+                    fill_price,
+                    lifecycle_applied=True,
+                    position_applied=False,
+                    pnl_applied=True,
+                    accounting_finalized=True,
+                    lifecycle_resolved=True,
+                )
                 paired_qty = min(qty, abs(int(paired_exit.cumulative_filled_quantity)))
                 realized = (float(paired_exit.average_fill_price) - fill_price) * paired_qty
                 self._local_realized_pnl += realized
                 with self._lock:
                     self._refresh_realized_pnl_locked()
-                order.applied_filled_quantity += qty
+                mark_applied()
                 self._logger.warning(
                     "historical_entry_fill_reconciled_after_exit",
                     extra={
@@ -2706,8 +3043,25 @@ class PositionManager:
                         "realized_pnl": realized,
                     },
                 )
-                return True
-            self._persist_fill(order, qty, fill_price)
+                return FillApplicationResult(
+                    fill_recorded=True,
+                    position_applied=False,
+                    pnl_applied=True,
+                    accounting_finalized=True,
+                    lifecycle_resolved=True,
+                    quantity_delta=qty,
+                    delta_fill_price=fill_price,
+                    reason="historical_entry_fill_reconciled_after_exit",
+                )
+            self._persist_fill(
+                order,
+                qty,
+                fill_price,
+                lifecycle_applied=True,
+                position_applied=True,
+                accounting_finalized=False,
+                lifecycle_resolved=False,
+            )
             position_side: Side = "LONG" if side == "BUY" else "SHORT"
             self.open_position(
                 symbol=symbol_key,
@@ -2716,17 +3070,50 @@ class PositionManager:
                 entry_price=fill_price,
                 order_id=order.order_id,
             )
-            order.applied_filled_quantity += qty
-            return True
+            mark_applied()
+            return FillApplicationResult(
+                fill_recorded=True,
+                position_applied=True,
+                bracket_applied=bool(order.bracket_id),
+                accounting_finalized=False,
+                lifecycle_resolved=bool(order.bracket_id),
+                quantity_delta=qty,
+                delta_fill_price=fill_price,
+                reason="entry_fill_applied",
+            )
 
         position = self._positions[symbol_key]
         if (position.side == "LONG" and side == "SELL") or (
             position.side == "SHORT" and side == "BUY"
         ):
-            self._persist_fill(order, qty, fill_price)
+            self._persist_fill(
+                order,
+                qty,
+                fill_price,
+                lifecycle_applied=True,
+                position_applied=True,
+                pnl_applied=True,
+                accounting_finalized=is_terminal,
+                lifecycle_resolved=is_terminal,
+            )
             self._reduce_or_close_position(position, qty, fill_price)
-            order.applied_filled_quantity += qty
-            return True
+            lifecycle = self._exit_lifecycles.get(order.order_id)
+            if lifecycle is not None:
+                lifecycle.final_fill_price = float(cumulative_avg)
+                lifecycle.state = "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
+                if is_terminal:
+                    lifecycle.finalized_at = _now()
+            mark_applied()
+            return FillApplicationResult(
+                fill_recorded=True,
+                position_applied=True,
+                pnl_applied=True,
+                accounting_finalized=is_terminal,
+                lifecycle_resolved=is_terminal,
+                quantity_delta=qty,
+                delta_fill_price=fill_price,
+                reason="exit_fill_applied",
+            )
         else:
             if intent in ("EXIT", "REDUCE"):
                 self._logger.warning(
@@ -2739,11 +3126,32 @@ class PositionManager:
                         "order_side": side,
                     },
                 )
-                return False
-            self._persist_fill(order, qty, fill_price)
+                return FillApplicationResult(
+                    quantity_delta=qty,
+                    delta_fill_price=fill_price,
+                    reason="exit_fill_side_mismatch",
+                )
+            self._persist_fill(
+                order,
+                qty,
+                fill_price,
+                lifecycle_applied=True,
+                position_applied=True,
+                accounting_finalized=False,
+                lifecycle_resolved=False,
+            )
             self._scale_position(position, qty, fill_price)
-            order.applied_filled_quantity += qty
-            return True
+            mark_applied()
+            return FillApplicationResult(
+                fill_recorded=True,
+                position_applied=True,
+                bracket_applied=bool(order.bracket_id),
+                accounting_finalized=False,
+                lifecycle_resolved=bool(order.bracket_id),
+                quantity_delta=qty,
+                delta_fill_price=fill_price,
+                reason="scale_fill_applied",
+            )
 
     def _scale_position(self, position: Position, qty: int, fill_price: float) -> None:
         new_qty = position.quantity + qty

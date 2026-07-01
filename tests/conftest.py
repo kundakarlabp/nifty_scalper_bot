@@ -99,20 +99,21 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
         loop.close()
 
 
-def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool:
-    if inspect.iscoroutinefunction(pyfuncitem.obj):
-        loop = pyfuncitem.funcargs.get("event_loop")
-        kwargs = {
-            name: pyfuncitem.funcargs[name]
-            for name in pyfuncitem._fixtureinfo.argnames  # type: ignore[attr-defined]
-        }
-        if loop is None or not isinstance(loop, asyncio.AbstractEventLoop):
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(pyfuncitem.obj(**kwargs))
-            finally:
-                loop.close()
-        else:
+def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
+    if not inspect.iscoroutinefunction(pyfuncitem.obj):
+        return None
+
+    loop = pyfuncitem.funcargs.get("event_loop")
+    kwargs = {
+        name: pyfuncitem.funcargs[name]
+        for name in pyfuncitem._fixtureinfo.argnames  # type: ignore[attr-defined]
+    }
+    if loop is None or not isinstance(loop, asyncio.AbstractEventLoop):
+        loop = asyncio.new_event_loop()
+        try:
             loop.run_until_complete(pyfuncitem.obj(**kwargs))
-        return True
-    return False
+        finally:
+            loop.close()
+    else:
+        loop.run_until_complete(pyfuncitem.obj(**kwargs))
+    return True

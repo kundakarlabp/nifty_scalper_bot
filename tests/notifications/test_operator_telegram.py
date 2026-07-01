@@ -203,6 +203,8 @@ EXPECTED_OPERATOR_COMMANDS = (
     "check_core",
     "check_execution",
     "errors",
+    "logs",
+    "dumplogs",
     "stderror",
     "selftest",
     "emergency",

@@ -2257,6 +2257,34 @@ class OrderManager:
                 },
             )
             return None
+        pnl_blocker = None
+        if normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"}:
+            blocker_getter = getattr(
+                self._positions, "current_pnl_reconciliation_blocker", None
+            )
+            if callable(blocker_getter):
+                pnl_blocker = blocker_getter()
+        if pnl_blocker:
+            self.set_last_skip_reason(str(pnl_blocker))
+            self._logger.error(
+                "LIVE_ORDER_REJECTED symbol=%s side=%s reason=%s",
+                symbol,
+                side,
+                pnl_blocker,
+                extra={
+                    "event": "LIVE_ORDER_REJECTED",
+                    "symbol": symbol,
+                    "side": side,
+                    "intent": normalized_intent,
+                    "reason": pnl_blocker,
+                    "pnl_reconciliation": (
+                        self._positions.pnl_reconciliation_snapshot()
+                        if hasattr(self._positions, "pnl_reconciliation_snapshot")
+                        else None
+                    ),
+                },
+            )
+            return None
         broker = getattr(self, "_broker", None)
         if bool(getattr(broker, "auth_invalid", False)):
             self.set_last_skip_reason("broker_auth_invalid")

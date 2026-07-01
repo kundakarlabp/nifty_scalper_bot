@@ -6,7 +6,14 @@ import logging
 import time
 from typing import Any
 
+import pytest
+
 from nifty_scalper_bot.execution.bracket_manager import BracketExitLifecycle, BracketManager
+
+
+@pytest.fixture(autouse=True)
+def isolated_bracket_store(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
 
 class _Broker:

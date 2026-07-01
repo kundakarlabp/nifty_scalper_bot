@@ -440,7 +440,9 @@ class HardenedBracketManager(_LegacyBracketManager):
         with self._lock:
             bracket.exit_in_progress = True
             bracket.exit_attempt_count += 1
-            bracket.last_exit_attempt_at = time.time()
+            now_ts = time.time()
+            bracket.last_exit_attempt_at = now_ts
+            bracket.exit_triggered_at = now_ts
             attempt = bracket.exit_attempt_count
             bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_ORDER_PENDING.value
             bracket.entry_status = bracket.exit_state
