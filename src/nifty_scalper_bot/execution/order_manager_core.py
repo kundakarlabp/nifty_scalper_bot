@@ -10322,8 +10322,11 @@ class OrderManager:
         if not status_str:
             return OrderStatus.SUBMITTED
         mapping = {
+            "submitted": OrderStatus.PENDING,
+            "validation pending": OrderStatus.PENDING,
+            "put order request received": OrderStatus.PENDING,
             "open": OrderStatus.SUBMITTED,
-            "put order request received": OrderStatus.SUBMITTED,
+            "open pending": OrderStatus.SUBMITTED,
             "complete": OrderStatus.FILLED,
             "filled": OrderStatus.FILLED,
             "partial": OrderStatus.PARTIALLY_FILLED,

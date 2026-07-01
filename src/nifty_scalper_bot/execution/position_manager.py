@@ -39,6 +39,14 @@ if TYPE_CHECKING:
 
 Side = Literal["LONG", "SHORT"]
 OrderSide = Literal["BUY", "SELL"]
+OrderIntent = Literal[
+    "ENTRY",
+    "SCALE_IN",
+    "EXIT",
+    "REDUCE",
+    "REVERSAL",
+    "UNKNOWN",
+]
 OrderStatus = Literal[
     "PENDING",
     "OPEN",
@@ -86,6 +94,39 @@ def _normalize_status(value: str) -> OrderStatus:
     ):
         raise ValueError(f"Unsupported status '{value}'")
     return cast(OrderStatus, normalized)
+
+
+def normalize_broker_order_status(value: object) -> OrderStatus | None:
+    """Map broker-specific order statuses to the internal lifecycle states."""
+
+    if value is None:
+        return None
+    normalized = str(value).strip().upper()
+    mapping: dict[str, OrderStatus] = {
+        "SUBMITTED": "PENDING",
+        "VALIDATION PENDING": "PENDING",
+        "PUT ORDER REQ RECEIVED": "PENDING",
+        "OPEN": "OPEN",
+        "OPEN PENDING": "OPEN",
+        "TRIGGER PENDING": "OPEN",
+        "PARTIALLY FILLED": "PARTIALLY_FILLED",
+        "PARTIAL": "PARTIALLY_FILLED",
+        "COMPLETE": "FILLED",
+        "FILLED": "FILLED",
+        "CANCELLED": "CANCELLED",
+        "CANCELED": "CANCELLED",
+        "REJECTED": "REJECTED",
+        "EXPIRED": "EXPIRED",
+        "PENDING": "PENDING",
+    }
+    return mapping.get(normalized)
+
+
+def _normalize_intent(value: object | None) -> OrderIntent:
+    normalized = str(value or "UNKNOWN").strip().upper()
+    if normalized in {"ENTRY", "SCALE_IN", "EXIT", "REDUCE", "REVERSAL", "UNKNOWN"}:
+        return cast(OrderIntent, normalized)
+    return "UNKNOWN"
 
 def _to_int(value: object) -> int:
     """Robust integer conversion handling None and strings."""
@@ -318,6 +359,13 @@ class Order:
     filled_quantity: int = 0
     fill_price: float | None = None
     linked_position_symbol: str | None = None
+    intent: OrderIntent = "UNKNOWN"
+    bracket_id: str | None = None
+    signal_id: str | None = None
+    signal_fingerprint: str | None = None
+    pre_order_position_side: Side | None = None
+    pre_order_quantity: int = 0
+    terminal_at: datetime | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the order for JSON persistence."""
@@ -334,6 +382,13 @@ class Order:
             "filled_quantity": self.filled_quantity,
             "fill_price": self.fill_price,
             "linked_position_symbol": self.linked_position_symbol,
+            "intent": self.intent,
+            "bracket_id": self.bracket_id,
+            "signal_id": self.signal_id,
+            "signal_fingerprint": self.signal_fingerprint,
+            "pre_order_position_side": self.pre_order_position_side,
+            "pre_order_quantity": self.pre_order_quantity,
+            "terminal_at": self.terminal_at.isoformat() if self.terminal_at else None,
         }
 
     @staticmethod
@@ -347,13 +402,41 @@ class Order:
             order_type=str(payload["order_type"]),
             quantity=_to_int(payload["quantity"]),
             price=_to_float(payload["price"]),
-            status=_normalize_status(str(payload["status"])),
+            status=normalize_broker_order_status(payload.get("status"))
+            or _normalize_status(str(payload["status"])),
             timestamp=datetime.fromisoformat(str(payload["timestamp"])),
             filled_quantity=_to_int(payload.get("filled_quantity", 0)),
             fill_price=_to_optional_float(payload.get("fill_price")),
             linked_position_symbol=(
                 str(payload["linked_position_symbol"])
                 if payload.get("linked_position_symbol") is not None
+                else None
+            ),
+            intent=_normalize_intent(payload.get("intent")),
+            bracket_id=(
+                str(payload["bracket_id"])
+                if payload.get("bracket_id") is not None
+                else None
+            ),
+            signal_id=(
+                str(payload["signal_id"])
+                if payload.get("signal_id") is not None
+                else None
+            ),
+            signal_fingerprint=(
+                str(payload["signal_fingerprint"])
+                if payload.get("signal_fingerprint") is not None
+                else None
+            ),
+            pre_order_position_side=(
+                _normalize_side(str(payload["pre_order_position_side"]))
+                if payload.get("pre_order_position_side") is not None
+                else None
+            ),
+            pre_order_quantity=_to_int(payload.get("pre_order_quantity", 0)),
+            terminal_at=(
+                datetime.fromisoformat(str(payload["terminal_at"]))
+                if payload.get("terminal_at") is not None
                 else None
             ),
         )
@@ -1278,6 +1361,10 @@ class PositionManager:
         qty: int,
         price: float,
         order_type: str,
+        intent: OrderIntent | str | None = None,
+        bracket_id: str | None = None,
+        signal_id: str | None = None,
+        signal_fingerprint: str | None = None,
     ) -> None:
         """Track a newly submitted order.
         
@@ -1288,7 +1375,10 @@ class PositionManager:
         order_id = str(order_id).strip()
         
         # ✅ FIX 1: Don't re-add orders that were already processed
-        if hasattr(self, '_processed_order_ids') and order_id in self._processed_order_ids:
+        if (
+            hasattr(self, "_processed_order_ids")
+            and order_id in self._processed_order_ids
+        ):
             self._logger.debug(
                 f"Skipping add_pending_order for already-processed: {order_id}",
                 extra={"event": "order_add_skip_processed", "order_id": order_id}
@@ -1304,17 +1394,36 @@ class PositionManager:
             return
 
         symbol_key = symbol.upper()
+        existing_position = self._positions.get(symbol_key)
+        normalized_side = _normalize_order_side(side)
+        normalized_intent = _normalize_intent(intent)
+        if normalized_intent == "UNKNOWN":
+            if existing_position is not None:
+                exit_side = "SELL" if existing_position.side == "LONG" else "BUY"
+                normalized_intent = (
+                    "EXIT" if normalized_side == exit_side else "SCALE_IN"
+                )
+            elif normalized_side == "BUY":
+                normalized_intent = "ENTRY"
         order = Order(
             order_id=order_id,
             symbol=symbol_key,
-            side=_normalize_order_side(side),
+            side=normalized_side,
             order_type=order_type,
             quantity=int(qty),
             price=float(price),
             status="PENDING",
             linked_position_symbol=(
-                symbol_key if self.has_position(symbol_key) else None
+                symbol_key if existing_position is not None else None
             ),
+            intent=normalized_intent,
+            bracket_id=bracket_id,
+            signal_id=signal_id,
+            signal_fingerprint=signal_fingerprint,
+            pre_order_position_side=(
+                existing_position.side if existing_position else None
+            ),
+            pre_order_quantity=existing_position.quantity if existing_position else 0,
         )
         self._orders[order.order_id] = order
         self._persist_order_state(order)
@@ -1360,7 +1469,8 @@ class PositionManager:
             return
 
         try:
-            order.status = _normalize_status(str(status))
+            broker_status = normalize_broker_order_status(status)
+            order.status = broker_status or _normalize_status(str(status))
         except ValueError:
             self._logger.warning(
                 "Ignoring unsupported status '%s' for order %s", status, order_id
@@ -1373,6 +1483,7 @@ class PositionManager:
         if order.status == "FILLED" and order.fill_price is not None:
             order.filled_quantity = order.quantity
             self._handle_filled_order(order)
+            order.terminal_at = _now()
             
             # ✅ FIX: Mark this order as processed AFTER handling the fill
             # This ensures we never process the same fill twice
@@ -1384,7 +1495,9 @@ class PositionManager:
             
             # ✅ FIX: Prevent memory leak - trim old IDs if too many
             if len(self._processed_order_ids) > self._max_processed_ids:
-                to_remove = list(self._processed_order_ids)[:self._max_processed_ids // 2]
+                to_remove = list(self._processed_order_ids)[
+                    : self._max_processed_ids // 2
+                ]
                 for old_id in to_remove:
                     self._processed_order_ids.discard(old_id)
                 self._logger.debug(
@@ -1413,6 +1526,9 @@ class PositionManager:
             state = {
                 "positions": [position.to_dict() for position in self._positions.values()],
                 "orders": [order.to_dict() for order in self._orders.values()],
+                "processed_order_ids": list(self._processed_order_ids)[
+                    -self._max_processed_ids :
+                ],
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
                 "broker_realized_pnl": self._broker_realized_pnl,
@@ -1481,6 +1597,11 @@ class PositionManager:
 
         self._positions = positions
         self._orders = orders
+        processed_raw = payload.get("processed_order_ids", [])
+        if isinstance(processed_raw, list):
+            self._processed_order_ids = {
+                str(item).strip() for item in processed_raw if str(item).strip()
+            }
         contracts: Dict[str, ActiveContract] = {}
         index: Dict[str, str] = {}
         for item in payload.get("active_contracts", []):
@@ -2169,7 +2290,22 @@ class PositionManager:
         self._persist_fill(order, qty, fill_price)
 
         side = order.side
+        intent = _normalize_intent(order.intent)
         if not self.has_position(symbol_key):
+            if intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
+                self._logger.warning(
+                    "Ignoring %s %s fill while flat; explicit entry intent required",
+                    intent,
+                    side,
+                    extra={
+                        "event": "exit_fill_without_position",
+                        "order_id": order.order_id,
+                        "symbol": symbol_key,
+                        "side": side,
+                        "intent": intent,
+                    },
+                )
+                return
             position_side: Side = "LONG" if side == "BUY" else "SHORT"
             self.open_position(
                 symbol=symbol_key,
@@ -2186,6 +2322,18 @@ class PositionManager:
         ):
             self._reduce_or_close_position(position, qty, fill_price)
         else:
+            if intent in ("EXIT", "REDUCE"):
+                self._logger.warning(
+                    "Ignoring exit fill that does not match open position side",
+                    extra={
+                        "event": "exit_fill_side_mismatch",
+                        "order_id": order.order_id,
+                        "symbol": symbol_key,
+                        "position_side": position.side,
+                        "order_side": side,
+                    },
+                )
+                return
             self._scale_position(position, qty, fill_price)
 
     def _scale_position(self, position: Position, qty: int, fill_price: float) -> None:
@@ -2236,4 +2384,11 @@ class PositionManager:
         return (entry_price - exit_price) * qty
 
 
-__all__ = ["Order", "Position", "PositionManager", "ActiveContract"]
+__all__ = [
+    "Order",
+    "OrderIntent",
+    "Position",
+    "PositionManager",
+    "ActiveContract",
+    "normalize_broker_order_status",
+]

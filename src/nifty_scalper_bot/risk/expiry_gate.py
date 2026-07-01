@@ -69,10 +69,10 @@ def midday_pause_block(now: datetime | None = None) -> tuple[bool, str]:
 
     Blocks NEW option-buy entries during the low-volatility midday window
     (default 11:30-13:15 IST) where chop feeds transaction costs. Exits
-    untouched. Env: MIDDAY_PAUSE_ENABLED (true), MIDDAY_PAUSE_START (11:30),
+    untouched. Env: MIDDAY_PAUSE_ENABLED (false), MIDDAY_PAUSE_START (11:30),
     MIDDAY_PAUSE_END (13:15).
     """
-    if not parse_bool_env(os.getenv("MIDDAY_PAUSE_ENABLED"), True):
+    if not parse_bool_env(os.getenv("MIDDAY_PAUSE_ENABLED"), False):
         return False, "pause_disabled"
     current = (now.astimezone(IST) if now else datetime.now(IST)).time()
     start = _env_hhmm("MIDDAY_PAUSE_START", dtime(11, 30))

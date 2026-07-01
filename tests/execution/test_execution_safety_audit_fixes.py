@@ -11,7 +11,12 @@ from nifty_scalper_bot.execution import bracket_core
 from nifty_scalper_bot.execution.bracket_core import BracketState
 from nifty_scalper_bot.execution.execution_policy import ExecutionPolicy
 from nifty_scalper_bot.execution.margin_engine import MarginInputs
-from nifty_scalper_bot.execution.position_manager import Order, Position, PositionManager
+from nifty_scalper_bot.execution.position_manager import (
+    Order,
+    Position,
+    PositionManager,
+    normalize_broker_order_status,
+)
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 from nifty_scalper_bot.utils.errors import BrokerError
 from nifty_scalper_bot.utils.errors import OrderPlacementError
@@ -106,12 +111,100 @@ def test_update_from_order_uses_fill_price_and_existing_fill_lifecycle(tmp_path)
         status="FILLED",
         filled_quantity=65,
         fill_price=101.0,
+        intent="ENTRY",
     )
     manager.update_from_order(order)
     position = manager.get_position(SYMBOL)
     assert position is not None
     assert position.entry_price == pytest.approx(101.0)
     assert position.quantity == 65
+
+
+def test_exit_sell_fill_after_reconciled_flat_does_not_open_short(tmp_path) -> None:
+    manager = _position_manager(tmp_path)
+    manager.add_pending_order(
+        "exit-1", SYMBOL, "SELL", 65, 116.0, "MARKET", intent="EXIT"
+    )
+    manager.set_broker_client(SimpleNamespace(get_positions=lambda: []))
+    assert manager.reconcile_now() is True
+    assert manager.get_position(SYMBOL) is None
+
+    manager.update_order_status("exit-1", "COMPLETE", fill_price=116.0)
+
+    assert manager.get_position(SYMBOL) is None
+    assert manager.get_open_positions() == []
+    assert "exit-1" in manager._processed_order_ids
+
+
+def test_duplicate_exit_update_is_idempotent_across_restart(tmp_path) -> None:
+    state_path = tmp_path / "positions.json"
+    manager = _position_manager(tmp_path)
+    manager.add_pending_order(
+        "exit-dup", SYMBOL, "SELL", 65, 116.0, "MARKET", intent="EXIT"
+    )
+    manager.set_broker_client(SimpleNamespace(get_positions=lambda: []))
+    assert manager.reconcile_now() is True
+    manager.update_order_status("exit-dup", "COMPLETE", fill_price=116.0)
+    first_realized = manager.get_realized_pnl()
+
+    restarted = PositionManager(state_file=str(state_path))
+    restarted._schedule_retry_after_failure = lambda *_args, **_kwargs: None
+    restarted.add_pending_order(
+        "exit-dup", SYMBOL, "SELL", 65, 116.0, "MARKET", intent="EXIT"
+    )
+
+    assert "exit-dup" in restarted._processed_order_ids
+    assert restarted.get_position(SYMBOL) is None
+    assert restarted.get_realized_pnl() == pytest.approx(first_realized)
+
+
+def test_unknown_legacy_sell_while_flat_never_opens_short(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    order = Order(
+        order_id="legacy-sell",
+        symbol=SYMBOL,
+        side="SELL",
+        order_type="MARKET",
+        quantity=65,
+        price=116.0,
+        status="FILLED",
+        filled_quantity=65,
+        fill_price=116.0,
+    )
+    manager._orders[order.order_id] = order
+
+    manager.update_order_status(order.order_id, "COMPLETE", fill_price=116.0)
+
+    assert manager.get_position(SYMBOL) is None
+
+
+def test_explicit_short_entry_still_opens_short(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    order = Order(
+        order_id="short-entry",
+        symbol=SYMBOL,
+        side="SELL",
+        order_type="MARKET",
+        quantity=65,
+        price=116.0,
+        status="FILLED",
+        filled_quantity=65,
+        fill_price=116.0,
+        intent="ENTRY",
+    )
+    manager.update_from_order(order)
+
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.side == "SHORT"
+    assert position.quantity == 65
+
+
+def test_broker_status_normalization_accepts_zerodha_statuses() -> None:
+    assert normalize_broker_order_status("SUBMITTED") == "PENDING"
+    assert normalize_broker_order_status("OPEN PENDING") == "OPEN"
+    assert normalize_broker_order_status("TRIGGER PENDING") == "OPEN"
+    assert normalize_broker_order_status("COMPLETE") == "FILLED"
 
 
 def _stop(manager: BracketManager) -> None:

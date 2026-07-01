@@ -46,8 +46,9 @@ def test_bad_cutoff_falls_back(monkeypatch) -> None:
     assert blocked  # falls back to 13:30
 
 
-def test_midday_pause_blocks_within_window() -> None:
+def test_midday_pause_blocks_within_window_when_enabled(monkeypatch) -> None:
     from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
+    monkeypatch.setenv("MIDDAY_PAUSE_ENABLED", "true")
     blocked, reason = midday_pause_block(_ist(2026, 6, 10, 12, 0))
     assert blocked and "midday_pause" in reason
 
@@ -67,7 +68,7 @@ def test_midday_pause_disabled_via_env(monkeypatch) -> None:
     assert not blocked and reason == "pause_disabled"
 
 
-def test_midday_pause_default_enabled_and_window(monkeypatch) -> None:
+def test_midday_pause_default_disabled_and_window(monkeypatch) -> None:
     from nifty_scalper_bot.risk.expiry_gate import midday_pause_block
 
     monkeypatch.delenv("MIDDAY_PAUSE_ENABLED", raising=False)
@@ -76,8 +77,8 @@ def test_midday_pause_default_enabled_and_window(monkeypatch) -> None:
 
     blocked, reason = midday_pause_block(_ist(2026, 6, 10, 12, 0))
 
-    assert blocked
-    assert reason == "midday_pause_11:30-13:15_ist"
+    assert not blocked
+    assert reason == "pause_disabled"
 
 
 def test_midday_pause_false_allows_inside_window(monkeypatch) -> None:
