@@ -99,6 +99,17 @@ class OneMinuteBarBuilder:
             return None
 
         current_bucket = self._current["bucket"]
+        if bucket_start < current_bucket:
+            self._logger.debug(
+                "Dropping late tick for already-active minute bucket",
+                extra={
+                    "event": "one_minute_bar_late_tick_dropped",
+                    "tick_bucket": bucket_start.isoformat(),
+                    "current_bucket": current_bucket.isoformat(),
+                    "tick_ts": timestamp.isoformat(),
+                },
+            )
+            return None
         if bucket_start == current_bucket:
             self._extend_bar(price, volume, timestamp)
             return None
@@ -157,7 +168,7 @@ class OneMinuteBarBuilder:
             "low": float(price),
             "close": float(price),
             "volume": max(int(volume), 0),
-            "start": timestamp,
+            "start": bucket_start,
             "end": timestamp,
         }
 

@@ -125,17 +125,26 @@ class CandleEngine:
             return None
         candle = dict(self.current_candle)
         _validate_ohlc_row(candle)
+        incoming_ts = pd.to_datetime(candle.get('timestamp'), utc=True, errors='coerce')
+        if pd.isna(incoming_ts):
+            raise DataIntegrityError('candle timestamp is invalid')
+        existing = self.df.dropna(how='all') if self.df is not None else pd.DataFrame(columns=_OHLC_COLUMNS)
+        if not existing.empty:
+            last_ts = pd.to_datetime(existing['timestamp'].iloc[-1], utc=True, errors='coerce')
+            if not pd.isna(last_ts):
+                if incoming_ts < last_ts:
+                    log_throttled(LOGGER, f"candle_out_of_order_{getattr(self, 'symbol', 'unknown')}", "candle_out_of_order symbol=%s incoming_ts=%s last_ts=%s source=candle_engine" % (getattr(self, 'symbol', 'unknown'), incoming_ts.isoformat(), last_ts.isoformat()), interval_sec=30.0, level=logging.WARNING, extra={'event': 'candle_out_of_order', 'symbol': getattr(self, 'symbol', 'unknown'), 'incoming_ts': incoming_ts.isoformat(), 'last_ts': last_ts.isoformat(), 'source': 'candle_engine'})
+                    raise DataIntegrityError('candle timestamps must be monotonic')
+                if incoming_ts == last_ts:
+                    self.current_candle = None
+                    return None
         new_row = pd.DataFrame([candle]).dropna(how='all')
         if new_row.empty:
             return None
-        if self.df is None or self.df.empty:
+        if existing.empty:
             frame = new_row.reset_index(drop=True)
         else:
-            existing = self.df.dropna(how='all')
-            if existing.empty:
-                frame = new_row.reset_index(drop=True)
-            else:
-                frame = pd.concat([existing, new_row], ignore_index=True)
+            frame = pd.concat([existing, new_row], ignore_index=True)
         frame = sanitize(frame).tail(self.max_bars).reset_index(drop=True)
         if frame['timestamp'].duplicated().any():
             raise DataIntegrityError('duplicate candle timestamps')
@@ -147,8 +156,11 @@ class CandleEngine:
         return candle
 
     def flush(self) -> dict[str, Any] | None:
-        """Flush active candle into finalized store. Args: none. Returns: candle|None. Raises: DataIntegrityError."""
-        return self._finalize_current_candle()
+        """Flush active candle into finalized store idempotently. Args: none. Returns: candle|None. Raises: DataIntegrityError."""
+        finalized = self._finalize_current_candle()
+        if finalized is not None:
+            self.current_candle = None
+        return finalized
 
     def get_df(self) -> pd.DataFrame:
         """Return finalized candles. Args: none. Returns: DataFrame. Raises: None."""

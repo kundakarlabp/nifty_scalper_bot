@@ -52,7 +52,8 @@ EVENT_WORDS = {
     "SUBSCRIPTION", "RECONCIL", "CONTRACT_SSOT", "LIVE_READINESS",
 }
 NULLS = {"", "none", "null", "nil", "false", "0", "unknown", "n/a", "na"}
-TRADE_WORDS = {"ORDER", "FILLED", "ENTRY", "EXIT", "TARGET", "STOP", "PNL", "POSITION"}
+TRADE_WORDS = {"ORDER_SENT", "ORDER_PLACED", "ORDER_FILLED", "FILLED", "ENTRY", "EXIT", "TARGET_HIT", "STOP_HIT", "STOP_LOSS", "PNL", "POSITION_OPENED", "POSITION_CLOSED", "TRADE_ATTEMPT"}
+NON_TRADE_SYSTEM_WORDS = {"READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE"}
 
 
 def fields(message: str) -> dict[str, str]:
@@ -88,6 +89,8 @@ def parse_event(line: str) -> dict[str, str] | None:
             return None
         if "WARN" in upper or "DEGRADED" in upper:
             kind = "WARNING"
+        elif any(token in upper for token in NON_TRADE_SYSTEM_WORDS):
+            kind = "SYSTEM"
         elif any(token in upper for token in TRADE_WORDS):
             kind = "TRADE"
         elif "SIGNAL" in upper or "CANDIDATE_REJECTED" in upper:
