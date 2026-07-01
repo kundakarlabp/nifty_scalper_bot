@@ -458,7 +458,25 @@ class MarketDataPipeline:
             return None
         candle = self.builder.on_tick(tick)
         if candle is not None:
-            self.store.push(candle)
+            try:
+                self.store.push(candle)
+            except DataIntegrityError as exc:
+                log_throttled(
+                    LOGGER,
+                    f"pipeline_candle_store_rejected:{candle.symbol}",
+                    f"pipeline_candle_store_rejected symbol={candle.symbol} incoming_ts={candle.timestamp.isoformat()} error_type={type(exc).__name__} reason={exc} source=market_data_pipeline",
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "pipeline_candle_store_rejected",
+                        "symbol": candle.symbol,
+                        "incoming_ts": candle.timestamp.isoformat(),
+                        "error_type": type(exc).__name__,
+                        "reason": str(exc),
+                        "source": "market_data_pipeline",
+                    },
+                )
+                return None
         return candle
 
     def candles_ready(self, symbol: str, min_required: int = MIN_REQUIRED_CANDLES) -> bool:

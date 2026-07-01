@@ -333,3 +333,54 @@ def test_readyz_live_blocks_invalid_broker_authentication(monkeypatch):
     assert response.status_code == 503
     assert body["primary_blocker"] == "broker_authentication_invalid"
     assert "broker_authentication_invalid" in body["blockers"]
+
+
+def test_health_trading_reconciliation_requires_authenticated_broker():
+    ctx = _ctx(position_reconciliation_started=True, position_reconciliation_completed=True)
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["authentication"] == "unknown"
+    assert body["reconciliation"]["completed"] is False
+
+
+def test_health_trading_reconciliation_completed_when_authenticated():
+    ctx = _ctx(
+        broker_authenticated=True,
+        position_reconciliation_started=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["authentication"] == "authenticated"
+    assert body["reconciliation"]["completed"] is True
+
+
+def test_health_trading_invalid_broker_forces_reconciliation_incomplete():
+    ctx = _ctx(
+        broker_auth_invalid=True,
+        position_reconciliation_started=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["authentication"] == "invalid"
+    assert body["reconciliation"]["completed"] is False
+
+
+def test_readyz_live_unknown_broker_still_blocks_once(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    ctx = _ctx(broker_balance_valid=True, position_reconciliation_completed=True)
+    main.app.state.bot_started = True
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.readyz())
+
+    assert body["ready"] is False
+    assert body["blockers"].count("broker_authentication_unknown") == 1

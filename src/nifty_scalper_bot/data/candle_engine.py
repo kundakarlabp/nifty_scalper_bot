@@ -136,6 +136,7 @@ class CandleEngine:
                     log_throttled(LOGGER, f"candle_out_of_order_{getattr(self, 'symbol', 'unknown')}", "candle_out_of_order symbol=%s incoming_ts=%s last_ts=%s source=candle_engine" % (getattr(self, 'symbol', 'unknown'), incoming_ts.isoformat(), last_ts.isoformat()), interval_sec=30.0, level=logging.WARNING, extra={'event': 'candle_out_of_order', 'symbol': getattr(self, 'symbol', 'unknown'), 'incoming_ts': incoming_ts.isoformat(), 'last_ts': last_ts.isoformat(), 'source': 'candle_engine'})
                     raise DataIntegrityError('candle timestamps must be monotonic')
                 if incoming_ts == last_ts:
+                    self.current_candle = None
                     return None
         new_row = pd.DataFrame([candle]).dropna(how='all')
         if new_row.empty:

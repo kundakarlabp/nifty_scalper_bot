@@ -479,7 +479,6 @@ def readyz():
         and not bool(getattr(ctx, "broker_auth_invalid", False))
         and bool(getattr(ctx, "broker_balance_valid", False))
         and bool(getattr(ctx, "position_reconciliation_completed", False))
-        and (not live_mode or auth_state == "authenticated")
         and not bool(getattr(ctx, "position_reconciliation_failed", False))
         and not operational_blockers
     )
@@ -528,6 +527,10 @@ def health_trading():
         blockers = blockers or [primary]
     structured_status = _structured_runtime_status(ctx)
     auth_state = structured_status.get("broker_authentication", "unknown")
+    reconciliation_completed = (
+        bool(getattr(ctx, "position_reconciliation_completed", False))
+        and auth_state == "authenticated"
+    )
     return JSONResponse(
         status_code=200,
         content={
