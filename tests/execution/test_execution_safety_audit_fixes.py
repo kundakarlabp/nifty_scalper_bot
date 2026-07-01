@@ -204,7 +204,109 @@ def test_broker_status_normalization_accepts_zerodha_statuses() -> None:
     assert normalize_broker_order_status("SUBMITTED") == "PENDING"
     assert normalize_broker_order_status("OPEN PENDING") == "OPEN"
     assert normalize_broker_order_status("TRIGGER PENDING") == "OPEN"
+    assert normalize_broker_order_status("PUT ORDER REQ RECEIVED") == "PENDING"
+    assert normalize_broker_order_status("PUT ORDER REQUEST RECEIVED") == "PENDING"
     assert normalize_broker_order_status("COMPLETE") == "FILLED"
+
+
+def test_confirmed_incident_delayed_entry_after_exit_stays_flat(tmp_path) -> None:
+    symbol = "NFO:NIFTY2670724050CE"
+    entry_order_id = "2072238244200112128"
+    exit_order_id = "2072245044739760128"
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        entry_order_id, symbol, "BUY", 65, 145.15, "MARKET", intent="ENTRY"
+    )
+    manager.open_position(
+        symbol=symbol,
+        side="LONG",
+        quantity=65,
+        entry_price=145.15,
+        order_id=entry_order_id,
+    )
+    manager.add_pending_order(
+        exit_order_id, symbol, "SELL", 65, 144.05, "MARKET", intent="EXIT"
+    )
+    manager.set_broker_client(SimpleNamespace(get_positions=lambda: []))
+    assert manager.reconcile_now() is True
+
+    for _ in range(3):
+        manager.apply_broker_order_update(
+            exit_order_id,
+            {
+                "status": "COMPLETE",
+                "filled_quantity": 65,
+                "average_price": 144.05,
+            },
+        )
+        manager.apply_broker_order_update(
+            entry_order_id,
+            {
+                "status": "COMPLETE",
+                "filled_quantity": 65,
+                "average_price": 145.15,
+            },
+        )
+
+    restarted = PositionManager(state_file=str(tmp_path / "positions.json"))
+    restarted.add_pending_order(
+        exit_order_id, symbol, "SELL", 65, 144.05, "MARKET", intent="EXIT"
+    )
+    restarted.add_pending_order(
+        entry_order_id, symbol, "BUY", 65, 145.15, "MARKET", intent="ENTRY"
+    )
+    restarted.apply_broker_order_update(
+        exit_order_id,
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 144.05},
+    )
+    restarted.apply_broker_order_update(
+        entry_order_id,
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 145.15},
+    )
+
+    assert restarted.get_position(symbol) is None
+    assert restarted.get_open_positions() == []
+    assert restarted.get_realized_pnl() == pytest.approx((144.05 - 145.15) * 65)
+    assert entry_order_id in restarted._processed_order_ids
+    assert exit_order_id in restarted._terminal_orders
+
+
+def test_partial_fills_apply_only_cumulative_delta(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order("partial-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+
+    manager.apply_broker_order_update(
+        "partial-entry",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 100.0},
+    )
+    manager.apply_broker_order_update(
+        "partial-entry",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 100.0},
+    )
+
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.quantity == 65
+
+
+def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = BracketManager(order_manager=SimpleNamespace())
+    _stop(manager)
+
+    manager.register_virtual_bracket(
+        order_id="exit-order",
+        symbol=SYMBOL,
+        side="SELL",
+        qty=65,
+        price=100.0,
+        sl=110.0,
+        tp=80.0,
+        tag="exit",
+        intent="EXIT",
+    )
+
+    assert manager.get_bracket("exit-order") is None
 
 
 def _stop(manager: BracketManager) -> None:

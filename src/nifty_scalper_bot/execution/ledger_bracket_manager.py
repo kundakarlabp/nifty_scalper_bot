@@ -261,6 +261,10 @@ class LedgerBracketManager(CanonicalBracketManager):
         bracket = self.get_bracket(order_id)
         ledger_ok = True
         if bracket is not None:
+            tag_text = str(getattr(bracket, "tag", "") or "").upper()
+            if "EXIT" in tag_text or "REDUCE" in tag_text:
+                super().confirm_entry_fill(order_id, fill_price)
+                return
             try:
                 self._record_entry_fill(bracket, float(fill_price))
             except Exception as exc:  # noqa: BLE001

@@ -915,7 +915,8 @@ class BracketManager:
         tp1_price: float | None = None,
         tp1_qty: int | None = None,
         trailing_atr_mult: float | None = None,
-        activate_immediately: bool = False
+        activate_immediately: bool = False,
+        intent: str | None = None,
     ) -> None:
         """Register a position for virtual bracket monitoring.
 
@@ -940,6 +941,21 @@ class BracketManager:
             None.
         """
         symbol = normalize_symbol(symbol)
+        normalized_intent = str(intent or "").strip().upper()
+        if normalized_intent in {"EXIT", "REDUCE"}:
+            LOGGER.error(
+                "BRACKET_ENTRY_REJECTED_FOR_EXIT_ORDER order_id=%s symbol=%s intent=%s",
+                order_id,
+                symbol,
+                normalized_intent,
+                extra={
+                    "event": "BRACKET_ENTRY_REJECTED_FOR_EXIT_ORDER",
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "intent": normalized_intent,
+                },
+            )
+            return
         side = _normalize_bracket_side(side)
         if symbol in self.active_brackets:
             LOGGER.info(
@@ -1131,6 +1147,21 @@ class BracketManager:
             bracket = self._brackets.get(order_id)
             if not bracket:
                 LOGGER.warning(f"⚠️ No bracket found for order {order_id}")
+                return
+            tag_text = str(getattr(bracket, "tag", "") or "").upper()
+            if "EXIT" in tag_text or "REDUCE" in tag_text:
+                LOGGER.error(
+                    "BRACKET_ENTRY_FILL_REJECTED_FOR_EXIT_ORDER order_id=%s symbol=%s tag=%s",
+                    order_id,
+                    bracket.symbol,
+                    getattr(bracket, "tag", ""),
+                    extra={
+                        "event": "BRACKET_ENTRY_FILL_REJECTED_FOR_EXIT_ORDER",
+                        "order_id": order_id,
+                        "symbol": bracket.symbol,
+                        "tag": getattr(bracket, "tag", ""),
+                    },
+                )
                 return
             
             # Update entry price with actual fill

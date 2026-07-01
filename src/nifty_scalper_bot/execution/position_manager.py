@@ -8,6 +8,7 @@ import math
 import os
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,6 +107,7 @@ def normalize_broker_order_status(value: object) -> OrderStatus | None:
         "SUBMITTED": "PENDING",
         "VALIDATION PENDING": "PENDING",
         "PUT ORDER REQ RECEIVED": "PENDING",
+        "PUT ORDER REQUEST RECEIVED": "PENDING",
         "OPEN": "OPEN",
         "OPEN PENDING": "OPEN",
         "TRIGGER PENDING": "OPEN",
@@ -345,6 +347,59 @@ class Position:
 
 
 @dataclass(slots=True)
+class TerminalOrderMetadata:
+    """Durable idempotency record for terminal broker updates."""
+
+    terminal_at: datetime
+    normalized_status: OrderStatus
+    cumulative_filled_quantity: int
+    average_fill_price: float | None
+    lifecycle_applied: bool
+    accounting_finalized: bool
+    symbol: str | None = None
+    intent: OrderIntent = "UNKNOWN"
+    side: OrderSide | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "terminal_at": self.terminal_at.isoformat(),
+            "normalized_status": self.normalized_status,
+            "cumulative_filled_quantity": self.cumulative_filled_quantity,
+            "average_fill_price": self.average_fill_price,
+            "lifecycle_applied": self.lifecycle_applied,
+            "accounting_finalized": self.accounting_finalized,
+            "symbol": self.symbol,
+            "intent": self.intent,
+            "side": self.side,
+        }
+
+    @staticmethod
+    def from_dict(payload: Mapping[str, Any]) -> "TerminalOrderMetadata":
+        return TerminalOrderMetadata(
+            terminal_at=datetime.fromisoformat(str(payload["terminal_at"])),
+            normalized_status=(
+                normalize_broker_order_status(payload.get("normalized_status"))
+                or _normalize_status(str(payload["normalized_status"]))
+            ),
+            cumulative_filled_quantity=_to_int(
+                payload.get("cumulative_filled_quantity", 0)
+            ),
+            average_fill_price=_to_optional_float(payload.get("average_fill_price")),
+            lifecycle_applied=bool(payload.get("lifecycle_applied", False)),
+            accounting_finalized=bool(payload.get("accounting_finalized", False)),
+            symbol=(
+                str(payload["symbol"]) if payload.get("symbol") is not None else None
+            ),
+            intent=_normalize_intent(payload.get("intent")),
+            side=(
+                _normalize_order_side(str(payload["side"]))
+                if payload.get("side") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(slots=True)
 class Order:
     """Represents a broker order tracked by the manager."""
 
@@ -366,6 +421,7 @@ class Order:
     pre_order_position_side: Side | None = None
     pre_order_quantity: int = 0
     terminal_at: datetime | None = None
+    applied_filled_quantity: int = 0
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the order for JSON persistence."""
@@ -389,6 +445,7 @@ class Order:
             "pre_order_position_side": self.pre_order_position_side,
             "pre_order_quantity": self.pre_order_quantity,
             "terminal_at": self.terminal_at.isoformat() if self.terminal_at else None,
+            "applied_filled_quantity": self.applied_filled_quantity,
         }
 
     @staticmethod
@@ -439,6 +496,7 @@ class Order:
                 if payload.get("terminal_at") is not None
                 else None
             ),
+            applied_filled_quantity=_to_int(payload.get("applied_filled_quantity", 0)),
         )
 
 
@@ -574,8 +632,8 @@ class PositionManager:
         self._positions: Dict[str, Position] = {}
         self._lock = threading.RLock()
         self._orders: Dict[str, Order] = {}
-        self._processed_order_ids: set[str] = set()
-        self._max_processed_ids = 1000  # Limit memory usage
+        self._terminal_orders: dict[str, TerminalOrderMetadata] = {}
+        self._max_terminal_orders = 5000  # Limit persisted idempotency history.
         self._daily_realized_pnl: float = 0.0
         self._local_realized_pnl: float = 0.0
         self._broker_realized_pnl: float | None = None
@@ -609,6 +667,31 @@ class PositionManager:
         instead of being re-adopted forever.
         """
         self._on_symbols_flat_hook = hook
+
+    @property
+    def _processed_order_ids(self) -> set[str]:
+        """Backward-compatible read view for older tests and diagnostics."""
+
+        return {
+            order_id
+            for order_id, metadata in self._terminal_orders.items()
+            if metadata.lifecycle_applied
+        }
+
+    @_processed_order_ids.setter
+    def _processed_order_ids(self, value: Iterable[str]) -> None:
+        now = _now()
+        self._terminal_orders = {
+            str(order_id): TerminalOrderMetadata(
+                terminal_at=now,
+                normalized_status="FILLED",
+                cumulative_filled_quantity=0,
+                average_fill_price=None,
+                lifecycle_applied=True,
+                accounting_finalized=True,
+            )
+            for order_id in value
+        }
 
     def set_broker_client(self, broker_client: Any | None) -> None:
         """Attach the broker client used for reconciliation.
@@ -1376,8 +1459,9 @@ class PositionManager:
         
         # ✅ FIX 1: Don't re-add orders that were already processed
         if (
-            hasattr(self, "_processed_order_ids")
-            and order_id in self._processed_order_ids
+            hasattr(self, "_terminal_orders")
+            and order_id in self._terminal_orders
+            and self._terminal_orders[order_id].lifecycle_applied
         ):
             self._logger.debug(
                 f"Skipping add_pending_order for already-processed: {order_id}",
@@ -1447,12 +1531,13 @@ class PositionManager:
         order_id = str(order_id).strip()
         
         # ✅ FIX: Initialize _processed_order_ids if not exists (backward compat)
-        if not hasattr(self, '_processed_order_ids'):
-            self._processed_order_ids = set()
-            self._max_processed_ids = 1000
+        if not hasattr(self, "_terminal_orders"):
+            self._terminal_orders = {}
+            self._max_terminal_orders = 5000
         
         # ✅ FIX: Skip if this order was already fully processed
-        if order_id in self._processed_order_ids:
+        terminal_record = self._terminal_orders.get(order_id)
+        if terminal_record is not None and terminal_record.lifecycle_applied:
             self._logger.debug(
                 f"Skipping already-processed order: {order_id}",
                 extra={"event": "order_already_processed", "order_id": order_id}
@@ -1481,28 +1566,30 @@ class PositionManager:
             order.fill_price = float(fill_price)
 
         if order.status == "FILLED" and order.fill_price is not None:
-            order.filled_quantity = order.quantity
-            self._handle_filled_order(order)
+            if order.filled_quantity <= 0:
+                order.filled_quantity = order.quantity
+            lifecycle_applied = self._handle_filled_order(order)
             order.terminal_at = _now()
-            
-            # ✅ FIX: Mark this order as processed AFTER handling the fill
-            # This ensures we never process the same fill twice
-            self._processed_order_ids.add(order_id)
-            self._logger.debug(
-                f"Marked order as processed: {order_id}",
-                extra={"event": "order_marked_processed", "order_id": order_id}
+            self._terminal_orders[order_id] = TerminalOrderMetadata(
+                terminal_at=order.terminal_at,
+                normalized_status=order.status,
+                cumulative_filled_quantity=order.filled_quantity,
+                average_fill_price=order.fill_price,
+                lifecycle_applied=lifecycle_applied,
+                accounting_finalized=lifecycle_applied,
+                symbol=order.symbol,
+                intent=order.intent,
+                side=order.side,
             )
-            
-            # ✅ FIX: Prevent memory leak - trim old IDs if too many
-            if len(self._processed_order_ids) > self._max_processed_ids:
-                to_remove = list(self._processed_order_ids)[
-                    : self._max_processed_ids // 2
-                ]
-                for old_id in to_remove:
-                    self._processed_order_ids.discard(old_id)
-                self._logger.debug(
-                    f"Trimmed processed_order_ids: removed {len(to_remove)} old entries"
-                )
+            self._logger.debug(
+                f"Marked terminal order: {order_id}",
+                extra={
+                    "event": "order_terminal_recorded",
+                    "order_id": order_id,
+                    "lifecycle_applied": lifecycle_applied,
+                }
+            )
+            self._evict_old_terminal_orders()
 
         self._persist_order_state(order)
 
@@ -1510,6 +1597,30 @@ class PositionManager:
             del self._orders[order.order_id]
 
         self.save_state()
+
+    def apply_broker_order_update(
+        self, order_id: str, broker_payload: Mapping[str, Any]
+    ) -> None:
+        """Canonical position-side broker update ingress."""
+
+        status = broker_payload.get("status")
+        fill_price_raw = (
+            broker_payload.get("average_price")
+            or broker_payload.get("fill_price")
+            or broker_payload.get("price")
+        )
+        filled_qty = broker_payload.get("filled_quantity") or broker_payload.get(
+            "filled"
+        )
+        order = self._orders.get(str(order_id))
+        if order is not None and filled_qty is not None:
+            with suppress(Exception):
+                order.filled_quantity = int(float(filled_qty))
+        fill_price: float | None = None
+        if fill_price_raw is not None:
+            with suppress(Exception):
+                fill_price = float(fill_price_raw)
+        self.update_order_status(str(order_id), str(status or ""), fill_price)
 
     def get_pending_orders(self, symbol: str | None = None) -> list[Order]:
         """Return tracked orders, optionally filtered by ``symbol``."""
@@ -1526,9 +1637,10 @@ class PositionManager:
             state = {
                 "positions": [position.to_dict() for position in self._positions.values()],
                 "orders": [order.to_dict() for order in self._orders.values()],
-                "processed_order_ids": list(self._processed_order_ids)[
-                    -self._max_processed_ids :
-                ],
+                "terminal_orders": {
+                    order_id: metadata.to_dict()
+                    for order_id, metadata in self._terminal_orders.items()
+                },
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
                 "broker_realized_pnl": self._broker_realized_pnl,
@@ -1597,11 +1709,36 @@ class PositionManager:
 
         self._positions = positions
         self._orders = orders
-        processed_raw = payload.get("processed_order_ids", [])
-        if isinstance(processed_raw, list):
-            self._processed_order_ids = {
-                str(item).strip() for item in processed_raw if str(item).strip()
-            }
+        terminal_raw = payload.get("terminal_orders", {})
+        restored_terminal: dict[str, TerminalOrderMetadata] = {}
+        if isinstance(terminal_raw, Mapping):
+            for order_id, metadata in terminal_raw.items():
+                if not isinstance(metadata, Mapping):
+                    continue
+                try:
+                    restored_terminal[str(order_id)] = TerminalOrderMetadata.from_dict(
+                        cast(Mapping[str, Any], metadata)
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    self._logger.error("Skipping invalid terminal order: %s", exc)
+        else:
+            # Backward compatibility with the prior reviewed patch.
+            processed_raw = payload.get("processed_order_ids", [])
+            if isinstance(processed_raw, list):
+                now = _now()
+                restored_terminal = {
+                    str(item).strip(): TerminalOrderMetadata(
+                        terminal_at=now,
+                        normalized_status="FILLED",
+                        cumulative_filled_quantity=0,
+                        average_fill_price=None,
+                        lifecycle_applied=True,
+                        accounting_finalized=True,
+                    )
+                    for item in processed_raw
+                    if str(item).strip()
+                }
+        self._terminal_orders = restored_terminal
         contracts: Dict[str, ActiveContract] = {}
         index: Dict[str, str] = {}
         for item in payload.get("active_contracts", []):
@@ -2150,6 +2287,19 @@ class PositionManager:
                 exc,
             )
 
+    def _evict_old_terminal_orders(self) -> None:
+        """Keep durable terminal idempotency records bounded deterministically."""
+
+        overflow = len(self._terminal_orders) - self._max_terminal_orders
+        if overflow <= 0:
+            return
+        ordered = sorted(
+            self._terminal_orders.items(),
+            key=lambda item: (item[1].terminal_at, item[0]),
+        )
+        for order_id, _metadata in ordered[:overflow]:
+            self._terminal_orders.pop(order_id, None)
+
     def _persist_fill(self, order: Order, quantity: int, fill_price: float) -> None:
         """Persist executed fill metadata to durable storage.
 
@@ -2183,13 +2333,28 @@ class PositionManager:
         else:
             timestamp_iso = datetime.now(timezone.utc).isoformat()
         payload: dict[str, object] = {
+            "fill_id": (
+                f"{order.order_id}:{order.applied_filled_quantity + int(quantity)}"
+            ),
             "order_id": order.order_id,
+            "intent": order.intent,
+            "bracket_id": order.bracket_id,
+            "signal_id": order.signal_id,
+            "signal_fingerprint": order.signal_fingerprint,
             "symbol": order.symbol,
             "side": order.side,
-            "quantity": int(quantity),
+            "quantity_delta": int(quantity),
+            "cumulative_filled_quantity": int(
+                order.applied_filled_quantity + int(quantity)
+            ),
             "fill_price": float(fill_price),
             "status": order.status,
             "timestamp": timestamp_iso,
+            "broker_order_timestamp": timestamp_iso,
+            "exchange_timestamp": timestamp_iso,
+            "exchange_update_timestamp": timestamp_iso,
+            "lifecycle_applied": True,
+            "accounting_finalized": True,
         }
         linked_symbol = getattr(order, "linked_position_symbol", None)
         if linked_symbol:
@@ -2272,22 +2437,23 @@ class PositionManager:
 
     # Internal helpers -------------------------------------------------
 
-    def _handle_filled_order(self, order: Order) -> None:
+    def _handle_filled_order(self, order: Order) -> bool:
         symbol_key = order.symbol
-        qty = order.quantity if order.filled_quantity == 0 else order.filled_quantity
+        cumulative_qty = (
+            order.quantity if order.filled_quantity == 0 else order.filled_quantity
+        )
+        qty = int(cumulative_qty) - int(order.applied_filled_quantity or 0)
         qty = abs(qty)
         if qty <= 0:
             self._logger.warning(
                 "Ignoring zero-quantity fill for order %s", order.order_id
             )
-            return
+            return False
 
         fill_price = order.fill_price
         if fill_price is None:
             self._logger.warning("Missing fill price for order %s", order.order_id)
-            return
-
-        self._persist_fill(order, qty, fill_price)
+            return False
 
         side = order.side
         intent = _normalize_intent(order.intent)
@@ -2305,7 +2471,42 @@ class PositionManager:
                         "intent": intent,
                     },
                 )
-                return
+                return False
+            paired_exit = next(
+                (
+                    metadata
+                    for metadata in sorted(
+                        self._terminal_orders.values(),
+                        key=lambda item: item.terminal_at,
+                        reverse=True,
+                    )
+                    if metadata.symbol == symbol_key
+                    and metadata.intent in ("EXIT", "REDUCE")
+                    and metadata.side == "SELL"
+                    and metadata.average_fill_price is not None
+                ),
+                None,
+            )
+            if intent in ("ENTRY", "SCALE_IN") and side == "BUY" and paired_exit:
+                self._persist_fill(order, qty, fill_price)
+                paired_qty = min(qty, abs(int(paired_exit.cumulative_filled_quantity)))
+                realized = (float(paired_exit.average_fill_price) - fill_price) * paired_qty
+                self._local_realized_pnl += realized
+                with self._lock:
+                    self._refresh_realized_pnl_locked()
+                order.applied_filled_quantity += qty
+                self._logger.warning(
+                    "historical_entry_fill_reconciled_after_exit",
+                    extra={
+                        "event": "historical_entry_fill_reconciled_after_exit",
+                        "order_id": order.order_id,
+                        "symbol": symbol_key,
+                        "quantity": paired_qty,
+                        "realized_pnl": realized,
+                    },
+                )
+                return True
+            self._persist_fill(order, qty, fill_price)
             position_side: Side = "LONG" if side == "BUY" else "SHORT"
             self.open_position(
                 symbol=symbol_key,
@@ -2314,13 +2515,17 @@ class PositionManager:
                 entry_price=fill_price,
                 order_id=order.order_id,
             )
-            return
+            order.applied_filled_quantity += qty
+            return True
 
         position = self._positions[symbol_key]
         if (position.side == "LONG" and side == "SELL") or (
             position.side == "SHORT" and side == "BUY"
         ):
+            self._persist_fill(order, qty, fill_price)
             self._reduce_or_close_position(position, qty, fill_price)
+            order.applied_filled_quantity += qty
+            return True
         else:
             if intent in ("EXIT", "REDUCE"):
                 self._logger.warning(
@@ -2333,8 +2538,11 @@ class PositionManager:
                         "order_side": side,
                     },
                 )
-                return
+                return False
+            self._persist_fill(order, qty, fill_price)
             self._scale_position(position, qty, fill_price)
+            order.applied_filled_quantity += qty
+            return True
 
     def _scale_position(self, position: Position, qty: int, fill_price: float) -> None:
         new_qty = position.quantity + qty
@@ -2390,5 +2598,6 @@ __all__ = [
     "Position",
     "PositionManager",
     "ActiveContract",
+    "TerminalOrderMetadata",
     "normalize_broker_order_status",
 ]
