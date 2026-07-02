@@ -1,6 +1,7 @@
 name: Temporary Full Test Diagnostics
 
 on:
+  pull_request:
   push:
     branches:
       - codex/test-suite-repair-2026-07-02
