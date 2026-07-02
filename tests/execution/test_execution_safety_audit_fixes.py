@@ -660,6 +660,7 @@ def test_direct_long_bracket_registration_normalizes_and_triggers_sl(tmp_path, m
 
 def test_bracket_state_is_written_and_restored_with_ledger_recovery_fields(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BRACKET_AUTO_RESTORE", "true")
     manager = BracketManager(order_manager=SimpleNamespace())
     _stop(manager)
     manager.register_virtual_bracket(
