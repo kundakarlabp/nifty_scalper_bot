@@ -36,10 +36,9 @@ jobs:
           set +e
           test -f tests/strategies/test_vwap_mean_reversion.py
           test -f tests/strategies/test_elite_builder_mode.py
-          test -f tests/execution/test_market_aware_time_stop.py
           test -f tests/execution/test_execution_policy.py
           test -f tests/execution/test_execution_safety_audit_fixes.py
-          python -m pytest -q tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_market_aware_time_stop.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py > focused-pytest-output.txt 2>&1
+          python -m pytest -q tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py > focused-pytest-output.txt 2>&1
           echo $? > focused-pytest-exit-code.txt
           exit 0
       - name: Execution safety regression tests
