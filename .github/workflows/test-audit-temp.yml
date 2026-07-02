@@ -1,0 +1,65 @@
+name: Temporary Complete Test Audit
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BRACKET_AUTO_RESTORE: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Capture complete test report
+        shell: bash
+        run: |
+          set +e
+          python -m compileall -q src dashboard scripts tests > compile-output.txt 2>&1
+          echo $? > compile-exit-code.txt
+          python -m pytest -q --maxfail=0 > full-pytest-output.txt 2>&1
+          echo $? > full-pytest-exit-code.txt
+          python - <<'PY'
+          from collections import Counter
+          from pathlib import Path
+          import json
+          import re
+
+          text = Path('full-pytest-output.txt').read_text(encoding='utf-8', errors='replace')
+          failed = re.findall(r'^FAILED\s+([^\s]+)', text, flags=re.MULTILINE)
+          errors = re.findall(r'^ERROR\s+([^\s]+)', text, flags=re.MULTILINE)
+          error_types = re.findall(r'^(E\s+)([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)):', text, flags=re.MULTILINE)
+          def by_file(items):
+              return Counter(item.split('::', 1)[0] for item in items)
+          report = {
+              'failed_total': len(failed),
+              'error_total': len(errors),
+              'failed_by_file': by_file(failed).most_common(),
+              'errors_by_file': by_file(errors).most_common(),
+              'error_types': Counter(kind for _, kind in error_types).most_common(),
+          }
+          Path('test-audit-summary.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+          PY
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: complete-test-audit
+          path: |
+            compile-output.txt
+            compile-exit-code.txt
+            full-pytest-output.txt
+            full-pytest-exit-code.txt
+            test-audit-summary.json
+          if-no-files-found: error
