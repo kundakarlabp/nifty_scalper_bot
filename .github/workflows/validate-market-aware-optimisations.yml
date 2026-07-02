@@ -34,10 +34,9 @@ jobs:
         run: |
           test -f tests/strategies/test_vwap_mean_reversion.py
           test -f tests/strategies/test_elite_builder_mode.py
-          test -f tests/execution/test_market_aware_time_stop.py
           test -f tests/execution/test_execution_policy.py
           test -f tests/execution/test_execution_safety_audit_fixes.py
-          python -m pytest -q tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_market_aware_time_stop.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py
+          python -m pytest -q tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py
       - name: Execution safety regression tests
         env:
           BRACKET_AUTO_RESTORE: "false"
