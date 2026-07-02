@@ -181,3 +181,27 @@ async def test_noncallable_websocket_state_is_handled(
 
     assert "POLLING_SUPERVISOR_NONCALLABLE" in caplog.text
     assert "websocket_manager.is_connected" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_noncallable_market_session_state_is_handled(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "is_market_open_now", (False,))
+    ctx = _supervisor_ctx(is_connected=False)
+    fallback = _Fallback()
+
+    with caplog.at_level(logging.WARNING, logger="nifty_scalper_bot.core.app"):
+        await app._polling_failover_supervisor_iteration(
+            ctx,
+            fallback,
+            quote_stale_ms=1000,
+            degraded_since=0.0,
+            recovered_since=None,
+            activate_after=0.0,
+        )
+
+    assert "POLLING_SUPERVISOR_NONCALLABLE" in caplog.text
+    assert "is_market_open_now" in caplog.text
+    assert "Failure in polling failover supervisor" not in caplog.text
