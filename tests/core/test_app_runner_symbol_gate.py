@@ -9,9 +9,19 @@ from nifty_scalper_bot.core.app import (
 )
 
 
+class _IndicatorEngine:
+    def __init__(self, history_by_symbol: dict[str, int]) -> None:
+        self._history_by_symbol = history_by_symbol
+
+    def get_history(self, symbol: str):
+        return [object()] * int(self._history_by_symbol.get(symbol, 0))
+
+
 class _Runner:
     def __init__(self, required: int = 50) -> None:
         self._required_candles = required
+        self._history_by_symbol: dict[str, int] = {}
+        self._indicator_engine = _IndicatorEngine(self._history_by_symbol)
         self.added: list[str] = []
 
     def add_symbol(self, sym: str) -> None:
@@ -56,19 +66,21 @@ def test_startup_runner_add_gate_resolved_and_unresolved() -> None:
 
 
 def test_active_basket_deferred_add_then_single_promotion() -> None:
+    symbol = "NFO:NIFTY24600CE"
     runner = _Runner(required=50)
-    mdm = _Mdm({"NFO:NIFTY24600CE": 30}, required=50)
+    mdm = _Mdm({symbol: 30}, required=50)
     ctx = _ctx(runner, mdm)
     pending: set[str] = set()
 
-    assert _gate_runner_symbol_add(ctx, "NFO:NIFTY24600CE", pending) is False
+    assert _gate_runner_symbol_add(ctx, symbol, pending) is False
     assert runner.added == []
-    assert "NFO:NIFTY24600CE" in pending
+    assert symbol in pending
 
-    mdm._bars_by_symbol["NFO:NIFTY24600CE"] = 75
-    assert _gate_runner_symbol_add(ctx, "NFO:NIFTY24600CE", pending) is True
-    assert runner.added == ["NFO:NIFTY24600CE"]
-    assert "NFO:NIFTY24600CE" not in pending
+    mdm._bars_by_symbol[symbol] = 75
+    runner._history_by_symbol[symbol] = 75
+    assert _gate_runner_symbol_add(ctx, symbol, pending) is True
+    assert runner.added == [symbol]
+    assert symbol not in pending
 
 
 def test_symbol_history_requirement_uses_max_threshold() -> None:
