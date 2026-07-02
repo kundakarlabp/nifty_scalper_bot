@@ -3379,6 +3379,59 @@ class PositionManager:
             )
 
         position = self._positions[symbol_key]
+        entry_side_matches = (
+            (position.side == "LONG" and side == "BUY")
+            or (position.side == "SHORT" and side == "SELL")
+        )
+        if intent in ("ENTRY", "SCALE_IN", "REVERSAL") and entry_side_matches:
+            expected_post_fill_qty = int(order.pre_order_quantity or 0) + cumulative_qty
+            if position.quantity >= expected_post_fill_qty:
+                # Broker position snapshots are absolute state. If the authoritative
+                # quantity already includes this cumulative fill, record the fill
+                # lifecycle but do not apply the quantity delta a second time.
+                self._persist_fill(
+                    order,
+                    qty,
+                    fill_price,
+                    lifecycle_applied=True,
+                    position_applied=True,
+                    accounting_finalized=False,
+                    lifecycle_resolved=False,
+                )
+                if order.pre_order_quantity == 0 and position.order_id is None:
+                    position.order_id = order.order_id
+                order.protection_confirmed = False
+                order.protection_failure_reason = "entry_protection_incomplete"
+                mark_applied()
+                self._logger.info(
+                    "ENTRY_FILL_ALREADY_REFLECTED_BY_BROKER_SYNC "
+                    "order_id=%s symbol=%s broker_qty=%s expected_qty=%s "
+                    "cumulative_fill_qty=%s",
+                    order.order_id,
+                    symbol_key,
+                    position.quantity,
+                    expected_post_fill_qty,
+                    cumulative_qty,
+                    extra={
+                        "event": "ENTRY_FILL_ALREADY_REFLECTED_BY_BROKER_SYNC",
+                        "order_id": order.order_id,
+                        "symbol": symbol_key,
+                        "broker_quantity": position.quantity,
+                        "expected_post_fill_quantity": expected_post_fill_qty,
+                        "cumulative_filled_quantity": cumulative_qty,
+                    },
+                )
+                return FillApplicationResult(
+                    fill_recorded=True,
+                    position_applied=True,
+                    bracket_applied=False,
+                    accounting_finalized=False,
+                    lifecycle_resolved=False,
+                    quantity_delta=qty,
+                    delta_fill_price=fill_price,
+                    reason="entry_fill_already_reflected_by_broker_sync",
+                )
+
         if (position.side == "LONG" and side == "SELL") or (
             position.side == "SHORT" and side == "BUY"
         ):

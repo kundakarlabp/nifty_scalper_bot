@@ -81,7 +81,7 @@ async def test_missing_levels_untouched() -> None:
 
 
 async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
-    """End-to-end: a stale BUY plan is accepted (re-anchored), not rejected."""
+    """End-to-end: ordinary quote drift is re-anchored, not rejected."""
     from nifty_scalper_bot.execution.order_manager import OrderPreflightResult
     from nifty_scalper_bot.execution.position_manager import PositionManager
     from nifty_scalper_bot.utils.rate_limiter import RateLimiter
@@ -106,7 +106,7 @@ async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
         mgr, "_validate_trade_plan",
         lambda plan: OrderPreflightResult(True, "ok", {}),
     )
-    monkeypatch.setattr(mgr, "_protected_limit_price", lambda plan: 138.45)
+    monkeypatch.setattr(mgr, "_protected_limit_price", lambda plan: 119.00)
     monkeypatch.setattr(mgr, "place_managed_order_result", _fake_managed)
 
     plan = _plan("BUY", entry=112.70, sl=108.56, tp=116.93)
@@ -115,5 +115,5 @@ async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
     assert result.reason != "protected_price_invalidates_bracket"
     assert result.accepted
     # Re-anchored levels were what got submitted.
-    assert captured["entry_price"] == 138.45
-    assert captured["stop_loss"] < 138.45 < captured["take_profit"]
+    assert captured["entry_price"] == 119.00
+    assert captured["stop_loss"] < 119.00 < captured["take_profit"]

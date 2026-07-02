@@ -196,6 +196,25 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _ranked_candidate_for_symbol(
+    candidates: Iterable[Any], symbol: str
+) -> Any | None:
+    """Return the ranked candidate whose instrument exactly matches ``symbol``."""
+
+    symbol_key = normalize_symbol(symbol)
+    return next(
+        (
+            candidate
+            for candidate in candidates
+            if normalize_symbol(
+                str(getattr(candidate, "symbol", "") or "")
+            )
+            == symbol_key
+        ),
+        None,
+    )
+
+
 def _safe_positive_float(value: object, fallback: float, *, minimum: float = 0.0) -> float:
     fallback_value = max(float(fallback), float(minimum))
     parsed = parse_float_env(value, fallback_value)  # strips inline comments/whitespace
@@ -12611,27 +12630,10 @@ class StrategyRunner:
                     continue
                 if symbol in self._active_orphan_guards:
                     continue
-                self._active_orphan_guards.add(symbol)
 
-                # Check strategy tag
-                strategy = (
-                    getattr(pos, "strategy", "")
-                    or getattr(pos, "strategy_name", "")
-                    or getattr(pos, "tag", "")
-                    or ""
-                )
-
-                # Identify Orphan (Manual/Unknown/Empty)
-                is_orphan = strategy.lower().strip() in (
-                    "manual",
-                    "unknown",
-                    "manual/unknown",
-                    "",
-                    "none",
-                )
-
-                if not is_orphan:
-                    continue
+                # Ownership is determined by the durable bracket lifecycle, not by
+                # optional strategy/tag attributes that broker-reconciled Position
+                # objects do not carry.
 
                 # 1. Determine Side & Quantity Safely
                 raw_qty = int(getattr(pos, "quantity", 0) or 0)
@@ -12656,8 +12658,11 @@ class StrategyRunner:
                 # ✅ FIX #1: Use is_symbol_managed() instead of get_bracket()
                 # ═══════════════════════════════════════════════════════════════
                 if self._bracket_manager.is_symbol_managed(symbol):
-                    continue  # Already protected, skip
+                    continue  # Existing pending/active lifecycle owns the position.
 
+                # Add the in-flight guard only after all early classification checks.
+                # Every path below is covered by the existing finally block.
+                self._active_orphan_guards.add(symbol)
                 now = time.time()
                 if symbol in self._orphan_retry_last_attempt:
                     if now - self._orphan_retry_last_attempt[symbol] < 10:
@@ -12689,12 +12694,6 @@ class StrategyRunner:
                     self._logger.info(
                         f"✅ Orphan protected: {symbol} | Bracket={bracket_id}"
                     )
-
-                    # Try to tag the position to prevent re-adoption
-                    try:
-                        pos.strategy = "Adopted_Orphan"
-                    except (AttributeError, TypeError):
-                        pass  # Position might be frozen/immutable
 
                 except Exception:
                     self._orphan_retry_count[symbol] = (
@@ -13360,6 +13359,29 @@ class StrategyRunner:
                 trade_symbol or base_symbol or signal.symbol
             )
             selected_snapshot: dict[str, Any] = {}
+            dedup_reserved = False
+            dedup_key_context: dict[str, str] | None = None
+
+            def reject_after_dedup(
+                *,
+                reason: str,
+                details: Mapping[str, Any] | None = None,
+            ) -> SignalExecutionResult:
+                if dedup_reserved:
+                    self._mark_directional_dedup_failed(
+                        underlying=underlying,
+                        option_side=option_side,
+                        reason=reason_key,
+                    )
+                self._reset_execution_state(base_symbol)
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason=reason,
+                    details=details,
+                )
+
+            _reject_after_dedup = reject_after_dedup
             existing_snapshots = (
                 candidate_snapshots_obj
                 if isinstance(candidate_snapshots_obj, list)
@@ -13691,6 +13713,7 @@ class StrategyRunner:
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
                 original_trade_price = float(trade_price or 0.0)
+                replacement_blocked_reason: str | None = None
                 if selected_symbol != original_symbol:
                     allow_replace = _env_flag("ALLOW_CANDIDATE_REPLACEMENT", default=False)
                     strict_replace = _env_flag("STRICT_CANDIDATE_REPLACEMENT", default=True)
@@ -13751,6 +13774,25 @@ class StrategyRunner:
                             },
                         )
                         selected_symbol = original_symbol
+
+                # The final order symbol, candidate, quote snapshot and premium plan
+                # are one atomic decision. A rejected replacement must never leak
+                # its price/SL/TP into the original instrument.
+                candidate = _ranked_candidate_for_symbol(
+                    ranked_candidates, selected_symbol
+                )
+                if candidate is None:
+                    self._reset_execution_state(base_symbol)
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="final_symbol_candidate_unavailable",
+                        details={
+                            "original_symbol": original_symbol,
+                            "final_symbol": selected_symbol,
+                            "replacement_blocked_reason": replacement_blocked_reason,
+                        },
+                    )
                 if selected_symbol != original_symbol:
                     trade_symbol = selected_symbol
                     base_symbol = selected_symbol

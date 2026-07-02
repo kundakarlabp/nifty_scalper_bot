@@ -3727,6 +3727,45 @@ class OrderManager:
                 plan.trace_id,
             )
             return TradePlanSubmitResult(False, reason="protected_limit_unavailable", details={"entry_price": plan.entry_price}, broker_attempted=False)
+        if (
+            plan.intent in ("ENTRY", "SCALE_IN", "REVERSAL")
+            and plan.entry_price is not None
+            and plan.entry_price > 0
+        ):
+            try:
+                max_deviation_pct = float(
+                    os.getenv("MAX_ENTRY_REPRICE_DEVIATION_PCT", "8.0") or "8.0"
+                )
+            except (TypeError, ValueError):
+                max_deviation_pct = 8.0
+            if not math.isfinite(max_deviation_pct) or max_deviation_pct <= 0:
+                max_deviation_pct = 8.0
+            deviation_pct = (
+                abs(float(price) - float(plan.entry_price))
+                / float(plan.entry_price)
+                * 100.0
+            )
+            if deviation_pct > max_deviation_pct:
+                details = {
+                    "reference_price": float(plan.entry_price),
+                    "protected_price": float(price),
+                    "deviation_pct": deviation_pct,
+                    "max_deviation_pct": max_deviation_pct,
+                    "side": plan.side,
+                }
+                self._logger.warning(
+                    "ORDER_REJECTED symbol=%s "
+                    "reason=entry_price_deviation_exceeded details=%s trace_id=%s",
+                    symbol,
+                    details,
+                    plan.trace_id,
+                )
+                return TradePlanSubmitResult(
+                    False,
+                    reason="entry_price_deviation_exceeded",
+                    details=details,
+                    broker_attempted=False,
+                )
         plan = self._reanchor_bracket_to_price(plan, price)
         if plan.side == "BUY":
             if plan.stop_loss is not None and plan.stop_loss >= price:
@@ -4805,18 +4844,23 @@ class OrderManager:
             if tp_price <= 0:
                 tp_price = round(entry_price * (1.20 if side == "BUY" else 0.80), 1)
 
-            if self._bracket_manager.has_active_bracket(order.symbol):
-                self._logger.debug(
-                    "Condition met: skip_duplicate_bracket_registration",
-                    extra={
-                        "event": "order_manager_bracket_duplicate_skip",
-                        "symbol": order.symbol,
-                        "order_id": order.order_id,
-                    },
-                )
-                return
             bracket_exists = self._bracket_manager.get_bracket(order.order_id)
             if bracket_exists is None:
+                if self._bracket_manager.has_active_bracket(order.symbol):
+                    self._logger.error(
+                        "ENTRY_BRACKET_LIFECYCLE_CONFLICT "
+                        "order_id=%s symbol=%s source=%s",
+                        order.order_id,
+                        order.symbol,
+                        source,
+                        extra={
+                            "event": "ENTRY_BRACKET_LIFECYCLE_CONFLICT",
+                            "order_id": order.order_id,
+                            "symbol": order.symbol,
+                            "source": source,
+                        },
+                    )
+                    return
                 self._bracket_manager.register_virtual_bracket(
                     order_id=order.order_id,
                     symbol=order.symbol,
@@ -4826,8 +4870,19 @@ class OrderManager:
                     sl=sl_price,
                     tp=tp_price,
                     tag=order.tag or source,
+                    intent=str(getattr(order, "intent", "ENTRY") or "ENTRY"),
                 )
+                bracket_exists = self._bracket_manager.get_bracket(order.order_id)
+                if bracket_exists is None:
+                    raise RuntimeError("entry bracket registration was not confirmed")
             self._bracket_manager.confirm_entry_fill(order.order_id, entry_price)
+            verified = self._bracket_manager.get_bracket(order.order_id)
+            if (
+                verified is None
+                or not bool(getattr(verified, "entry_confirmed", False))
+                or not bool(getattr(verified, "active", False))
+            ):
+                raise RuntimeError("entry bracket activation was not confirmed")
             self._logger.info(
                 "Condition met: virtual bracket active for filled order",
                 extra={
@@ -4846,6 +4901,61 @@ class OrderManager:
                     "order_id": order.order_id,
                     "symbol": order.symbol,
                     "source": source,
+                },
+                exc_info=exc,
+            )
+
+    def _confirm_position_protection_for_fill(self, order: OrderDetails) -> None:
+        """Acknowledge protection only after fill accounting and bracket activation."""
+
+        if str(getattr(order, "intent", "UNKNOWN")).upper() not in {
+            "ENTRY",
+            "SCALE_IN",
+            "REVERSAL",
+        }:
+            return
+        if self._bracket_manager is None:
+            return
+        confirm = getattr(self._positions, "confirm_entry_protection", None)
+        if not callable(confirm):
+            return
+        bracket = self._bracket_manager.get_bracket(order.order_id)
+        protected_qty = int(order.filled_quantity or order.quantity or 0)
+        if (
+            bracket is None
+            or not bool(getattr(bracket, "entry_confirmed", False))
+            or not bool(getattr(bracket, "active", False))
+            or float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0) <= 0
+            or protected_qty <= 0
+        ):
+            self._logger.error(
+                "ENTRY_PROTECTION_NOT_CONFIRMED order_id=%s symbol=%s",
+                order.order_id,
+                order.symbol,
+                extra={
+                    "event": "ENTRY_PROTECTION_NOT_CONFIRMED",
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                },
+            )
+            return
+        try:
+            confirm(
+                order.order_id,
+                str(getattr(bracket, "bracket_id", order.order_id)),
+                protected_qty,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "ENTRY_PROTECTION_CONFIRM_FAILED order_id=%s symbol=%s error=%s",
+                order.order_id,
+                order.symbol,
+                exc,
+                extra={
+                    "event": "ENTRY_PROTECTION_CONFIRM_FAILED",
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "error_type": type(exc).__name__,
                 },
                 exc_info=exc,
             )
@@ -6096,6 +6206,8 @@ class OrderManager:
                     except Exception as e:
                         self._logger.exception("Unhandled exception", exc_info=True)
                         raise
+
+                self._confirm_position_protection_for_fill(order)
 
             # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
             # _check_zombie_orders cancels stuck PENDING orders after 45s via
