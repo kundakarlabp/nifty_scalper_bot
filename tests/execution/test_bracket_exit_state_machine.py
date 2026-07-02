@@ -229,3 +229,37 @@ def test_repeated_failed_exits_set_unresolved_until_broker_confirms_flat() -> No
     manager._reconcile_exit_state(bracket, requested_by="post_submit")
     assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
     assert manager.has_unresolved_exit() is False
+
+
+def test_two_bracket_lifecycles_each_emit_exit_triggered(caplog) -> None:
+    broker = _Broker(
+        status="OPEN",
+        positions=[
+            {"symbol": "NFO:NIFTY2660923100CE", "quantity": 65},
+            {"symbol": "NFO:NIFTY2660923100PE", "quantity": 65},
+        ],
+    )
+    om = _OrderManager(broker=broker, order_id="exit-1")
+    manager = _active_manager(om)
+    manager.register_virtual_bracket(
+        order_id="entry-2",
+        symbol="NFO:NIFTY2660923100PE",
+        side="BUY",
+        qty=65,
+        price=150.65,
+        sl=157.10,
+        tp=175.00,
+    )
+    manager.confirm_entry_fill("entry-2", 150.65)
+
+    with caplog.at_level(logging.INFO):
+        manager.on_tick("NFO:NIFTY2660923100CE", 157.10)
+        manager.on_tick("NFO:NIFTY2660923100CE", 156.90)
+        manager.on_tick("NFO:NIFTY2660923100PE", 157.10)
+        manager.on_tick("NFO:NIFTY2660923100PE", 156.90)
+
+    exit_triggered = [
+        rec for rec in caplog.records if getattr(rec, "event", "") == "EXIT_TRIGGERED"
+    ]
+    assert len(exit_triggered) == 2
+    assert len(om.calls) == 2

@@ -1588,9 +1588,17 @@ class BracketManager:
                     LOGGER.info(
                         "EXIT_TRIGGERED bracket_id=%s symbol=%s reason=%s qty=%s",
                         bracket.bracket_id,
-                        normalize_symbol(bracket.symbol),
+                        bracket.symbol,
                         reason,
                         int(action.get("qty") or bracket.remaining_quantity),
+                        extra={
+                            "event": "EXIT_TRIGGERED",
+                            "bypass_filters": True,
+                            "bracket_id": bracket.bracket_id,
+                            "symbol": bracket.symbol,
+                            "reason": reason,
+                            "quantity": int(action.get("qty") or bracket.remaining_quantity),
+                        },
                     )
                     self._log_bracket_event(
                         "EXIT_TRIGGERED",
@@ -1698,7 +1706,8 @@ class BracketManager:
                 bracket.last_exit_error = submit.error_message or submit.status
                 bracket.pending_exit_order_id = None
                 bracket.exit_order_id = None
-                decision = dict(getattr(self.order_manager, "_last_order_decision", {}) or {})
+                raw_decision = getattr(self.order_manager, "_last_order_decision", {}) or {}
+                decision = dict(raw_decision) if isinstance(raw_decision, Mapping) else {}
                 LOGGER.error(
                     "BRACKET_EXIT_ORDER_FAILED symbol=%s bracket_id=%s remaining_qty=%s attempt=%s error_type=%s error_message=%s retryable=%s order_manager_reason=%s broker_attempted=%s kill_switch_active=%s broker_rejection=%s",
                     symbol,
@@ -1714,6 +1723,7 @@ class BracketManager:
                     submit.broker_payload,
                     extra={
                         "event": "BRACKET_EXIT_ORDER_FAILED",
+                        "bypass_filters": True,
                         "symbol": symbol,
                         "bracket_id": bracket.bracket_id,
                         "remaining_qty": bracket.remaining_quantity,

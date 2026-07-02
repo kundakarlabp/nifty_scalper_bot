@@ -351,6 +351,11 @@ class DedupLogger:
         self._last_messages: dict[str, float] = {}
 
     def info(self, msg: object, *args: object, **kwargs: object) -> None:
+        extra = kwargs.get("extra") or {}
+        if isinstance(extra, dict) and bool(extra.get("bypass_filters")):
+            self._logger.info(msg, *args, **kwargs)
+            return
+
         now = time.monotonic()
         key = str(msg % args if args else msg)
 
