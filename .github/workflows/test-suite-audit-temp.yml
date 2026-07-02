@@ -1,4 +1,4 @@
-name: Temporary Test Suite Audit
+name: Temporary Test Fixture Repair
 
 on:
   push:
@@ -6,51 +6,38 @@ on:
       - codex/test-suite-repair-2026-07-02
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  audit:
+  repair:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      BRACKET_AUTO_RESTORE: "false"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip -q
-          python -m pip install -e '.[dev]' -q
-          python -m pip install -r dashboard/requirements.txt -q
-      - name: Capture repository and diagnostics
+          ref: codex/test-suite-repair-2026-07-02
+      - name: Repair bracket restore test fixture
         shell: bash
         run: |
-          set +e
-          python -m compileall -q src dashboard scripts tests > compile-output.txt 2>&1
-          echo $? > compile-exit-code.txt
-          python tools/repo_janitor.py > janitor-output.txt 2>&1
-          python -m pytest -q \
-            tests/strategies/test_vwap_mean_reversion.py \
-            tests/strategies/test_elite_builder_mode.py \
-            tests/execution/test_market_aware_time_stop.py \
-            tests/execution/test_execution_policy.py \
-            tests/execution/test_execution_safety_audit_fixes.py \
-            > focused-pytest-output.txt 2>&1
-          echo $? > focused-pytest-exit-code.txt
-          tar -czf repository-snapshot.tar.gz src tests pyproject.toml pytest.ini
-          exit 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: test-suite-audit
-          path: |
-            compile-output.txt
-            compile-exit-code.txt
-            focused-pytest-output.txt
-            focused-pytest-exit-code.txt
-            janitor-output.txt
-            JANITOR_REPORT.json
-            repository-snapshot.tar.gz
-          if-no-files-found: error
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/execution/test_execution_safety_audit_fixes.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''def test_bracket_state_is_written_and_restored_with_ledger_recovery_fields(tmp_path, monkeypatch) -> None:
+              monkeypatch.setenv("DATA_DIR", str(tmp_path))
+          '''
+          new = '''def test_bracket_state_is_written_and_restored_with_ledger_recovery_fields(tmp_path, monkeypatch) -> None:
+              monkeypatch.setenv("DATA_DIR", str(tmp_path))
+              monkeypatch.setenv("BRACKET_AUTO_RESTORE", "true")
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("expected bracket restore test anchor exactly once")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/execution/test_execution_safety_audit_fixes.py
+          git commit -m "test: enable restore in persistence fixture"
+          git push origin HEAD:codex/test-suite-repair-2026-07-02
