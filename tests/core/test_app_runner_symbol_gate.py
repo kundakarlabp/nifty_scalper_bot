@@ -27,10 +27,18 @@ class _Mdm:
         return [object()] * int(self._bars_by_symbol.get(sym, 0))
 
 
+def _ctx(runner: _Runner, mdm: _Mdm) -> SimpleNamespace:
+    return SimpleNamespace(
+        strategy_runner=runner,
+        market_data_manager=mdm,
+        data_hub=None,
+    )
+
+
 def test_startup_runner_add_gate_resolved_and_unresolved() -> None:
     runner = _Runner(required=55)
     mdm = _Mdm({"NSE:NIFTY": 80, "NFO:NIFTY24500CE": 20}, required=60)
-    ctx = SimpleNamespace(strategy_runner=runner, market_data_manager=mdm)
+    ctx = _ctx(runner, mdm)
     pending: set[str] = set()
 
     token_map = {"NSE:NIFTY": 256265, "NFO:NIFTY24500CE": 1234}
@@ -50,7 +58,7 @@ def test_startup_runner_add_gate_resolved_and_unresolved() -> None:
 def test_active_basket_deferred_add_then_single_promotion() -> None:
     runner = _Runner(required=50)
     mdm = _Mdm({"NFO:NIFTY24600CE": 30}, required=50)
-    ctx = SimpleNamespace(strategy_runner=runner, market_data_manager=mdm)
+    ctx = _ctx(runner, mdm)
     pending: set[str] = set()
 
     assert _gate_runner_symbol_add(ctx, "NFO:NIFTY24600CE", pending) is False
@@ -66,7 +74,7 @@ def test_active_basket_deferred_add_then_single_promotion() -> None:
 def test_symbol_history_requirement_uses_max_threshold() -> None:
     runner = _Runner(required=75)
     mdm = _Mdm({}, required=60)
-    ctx = SimpleNamespace(strategy_runner=runner, market_data_manager=mdm)
+    ctx = _ctx(runner, mdm)
     assert _symbol_history_requirement(ctx) == 75
 
 
