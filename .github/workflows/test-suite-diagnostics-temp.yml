@@ -1,4 +1,4 @@
-name: Temporary Full Test Diagnostics
+name: Temporary Targeted Test Validation
 
 on:
   pull_request:
@@ -10,9 +10,9 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  validate-targeted:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
     env:
       BRACKET_AUTO_RESTORE: "false"
     steps:
@@ -26,21 +26,14 @@ jobs:
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
-      - name: Run complete suite without early stop
-        shell: bash
+      - name: Compile tests
+        run: python -m compileall -q tests
+      - name: Validate repaired and consolidated tests
         run: |
-          set +e
-          python -m compileall -q src dashboard scripts tests > compile-output.txt 2>&1
-          echo $? > compile-exit-code.txt
-          python -m pytest -q --maxfail=0 > full-pytest-output.txt 2>&1
-          echo $? > full-pytest-exit-code.txt
-          exit 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: complete-test-diagnostics
-          path: |
-            compile-output.txt
-            compile-exit-code.txt
-            full-pytest-output.txt
-            full-pytest-exit-code.txt
-          if-no-files-found: error
+          python -m pytest -q \
+            tests/core/test_app_runner_symbol_gate.py \
+            tests/streaming/test_stream_supervisor_fallback.py \
+            tests/execution/test_execution_safety_audit_fixes.py::test_bracket_state_is_written_and_restored_with_ledger_recovery_fields \
+            tests/strategies/test_vwap_mean_reversion.py \
+            tests/strategies/test_elite_builder_mode.py \
+            tests/execution/test_execution_policy.py
