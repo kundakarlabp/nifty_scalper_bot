@@ -1,0 +1,74 @@
+name: Rebase Trading Incident Correction
+
+on:
+  push:
+    branches: [fix/trading-lifecycle-rebase-20260702]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Apply anchored production correction
+        run: |
+          python .github/patches/apply_trading_incident_fix.py
+          python .github/patches/apply_trading_incident_test_adjustments.py
+          python .github/patches/apply_runner_rejection_fixture.py
+          python .github/patches/apply_runner_dedup_scope_fix.py
+          python .github/patches/fix_bot_context_runtime_field.py
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+
+      - name: Validate affected production paths
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: |
+          git diff --check
+          python -m compileall -q src dashboard scripts tests
+          python -m pytest -q --tb=short \
+            tests/execution/test_trading_incident_regressions.py \
+            tests/execution/test_execution_safety_audit_fixes.py \
+            tests/execution/test_order_manager_trade_plan.py \
+            tests/test_bracket_reanchor.py \
+            tests/strategies/test_orphan_guard_skip_managed.py \
+            tests/strategies/test_runner_live_path_guards.py::test_runner_normalizes_one_lot_to_exchange_quantity \
+            tests/strategies/test_runner_live_path_guards.py::test_candidate_not_in_active_basket_fails_live_entry_eligibility \
+            tests/core/test_commit_active_dynamic_basket.py::test_commit_active_dynamic_basket_reconciles_without_name_error \
+            tests/core/test_bot_context_attributes.py
+
+      - name: Remove bootstrap machinery
+        run: |
+          rm -f .github/patches/apply_trading_incident_fix.py
+          rm -f .github/patches/apply_trading_incident_test_adjustments.py
+          rm -f .github/patches/apply_runner_rejection_fixture.py
+          rm -f .github/patches/apply_runner_dedup_scope_fix.py
+          rm -f .github/patches/apply_runner_test_fixture_adjustment.py
+          rm -f .github/patches/fix_bot_context_runtime_field.py
+          rm -f .github/workflows/rebase-trading-incident-fix.yml
+          rmdir .github/patches 2>/dev/null || true
+          git diff --check
+
+      - name: Commit rebased validated correction
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix entry price integrity and broker fill lifecycle"
+          git push origin HEAD:${{ github.ref_name }}
