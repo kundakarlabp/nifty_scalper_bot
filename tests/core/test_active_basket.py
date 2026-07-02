@@ -22,6 +22,7 @@ def test_tradable_quote_uses_symbol_list(monkeypatch) -> None:
         atm_ce_symbol=None,
         atm_pe_symbol=None,
         strategy_runner=None,
+        settings=SimpleNamespace(execution_mode="PAPER"),
     )
 
     import asyncio
@@ -48,4 +49,3 @@ def test_build_canonical_active_basket_returns_selected_symbols() -> None:
     )
     assert basket['selected_ce'] == basket['atm_ce']
     assert basket['selected_pe'] == basket['atm_pe']
-

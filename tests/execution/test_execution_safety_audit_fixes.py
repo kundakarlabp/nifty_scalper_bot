@@ -85,6 +85,7 @@ def test_explicit_empty_snapshot_is_authoritative_flat(tmp_path) -> None:
 
 def test_broker_realised_field_updates_daily_realised_without_using_total_pnl(tmp_path) -> None:
     manager = _position_manager(tmp_path)
+    manager.establish_pnl_session_baseline(-100.0)
     manager.synchronize_with_broker(
         [
             {
@@ -97,7 +98,7 @@ def test_broker_realised_field_updates_daily_realised_without_using_total_pnl(tm
             }
         ]
     )
-    assert manager.get_realized_pnl() == pytest.approx(-125.5)
+    assert manager.get_realized_pnl() == pytest.approx(-25.5)
 
 
 def test_update_from_order_uses_fill_price_and_existing_fill_lifecycle(tmp_path) -> None:
@@ -199,6 +200,9 @@ def test_explicit_short_entry_still_opens_short(tmp_path) -> None:
     assert position is not None
     assert position.side == "SHORT"
     assert position.quantity == 65
+    assert manager.current_entry_protection_blocker(SYMBOL) == "entry_protection_incomplete"
+    manager.confirm_entry_protection("short-entry", "short-bracket", 65)
+    assert manager.current_entry_protection_blocker(SYMBOL) is None
 
 
 def test_broker_status_normalization_accepts_zerodha_statuses() -> None:
@@ -498,16 +502,90 @@ def test_resolved_terminal_eviction_preserves_unresolved_records(tmp_path) -> No
 
 def test_pnl_reconciliation_mismatch_exposes_entry_blocker(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.establish_pnl_session_baseline(-150.0)
     manager._local_realized_pnl = 100.0
-    manager._broker_realized_pnl = -50.0
+    manager._broker_realized_pnl = -60.0
     with manager._lock:
         manager._refresh_realized_pnl_locked()
 
     snapshot = manager.pnl_reconciliation_snapshot()
     assert snapshot["pnl_reconciliation_status"] == "mismatch"
     assert snapshot["local_confirmed_realized"] == pytest.approx(100.0)
-    assert snapshot["broker_realized_snapshot"] == pytest.approx(-50.0)
+    assert snapshot["broker_realized_snapshot"] == pytest.approx(-60.0)
+    assert snapshot["broker_session_realized"] == pytest.approx(90.0)
     assert manager.current_pnl_reconciliation_blocker() == "pnl_reconciliation_mismatch"
+
+
+def test_entry_bracket_id_alone_does_not_resolve_without_protection_ack(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        "entry-protect",
+        SYMBOL,
+        "BUY",
+        65,
+        100.0,
+        "MARKET",
+        intent="ENTRY",
+        bracket_id="metadata-only",
+    )
+
+    manager.apply_broker_order_update(
+        "entry-protect",
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 100.0},
+    )
+
+    metadata = manager._terminal_orders["entry-protect"]
+    assert metadata.bracket_applied is False
+    assert metadata.lifecycle_resolved is False
+    assert metadata.protection_confirmed is False
+    assert manager.current_entry_protection_blocker(SYMBOL) == "entry_protection_incomplete"
+
+    with pytest.raises(ValueError):
+        manager.confirm_entry_protection("entry-protect", "metadata-only", 25)
+
+    manager.confirm_entry_protection("entry-protect", "metadata-only", 65)
+
+    resolved = manager._terminal_orders["entry-protect"]
+    assert resolved.bracket_applied is True
+    assert resolved.protected_quantity == 65
+    assert resolved.protection_confirmed is True
+    assert resolved.lifecycle_resolved is True
+    assert manager.current_entry_protection_blocker(SYMBOL) is None
+
+
+def test_session_pnl_baseline_survives_restart_and_resets_by_ist_day(tmp_path) -> None:
+    state_path = tmp_path / "positions.json"
+    manager = PositionManager(state_file=str(state_path))
+    established = manager.establish_pnl_session_baseline(
+        -1000.0,
+        snapshot_at=datetime(2026, 7, 2, 3, 45, tzinfo=timezone.utc),
+    )
+    assert established is True
+    manager._broker_realized_pnl = -1100.0
+    with manager._lock:
+        manager._refresh_realized_pnl_locked()
+    assert manager.broker_session_realized_pnl() == pytest.approx(-100.0)
+    assert manager.get_realized_pnl() == pytest.approx(-100.0)
+    manager.save_state()
+
+    restarted = PositionManager(state_file=str(state_path))
+    same_day_replaced = restarted.establish_pnl_session_baseline(
+        -1100.0,
+        snapshot_at=datetime(2026, 7, 2, 5, 0, tzinfo=timezone.utc),
+    )
+    assert same_day_replaced is False
+    assert restarted.pnl_reconciliation_snapshot()[
+        "session_opening_realized_baseline"
+    ] == pytest.approx(-1000.0)
+
+    new_day = restarted.establish_pnl_session_baseline(
+        -1200.0,
+        snapshot_at=datetime(2026, 7, 3, 4, 0, tzinfo=timezone.utc),
+    )
+    assert new_day is True
+    assert restarted.pnl_reconciliation_snapshot()[
+        "session_opening_realized_baseline"
+    ] == pytest.approx(-1200.0)
 
 def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))

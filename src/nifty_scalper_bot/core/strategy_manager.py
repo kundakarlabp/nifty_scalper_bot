@@ -556,8 +556,8 @@ class StrategyVote:
     side: str
     score: float
     confidence: float
-    reasons: list[str] = field(default_factory=list)
-    metadata: dict[str, t.Any] = field(default_factory=dict)
+    reasons: list[str]
+    metadata: dict[str, t.Any]
 
 
 def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
@@ -1240,9 +1240,9 @@ class StrategyManager(_BaseStrategyManager):
 
     def __init__(
         self,
-        strategies: list[t.Any] | None = None,
-        indicator_engine: t.Any | None = None,
-        position_manager: t.Any | None = None,
+        strategies: list[t.Any],
+        indicator_engine: t.Any,
+        position_manager: t.Any,
         min_confidence: float = 0.35,
         data_hub: t.Any | None = None,
         orchestrator: t.Any | None = None,
@@ -1278,7 +1278,6 @@ class StrategyManager(_BaseStrategyManager):
             None.
         """
 
-        strategies = strategies or []
         log.debug("Entered StrategyManager.__init__")
         log.info(
             "RUNTIME_STRATEGY_MANAGER_CLASS strategy_manager_module=%s strategy_manager_class=%s strategy_manager_id=%s",
@@ -3708,7 +3707,7 @@ class StrategyManager(_BaseStrategyManager):
         if combined_md.get("selected_ok_reason"):
             selected_ok_reason = str(combined_md.get("selected_ok_reason"))
             selected_ok = selected_ok_reason != "not_selected_or_near_atm"
-        log.info(
+        log.debug(
             "STRATEGY_COMBINER_BLOCKER symbol=%s strategy_vote_count=%s trigger_vote_count=%s context_vote_count=%s best_strategy=%s best_score=%s best_confidence=%s single_vote_allowed=%s selected_ok=%s selected_ok_reason=%s final_trade_score=%s final_trade_threshold=%s blocked_reason=%s",
             symbol,
             len(signal_votes),
@@ -3754,10 +3753,6 @@ class StrategyManager(_BaseStrategyManager):
     ) -> Signal | None:
         """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
         symbol_norm = str(symbol or "").strip().upper()
-        if not hasattr(self, "_last_no_signal_decision_by_symbol"):
-            self._last_no_signal_decision_by_symbol = {}
-        if not hasattr(self, "_observability_counters"):
-            self._observability_counters = {"signals_generated": 0, "signals_blocked_by_regime": 0, "signals_blocked_by_risk": 0, "orders_submitted": 0}
         def _record_no_signal(category: str, reason_text: str, blocked_at: str, *, no_vote_reason_counts: dict[str, int] | None = None, strategy_reasons: dict[str, str] | None = None, trigger_vote_count: int = 0, context_vote_count: int = 0, final_block_reason: str | None = None) -> None:
             self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
                 symbol=symbol_norm,
@@ -4033,7 +4028,7 @@ class StrategyManager(_BaseStrategyManager):
             # Single-vote (no consensus) is riskier, so a lone selected-option scalp
             # must clear a high score floor (default 9.0) on top of the normal gates.
             # This keeps single-vote trades to only the strongest signals.
-            selected_single_min = self._env_float("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", score_min)
+            selected_single_min = self._env_float("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0)
             if selected_option_scalp_allowed and raw_trigger_score < selected_single_min:
                 selected_option_scalp_allowed = False
             scalp_fallback_allowed = bool((allow_scalp_single and threshold_passed) or selected_option_scalp_allowed)

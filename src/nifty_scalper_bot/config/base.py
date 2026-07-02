@@ -12,11 +12,11 @@ class BrokerConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    api_key: str = "DUMMY_API_KEY"
-    api_secret: str = "DUMMY_API_SECRET"
+    api_key: str
+    api_secret: str
     access_token: str | None = None
-    base_url: HttpUrl = "https://api.kite.trade"
-    websocket_url: str = "wss://ws.kite.trade"
+    base_url: HttpUrl
+    websocket_url: str
 
     @field_validator("websocket_url")
     @classmethod
@@ -90,8 +90,8 @@ class RateLimitBucketConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    capacity: int = Field(default=1, ge=1)
-    refill_rate_per_sec: float = Field(default=1.0, gt=0)
+    capacity: int = Field(..., ge=1)
+    refill_rate_per_sec: float = Field(..., gt=0)
 
 
 class RateLimitConfig(BaseModel):
@@ -99,9 +99,9 @@ class RateLimitConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    orders: RateLimitBucketConfig = Field(default_factory=RateLimitBucketConfig)
-    rest: RateLimitBucketConfig = Field(default_factory=RateLimitBucketConfig)
-    hist: RateLimitBucketConfig = Field(default_factory=RateLimitBucketConfig)
+    orders: RateLimitBucketConfig
+    rest: RateLimitBucketConfig
+    hist: RateLimitBucketConfig
 
 
 class AppConfig(BaseModel):
@@ -109,11 +109,11 @@ class AppConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    broker: BrokerConfig = Field(default_factory=BrokerConfig)
-    risk: RiskConfig = Field(default_factory=RiskConfig)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    ratelimit: RateLimitConfig = Field(default_factory=RateLimitConfig)
-    quote_stale_threshold_ms: int = Field(default=1500, gt=0)
+    broker: BrokerConfig
+    risk: RiskConfig
+    logging: LoggingConfig
+    ratelimit: RateLimitConfig
+    quote_stale_threshold_ms: int = Field(..., gt=0)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
 
 

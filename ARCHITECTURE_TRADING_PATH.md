@@ -85,14 +85,10 @@ TradePlan
 
 At every ambiguous broker state, new entries remain blocked until orders, fills and positions are reconciled.
 
-## Startup compatibility adapters
-
-### Compatibility-only modules
+## Compatibility-only modules
 
 Compatibility adapters may preserve historical constructor or import shapes, but they must delegate to the canonical runtime owners above and must never create a second order, bracket, trailing or lifecycle authority.
 
 ## Forbidden runtime layers
 
-Retired executor, processor or compatibility modules must not place live orders,
-register live brackets, own trailing stops, mutate positions, or become a second
-runtime lifecycle authority.
+Retired executor, order-processor, monkey-patch installer and side-channel bracket layers must not be used in live runtime.

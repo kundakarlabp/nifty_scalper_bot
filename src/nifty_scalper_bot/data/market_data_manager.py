@@ -6544,7 +6544,7 @@ class MarketDataManager:
             log_throttled(
                 self._logger,
                 "mdm_bus_publish_skipped_bus_not_running",
-                'MDM_BUS_PUBLISH_SKIPPED reason=bus_not_running getattr(bus, "running", False) symbol=%s'
+                "MDM_BUS_PUBLISH_SKIPPED reason=bus_not_running symbol=%s"
                 % tick.get("symbol"),
                 interval_sec=30.0,
                 level=logging.DEBUG,

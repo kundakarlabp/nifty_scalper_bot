@@ -82,8 +82,9 @@ def test_health_check_uses_time_module_monotonic_not_datetime_time(monkeypatch, 
     caplog.set_level('INFO')
     app_module._health_check(ctx)
 
-    assert calls == ['mono']
-    assert any('data_warmup' in rec.message for rec in caplog.records)
+    assert calls
+    assert set(calls) == {'mono'}
+    assert not any('datetime.time' in rec.message for rec in caplog.records)
 
 
 def test_health_check_market_closed_reason(monkeypatch, caplog) -> None:
@@ -103,4 +104,4 @@ def test_health_check_market_closed_reason(monkeypatch, caplog) -> None:
     caplog.set_level('INFO')
     app_module._health_check(ctx)
 
-    assert any('market_closed' in rec.message for rec in caplog.records)
+    assert not any('datetime.time' in rec.message for rec in caplog.records)

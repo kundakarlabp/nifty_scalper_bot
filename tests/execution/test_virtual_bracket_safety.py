@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
 
 
@@ -14,6 +16,11 @@ class _Broker:
 
     def get_positions(self) -> list[dict[str, int]]:
         return []
+
+
+@pytest.fixture(autouse=True)
+def isolated_bracket_store(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
 
 class _OrderManager:

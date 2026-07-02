@@ -2589,12 +2589,13 @@ class BracketManager:
         with self._lock:
             if bracket.exit_state == BracketExitLifecycle.CLOSED.value:
                 return True
-            if requested_by not in {"pre_submit", "post_submit", "test_timeout", "test_flat"}:
+            if requested_by not in {"pre_submit", "post_submit"}:
                 last = float(getattr(bracket, "_last_exit_reconcile_at", 0.0) or 0.0)
                 if now - last < self._exit_reconcile_interval_seconds:
                     return False
             setattr(bracket, "_last_exit_reconcile_at", now)
             order_id = bracket.exit_order_id or bracket.pending_exit_order_id
+            exit_pending = bool(bracket.exit_pending or order_id)
         LOGGER.info(
             "EXIT_RECONCILE_REQUESTED bracket_id=%s symbol=%s requested_by=%s exit_order_id=%s",
             bracket.bracket_id,
@@ -2635,9 +2636,7 @@ class BracketManager:
             with self._lock:
                 bracket.last_exit_error = f"reconcile_failed:{type(exc).__name__}:{exc}"
                 age_basis = float(
-                    bracket.exit_triggered_at
-                    if requested_by == "test_timeout" and bracket.exit_triggered_at
-                    else (bracket.last_exit_attempt_at or bracket.exit_triggered_at or now)
+                    bracket.last_exit_attempt_at or bracket.exit_triggered_at or now
                 )
                 age = now - age_basis
                 if age >= self._exit_unresolved_escalation_seconds:
@@ -2663,22 +2662,34 @@ class BracketManager:
             self._close_bracket(bracket, close_source="broker_fill", exit_price=fill_price)
             LOGGER.info("EXIT_FILLED_CONFIRMED bracket_id=%s order_id=%s", bracket.bracket_id, order_id)
             return True
-        if flat and not order_id and requested_by in {"pre_submit", "pre_submit_hardened"}:
-            prospective_order_id = str(getattr(self.order_manager, "order_id", "") or "")
-            prospective_status = ""
-            if prospective_order_id:
-                with suppress(Exception):
-                    prospective_status = str(
-                        (self._get_broker_order_status(prospective_order_id) or {}).get(
-                            "status", ""
-                        )
-                    ).upper()
-            if prospective_status not in _FILLED_STATUSES:
-                self._close_bracket(bracket, close_source="reconciled_flat", exit_price=fill_price)
-                LOGGER.info("EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s", bracket.bracket_id, bracket.symbol)
+        if flat and not order_id:
+            if requested_by != "direct_pre_submit":
+                prospective_order_id = str(
+                    getattr(self.order_manager, "order_id", "") or ""
+                )
+                if prospective_order_id:
+                    with suppress(Exception):
+                        prospective_status = str(
+                            (
+                                self._get_broker_order_status(prospective_order_id)
+                                or {}
+                            ).get("status", "")
+                        ).upper()
+                        if prospective_status in _FILLED_STATUSES:
+                            return False
+                self._close_bracket(
+                    bracket,
+                    close_source="reconciled_flat",
+                    exit_price=fill_price,
+                )
+                LOGGER.info(
+                    "EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                )
                 return True
             LOGGER.info(
-                "EXIT_RECONCILED_FLAT_AWAITING_ORDER bracket_id=%s symbol=%s requested_by=%s",
+                "EXIT_RECONCILED_FLAT_IGNORED_WITHOUT_ORDER bracket_id=%s symbol=%s requested_by=%s",
                 bracket.bracket_id,
                 bracket.symbol,
                 requested_by,
@@ -2691,9 +2702,7 @@ class BracketManager:
 
         with self._lock:
             age_basis = float(
-                bracket.exit_triggered_at
-                if requested_by == "test_timeout" and bracket.exit_triggered_at
-                else (bracket.last_exit_attempt_at or bracket.exit_triggered_at or now)
+                bracket.last_exit_attempt_at or bracket.exit_triggered_at or now
             )
             age = now - age_basis
             if age >= self._exit_unresolved_escalation_seconds:

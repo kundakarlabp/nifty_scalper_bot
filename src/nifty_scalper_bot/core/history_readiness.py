@@ -347,9 +347,7 @@ def _hydration_status_map(ctx: BotContext, *, required_option_bars: int, require
             if role in {"spot", "futures_context"}
             else required_option_bars
         )
-        from nifty_scalper_bot.core import app as _app_module
-        builder = getattr(_app_module, "build_symbol_hydration_status", build_symbol_hydration_status)
-        statuses[sym] = builder(ctx, sym, role, required)
+        statuses[sym] = build_symbol_hydration_status(ctx, sym, role, required)
     ctx.hydration_status_by_symbol = {sym: status.to_dict() for sym, status in statuses.items()}
     ctx.last_hydration_status_at = datetime.now(timezone.utc)
     return statuses

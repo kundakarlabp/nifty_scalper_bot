@@ -182,7 +182,8 @@ def test_position_reconcile_failure_keeps_pending_then_escalates() -> None:
     assert bracket.position_flat_confirmed is False
 
     bracket.exit_triggered_at = time.time() - 1.0
-    manager._reconcile_exit_state(bracket, requested_by="test_timeout")
+    bracket.last_exit_attempt_at = time.time() - 1.0
+    manager._reconcile_exit_state(bracket, requested_by="post_submit")
 
     assert bracket.exit_state == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
     assert bracket.exit_pending is True
@@ -225,6 +226,6 @@ def test_repeated_failed_exits_set_unresolved_until_broker_confirms_flat() -> No
     assert manager.has_unresolved_exit() is True
 
     broker.positions = []
-    manager._reconcile_exit_state(bracket, requested_by="test_flat")
+    manager._reconcile_exit_state(bracket, requested_by="post_submit")
     assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
     assert manager.has_unresolved_exit() is False

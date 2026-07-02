@@ -23,6 +23,7 @@ from typing import (
     Sequence,
     cast,
 )
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.execution.position_snapshot import (
@@ -368,6 +369,10 @@ class TerminalOrderMetadata:
     trade_lifecycle_id: str | None = None
     linked_entry_order_id: str | None = None
     exit_lifecycle_state: str | None = None
+    protected_quantity: int = 0
+    protection_confirmed: bool = False
+    protection_confirmed_at: datetime | None = None
+    protection_failure_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -389,6 +394,14 @@ class TerminalOrderMetadata:
             "trade_lifecycle_id": self.trade_lifecycle_id,
             "linked_entry_order_id": self.linked_entry_order_id,
             "exit_lifecycle_state": self.exit_lifecycle_state,
+            "protected_quantity": self.protected_quantity,
+            "protection_confirmed": self.protection_confirmed,
+            "protection_confirmed_at": (
+                self.protection_confirmed_at.isoformat()
+                if self.protection_confirmed_at
+                else None
+            ),
+            "protection_failure_reason": self.protection_failure_reason,
         }
 
     @staticmethod
@@ -433,6 +446,18 @@ class TerminalOrderMetadata:
             exit_lifecycle_state=(
                 str(payload["exit_lifecycle_state"])
                 if payload.get("exit_lifecycle_state") is not None
+                else None
+            ),
+            protected_quantity=_to_int(payload.get("protected_quantity", 0)),
+            protection_confirmed=bool(payload.get("protection_confirmed", False)),
+            protection_confirmed_at=(
+                datetime.fromisoformat(str(payload["protection_confirmed_at"]))
+                if payload.get("protection_confirmed_at") is not None
+                else None
+            ),
+            protection_failure_reason=(
+                str(payload["protection_failure_reason"])
+                if payload.get("protection_failure_reason") is not None
                 else None
             ),
         )
@@ -552,6 +577,10 @@ class Order:
     trade_lifecycle_id: str | None = None
     linked_entry_order_id: str | None = None
     pre_order_entry_price: float | None = None
+    protected_quantity: int = 0
+    protection_confirmed: bool = False
+    protection_confirmed_at: datetime | None = None
+    protection_failure_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the order for JSON persistence."""
@@ -581,6 +610,14 @@ class Order:
             "trade_lifecycle_id": self.trade_lifecycle_id,
             "linked_entry_order_id": self.linked_entry_order_id,
             "pre_order_entry_price": self.pre_order_entry_price,
+            "protected_quantity": self.protected_quantity,
+            "protection_confirmed": self.protection_confirmed,
+            "protection_confirmed_at": (
+                self.protection_confirmed_at.isoformat()
+                if self.protection_confirmed_at
+                else None
+            ),
+            "protection_failure_reason": self.protection_failure_reason,
         }
 
     @staticmethod
@@ -649,6 +686,18 @@ class Order:
                 else None
             ),
             pre_order_entry_price=_to_optional_float(payload.get("pre_order_entry_price")),
+            protected_quantity=_to_int(payload.get("protected_quantity", 0)),
+            protection_confirmed=bool(payload.get("protection_confirmed", False)),
+            protection_confirmed_at=(
+                datetime.fromisoformat(str(payload["protection_confirmed_at"]))
+                if payload.get("protection_confirmed_at") is not None
+                else None
+            ),
+            protection_failure_reason=(
+                str(payload["protection_failure_reason"])
+                if payload.get("protection_failure_reason") is not None
+                else None
+            ),
         )
 
 
@@ -798,6 +847,13 @@ class PositionManager:
         self._pnl_authority: str = "unresolved"
         self._pnl_reconciliation_status: str = "unresolved"
         self._pnl_snapshot_at: datetime | None = None
+        self._session_opening_realized_baseline: float | None = None
+        self._pnl_trading_date: str | None = None
+        self._pnl_account_fingerprint: str | None = None
+        self._pnl_product_scope: str = "MIS"
+        self._baseline_established_at: datetime | None = None
+        self._baseline_source: str | None = None
+        self._require_pnl_baseline_for_entries: bool = False
         self._active_contracts: Dict[str, ActiveContract] = {}
         self._contract_index: Dict[str, str] = {}
         self._persistent_state: PersistentStateManager | None = None
@@ -1600,11 +1656,14 @@ class PositionManager:
         """Refresh authoritative confirmed P&L without silently taking min()."""
 
         local_confirmed = float(self._local_realized_pnl)
-        broker_confirmed = (
-            None
-            if self._broker_realized_pnl is None
-            else float(self._broker_realized_pnl)
-        )
+        broker_confirmed = None
+        if (
+            self._broker_realized_pnl is not None
+            and self._session_opening_realized_baseline is not None
+        ):
+            broker_confirmed = float(self._broker_realized_pnl) - float(
+                self._session_opening_realized_baseline
+            )
         if local_confirmed != 0.0:
             authoritative = local_confirmed
             authority = "local_confirmed_ledger"
@@ -1628,6 +1687,68 @@ class PositionManager:
         self._pnl_authority = authority
         self._pnl_reconciliation_status = status
         self._pnl_snapshot_at = _now()
+
+    @staticmethod
+    def _trading_date_ist(now: datetime | None = None) -> str:
+        """Return the exchange trading date in IST for P&L baselines."""
+
+        current = now or _now()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return current.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
+
+    def establish_pnl_session_baseline(
+        self,
+        broker_realized: float,
+        *,
+        account_fingerprint: str | None = None,
+        product_scope: str = "MIS",
+        snapshot_at: datetime | None = None,
+        source: str = "validated_broker_positions",
+        trading_date: str | None = None,
+    ) -> bool:
+        """Persist the opening broker-realized baseline for today's bot P&L.
+
+        Same-day restarts retain the existing baseline so an old cumulative
+        broker realized value is not misread as today's bot loss.
+        """
+
+        value = float(broker_realized)
+        if not math.isfinite(value):
+            raise ValueError("broker_realized must be finite")
+        as_of = snapshot_at or _now()
+        session_date = trading_date or self._trading_date_ist(as_of)
+        with self._lock:
+            if (
+                self._session_opening_realized_baseline is not None
+                and self._pnl_trading_date == session_date
+            ):
+                self._broker_realized_pnl = value
+                self._refresh_realized_pnl_locked()
+                return False
+            self._session_opening_realized_baseline = value
+            self._pnl_trading_date = session_date
+            self._pnl_account_fingerprint = account_fingerprint
+            self._pnl_product_scope = product_scope
+            self._baseline_established_at = as_of
+            self._baseline_source = source
+            self._broker_realized_pnl = value
+            self._refresh_realized_pnl_locked()
+        self.save_state()
+        return True
+
+    def broker_session_realized_pnl(self) -> float | None:
+        """Return broker cumulative realized minus the persisted session baseline."""
+
+        with self._lock:
+            if (
+                self._broker_realized_pnl is None
+                or self._session_opening_realized_baseline is None
+            ):
+                return None
+            return float(self._broker_realized_pnl) - float(
+                self._session_opening_realized_baseline
+            )
     def get_realized_pnl(self) -> float:
         """Return conservative realised P&L used by capital-protection gates."""
         with self._lock:
@@ -1643,9 +1764,28 @@ class PositionManager:
                     self._local_provisional_realized_pnl
                 ),
                 "broker_realized_snapshot": self._broker_realized_pnl,
+                "broker_session_realized": (
+                    None
+                    if self._broker_realized_pnl is None
+                    or self._session_opening_realized_baseline is None
+                    else float(self._broker_realized_pnl)
+                    - float(self._session_opening_realized_baseline)
+                ),
                 "authoritative_realized": float(self._authoritative_realized_pnl),
                 "pnl_authority": self._pnl_authority,
                 "pnl_reconciliation_status": self._pnl_reconciliation_status,
+                "session_opening_realized_baseline": (
+                    self._session_opening_realized_baseline
+                ),
+                "pnl_trading_date": self._pnl_trading_date,
+                "pnl_account_fingerprint": self._pnl_account_fingerprint,
+                "pnl_product_scope": self._pnl_product_scope,
+                "baseline_established_at": (
+                    self._baseline_established_at.isoformat()
+                    if self._baseline_established_at
+                    else None
+                ),
+                "baseline_source": self._baseline_source,
                 "pnl_snapshot_at": (
                     self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None
                 ),
@@ -1655,9 +1795,50 @@ class PositionManager:
         """Block new entries when confirmed local and broker P&L disagree."""
 
         with self._lock:
+            if (
+                self._require_pnl_baseline_for_entries
+                and self._session_opening_realized_baseline is None
+            ):
+                return "pnl_baseline_uninitialized"
             if self._pnl_reconciliation_status == "mismatch":
                 return "pnl_reconciliation_mismatch"
             return None
+
+    def require_pnl_session_baseline(self, required: bool = True) -> None:
+        """Require a validated session baseline before new entries are accepted."""
+
+        with self._lock:
+            self._require_pnl_baseline_for_entries = bool(required)
+
+    def current_entry_protection_blocker(self, symbol: str | None = None) -> str | None:
+        """Return current entry blocker when a filled entry lacks SL protection."""
+
+        symbol_key = symbol.upper() if symbol else None
+        with self._lock:
+            for order in self._orders.values():
+                if symbol_key is not None and order.symbol != symbol_key:
+                    continue
+                if order.intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
+                    continue
+                if order.applied_filled_quantity <= 0:
+                    continue
+                if (
+                    not order.protection_confirmed
+                    or order.protected_quantity < order.applied_filled_quantity
+                ):
+                    return "entry_protection_incomplete"
+            for metadata in self._unresolved_terminal_orders.values():
+                if symbol_key is not None and metadata.symbol != symbol_key:
+                    continue
+                if metadata.intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
+                    continue
+                if (
+                    not metadata.protection_confirmed
+                    or metadata.protected_quantity
+                    < metadata.cumulative_filled_quantity
+                ):
+                    return "entry_protection_incomplete"
+        return None
 
     def add_pending_order(
         self,
@@ -1856,6 +2037,10 @@ class PositionManager:
                     if order_id in self._exit_lifecycles
                     else None
                 ),
+                protected_quantity=order.protected_quantity,
+                protection_confirmed=order.protection_confirmed,
+                protection_confirmed_at=order.protection_confirmed_at,
+                protection_failure_reason=order.protection_failure_reason,
             )
             if not self._terminal_orders[order_id].lifecycle_resolved:
                 self._unresolved_terminal_orders[order_id] = self._terminal_orders[order_id]
@@ -1938,6 +2123,63 @@ class PositionManager:
             "oldest_age_s": oldest_age_s,
         }
 
+    def confirm_entry_protection(
+        self,
+        order_id: str,
+        bracket_id: str,
+        protected_quantity: int,
+    ) -> None:
+        """Acknowledge verified SL/TP protection for a filled entry order.
+
+        Bracket metadata alone is not proof of protection. The canonical
+        bracket/order runtime must call this only after it has verified the
+        active bracket, configured stop loss, symbol and lifecycle linkage.
+        """
+
+        order_key = str(order_id).strip()
+        bracket_key = str(bracket_id).strip()
+        protected_qty = int(protected_quantity)
+        if protected_qty <= 0:
+            raise ValueError("protected_quantity must be positive")
+        with self._lock:
+            order = self._orders.get(order_key)
+            if order is None:
+                raise KeyError(f"Unknown entry order '{order_key}'")
+            if order.intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
+                raise ValueError("Only entry-intent orders can confirm protection")
+            if order.bracket_id and order.bracket_id != bracket_key:
+                raise ValueError("Bracket ID does not match entry order")
+            if order.applied_filled_quantity <= 0:
+                raise ValueError("Entry fill must be applied before protection")
+            if protected_qty < order.applied_filled_quantity:
+                order.protected_quantity = protected_qty
+                order.protection_confirmed = False
+                order.protection_failure_reason = "entry_protection_incomplete"
+                self._persist_order_state(order)
+                self.save_state()
+                raise ValueError("protected quantity is below filled quantity")
+
+            now = _now()
+            order.bracket_id = bracket_key
+            order.protected_quantity = protected_qty
+            order.protection_confirmed = True
+            order.protection_confirmed_at = now
+            order.protection_failure_reason = None
+
+            metadata = self._terminal_orders.get(order_key)
+            if metadata is not None:
+                metadata.bracket_applied = True
+                metadata.protected_quantity = protected_qty
+                metadata.protection_confirmed = True
+                metadata.protection_confirmed_at = now
+                metadata.protection_failure_reason = None
+                if metadata.fill_recorded and metadata.position_applied:
+                    metadata.lifecycle_resolved = True
+                    metadata.accounting_finalized = False
+                    self._unresolved_terminal_orders.pop(order_key, None)
+            self._persist_order_state(order)
+        self.save_state()
+
     def save_state(self) -> None:
         """Persist one coherent positions/orders snapshot to disk."""
         with self._lock:
@@ -1965,6 +2207,21 @@ class PositionManager:
                 "pnl_reconciliation_status": self._pnl_reconciliation_status,
                 "pnl_snapshot_at": (
                     self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None
+                ),
+                "session_opening_realized_baseline": (
+                    self._session_opening_realized_baseline
+                ),
+                "pnl_trading_date": self._pnl_trading_date,
+                "pnl_account_fingerprint": self._pnl_account_fingerprint,
+                "pnl_product_scope": self._pnl_product_scope,
+                "baseline_established_at": (
+                    self._baseline_established_at.isoformat()
+                    if self._baseline_established_at
+                    else None
+                ),
+                "baseline_source": self._baseline_source,
+                "require_pnl_baseline_for_entries": (
+                    self._require_pnl_baseline_for_entries
                 ),
                 "active_contracts": [
                     contract.to_dict() for contract in self._active_contracts.values()
@@ -2134,6 +2391,35 @@ class PositionManager:
         if isinstance(pnl_snapshot_at, str) and pnl_snapshot_at:
             with suppress(ValueError):
                 self._pnl_snapshot_at = datetime.fromisoformat(pnl_snapshot_at)
+        baseline = payload.get("session_opening_realized_baseline")
+        self._session_opening_realized_baseline = (
+            None if baseline is None else float(baseline)
+        )
+        self._pnl_trading_date = (
+            str(payload["pnl_trading_date"])
+            if payload.get("pnl_trading_date") is not None
+            else None
+        )
+        self._pnl_account_fingerprint = (
+            str(payload["pnl_account_fingerprint"])
+            if payload.get("pnl_account_fingerprint") is not None
+            else None
+        )
+        self._pnl_product_scope = str(payload.get("pnl_product_scope", "MIS"))
+        baseline_established_at = payload.get("baseline_established_at")
+        if isinstance(baseline_established_at, str) and baseline_established_at:
+            with suppress(ValueError):
+                self._baseline_established_at = datetime.fromisoformat(
+                    baseline_established_at
+                )
+        self._baseline_source = (
+            str(payload["baseline_source"])
+            if payload.get("baseline_source") is not None
+            else None
+        )
+        self._require_pnl_baseline_for_entries = bool(
+            payload.get("require_pnl_baseline_for_entries", False)
+        )
         with self._lock:
             self._refresh_realized_pnl_locked()
         try:
@@ -2862,6 +3148,14 @@ class PositionManager:
         )
         cumulative_qty = int(cumulative_qty)
         previous_qty = int(order.applied_filled_quantity or 0)
+        if cumulative_qty > int(order.quantity):
+            self._logger.warning(
+                "Ignoring overfilled broker update for order %s: %s > %s",
+                order.order_id,
+                cumulative_qty,
+                order.quantity,
+            )
+            return FillApplicationResult(reason="cumulative_quantity_exceeds_order")
         qty = cumulative_qty - previous_qty
         if qty <= 0:
             self._logger.warning(
@@ -3070,16 +3364,18 @@ class PositionManager:
                 entry_price=fill_price,
                 order_id=order.order_id,
             )
+            order.protection_confirmed = False
+            order.protection_failure_reason = "entry_filled_unprotected"
             mark_applied()
             return FillApplicationResult(
                 fill_recorded=True,
                 position_applied=True,
-                bracket_applied=bool(order.bracket_id),
+                bracket_applied=False,
                 accounting_finalized=False,
-                lifecycle_resolved=bool(order.bracket_id),
+                lifecycle_resolved=False,
                 quantity_delta=qty,
                 delta_fill_price=fill_price,
-                reason="entry_fill_applied",
+                reason="entry_filled_unprotected",
             )
 
         position = self._positions[symbol_key]
@@ -3141,16 +3437,18 @@ class PositionManager:
                 lifecycle_resolved=False,
             )
             self._scale_position(position, qty, fill_price)
+            order.protection_confirmed = False
+            order.protection_failure_reason = "entry_protection_incomplete"
             mark_applied()
             return FillApplicationResult(
                 fill_recorded=True,
                 position_applied=True,
-                bracket_applied=bool(order.bracket_id),
+                bracket_applied=False,
                 accounting_finalized=False,
-                lifecycle_resolved=bool(order.bracket_id),
+                lifecycle_resolved=False,
                 quantity_delta=qty,
                 delta_fill_price=fill_price,
-                reason="scale_fill_applied",
+                reason="scale_fill_unprotected",
             )
 
     def _scale_position(self, position: Position, qty: int, fill_price: float) -> None:
