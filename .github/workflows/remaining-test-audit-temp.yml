@@ -1,0 +1,39 @@
+name: Temporary Remaining Test Audit
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BRACKET_AUTO_RESTORE: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Capture remaining failures
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q --maxfail=0 > remaining-pytest-output.txt 2>&1
+          echo $? > remaining-pytest-exit-code.txt
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remaining-test-audit
+          path: |
+            remaining-pytest-output.txt
+            remaining-pytest-exit-code.txt
+          if-no-files-found: error
