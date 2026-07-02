@@ -24,7 +24,7 @@ def test_trade_plan_dataclass_defaults():
 def test_submit_trade_plan_protected_price_invalidates_buy_bracket() -> None:
     m = _manager_stub()
     m._validate_trade_plan = lambda p: OrderPreflightResult(True)
-    m._protected_limit_price = lambda p: 111.0
+    m._protected_limit_price = lambda p: 107.0
     out = OrderManager.submit_trade_plan_result(m, TradePlan(symbol='NFO:NIFTY', side='BUY', quantity=75, entry_price=100.0, stop_loss=95.0, take_profit=105.0))
     assert out.accepted is False
     assert out.reason == 'protected_price_invalidates_bracket'

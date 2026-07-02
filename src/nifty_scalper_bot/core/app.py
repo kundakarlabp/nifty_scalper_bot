@@ -126,6 +126,7 @@ def _next_eod_flatten_time_ist(now_ist: datetime) -> datetime | None:
 
 
 BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
+    "canonical_history_ensurer_injection_failed": False,
     "hydration_status_by_symbol": dict,
     "last_hydration_status_at": None,
     "_active_selection_sync_log_key": None,
@@ -2761,6 +2762,7 @@ class BotContext:
     # Set True when startup pipeline fails but bot continues in degraded mode.
     degraded_mode: bool = False
 
+    canonical_history_ensurer_injection_failed: bool = False
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
     ) -> None:
@@ -8543,6 +8545,12 @@ def _commit_active_dynamic_basket(
     active_futures_symbol = canonical_nifty_future_symbol(requested_futures_symbol) or _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
+    basket_copy["option_symbols"] = [
+        str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))
+    ]
+    basket_copy["symbols"] = [str(sym) for sym in symbols if sym]
+    if atm_strike is not None:
+        basket_copy["atm_strike"] = atm_strike
     basket = normalize_active_basket_schema(basket_copy)
     # ── Subscription reconciliation (replaces futures-specific purge) ────────
     # Build desired token set from basket and trigger a clean set-difference
