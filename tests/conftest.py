@@ -4,10 +4,6 @@ import asyncio
 import inspect
 import os
 from contextlib import suppress
-
-# Set default mock credentials for tests to prevent ConfigurationError during Settings initialization
-os.environ.setdefault("BROKER_API_KEY", "mock_api_key")
-os.environ.setdefault("BROKER_API_SECRET", "mock_api_secret")
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
@@ -21,6 +17,11 @@ from src.nifty_scalper_bot.backtesting.backtest_engine import (
 )
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
+
+# Set default mock credentials for tests to prevent ConfigurationError during
+# Settings initialization.
+os.environ.setdefault("BROKER_API_KEY", "mock_api_key")
+os.environ.setdefault("BROKER_API_SECRET", "mock_api_secret")
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +55,7 @@ def sample_price_data() -> pd.DataFrame:
     base = np.linspace(100, 105, len(index))
     noise = rng.normal(scale=0.3, size=len(index))
     price = base + noise
-    data = pd.DataFrame(
+    return pd.DataFrame(
         {
             "open": price,
             "high": price + rng.normal(scale=0.2, size=len(index)),
@@ -64,7 +65,6 @@ def sample_price_data() -> pd.DataFrame:
         },
         index=index,
     )
-    return data
 
 
 @pytest.fixture
@@ -90,13 +90,31 @@ def backtest_engine(
     )
 
 
+def _close_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel pending tasks and close a test-owned event loop cleanly."""
+    if loop.is_closed():
+        return
+
+    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+    with suppress(Exception):
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    with suppress(Exception):
+        loop.run_until_complete(loop.shutdown_default_executor())
+    loop.close()
+
+
 @pytest.fixture
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     loop = asyncio.new_event_loop()
     try:
         yield loop
     finally:
-        loop.close()
+        _close_event_loop(loop)
 
 
 def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
@@ -113,7 +131,7 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
         try:
             loop.run_until_complete(pyfuncitem.obj(**kwargs))
         finally:
-            loop.close()
+            _close_event_loop(loop)
     else:
         loop.run_until_complete(pyfuncitem.obj(**kwargs))
     return True
