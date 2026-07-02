@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+import pytest
+
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
+
+
+@pytest.fixture(autouse=True)
+def isolated_bracket_store(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
 
 def _build_manager() -> tuple[BracketManager, Mock]:
     """Create manager with mock dependencies. Args: none; Returns: tuple; Raises: none."""
     order_manager = Mock()
+    order_manager.is_live_mode.return_value = False
     order_manager.wait_for_fill.return_value = True
     manager = BracketManager(order_manager=order_manager)
     manager.attach_exit_executor(lambda symbol, qty: f'exit-{symbol}-{qty}')
@@ -63,6 +71,7 @@ def test_trailing_stop_never_moves_backwards() -> None:
 def test_fallback_market_exit_executes_after_retry_exhaustion() -> None:
     """Ensure fallback market exit runs if retries fail."""
     order_manager = Mock()
+    order_manager.is_live_mode.return_value = False
     order_manager.place_order.return_value = 'fallback-1'
     order_manager.wait_for_fill.return_value = True
     manager = BracketManager(order_manager=order_manager)
@@ -89,6 +98,7 @@ def test_fallback_market_exit_executes_after_retry_exhaustion() -> None:
 def test_exit_state_mutates_only_after_broker_confirmation() -> None:
     """Ensure state mutates only after broker confirmation."""
     order_manager = Mock()
+    order_manager.is_live_mode.return_value = False
     order_manager.wait_for_fill.return_value = False
     order_manager.place_order.return_value = None
     manager = BracketManager(order_manager=order_manager)

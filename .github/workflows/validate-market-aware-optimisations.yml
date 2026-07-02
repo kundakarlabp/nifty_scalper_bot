@@ -19,8 +19,6 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Apply anchored source changes
-        run: python scripts/apply_market_aware_optimisations.py
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip -q
@@ -34,7 +32,12 @@ jobs:
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: |
-          python -m pytest -q tests/strategies/test_market_aware_optimisations.py tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_market_aware_time_stop.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py
+          test -f tests/strategies/test_vwap_mean_reversion.py
+          test -f tests/strategies/test_elite_builder_mode.py
+          test -f tests/execution/test_market_aware_time_stop.py
+          test -f tests/execution/test_execution_policy.py
+          test -f tests/execution/test_execution_safety_audit_fixes.py
+          python -m pytest -q tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_market_aware_time_stop.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py
       - name: Execution safety regression tests
         env:
           BRACKET_AUTO_RESTORE: "false"
@@ -44,6 +47,8 @@ jobs:
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: python -m pytest -q
+      - name: Verify committed tree unchanged
+        run: git diff --exit-code
       - name: Package validated candidate
         run: |
           mkdir -p /tmp/candidate

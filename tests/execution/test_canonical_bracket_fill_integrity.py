@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import pytest
+
 from nifty_scalper_bot.execution.bracket_manager import (
     BracketExitLifecycle,
     BracketManager,
@@ -13,6 +15,11 @@ from nifty_scalper_bot.execution.canonical_bracket_manager import (
 
 
 SYMBOL = "NFO:NIFTY2662324050PE"
+
+
+@pytest.fixture(autouse=True)
+def isolated_bracket_store(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
 
 class _Broker:
@@ -138,7 +145,7 @@ def test_confirmed_tp1_fill_keeps_residual_position_open_and_protected() -> None
         average_price=110.10,
     )
 
-    closed = manager._reconcile_exit_state(bracket, requested_by="test_tp1")
+    closed = manager._reconcile_exit_state(bracket, requested_by="post_submit")
 
     assert closed is False
     assert bracket.remaining_quantity == 40
@@ -218,7 +225,7 @@ def test_filled_full_exit_with_residual_never_closes_or_rearms() -> None:
         average_price=89.75,
     )
 
-    closed = manager._reconcile_exit_state(bracket, requested_by="test_nonflat")
+    closed = manager._reconcile_exit_state(bracket, requested_by="post_submit")
 
     assert closed is False
     assert bracket.remaining_quantity == 20
@@ -231,7 +238,7 @@ def test_filled_full_exit_with_residual_never_closes_or_rearms() -> None:
     assert order_manager.place_calls == []
 
     broker.positions = []
-    assert manager._reconcile_exit_state(bracket, requested_by="test_manual_flat") is True
+    assert manager._reconcile_exit_state(bracket, requested_by="post_submit") is True
     assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
     assert bracket.position_flat_confirmed is True
     assert close_calls == [SYMBOL]

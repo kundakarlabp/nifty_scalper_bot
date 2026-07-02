@@ -80,6 +80,8 @@ class PositionSizer:
         max_margin_qty = int(available_margin // max(margin_per_lot, 1.0)) * lot_size
         qty = min(qty, max_margin_qty)
         if qty < lot_size:
+            if raw_qty < lot_size:
+                return PositionSizingResult(False, 0, 'insufficient_risk_budget_for_one_lot')
             return PositionSizingResult(False, 0, 'insufficient_qty_or_margin')
         logger.info('POSITION_SIZE_DECISION equity=%s risk_amount=%s entry=%s sl=%s qty=%s', equity, risk_amount, entry, stop_loss, qty)
         return PositionSizingResult(True, qty, 'ok')

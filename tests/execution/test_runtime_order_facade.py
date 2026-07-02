@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from types import SimpleNamespace
 import subprocess
 import sys
@@ -124,6 +125,12 @@ print(json.dumps({
         check=True,
         text=True,
         capture_output=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, ["src", os.environ.get("PYTHONPATH", "")])
+            ),
+        },
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
     assert payload["before_class"] == payload["after_class"] == payload["package_class"]

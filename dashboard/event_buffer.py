@@ -29,9 +29,11 @@ def parse_event(line: str) -> dict[str, str] | None:
         return None
     message = SECRET.sub(r"\1=[REDACTED]", line[match.end():].strip())
     upper = message.upper()
-    if any(x in upper for x in IGNORE) or not any(x in upper for x in EVENTS):
-        return None
     expected_rejection = any(x in upper for x in EXPECTED_REJECTIONS)
+    if any(x in upper for x in IGNORE) or (
+        not expected_rejection and not any(x in upper for x in EVENTS)
+    ):
+        return None
     if any(x in upper for x in HARD_ERRORS) or (("ERROR" in upper or "FAILED" in upper or "FAILURE" in upper) and not expected_rejection):
         kind = "ERROR"
     elif any(x in upper for x in ("WARN", "DEGRADED")):

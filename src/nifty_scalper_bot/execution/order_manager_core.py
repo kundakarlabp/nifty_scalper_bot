@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -74,7 +75,11 @@ from nifty_scalper_bot.execution.margin_engine import (
     SizingResult,
 )
 from nifty_scalper_bot.execution.options_policy import OptionsExecutionPolicy
-from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.execution.position_manager import (
+    OrderIntent,
+    PositionManager,
+    normalize_broker_order_status,
+)
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
     TrailingStopController,
@@ -201,6 +206,11 @@ class OrderDetails:
     child_order_ids: list[str] = field(default_factory=list)
     client_order_id: str | None = None
     rejection_reason: str | None = None
+    intent: OrderIntent = "UNKNOWN"
+    intended_position_side: Literal["LONG", "SHORT"] | None = None
+    bracket_id: str | None = None
+    signal_id: str | None = None
+    signal_fingerprint: str | None = None
 
 
 @dataclass(slots=True)
@@ -232,6 +242,8 @@ class TradePlan:
     max_spread_pct: float = 5.0
     min_depth_qty: int = 150
     allow_market_entry: bool = False
+    intent: OrderIntent = "ENTRY"
+    intended_position_side: Literal["LONG", "SHORT"] | None = "LONG"
 
 @dataclass(slots=True)
 class TradePlanSubmitResult:
@@ -2209,6 +2221,8 @@ class OrderManager:
         signal_id: str | None = None,
         strategy_name: str = "manual",
         trace_id: str | None = None,
+        intent: OrderIntent | str | None = None,
+        intended_position_side: Literal["LONG", "SHORT"] | None = None,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -2220,6 +2234,58 @@ class OrderManager:
         )
         if trace_id:
             self._last_trace_id = trace_id
+        normalized_intent = str(intent or "UNKNOWN").strip().upper()
+        if normalized_intent not in {
+            "ENTRY",
+            "SCALE_IN",
+            "EXIT",
+            "REDUCE",
+            "REVERSAL",
+            "UNKNOWN",
+        }:
+            normalized_intent = "UNKNOWN"
+        if normalized_intent == "UNKNOWN" and self.is_live_mode():
+            self.set_last_skip_reason("order_intent_required")
+            self._logger.error(
+                "LIVE_ORDER_REJECTED symbol=%s side=%s reason=order_intent_required",
+                symbol,
+                side,
+                extra={
+                    "event": "LIVE_ORDER_REJECTED",
+                    "symbol": symbol,
+                    "side": side,
+                    "reason": "order_intent_required",
+                },
+            )
+            return None
+        pnl_blocker = None
+        if normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"}:
+            blocker_getter = getattr(
+                self._positions, "current_pnl_reconciliation_blocker", None
+            )
+            if callable(blocker_getter):
+                pnl_blocker = blocker_getter()
+        if pnl_blocker:
+            self.set_last_skip_reason(str(pnl_blocker))
+            self._logger.error(
+                "LIVE_ORDER_REJECTED symbol=%s side=%s reason=%s",
+                symbol,
+                side,
+                pnl_blocker,
+                extra={
+                    "event": "LIVE_ORDER_REJECTED",
+                    "symbol": symbol,
+                    "side": side,
+                    "intent": normalized_intent,
+                    "reason": pnl_blocker,
+                    "pnl_reconciliation": (
+                        self._positions.pnl_reconciliation_snapshot()
+                        if hasattr(self._positions, "pnl_reconciliation_snapshot")
+                        else None
+                    ),
+                },
+            )
+            return None
         broker = getattr(self, "_broker", None)
         if bool(getattr(broker, "auth_invalid", False)):
             self.set_last_skip_reason("broker_auth_invalid")
@@ -3043,6 +3109,9 @@ class OrderManager:
                         take_profit=take_profit,
                         tag=tag,
                         average_price=0.0,
+                        intent=cast(OrderIntent, normalized_intent),
+                        intended_position_side=intended_position_side,
+                        signal_id=signal_id,
                     )
                     self._register_order(details)
 
@@ -3070,6 +3139,7 @@ class OrderManager:
                             sl=float(stop_loss) if stop_loss else 0.0,
                             tp=float(take_profit) if take_profit else 0.0,
                             tag=tag or "auto",
+                            intent=normalized_intent,
                             activate_immediately=False,
                         )
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
@@ -3688,7 +3758,7 @@ class OrderManager:
                     return TradePlanSubmitResult(False, reason="broker_placement_exception", details={"error_type": type(exc).__name__, "error": err, "symbol": symbol, "trace_id": plan.trace_id, "protected_price": price}, broker_attempted=True)
                 return TradePlanSubmitResult(managed.accepted, order_id=managed.order_id, reason=managed.reason, details=managed.details or {"protected_price": price}, broker_attempted=managed.broker_attempted)
             try:
-                oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry, intent=plan.intent, intended_position_side=plan.intended_position_side)
             except Exception as exc:  # noqa: BLE001
                 err = self._sanitize_broker_error(exc)
                 self._last_order_api_error_type = type(exc).__name__
@@ -3700,7 +3770,7 @@ class OrderManager:
                 self._last_order_api_error = None
             return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "place_order_rejected", details={"protected_price": price}, broker_attempted=bool(oid))
         try:
-            oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+            oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product, intent=plan.intent, intended_position_side=plan.intended_position_side)
         except Exception as exc:  # noqa: BLE001
             err = self._sanitize_broker_error(exc)
             self._last_order_api_error_type = type(exc).__name__
@@ -3727,6 +3797,8 @@ class OrderManager:
         variety: str = "regular",
         trace_id: str | None = None,
         allow_market_entry: bool = False,
+        intent: OrderIntent = "ENTRY",
+        intended_position_side: Literal["LONG", "SHORT"] | None = "LONG",
     ) -> str | None:
         result = self.place_managed_order_result(
             symbol=symbol,
@@ -3742,6 +3814,8 @@ class OrderManager:
             variety=variety,
             trace_id=trace_id,
             allow_market_entry=allow_market_entry,
+            intent=intent,
+            intended_position_side=intended_position_side,
         )
         return result.order_id if result.accepted else None
 
@@ -3760,6 +3834,8 @@ class OrderManager:
         variety: str = "regular",
         trace_id: str | None = None,
         allow_market_entry: bool = False,
+        intent: OrderIntent = "ENTRY",
+        intended_position_side: Literal["LONG", "SHORT"] | None = "LONG",
     ) -> ManagedOrderResult:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
@@ -3807,6 +3883,8 @@ class OrderManager:
             trace_id=trace_id,
             tag=tag,
             product=product,
+            intent=intent,
+            intended_position_side=intended_position_side,
         )
 
         if order_id:
@@ -4683,6 +4761,22 @@ class OrderManager:
             self._notify_bracket_event(
                 "BRACKET_MANAGER_MISSING",
                 {"symbol": order.symbol, "order_id": order.order_id, "source": source},
+            )
+            return
+        if str(getattr(order, "intent", "UNKNOWN")).upper() not in {
+            "ENTRY",
+            "SCALE_IN",
+            "REVERSAL",
+        }:
+            self._logger.warning(
+                "Skipping entry bracket activation for non-entry order",
+                extra={
+                    "event": "entry_bracket_rejected_for_exit_order",
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "intent": getattr(order, "intent", "UNKNOWN"),
+                    "source": source,
+                },
             )
             return
         try:
@@ -5825,7 +5919,24 @@ class OrderManager:
                 extra={"event": "handle_bracket_update_failed", "entry_id": entry_id},
             )
 
+    def apply_broker_order_update(
+        self, order_id: str, broker_payload: Mapping[str, Any]
+    ) -> None:
+        """Canonical broker order update ingress for polling and websocket paths."""
+
+        payload = dict(broker_payload)
+        payload["order_id"] = str(order_id)
+        self._apply_broker_order_update(payload)
+
     def on_order_update(self, order_update: dict) -> None:
+        """Compatibility wrapper for broker websocket order updates."""
+
+        order_id = order_update.get("order_id")
+        if not order_id:
+            return
+        self.apply_broker_order_update(str(order_id), order_update)
+
+    def _apply_broker_order_update(self, order_update: dict) -> None:
         """Handle broker order updates and follow-up workflows.
 
         Args:
@@ -5891,6 +6002,7 @@ class OrderManager:
                         status=self._parse_status(status_raw),
                         timestamp=datetime.now(timezone.utc),
                         tag="adopted_manual_trade",
+                        intent="UNKNOWN",
                     )
 
                     # 1. Save to Memory (Stop "Unknown Order" warnings for future updates)
@@ -5907,6 +6019,7 @@ class OrderManager:
                             qty=order.quantity,
                             price=order.price,
                             order_type=order.order_type,
+                            intent="UNKNOWN",
                         )
 
                     self._logger.info(
@@ -5963,7 +6076,21 @@ class OrderManager:
                 )
 
                 # Update Positions (Critical for Dashboard accuracy)
-                if hasattr(self._positions, "update_from_order"):
+                if hasattr(self._positions, "apply_broker_order_update"):
+                    try:
+                        self._positions.apply_broker_order_update(
+                            order.order_id,
+                            {
+                                **order_update,
+                                "status": status_raw,
+                                "average_price": order.fill_price,
+                                "filled_quantity": order.filled_quantity,
+                            },
+                        )
+                    except Exception:
+                        self._logger.exception("Unhandled exception", exc_info=True)
+                        raise
+                elif hasattr(self._positions, "update_from_order"):
                     try:
                         self._positions.update_from_order(order)
                     except Exception as e:
@@ -6271,6 +6398,10 @@ class OrderManager:
                     qty=details.quantity,
                     price=details.price,
                     order_type=details.order_type,  # ✅ CORRECT: Pass Enum Object
+                    intent=details.intent,
+                    bracket_id=details.bracket_id,
+                    signal_id=details.signal_id,
+                    signal_fingerprint=details.signal_fingerprint,
                 )
 
             try:
@@ -6342,6 +6473,7 @@ class OrderManager:
                 price=_exit_ltp,  # supply live LTP for accounting; None is safe
                 tag=tag,
                 check_risk=False,  # exits MUST never be blocked by risk-manager
+                intent="EXIT",
             )
 
             if not exit_id:
@@ -9238,6 +9370,10 @@ class OrderManager:
             qty=details.quantity,
             price=details.price,
             order_type=details.order_type.value.upper(),
+            intent=details.intent,
+            bracket_id=details.bracket_id,
+            signal_id=details.signal_id,
+            signal_fingerprint=details.signal_fingerprint,
         )
         self._positions.update_order_status(details.order_id, details.status.name)
         self._publish_order_to_hub(details, response)
@@ -10318,22 +10454,28 @@ class OrderManager:
     def _parse_status(self, raw_status: Any) -> OrderStatus:
         if raw_status is None:
             return OrderStatus.SUBMITTED
+        canonical_status = normalize_broker_order_status(raw_status)
+        if canonical_status is not None:
+            if canonical_status == "PENDING":
+                return OrderStatus.PENDING
+            if canonical_status == "OPEN":
+                return OrderStatus.SUBMITTED
+            if canonical_status == "PARTIALLY_FILLED":
+                return OrderStatus.PARTIALLY_FILLED
+            if canonical_status == "FILLED":
+                return OrderStatus.FILLED
+            if canonical_status == "CANCELLED":
+                return OrderStatus.CANCELLED
+            if canonical_status == "REJECTED":
+                return OrderStatus.REJECTED
+            if canonical_status == "EXPIRED":
+                return OrderStatus.EXPIRED
         status_str = str(raw_status).strip().lower()
         if not status_str:
             return OrderStatus.SUBMITTED
         mapping = {
-            "open": OrderStatus.SUBMITTED,
-            "put order request received": OrderStatus.SUBMITTED,
-            "complete": OrderStatus.FILLED,
-            "filled": OrderStatus.FILLED,
             "partial": OrderStatus.PARTIALLY_FILLED,
-            "partially filled": OrderStatus.PARTIALLY_FILLED,
-            "cancelled": OrderStatus.CANCELLED,
             "cancelled by user": OrderStatus.CANCELLED,
-            "rejected": OrderStatus.REJECTED,
-            "expired": OrderStatus.EXPIRED,
-            "trigger pending": OrderStatus.PENDING,
-            "pending": OrderStatus.PENDING,
         }
         if status_str in mapping:
             return mapping[status_str]
@@ -12362,6 +12504,8 @@ class OrderManager:
             fill_price=price,
             filled_quantity=abs(qty),
             tag="orphan_adoption",
+            intent="ENTRY",
+            intended_position_side="LONG" if qty > 0 else "SHORT",
         )
 
         # 5. Register in OrderManager
@@ -12381,6 +12525,7 @@ class OrderManager:
                     qty=abs(qty),
                     price=price,
                     order_type=otype,
+                    intent="ENTRY",
                 )
 
                 # Immediately confirm fill since it's an orphan

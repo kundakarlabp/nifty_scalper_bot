@@ -5,6 +5,8 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from nifty_scalper_bot.execution.adaptive_trailing import (
     AdaptiveTrailingController,
     TrailingSpec,
@@ -25,6 +27,11 @@ from nifty_scalper_bot.execution.hardened_bracket_manager import (
 
 
 SYMBOL = "NFO:NIFTY2662324050PE"
+
+
+@pytest.fixture(autouse=True)
+def isolated_bracket_store(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
 
 class _Broker:
@@ -134,7 +141,7 @@ def _make_stale_exit(manager: BracketManager) -> Any:
 
 
 def test_canonical_imports_use_hardened_implementations() -> None:
-    assert BracketManager is CanonicalBracketManager
+    assert issubclass(BracketManager, CanonicalBracketManager)
     assert issubclass(CanonicalBracketManager, HardenedBracketManager)
     assert AdaptiveTrailingController is HardenedAdaptiveTrailingController
 

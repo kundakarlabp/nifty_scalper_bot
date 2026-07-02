@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -81,6 +82,12 @@ print(json.dumps({
         check=True,
         text=True,
         capture_output=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, ["src", os.environ.get("PYTHONPATH", "")])
+            ),
+        },
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
     assert payload["before"] == payload["after"] == payload["package"]

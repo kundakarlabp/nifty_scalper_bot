@@ -1,11 +1,17 @@
 from types import SimpleNamespace
 
-from nifty_scalper_bot.execution.order_manager import OrderManager, OrderPreflightResult, TradePlan
+from nifty_scalper_bot.execution.order_manager_core import (
+    OrderManager,
+    OrderPreflightResult,
+    TradePlan,
+)
 
 
 def _manager_stub():
     m = SimpleNamespace()
     m._logger = SimpleNamespace(warning=lambda *a, **k: None, error=lambda *a, **k: None)
+    m.is_kill_switch_active = lambda: False
+    m._reanchor_bracket_to_price = lambda plan, _price: plan
     return m
 
 
@@ -29,7 +35,7 @@ def test_submit_trade_plan_protected_price_invalidates_buy_bracket() -> None:
 def test_submit_trade_plan_protected_price_invalidates_sell_bracket() -> None:
     m = _manager_stub()
     m._validate_trade_plan = lambda p: OrderPreflightResult(True)
-    m._protected_limit_price = lambda p: 99.0
+    m._protected_limit_price = lambda p: 97.0
     out = OrderManager.submit_trade_plan_result(m, TradePlan(symbol='NFO:NIFTY', side='SELL', quantity=75, entry_price=100.0, stop_loss=101.0, take_profit=98.0))
     assert out.accepted is False
     assert out.reason == 'protected_price_invalidates_bracket'
@@ -87,6 +93,7 @@ def test_stale_last_order_decision_does_not_leak() -> None:
 
 from datetime import datetime, timedelta, timezone
 from collections import deque
+import threading
 import time
 import nifty_scalper_bot.execution.order_manager as order_manager_module
 
@@ -370,6 +377,9 @@ def test_live_kill_switch_auto_resets_after_cooldown(monkeypatch) -> None:
     om._kill_switch_engaged_at = datetime.now(timezone.utc)
     om._kill_switch_allow_auto_reset = True
     om._kill_switch_auto_reset_seconds = 1
+    om._logger = SimpleNamespace(info=lambda *a, **k: None)
+    om._lock = threading.RLock()
+    om._kill_switch_failure_history = deque(maxlen=20)
     # within cooldown -> still active
     assert OrderManager.is_kill_switch_active(om) is True
     # after cooldown -> auto-resets

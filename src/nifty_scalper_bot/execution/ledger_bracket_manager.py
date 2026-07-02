@@ -261,6 +261,12 @@ class LedgerBracketManager(CanonicalBracketManager):
         bracket = self.get_bracket(order_id)
         ledger_ok = True
         if bracket is not None:
+            entry_intent = str(
+                getattr(bracket, "entry_order_intent", "ENTRY") or "ENTRY"
+            ).upper()
+            if entry_intent not in {"ENTRY", "SCALE_IN", "REVERSAL"}:
+                super().confirm_entry_fill(order_id, fill_price)
+                return
             try:
                 self._record_entry_fill(bracket, float(fill_price))
             except Exception as exc:  # noqa: BLE001

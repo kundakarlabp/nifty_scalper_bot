@@ -130,7 +130,7 @@ if changed:
 PY_MIGRATE
   sudo systemctl daemon-reload
   SYSTEMD_ENTRYPOINT_MIGRATED=true
-  log "migrated $SERVICE ExecStart to deployment_main:app; EnvironmentFile preserved"
+  log "migrated $SERVICE ExecStart to deployment_main:app; env file preserved"
 }
 
 restart_streamlit() {

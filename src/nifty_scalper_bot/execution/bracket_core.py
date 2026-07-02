@@ -211,6 +211,9 @@ class BracketState:
     
     # Metadata
     tag: str | None = None
+    entry_order_intent: str = "ENTRY"
+    trade_lifecycle_id: str | None = None
+    linked_exit_order_ids: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     exit_executed: bool = False
@@ -915,7 +918,8 @@ class BracketManager:
         tp1_price: float | None = None,
         tp1_qty: int | None = None,
         trailing_atr_mult: float | None = None,
-        activate_immediately: bool = False
+        activate_immediately: bool = False,
+        intent: str | None = None,
     ) -> None:
         """Register a position for virtual bracket monitoring.
 
@@ -940,6 +944,21 @@ class BracketManager:
             None.
         """
         symbol = normalize_symbol(symbol)
+        normalized_intent = str(intent or "").strip().upper()
+        if normalized_intent in {"EXIT", "REDUCE"}:
+            LOGGER.error(
+                "BRACKET_ENTRY_REJECTED_FOR_EXIT_ORDER order_id=%s symbol=%s intent=%s",
+                order_id,
+                symbol,
+                normalized_intent,
+                extra={
+                    "event": "BRACKET_ENTRY_REJECTED_FOR_EXIT_ORDER",
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "intent": normalized_intent,
+                },
+            )
+            return
         side = _normalize_bracket_side(side)
         if symbol in self.active_brackets:
             LOGGER.info(
@@ -1012,6 +1031,8 @@ class BracketManager:
                 ),
                 entry_fill_price=price if activate_immediately else None,
                 tag=tag,
+                entry_order_intent=normalized_intent or "ENTRY",
+                trade_lifecycle_id=order_id,
                 trailing_config=t_config,
                 virtual_sl_id=f"vsl_{order_id}"
             )
@@ -1131,6 +1152,23 @@ class BracketManager:
             bracket = self._brackets.get(order_id)
             if not bracket:
                 LOGGER.warning(f"⚠️ No bracket found for order {order_id}")
+                return
+            entry_intent = str(
+                getattr(bracket, "entry_order_intent", "ENTRY") or "ENTRY"
+            ).upper()
+            if entry_intent not in {"ENTRY", "SCALE_IN", "REVERSAL"}:
+                LOGGER.error(
+                    "BRACKET_ENTRY_FILL_REJECTED_FOR_EXIT_ORDER order_id=%s symbol=%s intent=%s",
+                    order_id,
+                    bracket.symbol,
+                    entry_intent,
+                    extra={
+                        "event": "BRACKET_ENTRY_FILL_REJECTED_FOR_EXIT_ORDER",
+                        "order_id": order_id,
+                        "symbol": bracket.symbol,
+                        "intent": entry_intent,
+                    },
+                )
                 return
             
             # Update entry price with actual fill
@@ -1550,9 +1588,17 @@ class BracketManager:
                     LOGGER.info(
                         "EXIT_TRIGGERED bracket_id=%s symbol=%s reason=%s qty=%s",
                         bracket.bracket_id,
-                        normalize_symbol(bracket.symbol),
+                        bracket.symbol,
                         reason,
                         int(action.get("qty") or bracket.remaining_quantity),
+                        extra={
+                            "event": "EXIT_TRIGGERED",
+                            "bypass_filters": True,
+                            "bracket_id": bracket.bracket_id,
+                            "symbol": bracket.symbol,
+                            "reason": reason,
+                            "quantity": int(action.get("qty") or bracket.remaining_quantity),
+                        },
                     )
                     self._log_bracket_event(
                         "EXIT_TRIGGERED",
@@ -1660,7 +1706,8 @@ class BracketManager:
                 bracket.last_exit_error = submit.error_message or submit.status
                 bracket.pending_exit_order_id = None
                 bracket.exit_order_id = None
-                decision = dict(getattr(self.order_manager, "_last_order_decision", {}) or {})
+                raw_decision = getattr(self.order_manager, "_last_order_decision", {}) or {}
+                decision = dict(raw_decision) if isinstance(raw_decision, Mapping) else {}
                 LOGGER.error(
                     "BRACKET_EXIT_ORDER_FAILED symbol=%s bracket_id=%s remaining_qty=%s attempt=%s error_type=%s error_message=%s retryable=%s order_manager_reason=%s broker_attempted=%s kill_switch_active=%s broker_rejection=%s",
                     symbol,
@@ -1676,6 +1723,7 @@ class BracketManager:
                     submit.broker_payload,
                     extra={
                         "event": "BRACKET_EXIT_ORDER_FAILED",
+                        "bypass_filters": True,
                         "symbol": symbol,
                         "bracket_id": bracket.bracket_id,
                         "remaining_qty": bracket.remaining_quantity,
@@ -1732,6 +1780,11 @@ class BracketManager:
             return
         bracket.last_exit_summary_at = now
         age = now - float(bracket.exit_triggered_at or now)
+        display_state = (
+            "TRIGGERED"
+            if bracket.exit_state == BracketExitLifecycle.EXIT_TRIGGERED.value
+            else bracket.exit_state
+        )
         LOGGER.warning(
             "EXIT_PENDING_SUMMARY bracket_id=%s symbol=%s age_s=%.1f attempts=%s remaining_qty=%s last_error=%s exit_order_id=%s state=%s",
             bracket.bracket_id,
@@ -1741,7 +1794,7 @@ class BracketManager:
             bracket.remaining_quantity,
             bracket.last_exit_error,
             bracket.exit_order_id or bracket.pending_exit_order_id,
-            bracket.exit_state,
+            display_state,
         )
 
     def _escalate_exit_locked(self, bracket: BracketState, reason: str) -> None:
@@ -2552,6 +2605,7 @@ class BracketManager:
                     return False
             setattr(bracket, "_last_exit_reconcile_at", now)
             order_id = bracket.exit_order_id or bracket.pending_exit_order_id
+            exit_pending = bool(bracket.exit_pending or order_id)
         LOGGER.info(
             "EXIT_RECONCILE_REQUESTED bracket_id=%s symbol=%s requested_by=%s exit_order_id=%s",
             bracket.bracket_id,
@@ -2591,7 +2645,10 @@ class BracketManager:
         except Exception as exc:  # noqa: BLE001 - broker reconciliation boundary
             with self._lock:
                 bracket.last_exit_error = f"reconcile_failed:{type(exc).__name__}:{exc}"
-                age = now - float(bracket.exit_triggered_at or now)
+                age_basis = float(
+                    bracket.last_exit_attempt_at or bracket.exit_triggered_at or now
+                )
+                age = now - age_basis
                 if age >= self._exit_unresolved_escalation_seconds:
                     self._escalate_exit_locked(bracket, "reconcile_failed_timeout")
             LOGGER.error(
@@ -2615,13 +2672,49 @@ class BracketManager:
             self._close_bracket(bracket, close_source="broker_fill", exit_price=fill_price)
             LOGGER.info("EXIT_FILLED_CONFIRMED bracket_id=%s order_id=%s", bracket.bracket_id, order_id)
             return True
+        if flat and not order_id:
+            if requested_by != "direct_pre_submit":
+                prospective_order_id = str(
+                    getattr(self.order_manager, "order_id", "") or ""
+                )
+                if prospective_order_id:
+                    with suppress(Exception):
+                        prospective_status = str(
+                            (
+                                self._get_broker_order_status(prospective_order_id)
+                                or {}
+                            ).get("status", "")
+                        ).upper()
+                        if prospective_status in _FILLED_STATUSES:
+                            return False
+                self._close_bracket(
+                    bracket,
+                    close_source="reconciled_flat",
+                    exit_price=fill_price,
+                )
+                LOGGER.info(
+                    "EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                )
+                return True
+            LOGGER.info(
+                "EXIT_RECONCILED_FLAT_IGNORED_WITHOUT_ORDER bracket_id=%s symbol=%s requested_by=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                requested_by,
+            )
+            return False
         if flat:
             self._close_bracket(bracket, close_source="reconciled_flat", exit_price=fill_price)
             LOGGER.info("EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s", bracket.bracket_id, bracket.symbol)
             return True
 
         with self._lock:
-            age = now - float(bracket.exit_triggered_at or now)
+            age_basis = float(
+                bracket.last_exit_attempt_at or bracket.exit_triggered_at or now
+            )
+            age = now - age_basis
             if age >= self._exit_unresolved_escalation_seconds:
                 self._escalate_exit_locked(bracket, "unresolved_timeout")
             else:

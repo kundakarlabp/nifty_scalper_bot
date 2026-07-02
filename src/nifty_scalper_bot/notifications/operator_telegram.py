@@ -325,6 +325,56 @@ def _runtime_snapshot(service: Any) -> dict[str, Any]:
         or _first_attr(runner, ("last_trade_decision", "LAST_TRADE_DECISION_SNAPSHOT"))
     )
 
+    current_execution_blocker = (
+        live_block_reason
+        or _first_attr(ctx, ("execution_block_reason",))
+        or _first_attr(order, ("execution_block_reason", "current_execution_blocker"))
+    )
+    current_risk_breaker = (
+        _first_attr(risk, ("breaker_tripped", "is_breaker_tripped", "_breaker_tripped"))
+        or risk_snapshot_dict.get("breaker_tripped")
+    )
+    current_risk_breaker_reason = (
+        _first_attr(risk, ("breaker_reason", "current_risk_breaker_reason"))
+        or risk_snapshot_dict.get("breaker_reason")
+    )
+    if not current_risk_breaker:
+        current_risk_breaker_reason = None
+    last_risk_rejection = (
+        _first_attr(risk, ("last_rejection", "last_reason", "last_reject_reason", "_last_rejection"))
+        or risk_snapshot_dict.get("last_rejection")
+    )
+    last_order_rejection = _first_attr(
+        order,
+        (
+            "last_preflight_reject_reason",
+            "last_reject_reason",
+            "last_rejection",
+            "last_skip_reason",
+            "_last_skip_reason",
+        ),
+    )
+    unresolved_terminal_summary = {}
+    summary_getter = getattr(position_manager, "unresolved_terminal_summary", None)
+    if callable(summary_getter):
+        summary = _safe_call(summary_getter)
+        if isinstance(summary, Mapping):
+            unresolved_terminal_summary = dict(summary)
+    pnl_snapshot = {}
+    pnl_getter = getattr(position_manager, "pnl_reconciliation_snapshot", None)
+    if callable(pnl_getter):
+        pnl_raw = _safe_call(pnl_getter)
+        if isinstance(pnl_raw, Mapping):
+            pnl_snapshot = dict(pnl_raw)
+    current_pnl_reconciliation_blocker = None
+    pnl_blocker_getter = getattr(
+        position_manager, "current_pnl_reconciliation_blocker", None
+    )
+    if callable(pnl_blocker_getter):
+        current_pnl_reconciliation_blocker = _safe_call(pnl_blocker_getter)
+    if current_pnl_reconciliation_blocker and not current_execution_blocker:
+        current_execution_blocker = str(current_pnl_reconciliation_blocker)
+
     snap: dict[str, Any] = {
         "mode": _first_attr(ctx, ("mode", "trading_mode", "effective_mode")) or getattr(service, "mode", None),
         "effective_mode": _first_attr(ctx, ("effective_mode", "execution_mode")),
@@ -340,6 +390,12 @@ def _runtime_snapshot(service: Any) -> dict[str, Any]:
         "live_orders_armed": live_orders_armed,
         "live_block_reason": live_block_reason,
         "execution_block_reason": _first_attr(ctx, ("execution_block_reason",)) or _first_attr(order, ("execution_block_reason", "last_execution_block_reason")),
+        "current_execution_blocker": current_execution_blocker,
+        "current_risk_breaker": current_risk_breaker,
+        "current_risk_breaker_reason": current_risk_breaker_reason,
+        "current_readiness_blocker": live_block_reason,
+        "current_pnl_reconciliation_blocker": current_pnl_reconciliation_blocker,
+        "pnl_reconciliation": pnl_snapshot,
         "execution_ready_by_symbol": _first_attr(ctx, ("execution_ready_by_symbol",)) or _first_attr(runner, ("runtime_execution_ready_by_symbol", "_runtime_execution_ready_by_symbol")),
         "selected_ce_exec_ready": _first_attr(ctx, ("selected_ce_exec_ready", "ce_exec_ready")),
         "selected_pe_exec_ready": _first_attr(ctx, ("selected_pe_exec_ready", "pe_exec_ready")),
@@ -351,9 +407,11 @@ def _runtime_snapshot(service: Any) -> dict[str, Any]:
         "regime_state": _first_attr(strategy_manager, ("regime_state", "_regime_state")) or _first_attr(_dep(service, "regime_manager", "market_regime"), ("current_regime", "regime", "snapshot")),
         "adx_gate": _first_attr(runner, ("adx_gate", "last_adx_gate", "adx_gate_reason", "last_adx_gate_reason")) or _first_attr(strategy_manager, ("adx_gate", "last_adx_gate_reason")),
         "orb_direction_block": _first_attr(runner, ("orb_direction_block", "orb_direction_used", "orb_direction_state", "_orb_direction_used")) or _first_attr(strategy_manager, ("orb_direction_block", "orb_direction_state")),
-        "risk_reject": _first_attr(risk, ("last_rejection", "last_reason", "last_reject_reason", "_last_rejection")) or risk_snapshot_dict.get("last_rejection"),
-        "risk_breaker": _first_attr(risk, ("breaker_tripped", "is_breaker_tripped", "_breaker_tripped")) or risk_snapshot_dict.get("breaker_tripped"),
-        "order_reject": _first_attr(order, ("last_preflight_reject_reason", "last_reject_reason", "last_rejection", "last_skip_reason", "_last_skip_reason")),
+        "risk_reject": last_risk_rejection,
+        "last_risk_rejection": last_risk_rejection,
+        "risk_breaker": current_risk_breaker,
+        "order_reject": last_order_rejection,
+        "last_order_rejection": last_order_rejection,
         "daily_trades": trades_today,
         "max_trades_per_day": max_trades,
         "midday_pause": midday_pause,
@@ -363,6 +421,9 @@ def _runtime_snapshot(service: Any) -> dict[str, Any]:
         "bracket_manager": bracket_manager,
         "bracket_manager_attached": _first_attr(ctx, ("bracket_manager_attached",)) if _first_attr(ctx, ("bracket_manager_attached",)) is not None else bracket_manager is not None,
         "unresolved_exit": _first_attr(bracket_manager, ("has_unresolved_exit", "unresolved_exit", "get_first_unresolved_exit_bracket_id")),
+        "current_unresolved_exit": _first_attr(bracket_manager, ("has_unresolved_exit", "unresolved_exit", "get_first_unresolved_exit_bracket_id")),
+        "unresolved_terminal_count": unresolved_terminal_summary.get("count"),
+        "oldest_unresolved_terminal_age_s": unresolved_terminal_summary.get("oldest_age_s"),
         "active_basket": basket,
         "active_symbol_tokens": _first_attr(ctx, ("active_symbol_tokens",)) or _first_attr(mdm, ("active_symbol_tokens", "symbol_tokens")),
         "websocket_subscribed_tokens": _first_attr(websocket, ("subscribed_tokens", "tokens", "get_subscribed_tokens")),
@@ -525,9 +586,10 @@ async def cmd_diag(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -
 def _why_reason(snap: Mapping[str, Any]) -> str | None:
     for key in (
         "live_block_reason",
+        "current_execution_blocker",
+        "current_pnl_reconciliation_blocker",
         "execution_block_reason",
-        "order_reject",
-        "risk_reject",
+        "current_risk_breaker_reason",
         "last_signal_reason",
     ):
         reason = snap.get(key)
@@ -535,8 +597,8 @@ def _why_reason(snap: Mapping[str, Any]) -> str | None:
             return str(reason)
     for obj_key, attrs in (
         ("runner", ("last_gate_reason", "last_block_reason", "latest_rejection_reason")),
-        ("order", ("last_preflight_reject_reason", "last_reject_reason", "last_rejection", "_last_skip_reason")),
-        ("risk", ("last_rejection", "last_reason", "last_reject_reason", "_last_rejection")),
+        ("order", ("execution_block_reason", "current_execution_blocker")),
+        ("risk", ("breaker_reason", "current_risk_breaker_reason")),
     ):
         reason = _first_attr(snap.get(obj_key), attrs)
         if reason:
@@ -575,8 +637,14 @@ async def cmd_why(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) ->
         f"  orb_direction_block: {_compact(snap.get('orb_direction_block'))}\n"
         "execution:\n"
         f"  broker_ready: {_bool(snap.get('broker_ready'))}\n"
-        f"  risk_reject: {_value(snap.get('risk_reject'), 'none')}\n"
-        f"  order_reject: {_value(snap.get('order_reject'), 'none')}\n"
+        f"  current_execution_blocker: {_value(snap.get('current_execution_blocker'), 'none')}\n"
+        f"  current_pnl_reconciliation_blocker: {_value(snap.get('current_pnl_reconciliation_blocker'), 'none')}\n"
+        f"  current_risk_breaker_reason: {_value(snap.get('current_risk_breaker_reason'), 'none')}\n"
+        f"  unresolved_terminal_count: {_value(snap.get('unresolved_terminal_count'), '0')}\n"
+        f"  oldest_unresolved_terminal_age_s: {_value(snap.get('oldest_unresolved_terminal_age_s'), 'none')}\n"
+        "recent_history:\n"
+        f"  last_risk_rejection: {_value(snap.get('last_risk_rejection'), 'none')}\n"
+        f"  last_order_rejection: {_value(snap.get('last_order_rejection'), 'none')}\n"
         f"  open_orders: {_compact(_count(snap.get('open_orders')))}\n"
         f"  open_positions: {_compact(_count(snap.get('open_positions')))}"
     )
@@ -655,13 +723,18 @@ async def cmd_check_execution(update: Update, _: ContextTypes.DEFAULT_TYPE, serv
         "selected_pe_exec_ready": _bool(snap.get("selected_pe_exec_ready")),
         "broker_ready": _bool(snap.get("broker_ready")),
         "risk_breaker": snap.get("risk_breaker") if snap.get("risk_breaker") is not None else _component_state("RiskManager", snap.get("risk")),
+        "current_execution_blocker": snap.get("current_execution_blocker") or "none",
+        "current_pnl_reconciliation_blocker": snap.get("current_pnl_reconciliation_blocker") or "none",
+        "current_risk_breaker_reason": snap.get("current_risk_breaker_reason") or "none",
+        "unresolved_terminal_count": snap.get("unresolved_terminal_count") or 0,
+        "oldest_unresolved_terminal_age_s": snap.get("oldest_unresolved_terminal_age_s") or "none",
         "daily_trades": snap.get("daily_trades"),
         "max_trades_per_day": snap.get("max_trades_per_day"),
         "midday_pause": _format_gate(snap.get("midday_pause")),
         "expiry_theta_gate": _format_gate(snap.get("expiry_theta_gate")),
         "orb_direction_flags": _compact(snap.get("orb_direction_block")),
-        "last_order_rejection": snap.get("order_reject") or "none",
-        "last_risk_rejection": snap.get("risk_reject") or "none",
+        "recent_last_order_rejection": snap.get("last_order_rejection") or "none",
+        "recent_last_risk_rejection": snap.get("last_risk_rejection") or "none",
         "open_orders": _compact(_count(snap.get("open_orders"))),
         "open_positions": _compact(_count(snap.get("open_positions"))),
         "bracket_manager_attached": _bool(snap.get("bracket_manager_attached")),

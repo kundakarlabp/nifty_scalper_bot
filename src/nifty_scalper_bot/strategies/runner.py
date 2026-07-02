@@ -5900,8 +5900,25 @@ class StrategyRunner:
             max_attempts = 3
             for attempt in range(max_attempts):
                 try:
-                    plan = TradePlan(symbol=symbol, side=side, quantity=normalized_qty, entry_price=order_price, stop_loss=stop_loss, take_profit=take_profit, strategy_name="runner", tag=f"runner_{side.lower()}", allow_market_entry=False)
-                    order_id = self._order_manager.submit_trade_plan(plan)
+                    plan = TradePlan(
+                        symbol=symbol,
+                        side=side,
+                        quantity=normalized_qty,
+                        entry_price=order_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        strategy_name="runner",
+                        tag=f"runner_{side.lower()}",
+                        allow_market_entry=False,
+                        intent="ENTRY",
+                        intended_position_side="LONG" if side == "BUY" else "SHORT",
+                    )
+                    submit_result = self._order_manager.submit_trade_plan_result(plan)
+                    if not submit_result.accepted or not submit_result.order_id:
+                        raise RuntimeError(
+                            f"order_manager_rejected:{submit_result.reason}"
+                        )
+                    order_id = submit_result.order_id
                     break
                 except Exception as exc:
                     if attempt >= (max_attempts - 1):
