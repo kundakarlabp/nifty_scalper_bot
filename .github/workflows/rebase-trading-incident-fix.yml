@@ -3,18 +3,21 @@ name: Rebase Trading Incident Correction
 on:
   push:
     branches: [fix/trading-lifecycle-rebase-20260702]
+  pull_request:
+    types: [opened, synchronize]
 
 permissions:
   contents: write
 
 jobs:
   apply-and-validate:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -67,8 +70,9 @@ jobs:
 
       - name: Commit rebased validated correction
         run: |
+          branch_ref="${{ github.event.pull_request.head.ref || github.ref_name }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "Fix entry price integrity and broker fill lifecycle"
-          git push origin HEAD:${{ github.ref_name }}
+          git push origin HEAD:"${branch_ref}"
