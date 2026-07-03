@@ -247,3 +247,99 @@ def test_verified_bracket_acknowledges_position_protection(tmp_path) -> None:
 
     assert positions.current_entry_protection_blocker(SYMBOL) is None
     assert positions._terminal_orders[ENTRY_ID].protection_confirmed is True
+
+
+def test_duplicate_and_out_of_order_cumulative_fill_callbacks_are_idempotent(
+    tmp_path,
+) -> None:
+    """Slice-2(a): repeated or older cumulative callbacks never re-increase qty."""
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        ENTRY_ID, SYMBOL, "BUY", 65, 145.15, "LIMIT", intent="ENTRY"
+    )
+    manager.apply_broker_order_update(
+        ENTRY_ID,
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 145.15},
+    )
+    assert manager.get_position(SYMBOL).quantity == 65
+
+    # Exact duplicate of the same cumulative callback.
+    manager.apply_broker_order_update(
+        ENTRY_ID,
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 145.15},
+    )
+    # Out-of-order OLDER cumulative (delayed partial arriving after complete).
+    manager.apply_broker_order_update(
+        ENTRY_ID,
+        {"status": "PARTIALLY_FILLED", "filled_quantity": 40, "average_price": 145.10},
+    )
+    position = manager.get_position(SYMBOL)
+    assert position is not None and position.quantity == 65
+    assert manager._orders[ENTRY_ID].applied_filled_quantity == 65
+
+
+def test_broker_snapshot_after_fill_is_authoritative_replace_not_additive(
+    tmp_path,
+) -> None:
+    """Slice-2(b): a snapshot refresh after a fill replaces quantity, never adds."""
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        ENTRY_ID, SYMBOL, "BUY", 65, 145.15, "LIMIT", intent="ENTRY"
+    )
+    manager.apply_broker_order_update(
+        ENTRY_ID,
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 145.15},
+    )
+    assert manager.get_position(SYMBOL).quantity == 65
+
+    # Snapshot arriving AFTER the fill reports the same one lot.
+    manager.synchronize_with_broker(
+        [
+            {
+                "symbol": SYMBOL,
+                "product": "MIS",
+                "quantity": 65,
+                "average_price": 145.15,
+                "last_price": 145.15,
+                "realised": 0.0,
+            }
+        ]
+    )
+    position = manager.get_position(SYMBOL)
+    assert position is not None and position.quantity == 65
+
+
+def test_restart_with_partially_filled_unprotected_position_no_reapply(
+    tmp_path,
+) -> None:
+    """Slice-2(d): restart reconstructs a partial fill; replay does not re-apply."""
+    state_path = tmp_path / "positions.json"
+    manager = PositionManager(state_file=str(state_path))
+    manager.add_pending_order(
+        ENTRY_ID, SYMBOL, "BUY", 65, 145.15, "LIMIT", intent="ENTRY"
+    )
+    manager.apply_broker_order_update(
+        ENTRY_ID,
+        {"status": "PARTIALLY_FILLED", "filled_quantity": 40, "average_price": 145.15},
+    )
+    assert manager.get_position(SYMBOL).quantity == 40
+    assert manager._orders[ENTRY_ID].applied_filled_quantity == 40
+
+    restarted = PositionManager(state_file=str(state_path))
+    # Replayed partial (same cumulative) must be a no-op after restart.
+    restarted.apply_broker_order_update(
+        ENTRY_ID,
+        {"status": "PARTIALLY_FILLED", "filled_quantity": 40, "average_price": 145.15},
+    )
+    position = restarted.get_position(SYMBOL)
+    assert position is not None and position.quantity == 40
+    assert restarted._orders[ENTRY_ID].applied_filled_quantity == 40
+
+    # The genuine completion still applies exactly the remaining 25.
+    restarted.apply_broker_order_update(
+        ENTRY_ID,
+        {"status": "COMPLETE", "filled_quantity": 65, "average_price": 145.15},
+    )
+    position = restarted.get_position(SYMBOL)
+    assert position is not None and position.quantity == 65
+    assert restarted._orders[ENTRY_ID].applied_filled_quantity == 65

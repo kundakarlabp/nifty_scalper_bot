@@ -208,3 +208,50 @@ class Hub:
 def test_zero_spread_limit_is_strict_for_options() -> None:
     with pytest.raises(OrderPlacementError):
         ExecutionPolicy(Hub(), max_spread_pct=0.0).build_plan(SYMBOL, "BUY")
+
+
+def test_restart_with_already_protected_position_no_duplicate_bracket(
+    tmp_path, monkeypatch
+) -> None:
+    """Slice-2(d): restart restores the protected bracket; a replayed
+    registration for the same symbol must not create a second bracket."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BRACKET_AUTO_RESTORE", "true")
+    first = BracketManager(order_manager=SimpleNamespace())
+    stop(first)
+    first.register_virtual_bracket(
+        order_id="entry-protected",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=145.15,
+        sl=144.50,
+        tp=152.00,
+        activate_immediately=False,
+    )
+    first.confirm_entry_fill("entry-protected", 145.15)
+    first.save_state()
+
+    restored = BracketManager(order_manager=SimpleNamespace())
+    stop(restored)
+    recovered = restored.get_bracket("entry-protected")
+    assert recovered is not None
+    assert recovered.active and recovered.entry_confirmed
+    assert recovered.remaining_quantity == 65
+    assert len([b for b in restored._brackets.values() if b.symbol == SYMBOL]) == 1
+
+    # Replayed registration (e.g. recovery logic re-running) must dedupe.
+    restored.register_virtual_bracket(
+        order_id="entry-protected",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=145.15,
+        sl=144.50,
+        tp=152.00,
+        activate_immediately=False,
+    )
+    brackets = [b for b in restored._brackets.values() if b.symbol == SYMBOL]
+    assert len(brackets) == 1
+    assert brackets[0].remaining_quantity == 65
+    assert brackets[0].active and brackets[0].entry_confirmed
