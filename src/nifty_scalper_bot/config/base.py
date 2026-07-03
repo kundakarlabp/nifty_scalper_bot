@@ -38,7 +38,7 @@ class RiskConfig(BaseModel):
     max_daily_loss_pct: float = Field(default=5.0, ge=0.0)
     max_position_size_pct: float = Field(default=20.0, ge=0.0, le=100.0)
     max_total_exposure_pct: float = Field(default=80.0, ge=0.0, le=100.0)
-    max_concurrent_positions: int = Field(default=3, ge=1)
+    max_concurrent_positions: int = Field(default=1, ge=1)
     max_positions_per_symbol: int = Field(default=1, ge=1)
     min_risk_reward_ratio: float = Field(default=2.0, ge=1.0)
 

@@ -68,3 +68,14 @@ def test_record_rejection_margin_is_soft() -> None:
     assert risk.cooldown_remaining() == 0.0
     assert risk._cooldown_until is None
     assert risk._last_rejection == "MARGIN"
+
+
+def test_risk_config_max_concurrent_positions_matches_enforced_single_position() -> None:
+    """Slice-4: the second (dead-code) RiskManager's config default must not
+    silently disagree with the single-position policy enforced at the
+    execution choke point (order_manager_core's single-position gate)."""
+    from nifty_scalper_bot.config.base import RiskConfig
+    from nifty_scalper_bot.config import defaults
+
+    assert RiskConfig().max_concurrent_positions == 1
+    assert defaults.DEFAULT_RISK_MAX_CONCURRENT_POSITIONS == 1
