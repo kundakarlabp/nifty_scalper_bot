@@ -107,6 +107,25 @@ def _normalize_bracket_side(side: str) -> str:
 
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
+# Seconds after entry fill during which ticks older than the fill timestamp
+# are rejected (pre-fill/replayed signal ticks must not fire a false exit).
+STALE_TICK_ARM_WINDOW_SEC = 5.0
+
+
+def tick_exchange_epoch(tick: Mapping[str, Any]) -> float | None:
+    """Return the tick's exchange timestamp as epoch seconds, or None."""
+    raw = tick.get("exchange_timestamp") or tick.get("timestamp")
+    if raw is None:
+        return None
+    if hasattr(raw, "timestamp"):
+        try:
+            return float(raw.timestamp())
+        except (TypeError, ValueError, OSError):
+            return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+        return value / 1000.0 if value > 1e12 else value
+    return None
 _PROTECTIVE_EXIT_REASON_TOKENS = (
     "HARD_SL_BREACH",
     "WATCHDOG_HARD_SL",
@@ -230,6 +249,9 @@ class BracketState:
     exit_state: str = BracketExitLifecycle.OPEN_PENDING_FILL.value
     exit_order_id: str | None = None
     entry_fill_price: float | None = None
+    # Wall-clock time the entry fill was confirmed (bracket activation).
+    # Used to reject pre-fill/replayed ticks against a freshly activated bracket.
+    entry_fill_ts: float | None = None
     exit_reason: str | None = None
     exit_triggered_at: float | None = None
     exit_attempt_count: int = 0
@@ -1227,6 +1249,7 @@ class BracketManager:
             bracket.entry_status = "ACTIVE"
             bracket.exit_state = BracketExitLifecycle.OPEN_ACTIVE.value
             bracket.entry_fill_price = fill_price
+            bracket.entry_fill_ts = time.time()
             bracket.exit_pending = False
             bracket.updated_at = time.time()
             
@@ -1312,8 +1335,19 @@ class BracketManager:
     # 3. EXECUTION LOGIC (The "Sniper")
     # --------------------------------------------------------------------------
 
-    def on_tick(self, symbol: str, ltp: float) -> None:
-        """Process one tick through trailing and hard SL/TP evaluation."""
+    def on_tick(
+        self, symbol: str, ltp: float, exchange_ts: float | None = None
+    ) -> None:
+        """Process one tick through trailing and hard SL/TP evaluation.
+
+        Args:
+            symbol: Instrument symbol for the tick.
+            ltp: Last traded price.
+            exchange_ts: Optional exchange timestamp (epoch seconds). When
+                provided, ticks older than a freshly activated bracket's fill
+                time are not evaluated against it — a replayed pre-fill signal
+                tick must not trigger an immediate false exit right after entry.
+        """
         symbol = normalize_symbol(symbol)
         # ═══════════════════════════════════════════════════════════
         # FAST PATH: Early exit checks (no lock needed)
@@ -1333,9 +1367,32 @@ class BracketManager:
         # SNAPSHOT: Minimal lock scope - just get bracket references
         # ═══════════════════════════════════════════════════════════
         candidates = []
+        now_ts = time.time()
         with self._lock:
             for eid in relevant_ids:
                 b = self._brackets.get(eid)
+                # Stale-tick guard: within the arming window after entry fill,
+                # a tick whose exchange timestamp predates the fill is the
+                # pre-fill/replayed signal tick — never evaluate it against
+                # this bracket. Bounded window so clock skew cannot suppress
+                # genuine SL/TP evaluation beyond the first seconds.
+                if (
+                    b is not None
+                    and exchange_ts is not None
+                    and b.entry_fill_ts is not None
+                    and exchange_ts < b.entry_fill_ts
+                    and (now_ts - b.entry_fill_ts) <= STALE_TICK_ARM_WINDOW_SEC
+                ):
+                    self._log_throttled(
+                        "debug",
+                        f"stale_prefill_tick_skip_{eid}",
+                        5.0,
+                        "BRACKET_STALE_TICK_SKIP symbol=%s tick_ts=%.3f fill_ts=%.3f",
+                        b.symbol,
+                        exchange_ts,
+                        b.entry_fill_ts,
+                    )
+                    continue
                 # 🟢 FIX: Remove 'b.active' check so we can catch inactive ones
                 if (
                     b
@@ -1896,7 +1953,8 @@ class BracketManager:
             ltp = tick.get("last_price") or tick.get("ltp")
             if not symbol or not isinstance(ltp, (int, float)):
                 return
-            self.on_tick(symbol, float(ltp))
+            exchange_ts = tick_exchange_epoch(tick)
+            self.on_tick(symbol, float(ltp), exchange_ts)
         except Exception as e:
             LOGGER.error("Failure in BracketManager.on_tick_event: %s", e)
 

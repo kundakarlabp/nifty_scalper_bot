@@ -25,6 +25,19 @@ os.environ.setdefault("BROKER_API_SECRET", "mock_api_secret")
 
 
 @pytest.fixture(autouse=True)
+def _isolate_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point DATA_DIR at a per-test directory.
+
+    Bracket and order managers persist state (virtual_brackets.json,
+    orders.json, fill ledgers) under DATA_DIR (default ``data/``). Without
+    isolation, one test's saved bracket is silently restored by the next
+    test's manager, causing order-dependent failures. Tests that set their
+    own DATA_DIR still win: their monkeypatch runs after this fixture.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "state"))
+
+
+@pytest.fixture(autouse=True)
 def reset_trading_switch() -> Generator[None, None, None]:
     switch = trading_switch()
     with suppress(Exception):

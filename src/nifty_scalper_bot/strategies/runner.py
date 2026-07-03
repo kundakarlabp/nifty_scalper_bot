@@ -99,6 +99,7 @@ from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
     OrderStateMachine,
 )
+from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
@@ -9907,7 +9908,9 @@ class StrategyRunner:
                     )
                     _ltp = float(_ltp_raw)
                     if _ltp > 0:
-                        self._bracket_manager.on_tick(symbol, _ltp)
+                        self._bracket_manager.on_tick(
+                            symbol, _ltp, tick_exchange_epoch(tick)
+                        )
                         tick_err_map = getattr(
                             self._bracket_manager, "_tick_error_logged", None
                         )

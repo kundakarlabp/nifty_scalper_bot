@@ -491,10 +491,12 @@ class LedgerBracketManager(CanonicalBracketManager):
 
     def _retry_ledger_block(self, bracket: Any) -> bool:
         try:
+            replayed = False
             pending_entry = getattr(bracket, "_ledger_pending_entry_price", None)
             if pending_entry is not None:
                 self._record_entry_fill(bracket, float(pending_entry))
                 delattr(bracket, "_ledger_pending_entry_price")
+                replayed = True
 
             pending_order = getattr(bracket, "_ledger_pending_exit_order_id", None)
             if pending_order:
@@ -519,6 +521,17 @@ class LedgerBracketManager(CanonicalBracketManager):
                 ):
                     with suppress(AttributeError):
                         delattr(bracket, name)
+                replayed = True
+
+            if (
+                bracket.exit_state != _legacy.BracketExitLifecycle.CLOSED.value
+                and not replayed
+            ):
+                # Durable block on a still-open bracket with nothing to replay
+                # (markers lost, e.g. the state snapshot itself failed to persist
+                # before a restart). Keep the entry freeze latched; closure
+                # reconciliation clears it once flat + ledger-complete.
+                return False
 
             if bracket.exit_state == _legacy.BracketExitLifecycle.CLOSED.value:
                 if not self._safe_position_flat(bracket.symbol):
