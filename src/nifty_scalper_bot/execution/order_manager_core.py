@@ -685,6 +685,9 @@ class OrderManager:
         "market closed",
     )
     BRACKET_ENTRY_TIMEOUT_SEC: float = 5.0
+    # TTL for the in-flight entry reservation taken by the single-position
+    # gate; covers the broker submit window and self-heals on failure paths.
+    ENTRY_INFLIGHT_TTL_SEC: float = 30.0
     FINAL_STATUSES: tuple[OrderStatus, ...] = (
         OrderStatus.CANCELLED,
         OrderStatus.FILLED,
@@ -825,6 +828,11 @@ class OrderManager:
         _data_dir = get_data_dir()
         self._history_path = Path(history_path or _data_dir / "order_history.json")
         self._orders: dict[str, OrderDetails] = {}
+        # ENTRY submissions currently between the single-position gate and
+        # local order registration (symbol -> reservation wall-clock ts).
+        # Entries auto-expire after _ENTRY_INFLIGHT_TTL_SEC so a crashed
+        # submission can never wedge the gate.
+        self._entries_in_flight: dict[str, float] = {}
         self._history: deque[OrderDetails] = deque(maxlen=1000)
         self._history_index: dict[str, int] = {}
         self._history_base_index = 0
@@ -2619,6 +2627,79 @@ class OrderManager:
                     extra={"event": "exit_dedup_bypass", "symbol": normalized_symbol},
                 )
 
+            # ── SINGLE-POSITION GATE (cross-strike, atomic at the choke point) ──
+            # One NIFTY option exposure at a time. Reject a second ENTRY while
+            # any OTHER option symbol has: an entry submission in flight, a live
+            # entry order, an open local position, or an active bracket.
+            # Same-symbol duplicates are already handled by the dedup above.
+            # Fail-closed: unreadable state blocks the entry.
+            if normalized_intent == "ENTRY" and not is_system_exit:
+                _gate_now = time.time()
+                # Purge expired reservations first (self-healing).
+                for _sym, _ts in list(self._entries_in_flight.items()):
+                    if _gate_now - _ts > self.ENTRY_INFLIGHT_TTL_SEC:
+                        self._entries_in_flight.pop(_sym, None)
+                conflict: str | None = None
+                for _sym in self._entries_in_flight:
+                    if _sym != normalized_symbol:
+                        conflict = f"entry_in_flight:{_sym}"
+                        break
+                if conflict is None:
+                    for o in self._orders.values():
+                        o_sym = normalize_symbol(o.symbol)
+                        if (
+                            o_sym != normalized_symbol
+                            and str(getattr(o, "intent", "")).upper()
+                            in {"ENTRY", "SCALE_IN", "REVERSAL"}
+                            and o.status
+                            in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
+                        ):
+                            conflict = f"pending_entry_order:{o_sym}"
+                            break
+                if conflict is None:
+                    try:
+                        for pos in self._positions.get_open_positions():
+                            p_sym = normalize_symbol(str(pos.symbol))
+                            if (
+                                p_sym != normalized_symbol
+                                and int(getattr(pos, "quantity", 0) or 0) != 0
+                            ):
+                                conflict = f"open_position:{p_sym}"
+                                break
+                    except Exception:  # noqa: BLE001 — fail-closed on unknown state
+                        conflict = "position_state_unavailable"
+                if conflict is None and self._bracket_manager is not None:
+                    try:
+                        _actives = getattr(self._bracket_manager, "active_brackets", {}) or {}
+                        for _b_sym in _actives:
+                            if normalize_symbol(str(_b_sym)) != normalized_symbol:
+                                conflict = f"active_bracket:{_b_sym}"
+                                break
+                    except Exception:  # noqa: BLE001 — fail-closed on unknown state
+                        conflict = "bracket_state_unavailable"
+                if conflict:
+                    self._logger.warning(
+                        "ORDER_BLOCKED: single_position_gate symbol=%s side=%s conflict=%s",
+                        normalized_symbol,
+                        side,
+                        conflict,
+                        extra={
+                            "event": "ORDER_BLOCKED",
+                            "block_reason": "single_position_gate",
+                            "symbol": normalized_symbol,
+                            "conflict": conflict,
+                        },
+                    )
+                    _log_order_decision(
+                        allowed=False,
+                        block_reason=f"single_position_gate:{conflict}",
+                    )
+                    return None
+                # Reserve this symbol atomically with the check so a racing
+                # second entry (CE vs PE) cannot pass the gate before this
+                # order is registered locally.
+                self._entries_in_flight[normalized_symbol] = _gate_now
+
         # ---------------------------------------------------------------------
         # 1. IDEMPOTENCY CHECK (The Fix for Duplicate Trades)
         # ---------------------------------------------------------------------
@@ -3114,6 +3195,10 @@ class OrderManager:
                         signal_id=signal_id,
                     )
                     self._register_order(details)
+                    # Local order record now owns the symbol — release the
+                    # single-position gate's in-flight reservation.
+                    with self._lock:
+                        self._entries_in_flight.pop(normalized_symbol, None)
 
                     # C. Auto-Register Bracket
                     # SKIP if caller will register separately (e.g. place_bracket_order)
@@ -12420,6 +12505,20 @@ class OrderManager:
                     # This stops the "Infinite Rescue Loop".
                     is_active_locally = False
                     with self._lock:
+                        # An ENTRY submission currently in flight for this
+                        # symbol proves the position is ours (broker accepted
+                        # the order before we registered it locally). Never
+                        # adopt it as an orphan during that window.
+                        _now_orphan = time.time()
+                        for _if_sym, _if_ts in self._entries_in_flight.items():
+                            if (
+                                DataHub.normalize(_if_sym)
+                                == DataHub.normalize(broker_sym)
+                                and _now_orphan - _if_ts
+                                <= self.ENTRY_INFLIGHT_TTL_SEC
+                            ):
+                                is_active_locally = True
+                                break
                         for order in self._orders.values():
                             # Normalize symbol check
                             if DataHub.normalize(order.symbol) == DataHub.normalize(
@@ -12707,7 +12806,15 @@ class OrderManager:
                                 or tick_data.get("price")
                             )
                             if ltp and float(ltp) > 0:
-                                self._bracket_manager.on_tick(symbol, float(ltp))
+                                from nifty_scalper_bot.execution.bracket_manager import (
+                                    tick_exchange_epoch,
+                                )
+
+                                self._bracket_manager.on_tick(
+                                    symbol,
+                                    float(ltp),
+                                    tick_exchange_epoch(tick_data),
+                                )
                         except Exception as e:
                             self._logger.exception("Unhandled exception", exc_info=True)
                             raise

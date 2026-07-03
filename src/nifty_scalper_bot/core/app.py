@@ -12150,7 +12150,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # Ensure we have LTP
                 ltp = tick.get("ltp")
                 if ltp and ctx.bracket_manager:
-                    ctx.bracket_manager.on_tick(sym, ltp)
+                    from nifty_scalper_bot.execution.bracket_manager import (
+                        tick_exchange_epoch,
+                    )
+
+                    ctx.bracket_manager.on_tick(sym, ltp, tick_exchange_epoch(tick))
 
             # 2. Subscribe to the DataHub
             # CHANGE: ctx.market_data -> ctx.market_data_manager

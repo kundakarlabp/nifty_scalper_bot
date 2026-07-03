@@ -877,3 +877,102 @@ def test_duplicate_managed_position_rows_reject_snapshot_atomically(tmp_path) ->
     preserved = manager.get_position(SYMBOL)
     assert preserved is not None
     assert preserved.current_price == pytest.approx(original_price)
+
+
+def test_incident_single_lot_lifecycle_no_false_exit_no_second_entry(
+    monkeypatch, tmp_path
+) -> None:
+    """Regression for the one-lot incident (NFO:NIFTY2670724050CE, qty 65).
+
+    Invariants: exactly one bracket per entry, a replayed pre-fill tick never
+    fires an immediate false exit right after activation, a fresh tick still
+    evaluates the SL, a second entry on another strike is rejected atomically
+    at the order-submission choke point, and exposure never exceeds 65.
+    """
+    from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
+
+    ce = "NFO:NIFTY2670724050CE"
+    pe = "NFO:NIFTY2670724050PE"
+
+    class _IncidentBroker:
+        def place_order(self, **_kwargs):
+            return {"order_id": "E1"}
+
+        def get_orders(self):
+            return []
+
+        def get_positions(self):
+            return []
+
+    class _IncidentPositions:
+        def has_open_position(self, _symbol):
+            return False
+
+        def get_open_positions(self):
+            return []
+
+    om = OrderManager(_IncidentBroker(), _IncidentPositions(), object())
+    monkeypatch.setattr(om, "_lot_size_for_symbol", lambda _s: 65)
+    bm = BracketManager(order_manager=om)
+    om.set_bracket_manager(bm)
+    try:
+        entry_id = om.place_order(
+            symbol=ce,
+            side="BUY",
+            quantity=65,
+            order_type=OrderType.LIMIT,
+            price=145.15,
+            stop_loss=144.50,
+            take_profit=152.00,
+            intent="ENTRY",
+            check_risk=False,
+            signal_id="incident-ce-1",
+        )
+        assert entry_id, "incident entry must be accepted"
+
+        # Exactly one bracket, qty 65 — no duplicate registration.
+        ce_brackets = [
+            b for b in bm._brackets.values() if b.symbol == ce
+        ]
+        assert len(ce_brackets) == 1
+        bracket = ce_brackets[0]
+        assert bracket.quantity == 65
+
+        # Reservation released once the local order record owns the symbol.
+        assert ce not in om._entries_in_flight
+
+        bm.confirm_entry_fill(entry_id, 145.15)
+        assert bracket.active and bracket.entry_confirmed
+        assert bracket.entry_fill_ts is not None
+
+        # Replayed pre-fill tick (exchange ts before fill) at 144.05 — below
+        # SL 144.50 — must NOT fire a false immediate exit.
+        bm.on_tick(ce, 144.05, exchange_ts=bracket.entry_fill_ts - 2.0)
+        assert bracket.exit_pending is False
+        assert bracket.exit_executed is False
+        assert bracket.remaining_quantity == 65
+
+        # A genuine (fresh) tick at the same price still evaluates the SL.
+        action = bm._evaluate_exit_fast(bracket, 144.05)
+        assert action is not None and action.get("type") == "SL"
+
+        # Second entry on the other strike is rejected at the choke point.
+        pe_id = om.place_order(
+            symbol=pe,
+            side="BUY",
+            quantity=65,
+            order_type=OrderType.LIMIT,
+            price=100.0,
+            stop_loss=95.0,
+            take_profit=110.0,
+            intent="ENTRY",
+            check_risk=False,
+            signal_id="incident-pe-1",
+        )
+        assert pe_id is None, "single-position gate must reject the second strike"
+        assert not [b for b in bm._brackets.values() if b.symbol == pe]
+
+        # Exposure never exceeded one lot across all brackets.
+        assert sum(b.quantity for b in bm._brackets.values()) == 65
+    finally:
+        bm._running = False
