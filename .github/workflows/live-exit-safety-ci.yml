@@ -85,9 +85,14 @@ jobs:
           rm -f .github/workflows/live-rearm-pd-fix.yml .github/live-rearm-patch-trigger
       - name: Focused validation
         run: |
-          python -m pip install --disable-pip-version-check -q pytest
           python -m py_compile src/nifty_scalper_bot/core/app.py tests/core/test_live_rearm_pandas_binding.py
-          python -m pytest -q tests/core/test_live_rearm_pandas_binding.py
+          python - <<'PY'
+          import runpy
+          tests = runpy.run_path('tests/core/test_live_rearm_pandas_binding.py')
+          tests['test_live_rearm_readiness_binds_pandas_alias']()
+          tests['test_runtime_readiness_timestamp_fallback_uses_bound_pd_alias']()
+          print('2 focused live-rearm regression checks passed')
+          PY
           git diff --check
       - name: Restore CI workflow and commit patch
         run: |
