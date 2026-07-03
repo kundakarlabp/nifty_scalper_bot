@@ -1,22 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import os
 from contextlib import suppress
 from dataclasses import dataclass
+import inspect
+import os
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any, Generator
 
 import numpy as np
 import pandas as pd
 import pytest
+
+from nifty_scalper_bot.core.trading_switch import trading_switch
 from src.nifty_scalper_bot.backtesting.backtest_engine import (
     BacktestConfig,
     BacktestEngine,
 )
-
-from nifty_scalper_bot.core.trading_switch import trading_switch
 
 _ORIGINAL_PATH_READ_TEXT = Path.read_text
 
@@ -27,7 +29,7 @@ os.environ.setdefault("BROKER_API_SECRET", "mock_api_secret")
 
 
 @pytest.fixture(autouse=True)
-def _isolate_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_data_dir(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Point DATA_DIR at a per-test directory.
 
     Bracket and order managers persist state (virtual_brackets.json,
@@ -36,7 +38,14 @@ def _isolate_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     test's manager, causing order-dependent failures. Tests that set their
     own DATA_DIR still win: their monkeypatch runs after this fixture.
     """
-    monkeypatch.setenv("DATA_DIR", str(tmp_path / "state"))
+    root = Path.cwd() / ".pytest-data-dir"
+    root.mkdir(parents=True, exist_ok=True)
+    sandbox = Path(tempfile.mkdtemp(prefix="data-dir-", dir=root))
+    monkeypatch.setenv("DATA_DIR", str(sandbox / "state"))
+    try:
+        yield
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

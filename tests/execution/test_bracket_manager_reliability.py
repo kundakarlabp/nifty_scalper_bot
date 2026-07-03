@@ -5,14 +5,7 @@ from __future__ import annotations
 import time
 from unittest.mock import Mock
 
-import pytest
-
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
-
-
-@pytest.fixture(autouse=True)
-def isolated_bracket_store(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
 
 def _build_manager() -> tuple[BracketManager, Mock]:
@@ -23,6 +16,15 @@ def _build_manager() -> tuple[BracketManager, Mock]:
     manager = BracketManager(order_manager=order_manager)
     manager.attach_exit_executor(lambda symbol, qty: f"exit-{symbol}-{qty}")
     return manager, order_manager
+
+
+def _wait_for_exit(manager: BracketManager, entry_id: str, timeout_s: float = 1.0):
+    deadline = time.time() + timeout_s
+    bracket = manager.get_bracket(entry_id)
+    while time.time() < deadline and bracket is not None and not bracket.exit_executed:
+        time.sleep(0.01)
+        bracket = manager.get_bracket(entry_id)
+    return bracket
 
 
 def test_stop_loss_cross_detection_on_jump() -> None:
@@ -43,7 +45,7 @@ def test_stop_loss_cross_detection_on_jump() -> None:
     manager.on_tick("NFO:NIFTYTEST", 104.0)
     manager.on_tick("NFO:NIFTYTEST", 97.0)
 
-    bracket = manager.get_bracket("entry-1")
+    bracket = _wait_for_exit(manager, "entry-1")
     assert bracket is not None
     assert bracket.exit_executed is True
     assert bracket.active is False
@@ -95,10 +97,9 @@ def test_fallback_market_exit_executes_after_retry_exhaustion() -> None:
         time.sleep(0.01)
 
     assert order_manager.place_order.called
-    bracket = manager.get_bracket("entry-3")
-    while time.time() < deadline and bracket is not None and not bracket.exit_executed:
-        time.sleep(0.01)
-        bracket = manager.get_bracket("entry-3")
+    bracket = _wait_for_exit(
+        manager, "entry-3", timeout_s=max(0.0, deadline - time.time())
+    )
     assert bracket is not None
     assert bracket.exit_executed is True
 
@@ -146,6 +147,6 @@ def test_websocket_tick_jump_scenario_triggers_sl() -> None:
     for tick in [105.0, 104.0, 97.0]:
         manager.on_tick_event({"symbol": "NFO:NIFTYTEST5", "ltp": tick})
 
-    bracket = manager.get_bracket("entry-5")
+    bracket = _wait_for_exit(manager, "entry-5")
     assert bracket is not None
     assert bracket.exit_executed is True
