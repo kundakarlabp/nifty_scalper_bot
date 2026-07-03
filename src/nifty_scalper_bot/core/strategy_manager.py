@@ -3814,6 +3814,45 @@ class StrategyManager(_BaseStrategyManager):
                 context_votes.append((signal, vote))
             else:
                 trigger_votes.append((signal, vote))
+        # ── Underlying-direction authority gate (fail closed) ──
+        # An option ENTRY may only be approved with a fresh, valid underlying
+        # (spot/futures) direction that matches the option side. Missing or
+        # stale underlying context must skip the entry, never fail open.
+        # Close signals returned above are never gated.
+        if symbol_norm.endswith(("CE", "PE")):
+            _bias = str(
+                indicator_map.get("direction_bias")
+                or indicator_map.get("underlying_direction_bias")
+                or ""
+            ).upper()
+            _ctx_fresh = bool(indicator_map.get("context_fresh"))
+            _side_expected = "CE" if symbol_norm.endswith("CE") else "PE"
+            _gate_block: str | None = None
+            if _bias not in {"CE", "PE"} or not _ctx_fresh:
+                _gate_block = "underlying_direction_unresolved"
+            elif _bias != _side_expected:
+                _gate_block = "underlying_direction_conflict"
+            if _gate_block is not None:
+                _record_no_signal(
+                    "context",
+                    f"{_gate_block}_fail_closed",
+                    "underlying_direction_gate",
+                    trigger_vote_count=len(trigger_votes),
+                    context_vote_count=len(context_votes),
+                    final_block_reason=_gate_block,
+                )
+                log_throttled(
+                    log,
+                    f"underlying_direction_gate:{symbol_norm}",
+                    "UNDERLYING_DIRECTION_GATE_BLOCKED symbol=%s bias=%s context_fresh=%s reason=%s",
+                    symbol_norm,
+                    _bias or None,
+                    _ctx_fresh,
+                    _gate_block,
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                )
+                return None
         approval_path = "multi_trigger"
         if not trigger_votes:
             promoted_candidate = self._try_context_promotion(symbol_norm, context_votes, indicator_map, mode_profile)

@@ -57,3 +57,56 @@ async def test_malformed_score_env_does_not_crash() -> None:
     assert parse_float_env("high", 9.0) == 9.0
     assert parse_float_env("", 9.0) == 9.0
     assert parse_float_env("9.5", 9.0) == 9.5
+
+
+def _gate_probe(symbol: str, indicators: dict):
+    """Drive the real _combine_strategy_votes gate with one strong CE vote."""
+    from nifty_scalper_bot.core.strategy_manager import (
+        Signal,
+        StrategyManager,
+        StrategyVote,
+    )
+
+    mgr = StrategyManager.__new__(StrategyManager)
+    mgr._last_no_signal_decision_by_symbol = {}
+    sig = Signal(
+        action="BUY", symbol=symbol, quantity=65, confidence=0.9,
+        reason="t", stop_loss=140.0, take_profit=150.0, metadata={},
+    )
+    vote = StrategyVote(
+        strategy="VWAPPro", side="CE", score=9.9, confidence=0.9,
+        reasons=[], metadata={"role": "trigger"},
+    )
+    result = mgr._combine_strategy_votes(
+        symbol=symbol, signals=[(sig, vote)], indicators=indicators
+    )
+    decision = mgr._last_no_signal_decision_by_symbol.get(symbol.upper())
+    return result, decision
+
+
+async def test_option_entry_fails_closed_without_underlying_direction() -> None:
+    # Slice-3: missing underlying direction context must block, not fail open.
+    result, decision = _gate_probe("NFO:NIFTY2670724050CE", {})
+    assert result is None
+    assert decision is not None
+    assert decision.final_block_reason == "underlying_direction_unresolved"
+
+
+async def test_option_entry_fails_closed_on_stale_context() -> None:
+    # Direction present but context not fresh -> still blocked.
+    result, decision = _gate_probe(
+        "NFO:NIFTY2670724050CE",
+        {"direction_bias": "CE", "context_fresh": False},
+    )
+    assert result is None
+    assert decision.final_block_reason == "underlying_direction_unresolved"
+
+
+async def test_option_entry_blocked_when_bias_conflicts_option_side() -> None:
+    # PE bias can never approve a CE entry (and vice versa) - no side flip.
+    result, decision = _gate_probe(
+        "NFO:NIFTY2670724050CE",
+        {"direction_bias": "PE", "context_fresh": True},
+    )
+    assert result is None
+    assert decision.final_block_reason == "underlying_direction_conflict"
