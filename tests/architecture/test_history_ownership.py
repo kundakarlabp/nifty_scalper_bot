@@ -34,8 +34,12 @@ HYDRATION_OWNERSHIP_NAMES = {
 }
 
 
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
 def _call_names(path: Path, names: set[str]) -> list[str]:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(_read_text(path))
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -71,20 +75,20 @@ async def test_only_allowlisted_files_call_broker_historical_data() -> None:
 
 
 async def test_app_uses_canonical_runtime_history_not_mdm_wrappers() -> None:
-    text = (SRC / "core" / "app.py").read_text()
+    text = _read_text(SRC / "core" / "app.py")
     assert "ctx.market_data_manager.hydrate_symbol_history" not in text
     assert "ctx.market_data_manager.fetch_history" not in text
     assert "_indicator_engine.replace_history" not in text
 
 
 async def test_datahub_has_no_authoritative_history_cache() -> None:
-    text = (SRC / "data" / "data_hub.py").read_text()
+    text = _read_text(SRC / "data" / "data_hub.py")
     assert "_history_cache" not in text
     assert "def _normalize_history_rows" not in text
 
 
 async def test_runner_does_not_call_broker_history() -> None:
-    text = (SRC / "strategies" / "runner.py").read_text()
+    text = _read_text(SRC / "strategies" / "runner.py")
     assert ".historical_data(" not in text
     assert ".fetch_history(" not in text
 
@@ -104,28 +108,44 @@ async def test_execution_and_notifications_do_not_hydrate() -> None:
 
 async def test_canonical_readiness_function_exists_and_is_pure() -> None:
     # Readiness computation was extracted from app.py to core/history_readiness.py.
-    text = (SRC / "core" / "history_readiness.py").read_text()
+    text = _read_text(SRC / "core" / "history_readiness.py")
     tree = ast.parse(text)
     target = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "compute_selected_option_history_readiness":
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "compute_selected_option_history_readiness"
+        ):
             target = node
             break
     assert target is not None, "compute_selected_option_history_readiness missing"
-    body_calls = _call_names_in_node(target, {"ensure_history", "historical_data", "reseed_history_from_bars", "replace_history", "ingest_historical_bar"})
+    body_calls = _call_names_in_node(
+        target,
+        {
+            "ensure_history",
+            "historical_data",
+            "reseed_history_from_bars",
+            "replace_history",
+            "ingest_historical_bar",
+        },
+    )
     assert body_calls == [], f"Canonical readiness must be pure, found: {body_calls}"
 
 
 def _func_source(path: Path, func_name: str) -> str:
-    tree = ast.parse(path.read_text())
+    text = _read_text(path)
+    tree = ast.parse(text)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
-            return ast.get_source_segment(path.read_text(), node) or ""
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == func_name
+        ):
+            return ast.get_source_segment(text, node) or ""
     return ""
 
 
 def _function_call_attrs(path: Path) -> dict[str, set[str]]:
-    text = path.read_text()
+    text = _read_text(path)
     tree = ast.parse(text)
     result: dict[str, set[str]] = {}
     for node in ast.walk(tree):
@@ -143,7 +163,7 @@ def _function_call_attrs(path: Path) -> dict[str, set[str]]:
 
 
 def _imported_names(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(_read_text(path))
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -151,14 +171,16 @@ def _imported_names(path: Path) -> set[str]:
                 names.add(alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                names.add(alias.name.rsplit('.', 1)[-1])
+                names.add(alias.name.rsplit(".", 1)[-1])
     return names
 
 
 async def test_runner_prewarm_has_no_datahub_hydrate_or_reseed() -> None:
     # Spec §3/§13: production prewarm must not call DataHub hydrate, reseed, or
     # ingest historical bars.
-    src = _func_source(SRC / "strategies" / "runner.py", "_request_selected_option_history_prewarm")
+    src = _func_source(
+        SRC / "strategies" / "runner.py", "_request_selected_option_history_prewarm"
+    )
     assert src, "prewarm function not found"
     assert "hydrate_symbol_history" not in src, "prewarm must not call DataHub hydrate"
     assert "reseed_history_from_bars" not in src, "prewarm must not reseed raw rows"
@@ -176,13 +198,13 @@ async def test_hydrate_from_mdm_cache_is_thin_delegate() -> None:
 
 async def test_app_injects_runtime_history_ensurer() -> None:
     # Spec §13: app wires the canonical callback into the runner.
-    text = (SRC / "core" / "app.py").read_text()
+    text = _read_text(SRC / "core" / "app.py")
     assert "set_runtime_history_ensurer" in text
     assert "ensure_symbol_runtime_history" in text
 
 
 async def test_runner_declares_ensurer_field() -> None:
-    text = (SRC / "strategies" / "runner.py").read_text()
+    text = _read_text(SRC / "strategies" / "runner.py")
     assert "self._runtime_history_ensurer" in text
     assert "def set_runtime_history_ensurer" in text
 
@@ -190,7 +212,7 @@ async def test_runner_declares_ensurer_field() -> None:
 async def test_runner_makes_no_direct_request_hydration_call() -> None:
     # Spec §9: Runner must not call request_hydration on DataHub or MDM. We scan
     # for an ast.Call whose attr is 'request_hydration'.
-    src = (SRC / "strategies" / "runner.py").read_text()
+    src = _read_text(SRC / "strategies" / "runner.py")
     tree = ast.parse(src)
     bad = []
     for node in ast.walk(tree):
@@ -220,26 +242,41 @@ async def test_request_mdm_hydration_is_thin_canonical_delegate() -> None:
 
 
 async def test_runtime_history_ensurer_callback_contract_is_explicit() -> None:
-    text = (SRC / "core" / "app.py").read_text()
+    text = _read_text(SRC / "core" / "app.py")
     tree = ast.parse(text)
-    funcs = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_runtime_history_ensurer"]
+    funcs = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_runtime_history_ensurer"
+    ]
     assert len(funcs) == 1
     fn = funcs[0]
     assert fn.args.vararg is None
-    assert fn.args.kwarg is None, "production runtime history ensurer must not accept **kwargs"
+    assert (
+        fn.args.kwarg is None
+    ), "production runtime history ensurer must not accept **kwargs"
     assert [a.arg for a in fn.args.args] == ["symbol"]
-    assert [a.arg for a in fn.args.kwonlyargs] == ["role", "phase", "reason", "required_bars", "target_bars"]
+    assert [a.arg for a in fn.args.kwonlyargs] == [
+        "role",
+        "phase",
+        "reason",
+        "required_bars",
+        "target_bars",
+    ]
 
 
 async def test_only_one_production_history_ensurer_injection_point() -> None:
-    text = (SRC / "core" / "app.py").read_text()
+    text = _read_text(SRC / "core" / "app.py")
     assert text.count("set_runtime_history_ensurer(") == 1
     assert "CANONICAL_HISTORY_ENSURER_INJECTION_FAILED" in text
-    assert "LOGGER.error" in text[text.index("CANONICAL_HISTORY_ENSURER_INJECTION_FAILED") - 400:]
+    assert (
+        "LOGGER.error"
+        in text[text.index("CANONICAL_HISTORY_ENSURER_INJECTION_FAILED") - 400 :]
+    )
 
 
 async def test_mdm_readiness_concepts_are_explicit_and_separate() -> None:
-    text = (SRC / "data" / "market_data_manager.py").read_text()
+    text = _read_text(SRC / "data" / "market_data_manager.py")
     assert "def is_tick_ready" in text
     assert "def is_ohlc_ready" in text
     assert "def is_market_data_ready" in text
@@ -255,9 +292,10 @@ async def test_historical_bar_ingestion_does_not_write_raw_tick_history() -> Non
 
 
 async def test_data_source_no_longer_calls_broker_historical_data() -> None:
-    text = (SRC / "data" / "source.py").read_text()
+    text = _read_text(SRC / "data" / "source.py")
     assert ".historical_data(" not in text
     assert "MarketDataManager.ensure_history" in text
+
 
 async def test_market_data_source_get_ohlc_has_no_production_callers() -> None:
     offenders = []
@@ -265,28 +303,40 @@ async def test_market_data_source_get_ohlc_has_no_production_callers() -> None:
         rel = path.relative_to(ROOT).as_posix()
         if rel == "src/nifty_scalper_bot/data/source.py":
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(_read_text(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_ohlc":
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get_ohlc"
+            ):
                 offenders.append((rel, node.lineno))
-    assert offenders == [], f"Production get_ohlc callers must use MDM.get_ohlc_bars/cache helpers: {offenders}"
+    assert (
+        offenders == []
+    ), f"Production get_ohlc callers must use MDM.get_ohlc_bars/cache helpers: {offenders}"
 
 
 async def test_no_cache_miss_then_direct_broker_history_fetch_pattern() -> None:
     offenders = []
     for path in SRC.rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(_read_text(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ExceptHandler):
-                body_calls = _call_names_in_node(node, {"historical_data", "get_historical_data"})
+                body_calls = _call_names_in_node(
+                    node, {"historical_data", "get_historical_data"}
+                )
                 if body_calls:
                     offenders.append((rel, node.lineno, body_calls))
-    assert offenders == [], f"Cache-miss fallbacks must not fetch broker history directly: {offenders}"
+    assert (
+        offenders == []
+    ), f"Cache-miss fallbacks must not fetch broker history directly: {offenders}"
 
 
-async def test_datahub_has_no_runtime_history_ownership_or_readiness_decisions() -> None:
-    text = (SRC / "data" / "data_hub.py").read_text()
+async def test_datahub_has_no_runtime_history_ownership_or_readiness_decisions() -> (
+    None
+):
+    text = _read_text(SRC / "data" / "data_hub.py")
     assert "_history_cache" not in text
     assert "def _normalize_history_rows" not in text
     assert "historical_data" not in text
@@ -310,7 +360,11 @@ async def test_datahub_get_ohlc_accepts_positional_limit() -> None:
 
         def get_ohlc_bars(self, symbol: str, *, limit: int | None = None):
             self.calls.append((symbol, limit))
-            return [{"close": 1}, {"close": 2}][-limit if limit else 0:] if limit else [{"close": 1}, {"close": 2}]
+            return (
+                [{"close": 1}, {"close": 2}][-limit if limit else 0 :]
+                if limit
+                else [{"close": 1}, {"close": 2}]
+            )
 
     mdm = _Mdm()
     hub = DataHub(market_data_manager=mdm)
@@ -322,7 +376,7 @@ async def test_datahub_get_ohlc_accepts_positional_limit() -> None:
 
 
 async def test_runner_has_no_direct_mdm_or_datahub_hydration_ownership_calls() -> None:
-    text = (SRC / "strategies" / "runner.py").read_text()
+    text = _read_text(SRC / "strategies" / "runner.py")
     assert ".ensure_history(" not in text
     assert ".fetch_history(" not in text
     assert ".hydrate_symbol_history(" not in text
@@ -331,45 +385,59 @@ async def test_runner_has_no_direct_mdm_or_datahub_hydration_ownership_calls() -
 
 
 async def test_app_injection_failure_marks_health_and_live_state() -> None:
-    text = (SRC / "core" / "app.py").read_text()
+    text = _read_text(SRC / "core" / "app.py")
     failure_idx = text.index("CANONICAL_HISTORY_ENSURER_INJECTION_FAILED")
     failure_block = text[failure_idx - 2000 : failure_idx + 1000]
     assert "canonical_history_ensurer_injection_failed" in failure_block
     assert "if safe_order_manager is not None" in failure_block
     assert "safe_order_manager.set_live_enabled(False)" in failure_block
     assert "live_block_reason" in failure_block
-    checker_src = _func_source(SRC / "core" / "app.py", "_check_canonical_history_ensurer")
+    checker_src = _func_source(
+        SRC / "core" / "app.py", "_check_canonical_history_ensurer"
+    )
     assert checker_src
     assert "canonical_history_ensurer_injection_failed" in checker_src
     assert "return False" in checker_src
 
 
 async def test_mdm_storage_names_remain_separate() -> None:
-    text = (SRC / "data" / "market_data_manager.py").read_text()
+    text = _read_text(SRC / "data" / "market_data_manager.py")
     assert "self._ohlc" in text
     assert "self._raw_tick_history" in text
-    ingest_src = _func_source(SRC / "data" / "market_data_manager.py", "ingest_historical_bar")
+    ingest_src = _func_source(
+        SRC / "data" / "market_data_manager.py", "ingest_historical_bar"
+    )
     assert "_ohlc" in ingest_src
-    assert "_raw_tick_history[" not in ingest_src and "_raw_tick_history.setdefault" not in ingest_src
+    assert (
+        "_raw_tick_history[" not in ingest_src
+        and "_raw_tick_history.setdefault" not in ingest_src
+    )
 
 
 async def test_production_code_uses_explicit_readiness_apis() -> None:
     offenders = []
     for path in SRC.rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(_read_text(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "is_symbol_ready":
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "is_symbol_ready"
+            ):
                 offenders.append((rel, node.lineno))
-    assert offenders == [], f"Use is_tick_ready/is_ohlc_ready/is_market_data_ready instead: {offenders}"
+    assert (
+        offenders == []
+    ), f"Use is_tick_ready/is_ohlc_ready/is_market_data_ready instead: {offenders}"
     mdm_src = _func_source(SRC / "data" / "market_data_manager.py", "is_symbol_ready")
     if mdm_src:
         assert "is_tick_ready" in mdm_src
         assert "is_ohlc_ready" not in mdm_src
 
+
 async def test_mdm_contract_ssot_regression_guards() -> None:
     path = SRC / "data" / "market_data_manager.py"
-    text = path.read_text()
+    text = _read_text(path)
     imported = _imported_names(path)
     assert "NIFTY_SPOT_TOKEN" not in text
     assert "256265" not in text
@@ -386,7 +454,8 @@ async def test_mdm_broker_history_calls_stay_inside_canonical_fetch_helper() -> 
     offenders = {
         name: sorted(calls & {"historical_data", "get_historical_data"})
         for name, calls in calls_by_func.items()
-        if name != "fetch_history" and calls & {"historical_data", "get_historical_data"}
+        if name != "fetch_history"
+        and calls & {"historical_data", "get_historical_data"}
     }
     assert offenders == {}
 
@@ -400,8 +469,10 @@ async def test_mdm_warmup_history_delegates_to_ensure_history() -> None:
 
 
 async def test_mdm_basket_replaces_desired_tokens_and_uses_mapping_helper() -> None:
-    text = (SRC / "data" / "market_data_manager.py").read_text()
-    set_basket = _func_source(SRC / "data" / "market_data_manager.py", "set_active_contract_basket")
+    text = _read_text(SRC / "data" / "market_data_manager.py")
+    set_basket = _func_source(
+        SRC / "data" / "market_data_manager.py", "set_active_contract_basket"
+    )
     assert "_desired_tokens.update(tokens)" not in set_basket
     assert "_replace_desired_tokens_from_basket" in set_basket
     assert "_set_symbol_token_mapping" in text
@@ -409,7 +480,9 @@ async def test_mdm_basket_replaces_desired_tokens_and_uses_mapping_helper() -> N
 
 
 async def test_mdm_readiness_requires_tradable_quote_and_canonical_bars() -> None:
-    src = _func_source(SRC / "data" / "market_data_manager.py", "hydrate_active_contract_basket")
+    src = _func_source(
+        SRC / "data" / "market_data_manager.py", "hydrate_active_contract_basket"
+    )
     assert "tradable_quote_ready" in src
     assert "tradable_quote_not_ready" in src
     assert "_selected_option_history_required_bars" in src
@@ -424,10 +497,22 @@ async def test_mdm_poll_volume_uses_cumulative_delta() -> None:
 
 
 async def test_runtime_execution_path_has_no_forbidden_router_imports() -> None:
-    forbidden = {"execution_router", "order_execution_hub", "preflight_validator", "ExecutionRouter", "OrderExecutionHub", "PreflightValidator"}
+    forbidden = {
+        "execution_router",
+        "order_execution_hub",
+        "preflight_validator",
+        "ExecutionRouter",
+        "OrderExecutionHub",
+        "PreflightValidator",
+    }
     offenders = []
-    for rel in ["core/app.py", "strategies/runner.py", "execution/order_manager.py", "execution/bracket_manager.py"]:
-        text = (SRC / rel).read_text()
+    for rel in [
+        "core/app.py",
+        "strategies/runner.py",
+        "execution/order_manager.py",
+        "execution/bracket_manager.py",
+    ]:
+        text = _read_text(SRC / rel)
         hits = sorted(item for item in forbidden if item in text)
         if hits:
             offenders.append((rel, hits))

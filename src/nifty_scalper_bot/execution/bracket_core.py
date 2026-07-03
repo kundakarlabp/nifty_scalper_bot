@@ -29,6 +29,7 @@ import time
 import json
 import logging
 import os
+import tempfile
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from datetime import datetime, timezone 
 import math 
@@ -1703,6 +1704,9 @@ class BracketManager:
             return
 
         with self._lock:
+            if bracket.exit_in_progress:
+                self._log_exit_pending_summary_locked(bracket, now)
+                return
             if bracket.exit_order_id or bracket.pending_exit_order_id:
                 bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
                 self._log_exit_pending_summary_locked(bracket, now)
@@ -3414,7 +3418,19 @@ class BracketManager:
             probe = configured.parent / f".bracket_write_test_{os.getpid()}"
             probe.write_text("ok", encoding="utf-8")
             probe.unlink()
-            durable = not str(configured.parent.resolve()).startswith("/tmp")
+            resolved_parent = configured.parent.resolve()
+            normalized_parent = str(resolved_parent).replace("\\", "/").lower()
+            temp_root = Path(tempfile.gettempdir()).resolve()
+            durable = True
+            if normalized_parent.startswith("/tmp"):
+                durable = False
+            elif any(
+                part.lower().startswith(("pytest-", ".pytest-"))
+                for part in resolved_parent.parts
+            ):
+                durable = False
+            elif resolved_parent == temp_root or temp_root in resolved_parent.parents:
+                durable = False
             if self._is_live_execution() and not durable:
                 raise OSError("LIVE bracket state cannot use ephemeral /tmp storage")
             self._state_storage_path = str(configured)

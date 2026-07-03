@@ -65,7 +65,6 @@ OPTION_FORCE_RESELECT_AFTER_SECONDS: int = 300
 OPTION_HISTORY_WARM_CACHE_SIZE: int = 5
 
 
-
 def _ensure_env_loaded_before_settings() -> None:
     """Load .env file before any settings are built.
 
@@ -92,16 +91,16 @@ def _ensure_env_loaded_before_settings() -> None:
                 load_dotenv(dotenv_path=str(env_path), override=False)
                 normalise_live_env_defaults()
                 enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
-                print(f"✅ [SETTINGS] Loaded .env from {env_path}", flush=True)
+                print(f"[SETTINGS] Loaded .env from {env_path}", flush=True)
                 print(f"   ENABLE_LIVE={enable_live}", flush=True)
                 return
         except Exception as e:
-            print(f"⚠️ [SETTINGS] Error loading {env_path}: {e}", flush=True)
+            print(f"[SETTINGS] Error loading {env_path}: {e}", flush=True)
             continue
 
     # Fallback
     load_dotenv(override=False)
-    print("⚠️ [SETTINGS] No .env found, using system environment", flush=True)
+    print("[SETTINGS] No .env found, using system environment", flush=True)
 
     normalise_live_env_defaults()
 
@@ -627,7 +626,9 @@ ORDER_TRUNCATE_TO_LOT = _env_bool("ORDER_TRUNCATE_TO_LOT", default=True)
 ORDER_ALLOW_NAKED_SHORTS = _env_bool("ORDER_ALLOW_NAKED_SHORTS", default=False)
 
 MIN_LOTS_PER_TRADE = _env_int("MIN_LOTS_PER_TRADE", default=1, minimum=1)
-MAX_LOTS_PER_TRADE = _env_int("MAX_LOTS_PER_TRADE", default=2, minimum=1)  # ✅ FIX #4: Was 1; risk settings used default=3. Aligned to 2 (conservative start)
+MAX_LOTS_PER_TRADE = _env_int(
+    "MAX_LOTS_PER_TRADE", default=2, minimum=1
+)  # ✅ FIX #4: Was 1; risk settings used default=3. Aligned to 2 (conservative start)
 RISK_FALLBACK_PRICE_MOVE_PCT = _env_float(
     "RISK_FALLBACK_PRICE_MOVE_PCT", default=2.0, minimum=0.0
 )
@@ -651,9 +652,7 @@ ADAPTIVE_RECALIBRATE_EVERY = _env_int(
 )
 MAX_KELLY_FRACTION = _env_float("MAX_KELLY_FRACTION", default=0.25, minimum=0.0)
 REGIME_FALLBACK_SCALE = _env_float("REGIME_FALLBACK_SCALE", default=0.5, minimum=0.0)
-ALLOW_AFTER_MARKET_STREAMING = _env_bool(
-    "ALLOW_AFTER_MARKET_STREAMING", default=True
-)
+ALLOW_AFTER_MARKET_STREAMING = _env_bool("ALLOW_AFTER_MARKET_STREAMING", default=True)
 MIN_REGIME_HISTORY = _env_int("MIN_REGIME_HISTORY", default=50, minimum=1)
 SIGNAL_WEIGHT_MOMENTUM = _env_float("SIGNAL_WEIGHT_MOMENTUM", default=1.0)
 SIGNAL_WEIGHT_VOL = _env_float("SIGNAL_WEIGHT_VOL", default=0.8)
@@ -738,7 +737,9 @@ class RiskSettings:
     trading_day_reset_hour_utc: int = 3
     breaker_auto_shadow: bool = True
     min_lots_per_trade: int = 1
-    max_lots_per_trade: int = 2  # Was 6 — disagrees with _build_risk_settings env default(3); set 2 for conservative live trading
+    max_lots_per_trade: int = (
+        2  # Was 6 — disagrees with _build_risk_settings env default(3); set 2 for conservative live trading
+    )
     atr_stop_multiple: float = 1.0
     contract_lot_size: int = 65  # NIFTY options lot size = 65 (current)
     allow_pyramiding: bool = False
@@ -1043,14 +1044,18 @@ def _build_elite_settings() -> EliteStrategiesSettings:
             enabled=_env_bool("ENABLE_TUESDAY_GAMMA_BUYER", default=True),
             min_confidence=_env_float("TUESDAY_GAMMA_MIN_CONFIDENCE", default=65.0),
             atr_multiplier=_env_float("TUESDAY_GAMMA_ATR_MULTIPLIER", default=1.2),
-            target_multiplier=_env_float("TUESDAY_GAMMA_TARGET_MULTIPLIER", default=1.8),
+            target_multiplier=_env_float(
+                "TUESDAY_GAMMA_TARGET_MULTIPLIER", default=1.8
+            ),
         )
 
         # 7. OI Max Pain (Unlocked)
         oi_cfg = OIMaxPainStrategyConfig(
             enabled=_env_bool("OI_MAX_PAIN_ENABLED", default=True),
             min_confidence=_env_float("OI_MIN_CONFIDENCE", default=40.0),
-            min_deviation_pct=_env_float("OI_MIN_DISTANCE_PCT", default=0.5),  # % distance from max pain (was 50.0 pts — wrong scale; never fired)
+            min_deviation_pct=_env_float(
+                "OI_MIN_DISTANCE_PCT", default=0.5
+            ),  # % distance from max pain (was 50.0 pts — wrong scale; never fired)
         )
 
         # 8. CPR Breakout (Unlocked)
@@ -1193,7 +1198,9 @@ def _build_risk_settings() -> RiskSettings:
             "RISK_LOSS_COOLDOWN_SEC", default=90.0, minimum=0.0
         )
     min_lots = _env_int("MIN_LOTS_PER_TRADE", default=1, minimum=1)
-    max_lots = _env_int("MAX_LOTS_PER_TRADE", default=2, minimum=1)  # Was 3 — now aligned with RiskSettings dataclass default
+    max_lots = _env_int(
+        "MAX_LOTS_PER_TRADE", default=2, minimum=1
+    )  # Was 3 — now aligned with RiskSettings dataclass default
     if max_lots < min_lots:
         max_lots = min_lots
     atr_multiple = _env_float("ATR_MULT", default=1.0, minimum=0.0)
@@ -1423,7 +1430,9 @@ def _build_option_universe_settings() -> OptionUniverseSettings:
         expiry_roll_hours=_env_float(
             "OPTION_UNIVERSE__EXPIRY_ROLL_HOURS", default=12.0, minimum=0.0
         ),
-        instrument_refresh=_env_bool("OPTION_UNIVERSE__INSTRUMENT_REFRESH", default=True),
+        instrument_refresh=_env_bool(
+            "OPTION_UNIVERSE__INSTRUMENT_REFRESH", default=True
+        ),
         refresh_interval_minutes=_env_int(
             "OPTION_UNIVERSE__REFRESH_INTERVAL_MINUTES", default=60, minimum=15
         ),
@@ -1456,8 +1465,12 @@ def _build_instrument_settings() -> InstrumentSettings:
                 resolve_env("SYNC_INSTRUMENTS_FILTER")
                 or "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY"
             ),
-            refresh_cron_enabled=_env_bool("INSTRUMENTS_REFRESH_CRON_ENABLED", default=True),
-            refresh_interval_hours=_env_float("INSTRUMENTS_REFRESH_INTERVAL_HOURS", default=24.0),
+            refresh_cron_enabled=_env_bool(
+                "INSTRUMENTS_REFRESH_CRON_ENABLED", default=True
+            ),
+            refresh_interval_hours=_env_float(
+                "INSTRUMENTS_REFRESH_INTERVAL_HOURS", default=24.0
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(

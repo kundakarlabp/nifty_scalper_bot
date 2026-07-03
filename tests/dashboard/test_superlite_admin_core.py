@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from starlette.requests import Request
 
 
@@ -15,7 +17,10 @@ def test_atomic_update_retains_unspecified_settings(tmp_path, monkeypatch) -> No
 
     values = core.read_env()
     assert values == {"FIRST": "one", "SECOND": "two", "DAILY": "new"}
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name == "nt":
+        assert path.exists()
+    else:
+        assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_same_origin_post_is_allowed() -> None:
