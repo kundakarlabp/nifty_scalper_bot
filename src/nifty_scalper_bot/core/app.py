@@ -66,6 +66,7 @@ from typing import (
     cast,
 )
 
+import pandas as pd
 import pytz
 from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
