@@ -34,40 +34,34 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
 
 def test_pytest_hook_runs_sync_body(pytester):
     pytester.makeconftest(_HOOK)
-    pytester.makepyfile(
-        test_sync_body="""
+    pytester.makepyfile(test_sync_body="""
         SENTINEL = False
 
         def test_sync_body_executes():
             global SENTINEL
             SENTINEL = True
             assert SENTINEL
-        """
-    )
-    result = pytester.runpytest("-q")
+        """)
+    result = pytester.runpytest("-o", "addopts=")
     result.assert_outcomes(passed=1)
 
 
 def test_pytest_hook_preserves_sync_assertion_failures(pytester):
     pytester.makeconftest(_HOOK)
-    pytester.makepyfile(
-        test_sync_failure="""
+    pytester.makepyfile(test_sync_failure="""
         def test_sync_failure_executes_and_fails():
             assert False, "sync body executed"
-        """
-    )
-    result = pytester.runpytest("-q")
+        """)
+    result = pytester.runpytest("-o", "addopts=")
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines(["*sync body executed*"])
 
 
 def test_pytest_hook_runs_async_body(pytester):
     pytester.makeconftest(_HOOK)
-    pytester.makepyfile(
-        test_async_body="""
+    pytester.makepyfile(test_async_body="""
         async def test_async_body_executes():
             assert True
-        """
-    )
-    result = pytester.runpytest("-q")
+        """)
+    result = pytester.runpytest("-o", "addopts=")
     result.assert_outcomes(passed=1)

@@ -6,7 +6,7 @@ import os
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,8 @@ from src.nifty_scalper_bot.backtesting.backtest_engine import (
 )
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
+
+_ORIGINAL_PATH_READ_TEXT = Path.read_text
 
 # Set default mock credentials for tests to prevent ConfigurationError during
 # Settings initialization.
@@ -35,6 +37,16 @@ def _isolate_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     own DATA_DIR still win: their monkeypatch runs after this fixture.
     """
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "state"))
+
+
+@pytest.fixture(autouse=True)
+def _default_path_read_text_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _read_text_utf8_default(self: Path, *args: Any, **kwargs: Any) -> str:
+        if not args and "encoding" not in kwargs:
+            kwargs["encoding"] = "utf-8"
+        return _ORIGINAL_PATH_READ_TEXT(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text_utf8_default)
 
 
 @pytest.fixture(autouse=True)
