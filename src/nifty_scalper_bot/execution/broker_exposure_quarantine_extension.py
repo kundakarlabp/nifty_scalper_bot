@@ -7,6 +7,7 @@ position/P&L accounting until cost basis is recovered.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from nifty_scalper_bot.execution import position_identity_extension as _position_identity
@@ -15,6 +16,7 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _PATCH_APPLIED = False
 _ORIGINALS: dict[str, Any] = {}
+_MANUAL_INTENTS = {"", "UNKNOWN", "BROKER_IMPORTED_ORDER", "MANUAL_ORDER_QUARANTINED"}
 
 
 def _canonical(symbol: object) -> str:
@@ -62,6 +64,44 @@ def _quarantined_exposure(row: dict[str, Any], reason: str) -> dict[str, Any]:
     return out
 
 
+def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
+    symbol = _canonical(getattr(order, "symbol", ""))
+    if not symbol:
+        return None
+    try:
+        qty = int(getattr(order, "filled_quantity", 0) or getattr(order, "quantity", 0) or 0)
+    except Exception:
+        qty = 0
+    try:
+        price = float(
+            getattr(order, "average_price", 0.0)
+            or getattr(order, "fill_price", 0.0)
+            or getattr(order, "price", 0.0)
+            or 0.0
+        )
+    except Exception:
+        price = 0.0
+    return {
+        "symbol": symbol,
+        "tradingsymbol": symbol,
+        "quantity": abs(qty),
+        "signed_quantity": qty,
+        "side": str(getattr(order, "side", "") or "").upper(),
+        "product": str(getattr(order, "product", "MIS") or "MIS").upper(),
+        "average_price": price,
+        "status": "MANUAL_ORDER_QUARANTINED",
+        "reason": "manual_order_quarantined",
+        "intent": intent,
+        "order_id": str(getattr(order, "order_id", "") or ""),
+        "managed_position": False,
+        "entry_accounting_allowed": False,
+        "realized_pnl_accounting_allowed": False,
+        "requires_history_recovery": True,
+        "created_at": time.time(),
+        "source": "broker_order_update",
+    }
+
+
 def _build_exposures(prepared: Any, unresolved: set[str]) -> dict[str, dict[str, Any]]:
     if not isinstance(prepared, list) or not unresolved:
         return {}
@@ -87,6 +127,8 @@ def apply_patches() -> None:
     _ORIGINALS["PositionManager.synchronize_with_broker"] = cls.synchronize_with_broker
     if hasattr(cls, "current_entry_protection_blocker"):
         _ORIGINALS["PositionManager.current_entry_protection_blocker"] = cls.current_entry_protection_blocker
+    if hasattr(cls, "_handle_filled_order"):
+        _ORIGINALS["PositionManager._handle_filled_order"] = cls._handle_filled_order
 
     def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
         _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
@@ -119,10 +161,23 @@ def apply_patches() -> None:
             return False
         return exposures.pop(_canonical(symbol), None) is not None
 
+    def _handle_filled_order(self: Any, order: Any) -> Any:
+        intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
+        result = _ORIGINALS["PositionManager._handle_filled_order"](self, order)
+        if intent in _MANUAL_INTENTS:
+            exposure = _manual_order_exposure(order, intent)
+            if exposure is not None:
+                exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
+                exposures[exposure["symbol"]] = exposure
+                self._quarantined_broker_exposures = exposures
+        return result
+
     cls.__init__ = __init__
     cls.synchronize_with_broker = synchronize_with_broker
     if "PositionManager.current_entry_protection_blocker" in _ORIGINALS:
         cls.current_entry_protection_blocker = current_entry_protection_blocker
+    if "PositionManager._handle_filled_order" in _ORIGINALS:
+        cls._handle_filled_order = _handle_filled_order
     cls.get_quarantined_broker_exposures = get_quarantined_broker_exposures
     cls.clear_quarantined_broker_exposure = clear_quarantined_broker_exposure
     cls._broker_exposure_quarantine_patch = True
@@ -131,4 +186,4 @@ def apply_patches() -> None:
 
 apply_patches()
 
-__all__ = ["apply_patches", "_build_exposures", "_quarantined_exposure"]
+__all__ = ["apply_patches", "_build_exposures", "_manual_order_exposure", "_quarantined_exposure"]
