@@ -24,15 +24,6 @@ _RELEASE_WATCHDOG = start_release_watchdog_thread(_RELEASE)
 # lifespan, health, admin and trading routes.
 from nifty_scalper_bot.main import app  # noqa: E402
 
-try:  # noqa: SIM105 - keep dashboard optional so release boot never fails on ops UI.
-    from nifty_scalper_bot.admin_ops_dashboard import router as _admin_ops_router  # noqa: E402
-
-    app.include_router(_admin_ops_router)
-except Exception as _admin_ops_exc:  # noqa: BLE001
-    import logging as _logging  # noqa: E402
-
-    _logging.getLogger(__name__).warning("admin ops dashboard not mounted: %s", _admin_ops_exc)
-
 app.state.release = _RELEASE.as_dict()
 app.state.release_watchdog_started = _RELEASE_WATCHDOG is not None
 
