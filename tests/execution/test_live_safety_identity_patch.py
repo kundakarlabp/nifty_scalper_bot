@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 import threading
 
@@ -130,7 +131,7 @@ def test_position_manager_does_not_double_quantity_on_alias_collision(tmp_path):
     # Simulate old persisted/runtime state that already had both aliases. The
     # canonicalizer must collapse aliases without summing quantity to 130.
     existing = manager.get_position("NFO:NIFTY2670724250PE")
-    duplicate = SimpleNamespace(**existing.to_dict())
+    duplicate = copy.copy(existing)
     duplicate.symbol = "NFO:NIFTY2670724250PE"
     duplicate.quantity = 65
     manager._positions["NIFTY2670724250PE"] = existing
