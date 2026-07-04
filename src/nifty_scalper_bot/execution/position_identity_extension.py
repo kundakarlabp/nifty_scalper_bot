@@ -10,6 +10,7 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _PATCH_APPLIED = False
 _ORIGINALS: dict[str, Any] = {}
+_SYMBOL_FIELDS = ("symbol", "tradingsymbol", "trading_symbol")
 
 
 def _canonical_key(symbol: object) -> str:
@@ -20,16 +21,46 @@ def _canonicalize_payload_symbol(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
     cloned = dict(payload)
-    for key in (
-        "symbol",
-        "tradingsymbol",
-        "trading_symbol",
-        "instrument",
-        "instrument_symbol",
-    ):
-        if cloned.get(key):
-            cloned[key] = _canonical_key(cloned[key])
+    for key in _SYMBOL_FIELDS:
+        value = cloned.get(key)
+        if isinstance(value, str) and value.strip():
+            cloned[key] = _canonical_key(value)
     return cloned
+
+
+def _canonicalize_broker_positions(broker_positions: Any) -> Any:
+    if broker_positions is None:
+        return None
+    if isinstance(broker_positions, dict):
+        return _canonicalize_payload_symbol(broker_positions)
+    try:
+        return [_canonicalize_payload_symbol(position) for position in broker_positions]
+    except TypeError:
+        return broker_positions
+
+
+def _canonicalize_position_store(manager: Any) -> None:
+    positions = getattr(manager, "_positions", None)
+    if not isinstance(positions, dict):
+        return
+    canonical: dict[str, Any] = {}
+    for raw_key, position in list(positions.items()):
+        key = _canonical_key(getattr(position, "symbol", raw_key))
+        if not key:
+            key = str(raw_key).strip().upper()
+        with suppress(Exception):
+            position.symbol = key
+        existing = canonical.get(key)
+        if existing is None:
+            canonical[key] = position
+            continue
+        with suppress(Exception):
+            if abs(int(getattr(position, "quantity", 0) or 0)) > abs(
+                int(getattr(existing, "quantity", 0) or 0)
+            ):
+                canonical[key] = position
+    positions.clear()
+    positions.update(canonical)
 
 
 def apply_patches() -> None:
@@ -72,37 +103,25 @@ def apply_patches() -> None:
             **kwargs,
         )
 
-    def get_pending_orders(self: Any, symbol: str | None = None) -> Any:
+    def get_pending_orders(
+        self: Any,
+        symbol: str | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         return _ORIGINALS["PositionManager.get_pending_orders"](
             self,
             _canonical_key(symbol) if symbol else None,
+            *args,
+            **kwargs,
         )
 
     def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
-        canonical_positions = None
-        if broker_positions is not None:
-            with suppress(TypeError):
-                canonical_positions = [
-                    _canonicalize_payload_symbol(position)
-                    for position in broker_positions
-                ]
-        if canonical_positions is None:
-            canonical_positions = broker_positions
         result = _ORIGINALS["PositionManager.synchronize_with_broker"](
             self,
-            canonical_positions,
+            _canonicalize_broker_positions(broker_positions),
         )
-        positions = getattr(self, "_positions", None)
-        if isinstance(positions, dict):
-            canonical: dict[str, Any] = {}
-            for raw_key, position in list(positions.items()):
-                key = _canonical_key(getattr(position, "symbol", raw_key))
-                if key:
-                    with suppress(Exception):
-                        position.symbol = key
-                    canonical[key] = position
-            positions.clear()
-            positions.update(canonical)
+        _canonicalize_position_store(self)
         return result
 
     def apply_broker_order_update(
