@@ -72,6 +72,43 @@ def _prepared_row_symbol(row: Any) -> str:
     return _canonical_key(row.get("symbol") or row.get("tradingsymbol"))
 
 
+def _build_quarantined_exposure(row: dict[str, Any], reason: str) -> dict[str, Any]:
+    symbol = _prepared_row_symbol(row)
+    qty = _net_quantity(row)
+    side = "LONG" if qty > 0 else "SHORT" if qty < 0 else "FLAT"
+    exposure = dict(row)
+    exposure.update(
+        {
+            "symbol": symbol,
+            "tradingsymbol": symbol,
+            "quantity": abs(qty),
+            "signed_quantity": qty,
+            "side": side,
+            "status": "BROKER_POSITION_QUARANTINED",
+            "reason": reason,
+            "cost_basis_unresolved": True,
+            "managed_position": False,
+            "entry_accounting_allowed": False,
+            "pnl_accounting_allowed": False,
+            "requires_history_recovery": True,
+        }
+    )
+    return exposure
+
+
+def _build_quarantined_exposures(prepared: Any, unresolved: set[str]) -> dict[str, dict[str, Any]]:
+    if not isinstance(prepared, list) or not unresolved:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in prepared:
+        if not isinstance(row, dict):
+            continue
+        symbol = _prepared_row_symbol(row)
+        if symbol in unresolved:
+            out[symbol] = _build_quarantined_exposure(row, "cost_basis_unresolved")
+    return out
+
+
 def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any, set[str]]:
     canonicalized = _canonicalize_broker_positions(broker_positions)
     if not isinstance(canonicalized, list):
@@ -165,6 +202,7 @@ def apply_patches() -> None:
         self._single_reconcile_generation = 0
         self._single_reconcile_coalesced = 0
         self._cost_basis_unresolved_symbols = set()
+        self._quarantined_broker_exposures: dict[str, dict[str, Any]] = {}
 
     def _symbol_lifecycle_lock_for(self: Any, symbol: str) -> Any:
         return _ORIGINALS["PositionManager._symbol_lifecycle_lock_for"](
@@ -217,6 +255,7 @@ def apply_patches() -> None:
     def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
+        self._quarantined_broker_exposures = _build_quarantined_exposures(prepared, unresolved)
         if unresolved and isinstance(prepared, list):
             prepared = [row for row in prepared if _prepared_row_symbol(row) not in unresolved]
         result = _ORIGINALS["PositionManager.synchronize_with_broker"](
@@ -245,6 +284,25 @@ def apply_patches() -> None:
         if callable(original):
             return original(self, _canonical_key(symbol) if symbol else None)
         return None
+
+    def get_quarantined_broker_exposures(self: Any, symbol: str | None = None) -> dict[str, dict[str, Any]] | list[dict[str, Any]]:
+        exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
+        if symbol is None:
+            return {key: dict(value) for key, value in exposures.items()}
+        key = _canonical_key(symbol)
+        exposure = exposures.get(key)
+        return [dict(exposure)] if exposure is not None else []
+
+    def clear_quarantined_broker_exposure(self: Any, symbol: str) -> bool:
+        exposures = getattr(self, "_quarantined_broker_exposures", {})
+        if not isinstance(exposures, dict):
+            return False
+        key = _canonical_key(symbol)
+        removed = exposures.pop(key, None) is not None
+        unresolved = getattr(self, "_cost_basis_unresolved_symbols", set())
+        if isinstance(unresolved, set):
+            unresolved.discard(key)
+        return removed
 
     def _handle_filled_order(self: Any, order: Any) -> Any:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
@@ -286,10 +344,17 @@ def apply_patches() -> None:
         cls.current_entry_protection_blocker = current_entry_protection_blocker
     if "PositionManager._handle_filled_order" in _ORIGINALS:
         cls._handle_filled_order = _handle_filled_order
+    cls.get_quarantined_broker_exposures = get_quarantined_broker_exposures
+    cls.clear_quarantined_broker_exposure = clear_quarantined_broker_exposure
     cls._canonical_position_ingress_patch = True
     _PATCH_APPLIED = True
 
 
 apply_patches()
 
-__all__ = ["apply_patches"]
+__all__ = [
+    "apply_patches",
+    "_build_quarantined_exposure",
+    "_build_quarantined_exposures",
+    "_prepare_broker_positions",
+]
