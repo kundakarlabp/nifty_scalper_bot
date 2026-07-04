@@ -20,6 +20,9 @@ from nifty_scalper_bot.execution.order_manager import (
     OrderManager,
     RuntimeOrderManager,
 )
+from nifty_scalper_bot.execution.live_safety_identity import apply_patches as _apply_live_safety_identity_patches
+
+_apply_live_safety_identity_patches()
 
 CanonicalBracketManager = BracketManager
 
