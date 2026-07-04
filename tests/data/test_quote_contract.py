@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib
+
+importlib.import_module("nifty_scalper_bot.data.quote_identity_extension")
 from nifty_scalper_bot.data.data_hub import DataHub
 
 
