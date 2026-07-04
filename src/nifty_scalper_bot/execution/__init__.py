@@ -22,9 +22,11 @@ from nifty_scalper_bot.execution.order_manager import (
 )
 from nifty_scalper_bot.execution.live_safety_identity import apply_patches as _apply_live_safety_identity_patches
 from nifty_scalper_bot.execution.position_identity_extension import apply_patches as _apply_position_identity_extension_patches
+import nifty_scalper_bot.execution.bracket_ownership_extension as _bracket_ownership_extension
 
 _apply_live_safety_identity_patches()
 _apply_position_identity_extension_patches()
+_bracket_ownership_extension.apply_patches()
 
 CanonicalBracketManager = BracketManager
 
