@@ -80,7 +80,10 @@ def test_unresolved_broker_cost_basis_blocks_entries_without_sync_exception(tmp_
     )
 
     assert manager.get_position(SYMBOL) is None
-    assert manager.current_entry_protection_blocker(SYMBOL) == "cost_basis_unresolved"
+    assert manager.current_entry_protection_blocker(SYMBOL) == "broker_exposure_quarantined"
+    exposures = manager.get_quarantined_broker_exposures()
+    assert exposures[SYMBOL]["reason"] == "cost_basis_unresolved"
+    assert exposures[SYMBOL]["status"] == "BROKER_POSITION_QUARANTINED"
     prepared, unresolved = identity_ext._prepare_broker_positions(
         manager,
         [
