@@ -15,12 +15,6 @@ from nifty_scalper_bot.data.instrument_loader import (
     write_instrument_rows_to_csv,
 )
 
-# Import for side effect: DataHub quotes are stamped with canonical symbol,
-# token, update-version and tick-age metadata before execution can consume them.
-from nifty_scalper_bot.data import quote_identity_extension as _quote_identity_extension
-
-_quote_identity_extension.apply_patches()
-
 __all__ = [
     "Instrument",
     "InstrumentResolver",
