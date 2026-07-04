@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 from typing import Any
 
+from nifty_scalper_bot.execution import live_safety_identity as _live_safety_identity
 from nifty_scalper_bot.execution import position_manager as _position_manager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -63,6 +64,16 @@ def _canonicalize_position_store(manager: Any) -> None:
     positions.update(canonical)
 
 
+def _restore_persistent_state_methods(cls: Any) -> None:
+    """Undo broad restore/save canonicalization while retaining live ingress guards."""
+
+    live_originals = getattr(_live_safety_identity, "_ORIGINALS", {})
+    for name in ("__init__", "save_state"):
+        original = live_originals.get(f"PositionManager.{name}")
+        if callable(original):
+            setattr(cls, name, original)
+
+
 def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
@@ -71,6 +82,8 @@ def apply_patches() -> None:
     if cls is None or getattr(cls, "_canonical_position_ingress_patch", False):
         _PATCH_APPLIED = True
         return
+
+    _restore_persistent_state_methods(cls)
 
     for name in (
         "_symbol_lifecycle_lock_for",
