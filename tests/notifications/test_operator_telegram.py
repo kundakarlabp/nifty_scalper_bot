@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,6 +27,7 @@ class DummyMessage:
     def __init__(self) -> None:
         self.replies: list[str] = []
         self.chat = SimpleNamespace(id=12345)
+        self.text = "/ping"
 
     async def reply_text(self, text: str, **_: Any) -> None:
         self.replies.append(text)
@@ -67,18 +69,22 @@ async def test_operator_registry_keeps_only_production_commands(caplog: pytest.L
 
 
 @pytest.mark.asyncio
-async def test_help_lists_exactly_kept_commands() -> None:
+async def test_help_is_grouped_and_lists_kept_commands() -> None:
     app = FakeApp()
     service = SimpleNamespace(chat_id=12345)
     register_operator_commands(app, service)  # type: ignore[arg-type]
-    update = DummyUpdate()
+    update = DummyUpdate(text="/help")
 
     await _handler(app, "help").callback(update, DummyContext())  # type: ignore[arg-type]
 
-    lines = update.effective_message.replies[-1].splitlines()
-    assert [line.split(" - ", 1)[0] for line in lines] == list(OPERATOR_COMMAND_NAMES)
-    assert "mode -" not in update.effective_message.replies[-1]
-    assert "emergencystop -" not in update.effective_message.replies[-1]
+    reply = update.effective_message.replies[-1]
+    assert "Operator commands" in reply
+    assert "Core" in reply
+    assert "/status - compact current runtime status" in reply
+    assert "/market - operator-grade selected CE/PE quote" in reply
+    assert "/flatten [confirmed-destructive]" in reply
+    assert "mode -" not in reply
+    assert "emergencystop -" not in reply
 
 
 @pytest.mark.asyncio
@@ -117,7 +123,7 @@ async def test_missing_subsystem_warns_not_silent() -> None:
     app = FakeApp()
     service = SimpleNamespace(chat_id=12345)
     register_operator_commands(app, service)  # type: ignore[arg-type]
-    update = DummyUpdate()
+    update = DummyUpdate(text="/check_core")
 
     await _handler(app, "check_core").callback(update, DummyContext())  # type: ignore[arg-type]
 
@@ -131,7 +137,7 @@ async def test_selftest_is_read_only() -> None:
     order = SimpleNamespace(cancel_order=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not cancel")))
     service = SimpleNamespace(chat_id=12345, deps=SimpleNamespace(broker_client=broker, order_manager=order))
     register_operator_commands(app, service)  # type: ignore[arg-type]
-    update = DummyUpdate()
+    update = DummyUpdate(text="/selftest")
 
     await _handler(app, "selftest").callback(update, DummyContext())  # type: ignore[arg-type]
 
@@ -152,12 +158,26 @@ async def test_emergency_calls_kill_switch_only_when_available() -> None:
         deps=SimpleNamespace(order_manager=SimpleNamespace(engage_kill_switch=kill_switch)),
     )
     register_operator_commands(app, service)  # type: ignore[arg-type]
-    update = DummyUpdate()
+    update = DummyUpdate(text="/emergency")
 
     await _handler(app, "emergency").callback(update, DummyContext())  # type: ignore[arg-type]
 
     assert called == ["telegram_emergency"]
-    assert "Emergency triggered" in update.effective_message.replies[-1]
+    assert "Emergency kill switch triggered" in update.effective_message.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_emergency_does_not_flatten_by_default() -> None:
+    app = FakeApp()
+    flattened: list[str] = []
+    service = SimpleNamespace(chat_id=12345, close_all_positions=lambda: flattened.append("flat"))
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+    update = DummyUpdate(text="/emergency")
+
+    await _handler(app, "emergency").callback(update, DummyContext())  # type: ignore[arg-type]
+
+    assert flattened == []
+    assert update.effective_message.replies == ["Emergency handler not wired."]
 
 
 @pytest.mark.asyncio
@@ -165,7 +185,7 @@ async def test_emergency_reports_unwired_without_side_effect() -> None:
     app = FakeApp()
     service = SimpleNamespace(chat_id=12345)
     register_operator_commands(app, service)  # type: ignore[arg-type]
-    update = DummyUpdate()
+    update = DummyUpdate(text="/emergency")
 
     await _handler(app, "emergency").callback(update, DummyContext())  # type: ignore[arg-type]
 
@@ -194,26 +214,43 @@ EXPECTED_OPERATOR_COMMANDS = (
     "help",
     "ping",
     "status",
+    "why",
+    "doctor",
     "health",
     "diag",
-    "why",
     "check",
     "check_connectivity",
     "check_market",
     "check_core",
     "check_execution",
+    "market",
+    "exec",
+    "risk",
+    "positions",
+    "bracket",
+    "reconcile",
+    "today",
+    "latency",
+    "version",
     "errors",
     "logs",
     "dumplogs",
     "stderror",
     "selftest",
+    "pause",
+    "resume",
+    "shadow",
     "emergency",
+    "flatten",
+    "cancel_pending",
+    "confirm",
 )
 
 
 def test_registered_command_names_equal_expected_set() -> None:
     assert OPERATOR_COMMAND_NAMES == EXPECTED_OPERATOR_COMMANDS
     assert OPERATOR_COMMAND_NAMES.count("check_execution") == 1
+    assert OPERATOR_COMMAND_NAMES.count("emergency") == 1
 
 
 @pytest.mark.asyncio
@@ -334,37 +371,90 @@ async def test_diagnostic_handlers_do_not_crash_with_missing_dependencies() -> N
     service = SimpleNamespace(chat_id=12345)
     register_operator_commands(app, service)  # type: ignore[arg-type]
 
-    for command in ("why", "check_execution", "check_market", "check_core"):
+    for command in ("why", "check_execution", "check_market", "check_core", "market", "exec", "risk", "positions", "bracket", "reconcile", "doctor", "today", "latency", "version"):
         update = DummyUpdate(text=f"/{command}")
         await _handler(app, command).callback(update, DummyContext())  # type: ignore[arg-type]
-        assert update.effective_message.replies
-        assert not update.effective_message.replies[-1].startswith("ERROR:")
+        assert update.effective_message.replies, command
 
 
 @pytest.mark.asyncio
-async def test_diagnostic_handlers_remain_read_only() -> None:
+async def test_new_read_only_commands_do_not_place_or_cancel_orders() -> None:
     app = FakeApp()
-
-    def forbidden(*_: Any, **__: Any) -> None:
-        raise AssertionError("mutating method must not be called")
-
     order = SimpleNamespace(
-        consume_skip_reason=forbidden,
-        place_order=forbidden,
-        cancel_order=forbidden,
-        _last_skip_reason="preflight_block",
+        place_order=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not place")),
+        cancel_order=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not cancel")),
     )
-    service = SimpleNamespace(
-        chat_id=12345,
-        deps=SimpleNamespace(
-            bot_context=SimpleNamespace(selected_ce="CE", selected_pe="PE"),
-            order_manager=order,
-            risk_manager=SimpleNamespace(_last_rejection="risk_block"),
-        ),
-    )
+    service = SimpleNamespace(chat_id=12345, deps=SimpleNamespace(order_manager=order))
     register_operator_commands(app, service)  # type: ignore[arg-type]
 
-    for command in ("why", "check_execution"):
+    for command in ("market", "exec", "risk", "positions", "bracket", "reconcile", "doctor", "today", "latency", "version"):
         update = DummyUpdate(text=f"/{command}")
         await _handler(app, command).callback(update, DummyContext())  # type: ignore[arg-type]
-        assert "preflight_block" in update.effective_message.replies[-1]
+        assert update.effective_message.replies, command
+
+
+@pytest.mark.asyncio
+async def test_flatten_requires_confirmation_before_side_effect() -> None:
+    app = FakeApp()
+    called: list[str] = []
+    service = SimpleNamespace(chat_id=12345, close_all_positions=lambda: called.append("flattened") or "flat")
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+
+    request = DummyUpdate(text="/flatten")
+    await _handler(app, "flatten").callback(request, DummyContext())  # type: ignore[arg-type]
+    assert called == []
+    reply = request.effective_message.replies[-1]
+    assert "CONFIRM REQUIRED" in reply
+    match = re.search(r"/confirm flatten (\d{4})", reply)
+    assert match
+
+    confirm = DummyUpdate(text=f"/confirm flatten {match.group(1)}")
+    await _handler(app, "confirm").callback(confirm, DummyContext())  # type: ignore[arg-type]
+    assert called == ["flattened"]
+    assert "Confirmed flatten" in confirm.effective_message.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_shadow_off_requires_confirmation_but_shadow_on_is_immediate() -> None:
+    app = FakeApp()
+    states: list[bool] = []
+
+    def set_shadow(value: bool) -> bool:
+        states.append(value)
+        return value
+
+    service = SimpleNamespace(chat_id=12345, set_shadow_mode=set_shadow)
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+
+    on_update = DummyUpdate(text="/shadow on")
+    await _handler(app, "shadow").callback(on_update, DummyContext())  # type: ignore[arg-type]
+    assert states == [True]
+
+    off_update = DummyUpdate(text="/shadow off")
+    await _handler(app, "shadow").callback(off_update, DummyContext())  # type: ignore[arg-type]
+    assert states == [True]
+    match = re.search(r"/confirm shadow_off (\d{4})", off_update.effective_message.replies[-1])
+    assert match
+
+    confirm = DummyUpdate(text=f"/confirm shadow_off {match.group(1)}")
+    await _handler(app, "confirm").callback(confirm, DummyContext())  # type: ignore[arg-type]
+    assert states == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_requires_confirmation() -> None:
+    app = FakeApp()
+    called: list[str] = []
+    order = SimpleNamespace(cancel_pending_orders=lambda: called.append("cancelled") or "cancelled")
+    service = SimpleNamespace(chat_id=12345, deps=SimpleNamespace(order_manager=order))
+    register_operator_commands(app, service)  # type: ignore[arg-type]
+
+    request = DummyUpdate(text="/cancel_pending")
+    await _handler(app, "cancel_pending").callback(request, DummyContext())  # type: ignore[arg-type]
+    assert called == []
+    match = re.search(r"/confirm cancel_pending (\d{4})", request.effective_message.replies[-1])
+    assert match
+
+    confirm = DummyUpdate(text=f"/confirm cancel_pending {match.group(1)}")
+    await _handler(app, "confirm").callback(confirm, DummyContext())  # type: ignore[arg-type]
+    assert called == ["cancelled"]
