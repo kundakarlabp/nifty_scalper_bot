@@ -45,7 +45,19 @@ jobs:
       - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q -x --tb=short
+        run: |
+          set +e
+          python -m pytest -q -x --tb=short > pytest-full.log 2>&1
+          status=$?
+          cat pytest-full.log
+          exit $status
+      - name: Upload pytest diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-full-log
+          path: pytest-full.log
+          if-no-files-found: ignore
       - name: Verify committed tree unchanged
         run: git diff --exit-code
       - name: Package validated candidate
