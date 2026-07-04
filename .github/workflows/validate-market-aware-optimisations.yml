@@ -45,7 +45,7 @@ jobs:
       - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q
+        run: python -m pytest -q -x --tb=short
       - name: Verify committed tree unchanged
         run: git diff --exit-code
       - name: Package validated candidate
