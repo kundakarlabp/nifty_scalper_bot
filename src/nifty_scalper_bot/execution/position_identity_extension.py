@@ -19,6 +19,7 @@ _ORIGINALS: dict[str, Any] = {}
 _SYMBOL_FIELDS = ("symbol", "tradingsymbol", "trading_symbol")
 _AVG_PRICE_FIELDS = ("average_price", "avg_price", "buy_price", "price")
 _QTY_FIELDS = ("quantity", "net_qty", "net_quantity", "netQuantity", "net")
+_QUARANTINE_INTENTS = {"", "UNKNOWN", "BROKER_IMPORTED_ORDER", "MANUAL_ORDER_QUARANTINED"}
 
 
 def _canonical_key(symbol: object) -> str:
@@ -63,6 +64,12 @@ def _net_quantity(payload: dict[str, Any]) -> int:
         with suppress(Exception):
             return int(float(payload.get(key) or 0))
     return 0
+
+
+def _prepared_row_symbol(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return _canonical_key(row.get("symbol") or row.get("tradingsymbol"))
 
 
 def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any, set[str]]:
@@ -147,6 +154,7 @@ def apply_patches() -> None:
         "synchronize_with_broker",
         "apply_broker_order_update",
         "current_entry_protection_blocker",
+        "_handle_filled_order",
     ):
         if hasattr(cls, name):
             _ORIGINALS[f"PositionManager.{name}"] = getattr(cls, name)
@@ -209,8 +217,8 @@ def apply_patches() -> None:
     def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
-        if unresolved:
-            raise ValueError("cost_basis_unresolved")
+        if unresolved and isinstance(prepared, list):
+            prepared = [row for row in prepared if _prepared_row_symbol(row) not in unresolved]
         result = _ORIGINALS["PositionManager.synchronize_with_broker"](
             self,
             prepared,
@@ -238,6 +246,28 @@ def apply_patches() -> None:
             return original(self, _canonical_key(symbol) if symbol else None)
         return None
 
+    def _handle_filled_order(self: Any, order: Any) -> Any:
+        intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
+        if intent in _QUARANTINE_INTENTS:
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "warning", None)
+            if callable(log):
+                log(
+                    "MANUAL_ORDER_QUARANTINED order_id=%s symbol=%s side=%s",
+                    getattr(order, "order_id", None),
+                    getattr(order, "symbol", None),
+                    getattr(order, "side", None),
+                    extra={
+                        "event": "MANUAL_ORDER_QUARANTINED",
+                        "order_id": getattr(order, "order_id", None),
+                        "symbol": getattr(order, "symbol", None),
+                        "side": getattr(order, "side", None),
+                        "intent": intent,
+                    },
+                )
+            return _position_manager.FillApplicationResult(reason="manual_order_quarantined")
+        return _ORIGINALS["PositionManager._handle_filled_order"](self, order)
+
     if "PositionManager.__init__" in _ORIGINALS:
         cls.__init__ = __init__
     if "PositionManager._symbol_lifecycle_lock_for" in _ORIGINALS:
@@ -254,6 +284,8 @@ def apply_patches() -> None:
         cls.apply_broker_order_update = apply_broker_order_update
     if "PositionManager.current_entry_protection_blocker" in _ORIGINALS:
         cls.current_entry_protection_blocker = current_entry_protection_blocker
+    if "PositionManager._handle_filled_order" in _ORIGINALS:
+        cls._handle_filled_order = _handle_filled_order
     cls._canonical_position_ingress_patch = True
     _PATCH_APPLIED = True
 
