@@ -7,6 +7,7 @@ by the loaded runtime guards in this module.
 from __future__ import annotations
 
 from contextlib import suppress
+import threading
 from typing import Any
 
 from nifty_scalper_bot.execution import live_safety_identity as _live_safety_identity
@@ -135,7 +136,9 @@ def apply_patches() -> None:
     _restore_persistent_state_methods(cls)
 
     for name in (
+        "__init__",
         "_symbol_lifecycle_lock_for",
+        "reconcile_now",
         "add_pending_order",
         "get_pending_orders",
         "synchronize_with_broker",
@@ -145,11 +148,32 @@ def apply_patches() -> None:
         if hasattr(cls, name):
             _ORIGINALS[f"PositionManager.{name}"] = getattr(cls, name)
 
+    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+        _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
+        self._single_reconcile_lock = threading.Lock()
+        self._single_reconcile_generation = 0
+        self._single_reconcile_coalesced = 0
+        self._cost_basis_unresolved_symbols = set()
+
     def _symbol_lifecycle_lock_for(self: Any, symbol: str) -> Any:
         return _ORIGINALS["PositionManager._symbol_lifecycle_lock_for"](
             self,
             _canonical_key(symbol),
         )
+
+    def reconcile_now(self: Any) -> bool:
+        lock = getattr(self, "_single_reconcile_lock", None)
+        if lock is None:
+            self._single_reconcile_lock = threading.Lock()
+            lock = self._single_reconcile_lock
+        if not lock.acquire(False):
+            self._single_reconcile_coalesced = int(getattr(self, "_single_reconcile_coalesced", 0)) + 1
+            return bool(getattr(self, "_last_reconcile_success_at", None))
+        try:
+            self._single_reconcile_generation = int(getattr(self, "_single_reconcile_generation", 0)) + 1
+            return bool(_ORIGINALS["PositionManager.reconcile_now"](self))
+        finally:
+            lock.release()
 
     def add_pending_order(
         self: Any,
@@ -211,8 +235,12 @@ def apply_patches() -> None:
             return original(self, _canonical_key(symbol) if symbol else None)
         return None
 
+    if "PositionManager.__init__" in _ORIGINALS:
+        cls.__init__ = __init__
     if "PositionManager._symbol_lifecycle_lock_for" in _ORIGINALS:
         cls._symbol_lifecycle_lock_for = _symbol_lifecycle_lock_for
+    if "PositionManager.reconcile_now" in _ORIGINALS:
+        cls.reconcile_now = reconcile_now
     if "PositionManager.add_pending_order" in _ORIGINALS:
         cls.add_pending_order = add_pending_order
     if "PositionManager.get_pending_orders" in _ORIGINALS:
