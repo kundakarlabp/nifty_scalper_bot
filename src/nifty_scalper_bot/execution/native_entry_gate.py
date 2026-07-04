@@ -8,11 +8,42 @@ from typing import Any, Mapping
 
 
 NO_BLOCK = object()
+_PROTECTIVE_INTENTS = {"EXIT", "REDUCE"}
+_LEGACY_PROTECTIVE_TAG_PREFIXES = (
+    "EXIT_",
+    "SL_",
+    "TP_",
+    "EOD_",
+    "PANIC",
+    "FLATTEN",
+    "SQUAREOFF",
+)
 
 
 def configure_provider(manager: Any, provider: Any | None) -> None:
     manager._unresolved_exit_provider = provider
     manager._unresolved_exit_guard_installed = provider is not None
+
+
+def _bound_place_order_values(
+    base_place_order: Any,
+    manager: Any,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        bound = inspect.signature(base_place_order).bind_partial(
+            manager,
+            *args,
+            **dict(kwargs),
+        )
+        return {
+            key: value
+            for key, value in bound.arguments.items()
+            if key != "self"
+        }
+    except Exception:
+        return dict(kwargs)
 
 
 def _protective_place_order(
@@ -21,25 +52,27 @@ def _protective_place_order(
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
 ) -> bool:
-    try:
-        bound = inspect.signature(base_place_order).bind_partial(
-            manager,
-            *args,
-            **dict(kwargs),
-        )
-        values = {
-            key: value
-            for key, value in bound.arguments.items()
-            if key != "self"
-        }
-    except Exception:
-        values = dict(kwargs)
+    values = _bound_place_order_values(base_place_order, manager, args, kwargs)
+    intent = str(values.get("intent") or "").strip().upper()
+    if intent in _PROTECTIVE_INTENTS:
+        return True
+
+    # Explicit legacy flags are retained for compatibility with older restored
+    # runtime objects. Tag text is diagnostic only; it is no longer sufficient to
+    # prove protective status in live mode.
     if bool(values.get("reduce_only")) or bool(values.get("is_exit")):
         return True
+
+    live_checker = getattr(manager, "is_live_mode", None)
+    live_mode = False
+    if callable(live_checker):
+        with suppress(Exception):
+            live_mode = bool(live_checker())
+    if live_mode:
+        return False
+
     tag = str(values.get("tag") or "").strip().upper()
-    return tag.startswith(
-        ("EXIT_", "SL_", "TP_", "EOD_", "PANIC", "FLATTEN", "SQUAREOFF")
-    )
+    return tag.startswith(_LEGACY_PROTECTIVE_TAG_PREFIXES)
 
 
 def unresolved_details(manager: Any) -> dict[str, Any] | None:
