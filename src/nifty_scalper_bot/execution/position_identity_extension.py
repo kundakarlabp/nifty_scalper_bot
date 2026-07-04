@@ -1,17 +1,13 @@
 """Canonical PositionManager ingress patch for broker and pending-order paths.
 
-Runtime role:
-- Canonicalizes live broker/pending-order ingress.
-- Coalesces concurrent reconciliation requests.
-- Keeps unresolved broker exposures visible as quarantine records instead of
-  turning anonymous/LTP-priced broker state into managed positions.
+Follow-up scope: broker reconciliation ownership and orphan protection are handled
+by the loaded runtime guards in this module.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
 import threading
-import time
 from typing import Any
 
 from nifty_scalper_bot.execution import live_safety_identity as _live_safety_identity
@@ -98,65 +94,10 @@ def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any,
             existing_entry = float(getattr(existing, "entry_price", 0.0) or 0.0) if existing else 0.0
             if existing_entry > 0.0:
                 cloned["average_price"] = existing_entry
-                cloned["cost_basis_source"] = "existing_local_position"
             else:
-                cloned["cost_basis_unresolved"] = True
                 unresolved.add(symbol)
         prepared.append(cloned)
     return prepared, unresolved
-
-
-def _quarantine_record(row: dict[str, Any], reason: str) -> dict[str, Any]:
-    symbol = _prepared_row_symbol(row)
-    qty = _net_quantity(row)
-    return {
-        "symbol": symbol,
-        "tradingsymbol": symbol,
-        "quantity": qty,
-        "side": "LONG" if qty > 0 else "SHORT" if qty < 0 else "FLAT",
-        "product": str(row.get("product") or "MIS").upper(),
-        "average_price": _positive_float(row, _AVG_PRICE_FIELDS),
-        "last_price": _positive_float(row, ("last_price", "ltp", "close")),
-        "reason": reason,
-        "status": "BROKER_POSITION_QUARANTINED",
-        "cost_basis_unresolved": reason == "cost_basis_unresolved",
-        "created_at": time.time(),
-        "source": "broker_sync",
-    }
-
-
-def _set_quarantined_exposures(manager: Any, prepared: Any, unresolved: set[str]) -> None:
-    records: dict[str, dict[str, Any]] = {}
-    if isinstance(prepared, list):
-        for row in prepared:
-            if not isinstance(row, dict):
-                continue
-            symbol = _prepared_row_symbol(row)
-            if symbol in unresolved:
-                records[symbol] = _quarantine_record(row, "cost_basis_unresolved")
-    manager._quarantined_broker_exposures = records
-
-
-def _record_manual_order_quarantine(manager: Any, order: Any, intent: str) -> None:
-    symbol = _canonical_key(getattr(order, "symbol", ""))
-    if not symbol:
-        return
-    records = dict(getattr(manager, "_quarantined_broker_exposures", {}) or {})
-    records[symbol] = {
-        "symbol": symbol,
-        "tradingsymbol": symbol,
-        "quantity": int(getattr(order, "filled_quantity", 0) or getattr(order, "quantity", 0) or 0),
-        "side": str(getattr(order, "side", "") or "").upper(),
-        "product": str(getattr(order, "product", "MIS") or "MIS").upper(),
-        "average_price": float(getattr(order, "average_price", 0.0) or getattr(order, "price", 0.0) or 0.0),
-        "reason": "manual_order_quarantined",
-        "status": "MANUAL_ORDER_QUARANTINED",
-        "intent": intent,
-        "order_id": str(getattr(order, "order_id", "") or ""),
-        "created_at": time.time(),
-        "source": "broker_order_update",
-    }
-    manager._quarantined_broker_exposures = records
 
 
 def _canonicalize_position_store(manager: Any) -> None:
@@ -224,7 +165,6 @@ def apply_patches() -> None:
         self._single_reconcile_generation = 0
         self._single_reconcile_coalesced = 0
         self._cost_basis_unresolved_symbols = set()
-        self._quarantined_broker_exposures: dict[str, dict[str, Any]] = {}
 
     def _symbol_lifecycle_lock_for(self: Any, symbol: str) -> Any:
         return _ORIGINALS["PositionManager._symbol_lifecycle_lock_for"](
@@ -277,7 +217,6 @@ def apply_patches() -> None:
     def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
-        _set_quarantined_exposures(self, prepared, unresolved)
         if unresolved and isinstance(prepared, list):
             prepared = [row for row in prepared if _prepared_row_symbol(row) not in unresolved]
         result = _ORIGINALS["PositionManager.synchronize_with_broker"](
@@ -310,7 +249,6 @@ def apply_patches() -> None:
     def _handle_filled_order(self: Any, order: Any) -> Any:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
         if intent in _QUARANTINE_INTENTS:
-            _record_manual_order_quarantine(self, order, intent)
             logger = getattr(self, "_logger", None)
             log = getattr(logger, "warning", None)
             if callable(log):
@@ -330,9 +268,6 @@ def apply_patches() -> None:
             return _position_manager.FillApplicationResult(reason="manual_order_quarantined")
         return _ORIGINALS["PositionManager._handle_filled_order"](self, order)
 
-    def get_quarantined_broker_exposures(self: Any) -> list[dict[str, Any]]:
-        return [dict(record) for record in dict(getattr(self, "_quarantined_broker_exposures", {}) or {}).values()]
-
     if "PositionManager.__init__" in _ORIGINALS:
         cls.__init__ = __init__
     if "PositionManager._symbol_lifecycle_lock_for" in _ORIGINALS:
@@ -351,7 +286,6 @@ def apply_patches() -> None:
         cls.current_entry_protection_blocker = current_entry_protection_blocker
     if "PositionManager._handle_filled_order" in _ORIGINALS:
         cls._handle_filled_order = _handle_filled_order
-    cls.get_quarantined_broker_exposures = get_quarantined_broker_exposures
     cls._canonical_position_ingress_patch = True
     _PATCH_APPLIED = True
 
