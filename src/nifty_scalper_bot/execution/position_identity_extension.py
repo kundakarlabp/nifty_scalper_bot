@@ -78,6 +78,9 @@ def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any,
             continue
         cloned = dict(row)
         symbol = _canonical_key(cloned.get("tradingsymbol") or cloned.get("symbol"))
+        if symbol:
+            cloned["tradingsymbol"] = symbol
+            cloned["symbol"] = symbol
         avg_price = _positive_float(cloned, _AVG_PRICE_FIELDS)
         if _net_quantity(cloned) != 0 and avg_price <= 0.0:
             existing = positions.get(symbol) if isinstance(positions, dict) else None
