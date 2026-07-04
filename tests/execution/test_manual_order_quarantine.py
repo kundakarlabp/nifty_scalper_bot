@@ -34,6 +34,10 @@ def test_unknown_buy_fill_does_not_scale_existing_long_position(tmp_path):
     assert terminal.intent == "UNKNOWN"
     assert terminal.lifecycle_applied is False
     assert terminal.lifecycle_resolved is False
+    exposures = manager.get_quarantined_broker_exposures()
+    assert exposures[SYMBOL]["status"] == "MANUAL_ORDER_QUARANTINED"
+    assert exposures[SYMBOL]["order_id"] == "manual-buy"
+    assert exposures[SYMBOL]["reason"] == "manual_order_quarantined"
 
 
 def test_unknown_sell_fill_does_not_close_existing_long_position(tmp_path):
@@ -62,6 +66,9 @@ def test_unknown_sell_fill_does_not_close_existing_long_position(tmp_path):
     terminal = manager._terminal_orders[order.order_id]
     assert terminal.pnl_applied is False
     assert terminal.lifecycle_resolved is False
+    exposures = manager.get_quarantined_broker_exposures()
+    assert exposures[SYMBOL]["status"] == "MANUAL_ORDER_QUARANTINED"
+    assert exposures[SYMBOL]["side"] == "SELL"
 
 
 def test_unresolved_broker_cost_basis_blocks_entries_without_sync_exception(tmp_path):
