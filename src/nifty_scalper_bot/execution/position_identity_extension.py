@@ -1,4 +1,8 @@
-"""Canonical PositionManager ingress patch for broker and pending-order paths."""
+"""Canonical PositionManager ingress patch for broker and pending-order paths.
+
+Follow-up scope: broker reconciliation ownership and orphan protection are handled
+by the loaded runtime guards in this module.
+"""
 
 from __future__ import annotations
 
