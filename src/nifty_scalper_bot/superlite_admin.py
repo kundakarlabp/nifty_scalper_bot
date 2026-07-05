@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from nifty_scalper_bot import admin_dashboard as dashboard
+from nifty_scalper_bot.ops.service_control import memory_snapshot
 from nifty_scalper_bot.superlite_admin_core import (
     APP_DIR,
     ENGINE_SERVICE,
@@ -118,4 +119,6 @@ def healthz() -> dict[str, str]:
 
 @app.get("/admin/api/status")
 def status() -> JSONResponse:
-    return JSONResponse(status_snapshot(), headers={"Cache-Control": "no-store"})
+    data = status_snapshot()
+    data["host_memory"] = memory_snapshot()
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
