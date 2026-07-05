@@ -1,17 +1,16 @@
 """Canonical strategy history-context builder.
 
 This module owns the small, deterministic context-building contract consumed by
-strategy evaluation.  It does not select contracts, fetch broker instruments,
-place orders, or change strategy scores.
+strategy evaluation. It does not select contracts, fetch broker instruments,
+place orders, import execution, or change strategy scores.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
+import os
 from typing import Any, Mapping
-
-from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 
 SPOT_SYMBOLS = {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}
 OPTION_SUFFIXES = ("CE", "PE")
@@ -62,9 +61,16 @@ class StrategyHistoryContext:
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
-        return int(value)
+        return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return max(default, minimum)
+    return max(_safe_int(raw, default), minimum)
 
 
 def _bar_ts(bar: Any) -> Any:
@@ -138,11 +144,11 @@ def build_strategy_history_context(
     else:
         resolved_history_count = underlying_count
 
-    policy = HistoryReadinessPolicy.from_env()
+    option_eval_min_bars = _env_int("OPTION_EVAL_MIN_BARS", 5)
+    context_min_bars = _env_int("CONTEXT_MIN_BARS", 50)
+    smc_min_bars = _env_int("SMC_MIN_BARS_REQUIRED", 30)
     domain_min_required = (
-        policy.option_eval_min_bars
-        if history_domain_used == "options"
-        else policy.context_min_bars
+        option_eval_min_bars if history_domain_used == "options" else context_min_bars
     )
     oldest_bar_ts = _bar_ts(bars[0]) if bars else None
     latest_bar_ts = _bar_ts(bars[-1]) if bars else None
@@ -162,8 +168,8 @@ def build_strategy_history_context(
         history_quality="warm" if resolved_history_count >= domain_min_required else "cold",
         history_required_min=domain_min_required,
         history_ready=resolved_history_count >= domain_min_required,
-        smc_history_required_min=policy.smc_min_bars,
-        history_ready_for_smc=resolved_history_count >= policy.smc_min_bars,
+        smc_history_required_min=smc_min_bars,
+        history_ready_for_smc=resolved_history_count >= smc_min_bars,
     ).to_dict()
 
 
