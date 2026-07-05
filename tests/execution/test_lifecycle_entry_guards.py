@@ -39,6 +39,14 @@ def _base_place_order(_manager: Any, *, intent: str | None = None, tag: str | No
     return None
 
 
+def _bound_manager(position_manager: Any) -> BoundBracketManager:
+    order_manager = SimpleNamespace(_position_manager=position_manager)
+    manager = BoundBracketManager.__new__(BoundBracketManager)
+    manager.order_manager = order_manager
+    manager.has_unresolved_exit = lambda: False
+    return manager
+
+
 def test_native_entry_gate_blocks_generic_provider_reason() -> None:
     provider = SimpleNamespace(current_entry_blocker=lambda: "pnl_reconciliation_mismatch")
     manager = _Manager(provider)
@@ -104,10 +112,7 @@ def test_bound_bracket_manager_surfaces_position_manager_reason() -> None:
         current_pnl_reconciliation_blocker=lambda: "pnl_reconciliation_mismatch",
         unresolved_terminal_summary=lambda: {"count": 0},
     )
-    order_manager = SimpleNamespace(_position_manager=position_manager)
-    manager = BoundBracketManager.__new__(BoundBracketManager)
-    manager.order_manager = order_manager
-    manager.has_unresolved_exit = lambda: False
+    manager = _bound_manager(position_manager)
 
     blocker = manager.current_entry_blocker()
 
@@ -126,10 +131,7 @@ def test_bound_bracket_manager_surfaces_unresolved_terminal_summary() -> None:
         current_exit_lifecycle_blocker=lambda: None,
         unresolved_terminal_summary=lambda: {"count": 2, "oldest_age_s": 17.5},
     )
-    order_manager = SimpleNamespace(_position_manager=position_manager)
-    manager = BoundBracketManager.__new__(BoundBracketManager)
-    manager.order_manager = order_manager
-    manager.has_unresolved_exit = lambda: False
+    manager = _bound_manager(position_manager)
 
     blocker = manager.current_entry_blocker()
 
@@ -137,6 +139,44 @@ def test_bound_bracket_manager_surfaces_unresolved_terminal_summary() -> None:
     assert blocker["block_reason"] == "unresolved_terminal_order"
     assert blocker["unresolved_terminal_count"] == 2
     assert blocker["oldest_unresolved_terminal_age_s"] == 17.5
+
+
+def test_bound_bracket_manager_blocks_unmanaged_broker_synced_positions() -> None:
+    position_manager = SimpleNamespace(
+        current_entry_protection_blocker=lambda: None,
+        current_pnl_reconciliation_blocker=lambda: None,
+        current_position_reconciliation_blocker=lambda: None,
+        current_orphan_position_blocker=lambda: None,
+        current_exit_lifecycle_blocker=lambda: None,
+        unresolved_terminal_summary=lambda: {"count": 0},
+        get_open_positions=lambda: [SimpleNamespace(symbol="NFO:NIFTY2662324050PE", order_id=None)],
+    )
+    manager = _bound_manager(position_manager)
+
+    blocker = manager.current_entry_blocker()
+
+    assert blocker is not None
+    assert blocker["block_reason"] == "broker_synced_unmanaged_position"
+    assert blocker["unmanaged_position_count"] == 1
+
+
+def test_bound_bracket_manager_blocks_unhealthy_reconciliation_state() -> None:
+    position_manager = SimpleNamespace(
+        current_entry_protection_blocker=lambda: None,
+        current_pnl_reconciliation_blocker=lambda: None,
+        unresolved_terminal_summary=lambda: {"count": 0},
+        get_open_positions=lambda: [],
+        _consecutive_reconcile_failures=2,
+        _last_reconcile_error="fetch_error",
+    )
+    manager = _bound_manager(position_manager)
+
+    blocker = manager.current_entry_blocker()
+
+    assert blocker is not None
+    assert blocker["block_reason"] == "position_reconciliation_unhealthy"
+    assert blocker["consecutive_reconcile_failures"] == 2
+    assert blocker["last_reconcile_error"] == "fetch_error"
 
 
 def test_bound_bracket_manager_keeps_unresolved_bracket_priority() -> None:
