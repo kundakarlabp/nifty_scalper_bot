@@ -8,6 +8,17 @@ from nifty_scalper_bot.utils.logging import get_logger
 # TODO: remove compatibility shim once downstream modules are updated.
 from nifty_scalper_bot.utils.pricing import canonical_price_source  # compat
 
+try:
+    from nifty_scalper_bot.core.strategy_live_safety import apply_patches as _apply_strategy_live_safety
+
+    _apply_strategy_live_safety()
+except Exception as exc:  # noqa: BLE001 - core package import must not crash tooling
+    get_logger(__name__).error(
+        "STRATEGY_LIVE_SAFETY_PATCH_FAILED error=%s",
+        exc,
+        extra={"event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED", "error_type": type(exc).__name__},
+    )
+
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
 
 _LOGGER = get_logger(__name__)
