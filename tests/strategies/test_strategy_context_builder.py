@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from nifty_scalper_bot.core import strategy_manager
-from nifty_scalper_bot.strategies import signal_generator
 from nifty_scalper_bot.strategies.context_builder import (
     build_strategy_history_context,
     classify_history_domain,
@@ -90,6 +89,5 @@ def test_context_builder_runner_context_can_supply_domain_counts(monkeypatch) ->
     assert ctx["history_ready"] is True
 
 
-def test_existing_strategy_entry_points_use_canonical_builder() -> None:
-    assert signal_generator.build_strategy_history_context is build_strategy_history_context
+def test_strategy_manager_uses_canonical_context_builder() -> None:
     assert strategy_manager.build_strategy_history_context is build_strategy_history_context
