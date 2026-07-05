@@ -143,7 +143,7 @@ Environment=BOT_SERVICE_NAME=$SERVICE
 Environment=BOT_STREAMLIT_SERVICE_NAME=$STREAMLIT_SERVICE
 Environment=PORT=$PORT
 Environment=BOT_STREAMLIT_PORT=$STREAMLIT_PORT
-ExecStart=$APP_DIR/deploy/lightsail_release.sh --auto
+ExecStart=/usr/bin/env bash $APP_DIR/deploy/lightsail_release.sh --auto
 EOF_DEPLOY_SERVICE
 
 sudo tee /etc/systemd/system/niftybot-autodeploy.timer >/dev/null <<EOF_TIMER
