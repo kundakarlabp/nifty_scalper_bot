@@ -49,7 +49,10 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "dashboard/superlite_console.py" in release
     assert "dashboard/operations_console.py" not in release
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*true' in release
+    assert '"engine_http_responsive"[[:space:]]*:[[:space:]]*true' in release
     assert 'http://127.0.0.1:${PORT}/livez' in release
+    health_block = release.split("service_healthy", 1)[1].split("wait_for_service", 1)[0]
+    assert "/readyz" not in health_block
     assert 'git reset --hard --quiet "$BEFORE"' in release
     assert 'sudo systemctl restart "$SERVICE"' in release
 
