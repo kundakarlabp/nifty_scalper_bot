@@ -83,8 +83,8 @@ def _record(manager: Any, symbol: str, reason: str, trace_id: str | None, detail
             decisions[str(symbol).upper()] = payload
     log_throttled(
         LOG,
-        key=f"strategy_live_safety:{symbol}:{reason}",
-        msg="STRATEGY_LIVE_SAFETY_BLOCK symbol=%s reason=%s",
+        f"strategy_live_safety:{symbol}:{reason}",
+        "STRATEGY_LIVE_SAFETY_BLOCK symbol=%s reason=%s",
         symbol,
         reason,
         interval_sec=30.0,
