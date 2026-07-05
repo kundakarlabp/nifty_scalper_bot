@@ -14,7 +14,7 @@ Operational constraints:
 from __future__ import annotations
 
 from contextlib import suppress
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 
@@ -37,6 +37,25 @@ def _call_blocker(source: Any, method_name: str) -> Any | None:
         return None
 
 
+def _call_sequence(source: Any, names: Sequence[str]) -> list[Any]:
+    for name in names:
+        method = getattr(source, name, None)
+        if callable(method):
+            try:
+                value = method()
+            except Exception:
+                continue
+        else:
+            value = getattr(source, name, None)
+        if value is None:
+            continue
+        try:
+            return list(value)
+        except TypeError:
+            continue
+    return []
+
+
 def _block(reason: str, *, source: str, **details: Any) -> dict[str, Any]:
     return {
         "block_reason": str(reason),
@@ -45,6 +64,37 @@ def _block(reason: str, *, source: str, **details: Any) -> dict[str, Any]:
         "retryable": False,
         **details,
     }
+
+
+def _synthetic_position_blocker(position_manager: Any) -> dict[str, Any] | None:
+    failures = int(getattr(position_manager, "_consecutive_reconcile_failures", 0) or 0)
+    last_error = getattr(position_manager, "_last_reconcile_error", None)
+    if failures > 0 or last_error:
+        return _block(
+            "position_reconciliation_unhealthy",
+            source="position_manager_reconciliation_state",
+            consecutive_reconcile_failures=failures,
+            last_reconcile_error=last_error,
+        )
+
+    positions = _call_sequence(
+        position_manager,
+        ("get_open_positions", "get_all_positions", "open_positions"),
+    )
+    unmanaged = [
+        getattr(position, "symbol", None)
+        for position in positions
+        if getattr(position, "order_id", None) in (None, "")
+    ]
+    unmanaged = [str(symbol) for symbol in unmanaged if symbol]
+    if unmanaged:
+        return _block(
+            "broker_synced_unmanaged_position",
+            source="position_manager_positions",
+            unmanaged_position_count=len(unmanaged),
+            unmanaged_symbols=unmanaged[:5],
+        )
+    return None
 
 
 class BoundBracketManager(RuntimeBracketManager):
@@ -71,7 +121,8 @@ class BoundBracketManager(RuntimeBracketManager):
         This keeps the bracket manager as the single provider registered with
         RuntimeOrderManager while allowing the native entry gate to consume
         position-manager safety state: unprotected fills, P&L mismatch,
-        unresolved terminal exits, and broker/local reconciliation uncertainty.
+        unresolved terminal exits, broker/local reconciliation uncertainty, and
+        broker-synced positions that do not yet have local order ownership.
         """
 
         checker = getattr(self, "has_unresolved_exit", None)
@@ -120,7 +171,8 @@ class BoundBracketManager(RuntimeBracketManager):
                         unresolved_terminal_count=int(summary.get("count") or 0),
                         oldest_unresolved_terminal_age_s=summary.get("oldest_age_s"),
                     )
-        return None
+
+        return _synthetic_position_blocker(position_manager)
 
 
 __all__ = ["BoundBracketManager"]
