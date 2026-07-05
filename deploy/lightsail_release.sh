@@ -7,6 +7,7 @@ set -euo pipefail
 APP_DIR="${BOT_APP_DIR:-/home/ubuntu/nifty_scalper_bot}"
 SERVICE="${BOT_SERVICE_NAME:-niftybot}"
 STREAMLIT_SERVICE="${BOT_STREAMLIT_SERVICE_NAME:-niftybot-streamlit}"
+AUTODEPLOY_SERVICE="${BOT_AUTODEPLOY_SERVICE_NAME:-niftybot-autodeploy}"
 PORT="${PORT:-8080}"
 STREAMLIT_PORT="${BOT_STREAMLIT_PORT:-8501}"
 CONFIG_DIR="${NIFTYBOT_CONFIG_DIR:-/home/ubuntu/.config/niftybot}"
@@ -18,6 +19,7 @@ LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
 FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
+AUTODEPLOY_ENTRYPOINT_MIGRATED=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -133,6 +135,45 @@ PY_MIGRATE
   log "migrated $SERVICE ExecStart to deployment_main:app; env file preserved"
 }
 
+migrate_autodeploy_entrypoint() {
+  local unit_path="/etc/systemd/system/${AUTODEPLOY_SERVICE}.service"
+  local canonical_exec="ExecStart=/usr/bin/env bash ${APP_DIR}/deploy/lightsail_release.sh --auto"
+  if [ ! -f "$unit_path" ]; then
+    AUTODEPLOY_ENTRYPOINT_MIGRATED=false
+    return 0
+  fi
+  if grep -Fqx "$canonical_exec" "$unit_path" 2>/dev/null; then
+    AUTODEPLOY_ENTRYPOINT_MIGRATED=false
+    return 0
+  fi
+  if ! grep -q '^ExecStart=' "$unit_path" 2>/dev/null; then
+    log "WARNING: $unit_path has no ExecStart; skipping auto-deploy entrypoint migration"
+    AUTODEPLOY_ENTRYPOINT_MIGRATED=false
+    return 0
+  fi
+  sudo python3 - "$unit_path" "$canonical_exec" <<'PY_MIGRATE'
+import sys
+from pathlib import Path
+unit = Path(sys.argv[1])
+canonical = sys.argv[2]
+text = unit.read_text(encoding="utf-8")
+lines = text.splitlines()
+out = []
+changed = False
+for line in lines:
+    if line.startswith("ExecStart=") and not changed:
+        out.append(canonical)
+        changed = True
+    else:
+        out.append(line)
+if changed:
+    unit.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+PY_MIGRATE
+  sudo systemctl daemon-reload
+  AUTODEPLOY_ENTRYPOINT_MIGRATED=true
+  log "migrated $AUTODEPLOY_SERVICE ExecStart to bash wrapper"
+}
+
 restart_streamlit() {
   if ! systemctl is-enabled --quiet "$STREAMLIT_SERVICE" 2>/dev/null; then
     return 0
@@ -153,6 +194,7 @@ exec 9>"$LOCK_FILE"
 if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
 
 cd "$APP_DIR"
+chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
 fi
@@ -163,6 +205,7 @@ if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
 fi
 validate_environment
 migrate_systemd_entrypoint
+migrate_autodeploy_entrypoint
 if [ "$SYSTEMD_ENTRYPOINT_MIGRATED" = true ]; then
   FORCE_RESTART=true
 fi
@@ -202,6 +245,7 @@ TARGETED_TESTS=(
   tests/test_execution_path_contract.py
   tests/execution/test_runtime_order_facade.py
   tests/execution/test_runtime_bracket_facade.py
+  tests/execution/test_bracket_persistence_policy.py
   tests/integration/test_canonical_bo_end_to_end.py
   tests/dashboard/test_event_buffer_truth.py
   tests/dashboard/test_log_export.py
