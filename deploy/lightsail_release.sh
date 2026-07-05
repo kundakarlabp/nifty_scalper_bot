@@ -140,8 +140,6 @@ restart_streamlit() {
   if sudo -n systemctl restart "$STREAMLIT_SERVICE" 2>/dev/null; then
     :
   else
-    # Existing hosts may not yet have the expanded sudoers rule. The process is
-    # owned by ubuntu and Restart=always, so TERM safely asks systemd to relaunch it.
     pkill -TERM -u "$(id -u)" -f 'streamlit run .*/dashboard/superlite_console.py' 2>/dev/null || true
   fi
   for _ in $(seq 1 20); do
@@ -219,7 +217,16 @@ for test_path in "${TARGETED_TESTS[@]}"; do
   [ -f "$CANDIDATE/$test_path" ] && EXISTING_TESTS+=("$CANDIDATE/$test_path")
 done
 if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
-  PYTHONPATH="$CANDIDATE/src:$CANDIDATE" "$VENV/bin/python" -m pytest -q "${EXISTING_TESTS[@]}" || {
+  env \
+    EXECUTION_MODE=SHADOW \
+    ENABLE_LIVE=false \
+    ENABLE_LIVE_TRADING=false \
+    ORDERS__ENABLE_LIVE=false \
+    PAPER_MODE=true \
+    SHADOW_MODE=true \
+    DATA_DIR="$CANDIDATE/.validation-data" \
+    PYTHONPATH="$CANDIDATE/src:$CANDIDATE" \
+    "$VENV/bin/python" -m pytest -q "${EXISTING_TESTS[@]}" || {
     write_status validation_failed "focused tests failed for ${AFTER:0:7}"; exit 1;
   }
 fi
