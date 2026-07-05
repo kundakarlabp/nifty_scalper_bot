@@ -52,10 +52,31 @@ def test_public_runtime_has_one_owner_per_lifecycle_domain() -> None:
     )
     assert execution.OrderManager is OrderManager
     assert execution.BracketManager is BracketManager
+    assert execution.CanonicalBracketManager is BracketManager
     assert execution.AdaptiveTrailingController is AdaptiveTrailingController
     assert issubclass(OrderManager, CoreOrderManager)
     assert issubclass(BracketManager, CoreBracketManager)
     assert issubclass(AdaptiveTrailingController, CoreAdaptiveTrailingController)
+
+
+def test_execution_package_exports_only_canonical_runtime_owners() -> None:
+    assert set(execution.__all__) == {
+        "AdaptiveTrailingController",
+        "BoundBracketManager",
+        "BracketManager",
+        "CanonicalBracketManager",
+        "HardenedAdaptiveTrailingController",
+        "OrderManager",
+        "RuntimeOrderManager",
+    }
+    for name in (
+        "FillIntegrityBracketManager",
+        "HardenedBracketManager",
+        "LedgerBracketManager",
+        "RuntimeBracketManager",
+    ):
+        assert name not in execution.__all__
+        assert getattr(execution, name) is BracketManager
 
 
 def test_execution_package_import_does_not_install_or_replace_runtime_methods() -> None:
@@ -162,6 +183,7 @@ def test_startup_compatibility_adapters_do_not_own_execution_logic() -> None:
     assert "_evaluate_tick" not in lifecycle_methods
     assert "_monitor_loop" not in lifecycle_methods
     assert "_execute_exit" not in lifecycle_methods
+
 
 def test_live_capable_strategies_do_not_bypass_trade_plan_execution() -> None:
     offenders: list[str] = []
