@@ -19,17 +19,6 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
         extra={"event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED", "error_type": type(exc).__name__},
     )
 
-try:
-    from nifty_scalper_bot.core.strategy_context_patch import apply_patches as _apply_strategy_context_builder
-
-    _apply_strategy_context_builder()
-except Exception as exc:  # noqa: BLE001 - core package import must not crash tooling
-    get_logger(__name__).error(
-        "STRATEGY_CONTEXT_BUILDER_PATCH_FAILED error=%s",
-        exc,
-        extra={"event": "STRATEGY_CONTEXT_BUILDER_PATCH_FAILED", "error_type": type(exc).__name__},
-    )
-
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
 
 _LOGGER = get_logger(__name__)
