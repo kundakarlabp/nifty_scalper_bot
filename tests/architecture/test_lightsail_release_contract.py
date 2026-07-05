@@ -33,6 +33,7 @@ def test_lightsail_uses_external_environment_file() -> None:
     assert 'ln -sfn "$ENV_FILE" "$LEGACY_ENV"' in setup
     assert "DEPLOYMENT_PLATFORM=aws_lightsail" in setup
     assert "nifty_scalper_bot.deployment_main:app" in setup
+    assert "ExecStart=/usr/bin/env bash $APP_DIR/deploy/lightsail_release.sh --auto" in setup
 
 
 def test_release_runner_validates_and_rolls_back() -> None:
@@ -41,6 +42,7 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "git worktree add" in release
     assert "compileall" in release
     assert "pytest" in release
+    assert "tests/execution/test_bracket_persistence_policy.py" in release
     assert "tests/data/test_datahub_bounded_persistence.py" in release
     assert "tests/data/test_mdm_tick_coalescing.py" in release
     assert "tests/test_mdm_event_loop_consumer.py" in release
@@ -58,11 +60,23 @@ def test_lightsail_release_migrates_existing_systemd_entrypoint_safely() -> None
     assert "nifty_scalper_bot.deployment_main:app" in release
     assert "sudo systemctl daemon-reload" in release
     migration_block = release.split("migrate_systemd_entrypoint", 1)[1].split(
-        "restart_streamlit", 1
+        "migrate_autodeploy_entrypoint", 1
     )[0]
     assert "EnvironmentFile" not in migration_block
     assert "ExecStart=" in migration_block
     assert "SYSTEMD_ENTRYPOINT_MIGRATED=true" in migration_block
+    assert "sudo systemctl daemon-reload" in migration_block
+
+
+def test_lightsail_release_migrates_autodeploy_entrypoint_to_bash() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert "migrate_autodeploy_entrypoint" in release
+    assert 'AUTODEPLOY_SERVICE="${BOT_AUTODEPLOY_SERVICE_NAME:-niftybot-autodeploy}"' in release
+    migration_block = release.split("migrate_autodeploy_entrypoint", 1)[1].split(
+        "restart_streamlit", 1
+    )[0]
+    assert "ExecStart=/usr/bin/env bash ${APP_DIR}/deploy/lightsail_release.sh --auto" in migration_block
+    assert "AUTODEPLOY_ENTRYPOINT_MIGRATED=true" in migration_block
     assert "sudo systemctl daemon-reload" in migration_block
 
 
