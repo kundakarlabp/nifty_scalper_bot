@@ -56,6 +56,7 @@ class _Manager:
         quote: dict[str, Any] | None = None,
         resolver: Any | None = None,
         margin: float = 20_000.0,
+        live: bool = False,
     ) -> None:
         self.responses = list(responses)
         self.plans: list[TradePlan] = []
@@ -67,6 +68,7 @@ class _Manager:
         self._margin_buffer = 0.95
         self._last_order_decision: dict[str, Any] = {}
         self.margin = margin
+        self.live = live
 
     def submit_trade_plan_result(self, plan: TradePlan) -> TradePlanSubmitResult:
         self.plans.append(plan)
@@ -75,14 +77,17 @@ class _Manager:
     def _resolve_available_margin(self) -> tuple[float, str]:
         return self.margin, "fresh"
 
+    def is_live_mode(self) -> bool:
+        return bool(self.live)
+
 
 install_entry_recovery(_Manager)
 
 
-def _plan(quantity: int = 130) -> TradePlan:
+def _plan(quantity: int = 130, side: str = "BUY") -> TradePlan:
     return TradePlan(
         symbol="NFO:NIFTY2662324050PE",
-        side="BUY",
+        side=side,  # type: ignore[arg-type]
         quantity=quantity,
         entry_price=100.0,
         stop_loss=90.0,
@@ -172,3 +177,52 @@ def test_price_recovery_blocks_excessive_reprice_before_duplicate_entry(monkeypa
     assert recovery["outcome"] == "rebuild_failed"
     assert recovery["reprice_deviation_pct"] == 45.0
     assert recovery["max_reprice_deviation_pct"] == 3.0
+
+
+def test_live_price_recovery_blocks_ltp_only_quote_before_retry(monkeypatch) -> None:
+    monkeypatch.delenv("ENTRY_RECOVERY_MAX_REPRICE_DEVIATION_PCT", raising=False)
+    manager = _Manager(
+        [_reject("invalid limit price: price out of range"), _accept("should-not-submit")],
+        quote={"ltp": 101.0, "last_price": 101.0},
+        live=True,
+    )
+
+    result = manager.submit_trade_plan_result(_plan(quantity=65))
+
+    assert result.accepted is False
+    assert len(manager.plans) == 1
+    recovery = result.details["entry_recovery"]
+    assert recovery["outcome"] == "live_bid_ask_unavailable"
+
+
+def test_live_price_recovery_rebuilds_from_ask_not_ltp(monkeypatch) -> None:
+    monkeypatch.delenv("ENTRY_RECOVERY_MAX_REPRICE_DEVIATION_PCT", raising=False)
+    manager = _Manager(
+        [_reject("invalid limit price: price out of range"), _accept("live-retry")],
+        quote={"bid": 100.5, "ask": 101.0, "ltp": 98.0},
+        live=True,
+    )
+
+    result = manager.submit_trade_plan_result(_plan(quantity=65))
+
+    assert result.accepted is True
+    assert len(manager.plans) == 2
+    assert manager.plans[1].entry_price == 101.0
+    assert manager.plans[1].stop_loss == 91.0
+    assert manager.plans[1].take_profit == 121.0
+    assert result.details["entry_recovery"]["retry_entry"] == 101.0
+
+
+def test_shadow_price_recovery_can_still_use_ltp_fallback() -> None:
+    manager = _Manager(
+        [_reject("invalid limit price: price out of range"), _accept("shadow-retry")],
+        quote={"ltp": 101.0},
+        live=False,
+    )
+
+    result = manager.submit_trade_plan_result(_plan(quantity=65))
+
+    assert result.accepted is True
+    assert len(manager.plans) == 2
+    assert manager.plans[1].entry_price == 101.0
+    assert result.details["entry_recovery"]["retry_entry"] == 101.0

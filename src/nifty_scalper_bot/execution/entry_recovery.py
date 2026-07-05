@@ -93,8 +93,43 @@ def _positive(quote: Mapping[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _entry_price(plan: Any, quote: Mapping[str, Any]) -> float | None:
+def _manager_live_mode(manager: Any) -> bool:
+    checker = getattr(manager, "is_live_mode", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return True
+    execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+    live_enabled = str(os.getenv("ENABLE_LIVE", "") or os.getenv("ENABLE_LIVE_TRADING", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    shadow_or_paper = str(os.getenv("SHADOW_MODE", "") or "").strip().lower() in {"1", "true", "yes", "y", "on"} or str(os.getenv("PAPER_MODE", "") or os.getenv("PAPER__ENABLED", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return execution_mode == "LIVE" and live_enabled and not shadow_or_paper
+
+
+def _is_entry_intent(plan: Any) -> bool:
+    intent = str(getattr(plan, "intent", "ENTRY") or "ENTRY").strip().upper()
+    return intent in {"", "ENTRY", "UNKNOWN"}
+
+
+def _is_live_entry(manager: Any, plan: Any) -> bool:
+    return _manager_live_mode(manager) and _is_entry_intent(plan)
+
+
+def _entry_price(manager: Any, plan: Any, quote: Mapping[str, Any]) -> float | None:
     side = str(getattr(plan, "side", "BUY") or "BUY").upper()
+    bid = _positive(quote, "bid", "best_bid", "buy_price")
+    ask = _positive(quote, "ask", "best_ask", "offer", "sell_price")
+
+    if _is_live_entry(manager, plan):
+        # Live option entries must be executable from fresh two-sided quotes.
+        # LTP is allowed for diagnostics and emergency exits elsewhere, but not
+        # for retrying a new risk-increasing entry after broker rejection.
+        if bid is None or ask is None or ask < bid:
+            return None
+        if side != "BUY":
+            return None
+        return float(ask)
+
     keys = ("ask", "best_ask", "offer", "sell_price") if side == "BUY" else ("bid", "best_bid", "buy_price")
     return _positive(quote, *keys) or _positive(quote, "ltp", "last_price", "last_traded_price", "price")
 
@@ -155,11 +190,22 @@ def _max_reprice_deviation_pct(manager: Any) -> float:
                 continue
             if math.isfinite(value) and value > 0:
                 return value
-    return 8.0
+    return 2.5 if _manager_live_mode(manager) else 8.0
 
 
 def _rebuild_plan(manager: Any, plan: Any, quote: Mapping[str, Any], decision: RecoveryDecision, *, quantity: int | None = None) -> Any | None:
-    fresh = _entry_price(plan, quote)
+    fresh = _entry_price(manager, plan, quote)
+    if _is_live_entry(manager, plan) and fresh is None:
+        _log(
+            manager,
+            "warning",
+            "ENTRY_RECOVERY_LIVE_QUOTE_BLOCKED symbol=%s reason=bid_ask_required",
+            getattr(plan, "symbol", ""),
+            event="ENTRY_RECOVERY_LIVE_QUOTE_BLOCKED",
+            symbol=getattr(plan, "symbol", ""),
+            side=getattr(plan, "side", ""),
+        )
+        return None
     deviation = _reprice_deviation_pct(plan, fresh)
     max_deviation = _max_reprice_deviation_pct(manager)
     if deviation is not None and deviation > max_deviation:
@@ -399,7 +445,9 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
                 return _result_like(result, accepted=False, order_id=None, reason="entry_order_state_ambiguous", details={"entry_recovery": {"outcome": state, **evidence}}, broker_attempted=True)
 
         quote = _fresh_quote(manager, str(plan.symbol), getattr(plan, "trace_id", None))
-        fresh = _entry_price(plan, quote)
+        fresh = _entry_price(manager, plan, quote)
+        if _is_live_entry(manager, plan) and fresh is None:
+            return _annotate(result, decision, outcome="live_bid_ask_unavailable")
         quantity: int | None = None
         if decision.action is RecoveryAction.RESIZE_AND_REVALIDATE:
             quantity = _affordable_quantity(manager, plan, float(fresh or 0.0))
@@ -487,6 +535,13 @@ def _finalize_partial_entry(manager: Any, order: Any, payload: Mapping[str, Any]
 
 
 def install_entry_recovery(order_manager_class: type[Any]) -> None:
+    """Compatibility installer for legacy tests only.
+
+    Production uses ``RuntimeOrderManager`` direct method overrides and must not
+    rely on import-time monkey-patching. This hook is retained so older focused
+    tests and external test doubles can exercise the same bounded recovery helper
+    without altering production package import behaviour.
+    """
     if getattr(order_manager_class, "_canonical_entry_recovery_installed", False):
         return
     original_submit = getattr(order_manager_class, "submit_trade_plan_result", None)
@@ -514,4 +569,4 @@ def install_entry_recovery(order_manager_class: type[Any]) -> None:
     setattr(order_manager_class, "_canonical_entry_recovery_installed", True)
 
 
-__all__ = ["install_entry_recovery"]
+__all__ = ["install_entry_recovery", "_recover_submit", "_finalize_partial_entry"]
