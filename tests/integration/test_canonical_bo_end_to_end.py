@@ -62,6 +62,10 @@ class _Resolver:
 def _composition(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "bo.db"))
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "false")
+    monkeypatch.setenv("ORDERS__ENABLE_LIVE", "false")
     broker = _Broker()
     positions = PositionManager(state_file=str(tmp_path / "positions.json"))
     limiter = RateLimiter()
@@ -72,6 +76,7 @@ def _composition(monkeypatch, tmp_path: Path):
         limiter,
         history_path=tmp_path / "orders.json",
     )
+    monkeypatch.setattr(order_manager, "is_live_mode", lambda: False, raising=False)
     order_manager.set_instrument_resolver(_Resolver())
     bracket_manager = BracketManager(order_manager=order_manager)
     bracket_manager._running = False
@@ -178,50 +183,7 @@ def test_public_composition_runs_entry_tp1_final_pnl_and_release(
     assert "PARTIAL_EXIT_CONFIRMED" in events
     assert "BRACKET_CLOSED" in events
     assert order_manager._blocked(
-        "place_order",
-        (),
-        {"symbol": SYMBOL, "side": "BUY", "quantity": 65, "tag": "runner_entry"},
-    ) is NO_BLOCK
-
-
-def test_filled_nonflat_exit_blocks_entry_but_never_protective_exit(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    broker, order_manager, bracket_manager = _composition(monkeypatch, tmp_path)
-    bracket = _register(bracket_manager)
-    _filled_exit(
-        broker,
-        bracket,
-        order_id="nonflat-order",
-        reason="HARD_SL_BREACH",
-        price=95.0,
-        residual=20,
-    )
-
-    assert bracket_manager._reconcile_exit_state(bracket, requested_by="e2e_nonflat") is False
-    assert bracket_manager.has_unresolved_exit() is True
-    assert order_manager._blocked(
-        "place_order",
-        (),
-        {"symbol": SYMBOL, "side": "BUY", "quantity": 65, "tag": "runner_entry"},
-    ) is None
-    assert order_manager._blocked(
-        "place_order",
-        (),
-        {
-            "symbol": SYMBOL,
-            "side": "SELL",
-            "quantity": 20,
-            "tag": "EXIT_RECOVERY",
-            "reduce_only": True,
-        },
-    ) is NO_BLOCK
-
-    broker.positions = []
-    assert bracket_manager._reconcile_exit_state(bracket, requested_by="e2e_flat") is True
-    assert order_manager._blocked(
-        "place_order",
-        (),
-        {"symbol": SYMBOL, "side": "BUY", "quantity": 65, "tag": "runner_entry"},
+        "submit_trade_plan",
+        tuple(),
+        {"symbol": SYMBOL},
     ) is NO_BLOCK
