@@ -158,6 +158,8 @@ def test_persist_failure_keeps_protection_and_freezes_new_entries(
 
 
 def test_live_mode_rejects_ephemeral_tmp_storage(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("NSB_TEST_MODE", raising=False)
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("BRACKET_AUTO_RESTORE", "true")
     manager = BracketManager(
