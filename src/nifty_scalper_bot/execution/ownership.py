@@ -3,6 +3,7 @@
 
 Key responsibilities:
     - Register the active bracket manager as the unresolved-exit provider.
+    - Surface bracket, protection, P&L and reconciliation blockers to the gate.
     - Preserve a compatibility fallback for noncanonical external test doubles.
 
 Operational constraints:
@@ -13,8 +14,37 @@ Operational constraints:
 from __future__ import annotations
 
 from contextlib import suppress
+from typing import Any, Mapping
 
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
+
+
+def _order_manager_position_manager(order_manager: Any) -> Any | None:
+    for name in ("_position_manager", "position_manager", "positions"):
+        value = getattr(order_manager, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _call_blocker(source: Any, method_name: str) -> Any | None:
+    method = getattr(source, method_name, None)
+    if not callable(method):
+        return None
+    try:
+        return method()
+    except TypeError:
+        return None
+
+
+def _block(reason: str, *, source: str, **details: Any) -> dict[str, Any]:
+    return {
+        "block_reason": str(reason),
+        "block_source": source,
+        "broker_attempted": False,
+        "retryable": False,
+        **details,
+    }
 
 
 class BoundBracketManager(RuntimeBracketManager):
@@ -34,6 +64,63 @@ class BoundBracketManager(RuntimeBracketManager):
                 )
             return
         super()._install_unresolved_exit_entry_guard()
+
+    def current_entry_blocker(self) -> Mapping[str, Any] | None:
+        """Return the first live-safety blocker for new entries.
+
+        This keeps the bracket manager as the single provider registered with
+        RuntimeOrderManager while allowing the native entry gate to consume
+        position-manager safety state: unprotected fills, P&L mismatch,
+        unresolved terminal exits, and broker/local reconciliation uncertainty.
+        """
+
+        checker = getattr(self, "has_unresolved_exit", None)
+        try:
+            if callable(checker) and bool(checker()):
+                bracket_id = None
+                getter = getattr(self, "get_first_unresolved_exit_bracket_id", None)
+                if callable(getter):
+                    with suppress(Exception):
+                        bracket_id = getter()
+                return _block(
+                    "unresolved_exit_position",
+                    source="bracket_manager",
+                    bracket_id=bracket_id,
+                )
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            return _block(
+                "entry_blocker_provider_error",
+                source="bracket_manager",
+                provider_error=f"{type(exc).__name__}: {exc}",
+            )
+
+        position_manager = _order_manager_position_manager(getattr(self, "order_manager", None))
+        if position_manager is None:
+            return None
+
+        for method_name in (
+            "current_entry_protection_blocker",
+            "current_pnl_reconciliation_blocker",
+            "current_position_reconciliation_blocker",
+            "current_orphan_position_blocker",
+            "current_exit_lifecycle_blocker",
+        ):
+            reason = _call_blocker(position_manager, method_name)
+            if reason:
+                return _block(str(reason), source=method_name)
+
+        summary_getter = getattr(position_manager, "unresolved_terminal_summary", None)
+        if callable(summary_getter):
+            with suppress(Exception):
+                summary = summary_getter()
+                if isinstance(summary, Mapping) and int(summary.get("count") or 0) > 0:
+                    return _block(
+                        "unresolved_terminal_order",
+                        source="unresolved_terminal_summary",
+                        unresolved_terminal_count=int(summary.get("count") or 0),
+                        oldest_unresolved_terminal_age_s=summary.get("oldest_age_s"),
+                    )
+        return None
 
 
 __all__ = ["BoundBracketManager"]
