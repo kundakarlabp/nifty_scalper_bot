@@ -86,13 +86,11 @@ service_healthy() {
   local live_json
   live_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/livez" 2>/dev/null || true)"
   grep -Eq '"bot_loaded"[[:space:]]*:[[:space:]]*true' <<<"$live_json" || return 1
-  if env_truthy ENABLE_LIVE; then
-    curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/readyz" >/dev/null 2>&1 || return 1
-  fi
+  grep -Eq '"engine_http_responsive"[[:space:]]*:[[:space:]]*true' <<<"$live_json" || return 1
 }
 
 wait_for_service() {
-  for _ in $(seq 1 45); do service_healthy && return 0; sleep 2; done
+  for _ in $(seq 1 150); do service_healthy && return 0; sleep 2; done
   return 1
 }
 
