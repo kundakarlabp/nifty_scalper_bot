@@ -191,7 +191,7 @@ def _max_reprice_deviation_pct(manager: Any) -> float:
                 continue
             if math.isfinite(value) and value > 0:
                 return value
-    return 3.0
+    return 8.0
 
 
 def _rebuild_plan(
