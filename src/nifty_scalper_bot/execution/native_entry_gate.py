@@ -18,6 +18,11 @@ _LEGACY_PROTECTIVE_TAG_PREFIXES = (
     "FLATTEN",
     "SQUAREOFF",
 )
+_PROVIDER_BLOCKER_METHODS = (
+    "current_entry_blocker",
+    "current_execution_blocker",
+    "current_reconciliation_blocker",
+)
 
 
 def configure_provider(manager: Any, provider: Any | None) -> None:
@@ -75,8 +80,65 @@ def _protective_place_order(
     return tag.startswith(_LEGACY_PROTECTIVE_TAG_PREFIXES)
 
 
+def _normalise_provider_block(result: Any, *, source: str) -> dict[str, Any] | None:
+    if not result:
+        return None
+    if isinstance(result, Mapping):
+        reason = (
+            result.get("block_reason")
+            or result.get("reason")
+            or result.get("blocker")
+            or source
+        )
+        details = dict(result)
+    else:
+        reason = str(result)
+        details = {"reason": reason}
+    reason_token = str(reason or source).strip() or source
+    details.update(
+        {
+            "block_reason": reason_token,
+            "broker_attempted": False,
+            "retryable": False,
+            "provider_blocker": True,
+            "provider_blocker_source": source,
+        }
+    )
+    return details
+
+
+def _provider_block_details(provider: Any, manager: Any) -> dict[str, Any] | None:
+    for method_name in _PROVIDER_BLOCKER_METHODS:
+        checker = getattr(provider, method_name, None)
+        if not callable(checker):
+            continue
+        try:
+            try:
+                result = checker()
+            except TypeError:
+                result = checker(manager)
+        except Exception as exc:
+            return {
+                "block_reason": "entry_blocker_provider_error",
+                "provider_error": f"{type(exc).__name__}: {exc}",
+                "provider_blocker": True,
+                "provider_blocker_source": method_name,
+                "broker_attempted": False,
+                "retryable": False,
+            }
+        details = _normalise_provider_block(result, source=method_name)
+        if details is not None:
+            return details
+    return None
+
+
 def unresolved_details(manager: Any) -> dict[str, Any] | None:
     provider = getattr(manager, "_unresolved_exit_provider", None)
+    provider_block = _provider_block_details(provider, manager)
+    if provider_block is not None:
+        _record_block(manager, provider_block)
+        return provider_block
+
     checker = getattr(provider, "has_unresolved_exit", None)
     if not callable(checker):
         return None
@@ -101,24 +163,31 @@ def unresolved_details(manager: Any) -> dict[str, Any] | None:
     }
     if provider_error:
         details["provider_error"] = provider_error
+    _record_block(manager, details)
+    return details
+
+
+def _record_block(manager: Any, details: Mapping[str, Any]) -> None:
+    reason = str(details.get("block_reason") or "entry_blocked")
     manager._last_order_decision = dict(details)
     setter = getattr(manager, "set_last_skip_reason", None)
     if callable(setter):
         with suppress(Exception):
-            setter("unresolved_exit_position")
+            setter(reason)
     logger = getattr(manager, "_logger", None)
     log = getattr(logger, "critical", None)
     if callable(log):
         log(
-            "ENTRY_BLOCKED_UNRESOLVED_EXIT bracket_id=%s",
-            bracket_id,
+            "ENTRY_BLOCKED_NATIVE_GATE reason=%s bracket_id=%s",
+            reason,
+            details.get("bracket_id"),
             extra={
-                "event": "ENTRY_BLOCKED_UNRESOLVED_EXIT",
-                "bracket_id": bracket_id,
+                "event": "ENTRY_BLOCKED_NATIVE_GATE",
+                "block_reason": reason,
+                "bracket_id": details.get("bracket_id"),
                 "native_gate": True,
             },
         )
-    return details
 
 
 def block_result(
@@ -139,11 +208,12 @@ def block_result(
     details = unresolved_details(manager)
     if details is None:
         return NO_BLOCK
+    reason = str(details.get("block_reason") or "entry_blocked")
     if method_name == "submit_trade_plan_result":
         return base_module.TradePlanSubmitResult(
             accepted=False,
             order_id=None,
-            reason="unresolved_exit_position",
+            reason=reason,
             details=details,
             broker_attempted=False,
         )
@@ -151,7 +221,7 @@ def block_result(
         return base_module.ManagedOrderResult(
             accepted=False,
             order_id=None,
-            reason="unresolved_exit_position",
+            reason=reason,
             details=details,
             broker_attempted=False,
         )
