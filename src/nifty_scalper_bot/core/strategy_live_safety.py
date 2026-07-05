@@ -1,8 +1,8 @@
 """Live-safety guard for StrategyManager.
 
-The guard is intentionally narrow: real LIVE mode fails closed on cold history,
-missing DataHub readiness, approved-signal final-filter bypass, and missing live
-signal identity. PAPER/SHADOW behaviour is unchanged.
+Real LIVE mode fails closed on cold history, explicit DataHub indicator
+unreadiness, approved-signal filter bypass, and missing live signal identity.
+PAPER/SHADOW behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -18,7 +18,13 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 LOG = get_logger(__name__)
 TRUTHY = {"1", "true", "yes", "y", "on", "live"}
-IDENTITY_KEYS = ("signal_id", "deterministic_signal_id", "bar_timestamp", "signal_timestamp", "timestamp")
+IDENTITY_KEYS = (
+    "signal_id",
+    "deterministic_signal_id",
+    "bar_timestamp",
+    "signal_timestamp",
+    "timestamp",
+)
 
 
 def _env_true(name: str) -> bool:
@@ -31,7 +37,9 @@ def _is_live(manager: Any) -> bool:
         with suppress(Exception):
             return bool(checker())
     mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
-    return mode == "LIVE" and (_env_true("ENABLE_LIVE") or _env_true("ENABLE_LIVE_TRADING")) and not (_env_true("PAPER_MODE") or _env_true("PAPER__ENABLED") or _env_true("SHADOW_MODE"))
+    live = _env_true("ENABLE_LIVE") or _env_true("ENABLE_LIVE_TRADING")
+    paper_shadow = _env_true("PAPER_MODE") or _env_true("PAPER__ENABLED") or _env_true("SHADOW_MODE")
+    return mode == "LIVE" and live and not paper_shadow
 
 
 def _bars_available(manager: Any, symbol: str) -> int:
@@ -60,7 +68,13 @@ def _hub_ready(manager: Any) -> bool | None:
     return False
 
 
-def _record(manager: Any, symbol: str, reason: str, trace_id: str | None, details: dict[str, Any] | None = None) -> None:
+def _record(
+    manager: Any,
+    symbol: str,
+    reason: str,
+    trace_id: str | None,
+    details: dict[str, Any] | None = None,
+) -> None:
     payload = dict(details or {})
     payload.setdefault("reason", reason)
     payload.setdefault("trace_id", trace_id)
@@ -68,6 +82,7 @@ def _record(manager: Any, symbol: str, reason: str, trace_id: str | None, detail
     if isinstance(decisions, dict):
         try:
             from nifty_scalper_bot.core.strategy_manager import StrategyNoSignalDecision
+
             decisions[str(symbol).upper()] = StrategyNoSignalDecision(
                 symbol=str(symbol),
                 eval_id=str(trace_id or payload.get("eval_id") or ""),
@@ -78,6 +93,13 @@ def _record(manager: Any, symbol: str, reason: str, trace_id: str | None, detail
                 no_vote_reason_counts={},
                 strategy_reasons={},
                 direction_bias=None,
+                underlying_direction_bias=None,
+                context_age_seconds=None,
+                trigger_vote_count=0,
+                context_vote_count=0,
+                selected_ce=None,
+                selected_pe=None,
+                trace_id=trace_id,
             )
         except Exception:
             decisions[str(symbol).upper()] = payload
@@ -99,9 +121,17 @@ def _readiness_block(manager: Any, symbol: str) -> dict[str, Any] | None:
     required = _required_bars(manager)
     available = _bars_available(manager, symbol)
     if available < required:
-        return {"reason": "live_indicators_not_ready", "bars_available": available, "required_bars": required}
+        return {
+            "reason": "live_indicators_not_ready",
+            "bars_available": available,
+            "required_bars": required,
+        }
     if _hub_ready(manager) is False:
-        return {"reason": "live_hub_indicators_not_ready", "bars_available": available, "required_bars": required}
+        return {
+            "reason": "live_hub_indicators_not_ready",
+            "bars_available": available,
+            "required_bars": required,
+        }
     return None
 
 
@@ -121,21 +151,49 @@ def _final_filter(manager: Any, signal: Signal, trace_id: str | None) -> Signal 
     if callable(filter_fn):
         try:
             if not bool(filter_fn(signal)):
-                _record(manager, signal.symbol, "live_signal_final_filter_block", trace_id, {"confidence": signal.confidence, "action": signal.action})
+                _record(
+                    manager,
+                    signal.symbol,
+                    "live_signal_final_filter_block",
+                    trace_id,
+                    {"confidence": signal.confidence, "action": signal.action},
+                )
                 return None
         except Exception as exc:
-            _record(manager, signal.symbol, "live_signal_final_filter_error", trace_id, {"error": f"{type(exc).__name__}: {exc}"})
+            _record(
+                manager,
+                signal.symbol,
+                "live_signal_final_filter_error",
+                trace_id,
+                {"error": f"{type(exc).__name__}: {exc}"},
+            )
             return None
     orchestrator = getattr(manager, "_orchestrator", None)
     filter_signal = getattr(orchestrator, "filter_signal", None)
     if callable(filter_signal):
         try:
-            filtered = filter_signal(signal, dict(getattr(signal, "metadata", {}) or {}), getattr(manager, "_position_manager", None))
+            filtered = filter_signal(
+                signal,
+                dict(getattr(signal, "metadata", {}) or {}),
+                getattr(manager, "_position_manager", None),
+            )
         except Exception as exc:
-            _record(manager, signal.symbol, "live_signal_orchestrator_error", trace_id, {"error": f"{type(exc).__name__}: {exc}"})
+            _record(
+                manager,
+                signal.symbol,
+                "live_signal_orchestrator_error",
+                trace_id,
+                {"error": f"{type(exc).__name__}: {exc}"},
+            )
             return None
         if filtered is None:
-            _record(manager, signal.symbol, "live_signal_orchestrator_block", trace_id, {"confidence": signal.confidence, "action": signal.action})
+            _record(
+                manager,
+                signal.symbol,
+                "live_signal_orchestrator_block",
+                trace_id,
+                {"confidence": signal.confidence, "action": signal.action},
+            )
             return None
         if isinstance(filtered, Signal):
             return filtered
@@ -150,11 +208,23 @@ def apply_patches() -> None:
         return
     original = cls.generate_signal
 
-    def generate_signal(self: Any, symbol: str, current_price: float, *, trace_id: str | None = None) -> Signal | None:
+    def generate_signal(
+        self: Any,
+        symbol: str,
+        current_price: float,
+        *,
+        trace_id: str | None = None,
+    ) -> Signal | None:
         symbol_norm = normalize_symbol(symbol)
         block = _readiness_block(self, symbol_norm)
         if block is not None:
-            _record(self, symbol_norm, str(block.get("reason") or "live_indicators_not_ready"), trace_id, block)
+            _record(
+                self,
+                symbol_norm,
+                str(block.get("reason") or "live_indicators_not_ready"),
+                trace_id,
+                block,
+            )
             return None
         signal = original(self, symbol, current_price, trace_id=trace_id)
         if signal is None or not _is_live(self):
@@ -166,7 +236,13 @@ def apply_patches() -> None:
                 return None
             metadata = dict(getattr(signal, "metadata", {}) or {})
         if not _has_identity(signal):
-            _record(self, signal.symbol, "live_signal_missing_deterministic_identity", trace_id, {"metadata_keys": sorted(metadata.keys())})
+            _record(
+                self,
+                signal.symbol,
+                "live_signal_missing_deterministic_identity",
+                trace_id,
+                {"metadata_keys": sorted(metadata.keys())},
+            )
             return None
         return _add_identity(signal)
 
