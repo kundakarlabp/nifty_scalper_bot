@@ -1,10 +1,9 @@
 """Bounded recovery for the authoritative runner-facing entry path.
 
-The installer wraps existing OrderManager methods without replacing the class.
-This preserves unbound-method tests and established callers while adding
-production-safe retry, reconciliation, lot-size and partial-fill handling.
+Wraps existing OrderManager methods without replacing the class. Recovery stays
+bounded, reconciles uncertain broker outcomes before retrying, keeps quantities
+whole-lot, and protects partial entry fills.
 """
-
 from __future__ import annotations
 
 from dataclasses import replace
@@ -13,11 +12,7 @@ import os
 import time
 from typing import Any, Callable, Mapping
 
-from nifty_scalper_bot.execution.broker_recovery import (
-    RecoveryAction,
-    RecoveryDecision,
-    decide_recovery,
-)
+from nifty_scalper_bot.execution.broker_recovery import RecoveryAction, RecoveryDecision, decide_recovery
 from nifty_scalper_bot.utils.lot_size import resolve_lot_size
 
 
@@ -28,38 +23,17 @@ def _log(manager: Any, level: str, message: str, *args: Any, **extra: Any) -> No
         fn(message, *args, extra={"event": extra.pop("event", "ENTRY_RECOVERY"), **extra})
 
 
-def _result_like(
-    previous: Any,
-    *,
-    accepted: bool,
-    order_id: str | None,
-    reason: str,
-    details: Mapping[str, Any],
-    broker_attempted: bool,
-) -> Any:
+def _result_like(previous: Any, *, accepted: bool, order_id: str | None, reason: str, details: Mapping[str, Any], broker_attempted: bool) -> Any:
     cls = type(previous)
     try:
-        return cls(
-            accepted=accepted,
-            order_id=order_id,
-            reason=reason,
-            details=dict(details),
-            broker_attempted=broker_attempted,
-        )
+        return cls(accepted=accepted, order_id=order_id, reason=reason, details=dict(details), broker_attempted=broker_attempted)
     except Exception:
         from nifty_scalper_bot.execution.order_manager import TradePlanSubmitResult
-
-        return TradePlanSubmitResult(
-            accepted=accepted,
-            order_id=order_id,
-            reason=reason,
-            details=dict(details),
-            broker_attempted=broker_attempted,
-        )
+        return TradePlanSubmitResult(accepted=accepted, order_id=order_id, reason=reason, details=dict(details), broker_attempted=broker_attempted)
 
 
 def _failure_text(manager: Any, result: Any) -> str:
-    fields: list[str] = [str(getattr(result, "reason", "") or "")]
+    fields = [str(getattr(result, "reason", "") or "")]
     details = getattr(result, "details", {}) or {}
     if isinstance(details, Mapping):
         fields.extend(str(value) for value in details.values())
@@ -70,8 +44,7 @@ def _failure_text(manager: Any, result: Any) -> str:
 
 
 def _symbol_key(value: object) -> str:
-    token = str(value or "").strip().upper()
-    return token.split(":", 1)[-1]
+    return str(value or "").strip().upper().split(":", 1)[-1]
 
 
 def _provider(manager: Any) -> Any | None:
@@ -122,25 +95,21 @@ def _positive(quote: Mapping[str, Any], *keys: str) -> float | None:
 
 def _entry_price(plan: Any, quote: Mapping[str, Any]) -> float | None:
     side = str(getattr(plan, "side", "BUY") or "BUY").upper()
-    if side == "BUY":
-        price = _positive(quote, "ask", "best_ask", "offer", "sell_price")
-    else:
-        price = _positive(quote, "bid", "best_bid", "buy_price")
-    return price or _positive(quote, "ltp", "last_price", "last_traded_price", "price")
+    keys = ("ask", "best_ask", "offer", "sell_price") if side == "BUY" else ("bid", "best_bid", "buy_price")
+    return _positive(quote, *keys) or _positive(quote, "ltp", "last_price", "last_traded_price", "price")
 
 
 def _tick_size(manager: Any, symbol: str) -> float:
     resolver = getattr(manager, "_instrument_resolver", None)
     for name in ("get_tick_size", "tick_size", "get_tick"):
         fn = getattr(resolver, name, None) if resolver is not None else None
-        if not callable(fn):
-            continue
-        try:
-            value = float(fn(symbol) or 0.0)
-        except Exception:
-            continue
-        if math.isfinite(value) and value > 0:
-            return value
+        if callable(fn):
+            try:
+                value = float(fn(symbol) or 0.0)
+            except Exception:
+                continue
+            if math.isfinite(value) and value > 0:
+                return value
     try:
         return max(float(os.getenv("ORDER_TICK_SIZE", "0.05") or 0.05), 0.01)
     except ValueError:
@@ -153,15 +122,12 @@ def _tick(value: float, size: float = 0.05) -> float:
 
 def _valid_geometry(plan: Any) -> bool:
     try:
-        entry = float(plan.entry_price or 0.0)
-        stop = float(plan.stop_loss or 0.0)
-        target = float(plan.take_profit or 0.0)
+        entry, stop, target = float(plan.entry_price or 0.0), float(plan.stop_loss or 0.0), float(plan.take_profit or 0.0)
     except (TypeError, ValueError):
         return False
     if min(entry, stop, target) <= 0:
         return False
-    side = str(plan.side).upper()
-    return stop < entry < target if side == "BUY" else target < entry < stop
+    return stop < entry < target if str(plan.side).upper() == "BUY" else target < entry < stop
 
 
 def _reprice_deviation_pct(plan: Any, fresh_price: float | None) -> float | None:
@@ -169,16 +135,14 @@ def _reprice_deviation_pct(plan: Any, fresh_price: float | None) -> float | None
         original = float(getattr(plan, "entry_price", 0.0) or 0.0)
     except (TypeError, ValueError):
         return None
-    if fresh_price is None or original <= 0:
-        return None
-    return abs(float(fresh_price) - original) / original * 100.0
+    return None if fresh_price is None or original <= 0 else abs(float(fresh_price) - original) / original * 100.0
 
 
 def _max_reprice_deviation_pct(manager: Any) -> float:
     for attr in ("_max_entry_reprice_deviation_pct", "_entry_recovery_max_reprice_deviation_pct"):
         try:
             value = float(getattr(manager, attr))
-        except (TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             continue
         if math.isfinite(value) and value > 0:
             return value
@@ -194,29 +158,12 @@ def _max_reprice_deviation_pct(manager: Any) -> float:
     return 8.0
 
 
-def _rebuild_plan(
-    manager: Any,
-    plan: Any,
-    quote: Mapping[str, Any],
-    decision: RecoveryDecision,
-    *,
-    quantity: int | None = None,
-) -> Any | None:
+def _rebuild_plan(manager: Any, plan: Any, quote: Mapping[str, Any], decision: RecoveryDecision, *, quantity: int | None = None) -> Any | None:
     fresh = _entry_price(plan, quote)
     deviation = _reprice_deviation_pct(plan, fresh)
     max_deviation = _max_reprice_deviation_pct(manager)
     if deviation is not None and deviation > max_deviation:
-        _log(
-            manager,
-            "warning",
-            "ENTRY_RECOVERY_REPRICE_BLOCKED symbol=%s deviation_pct=%.2f max_pct=%.2f",
-            getattr(plan, "symbol", ""),
-            deviation,
-            max_deviation,
-            event="ENTRY_RECOVERY_REPRICE_BLOCKED",
-            deviation_pct=deviation,
-            max_deviation_pct=max_deviation,
-        )
+        _log(manager, "warning", "ENTRY_RECOVERY_REPRICE_BLOCKED symbol=%s deviation_pct=%.2f max_pct=%.2f", getattr(plan, "symbol", ""), deviation, max_deviation, event="ENTRY_RECOVERY_REPRICE_BLOCKED", deviation_pct=deviation, max_deviation_pct=max_deviation)
         return None
 
     callback = getattr(manager, "_trade_plan_rebuilder", None)
@@ -246,34 +193,21 @@ def _rebuild_plan(
             return replace(rebuilt, quantity=quantity) if quantity is not None else rebuilt
 
     try:
-        old_entry = float(plan.entry_price or 0.0)
-        old_stop = float(plan.stop_loss or 0.0)
-        old_target = float(plan.take_profit or 0.0)
+        old_entry, old_stop, old_target = float(plan.entry_price or 0.0), float(plan.stop_loss or 0.0), float(plan.take_profit or 0.0)
     except (TypeError, ValueError):
         return None
     if fresh is None or old_entry <= 0 or old_stop <= 0 or old_target <= 0:
         return None
-    side = str(plan.side).upper()
-    if side == "BUY":
-        risk = old_entry - old_stop
-        reward = old_target - old_entry
-        stop = fresh - risk
-        target = fresh + reward
+    if str(plan.side).upper() == "BUY":
+        risk, reward = old_entry - old_stop, old_target - old_entry
+        stop, target = fresh - risk, fresh + reward
     else:
-        risk = old_stop - old_entry
-        reward = old_entry - old_target
-        stop = fresh + risk
-        target = fresh - reward
+        risk, reward = old_stop - old_entry, old_entry - old_target
+        stop, target = fresh + risk, fresh - reward
     if risk <= 0 or reward <= 0:
         return None
-    tick_size = _tick_size(manager, str(getattr(plan, "symbol", "")))
-    rebuilt = replace(
-        plan,
-        entry_price=_tick(fresh, tick_size),
-        stop_loss=_tick(stop, tick_size),
-        take_profit=_tick(target, tick_size),
-        quantity=int(quantity if quantity is not None else plan.quantity),
-    )
+    size = _tick_size(manager, str(getattr(plan, "symbol", "")))
+    rebuilt = replace(plan, entry_price=_tick(fresh, size), stop_loss=_tick(stop, size), take_profit=_tick(target, size), quantity=int(quantity if quantity is not None else plan.quantity))
     return rebuilt if _valid_geometry(rebuilt) else None
 
 
@@ -328,9 +262,7 @@ def _lot_size(manager: Any, symbol: str) -> int:
 
 
 def _whole_lot_quantity(quantity: int, lot: int) -> int:
-    if quantity <= 0 or lot <= 0:
-        return 0
-    return (int(quantity) // int(lot)) * int(lot)
+    return 0 if quantity <= 0 or lot <= 0 else (int(quantity) // int(lot)) * int(lot)
 
 
 def _affordable_quantity(manager: Any, plan: Any, fresh_price: float) -> int:
@@ -339,8 +271,7 @@ def _affordable_quantity(manager: Any, plan: Any, fresh_price: float) -> int:
         return 0
     lot = _lot_size(manager, str(plan.symbol))
     factor = max(float(getattr(manager, "_margin_factor", 1.0) or 1.0), 1.0)
-    configured_buffer = float(getattr(manager, "_margin_buffer", 0.95) or 0.95)
-    buffer = min(max(configured_buffer, 0.5), 0.98)
+    buffer = min(max(float(getattr(manager, "_margin_buffer", 0.95) or 0.95), 0.5), 0.98)
     per_lot = fresh_price * lot * factor
     lots = int((available * buffer) // per_lot) if per_lot > 0 else 0
     return min(int(plan.quantity), max(lots, 0) * lot)
@@ -360,11 +291,9 @@ def _freeze_quantity(manager: Any, plan: Any) -> int:
                 break
     if cap <= 0:
         cap = int(os.getenv("ORDER_FREEZE_QUANTITY", "0") or 0)
-    lot = _lot_size(manager, str(plan.symbol))
     if cap <= 0:
         return 0
-    capped = min(int(plan.quantity), cap)
-    return _whole_lot_quantity(capped, lot)
+    return _whole_lot_quantity(min(int(plan.quantity), cap), _lot_size(manager, str(plan.symbol)))
 
 
 def _broker_orders(manager: Any) -> list[Mapping[str, Any]] | None:
@@ -395,11 +324,7 @@ def _broker_positions(manager: Any) -> list[Mapping[str, Any]] | None:
 
 
 def _reconcile_intent(manager: Any, plan: Any) -> tuple[str, str | None, dict[str, Any]]:
-    keys = [
-        str(getattr(plan, "signal_id", "") or ""),
-        str(getattr(plan, "trace_id", "") or ""),
-        str(getattr(plan, "tag", "") or ""),
-    ]
+    keys = [str(getattr(plan, name, "") or "") for name in ("signal_id", "trace_id", "tag")]
     finder = getattr(manager, "_find_open_order", None)
     if callable(finder):
         for key in keys:
@@ -422,18 +347,10 @@ def _reconcile_intent(manager: Any, plan: Any) -> tuple[str, str | None, dict[st
     for order in orders:
         if _symbol_key(order.get("tradingsymbol") or order.get("symbol")) != wanted_symbol:
             continue
-        candidates = {
-            str(order.get("tag") or "").upper(),
-            str(order.get("client_order_id") or "").upper(),
-            str(order.get("guid") or "").upper(),
-        }
-        if wanted and not any(
-            key == candidate or (key and candidate and key[-8:] in candidate)
-            for key in wanted for candidate in candidates
-        ):
+        candidates = {str(order.get(key) or "").upper() for key in ("tag", "client_order_id", "guid")}
+        if wanted and not any(key == candidate or (key and candidate and key[-8:] in candidate) for key in wanted for candidate in candidates):
             continue
-        status = str(order.get("status") or "").upper()
-        if status not in {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}:
+        if str(order.get("status") or "").upper() not in {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}:
             oid = str(order.get("order_id") or order.get("id") or "")
             return "order_found", oid or None, {"order": dict(order)}
 
@@ -454,33 +371,18 @@ def _reconcile_intent(manager: Any, plan: Any) -> tuple[str, str | None, dict[st
 
 def _annotate(result: Any, decision: RecoveryDecision, **extra: Any) -> Any:
     details = dict(getattr(result, "details", {}) or {})
-    details["entry_recovery"] = {
-        "failure": decision.failure.value,
-        "action": decision.action.value,
-        "retryable": decision.retryable,
-        **extra,
-    }
+    details["entry_recovery"] = {"failure": decision.failure.value, "action": decision.action.value, "retryable": decision.retryable, **extra}
     try:
         result.details = details
         return result
     except Exception:
-        return _result_like(
-            result,
-            accepted=bool(getattr(result, "accepted", False)),
-            order_id=getattr(result, "order_id", None),
-            reason=str(getattr(result, "reason", "unknown")),
-            details=details,
-            broker_attempted=bool(getattr(result, "broker_attempted", False)),
-        )
+        return _result_like(result, accepted=bool(getattr(result, "accepted", False)), order_id=getattr(result, "order_id", None), reason=str(getattr(result, "reason", "unknown")), details=details, broker_attempted=bool(getattr(result, "broker_attempted", False)))
 
 
 def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> Any:
     result = original(manager, plan)
-    if bool(getattr(result, "accepted", False)) or not bool(getattr(result, "broker_attempted", False)):
+    if bool(getattr(result, "accepted", False)) or not bool(getattr(result, "broker_attempted", False)) or getattr(manager, "_entry_recovery_active", False):
         return result
-    if getattr(manager, "_entry_recovery_active", False):
-        return result
-
     decision = decide_recovery(_failure_text(manager, result))
     if not decision.retryable:
         return _annotate(result, decision, outcome="terminal")
@@ -490,14 +392,7 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
         if decision.reconcile_first:
             state, order_id, evidence = _reconcile_intent(manager, plan)
             if state == "order_found" and order_id:
-                return _result_like(
-                    result,
-                    accepted=True,
-                    order_id=order_id,
-                    reason="broker_order_reconciled",
-                    details={"entry_recovery": {"failure": decision.failure.value, "action": decision.action.value, "outcome": state, **evidence}},
-                    broker_attempted=True,
-                )
+                return _result_like(result, accepted=True, order_id=order_id, reason="broker_order_reconciled", details={"entry_recovery": {"failure": decision.failure.value, "action": decision.action.value, "outcome": state, **evidence}}, broker_attempted=True)
             if state == "exposure_found":
                 return _result_like(result, accepted=False, order_id=None, reason="entry_exposure_reconciliation_required", details={"entry_recovery": {"outcome": state, **evidence}}, broker_attempted=True)
             if state != "absent":
@@ -524,24 +419,15 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
             details = {"fresh_price": fresh}
             deviation = _reprice_deviation_pct(plan, fresh)
             if deviation is not None:
-                details["reprice_deviation_pct"] = round(deviation, 4)
-                details["max_reprice_deviation_pct"] = _max_reprice_deviation_pct(manager)
+                details.update({"reprice_deviation_pct": round(deviation, 4), "max_reprice_deviation_pct": _max_reprice_deviation_pct(manager)})
             return _annotate(result, decision, outcome="rebuild_failed", **details)
 
-        signal_id = str(getattr(plan, "signal_id", "") or "")
         clearer = getattr(manager, "_clear_pending_signal", None)
+        signal_id = str(getattr(plan, "signal_id", "") or "")
         if signal_id and callable(clearer):
             clearer(signal_id)
         retried = original(manager, rebuilt)
-        return _annotate(
-            retried,
-            decision,
-            outcome="retried_once",
-            original_quantity=int(plan.quantity),
-            retry_quantity=int(rebuilt.quantity),
-            original_entry=getattr(plan, "entry_price", None),
-            retry_entry=getattr(rebuilt, "entry_price", None),
-        )
+        return _annotate(retried, decision, outcome="retried_once", original_quantity=int(plan.quantity), retry_quantity=int(rebuilt.quantity), original_entry=getattr(plan, "entry_price", None), retry_entry=getattr(rebuilt, "entry_price", None))
     finally:
         setattr(manager, "_entry_recovery_active", False)
 
@@ -590,49 +476,29 @@ def _finalize_partial_entry(manager: Any, order: Any, payload: Mapping[str, Any]
     if filled <= 0 or average <= 0:
         return
 
-    bracket_manager = getattr(manager, "_bracket_manager", None)
-    confirmer = getattr(bracket_manager, "confirm_partial_entry_fill", None)
+    confirmer = getattr(getattr(manager, "_bracket_manager", None), "confirm_partial_entry_fill", None)
     if callable(confirmer):
         confirmer(order_id, filled, average)
     marker = getattr(manager, "_mark_order_uncertain", None)
     if callable(marker):
         marker(str(getattr(order, "client_order_id", None) or order_id))
-    setattr(manager, "_last_order_decision", {
-        "block_reason": "partial_entry_fill_reconciled",
-        "broker_attempted": True,
-        "details": {"order_id": order_id, "filled_quantity": filled, "average_price": average, "remainder_cancel_requested": True},
-    })
-    _log(
-        manager,
-        "critical",
-        "ENTRY_PARTIAL_FILL_RECONCILED order_id=%s symbol=%s filled=%s average=%s",
-        order_id,
-        getattr(order, "symbol", ""),
-        filled,
-        average,
-        event="ENTRY_PARTIAL_FILL_RECONCILED",
-        order_id=order_id,
-        filled_quantity=filled,
-    )
+    setattr(manager, "_last_order_decision", {"block_reason": "partial_entry_fill_reconciled", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": filled, "average_price": average, "remainder_cancel_requested": True}})
+    _log(manager, "critical", "ENTRY_PARTIAL_FILL_RECONCILED order_id=%s symbol=%s filled=%s average=%s", order_id, getattr(order, "symbol", ""), filled, average, event="ENTRY_PARTIAL_FILL_RECONCILED", order_id=order_id, filled_quantity=filled)
 
 
 def install_entry_recovery(order_manager_class: type[Any]) -> None:
     if getattr(order_manager_class, "_canonical_entry_recovery_installed", False):
         return
-
     original_submit = getattr(order_manager_class, "submit_trade_plan_result", None)
     if callable(original_submit):
         setattr(order_manager_class, "_entry_recovery_original_submit", original_submit)
-
         def submit_trade_plan_result(self: Any, plan: Any) -> Any:
             return _recover_submit(original_submit, self, plan)
-
         setattr(order_manager_class, "submit_trade_plan_result", submit_trade_plan_result)
 
     original_update = getattr(order_manager_class, "_update_from_response", None)
     if callable(original_update):
         setattr(order_manager_class, "_entry_recovery_original_update", original_update)
-
         def update_from_response(self: Any, order: Any, payload: dict[str, Any]) -> Any:
             updated = original_update(self, order, payload)
             try:
@@ -640,12 +506,10 @@ def install_entry_recovery(order_manager_class: type[Any]) -> None:
             except Exception as exc:  # noqa: BLE001
                 _log(self, "error", "ENTRY_PARTIAL_FILL_RECONCILE_FAILED order_id=%s error=%s", getattr(order, "order_id", ""), exc, event="ENTRY_PARTIAL_FILL_RECONCILE_FAILED")
             return updated
-
         setattr(order_manager_class, "_update_from_response", update_from_response)
 
     def set_trade_plan_rebuilder(self: Any, callback: Callable[..., Any] | None) -> None:
         setattr(self, "_trade_plan_rebuilder", callback)
-
     setattr(order_manager_class, "set_trade_plan_rebuilder", set_trade_plan_rebuilder)
     setattr(order_manager_class, "_canonical_entry_recovery_installed", True)
 
