@@ -19,6 +19,10 @@ IST = ZoneInfo("Asia/Kolkata")
 ADMIN_API = os.getenv("BOT_ADMIN_API_URL", "http://127.0.0.1:8081").rstrip("/")
 ADMIN_PUBLIC = os.getenv("BOT_ADMIN_PUBLIC_URL", "http://15.206.3.6:8081/admin")
 SERVICE = os.getenv("BOT_SERVICE_NAME", "niftybot")
+LOW_MEMORY_MODE = os.getenv("BOT_CONSOLE_LOW_MEMORY_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+STATUS_TTL = max(3, int(os.getenv("BOT_CONSOLE_STATUS_TTL_SECONDS", "10" if LOW_MEMORY_MODE else "6")))
+EVENT_TTL = max(5, int(os.getenv("BOT_CONSOLE_EVENT_TTL_SECONDS", "15" if LOW_MEMORY_MODE else "8")))
+MAX_JOURNAL_LINES = max(100, min(int(os.getenv("BOT_CONSOLE_MAX_JOURNAL_LINES", "300" if LOW_MEMORY_MODE else "650")), 1000))
 EVENT_TYPES = ["ALL", "TRADE", "SIGNAL", "RISK", "ERROR", "WARNING", "SYSTEM"]
 PNL = re.compile(r"\bpnl=(-?\d+(?:\.\d+)?)", re.IGNORECASE)
 
@@ -28,7 +32,7 @@ st.markdown("""
 :root{--bg:#070b11;--panel:#0d151f;--line:#223249;--text:#e7edf5;--muted:#8292a7;--green:#39d98a;--amber:#f4c45d;--red:#ff6475;--blue:#67a9ff}
 html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;color:var(--text)}
 header,[data-testid="stSidebar"],[data-testid="collapsedControl"]{display:none!important}.block-container{max-width:none!important;padding:.55rem .85rem 1rem!important}
-.hero{background:#0d1d2c;border:1px solid #29445e;border-radius:12px;padding:11px 14px;margin-bottom:8px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.hero b{font-size:1.15rem}.muted{color:var(--muted);font-size:.72rem}.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin:7px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px}.label{font-size:.61rem;color:var(--muted);text-transform:uppercase}.value{font-size:.95rem;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ok{color:var(--green)}.warn{color:var(--amber)}.bad{color:var(--red)}.feed{height:510px;overflow:auto;background:#05090e;border:1px solid var(--line);border-radius:10px}.row{display:grid;grid-template-columns:140px 65px minmax(0,1fr);gap:8px;padding:5px 8px;border-bottom:1px solid #152233;font:11.5px/1.4 ui-monospace,Consolas,monospace}.ts{color:#7f91a6}.msg{word-break:break-word}.ERROR{color:var(--red)}.WARNING{color:var(--amber)}.TRADE{color:#55dfd4}.SIGNAL{color:var(--blue)}.RISK{color:#c39aff}.SYSTEM{color:#aebdcc}@media(max-width:750px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.row{grid-template-columns:100px 55px minmax(0,1fr);font-size:9.5px}}
+.hero{background:#0d1d2c;border:1px solid #29445e;border-radius:12px;padding:11px 14px;margin-bottom:8px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.hero b{font-size:1.15rem}.muted{color:var(--muted);font-size:.72rem}.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin:7px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px}.label{font-size:.61rem;color:var(--muted);text-transform:uppercase}.value{font-size:.95rem;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ok{color:var(--green)}.warn{color:var(--amber)}.bad{color:var(--red)}.feed{height:470px;overflow:auto;background:#05090e;border:1px solid var(--line);border-radius:10px}.row{display:grid;grid-template-columns:140px 65px minmax(0,1fr);gap:8px;padding:5px 8px;border-bottom:1px solid #152233;font:11.5px/1.4 ui-monospace,Consolas,monospace}.ts{color:#7f91a6}.msg{word-break:break-word}.ERROR{color:var(--red)}.WARNING{color:var(--amber)}.TRADE{color:#55dfd4}.SIGNAL{color:var(--blue)}.RISK{color:#c39aff}.SYSTEM{color:#aebdcc}@media(max-width:750px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.row{grid-template-columns:100px 55px minmax(0,1fr);font-size:9.5px}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -44,19 +48,28 @@ def _get_json(path: str) -> dict:
         return {"engine_http_status": "ADMIN API UNREACHABLE"}
 
 
-@st.cache_data(ttl=6, show_spinner=False)
+def _post(path: str) -> bool:
+    try:
+        request = urllib.request.Request(ADMIN_API + path, data=b"", method="POST")
+        with urllib.request.urlopen(request, timeout=2.5):
+            return True
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return False
+
+
+@st.cache_data(ttl=STATUS_TTL, show_spinner=False)
 def status_snapshot() -> dict:
     return _get_json("/admin/api/status")
 
 
-@st.cache_data(ttl=8, show_spinner=False)
-def recent_events(lines: int = 650) -> list[dict[str, str]]:
+@st.cache_data(ttl=EVENT_TTL, show_spinner=False)
+def recent_events(lines: int = MAX_JOURNAL_LINES) -> list[dict[str, str]]:
     try:
         result = subprocess.run(
-            ["journalctl", "-u", SERVICE, "-n", str(max(100, min(lines, 1000))), "--no-pager", "-o", "cat"],
+            ["journalctl", "-u", SERVICE, "-n", str(max(100, min(lines, MAX_JOURNAL_LINES))), "--no-pager", "-o", "cat"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=3 if LOW_MEMORY_MODE else 5,
             check=False,
         )
         raw = result.stdout if result.returncode == 0 else ""
@@ -128,25 +141,36 @@ def pnl_summary(rows: list[dict[str, str]]) -> tuple[float, int]:
             continue
         match = PNL.search(row["message"])
         if match:
-            try: values.append(float(match.group(1)))
-            except ValueError: pass
+            try:
+                values.append(float(match.group(1)))
+            except ValueError:
+                pass
     return round(sum(values), 2), len(values)
 
 
 now = datetime.now(IST)
 within_session = now.weekday() < 5 and time(9, 15) <= now.time() <= time(15, 30)
 st.markdown(
-    f'<div class="hero"><div><b>⚡ Nifty Scalper Review</b><div class="muted">Read only · bounded journal reads · no background follower</div></div><div><b>{"SESSION OPEN" if within_session else "OUTSIDE SESSION"}</b><div class="muted">{now:%d %b %Y · %I:%M %p IST}</div></div></div>',
+    f'<div class="hero"><div><b>⚡ Nifty Scalper Review</b><div class="muted">Low-memory mode {"ON" if LOW_MEMORY_MODE else "OFF"} · bounded journal reads · no background follower</div></div><div><b>{"SESSION OPEN" if within_session else "OUTSIDE SESSION"}</b><div class="muted">{now:%d %b %Y · %I:%M %p IST}</div></div></div>',
     unsafe_allow_html=True,
 )
+refresh_choices = [20, 30, 60, 120] if LOW_MEMORY_MODE else [8, 10, 15, 30]
+row_choices = [25, 50, 100, 150] if LOW_MEMORY_MODE else [50, 100, 200, 300]
 controls = st.columns([1, 1, 1.1, 2.2, .9, .9, 1.1], gap="small")
-auto_refresh = controls[0].toggle("Auto-refresh", value=within_session)
-refresh_seconds = controls[1].selectbox("Every", [8, 10, 15, 30], index=1, format_func=lambda value: f"{value}s")
+auto_refresh = controls[0].toggle("Auto-refresh", value=False if LOW_MEMORY_MODE else within_session)
+refresh_seconds = controls[1].selectbox("Every", refresh_choices, index=1, format_func=lambda value: f"{value}s")
 event_type = controls[2].selectbox("Event", EVENT_TYPES)
 query = controls[3].text_input("Contains", placeholder="symbol, blocker, order…")
-row_limit = controls[4].selectbox("Rows", [50, 100, 200, 300], index=1)
+row_limit = controls[4].selectbox("Rows", row_choices, index=1)
 trade_only = controls[5].toggle("Trade events", value=False)
 controls[6].link_button("Open admin", ADMIN_PUBLIC, width="stretch")
+
+ops = st.columns([1, 1, 2.5], gap="small")
+if ops[0].button("Restart bot", type="primary", width="stretch"):
+    st.cache_data.clear()
+    st.toast("Bot restart requested" if _post("/admin/restart") else "Restart request failed")
+ops[1].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
+ops[2].caption("For a fully frozen bot, use this independent console or the Admin page. Instance stop remains outside the bot UI to avoid accidental host shutdown.")
 
 
 def render() -> None:
@@ -159,6 +183,7 @@ def render() -> None:
     broker = status.get("broker") or {}
     recon = status.get("reconciliation") or {}
     selected = status.get("selected") or {}
+    memory = status.get("host_memory") or {}
     pnl_total, closed = pnl_summary(rows_all)
     primary = status.get("primary_blocker") or next((b for b in status.get("blockers", []) if b), "—")
     engine_status = engine_display_status(status)
@@ -166,11 +191,13 @@ def render() -> None:
     broker_label = broker_display_label(broker_state)
     recon_state = status.get("reconciled")
     recon_label = reconciliation_display_label(recon_state, recon)
+    mem_pct = memory.get("mem_used_pct")
+    mem_css = "bad" if isinstance(mem_pct, (int, float)) and mem_pct >= 90 else "warn" if isinstance(mem_pct, (int, float)) and mem_pct >= 75 else "ok"
     st.markdown(
         '<div class="cards">'
         + card("Engine", engine_status, "ok" if status.get("operational_ready") else "warn")
         + card("Primary blocker", primary, "warn" if primary != "—" else "ok")
-        + card("Mode", status.get("mode") or "UNKNOWN", "ok" if status.get("live_orders_armed") else "warn")
+        + card("Memory", f"{mem_pct if mem_pct is not None else '—'}%", mem_css)
         + card("Broker", broker_label, "ok" if broker_label.startswith("YES") else "warn")
         + card("Reconciled", recon_label, "ok" if recon_label.startswith("YES") else "warn")
         + '</div><div class="cards">'
