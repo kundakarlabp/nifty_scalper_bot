@@ -28,11 +28,17 @@ from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-_PRODUCTION_DIRECTIONAL = {'smc', 'vwap', 'order_flow', 'orb', 'bb_squeeze'}
-_CONTEXT_ONLY = {'oi_max_pain'}
+_PRIMARY_DIRECTIONAL = {'smc', 'vwap', 'orb'}
+_CONTEXT_ONLY = {'oi_max_pain', 'order_flow', 'bb_squeeze'}
 _DISABLED_UNTIL_FEATURE_COMPLETE = {'cpr', 'rsi_div'}
 _EXPIRY_ONLY = {'gamma_scalping', 'tuesday_gamma_buyer'}
 _THETA_ONLY = {'straddle'}
+_TRUE_VALUES = {'1', 'true', 'yes', 'on'}
+
+
+def _env_true(name: str, default: str = 'false') -> bool:
+    return str(os.getenv(name, default) or default).strip().lower() in _TRUE_VALUES
+
 
 def build_elite_strategies(
     settings: EliteStrategiesSettings,
@@ -50,9 +56,7 @@ def build_elite_strategies(
     """
     strategies: List[EliteStrategy] = []
     strategy_mode = str(os.getenv('STRATEGY_MODE', 'directional_scalp')).strip().lower()
-    allow_expiry_gamma = str(
-        os.getenv('ALLOW_EXPIRY_GAMMA_STRATEGIES', 'false')
-    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    allow_expiry_gamma = _env_true('ALLOW_EXPIRY_GAMMA_STRATEGIES')
     active_names: list[str] = []
     context_names: list[str] = []
     disabled_names: list[str] = []
@@ -91,7 +95,7 @@ def build_elite_strategies(
                 disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                 continue
 
-            if field_name == 'oi_max_pain' and str(os.getenv('ENABLE_OI_CONTEXT_PROVIDER', 'false')).strip().lower() not in {'1','true','yes','on'}:
+            if field_name == 'oi_max_pain' and not _env_true('ENABLE_OI_CONTEXT_PROVIDER'):
                 disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                 continue
 
@@ -99,14 +103,14 @@ def build_elite_strategies(
                 if field_name in _EXPIRY_ONLY or field_name in _THETA_ONLY:
                     disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                     continue
-                if field_name not in _PRODUCTION_DIRECTIONAL and field_name not in _CONTEXT_ONLY:
+                if field_name not in _PRIMARY_DIRECTIONAL and field_name not in _CONTEXT_ONLY:
                     disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                     continue
                 if field_name in _DISABLED_UNTIL_FEATURE_COMPLETE:
-                    if field_name == 'cpr' and str(os.getenv('ENABLE_CPR_EXPERIMENTAL', 'false')).strip().lower() not in {'1','true','yes','on'}:
+                    if field_name == 'cpr' and not _env_true('ENABLE_CPR_EXPERIMENTAL'):
                         disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                         continue
-                    if field_name == 'rsi_div' and str(os.getenv('ENABLE_RSI_DIVERGENCE_EXPERIMENTAL', 'false')).strip().lower() not in {'1','true','yes','on'}:
+                    if field_name == 'rsi_div' and not _env_true('ENABLE_RSI_DIVERGENCE_EXPERIMENTAL'):
                         disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                         continue
                 if field_name in _CONTEXT_ONLY:
@@ -138,8 +142,10 @@ def build_elite_strategies(
     passed = len(strategies)
     total = len(registry)
     LOGGER.info(f"📊 Strategy Build Complete: {passed}/{total} active.")
-    orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
-    if not orderflow_trigger and 'OrderFlow' in active_names and 'OrderFlow' not in context_names:
+    orderflow_trigger = _env_true('ORDERFLOW_ALLOW_TRIGGER_ROLE')
+    if orderflow_trigger and 'OrderFlow' in context_names:
+        context_names.remove('OrderFlow')
+    elif not orderflow_trigger and 'OrderFlow' in active_names and 'OrderFlow' not in context_names:
         context_names.append('OrderFlow')
     trigger_capable = [name for name in active_names if name not in (context_names or [])]
     LOGGER.info(
