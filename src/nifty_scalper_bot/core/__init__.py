@@ -2,22 +2,39 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from nifty_scalper_bot.utils.logging import get_logger
 # TODO: remove compatibility shim once downstream modules are updated.
 from nifty_scalper_bot.utils.pricing import canonical_price_source  # compat
 
+_CORE_TRUTHY = {"1", "true", "yes", "y", "on", "live"}
+
+
+def _core_env_true(name: str) -> bool:
+    return str(os.getenv(name, "") or "").strip().lower() in _CORE_TRUTHY
+
+
+def _real_live_mode_requested() -> bool:
+    mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+    live_enabled = _core_env_true("ENABLE_LIVE") or _core_env_true("ENABLE_LIVE_TRADING")
+    paper_shadow = _core_env_true("PAPER_MODE") or _core_env_true("PAPER__ENABLED") or _core_env_true("SHADOW_MODE")
+    return mode == "LIVE" and live_enabled and not paper_shadow
+
+
 try:
     from nifty_scalper_bot.core.strategy_live_safety import apply_patches as _apply_strategy_live_safety
 
     _apply_strategy_live_safety()
-except Exception as exc:  # noqa: BLE001 - core package import must not crash tooling
+except Exception as exc:  # noqa: BLE001 - non-live tooling imports should remain usable
     get_logger(__name__).error(
         "STRATEGY_LIVE_SAFETY_PATCH_FAILED error=%s",
         exc,
         extra={"event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED", "error_type": type(exc).__name__},
     )
+    if _real_live_mode_requested():
+        raise RuntimeError("strategy_live_safety_patch_failed") from exc
 
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
 
