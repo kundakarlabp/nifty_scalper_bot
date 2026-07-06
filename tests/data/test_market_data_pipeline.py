@@ -32,6 +32,7 @@ def test_candle_store_push_duplicate_noop_and_older_rejected() -> None:
     assert len(store.get("NFO:TEST")) == 1
     with pytest.raises(DataIntegrityError):
         store.push(_candle(base - timedelta(minutes=1), 99.0))
+    assert len(store.get("NFO:TEST")) == 1
 
 
 def test_market_data_pipeline_catches_store_integrity_rejection(caplog) -> None:
