@@ -18,6 +18,26 @@ from nifty_scalper_bot.strategies.option_signal import score_option_candidate
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
 LOGGER = get_logger(__name__)
+_TRUE_VALUES = {'1', 'true', 'yes', 'y', 'on', 'live'}
+
+
+def _env_true(name: str) -> bool:
+    return str(os.getenv(name, '') or '').strip().lower() in _TRUE_VALUES
+
+
+def _real_live_mode() -> bool:
+    mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
+    live_enabled = _env_true('ENABLE_LIVE') or _env_true('ENABLE_LIVE_TRADING')
+    paper_or_shadow = _env_true('PAPER_MODE') or _env_true('PAPER__ENABLED') or _env_true('SHADOW_MODE')
+    return mode == 'LIVE' and live_enabled and not paper_or_shadow
+
+
+def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(float(minimum), float(value))
 
 
 @dataclass(slots=True)
@@ -112,9 +132,14 @@ class TradeCandidateSelector:
             max_age = float(self.max_tick_age_s)
         if self.require_real_ticks_last_60s is not None:
             min_ticks = int(self.require_real_ticks_last_60s)
-        allow_ltp_only = os.getenv('ALLOW_LTP_ONLY_CANDIDATE', 'false').lower() in {'1', 'true', 'yes', 'on'}
+        is_live = _real_live_mode()
+        if is_live:
+            max_spread = min(max_spread, _float_env('LIVE_CANDIDATE_MAX_SPREAD_PCT', 0.75, minimum=0.01))
+            max_age = min(max_age, _float_env('LIVE_CANDIDATE_MAX_TICK_AGE_S', 2.5, minimum=0.1))
+            min_ticks = max(min_ticks, parse_int_env(os.getenv('LIVE_CANDIDATE_MIN_REAL_TICKS_60S'), 2))
+        allow_ltp_only = (not is_live) and os.getenv('ALLOW_LTP_ONLY_CANDIDATE', 'false').lower() in {'1', 'true', 'yes', 'on'}
         ranked: list[TradeCandidate] = []
-        rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0, 'cost_edge_insufficient': 0}
+        rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'live_bid_ask_required': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0, 'cost_edge_insufficient': 0}
         ltp_only_used = 0
         for s in snapshots:
             side = str(s.get('side') or s.get('option_type') or '').upper()
@@ -131,6 +156,10 @@ class TradeCandidateSelector:
                 continue
             bid, ask, ltp = self._f(s.get('bid')), self._f(s.get('ask')), self._f(s.get('ltp'))
             has_bid_ask = bool((bid or 0) > 0 and (ask or 0) > 0)
+            if is_live and not has_bid_ask:
+                rejects['live_bid_ask_required'] += 1
+                self._log_reject("live_bid_ask_required", symbol, throttle_key_parts=("live_bid_ask_required", symbol), ltp=ltp, bid=bid, ask=ask, quote_quality=s.get("quote_quality"), ltp_only_fallback=bool(s.get("ltp_only_fallback")))
+                continue
             if ltp is None or ltp <= 0:
                 rejects['missing_bid_ask'] += 1
                 self._log_reject("missing_bid_ask", symbol, throttle_key_parts=("missing_bid_ask", symbol, "invalid_ltp"), ltp=ltp, bid=bid, ask=ask, quote_quality=s.get("quote_quality"), ltp_only_fallback=bool(s.get("ltp_only_fallback")), allow_ltp_only=allow_ltp_only)
