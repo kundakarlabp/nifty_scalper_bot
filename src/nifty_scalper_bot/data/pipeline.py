@@ -21,9 +21,9 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -31,6 +31,7 @@ from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.utils.logging import log_throttled
 
 LOGGER = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 MIN_REQUIRED_CANDLES: int = 50  # hard strategy gate
 
@@ -55,6 +56,13 @@ class _Counter:
 
 _DROPPED_TICKS = _Counter()
 _DROPPED_CANDLES = _Counter()
+
+
+def _to_ist_timestamp(value: Any) -> pd.Timestamp:
+    ts = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(ts):
+        raise DataIntegrityError(f"unparseable timestamp: {value!r}")
+    return pd.Timestamp(ts).tz_convert(IST)
 
 
 def get_dropped_ticks() -> int:
@@ -82,7 +90,7 @@ class ValidatedTick:
 @dataclass(frozen=True, slots=True)
 class Candle:
     symbol: str
-    timestamp: pd.Timestamp   # minute-bucket open time
+    timestamp: pd.Timestamp  # minute-bucket open time
     open: float
     high: float
     low: float
@@ -114,12 +122,12 @@ class TickValidator:
             if not symbol_raw or str(symbol_raw).strip() == "":
                 raise DataIntegrityError("missing symbol")
 
-            ts_raw = raw.get("exchange_timestamp") or raw.get("timestamp") or raw.get("ts")
+            ts_raw = (
+                raw.get("exchange_timestamp") or raw.get("timestamp") or raw.get("ts")
+            )
             if ts_raw is None:
                 raise DataIntegrityError("missing timestamp")
-            ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
-            if pd.isna(ts):
-                raise DataIntegrityError(f"unparseable timestamp: {ts_raw!r}")
+            ts = _to_ist_timestamp(ts_raw)
 
             ltp_raw = raw.get("ltp") or raw.get("last_price") or raw.get("close")
             if ltp_raw is None:
@@ -174,8 +182,8 @@ class CandleBuilder:
     """
 
     def __init__(self) -> None:
-        self._active: dict[str, dict[str, Any]] = {}   # symbol → active candle
-        self._last_ts: dict[str, pd.Timestamp] = {}    # symbol → last tick ts
+        self._active: dict[str, dict[str, Any]] = {}  # symbol → active candle
+        self._last_ts: dict[str, pd.Timestamp] = {}  # symbol → last tick ts
         self._lock = threading.Lock()
 
     def on_tick(self, tick: ValidatedTick) -> Optional[Candle]:
@@ -224,10 +232,23 @@ class CandleBuilder:
             log_throttled(
                 LOGGER,
                 f"tick_late_bucket:{sym}",
-                f"tick_out_of_order symbol={sym} tick_minute={minute.isoformat()} current_minute={pd.Timestamp(active['timestamp']).isoformat()} total_dropped={_DROPPED_TICKS.value}",
+                (
+                    f"tick_out_of_order symbol={sym} "
+                    f"tick_minute={minute.isoformat()} "
+                    f"current_minute={pd.Timestamp(active['timestamp']).isoformat()} "
+                    f"total_dropped={_DROPPED_TICKS.value}"
+                ),
                 interval_sec=30.0,
                 level=logging.DEBUG,
-                extra={"event": "tick_out_of_order", "symbol": sym, "tick_ts": ts.isoformat(), "tick_minute": minute.isoformat(), "last_ts": last.isoformat() if last is not None else None, "source": "candle_builder", "total_dropped": _DROPPED_TICKS.value},
+                extra={
+                    "event": "tick_out_of_order",
+                    "symbol": sym,
+                    "tick_ts": ts.isoformat(),
+                    "tick_minute": minute.isoformat(),
+                    "last_ts": last.isoformat() if last is not None else None,
+                    "source": "candle_builder",
+                    "total_dropped": _DROPPED_TICKS.value,
+                },
             )
             return None
         elif minute > pd.Timestamp(active["timestamp"]):
@@ -253,8 +274,11 @@ class CandleBuilder:
                 return None
             LOGGER.debug(
                 "candle_closed",
-                extra={"event": "candle_closed", "symbol": sym,
-                       "ts": closed.timestamp.isoformat()},
+                extra={
+                    "event": "candle_closed",
+                    "symbol": sym,
+                    "ts": closed.timestamp.isoformat(),
+                },
             )
         return closed
 
@@ -269,9 +293,12 @@ class CandleBuilder:
                 _DROPPED_CANDLES.increment()
                 LOGGER.error(
                     "candle_ohlc_violation",
-                    extra={"event": "candle_ohlc_violation", "symbol": symbol,
-                           "candle": candle.as_dict(),
-                           "total_dropped": _DROPPED_CANDLES.value},
+                    extra={
+                        "event": "candle_ohlc_violation",
+                        "symbol": symbol,
+                        "candle": candle.as_dict(),
+                        "total_dropped": _DROPPED_CANDLES.value,
+                    },
                 )
                 return None
             return candle
@@ -301,12 +328,24 @@ def _update_candle(candle: dict[str, Any], price: float, volume: float) -> None:
 def _finalize(candle: dict[str, Any]) -> Candle:
     return Candle(
         symbol=str(candle["symbol"]),
-        timestamp=pd.Timestamp(candle["timestamp"]),
+        timestamp=_to_ist_timestamp(candle["timestamp"]),
         open=float(candle["open"]),
         high=float(candle["high"]),
         low=float(candle["low"]),
         close=float(candle["close"]),
         volume=float(candle["volume"]),
+    )
+
+
+def _normalize_candle_timestamp(candle: Candle) -> Candle:
+    return Candle(
+        symbol=candle.symbol,
+        timestamp=_to_ist_timestamp(candle.timestamp),
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
     )
 
 
@@ -341,32 +380,49 @@ class CandleStore:
 
     def push(self, candle: Candle) -> None:
         with self._lock:
-            if candle.symbol not in self._store:
-                self._store[candle.symbol] = deque(maxlen=self._maxlen)
-            buf = self._store[candle.symbol]
+            normalized_candle = _normalize_candle_timestamp(candle)
+            if normalized_candle.symbol not in self._store:
+                self._store[normalized_candle.symbol] = deque(maxlen=self._maxlen)
+            buf = self._store[normalized_candle.symbol]
             if buf:
-                last_ts = pd.Timestamp(buf[-1].timestamp).floor("1min")
-                incoming_ts = pd.Timestamp(candle.timestamp).floor("1min")
+                last_ts = _to_ist_timestamp(buf[-1].timestamp).floor("1min")
+                incoming_ts = normalized_candle.timestamp.floor("1min")
                 if incoming_ts == last_ts:
                     return
                 if incoming_ts < last_ts:
                     _DROPPED_CANDLES.increment()
                     log_throttled(
                         LOGGER,
-                        f"candle_store_out_of_order:{candle.symbol}",
-                        f"candle_store_out_of_order symbol={candle.symbol} incoming_ts={incoming_ts.isoformat()} last_ts={last_ts.isoformat()} source=candle_store",
+                        f"candle_store_out_of_order:{normalized_candle.symbol}",
+                        (
+                            "candle_store_out_of_order "
+                            f"symbol={normalized_candle.symbol} "
+                            f"incoming_ts={incoming_ts.isoformat()} "
+                            f"last_ts={last_ts.isoformat()} source=candle_store"
+                        ),
                         interval_sec=30.0,
                         level=logging.WARNING,
-                        extra={"event": "candle_store_out_of_order", "symbol": candle.symbol, "incoming_ts": incoming_ts.isoformat(), "last_ts": last_ts.isoformat(), "source": "candle_store", "total_dropped": _DROPPED_CANDLES.value},
+                        extra={
+                            "event": "candle_store_out_of_order",
+                            "symbol": normalized_candle.symbol,
+                            "incoming_ts": incoming_ts.isoformat(),
+                            "last_ts": last_ts.isoformat(),
+                            "source": "candle_store",
+                            "total_dropped": _DROPPED_CANDLES.value,
+                        },
                     )
-                    raise DataIntegrityError("candle store timestamps must be monotonic")
-            buf.append(candle)
+                    raise DataIntegrityError(
+                        "candle store timestamps must be monotonic"
+                    )
+            buf.append(normalized_candle)
 
     def get(self, symbol: str) -> list[Candle]:
         with self._lock:
             return list(self._store.get(symbol, []))
 
-    def candles_ready(self, symbol: str, min_required: int = MIN_REQUIRED_CANDLES) -> bool:
+    def candles_ready(
+        self, symbol: str, min_required: int = MIN_REQUIRED_CANDLES
+    ) -> bool:
         """STEP 7 gate: no flags — just count >= min_required."""
         return len(self.get(symbol)) >= min_required
 
@@ -382,9 +438,7 @@ class CandleStore:
             for row in bars:
                 try:
                     ts_raw = row.get("timestamp") or row.get("date")
-                    ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
-                    if pd.isna(ts):
-                        continue
+                    ts = _to_ist_timestamp(ts_raw)
                     c = Candle(
                         symbol=symbol,
                         timestamp=ts.floor("1min"),
@@ -395,12 +449,31 @@ class CandleStore:
                         volume=float(row.get("volume") or 0),
                     )
                     if not _check_ohlc(c):
-                        LOGGER.warning("candle_store_seed_rejected", extra={"event": "candle_store_seed_rejected", "symbol": symbol, "incoming_ts": c.timestamp.isoformat(), "source": "seed", "reason": "ohlc_invalid"})
+                        LOGGER.warning(
+                            "candle_store_seed_rejected",
+                            extra={
+                                "event": "candle_store_seed_rejected",
+                                "symbol": symbol,
+                                "incoming_ts": c.timestamp.isoformat(),
+                                "source": "seed",
+                                "reason": "ohlc_invalid",
+                            },
+                        )
                         continue
                     by_minute[c.timestamp] = c
                 except (TypeError, ValueError, DataIntegrityError) as exc:
-                    LOGGER.warning("candle_store_seed_rejected", extra={"event": "candle_store_seed_rejected", "symbol": symbol, "source": "seed", "reason": type(exc).__name__})
-            buf: deque[Candle] = deque((by_minute[key] for key in sorted(by_minute)), maxlen=self._maxlen)
+                    LOGGER.warning(
+                        "candle_store_seed_rejected",
+                        extra={
+                            "event": "candle_store_seed_rejected",
+                            "symbol": symbol,
+                            "source": "seed",
+                            "reason": type(exc).__name__,
+                        },
+                    )
+            buf: deque[Candle] = deque(
+                (by_minute[key] for key in sorted(by_minute)), maxlen=self._maxlen
+            )
             self._store[symbol] = buf
         LOGGER.info(
             "candle_store_seeded",
@@ -413,6 +486,7 @@ class CandleStore:
 
     def to_dataframe(self, symbol: str) -> "pd.DataFrame":
         import pandas as _pd
+
         candles = self.get(symbol)
         if not candles:
             return _pd.DataFrame()
@@ -464,7 +538,12 @@ class MarketDataPipeline:
                 log_throttled(
                     LOGGER,
                     f"pipeline_candle_store_rejected:{candle.symbol}",
-                    f"pipeline_candle_store_rejected symbol={candle.symbol} incoming_ts={candle.timestamp.isoformat()} error_type={type(exc).__name__} reason={exc} source=market_data_pipeline",
+                    (
+                        f"pipeline_candle_store_rejected symbol={candle.symbol} "
+                        f"incoming_ts={candle.timestamp.isoformat()} "
+                        f"error_type={type(exc).__name__} "
+                        f"reason={exc} source=market_data_pipeline"
+                    ),
                     interval_sec=30.0,
                     level=logging.WARNING,
                     extra={
@@ -479,7 +558,9 @@ class MarketDataPipeline:
                 return None
         return candle
 
-    def candles_ready(self, symbol: str, min_required: int = MIN_REQUIRED_CANDLES) -> bool:
+    def candles_ready(
+        self, symbol: str, min_required: int = MIN_REQUIRED_CANDLES
+    ) -> bool:
         """STEP 7: strategy gate — pure count, no boolean flags."""
         return self.store.candles_ready(symbol, min_required)
 

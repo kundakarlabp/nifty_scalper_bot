@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -13,6 +14,8 @@ from nifty_scalper_bot.data.candle_engine import (
     sanitize,
     validate_dataframe,
 )
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def _tick(ts: datetime, price: float) -> dict[str, float | datetime]:
@@ -33,6 +36,10 @@ def test_candle_engine_finalizes_closed_candle() -> None:
     assert row["high"] == 102.0
     assert row["low"] == 100.0
     assert row["close"] == 102.0
+    assert row["timestamp"].isoformat() == "2026-01-02T14:45:00+05:30"
+    assert row["timestamp"].tzinfo == IST
+    assert engine.last_candle_close is not None
+    assert engine.last_candle_close.isoformat() == "2026-01-02T14:45:00+05:30"
 
 
 def test_detect_gap_returns_true_for_missing_minute() -> None:
@@ -136,6 +143,26 @@ def test_sanitize_deduplicates_and_drops_missing_close() -> None:
     assert cleaned["close"].isna().sum() == 0
 
 
+def test_sanitize_converts_timestamps_to_ist() -> None:
+    dirty = pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-01-02T09:15:00Z",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "volume": 10,
+            }
+        ]
+    )
+
+    cleaned = sanitize(dirty)
+
+    assert cleaned.iloc[0]["timestamp"].isoformat() == "2026-01-02T14:45:00+05:30"
+    assert cleaned.iloc[0]["timestamp"].tzinfo == IST
+
+
 def test_repair_with_backfill_merges_existing_and_recent() -> None:
     ts = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
     old = pd.DataFrame(
@@ -194,12 +221,27 @@ def test_candle_engine_equal_duplicate_is_noop_and_older_rejected() -> None:
     ts = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
     engine.on_tick(_tick(ts, 100.0))
     assert engine.flush() is not None
-    engine.current_candle = {"timestamp": pd.Timestamp(ts), "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 1.0}
+    engine.current_candle = {
+        "timestamp": pd.Timestamp(ts),
+        "open": 100.0,
+        "high": 100.0,
+        "low": 100.0,
+        "close": 100.0,
+        "volume": 1.0,
+    }
     assert engine.flush() is None
     assert engine.current_candle is None
     assert len(engine.get_df()) == 1
-    engine.current_candle = {"timestamp": pd.Timestamp(ts - timedelta(minutes=1)), "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0, "volume": 1.0}
+    engine.current_candle = {
+        "timestamp": pd.Timestamp(ts - timedelta(minutes=1)),
+        "open": 99.0,
+        "high": 99.0,
+        "low": 99.0,
+        "close": 99.0,
+        "volume": 1.0,
+    }
     from nifty_scalper_bot.data.source import DataIntegrityError
+
     try:
         engine.flush()
     except DataIntegrityError:
