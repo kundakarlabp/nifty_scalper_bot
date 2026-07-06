@@ -304,7 +304,7 @@ def apply_patches() -> None:
                 {"metadata_keys": sorted(metadata.keys())},
             )
             return None
-        return signal
+        return _add_identity(signal)
 
     cls._strategy_live_safety_original_generate_signal = original
     cls.generate_signal = generate_signal
