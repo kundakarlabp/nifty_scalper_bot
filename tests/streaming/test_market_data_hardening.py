@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, time as dtime
 import logging
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.streaming.market_data_hardening import (
     install_websocket_market_data_hardening,
@@ -71,3 +73,19 @@ def test_ticker_close_error_is_suppressed() -> None:
     ticker = DummyManager()._build_ticker()
 
     assert ticker.close() is None
+
+
+def test_trading_window_uses_configured_timezone_object() -> None:
+    install_websocket_market_data_hardening(WebSocketManager)
+    manager = WebSocketManager(
+        "api_key",
+        "access_token",
+        trading_window_enabled=True,
+        trading_window_tz="Asia/Kolkata",
+        trading_start=dtime(0, 0),
+        trading_end=dtime(23, 59),
+    )
+
+    assert str(manager._trading_tz) == str(ZoneInfo("Asia/Kolkata"))
+    if datetime.now(ZoneInfo("Asia/Kolkata")).weekday() < 5:
+        assert manager._is_within_trading_window() is True
