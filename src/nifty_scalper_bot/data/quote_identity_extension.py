@@ -1,10 +1,4 @@
-"""DataHub quote identity contract.
-
-This module stamps quote payloads with canonical instrument identity and dynamic
-freshness metadata at the data boundary. Execution may still fail closed, but
-valid live quotes should now carry the identity fields required by the final
-TradePlan guard.
-"""
+"""Quote identity helpers."""
 
 from __future__ import annotations
 
@@ -13,7 +7,10 @@ from datetime import datetime
 import time
 from typing import Any, Mapping
 
+import pandas as pd
+
 from nifty_scalper_bot.data import data_hub as _data_hub
+from nifty_scalper_bot.utils.ist_clock import timestamp as ist_timestamp
 
 _PATCH_APPLIED = False
 _ORIGINALS: dict[str, Any] = {}
@@ -68,11 +65,9 @@ def _coerce_timestamp_ms(raw: Any) -> float | None:
         if value > 0:
             return value * 1000.0 if value < 1e11 else value
     with suppress(Exception):
-        import pandas as pd
-
-        ts = pd.to_datetime(raw, utc=True, errors="coerce")
+        ts = ist_timestamp(raw, errors="coerce")
         if not pd.isna(ts):
-            return float(pd.Timestamp(ts).timestamp() * 1000.0)
+            return float(ts.timestamp() * 1000.0)
     return None
 
 

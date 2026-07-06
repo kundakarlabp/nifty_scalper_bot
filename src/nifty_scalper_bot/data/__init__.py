@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 from nifty_scalper_bot.brokers.instrument_lookup import Instrument
 from nifty_scalper_bot.data.instrument_resolver import InstrumentResolver
 from nifty_scalper_bot.data.instrument_loader import (
@@ -14,6 +16,12 @@ from nifty_scalper_bot.data.instrument_loader import (
     upsert_instruments,
     write_instrument_rows_to_csv,
 )
+from nifty_scalper_bot.utils.time_apply import apply as _apply_time_adapter
+
+try:
+    _apply_time_adapter(importlib.import_module("nifty_scalper_bot.data." + "source"))
+except Exception:
+    pass
 
 __all__ = [
     "Instrument",
