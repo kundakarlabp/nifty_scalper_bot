@@ -42,6 +42,12 @@ def _is_live(manager: Any) -> bool:
     return mode == "LIVE" and live and not paper_shadow
 
 
+def _metadata_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in TRUTHY
+
+
 def _bars_available(manager: Any, symbol: str) -> int:
     getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
     if not callable(getter):
@@ -146,6 +152,37 @@ def _add_identity(signal: Signal) -> Signal:
     return signal.with_metadata(**metadata)
 
 
+def _orderflow_selected_option_block(signal: Signal) -> dict[str, Any] | None:
+    """Block live OrderFlow entries that are not tied to selected/near-ATM options."""
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    strategy_name = str(metadata.get("strategy_name") or metadata.get("strategy") or "")
+    canonical = strategy_name.replace("_", "").replace("-", "").strip().lower()
+    if canonical not in {"orderflow", "orderflowstrategy"}:
+        return None
+
+    role = str(metadata.get("role") or "").strip().lower()
+    trigger_like = bool(
+        role == "trigger"
+        or _metadata_true(metadata.get("can_trigger"))
+        or _metadata_true(metadata.get("trigger_conditions_met"))
+        or _metadata_true(metadata.get("trigger_eligible"))
+        or metadata.get("approval_candidate") == "orderflow_live_depth_trigger"
+    )
+    if not trigger_like:
+        return None
+    if _metadata_true(metadata.get("selected_or_near_atm")):
+        return None
+    return {
+        "reason": "live_orderflow_selected_option_required",
+        "strategy_name": strategy_name,
+        "role": role or None,
+        "can_trigger": bool(metadata.get("can_trigger")),
+        "trigger_conditions_met": bool(metadata.get("trigger_conditions_met")),
+        "selected_or_near_atm": metadata.get("selected_or_near_atm"),
+        "candidate_symbol": metadata.get("candidate_symbol"),
+    }
+
+
 def _final_filter(manager: Any, signal: Signal, trace_id: str | None) -> Signal | None:
     filter_fn = getattr(manager, "_filter_signal", None)
     if callable(filter_fn):
@@ -235,6 +272,16 @@ def apply_patches() -> None:
             if signal is None:
                 return None
             metadata = dict(getattr(signal, "metadata", {}) or {})
+        orderflow_block = _orderflow_selected_option_block(signal)
+        if orderflow_block is not None:
+            _record(
+                self,
+                signal.symbol,
+                str(orderflow_block.get("reason") or "live_orderflow_selected_option_required"),
+                trace_id,
+                orderflow_block,
+            )
+            return None
         if not _has_identity(signal):
             _record(
                 self,
