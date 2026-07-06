@@ -72,6 +72,12 @@ def __getattr__(name: str) -> Any:
     if name == "NiftyScalperApp":
         try:
             from .app import NiftyScalperApp as _App
+            import sys
+            from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _install_session_adapter
+
+            module = sys.modules.get("nifty_scalper_bot.core.app")
+            if module is not None:
+                _install_session_adapter(module)
         except Exception as exc:  # noqa: BLE001
             _LOGGER.error(
                 "Failure in core.__getattr__: %s",
