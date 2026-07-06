@@ -237,9 +237,21 @@ def _final_filter(manager: Any, signal: Signal, trace_id: str | None) -> Signal 
     return signal
 
 
+def _install_canonical_history_builder(strategy_module: Any) -> None:
+    """Route StrategyManager history context through the canonical builder."""
+    from nifty_scalper_bot.core.strategy_context_builder import (
+        build_strategy_history_context as canonical_build_strategy_history_context,
+    )
+    from nifty_scalper_bot.strategies import signal_generator as signal_generator_module
+
+    strategy_module.build_strategy_history_context = canonical_build_strategy_history_context
+    signal_generator_module.build_strategy_history_context = canonical_build_strategy_history_context
+
+
 def apply_patches() -> None:
     from nifty_scalper_bot.core import strategy_manager as strategy_module
 
+    _install_canonical_history_builder(strategy_module)
     cls = strategy_module.StrategyManager
     if getattr(cls, "_strategy_live_safety_installed", False):
         return
