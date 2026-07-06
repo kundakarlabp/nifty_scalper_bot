@@ -283,8 +283,8 @@ def apply_patches() -> None:
             signal = _final_filter(self, signal, trace_id)
             if signal is None:
                 return None
-        signal = _add_identity(signal)
-        metadata = dict(getattr(signal, "metadata", {}) or {})
+            signal = _add_identity(signal)
+            metadata = dict(getattr(signal, "metadata", {}) or {})
         orderflow_block = _orderflow_selected_option_block(signal)
         if orderflow_block is not None:
             _record(
