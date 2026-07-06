@@ -14,6 +14,12 @@ SECRET = re.compile(
 FIELD = re.compile(r"\b([a-zA-Z][a-zA-Z0-9_]*)=([^\s,}]+)")
 TRACE = re.compile(r"\btrace_id=([^\s,}]+)")
 RESULT = re.compile(r"\baccepted=([^\s]+).*?\breason=([^\s]+)")
+BASE_COLUMNS = ["timestamp_ist", "type", "message"]
+DETAIL_COLUMNS = [
+    "event", "symbol", "reason", "source", "attempt", "required_bars",
+    "rows", "incoming_ts", "last_ts", "blocker", "failure_reason",
+    "trace_id", "accepted",
+]
 
 EXPECTED_REJECTIONS = {
     "CANDIDATE_REJECTED",
@@ -60,6 +66,23 @@ def fields(message: str) -> dict[str, str]:
     return {key.lower(): value for key, value in FIELD.findall(message)}
 
 
+def _detail_fields(message: str, values: dict[str, str]) -> dict[str, str]:
+    details = {key: values[key] for key in DETAIL_COLUMNS if key in values}
+    upper = message.upper()
+    if "DATA_INTEGRITY_ERROR" in upper and "reason" not in details:
+        details["reason"] = "missing_structured_details"
+        details.setdefault("source", "journal_message")
+    return details
+
+
+def _fieldnames(rows: list[dict[str, str]]) -> list[str]:
+    names = list(BASE_COLUMNS)
+    for key in DETAIL_COLUMNS:
+        if any(row.get(key) for row in rows):
+            names.append(key)
+    return names
+
+
 def _explicit_failure(upper: str, values: dict[str, str]) -> bool:
     if any(token in upper for token in HARD_ERRORS):
         return True
@@ -99,7 +122,9 @@ def parse_event(line: str) -> dict[str, str] | None:
             kind = "RISK"
         else:
             kind = "SYSTEM"
-    return {"timestamp_ist": stamp.group(1), "type": kind, "message": message}
+    row = {"timestamp_ist": stamp.group(1), "type": kind, "message": message}
+    row.update(_detail_fields(message, values))
+    return row
 
 
 def _terminal_key(row: dict[str, str]) -> tuple[str, str] | None:
@@ -143,7 +168,7 @@ def filter_events(rows: list[dict[str, str]], event_type: str, query: str) -> li
 
 def csv_bytes(rows: list[dict[str, str]]) -> bytes:
     target = io.StringIO()
-    writer = csv.DictWriter(target, fieldnames=["timestamp_ist", "type", "message"])
+    writer = csv.DictWriter(target, fieldnames=_fieldnames(rows), extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
     return target.getvalue().encode("utf-8-sig")
