@@ -1082,3 +1082,18 @@ class WebSocketManager:
             await task
         except asyncio.CancelledError:
             return
+
+
+# ── Explicit hardening integration (definition site, fails loudly) ──────────
+# Previously installed from streaming/__init__.py; centralized here so the
+# transport class is never exposed without the NSE calendar guard and
+# market-data hardening, regardless of import path.
+from nifty_scalper_bot.streaming.market_data_hardening import (  # noqa: E402
+    install_websocket_market_data_hardening as _install_ws_hardening,
+)
+from nifty_scalper_bot.utils.runtime_session_guards import (  # noqa: E402
+    install_websocket_market_calendar_guard as _install_ws_calendar_guard,
+)
+
+_install_ws_calendar_guard()
+_install_ws_hardening(WebSocketManager)

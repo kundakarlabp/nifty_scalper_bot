@@ -1870,3 +1870,13 @@ class IndicatorEngine:
     def supports_feature(self, feature_name: str) -> bool:
         """Args: feature_name. Returns: support flag. Raises: none."""
         return supports_feature(feature_name)
+
+
+# ── Explicit runtime-context contract integration (definition site) ─────────
+# Previously installed from strategies/__init__.py; centralized here so
+# IndicatorEngine always carries the contract regardless of import path.
+from nifty_scalper_bot.strategies.runtime_context_contract import (  # noqa: E402
+    install_indicator_runtime_context_contract as _install_ctx_contract,
+)
+
+_install_ctx_contract()

@@ -980,8 +980,40 @@ class MarketDataManager:
         if callback not in self._bar_subscribers:
             self._bar_subscribers.append(callback)
 
+    def _push_bar_to_pipeline(self, bar: dict[str, Any]) -> None:
+        """Sync one CLOSED MDM bar into the deterministic pipeline store.
+
+        MDM is the single runtime candle builder; the pipeline store is a
+        validated view of MDM's closed bars (store.push dedupes equal-minute
+        bars and rejects out-of-order ones). Errors never break publishing.
+        """
+        try:
+            from nifty_scalper_bot.data.pipeline import Candle, get_pipeline  # noqa: PLC0415
+
+            get_pipeline().store.push(
+                Candle(
+                    symbol=str(bar.get("symbol") or ""),
+                    timestamp=bar.get("timestamp") or bar.get("date"),
+                    open=float(bar.get("open") or bar.get("close") or 0.0),
+                    high=float(bar.get("high") or bar.get("close") or 0.0),
+                    low=float(bar.get("low") or bar.get("close") or 0.0),
+                    close=float(bar.get("close") or 0.0),
+                    volume=float(bar.get("volume") or 0.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - pipeline sync must not break bar publish
+            log_throttled(
+                self._logger,
+                f"pipeline_bar_sync_failed:{bar.get('symbol')}",
+                "PIPELINE_BAR_SYNC_FAILED symbol=%s error=%s" % (bar.get("symbol"), exc),
+                interval_sec=60,
+                level=logging.WARNING,
+                extra={"event": "PIPELINE_BAR_SYNC_FAILED", "symbol": str(bar.get("symbol") or "")},
+            )
+
     def _publish_closed_bar(self, bar: dict[str, Any]) -> None:
         """Args: bar. Returns: None. Raises: None."""
+        self._push_bar_to_pipeline(bar)
         for cb in list(self._bar_subscribers):
             try:
                 cb(dict(bar))
@@ -6249,25 +6281,14 @@ class MarketDataManager:
                 bar["close"],
             )
 
-        # ── PIPELINE FEED ─────────────────────────────────────────────────────
-        # Feed the deterministic MarketDataPipeline so pipeline.candles_ready()
-        # and pipeline.get_candles() reflect live data.  Lazy import avoids
-        # circular dependency.  Errors are caught so MDM consumer loop never dies.
-        try:
-            from nifty_scalper_bot.data.pipeline import get_pipeline  # noqa: PLC0415
-            _pipeline_candle = get_pipeline().on_tick(raw)
-            if _pipeline_candle is not None:
-                self._logger.debug(
-                    "CANDLE_FORMED symbol=%s ts=%s open=%.2f high=%.2f low=%.2f close=%.2f",
-                    _pipeline_candle.symbol,
-                    _pipeline_candle.timestamp,
-                    _pipeline_candle.open,
-                    _pipeline_candle.high,
-                    _pipeline_candle.low,
-                    _pipeline_candle.close,
-                )
-        except Exception as _pipe_exc:  # pragma: no cover
-            self._logger.debug("pipeline.on_tick feed failed: %s", _pipe_exc)
+        # ── PIPELINE SYNC (closed bars only) ─────────────────────────────────
+        # MDM is the single runtime candle builder. The deterministic pipeline
+        # store is populated from MDM's CLOSED bars via _publish_closed_bar →
+        # _push_bar_to_pipeline, so pipeline.candles_ready()/get_candles()
+        # reflect exactly the same candles as MDM. The former per-tick feed
+        # here made the pipeline a second live candle builder fed from two
+        # racing paths (MDM consumer + runner), causing out-of-order drops
+        # and readiness flapping.
 
     def _get_engine(self, symbol: str) -> CandleEngine:
         """Return or create candle engine for symbol."""
@@ -10499,3 +10520,14 @@ def _select_expiry(
 
 
 __all__ = ["MarketDataManager"]
+
+
+# ── Explicit hardening integration (definition site, fails loudly) ──────────
+# Previously installed by a hidden try/except-pass hook in data/__init__.py,
+# which could silently leave live trading without freshness guards. The class
+# is never exposed un-hardened: any import of this module hardens it here.
+from nifty_scalper_bot.data.market_data_hardening import (  # noqa: E402
+    install_market_data_manager_hardening as _install_mdm_hardening,
+)
+
+_install_mdm_hardening(MarketDataManager)
