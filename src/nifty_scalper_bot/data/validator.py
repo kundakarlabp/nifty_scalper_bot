@@ -46,17 +46,15 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
     if symbol_raw is None or str(symbol_raw).strip() == '':
         raise DataIntegrityError('Missing symbol')
 
-    # ── 2. TIMESTAMP — prefer exchange time, then internal timestamp ─────────
-    # Zerodha sends 'exchange_timestamp'. Prefer it over wall-clock/internal
-    # timestamps so candle ordering is based on exchange time consistently across
-    # the legacy and deterministic pipelines.
+    # ── 2. TIMESTAMP — accept exchange_timestamp fallback, then wall-clock ───
+    # Zerodha sends 'exchange_timestamp'; internal ticks use 'timestamp'.
+    # If neither is present (e.g. pre-open auction), use current UTC time so
+    # the candle engine can still process the tick rather than silently dropping it.
     timestamp_raw = (
-        raw_tick.get('exchange_timestamp')
-        or raw_tick.get('timestamp')
+        raw_tick.get('timestamp')
+        or raw_tick.get('exchange_timestamp')
     )
     if timestamp_raw is None:
-        # Fallback is kept for non-live/tooling ticks only; production live
-        # Zerodha ticks should carry exchange_timestamp.
         timestamp_raw = _dt.datetime.now(_dt.timezone.utc)
     timestamp = pd.to_datetime(timestamp_raw, utc=True, errors='coerce')
     if pd.isna(timestamp):
