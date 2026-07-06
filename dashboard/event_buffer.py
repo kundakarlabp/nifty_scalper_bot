@@ -11,8 +11,14 @@ from typing import Iterable
 
 STAMP = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} IST)\]")
 SECRET = re.compile(r"(?i)(api[_ -]?key|api[_ -]?secret|access[_ -]?token|request[_ -]?token|password)\s*[:=]\s*\S+")
+FIELD = re.compile(r"\b([a-zA-Z][a-zA-Z0-9_]*)=([^\s,}]+)")
 TRACE = re.compile(r"\btrace_id=([^\s,}]+)")
 RESULT = re.compile(r"\baccepted=([^\s]+).*?\breason=([^\s]+)")
+EVENT_DETAIL_FIELDS = (
+    "event", "symbol", "reason", "source", "attempt", "required_bars",
+    "rows", "incoming_ts", "last_ts", "blocker", "failure_reason",
+    "trace_id", "accepted",
+)
 EVENTS = ("SIGNAL","ORDER","FILLED","ENTRY","EXIT","TARGET","STOP","PNL","POSITION",
           "BROKER","AUTH","READY","BLOCKER","RISK","COOLDOWN","ERROR","FAIL","WARN",
           "DEGRADED","OPERATIONAL","STARTUP","SHUTDOWN","READINESS","CANDLE")
@@ -23,12 +29,25 @@ EXPECTED_REJECTIONS = ("CANDIDATE_REJECTED", "SIGNAL_REJECTED", "SIGNAL_EXECUTIO
 HARD_ERRORS = ("TRACEBACK", "CRITICAL", "UNHANDLED EXCEPTION", "RUNNER_ON_TICK_ERROR", "ORDER_FAILED", "STARTUP_FAILED", "HANDLER CRASHED", "FATAL")
 
 
+def _fields(message: str) -> dict[str, str]:
+    return {key.lower(): value for key, value in FIELD.findall(message)}
+
+
+def _details(message: str, values: dict[str, str]) -> dict[str, str]:
+    details = {key: values[key] for key in EVENT_DETAIL_FIELDS if key in values}
+    if "DATA_INTEGRITY_ERROR" in message.upper() and "reason" not in details:
+        details["reason"] = "missing_structured_details"
+        details.setdefault("source", "journal_message")
+    return details
+
+
 def parse_event(line: str) -> dict[str, str] | None:
     match = STAMP.search(line)
     if not match:
         return None
     message = SECRET.sub(r"\1=[REDACTED]", line[match.end():].strip())
     upper = message.upper()
+    values = _fields(message)
     expected_rejection = any(x in upper for x in EXPECTED_REJECTIONS)
     if any(x in upper for x in IGNORE) or (
         not expected_rejection and not any(x in upper for x in EVENTS)
@@ -48,7 +67,9 @@ def parse_event(line: str) -> dict[str, str] | None:
         kind = "RISK"
     else:
         kind = "SYSTEM"
-    return {"timestamp_ist": match.group(1), "type": kind, "message": message}
+    row = {"timestamp_ist": match.group(1), "type": kind, "message": message}
+    row.update(_details(message, values))
+    return row
 
 
 def terminal_event_key(row: dict[str, str]) -> tuple[str, str] | None:
