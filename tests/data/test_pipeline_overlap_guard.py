@@ -19,7 +19,9 @@ def _candle(symbol: str, ts: str, close: float = 100.0) -> Candle:
     )
 
 
-def test_hydration_live_overlap_candle_is_quietly_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hydration_live_overlap_candle_is_quietly_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("PIPELINE_CANDLE_OVERLAP_TOLERANCE_SECONDS", "120")
     store = CandleStore()
     symbol = "NFO:NIFTY2670724400CE"
@@ -29,7 +31,7 @@ def test_hydration_live_overlap_candle_is_quietly_dropped(monkeypatch: pytest.Mo
 
     candles = store.get(symbol)
     assert len(candles) == 1
-    assert pd.Timestamp(candles[0].timestamp) == pd.Timestamp("2026-07-06T08:35:00Z")
+    assert pd.Timestamp(candles[0].timestamp).isoformat() == "2026-07-06T14:05:00+05:30"
 
 
 def test_old_out_of_order_candle_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,11 +9,9 @@ dropping a small overlap window at the hydration/live boundary.
 
 from __future__ import annotations
 
-from collections import deque
 import os
+from collections import deque
 from typing import Any
-
-import pandas as pd
 
 
 def _float_env(name: str, default: float) -> float:
@@ -42,12 +40,15 @@ def install_candle_store_overlap_guard() -> bool:
 
     def push(self: Any, candle: Any) -> None:
         with self._lock:
-            if candle.symbol not in self._store:
-                self._store[candle.symbol] = deque(maxlen=self._maxlen)
-            buf = self._store[candle.symbol]
+            normalized_candle = pipeline_module._normalize_candle_timestamp(candle)
+            if normalized_candle.symbol not in self._store:
+                self._store[normalized_candle.symbol] = deque(maxlen=self._maxlen)
+            buf = self._store[normalized_candle.symbol]
             if buf:
-                last_ts = pd.Timestamp(buf[-1].timestamp).floor("1min")
-                incoming_ts = pd.Timestamp(candle.timestamp).floor("1min")
+                last_ts = pipeline_module._to_ist_timestamp(buf[-1].timestamp).floor(
+                    "1min"
+                )
+                incoming_ts = normalized_candle.timestamp.floor("1min")
                 if incoming_ts == last_ts:
                     return
                 if incoming_ts < last_ts:
@@ -58,14 +59,17 @@ def install_candle_store_overlap_guard() -> bool:
                     age_delta = max(0.0, (last_ts - incoming_ts).total_seconds())
                     if age_delta <= overlap_seconds:
                         pipeline_module.LOGGER.debug(
-                            "candle_store_overlap_duplicate symbol=%s incoming_ts=%s last_ts=%s age_delta_s=%.1f",
-                            candle.symbol,
+                            (
+                                "candle_store_overlap_duplicate symbol=%s "
+                                "incoming_ts=%s last_ts=%s age_delta_s=%.1f"
+                            ),
+                            normalized_candle.symbol,
                             incoming_ts.isoformat(),
                             last_ts.isoformat(),
                             age_delta,
                             extra={
                                 "event": "candle_store_overlap_duplicate",
-                                "symbol": candle.symbol,
+                                "symbol": normalized_candle.symbol,
                                 "incoming_ts": incoming_ts.isoformat(),
                                 "last_ts": last_ts.isoformat(),
                                 "age_delta_s": age_delta,
@@ -78,25 +82,31 @@ def install_candle_store_overlap_guard() -> bool:
                     pipeline_module._DROPPED_CANDLES.increment()
                     pipeline_module.log_throttled(
                         pipeline_module.LOGGER,
-                        f"candle_store_out_of_order:{candle.symbol}",
+                        f"candle_store_out_of_order:{normalized_candle.symbol}",
                         (
                             "candle_store_out_of_order symbol=%s incoming_ts=%s "
                             "last_ts=%s source=candle_store"
                         )
-                        % (candle.symbol, incoming_ts.isoformat(), last_ts.isoformat()),
+                        % (
+                            normalized_candle.symbol,
+                            incoming_ts.isoformat(),
+                            last_ts.isoformat(),
+                        ),
                         interval_sec=30.0,
                         level=pipeline_module.logging.WARNING,
                         extra={
                             "event": "candle_store_out_of_order",
-                            "symbol": candle.symbol,
+                            "symbol": normalized_candle.symbol,
                             "incoming_ts": incoming_ts.isoformat(),
                             "last_ts": last_ts.isoformat(),
                             "source": "candle_store",
                             "total_dropped": pipeline_module._DROPPED_CANDLES.value,
                         },
                     )
-                    raise pipeline_module.DataIntegrityError("candle store timestamps must be monotonic")
-            buf.append(candle)
+                    raise pipeline_module.DataIntegrityError(
+                        "candle store timestamps must be monotonic"
+                    )
+            buf.append(normalized_candle)
 
     push.__name__ = getattr(current, "__name__", "push")
     push.__doc__ = getattr(current, "__doc__", None)

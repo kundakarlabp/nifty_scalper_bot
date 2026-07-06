@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import datetime as _dt
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,10 +26,10 @@ class Tick:
     def to_dict(self) -> dict[str, Any]:
         """Return dictionary representation for legacy call sites."""
         return {
-            'symbol': self.symbol,
-            'timestamp': self.timestamp,
-            'ltp': self.ltp,
-            'volume': self.volume,
+            "symbol": self.symbol,
+            "timestamp": self.timestamp,
+            "ltp": self.ltp,
+            "volume": self.volume,
         }
 
 
@@ -42,41 +44,40 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
     Args: raw_tick. Returns: Tick. Raises: DataIntegrityError.
     """
     # ── 1. SYMBOL ────────────────────────────────────────────────────────────
-    symbol_raw = raw_tick.get('symbol')
-    if symbol_raw is None or str(symbol_raw).strip() == '':
-        raise DataIntegrityError('Missing symbol')
+    symbol_raw = raw_tick.get("symbol")
+    if symbol_raw is None or str(symbol_raw).strip() == "":
+        raise DataIntegrityError("Missing symbol")
 
     # ── 2. TIMESTAMP — accept exchange_timestamp fallback, then wall-clock ───
     # Zerodha sends 'exchange_timestamp'; internal ticks use 'timestamp'.
-    # If neither is present (e.g. pre-open auction), use current UTC time so
+    # If neither is present (e.g. pre-open auction), use current IST time so
     # the candle engine can still process the tick rather than silently dropping it.
-    timestamp_raw = (
-        raw_tick.get('timestamp')
-        or raw_tick.get('exchange_timestamp')
-    )
+    timestamp_raw = raw_tick.get("timestamp") or raw_tick.get("exchange_timestamp")
     if timestamp_raw is None:
-        timestamp_raw = _dt.datetime.now(_dt.timezone.utc)
-    timestamp = pd.to_datetime(timestamp_raw, utc=True, errors='coerce')
+        timestamp_raw = _dt.datetime.now(IST)
+    timestamp = pd.to_datetime(timestamp_raw, utc=True, errors="coerce")
     if pd.isna(timestamp):
-        raise DataIntegrityError('Invalid timestamp')
+        raise DataIntegrityError("Invalid timestamp")
+    timestamp = pd.Timestamp(timestamp).tz_convert(IST)
 
     # ── 3. LTP — accept last_price (Zerodha field name) as alias ─────────────
-    ltp_raw = raw_tick.get('ltp') or raw_tick.get('last_price')
+    ltp_raw = raw_tick.get("ltp") or raw_tick.get("last_price")
     if ltp_raw is None:
-        raise DataIntegrityError('Missing ltp/last_price')
+        raise DataIntegrityError("Missing ltp/last_price")
     ltp = float(ltp_raw)
     if ltp <= 0:
-        raise DataIntegrityError('Invalid price')
+        raise DataIntegrityError("Invalid price")
 
     # ── 4. VOLUME ────────────────────────────────────────────────────────────
-    volume_raw = 0.0
-    if 'volume_delta' in raw_tick:
-        volume_raw = raw_tick.get('volume_delta')
-    elif 'volume' in raw_tick:
-        volume_raw = raw_tick.get('volume')
-    elif 'volume_traded' in raw_tick:
-        # Legacy/raw fallback only. This path should not be used for MDM-normalized ticks.
-        volume_raw = raw_tick.get('volume_traded')
+    volume_raw: Any = 0.0
+    if "volume_delta" in raw_tick:
+        volume_raw = raw_tick.get("volume_delta")
+    elif "volume" in raw_tick:
+        volume_raw = raw_tick.get("volume")
+    elif "volume_traded" in raw_tick:
+        # Legacy/raw fallback only.
+        # This path should not be used for MDM-normalized ticks.
+        volume_raw = raw_tick.get("volume_traded")
     else:
         volume_raw = 0.0
 
@@ -87,7 +88,7 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
 
     return Tick(
         symbol=str(symbol_raw),
-        timestamp=pd.Timestamp(timestamp),
+        timestamp=timestamp,
         ltp=ltp,
         volume=volume,
     )
