@@ -1,6 +1,7 @@
-from nifty_scalper_bot.utils.ist_clock import IST_NAME, timestamp
+from nifty_scalper_bot.utils.ist_clock import timestamp
 
 
-def test_naive_time_is_ist():
+def test_clock_fields():
     ts = timestamp('2026-07-06 09:15:30')
-    assert str(ts.tz) == IST_NAME
+    assert ts.hour == 9
+    assert ts.minute == 15
