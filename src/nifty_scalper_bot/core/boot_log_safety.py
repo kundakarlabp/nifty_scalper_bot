@@ -23,6 +23,10 @@ RUNNER_EVENTS = {
     "runner_post_grace_blocked",
     "RUNNER_EVAL_DECISION",
 }
+BOOTSTRAP_EVENTS = {
+    "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
+    "SELECTED_OPTION_SUBSCRIPTION_STATE",
+}
 
 
 def _event(record: logging.LogRecord) -> str:
@@ -35,8 +39,11 @@ def _event(record: logging.LogRecord) -> str:
 def _fingerprint(record: logging.LogRecord) -> tuple[Any, ...]:
     return (
         _event(record),
+        getattr(record, "symbol", None),
         getattr(record, "selected_ce", None),
         getattr(record, "selected_pe", None),
+        getattr(record, "ce_symbol", None),
+        getattr(record, "pe_symbol", None),
         getattr(record, "futures_symbol", None),
         getattr(record, "atm_strike", None),
         getattr(record, "expiry", None),
@@ -44,6 +51,9 @@ def _fingerprint(record: logging.LogRecord) -> tuple[Any, ...]:
         getattr(record, "token_count", None),
         getattr(record, "count", None),
         getattr(record, "reason", None),
+        getattr(record, "ready", None),
+        getattr(record, "fresh_tick", None),
+        getattr(record, "subscribed", None),
     )
 
 
@@ -57,7 +67,7 @@ class BootLogRateControl(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         event = _event(record)
-        if event not in CONTRACT_EVENTS and event not in RUNNER_EVENTS:
+        if event not in CONTRACT_EVENTS and event not in RUNNER_EVENTS and event not in BOOTSTRAP_EVENTS:
             return True
         fp = _fingerprint(record)
         now = time.monotonic()
@@ -77,6 +87,7 @@ def apply_filters() -> None:
 
     for name in (
         "nifty_scalper_bot.core.instrument_manager",
+        "nifty_scalper_bot.core.app",
         "nifty_scalper_bot.strategies.runner",
     ):
         logger = logging.getLogger(name)
