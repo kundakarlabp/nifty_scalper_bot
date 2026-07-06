@@ -57,9 +57,6 @@ def build_elite_strategies(
     strategies: List[EliteStrategy] = []
     strategy_mode = str(os.getenv('STRATEGY_MODE', 'directional_scalp')).strip().lower()
     allow_expiry_gamma = _env_true('ALLOW_EXPIRY_GAMMA_STRATEGIES')
-    if strategy_mode == 'directional_scalp':
-        os.environ.setdefault('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'false')
-        os.environ.setdefault('ORDERFLOW_ALLOW_LIVE_TRIGGER', 'false')
     active_names: list[str] = []
     context_names: list[str] = []
     disabled_names: list[str] = []
