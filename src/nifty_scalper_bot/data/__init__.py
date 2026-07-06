@@ -23,6 +23,16 @@ try:
 except Exception:
     pass
 
+try:
+    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+    from nifty_scalper_bot.data.market_data_hardening import (
+        install_market_data_manager_hardening,
+    )
+
+    install_market_data_manager_hardening(MarketDataManager)
+except Exception:
+    pass
+
 __all__ = [
     "Instrument",
     "InstrumentResolver",
