@@ -2,32 +2,37 @@
 
 ## Product requirement
 
-The live market-data layer must have one deterministic WebSocket tick ingress path, strict freshness semantics for execution-critical symbols, resilient reconnect cleanup, and regression tests that prevent duplicate tick processing or stale-data promotion.
+The live market-data layer must have one deterministic WebSocket tick ingress path, strict freshness semantics for execution-critical symbols, resilient reconnect cleanup, thread-safe fallback ingestion, and deterministic one-minute candle closure even when the next tick is delayed.
 
 ## Problem statement
 
-The current implementation has several high-risk edge cases:
+The implementation had several high-risk edge cases:
 
-1. WebSocket batch ticks can be routed through both `MarketDataManager.process_ticks()` and a legacy per-tick callback when both are wired.
-2. Missing or malformed tick timestamps can be normalized to current wall-clock time, making old data appear fresh.
-3. WebSocket reconnect cleanup can raise from `ticker.close()` and interrupt recovery.
-4. Candle closure depends on next-tick arrival unless a periodic flush path is added later.
+1. WebSocket batch ticks could be routed through both `MarketDataManager.process_ticks()` and a legacy per-tick callback when both were wired.
+2. Missing or malformed tick timestamps could be normalized to current wall-clock time, making old data appear fresh.
+3. WebSocket reconnect cleanup could raise from `ticker.close()` and interrupt recovery.
+4. Candle closure depended on next-tick arrival.
+5. The fallback worker path used an asyncio queue from a synchronous/threaded callback context.
+6. WebSocket trading-window checks ignored the configured timezone object.
 
-## Scope in this PR
+## Completed scope
 
-In scope:
+Implemented:
 
 - Prevent duplicate WebSocket tick enqueue when MDM batch ingress is present.
 - Make ticker cleanup best-effort during reconnect handling.
 - Tag normalized WebSocket ticks with timestamp quality.
 - Reject synthetic/unknown timestamp quality from hard WebSocket LTP freshness.
-- Add focused unit tests for the above.
+- Replace the no-loop fallback ingestion path with a `queue.Queue` backed worker.
+- Add a clock-based candle flush task started with the MDM event-loop consumer.
+- Use the configured WebSocket trading timezone for trading-window checks.
+- Add focused unit tests for the above behavior.
 
-Out of scope for this PR:
+Still out of scope:
 
 - Full refactor of `market_data_manager.py` into smaller modules.
-- Replacing the fallback worker queue implementation.
-- Wall-clock candle flush scheduler. This should be implemented as a follow-up because it touches lifecycle timing and readiness behavior.
+- Inlining all hardening hooks back into the primary source files. The hooks are intentionally narrow to reduce regression risk.
+- Live broker validation. This must be done with paper/live-small mode during market hours.
 
 ## TDD acceptance tests
 
@@ -37,7 +42,11 @@ Out of scope for this PR:
 4. A WebSocket tick with no broker/exchange timestamp must be marked `timestamp_quality=synthetic`.
 5. `has_fresh_ws_ltp()` must not treat synthetic timestamp ticks as fresh.
 6. A valid fresh WebSocket tick with exchange/broker timestamp must still pass freshness.
+7. No-loop WS ingestion must use the thread-safe fallback queue, not the asyncio queue.
+8. The fallback queue must coalesce/drop lower-priority work before protected open-position ticks.
+9. Idle candles must finalize after the minute closes plus grace time, without requiring the next tick.
+10. WebSocket trading-window logic must use the configured timezone.
 
 ## Operational notes
 
-This PR intentionally uses narrow hardening hooks rather than rewriting the 10k-line MDM file. The next larger cleanup should inline these changes after full local CI and live-paper validation.
+The runtime remains designed for shadow/paper validation before increasing live size. The safest next larger cleanup is to inline these hooks into the source modules after local CI and one full market-session paper run.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import time
 from typing import Any
 
@@ -10,6 +11,7 @@ from nifty_scalper_bot.streaming.websocket_manager import ConnectionState
 
 _INSTALLED_ATTR = "_market_data_hardening_installed"
 _ORIGINAL_BUILD_ATTR = "_market_data_hardening_original_build_ticker"
+_ORIGINAL_TRADING_WINDOW_ATTR = "_market_data_hardening_original_is_within_trading_window"
 
 
 def install_websocket_market_data_hardening(manager_cls: type[Any]) -> None:
@@ -27,6 +29,11 @@ def install_websocket_market_data_hardening(manager_cls: type[Any]) -> None:
             return ticker
 
         setattr(manager_cls, "_build_ticker", _build_ticker_with_safe_close)
+
+    original_window = getattr(manager_cls, "_is_within_trading_window", None)
+    if callable(original_window):
+        setattr(manager_cls, _ORIGINAL_TRADING_WINDOW_ATTR, original_window)
+        setattr(manager_cls, "_is_within_trading_window", _is_within_trading_window_hardened)
 
     setattr(manager_cls, "_on_ticks", _hardened_on_ticks)
     setattr(manager_cls, _INSTALLED_ATTR, True)
@@ -59,6 +66,28 @@ def _wrap_ticker_close(manager: Any, ticker: Any) -> None:
         logger = getattr(manager, "_logger", None)
         if logger is not None:
             logger.debug("WS safe-close wrapper skipped: %s", exc)
+
+
+def _is_within_trading_window_hardened(self: Any) -> bool:
+    """Use the configured trading timezone instead of a hard-coded IST object."""
+    if not self._trading_window_enabled:
+        return True
+
+    now = datetime.now(self._trading_tz)
+    if now.weekday() >= 5:
+        return False
+
+    now_time = now.time().replace(tzinfo=None)
+    allowed = self._trading_start <= now_time <= self._trading_end
+    if not allowed:
+        self._logger.debug(
+            "WS window blocked | now=%s | start=%s | end=%s | tz=%s",
+            now_time,
+            self._trading_start,
+            self._trading_end,
+            self._trading_tz,
+        )
+    return allowed
 
 
 def _hardened_on_ticks(self: Any, ws: Any, ticks: Any) -> None:
