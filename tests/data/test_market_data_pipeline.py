@@ -1,6 +1,7 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pandas as pd
 import pytest
 
 from nifty_scalper_bot.data.pipeline import Candle, CandleStore, MarketDataPipeline
@@ -32,6 +33,21 @@ def test_candle_store_push_duplicate_noop_and_older_rejected() -> None:
     assert len(store.get("NFO:TEST")) == 1
     with pytest.raises(DataIntegrityError):
         store.push(_candle(base - timedelta(minutes=1), 99.0))
+
+
+def test_candle_store_push_keeps_one_row_for_same_instant_with_offset() -> None:
+    store = CandleStore()
+    base = pd.Timestamp("2026-01-02T09:15:00Z")
+    same_minute_ist = pd.Timestamp("2026-01-02T14:45:30+05:30")
+    earlier_ist = pd.Timestamp("2026-01-02T14:44:59+05:30")
+
+    store.push(_candle(base.to_pydatetime(), 100.0))
+    store.push(_candle(same_minute_ist.to_pydatetime(), 101.0))
+
+    assert len(store.get("NFO:TEST")) == 1
+    with pytest.raises(DataIntegrityError, match="monotonic"):
+        store.push(_candle(earlier_ist.to_pydatetime(), 99.0))
+    assert len(store.get("NFO:TEST")) == 1
 
 
 def test_market_data_pipeline_catches_store_integrity_rejection(caplog) -> None:
