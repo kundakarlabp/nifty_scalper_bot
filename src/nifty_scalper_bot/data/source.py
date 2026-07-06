@@ -14,6 +14,8 @@ import time
 
 import pandas as pd
 
+from nifty_scalper_bot.utils.ist_clock import timestamp as ist_timestamp
+
 
 class DataIntegrityError(ValueError):
     """Raised when required market data is missing or inconsistent."""
@@ -35,7 +37,7 @@ class CandleFrame:
             raise DataIntegrityError("Empty OHLC dataframe")
         if self.dataframe["close"].isna().any():
             raise DataIntegrityError("Close column contains nulls")
-        ts = pd.to_datetime(self.dataframe["timestamp"], utc=True, errors="coerce")
+        ts = self.dataframe["timestamp"].map(lambda value: ist_timestamp(value, errors="coerce"))
         if ts.isna().any():
             raise DataIntegrityError("Invalid timestamps in OHLC dataframe")
         if not ts.is_monotonic_increasing:
@@ -106,11 +108,8 @@ class HistoricalLiveOHLCProvider:
             if col in live_row:
                 cleaned.at[cleaned.index[-1], col] = live_row[col]
 
-        # Keep historical index as the source of truth for alignment.
         if "timestamp" in cleaned.columns:
-            cleaned["timestamp"] = pd.to_datetime(
-                cleaned["timestamp"], utc=True, errors="coerce"
-            )
+            cleaned["timestamp"] = cleaned["timestamp"].map(lambda value: ist_timestamp(value, errors="coerce"))
             if cleaned["timestamp"].isna().any():
                 raise DataIntegrityError("Invalid timestamps after live candle merge")
 
