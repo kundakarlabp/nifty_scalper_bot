@@ -166,6 +166,8 @@ def _should_backfill_approved_identity(signal: Signal) -> bool:
     metadata = dict(getattr(signal, "metadata", {}) or {})
     if not bool(metadata.get("is_approved")):
         return False
+    if not (_env_true("ORDERS__ENABLE_LIVE") or _env_true("ALLOW_LIVE_ORDERS")):
+        return False
     return any(metadata.get(key) not in (None, "") for key in RUNTIME_CONTEXT_KEYS)
 
 
