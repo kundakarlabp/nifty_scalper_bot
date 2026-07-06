@@ -6581,28 +6581,16 @@ class StrategyRunner:
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
 
-            # ── PIPELINE FEED + OBSERVABILITY ────────────────────────────────
-            # Feed deterministic pipeline so candles_ready() stays current.
-            # Also log TICK_RECEIVED (debug) and CANDLE_FORMED (info) events.
-            try:
-                _pl_candle = self._pipeline.on_tick(dict(tick))
-                self._logger.debug(
-                    "TICK_RECEIVED symbol=%s ltp=%s",
-                    normalized_symbol,
-                    tick.get("ltp") or tick.get("last_price", "?"),
-                )
-                if _pl_candle is not None:
-                    _pl_count = len(self._pipeline.store.get(normalized_symbol))
-                    self._logger.debug(
-                        "CANDLE_FORMED symbol=%s ts=%s close=%.2f candles=%d ready=%s",
-                        normalized_symbol,
-                        _pl_candle.timestamp,
-                        _pl_candle.close,
-                        _pl_count,
-                        _pl_count >= 50,
-                    )
-            except Exception as _pl_exc:
-                self._logger.debug("Runner pipeline feed failed: %s", _pl_exc)
+            # ── OBSERVABILITY ────────────────────────────────────────────────
+            # Pipeline candles are populated exclusively by MDM's closed bars
+            # (MarketDataManager._publish_closed_bar → _push_bar_to_pipeline).
+            # The former pipeline.on_tick feed here was a second live candle
+            # builder racing MDM's feed, causing out-of-order candle drops.
+            self._logger.debug(
+                "TICK_RECEIVED symbol=%s ltp=%s",
+                normalized_symbol,
+                tick.get("ltp") or tick.get("last_price", "?"),
+            )
             # ✅ FIX: Throttle stall warning to 30s — same-bar-skip causes expected
             # gaps between _last_global_eval_ts updates (one eval per bar ≈ 60s cycle).
             # ✅ FIX D: Raise stall threshold to 120s. Options tick once per ~13min;

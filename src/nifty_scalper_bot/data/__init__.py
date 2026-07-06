@@ -1,8 +1,12 @@
-"""Data layer exports used across the runtime."""
+"""Data layer exports used across the runtime.
+
+Hardening note: MarketDataManager hardening is installed explicitly in
+``market_data_manager.py`` and the IST time adapter in ``source.py`` — at
+their definition sites, failing loudly. This package import has no hidden
+side effects.
+"""
 
 from __future__ import annotations
-
-import importlib
 
 from nifty_scalper_bot.brokers.instrument_lookup import Instrument
 from nifty_scalper_bot.data.instrument_resolver import InstrumentResolver
@@ -16,22 +20,6 @@ from nifty_scalper_bot.data.instrument_loader import (
     upsert_instruments,
     write_instrument_rows_to_csv,
 )
-from nifty_scalper_bot.utils.time_apply import apply as _apply_time_adapter
-
-try:
-    _apply_time_adapter(importlib.import_module("nifty_scalper_bot.data." + "source"))
-except Exception:
-    pass
-
-try:
-    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-    from nifty_scalper_bot.data.market_data_hardening import (
-        install_market_data_manager_hardening,
-    )
-
-    install_market_data_manager_hardening(MarketDataManager)
-except Exception:
-    pass
 
 __all__ = [
     "Instrument",

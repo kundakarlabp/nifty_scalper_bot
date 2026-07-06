@@ -278,3 +278,12 @@ class MarketDataSource:
         raise DataIntegrityError(
             "Historical OHLC fetch is owned by MarketDataManager.ensure_history"
         )
+
+
+# ── Explicit IST time-adapter integration (definition site, fails loudly) ───
+# Previously applied by a hidden try/except-pass hook in data/__init__.py.
+import sys as _sys  # noqa: E402
+
+from nifty_scalper_bot.utils.time_apply import apply as _apply_ist_time_adapter  # noqa: E402
+
+_apply_ist_time_adapter(_sys.modules[__name__])
