@@ -25,6 +25,16 @@ IDENTITY_KEYS = (
     "signal_timestamp",
     "timestamp",
 )
+RUNTIME_CONTEXT_KEYS = (
+    "eval_id",
+    "strategy",
+    "strategy_name",
+    "approval_candidate",
+    "selected_ce",
+    "selected_pe",
+    "direction_bias",
+    "underlying_direction_bias",
+)
 
 
 def _env_true(name: str) -> bool:
@@ -150,6 +160,13 @@ def _add_identity(signal: Signal) -> Signal:
     metadata = dict(getattr(signal, "metadata", {}) or {})
     metadata.setdefault("deterministic_signal_id", signal.deterministic_id)
     return signal.with_metadata(**metadata)
+
+
+def _should_backfill_approved_identity(signal: Signal) -> bool:
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    if not bool(metadata.get("is_approved")):
+        return False
+    return any(metadata.get(key) not in (None, "") for key in RUNTIME_CONTEXT_KEYS)
 
 
 def _orderflow_selected_option_block(signal: Signal) -> dict[str, Any] | None:
@@ -283,7 +300,8 @@ def apply_patches() -> None:
             signal = _final_filter(self, signal, trace_id)
             if signal is None:
                 return None
-            signal = _add_identity(signal)
+            if _should_backfill_approved_identity(signal):
+                signal = _add_identity(signal)
             metadata = dict(getattr(signal, "metadata", {}) or {})
         orderflow_block = _orderflow_selected_option_block(signal)
         if orderflow_block is not None:
