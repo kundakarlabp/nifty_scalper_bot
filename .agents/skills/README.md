@@ -10,6 +10,11 @@ Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`. For non-trivial work, ge
 
 | Skill | Purpose | Explicit invocation |
 |---|---|---|
+| `grill-trading-plan` | Stress-test a fuzzy or safety-critical trading-bot change before PRD/code work | `$grill-trading-plan` |
+| `domain-modeling-trading` | Clarify vocabulary, ownership, state, and invariants before design changes | `$domain-modeling-trading` |
+| `to-prd-trading-change` | Convert resolved trading-bot context into a concise PRD with non-goals and tests | `$to-prd-trading-change` |
+| `to-issues-trading-change` | Split a resolved PRD into small vertical implementation slices | `$to-issues-trading-change` |
+| `runtime-contract-validation` | Validate external and cross-module contracts before data/strategy/execution changes | `$runtime-contract-validation` |
 | `diagnosing-trading-bugs` | Deterministic diagnosis of runtime, data, signal, broker, and order-state failures | `$diagnosing-trading-bugs` |
 | `tdd-trading-changes` | Test-first implementation using one behavior slice at a time | `$tdd-trading-changes` |
 | `codebase-design` | Module/interface/seam design while preserving repository ownership | `$codebase-design` |
@@ -21,9 +26,14 @@ Use a skill automatically when the request matches its description, or invoke it
 ## Typical sequence
 
 ```text
-diagnosing-trading-bugs
+grill-trading-plan
+→ domain-modeling-trading
+→ to-prd-trading-change
+→ to-issues-trading-change
+→ diagnosing-trading-bugs when bug-driven
 → tdd-trading-changes
 → codebase-design when an ownership decision is required
+→ runtime-contract-validation when touching boundaries/contracts
 → pre-merge-trading-review
 → session-worklog
 ```

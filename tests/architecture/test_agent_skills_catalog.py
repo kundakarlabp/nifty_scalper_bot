@@ -9,9 +9,14 @@ SKILLS_ROOT = ROOT / ".agents" / "skills"
 EXPECTED_SKILLS = {
     "codebase-design",
     "diagnosing-trading-bugs",
+    "domain-modeling-trading",
+    "grill-trading-plan",
     "pre-merge-trading-review",
+    "runtime-contract-validation",
     "session-worklog",
     "tdd-trading-changes",
+    "to-issues-trading-change",
+    "to-prd-trading-change",
 }
 
 
