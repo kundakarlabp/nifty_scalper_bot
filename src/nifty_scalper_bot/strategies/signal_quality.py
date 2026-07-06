@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Literal
 
 REQUIRED_SCORE_COMPONENTS: tuple[str, ...] = (
     'direction_score',
@@ -36,6 +35,7 @@ def resolve_signal_domain(symbol: str, metadata: dict[str, object] | None = None
     underlying_domain = bool(source_symbol)
     return contract_side, option_premium_domain, underlying_domain
 
+
 @dataclass(slots=True)
 class SignalQualityScore:
     """Args: score components. Returns: normalized score object. Raises: none."""
@@ -55,8 +55,6 @@ def missing_score_components(metadata: dict[str, object] | None) -> list[str]:
     """Args: score metadata dict. Returns: missing score keys. Raises: none."""
     payload = dict(metadata or {})
     return [key for key in REQUIRED_SCORE_COMPONENTS if payload.get(key) is None]
-
-
 
 
 def normalize_strategy_name(strategy_name: str | None) -> str:
@@ -86,8 +84,53 @@ def normalize_strategy_name(strategy_name: str | None) -> str:
     return aliases.get(raw, raw)
 
 
+def _parse_score_threshold(raw: object) -> float | None:
+    """Normalize configured threshold values to the internal 0..10 scale."""
+    try:
+        token = str(raw).strip()
+        if not token:
+            return None
+        if token.endswith('%'):
+            token = token[:-1].strip()
+        value = float(token)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    if value <= 1.0:
+        value *= 10.0
+    elif value > 10.0 and value <= 100.0:
+        value /= 10.0
+    elif value > 100.0:
+        return None
+    return max(0.0, min(10.0, round(value, 3)))
+
+
+def _normalise_score_threshold(raw: object, default: float) -> float:
+    parsed = _parse_score_threshold(raw)
+    if parsed is None:
+        return max(0.0, min(10.0, round(float(default), 3)))
+    return parsed
+
+
+def _env_score_threshold(primary_env: str, legacy_env: str | None, default_value: float) -> float:
+    value = os.getenv(primary_env)
+    if value is None and legacy_env:
+        value = os.getenv(legacy_env)
+    if value is None:
+        return max(0.0, min(10.0, round(float(default_value), 3)))
+    return _normalise_score_threshold(value, default_value)
+
+
+def _global_score_floor() -> float | None:
+    raw = os.getenv('GLOBAL_MIN_SIGNAL_CONFIDENCE')
+    if raw is None:
+        return None
+    return _parse_score_threshold(raw)
+
+
 def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> float:
-    """Args: strategy_name/mode. Returns: trigger threshold. Raises: none."""
+    """Args: strategy_name/mode. Returns: trigger threshold on 0..10 scale. Raises: none."""
     effective_mode = str(mode or os.getenv('EXECUTION_MODE', 'SHADOW')).strip().upper()
     strategy_key = normalize_strategy_name(strategy_name)
     is_live = effective_mode == 'LIVE'
@@ -103,10 +146,11 @@ def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> flo
     }
     live_default, paper_default, primary_env, legacy_env = defaults.get(strategy_key, (8.0, 6.5, 'SIGNAL_MIN_SCORE_LIVE', None))
     default_value = live_default if is_live else paper_default
-    value = os.getenv(primary_env)
-    if value is None and legacy_env:
-        value = os.getenv(legacy_env)
-    return float(value or default_value)
+    threshold = _env_score_threshold(primary_env, legacy_env, default_value)
+    global_floor = _global_score_floor()
+    if global_floor is not None:
+        threshold = max(threshold, global_floor)
+    return max(0.0, min(10.0, round(threshold, 3)))
 
 
 def context_boost_cap(strategy_name: str | None = None) -> float:
@@ -136,6 +180,7 @@ def compute_final_execution_score(*, trigger_score: float, context_score_effecti
     """Args: score parts. Returns: final execution score 0..10. Raises: none."""
     score = 0.45 * float(trigger_score) + 0.15 * float(context_score_effective) + 0.20 * float(candidate_score) + 0.10 * float(data_score) + 0.10 * float(rr_score)
     return max(0.0, min(10.0, round(score, 3)))
+
 
 def score_signal_quality(
     *,
