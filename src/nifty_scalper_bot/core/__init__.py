@@ -19,6 +19,17 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
         extra={"event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED", "error_type": type(exc).__name__},
     )
 
+try:
+    from nifty_scalper_bot.core.boot_log_safety import apply_filters as _apply_boot_log_rate_controls
+
+    _apply_boot_log_rate_controls()
+except Exception as exc:  # noqa: BLE001 - core package import must not crash tooling
+    get_logger(__name__).error(
+        "BOOT_LOG_RATE_CONTROL_FAILED error=%s",
+        exc,
+        extra={"event": "BOOT_LOG_RATE_CONTROL_FAILED", "error_type": type(exc).__name__},
+    )
+
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
 
 _LOGGER = get_logger(__name__)
