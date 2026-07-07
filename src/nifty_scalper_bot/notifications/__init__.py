@@ -6,22 +6,13 @@ import logging
 
 
 class _TelegramUpdaterDefaultErrorFilter(logging.Filter):
-    """Suppress PTB's non-actionable generic polling error line.
-
-    The actionable events are emitted by our Telegram controller as
-    TELEGRAM_POLLING_CONFLICT, telegram_polling_transient, or
-    TELEGRAM_UPDATER_ERROR. PTB's default_error_callback only says
-    "Exception happened while polling for updates" and hides the exception type,
-    which makes alert aggregation noisy without being diagnosable.
-    """
-
-    _GENERIC = "Exception happened while polling for updates"
+    _GENERIC = "while polling for updates"
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == "telegram.ext.Updater" and record.funcName == "default_error_callback":
             try:
                 return self._GENERIC not in record.getMessage()
-            except Exception:  # pragma: no cover - defensive logging boundary
+            except Exception:
                 return False
         return True
 
@@ -33,7 +24,17 @@ def _install_telegram_log_filters() -> None:
     logger.addFilter(_TelegramUpdaterDefaultErrorFilter())
 
 
+def _install_alert_log_hygiene() -> None:
+    try:
+        from nifty_scalper_bot.utils.alert_log_handler_hygiene import apply_patch
+
+        apply_patch()
+    except Exception:
+        return
+
+
 _install_telegram_log_filters()
+_install_alert_log_hygiene()
 
 __all__ = [
     "TelegramEnhancedNotifier",
@@ -44,7 +45,6 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Lazily load optional Telegram notification components. Args: name. Returns: object. Raises: AttributeError."""
     if name == "TelegramEnhancedNotifier":
         from .telegram_enhanced import TelegramEnhancedNotifier
 
