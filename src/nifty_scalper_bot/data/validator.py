@@ -1,4 +1,4 @@
-"""Strict market-data tick validation — Zerodha KiteTicker compatible."""
+"""Strict market-data tick validation."""
 
 from __future__ import annotations
 
@@ -16,15 +16,12 @@ IST = ZoneInfo("Asia/Kolkata")
 
 @dataclass(frozen=True, slots=True)
 class Tick:
-    """Validated tick payload."""
-
     symbol: str
     timestamp: pd.Timestamp
     ltp: float
     volume: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
-        """Return dictionary representation for legacy call sites."""
         return {
             "symbol": self.symbol,
             "timestamp": self.timestamp,
@@ -34,24 +31,10 @@ class Tick:
 
 
 def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
-    """Validate and normalise a raw broker tick.
-
-    Accepts both internal format (symbol/ltp/timestamp) and the raw
-    Zerodha KiteTicker format (instrument_token/last_price/exchange_timestamp).
-    The caller must inject ``symbol`` from the token→symbol map before calling
-    this function if it is absent.
-
-    Args: raw_tick. Returns: Tick. Raises: DataIntegrityError.
-    """
-    # ── 1. SYMBOL ────────────────────────────────────────────────────────────
     symbol_raw = raw_tick.get("symbol")
     if symbol_raw is None or str(symbol_raw).strip() == "":
         raise DataIntegrityError("Missing symbol")
 
-    # ── 2. TIMESTAMP — accept exchange_timestamp fallback, then wall-clock ───
-    # Zerodha sends 'exchange_timestamp'; internal ticks use 'timestamp'.
-    # If neither is present (e.g. pre-open auction), use current IST time so
-    # the candle engine can still process the tick rather than silently dropping it.
     timestamp_raw = raw_tick.get("timestamp") or raw_tick.get("exchange_timestamp")
     if timestamp_raw is None:
         timestamp_raw = _dt.datetime.now(IST)
@@ -60,7 +43,6 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
         raise DataIntegrityError("Invalid timestamp")
     timestamp = pd.Timestamp(timestamp).tz_convert(IST)
 
-    # ── 3. LTP — accept last_price (Zerodha field name) as alias ─────────────
     ltp_raw = raw_tick.get("ltp") or raw_tick.get("last_price")
     if ltp_raw is None:
         raise DataIntegrityError("Missing ltp/last_price")
@@ -68,15 +50,12 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
     if ltp <= 0:
         raise DataIntegrityError("Invalid price")
 
-    # ── 4. VOLUME ────────────────────────────────────────────────────────────
     volume_raw: Any = 0.0
     if "volume_delta" in raw_tick:
         volume_raw = raw_tick.get("volume_delta")
     elif "volume" in raw_tick:
         volume_raw = raw_tick.get("volume")
     elif "volume_traded" in raw_tick:
-        # Legacy/raw fallback only.
-        # This path should not be used for MDM-normalized ticks.
         volume_raw = raw_tick.get("volume_traded")
     else:
         volume_raw = 0.0
