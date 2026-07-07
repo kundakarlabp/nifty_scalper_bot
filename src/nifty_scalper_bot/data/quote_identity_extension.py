@@ -116,8 +116,17 @@ def _now_ms(hub: Any) -> float:
     return time.time() * 1000.0
 
 
+def _received_at_ms(hub: Any, quote: Mapping[str, Any], *, now_ms: float) -> float | None:
+    for key in ("received_at", "arrival_time", "ingested_at", "updated_at", "last_update_time"):
+        value = _coerce_arrival_ms(quote.get(key))
+        if value is not None and value <= now_ms + _future_grace_ms():
+            return value
+    return None
+
+
 def _resolve_quote_timestamp_ms(hub: Any, quote: Mapping[str, Any]) -> tuple[float | None, str]:
     now_ms = _now_ms(hub)
+    received_ms = _received_at_ms(hub, quote, now_ms=now_ms)
     candidates = (
         ("exchange_timestamp", quote.get("exchange_timestamp")),
         ("last_tick_timestamp", quote.get("last_tick_timestamp")),
@@ -131,11 +140,12 @@ def _resolve_quote_timestamp_ms(hub: Any, quote: Mapping[str, Any]) -> tuple[flo
             continue
         if ts_ms <= now_ms + _future_grace_ms():
             return ts_ms, source
-        arrival_ms = _coerce_arrival_ms(quote.get("received_at") or quote.get("arrival_time"))
-        if arrival_ms is not None and arrival_ms <= now_ms + _future_grace_ms():
-            return arrival_ms, f"received_at_for_{source}_future_guard"
-        return None, f"{source}_future_rejected"
-    return None, "missing"
+        if received_ms is not None:
+            return received_ms, f"received_at_for_{source}_future_guard"
+        return now_ms, f"hub_clock_for_{source}_future_guard"
+    if received_ms is not None:
+        return received_ms, "received_at"
+    return now_ms, "hub_clock_fallback"
 
 
 def stamp_quote_identity(hub: Any, requested_symbol: object, quote: Any) -> Any:
