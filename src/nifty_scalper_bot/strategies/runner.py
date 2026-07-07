@@ -4238,7 +4238,15 @@ class StrategyRunner:
                 end=end_ts,
             )
 
-            # 3. Ingest
+            # 3. Ingest — but never the in-progress minute. Zerodha's minute
+            # history includes the current PARTIAL candle; ingesting it
+            # advances last_bar_ts to the live minute, so the builder's
+            # correct closed bar is then dropped as out-of-order and the
+            # indicators keep the partial OHLC (seen as the every-minute
+            # "Dropping out-of-order candle" warnings on 2026-07-06).
+            # The live builder owns the current minute.
+            if end_ts > datetime.now(timezone.utc):
+                return
             symbol = canonical(str(data["symbol"]))
             self._ingest_bar(symbol, bar, is_backfill=True)
 
@@ -5081,10 +5089,17 @@ class StrategyRunner:
 
         # Use the public .timestamp property (wraps .start)
         if not is_backfill and last_ts and bar.timestamp <= last_ts:
-            self._logger.warning(
-                "Dropping out-of-order candle",
-                extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts},
-            )
+            duplicate = bar.timestamp == last_ts
+            if self._should_log_throttled(f"bar_ooo:{symbol}", 60.0):
+                self._logger.log(
+                    logging.DEBUG if duplicate else logging.WARNING,
+                    "Dropping out-of-order candle symbol=%s bar_ts=%s last_ts=%s duplicate=%s",
+                    symbol,
+                    bar.timestamp,
+                    last_ts,
+                    duplicate,
+                    extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts},
+                )
             return
 
         # 2. STATE: Update High-Water Mark

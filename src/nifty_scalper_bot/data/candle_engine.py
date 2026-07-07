@@ -284,11 +284,11 @@ def repair_with_backfill(
 ) -> pd.DataFrame:
     """Merge deterministic recent candles only without synthetic fills."""
     LOGGER.info(
-        "data_integrity_error",
+        "repair_with_backfill_deprecated symbol=%s",
+        symbol,
         extra={
-            "event": "data_integrity_error",
+            "event": "repair_with_backfill_deprecated",
             "symbol": symbol,
-            "reason": "repair_with_backfill_deprecated",
         },
     )
     recent = sanitize(fetch_recent_rest(symbol))
@@ -310,7 +310,9 @@ def fetch_historical_safe(
         if validate_dataframe(frame, min_required=min_required):
             return frame
         LOGGER.warning(
-            "data_integrity_error",
+            "data_integrity_error symbol=%s reason=historical_validation_failed attempt=%d",
+            symbol,
+            attempt,
             extra={
                 "event": "data_integrity_error",
                 "symbol": symbol,
@@ -379,11 +381,14 @@ def ensure_valid_data(
     )
     if hydrated is None:
         LOGGER.error(
-            "data_integrity_error",
+            "data_integrity_error symbol=%s reason=insufficient_historical min_required=%d",
+            symbol,
+            min_required,
             extra={
                 "event": "data_integrity_error",
                 "symbol": symbol,
                 "reason": "insufficient_historical",
+                "min_required": min_required,
             },
         )
         return None
