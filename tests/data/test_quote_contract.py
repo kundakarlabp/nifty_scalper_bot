@@ -37,8 +37,9 @@ def test_quote_contract_adds_identity_and_tick_age():
 
 
 def test_quote_identity_falls_back_to_arrival_when_timestamp_is_future():
+    now_epoch = 1_783_415_880.0  # 2026-07-07 14:48 IST
     hub = SimpleNamespace(
-        _now=lambda: 1_800_000_000.0,
+        _now=lambda: now_epoch,
         _canonical_quote_symbol=lambda symbol: f"NFO:{symbol}" if ":" not in str(symbol) else str(symbol),
         quote_update_version=lambda _symbol: 7,
     )
@@ -47,7 +48,7 @@ def test_quote_identity_falls_back_to_arrival_when_timestamp_is_future():
         "instrument_token": 12345,
         "last_price": 88.25,
         "timestamp": "2026-07-07T20:18:01+05:30",
-        "received_at": 1_800_000_000.0,
+        "received_at": now_epoch,
     }
 
     stamped = stamp_quote_identity(hub, "NIFTY24JAN100CE", quote)
