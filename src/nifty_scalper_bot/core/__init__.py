@@ -37,6 +37,19 @@ except Exception as exc:  # noqa: BLE001 - non-live tooling imports should remai
         raise RuntimeError("strategy_live_safety_patch_failed") from exc
 
 try:
+    from nifty_scalper_bot.core.strategy_exit_score_diagnostics import apply_patches as _apply_strategy_exit_score_diagnostics
+
+    _apply_strategy_exit_score_diagnostics()
+except Exception as exc:  # noqa: BLE001 - diagnostics must not disable tooling imports
+    get_logger(__name__).error(
+        "STRATEGY_EXIT_SCORE_DIAGNOSTIC_PATCH_FAILED error=%s",
+        exc,
+        extra={"event": "STRATEGY_EXIT_SCORE_DIAGNOSTIC_PATCH_FAILED", "error_type": type(exc).__name__},
+    )
+    if _real_live_mode_requested():
+        raise RuntimeError("strategy_exit_score_diagnostic_patch_failed") from exc
+
+try:
     from nifty_scalper_bot.core.boot_log_safety import apply_filters as _apply_boot_log_rate_controls
 
     _apply_boot_log_rate_controls()
