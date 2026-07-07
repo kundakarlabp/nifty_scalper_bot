@@ -976,3 +976,90 @@ def test_incident_single_lot_lifecycle_no_false_exit_no_second_entry(
         assert sum(b.quantity for b in bm._brackets.values()) == 65
     finally:
         bm._running = False
+
+
+def test_bracket_lifecycle_trailing_and_exits_on_live_class(monkeypatch, tmp_path) -> None:
+    """End-to-end lifecycle on the LIVE production class (full MRO), exercising
+    the fallback trailing path (_apply_trailing_math): SL must ratchet up on a
+    rally, stay monotonic on pullback, stay tick-rounded, fire the trailed-SL
+    exit exactly once, and TP1 must fire a single partial exit."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    placed: list = []
+
+    class _OM:
+        def place_reduce_only_exit(self, intent):
+            placed.append(intent)
+            return "X1"
+
+        def place_order(self, **kwargs):
+            placed.append(kwargs)
+            return "X1"
+
+        def get_order_status(self, _oid):
+            return {"status": "COMPLETE", "average_price": 151.0}
+
+    sym = "NFO:NIFTYLIFECYCLE24050CE"
+    bm = BracketManager(order_manager=_OM())
+    bm._running = False
+    try:
+        bm.register_virtual_bracket(
+            order_id="lc-1", symbol=sym, side="BUY", qty=65,
+            price=145.15, sl=143.0, tp=152.0, activate_immediately=False,
+        )
+        bm.confirm_entry_fill("lc-1", 145.15)
+        bracket = bm.get_bracket("lc-1")
+        sl0 = bracket.sl_trigger_price
+
+        for px in (146.0, 147.5, 149.0, 150.5):  # rally -> ratchet
+            bm.on_tick(sym, px)
+        trailed = bracket.sl_trigger_price
+        assert trailed > sl0, "trailing must raise SL on a rally"
+        assert round(trailed / 0.05, 6) % 1 == 0, "SL must stay tick-rounded"
+
+        bm.on_tick(sym, 147.0)  # pullback below trailed SL
+        assert bracket.sl_trigger_price >= trailed, "SL must never move down"
+        assert bracket.exit_pending is True
+        assert "SL" in str(bracket.exit_reason or "").upper()
+        assert len(placed) == 1, "trailed-SL exit must fire exactly once"
+
+        bm.on_tick(sym, 152.4)  # further ticks must not double-fire
+        assert len(placed) == 1
+    finally:
+        bm._running = False
+
+
+def test_bracket_tp1_partial_fires_once_on_live_class(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    placed: list = []
+
+    class _OM:
+        def place_reduce_only_exit(self, intent):
+            placed.append(intent)
+            return "X2"
+
+        def place_order(self, **kwargs):
+            placed.append(kwargs)
+            return "X2"
+
+        def get_order_status(self, _oid):
+            return {"status": "COMPLETE", "average_price": 149.1}
+
+    sym = "NFO:NIFTYLIFECYCLE24050PE"
+    bm = BracketManager(order_manager=_OM())
+    bm._running = False
+    try:
+        bm.register_virtual_bracket(
+            order_id="lc-2", symbol=sym, side="BUY", qty=65,
+            price=145.15, sl=143.0, tp=152.0,
+            tp1_price=149.0, tp1_qty=25, activate_immediately=False,
+        )
+        bm.confirm_entry_fill("lc-2", 145.15)
+        bracket = bm.get_bracket("lc-2")
+        assert [(t.name, t.quantity) for t in bracket.tp_levels] == [("TP1", 25)]
+
+        bm.on_tick(sym, 149.1)
+        assert bracket.exit_pending is True
+        assert "TP1" in str(bracket.exit_reason or "")
+        assert len(placed) == 1, "TP1 partial must fire exactly one exit order"
+    finally:
+        bm._running = False
