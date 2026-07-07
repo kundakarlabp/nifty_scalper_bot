@@ -1,8 +1,9 @@
 """Live-safety guard for StrategyManager.
 
 Real LIVE mode fails closed on cold history, explicit DataHub indicator
-unreadiness, approved-signal filter bypass, and missing live signal identity.
-PAPER/SHADOW behaviour is unchanged.
+unreadiness, approved-signal filter bypass, and unsafe OrderFlow candidates.
+Deterministic signal identity is generated at the live-safety boundary so
+approved signals are idempotent without depending on every strategy to stamp it.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ TRUTHY = {"1", "true", "yes", "y", "on", "live"}
 IDENTITY_KEYS = (
     "signal_id",
     "deterministic_signal_id",
+    "idempotency_key",
     "bar_timestamp",
     "signal_timestamp",
     "timestamp",
@@ -148,12 +150,22 @@ def _has_identity(signal: Signal) -> bool:
 
 def _add_identity(signal: Signal) -> Signal:
     metadata = dict(getattr(signal, "metadata", {}) or {})
-    metadata.setdefault("deterministic_signal_id", signal.deterministic_id)
+    if metadata.get("timestamp") in (None, ""):
+        for key in ("bar_timestamp", "latest_bar_ts", "signal_timestamp"):
+            candidate = metadata.get(key)
+            if candidate not in (None, ""):
+                metadata["timestamp"] = candidate
+                break
+    deterministic = str(metadata.get("deterministic_signal_id") or signal.deterministic_id)
+    metadata.setdefault("deterministic_signal_id", deterministic)
+    metadata.setdefault("signal_id", deterministic)
+    metadata.setdefault("idempotency_key", deterministic)
+    metadata.setdefault("signal_timestamp", metadata.get("timestamp"))
+    metadata.setdefault("identity_source", "strategy_live_safety")
     return signal.with_metadata(**metadata)
 
 
 def _orderflow_selected_option_block(signal: Signal) -> dict[str, Any] | None:
-    """Block live OrderFlow entries that are not tied to selected/near-ATM options."""
     metadata = dict(getattr(signal, "metadata", {}) or {})
     strategy_name = str(metadata.get("strategy_name") or metadata.get("strategy") or "")
     canonical = strategy_name.replace("_", "").replace("-", "").strip().lower()
@@ -238,7 +250,6 @@ def _final_filter(manager: Any, signal: Signal, trace_id: str | None) -> Signal 
 
 
 def _install_canonical_history_builder(strategy_module: Any) -> None:
-    """Route StrategyManager history context through the canonical builder."""
     from nifty_scalper_bot.core.strategy_context_builder import (
         build_strategy_history_context as canonical_build_strategy_history_context,
     )
@@ -278,11 +289,13 @@ def apply_patches() -> None:
         signal = original(self, symbol, current_price, trace_id=trace_id)
         if signal is None or not _is_live(self):
             return signal
+        signal = _add_identity(signal)
         metadata = dict(getattr(signal, "metadata", {}) or {})
         if bool(metadata.get("is_approved")):
             signal = _final_filter(self, signal, trace_id)
             if signal is None:
                 return None
+            signal = _add_identity(signal)
             metadata = dict(getattr(signal, "metadata", {}) or {})
         orderflow_block = _orderflow_selected_option_block(signal)
         if orderflow_block is not None:
@@ -303,7 +316,7 @@ def apply_patches() -> None:
                 {"metadata_keys": sorted(metadata.keys())},
             )
             return None
-        return _add_identity(signal)
+        return signal
 
     cls._strategy_live_safety_original_generate_signal = original
     cls.generate_signal = generate_signal
