@@ -30,8 +30,9 @@ def test_quote_contract_adds_identity_and_tick_age():
         assert quote["tradingsymbol"] == "NFO:NIFTY24JAN100CE"
         assert quote["instrument_token"] == 12345
         assert quote["quote_update_version"] == 1
-        assert "tick_age_ms" in quote
-        assert quote["tick_age_ms"] >= 0.0
+        assert quote["quote_identity_timestamp_source"] == "hub_clock_fallback"
+        assert quote["tick_age_ms"] == 0.0
+        assert quote["quote_age_s"] == 0.0
     finally:
         hub.close()
 
