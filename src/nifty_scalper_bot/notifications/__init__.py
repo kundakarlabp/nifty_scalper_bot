@@ -2,6 +2,39 @@
 
 from __future__ import annotations
 
+import logging
+
+
+class _TelegramUpdaterDefaultErrorFilter(logging.Filter):
+    """Suppress PTB's non-actionable generic polling error line.
+
+    The actionable events are emitted by our Telegram controller as
+    TELEGRAM_POLLING_CONFLICT, telegram_polling_transient, or
+    TELEGRAM_UPDATER_ERROR. PTB's default_error_callback only says
+    "Exception happened while polling for updates" and hides the exception type,
+    which makes alert aggregation noisy without being diagnosable.
+    """
+
+    _GENERIC = "Exception happened while polling for updates"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "telegram.ext.Updater" and record.funcName == "default_error_callback":
+            try:
+                return self._GENERIC not in record.getMessage()
+            except Exception:  # pragma: no cover - defensive logging boundary
+                return False
+        return True
+
+
+def _install_telegram_log_filters() -> None:
+    logger = logging.getLogger("telegram.ext.Updater")
+    if any(isinstance(filter_, _TelegramUpdaterDefaultErrorFilter) for filter_ in logger.filters):
+        return
+    logger.addFilter(_TelegramUpdaterDefaultErrorFilter())
+
+
+_install_telegram_log_filters()
+
 __all__ = [
     "TelegramEnhancedNotifier",
     "TelegramWebhookController",
