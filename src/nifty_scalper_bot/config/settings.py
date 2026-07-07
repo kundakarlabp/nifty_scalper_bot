@@ -732,6 +732,10 @@ class RiskSettings:
     per_trade_cap_pct: float = 25.0
     max_consecutive_losses: int = 3
     max_trades_per_day: int = 6  # enforced by RiskManager failsafe; 0 = unlimited
+    # Read by RiskManager's failsafe breaker (risk/risk_manager.py). Was
+    # missing, making that breaker a silent no-op; 1 matches the enforced
+    # single-position policy (execution choke-point gate). 0 = unlimited.
+    max_open_positions: int = 1
     loss_cooldown_seconds: float = 90.0
     cooldown_on_reject_seconds: float = 30.0
     trading_day_reset_hour_utc: int = 3
@@ -1208,6 +1212,7 @@ def _build_risk_settings() -> RiskSettings:
     return RiskSettings(
         daily_loss_pct=daily_loss_pct,
         max_trades_per_day=max_trades_day,
+        max_open_positions=_env_int("RISK_MAX_OPEN_POSITIONS", default=1, minimum=0),
         daily_pnl_cap_pct=_env_float(
             "RISK_DAILY_PNL_CAP_PCT", default=daily_loss_pct, minimum=0.0
         ),

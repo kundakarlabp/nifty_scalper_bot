@@ -38,6 +38,7 @@ import json
 import inspect
 import logging
 import os
+from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from pathlib import Path
 import re
@@ -7446,7 +7447,7 @@ class StrategyRunner:
             pe_mdm_history = _mdm_count(pe_symbol)
             ce_runner_history = _runner_count(ce_symbol)
             pe_runner_history = _runner_count(pe_symbol)
-            required_execution_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+            required_execution_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
             primary_blocker = str(universe_reason or self._runtime_readiness_reason or "")
             if not bool(self._runtime_live_orders_armed) and not primary_blocker:
                 primary_blocker = "startup_pipeline_incomplete"

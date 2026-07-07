@@ -35,6 +35,7 @@ Safe-edit notes:
 from __future__ import annotations
 
 import os
+from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -556,7 +557,7 @@ def compute_selected_option_history_readiness(
 
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
-    option_min = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+    option_min = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
     required = max(option_min, int(getattr(runner, "_option_required_bars", 0) or 0))
 
     def _readiness(sym: str | None) -> HistoryReadiness | None:
@@ -606,7 +607,7 @@ def resolve_history_policy(
     runner = getattr(ctx, "strategy_runner", None)
     role = str(role or "option_context")
     phase = str(phase or "dynamic_update")
-    option_min = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+    option_min = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
     context_env = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
     context_min = max(context_env, int(getattr(runner, "_context_required_bars", 0) or 0))
     from nifty_scalper_bot.core.app import _symbol_history_requirement
