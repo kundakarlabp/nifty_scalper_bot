@@ -20,6 +20,7 @@ from typing import Any
 from telegram import InputFile, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.infra.diagnostics import LOG_TAP
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 
@@ -556,7 +557,7 @@ async def cmd_ping(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -
 async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:
     snap = _runtime_snapshot(service)
     top = snap.get("live_block_reason") or _why_reason(snap) or "none"
-    await safe_reply(update, _lines(f"Status: {'BLOCKED' if top != 'none' else 'OK'}", {"top_blocker": top, "mode": snap.get("mode"), "effective_mode": snap.get("effective_mode"), "market": snap.get("market_state"), "selected_ce": snap.get("selected_ce"), "selected_pe": snap.get("selected_pe"), "data_hard_ready": _bool(snap.get("data_hard_ready")), "evaluation_ready": _bool(snap.get("evaluation_ready")), "live_orders_armed": _bool(snap.get("live_orders_armed")), "live_block_reason": snap.get("live_block_reason") or "none"}))
+    await safe_reply(update, _lines(f"Status: {'BLOCKED' if top != 'none' else 'OK'}", {"top_blocker": top, "build_sha": _resolve_build_sha(), "mode": snap.get("mode"), "effective_mode": snap.get("effective_mode"), "market": snap.get("market_state"), "selected_ce": snap.get("selected_ce"), "selected_pe": snap.get("selected_pe"), "data_hard_ready": _bool(snap.get("data_hard_ready")), "evaluation_ready": _bool(snap.get("evaluation_ready")), "live_orders_armed": _bool(snap.get("live_orders_armed")), "live_block_reason": snap.get("live_block_reason") or "none"}))
 
 
 async def cmd_health(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:

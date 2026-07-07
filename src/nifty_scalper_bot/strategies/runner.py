@@ -100,6 +100,7 @@ from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
     OrderStateMachine,
 )
+from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
@@ -1004,6 +1005,13 @@ class StrategyRunner:
         self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
         self._last_ws_reconnect_attempt_ts: float = 0.0
         self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
+        # Runner-LOCAL candle buffers: used ONLY as (a) the symbol registry for
+        # the staleness/backfill supervisor loop and (b) validity seeds for
+        # ensure_valid_data(). NOT a market-data source of truth — the single
+        # runtime OHLC authority is MarketDataManager (pipeline store mirrors
+        # its closed bars). Do not read prices from here for strategy or
+        # execution decisions. Consolidation into MDM reads is the deferred
+        # "runner-candle-consolidation" slice.
         self._candle_engines: dict[str, CandleEngine] = {}
         # STEP 1/4: Single deterministic pipeline — ticks flow here → closed candles only
         self._pipeline: MarketDataPipeline = get_pipeline(store_maxlen=1500)
@@ -1100,7 +1108,7 @@ class StrategyRunner:
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
         self._last_regime_inputs_by_symbol: dict[str, dict[str, Any]] = {}
         self._build_info = {
-            "git_sha": os.getenv("GIT_SHA", "unknown"),
+            "git_sha": _resolve_build_sha(),
             "git_branch": os.getenv("GIT_BRANCH", "unknown"),
             "deployment_id": os.getenv("DEPLOYMENT_ID", "unknown"),
             "build_time": os.getenv("BUILD_TIME", "unknown"),
@@ -7480,7 +7488,7 @@ class StrategyRunner:
                 "broker_authenticated": not bool(getattr(getattr(self, "_market_data", None), "broker_auth_invalid", False)),
                 "reconciled": getattr(self, "_position_reconciliation_completed", None),
                 "event_loop_lag_ms": round(float(getattr(self._market_data, "_event_loop_lag_seconds", 0.0) or 0.0) * 1000.0, 3),
-                "build_sha": os.getenv("GIT_COMMIT_SHA") or os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown",
+                "build_sha": _resolve_build_sha(),
                 "ce_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(ce_symbol, False)) if ce_symbol else False,
                 "pe_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(pe_symbol, False)) if pe_symbol else False,
                 "ce_quote_ready": bool(self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0)) if ce_symbol else False,

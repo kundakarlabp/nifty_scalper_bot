@@ -1,4 +1,9 @@
-"""Directional bias scoring engine."""
+"""NOT WIRED INTO PRODUCTION: kept only for its unit tests.
+
+The live underlying-direction authority is core/strategy_manager.py
+(_combine_strategy_votes gate + tradable_option context block).
+
+Directional bias scoring engine."""
 from __future__ import annotations
 
 from dataclasses import dataclass
