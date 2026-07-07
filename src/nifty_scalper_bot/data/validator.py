@@ -30,6 +30,18 @@ class Tick:
         }
 
 
+def _to_ist(value: Any) -> pd.Timestamp:
+    try:
+        ts = pd.Timestamp(value)
+    except Exception as exc:  # noqa: BLE001
+        raise DataIntegrityError("Invalid timestamp") from exc
+    if pd.isna(ts):
+        raise DataIntegrityError("Invalid timestamp")
+    if ts.tzinfo is None:
+        return ts.tz_localize(IST)
+    return ts.tz_convert(IST)
+
+
 def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
     symbol_raw = raw_tick.get("symbol")
     if symbol_raw is None or str(symbol_raw).strip() == "":
@@ -38,10 +50,7 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
     timestamp_raw = raw_tick.get("timestamp") or raw_tick.get("exchange_timestamp")
     if timestamp_raw is None:
         timestamp_raw = _dt.datetime.now(IST)
-    timestamp = pd.to_datetime(timestamp_raw, utc=True, errors="coerce")
-    if pd.isna(timestamp):
-        raise DataIntegrityError("Invalid timestamp")
-    timestamp = pd.Timestamp(timestamp).tz_convert(IST)
+    timestamp = _to_ist(timestamp_raw)
 
     ltp_raw = raw_tick.get("ltp") or raw_tick.get("last_price")
     if ltp_raw is None:
