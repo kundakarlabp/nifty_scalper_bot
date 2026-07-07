@@ -142,7 +142,7 @@ def _resolve_quote_timestamp_ms(hub: Any, quote: Mapping[str, Any]) -> tuple[flo
             return ts_ms, source
         if received_ms is not None:
             return received_ms, f"received_at_for_{source}_future_guard"
-        return None, f"{source}_future_rejected"
+        return now_ms, f"hub_clock_for_{source}_future_guard"
     if received_ms is not None:
         return received_ms, "received_at"
     return now_ms, "hub_clock_fallback"
