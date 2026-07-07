@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from datetime import datetime
+import os
 import time
 from typing import Any, Mapping
 
@@ -55,6 +56,14 @@ def _quote_symbol_hint(quote: Mapping[str, Any]) -> str:
     return ""
 
 
+def _future_grace_ms() -> float:
+    try:
+        seconds = float(os.getenv("MARKETDATA_MAX_FUTURE_CANDLE_SECONDS", "120") or 120)
+    except (TypeError, ValueError):
+        seconds = 120.0
+    return max(seconds, 0.0) * 1000.0
+
+
 def _coerce_timestamp_ms(raw: Any) -> float | None:
     if raw is None or raw == "":
         return None
@@ -69,6 +78,13 @@ def _coerce_timestamp_ms(raw: Any) -> float | None:
         if not pd.isna(ts):
             return float(ts.timestamp() * 1000.0)
     return None
+
+
+def _coerce_arrival_ms(raw: Any) -> float | None:
+    value = _coerce_timestamp_ms(raw)
+    if value is None:
+        return None
+    return value
 
 
 def _token_for(hub: Any, symbol: str, quote: Mapping[str, Any]) -> int | None:
@@ -90,6 +106,36 @@ def _token_for(hub: Any, symbol: str, quote: Mapping[str, Any]) -> int | None:
             if value is not None:
                 return int(value)
     return None
+
+
+def _now_ms(hub: Any) -> float:
+    now_fn = getattr(hub, "_now", None)
+    with suppress(Exception):
+        if callable(now_fn):
+            return float(now_fn()) * 1000.0
+    return time.time() * 1000.0
+
+
+def _resolve_quote_timestamp_ms(hub: Any, quote: Mapping[str, Any]) -> tuple[float | None, str]:
+    now_ms = _now_ms(hub)
+    candidates = (
+        ("exchange_timestamp", quote.get("exchange_timestamp")),
+        ("last_tick_timestamp", quote.get("last_tick_timestamp")),
+        ("timestamp", quote.get("timestamp")),
+        ("last_tick_ts_ms", quote.get("last_tick_ts_ms")),
+        ("timestamp_ms", quote.get("timestamp_ms")),
+    )
+    for source, raw in candidates:
+        ts_ms = _coerce_timestamp_ms(raw)
+        if ts_ms is None:
+            continue
+        if ts_ms <= now_ms + _future_grace_ms():
+            return ts_ms, source
+        arrival_ms = _coerce_arrival_ms(quote.get("received_at") or quote.get("arrival_time"))
+        if arrival_ms is not None and arrival_ms <= now_ms + _future_grace_ms():
+            return arrival_ms, f"received_at_for_{source}_future_guard"
+        return None, f"{source}_future_rejected"
+    return None, "missing"
 
 
 def stamp_quote_identity(hub: Any, requested_symbol: object, quote: Any) -> Any:
@@ -114,18 +160,20 @@ def stamp_quote_identity(hub: Any, requested_symbol: object, quote: Any) -> Any:
             version = version_getter(symbol)
             if version is not None:
                 stamped["quote_update_version"] = int(version)
-    ts_ms = _coerce_timestamp_ms(
-        stamped.get("timestamp_ms")
-        or stamped.get("last_tick_ts_ms")
-        or stamped.get("exchange_timestamp")
-        or stamped.get("timestamp")
-    )
+    ts_ms, ts_source = _resolve_quote_timestamp_ms(hub, stamped)
+    stamped["quote_identity_timestamp_source"] = ts_source
     if ts_ms is not None:
         stamped["last_tick_ts_ms"] = ts_ms
-        now_fn = getattr(hub, "_now", None)
-        with suppress(Exception):
-            now_ms = float(now_fn() if callable(now_fn) else time.time()) * 1000.0
-            stamped["tick_age_ms"] = max(0.0, now_ms - ts_ms)
+        age_ms = max(0.0, _now_ms(hub) - ts_ms)
+        stamped["tick_age_ms"] = age_ms
+        stamped["quote_age_ms"] = age_ms
+        stamped["last_tick_age_ms"] = age_ms
+        stamped["market_data_age_ms"] = age_ms
+        stamped["quote_age_s"] = age_ms / 1000.0
+        stamped["last_tick_age_s"] = age_ms / 1000.0
+        stamped["market_data_age_s"] = age_ms / 1000.0
+    else:
+        stamped["quote_identity_timestamp_rejected"] = True
     stamped["quote_identity_source"] = stamped.get("quote_identity_source") or "datahub_quote_contract"
     return stamped
 

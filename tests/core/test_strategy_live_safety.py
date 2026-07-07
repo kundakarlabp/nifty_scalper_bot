@@ -91,11 +91,16 @@ def test_live_approved_signal_must_pass_final_filter(monkeypatch) -> None:
     assert decision.reason == "live_signal_final_filter_block"
 
 
-def test_live_signal_identity_is_required_and_enriched() -> None:
+def test_live_signal_identity_is_generated_and_enriched() -> None:
     missing = _signal(strategy="SMC")
     present = _signal(strategy="SMC", timestamp="2026-07-05T09:20:00")
 
     assert guard._has_identity(missing) is False
     assert guard._has_identity(present) is True
-    enriched = guard._add_identity(present)
-    assert enriched.metadata["deterministic_signal_id"] == present.deterministic_id
+    enriched_missing = guard._add_identity(missing)
+    assert guard._has_identity(enriched_missing) is True
+    assert enriched_missing.metadata["deterministic_signal_id"] == missing.deterministic_id
+    assert enriched_missing.metadata["signal_id"] == missing.deterministic_id
+    assert enriched_missing.metadata["idempotency_key"] == missing.deterministic_id
+    enriched_present = guard._add_identity(present)
+    assert enriched_present.metadata["deterministic_signal_id"] == present.deterministic_id
