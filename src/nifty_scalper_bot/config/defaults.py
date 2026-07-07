@@ -27,6 +27,14 @@ DEFAULT_REST_RATE_LIMIT_REFILL_PER_SEC = 10.0
 DEFAULT_HIST_RATE_LIMIT_CAPACITY = 2
 DEFAULT_HIST_RATE_LIMIT_REFILL_PER_SEC = 1.0
 
+# ── Trading-path threshold map (owners) ─────────────────────────────────────
+# QUOTE_STALE_THRESHOLD_MS (5s)      → REST quote freshness, data_hub/policy.
+# MDM has_fresh_ws_ltp max_age (5s)  → WS tick freshness, data/market_data_hardening.py.
+#   (The two 5s values are coincidental, not shared — change independently.)
+# DEFAULT_OPTION_EXEC_MIN_BARS (30)  → option entry readiness, execution/readiness.py.
+# pipeline MIN_REQUIRED_CANDLES (50) → strategy candle gate, data/pipeline.py.
+# STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS (120s env)
+#                                    → underlying direction freshness, core/strategy_manager.py.
 QUOTE_STALE_THRESHOLD_MS = 5_000
 # Single source of truth for the option execution min-bars readiness gate.
 # Env: READINESS_OPTION_EXEC_MIN_BARS (legacy alias OPTION_EXECUTION_MIN_BARS).

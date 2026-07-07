@@ -92,7 +92,7 @@ from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.circuit_breaker import CircuitBreaker
 from nifty_scalper_bot.utils.errors import RateLimitError
 from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.market_hours import get_time_status
 from nifty_scalper_bot.utils.pricing import canonical_price_source
@@ -3494,6 +3494,14 @@ class OrderManager:
                         pass
                 except Exception:
                     pass
+        log_throttled(
+            self._logger,
+            f"quote_probe_all_methods_failed:{symbol}",
+            "QUOTE_PROBE_ALL_METHODS_FAILED symbol=%s" % symbol,
+            interval_sec=60,
+            level=logging.WARNING,
+            extra={"event": "QUOTE_PROBE_ALL_METHODS_FAILED", "symbol": str(symbol)},
+        )
         return None
 
     def _selected_option_symbols_for_execution(self) -> set[str]:
@@ -4217,379 +4225,6 @@ class OrderManager:
                 "stop_order_id": stop_details.order_id,
                 "target_order_id": target_details.order_id,
             },
-        )
-
-    def execute_bracket_trade(
-        self,
-        *,
-        symbol: str,
-        side: Literal["BUY", "SELL"],
-        quantity: int,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
-        product: str | None = None,
-        tag: str | None = None,
-        trailing_spec: TrailingSpec | None = None,
-        partial_profit_fraction: float = 0.0,
-        second_target_price: float | None = None,
-    ) -> tuple[str, str, str]:
-        """Execute bracket with margin checks, trailing, and partial profits.
-
-        Args:
-            symbol: Instrument identifier for the trade.
-            side: Trade direction (``BUY`` enters long, ``SELL`` enters short).
-            quantity: Requested order quantity.
-            entry_price: Limit entry price (<=0 treats as market).
-            stop_loss: Protective stop-loss trigger price.
-            take_profit: Initial take-profit price for the first exit leg.
-            product: Optional broker product code.
-            tag: Optional broker tag string for audit grouping.
-            trailing_spec: Optional trailing stop specification.
-            partial_profit_fraction: Fraction of quantity for the first target.
-            second_target_price: Optional price for the follow-up target.
-
-        Returns:
-            Tuple containing entry, stop-loss, and first take-profit order IDs.
-
-        Raises:
-            OrderPlacementError: If placement fails after risk checks.
-        """
-
-        self._logger.debug(
-            "Entered execute_bracket_trade",
-            extra={
-                "event": "execute_bracket_trade_enter",
-                "symbol": symbol,
-                "side": side,
-                "quantity": quantity,
-            },
-        )
-        self._validate_quantity(symbol, quantity)
-        if not self._ensure_trading_allowed(
-            symbol=symbol, side=side, quantity=quantity
-        ):
-            self._logger.info(
-                "Condition met: trading disabled for bracket",
-                extra={"event": "bracket_blocked"},
-            )
-            return "", "", ""
-
-        try:
-            margin_ok, reason, meta = self._precheck_margin(
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                product=product,
-                price=entry_price,
-                stop_loss=stop_loss,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in execute_bracket_trade: %s",
-                exc,
-                extra={"event": "execute_bracket_margin_failure", "symbol": symbol},
-            )
-            raise OrderPlacementError("Margin planning failed") from exc
-        if not margin_ok:
-            self._logger.info(
-                "Condition met: margin block for bracket",
-                extra={
-                    "event": "order_blocked",
-                    "reason": canonical(reason),
-                    "needed": meta.get("needed"),
-                    "available": meta.get("available"),
-                },
-            )
-            return "", "", ""
-
-        # Align requested quantity with margin engine sizing to avoid broker-side rejects.
-        try:
-            decision, _ = self._pre_trade_decision(
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                product=product,
-                price=entry_price,
-                stop_loss=stop_loss,
-            )
-            if decision.quantity > 0:
-                quantity = min(quantity, int(decision.quantity))
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in execute_bracket_trade sizing: %s", exc)
-        if quantity <= 0:
-            self._logger.warning(
-                "insufficient_margin",
-                extra={"event": "insufficient_margin", "symbol": symbol},
-            )
-            return "", "", ""
-
-        entry_order_type = (
-            OrderType.MARKET
-            if (entry_price is None or float(entry_price) <= 0.0)
-            else OrderType.LIMIT
-        )
-        try:
-            if entry_order_type == OrderType.MARKET:
-                entry = self._execute_market_order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=quantity,
-                    product=product,
-                    tag=tag,
-                )
-            else:
-                entry = self._place_single_order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=quantity,
-                    order_type=entry_order_type,
-                    price=entry_price,
-                    product=product,
-                    tag=tag,
-                )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in execute_bracket_trade entry: %s",
-                exc,
-                extra={"event": "execute_bracket_entry_failed", "symbol": symbol},
-            )
-            raise
-
-        try:
-            filled_entry = self._await_entry_fill(
-                entry,
-                timeout=max(float(self.BRACKET_ENTRY_TIMEOUT_SEC), 0.5),
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in execute_bracket_trade: %s",
-                exc,
-                extra={
-                    "event": "execute_bracket_entry_wait_failed",
-                    "symbol": symbol,
-                },
-            )
-            raise OrderPlacementError("Entry fill confirmation failed") from exc
-
-        if filled_entry is None or filled_entry.filled_quantity <= 0:
-            self._logger.info(
-                "Condition met: bracket entry unfilled",
-                extra={
-                    "event": "bracket_entry_unfilled",
-                    "entry_id": entry.order_id,
-                    "symbol": symbol,
-                },
-            )
-            return "", "", ""
-
-        entry = filled_entry
-        filled_quantity = int(max(entry.filled_quantity, 0))
-        if filled_quantity <= 0:
-            self._logger.info(
-                "Condition met: entry filled quantity zero",
-                extra={
-                    "event": "bracket_entry_zero_qty",
-                    "entry_id": entry.order_id,
-                    "symbol": symbol,
-                },
-            )
-            return "", "", ""
-
-        exit_side: Literal["BUY", "SELL"] = "SELL" if side == "BUY" else "BUY"
-        effective_entry_price = (
-            entry.fill_price or entry.price or float(entry_price or 0.0)
-        )
-        tick_size = 0.05
-        delta = float(effective_entry_price) - float(
-            entry_price or effective_entry_price
-        )
-        if abs(delta) > tick_size:
-            stop_loss = float(stop_loss) + delta
-            take_profit = (
-                float(take_profit) + delta
-            )  # anchor bracket to actual execution.
-        if side == "BUY":
-            if not (stop_loss < effective_entry_price < take_profit):
-                atr = max(abs(float(take_profit) - float(stop_loss)) / 2.0, 1.0)
-                stop_loss = effective_entry_price - (atr * 1.2)
-                take_profit = effective_entry_price + (atr * 1.8)
-        else:
-            if not (take_profit < effective_entry_price < stop_loss):
-                atr = max(abs(float(take_profit) - float(stop_loss)) / 2.0, 1.0)
-                stop_loss = effective_entry_price + (atr * 1.2)
-                take_profit = effective_entry_price - (atr * 1.8)
-        stop_loss = self._round_to_tick(float(stop_loss), tick_size=tick_size)
-        take_profit = self._round_to_tick(float(take_profit), tick_size=tick_size)
-
-        child_ids: list[str] = []
-        stop_details: OrderDetails
-        try:
-            stop_details = self._place_single_order(
-                symbol=symbol,
-                side=exit_side,
-                quantity=filled_quantity,
-                order_type=OrderType.STOP_LOSS_MARKET,
-                price=stop_loss,
-                product=product,
-                tag=tag,
-                parent_order_id=entry.order_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.critical(
-                "Failure in execute_bracket_trade stop: %s",
-                exc,
-                extra={"event": "execute_bracket_stop_failed", "symbol": symbol},
-            )
-            self._handle_failed_bracket_entry(
-                entry_details=entry,
-                exit_side=exit_side,
-                product=product,
-                tag=tag,
-                original_exception=exc,
-            )
-            raise OrderPlacementError("Stop-loss placement failed") from exc
-        child_ids.append(stop_details.order_id)
-
-        fraction = float(partial_profit_fraction or 0.0)
-        # [FIX] Lot-Aware Sizing
-        lot_size = self._lot_size_for_symbol(symbol)
-
-        tp_primary_qty = filled_quantity
-        tp_secondary_qty = 0
-
-        if 0 < fraction < 1:
-            # [FIX] Lot-aware sizing to prevent broker rejection
-            raw_target = int(filled_quantity * fraction)
-            # Ensure we have a valid lot size using the proper resolver
-            try:
-                lot_size = self._lot_size_for_symbol(symbol)
-            except Exception:
-                lot_size = 1
-
-            # Snap calculation to floor lot chunks (e.g. 37 -> 25 if lot is 25)
-            lots_count = raw_target // lot_size
-
-            if lots_count == 0:
-                # If fraction results in < 1 lot, force full exit at TP2
-                tp_primary_qty = 0
-            else:
-                tp_primary_qty = lots_count * lot_size
-
-            tp_secondary_qty = filled_quantity - tp_primary_qty
-
-            # Failsafe: if primary became 0, move everything to secondary
-            if tp_primary_qty == 0:
-                tp_primary_qty = filled_quantity
-                tp_secondary_qty = 0
-        else:
-            fraction = 0.0
-
-        tp_details: OrderDetails | None = None
-        if tp_primary_qty > 0:
-            try:
-                tp_details = self._place_single_order(
-                    symbol=symbol,
-                    side=exit_side,
-                    quantity=tp_primary_qty,
-                    order_type=OrderType.LIMIT,
-                    price=take_profit,
-                    product=product,
-                    tag=tag,
-                    parent_order_id=entry.order_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in execute_bracket_trade TP1: %s",
-                    exc,
-                    extra={"event": "execute_bracket_tp_failed", "symbol": symbol},
-                )
-                tp_details = None
-        if tp_details is not None:
-            child_ids.append(tp_details.order_id)
-
-        with self._lock:
-            entry.child_order_ids = list(child_ids)
-            self._register_order(entry)
-
-        state = BracketState(
-            entry_id=entry.order_id,
-            symbol=symbol,
-            side=side,
-            exit_side=exit_side,
-            total_quantity=filled_quantity,
-            entry_price=float(effective_entry_price),
-            product=product,
-            tag=tag,
-            stop_order_id=stop_details.order_id,
-            stop_price=float(stop_loss),
-            stop_order_type=OrderType.STOP_LOSS_MARKET,
-            tp_primary_id=tp_details.order_id if tp_details else None,
-            tp_primary_price=float(take_profit),
-            tp_primary_qty=tp_primary_qty if tp_details else 0,
-            tp_secondary_qty=tp_secondary_qty,
-            trailing_spec=trailing_spec,
-            partial_fraction=fraction,
-            second_target_price=second_target_price,
-        )
-        self._register_bracket_state(state)
-
-        if self._bracket_manager is not None:
-            try:
-                self._bracket_manager.register_bracket(
-                    entry_order_id=entry.order_id,
-                    stop_loss_order_id=stop_details.order_id,
-                    target_order_id=tp_details.order_id if tp_details else None,
-                    tp2_order_id=None,
-                    entry_quantity=filled_quantity,
-                )
-                self._logger.info(
-                    "Bracket registered with external manager",
-                    extra={
-                        "event": "execute_bracket_trade_registered",
-                        "entry_id": entry.order_id,
-                        "stop_id": stop_details.order_id,
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure registering bracket with manager: %s",
-                    exc,
-                    extra={
-                        "event": "execute_bracket_trade_register_failed",
-                        "entry_id": entry.order_id,
-                    },
-                    exc_info=exc,
-                )
-
-        if trailing_spec is not None:
-            try:
-                self.attach_trailing_stop(
-                    entry_order_id=entry.order_id,
-                    sl_order_id=stop_details.order_id,
-                    symbol=symbol,
-                    side=side,
-                    entry_price=effective_entry_price,
-                    spec=trailing_spec,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._logger.warning(
-                    "Failed to attach trailing stop for %s: %s", symbol, exc
-                )
-
-        self._logger.info(
-            "Condition met: bracket orders active",
-            extra={
-                "event": "execute_bracket_trade_success",
-                "entry_id": entry.order_id,
-                "stop_id": stop_details.order_id,
-                "tp_id": tp_details.order_id if tp_details else None,
-            },
-        )
-        return (
-            entry.order_id,
-            stop_details.order_id,
-            tp_details.order_id if tp_details is not None else "",
         )
 
     def place_bracket_order(
@@ -12823,8 +12458,19 @@ class OrderManager:
                     if _hub:
                         try:
                             _hub.ensure_tracking(symbol, seed=True)
-                        except Exception:
-                            pass
+                        except Exception as _seed_exc:  # noqa: BLE001
+                            log_throttled(
+                                self._logger,
+                                f"guard_seed_tracking_failed:{symbol}",
+                                "GUARD_SEED_TRACKING_FAILED symbol=%s error=%s"
+                                % (symbol, _seed_exc),
+                                interval_sec=60,
+                                level=logging.WARNING,
+                                extra={
+                                    "event": "GUARD_SEED_TRACKING_FAILED",
+                                    "symbol": str(symbol),
+                                },
+                            )
                         _hub.subscribe(symbol, bracket_tick_handler)
                         self._bracket_tick_subscriptions.add(symbol)
                         self._logger.info(f"📡 Subscribed to {symbol} for guarding.")

@@ -102,12 +102,9 @@ logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
 STARTUP_INSTANCE_ID = os.getenv("STARTUP_INSTANCE_ID") or uuid4().hex
 STARTUP_HOSTNAME = socket.gethostname()
-STARTUP_BUILD_SHA = (
-    os.getenv("RAILWAY_GIT_COMMIT_SHA")
-    or os.getenv("GIT_COMMIT_SHA")
-    or os.getenv("SOURCE_VERSION")
-    or "unknown"
-)
+from nifty_scalper_bot.config.env_utils import resolve_build_sha
+
+STARTUP_BUILD_SHA = resolve_build_sha()
 _BOT_START_GUARD = False
 print(
     "🚀 PYTHON START: Initializing "

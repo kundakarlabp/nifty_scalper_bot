@@ -124,3 +124,21 @@ def normalise_live_env_defaults() -> None:
 
     for key, value in defaults.items():
         setdefault_env(key, value)
+
+
+def resolve_build_sha() -> str:
+    """Canonical build/commit SHA for the running deployment.
+
+    Single source of truth for main.py startup banner, runner status blocks
+    and the Telegram /status command — previously three divergent env
+    fallback chains. Railway sets RAILWAY_GIT_COMMIT_SHA.
+    """
+    import os
+
+    return (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_COMMIT_SHA")
+        or os.getenv("SOURCE_VERSION")
+        or os.getenv("GIT_SHA")
+        or "unknown"
+    )
