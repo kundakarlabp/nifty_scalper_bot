@@ -159,3 +159,40 @@ def test_simulated_balance_requires_explicit_capital(monkeypatch) -> None:
     monkeypatch.setenv("BACKTEST__CAPITAL", "12345")
     assert client._resolve_simulated_balance() == 12345.0
     client._client.close()
+
+
+def test_auth_latch_reprobes_and_self_heals_on_success() -> None:
+    """2026-07-07 incident: IP-allowlist auth failure latched _auth_invalid
+    forever (only cleared in __init__), so even after fixing the Kite console
+    the bot stayed blocked until restart, while the quote poller logged one
+    ERROR per second. The latch must let one re-probe through per interval
+    and clear itself on the first successful authenticated request."""
+    import threading
+
+    from nifty_scalper_bot.data.rest.zerodha_client import (
+        BrokerAuthenticationError,
+        ZerodhaKiteClient,
+    )
+
+    client = ZerodhaKiteClient.__new__(ZerodhaKiteClient)
+    client._auth_invalid = True
+    client._auth_invalid_reason = "ip blocked"
+    client._auth_invalid_at = 1.0
+    client._auth_reprobe_interval = 60.0
+    client._auth_reprobe_next = 0.0
+    clock = {"now": 1000.0}
+    client._log_time_fn = lambda: clock["now"]
+
+    client._raise_if_authentication_latched()  # re-probe allowed
+    with pytest.raises(BrokerAuthenticationError):
+        client._raise_if_authentication_latched()  # inside window: blocked
+    clock["now"] = 1061.0
+    client._raise_if_authentication_latched()  # next window: re-probe again
+
+    client._resilience_lock = threading.Lock()
+    client._transient_error_streak = 3
+    client._breaker_open_until = 9.0
+    client._auth_failure_generation = 1
+    client._reset_transient_state()  # success path
+    assert client._auth_invalid is False
+    client._raise_if_authentication_latched()  # gate open again
