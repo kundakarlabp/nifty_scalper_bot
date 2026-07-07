@@ -60,7 +60,7 @@ from nifty_scalper_bot.utils.errors import (
     OrderPlacementError,
     WebSocketError,
 )
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter, RateLimitError
 from nifty_scalper_bot.utils.retry import (
     RetryableError,
@@ -278,6 +278,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._auth_invalid = False
         self._auth_invalid_reason: str | None = None
         self._auth_invalid_at: float | None = None
+        # Auth latch self-heal: while latched, one request per interval is
+        # allowed through as a re-probe so recovery is automatic once the
+        # operator fixes the Kite console allowlist/token (no restart needed).
+        self._auth_reprobe_interval: float = 60.0
+        self._auth_reprobe_next: float = 0.0
         self._auth_failure_generation = 0
         self._auth_failure_alerted_generation = -1
         self._auth_failure_callback: Callable[[dict[str, Any]], None] | None = None
@@ -379,10 +384,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
 
     def _raise_if_authentication_latched(self) -> None:
-        if self._auth_invalid:
-            raise BrokerAuthenticationError(
-                f"Zerodha authentication invalid: {self._auth_invalid_reason}"
-            )
+        if not self._auth_invalid:
+            return
+        now = self._log_time_fn()
+        if now >= self._auth_reprobe_next:
+            # Let exactly one request through per interval as a re-probe;
+            # a success clears the latch via _reset_transient_state.
+            self._auth_reprobe_next = now + self._auth_reprobe_interval
+            return
+        raise BrokerAuthenticationError(
+            f"Zerodha authentication invalid: {self._auth_invalid_reason}"
+        )
 
     def quote_api_available(self) -> bool:
         """Return quote API capability flag."""
@@ -1133,6 +1145,21 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     exc,
                     extra={
                         "event": "quote_bulk_access_denied",
+                        "symbols_count": len(symbols),
+                    },
+                )
+            elif isinstance(exc, BrokerAuthenticationError):
+                # Terminal auth failures repeat at poll cadence (233 ERROR
+                # lines in 4 minutes on 2026-07-07); throttle to one per
+                # minute — ZERODHA_AUTH_INVALIDATED already fired loudly once.
+                log_throttled(
+                    LOGGER,
+                    "quote_bulk_auth_invalid",
+                    "Quote bulk blocked by invalid auth (throttled): %s" % exc,
+                    interval_sec=60,
+                    level=logging.ERROR,
+                    extra={
+                        "event": "quote_bulk_request_error",
                         "symbols_count": len(symbols),
                     },
                 )
@@ -2979,6 +3006,21 @@ class ZerodhaKiteClient(BaseBrokerClient):
         with self._resilience_lock:
             self._transient_error_streak = 0
             self._breaker_open_until = 0.0
+        if self._auth_invalid:
+            # An authenticated request just succeeded: the console/token was
+            # fixed. Clear the latch so trading re-arms without a restart.
+            self._auth_invalid = False
+            self._auth_invalid_reason = None
+            self._auth_invalid_at = None
+            self._auth_reprobe_next = 0.0
+            LOGGER.warning(
+                "ZERODHA_AUTH_RESTORED generation=%s",
+                self._auth_failure_generation,
+                extra={
+                    "event": "ZERODHA_AUTH_RESTORED",
+                    "generation": self._auth_failure_generation,
+                },
+            )
 
     def _create_http_client(self, base_url: str) -> httpx.Client:
         # Force outbound connections over IPv4. Zerodha's developer console
