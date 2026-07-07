@@ -1,10 +1,4 @@
-"""Runtime context contract for live directional strategy gates.
-
-This module deliberately keeps the existing IndicatorEngine allow-list model, but
-adds the missing live-direction keys that are required by OrderFlowStrategy in
-LIVE mode.  The installer is idempotent and only preserves explicitly approved
-context fields; arbitrary user/provider payload keys remain filtered out.
-"""
+"""Runtime context contract for live directional and quote-age strategy gates."""
 
 from __future__ import annotations
 
@@ -32,6 +26,26 @@ _LIVE_DIRECTION_CONTEXT_KEYS = frozenset(
         "spot_tick_age_s",
         "futures_tick_age_s",
         "underlying_symbol",
+        "tick_age_ms",
+        "tick_age_s",
+        "quote_age_ms",
+        "quote_age_s",
+        "last_tick_age_ms",
+        "last_tick_age_s",
+        "market_data_age_ms",
+        "market_data_age_s",
+        "quote_update_version",
+        "update_version",
+        "tick_version",
+        "last_tick_ts_ms",
+        "timestamp_ms",
+        "last_tick_timestamp",
+        "real_ticks_last_60s",
+        "tick_count_60s",
+        "recent_real_tick_count",
+        "quote_depth_valid",
+        "quote_readiness_allowed",
+        "quote_readiness_reason",
     }
 )
 
@@ -85,15 +99,10 @@ def _coerce_timestamp(value: Any) -> datetime | None:
 
 
 def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, Any]:
-    """Return approved live-direction fields from a runtime context payload."""
     if not isinstance(context, Mapping):
         return {}
 
-    preserved = {
-        key: context[key]
-        for key in _LIVE_DIRECTION_CONTEXT_KEYS
-        if key in context
-    }
+    preserved = {key: context[key] for key in _LIVE_DIRECTION_CONTEXT_KEYS if key in context}
 
     if "direction_bias" not in preserved:
         for key in _DIRECTION_ALIAS_KEYS:
@@ -125,12 +134,6 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
 
 
 def install_indicator_runtime_context_contract() -> bool:
-    """Patch IndicatorEngine.set_runtime_context once, preserving live context keys.
-
-    Returns True when the installer changed the class, False when it was already
-    installed or the class could not be imported.  Import failures are intentionally
-    swallowed so package import remains safe in tooling contexts.
-    """
     try:
         from nifty_scalper_bot.strategies.indicators import IndicatorEngine
     except Exception:
@@ -149,21 +152,14 @@ def install_indicator_runtime_context_contract() -> bool:
             return
         try:
             with self._lock:
-                existing = self._runtime_context.setdefault(symbol, {}) if merge else dict(
-                    self._runtime_context.get(symbol, {}) or {}
-                )
+                existing = self._runtime_context.setdefault(symbol, {}) if merge else dict(self._runtime_context.get(symbol, {}) or {})
                 existing.update(extras)
                 self._runtime_context[symbol] = existing
                 self._cache.pop(symbol, None)
         except Exception as exc:
             logger = getattr(self, "_logger", None)
             if logger is not None:
-                logger.error(
-                    "LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED symbol=%s error=%s",
-                    symbol,
-                    exc,
-                    extra={"event": "LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED", "symbol": symbol, "error": str(exc)},
-                )
+                logger.error("LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED symbol=%s error=%s", symbol, exc, extra={"event": "LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED", "symbol": symbol, "error": str(exc)})
             raise
 
     set_runtime_context.__name__ = getattr(original, "__name__", "set_runtime_context")
