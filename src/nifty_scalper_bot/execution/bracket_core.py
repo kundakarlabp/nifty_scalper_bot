@@ -1998,6 +1998,15 @@ class BracketManager:
     def _apply_trailing_math(self, bracket: BracketState) -> None:
         """Apply adaptive trailing rules for the bracket.
 
+        SYNC CONTRACT: this is the FALLBACK trailing path (runs only when the
+        AdaptiveTrailingController could not attach). It must uphold exactly
+        the invariants of the canonical authority
+        HardenedBracketManager._virtual_modify_sl — under-lock compare-and-set,
+        monotonic per side (BUY only raises, SELL only lowers), tick rounding,
+        and BRACKET_TRAIL_UPDATE notify. Any change to either implementation
+        must be mirrored in the other. Verified end-to-end by
+        test_bracket_lifecycle_trailing_and_exits_on_live_class.
+
         Args:
             bracket: Active bracket state with the latest LTP snapshot.
 
