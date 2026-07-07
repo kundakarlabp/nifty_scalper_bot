@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 
 importlib.import_module("nifty_scalper_bot.data.quote_identity_extension")
 from nifty_scalper_bot.data.data_hub import DataHub
+from nifty_scalper_bot.data.quote_identity_extension import stamp_quote_identity
 
 
 class DummyMDM:
@@ -32,3 +34,25 @@ def test_quote_contract_adds_identity_and_tick_age():
         assert quote["tick_age_ms"] >= 0.0
     finally:
         hub.close()
+
+
+def test_quote_identity_falls_back_to_arrival_when_timestamp_is_future():
+    hub = SimpleNamespace(
+        _now=lambda: 1_800_000_000.0,
+        _canonical_quote_symbol=lambda symbol: f"NFO:{symbol}" if ":" not in str(symbol) else str(symbol),
+        quote_update_version=lambda _symbol: 7,
+    )
+    quote = {
+        "symbol": "NIFTY24JAN100CE",
+        "instrument_token": 12345,
+        "last_price": 88.25,
+        "timestamp": "2026-07-07T20:18:01+05:30",
+        "received_at": 1_800_000_000.0,
+    }
+
+    stamped = stamp_quote_identity(hub, "NIFTY24JAN100CE", quote)
+
+    assert stamped["quote_update_version"] == 7
+    assert stamped["quote_identity_timestamp_source"] == "received_at_for_timestamp_future_guard"
+    assert stamped["tick_age_ms"] == 0.0
+    assert stamped["quote_age_s"] == 0.0
