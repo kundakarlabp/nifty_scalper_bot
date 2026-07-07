@@ -79,3 +79,12 @@ def test_risk_config_max_concurrent_positions_matches_enforced_single_position()
 
     assert RiskConfig().max_concurrent_positions == 1
     assert defaults.DEFAULT_RISK_MAX_CONCURRENT_POSITIONS == 1
+
+
+def test_max_open_positions_breaker_is_armed() -> None:
+    """The RiskManager failsafe reads settings.max_open_positions; the field
+    was previously missing from RiskSettings, silently disabling the breaker."""
+    from nifty_scalper_bot.config.settings import RiskSettings, _build_risk_settings
+
+    assert RiskSettings().max_open_positions == 1
+    assert _build_risk_settings().max_open_positions == 1

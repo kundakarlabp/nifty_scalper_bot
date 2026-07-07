@@ -47,6 +47,7 @@ import hashlib
 import logging
 import math
 import os
+from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
 from pathlib import Path
 import random
 import sqlite3
@@ -8245,7 +8246,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         return min(mdm_bars, runner_bars), mdm_bars, runner_bars
     spot_symbol=str(basket.get('spot_symbol') or 'NSE:NIFTY')
     option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "5")) or 5)
-    option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+    option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
     configured_context_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
     runner_context_required_bars = int(getattr(getattr(ctx, "strategy_runner", None), "_context_required_bars", 0) or 0)
     context_execution_min_bars = max(configured_context_min_bars, runner_context_required_bars)

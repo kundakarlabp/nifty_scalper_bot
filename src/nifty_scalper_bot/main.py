@@ -11,6 +11,7 @@ Production Entrypoint
 import asyncio
 import logging
 import os
+from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
 import socket
 import sys
 from contextlib import asynccontextmanager, suppress
@@ -398,7 +399,7 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
     selected_ce = getattr(ctx, "selected_ce", None) or _get("selected_ce")
     selected_pe = getattr(ctx, "selected_pe", None) or _get("selected_pe")
     selected = {"atm": getattr(ctx, "atm_strike", None) or _get("atm_strike"), "ce": selected_ce, "pe": selected_pe}
-    required = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
+    required = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
     mdm = getattr(ctx, "market_data_manager", None)
     stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
     tick_pressure = stats_fn() if callable(stats_fn) else {}
