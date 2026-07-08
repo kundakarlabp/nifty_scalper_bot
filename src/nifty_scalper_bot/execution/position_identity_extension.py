@@ -7,11 +7,16 @@ by the loaded runtime guards in this module.
 from __future__ import annotations
 
 from contextlib import suppress
+import inspect
 import threading
 from typing import Any
 
 from nifty_scalper_bot.execution import live_safety_identity as _live_safety_identity
 from nifty_scalper_bot.execution import position_manager as _position_manager
+from nifty_scalper_bot.execution.position_snapshot import (
+    PositionSnapshotError,
+    decode_position_snapshot,
+)
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _PATCH_APPLIED = False
@@ -134,6 +139,66 @@ def _restore_persistent_state_methods(cls: Any) -> None:
             setattr(cls, name, original)
 
 
+def _resolve_broker_position_fetcher(manager: Any) -> Any | None:
+    resolver = getattr(manager, "_resolve_broker_position_fetcher", None)
+    if callable(resolver):
+        with suppress(Exception):
+            fetcher = resolver()
+            if callable(fetcher):
+                return fetcher
+    broker = (
+        getattr(manager, "_broker_client", None)
+        or getattr(manager, "broker_client", None)
+        or getattr(manager, "broker", None)
+    )
+    if broker is None:
+        return None
+    for name in ("get_positions", "list_positions", "positions", "fetch_positions"):
+        fetcher = getattr(broker, name, None)
+        if callable(fetcher):
+            return fetcher
+    return None
+
+
+def _broker_position_quantity(manager: Any, symbol: str) -> tuple[str, int, str | None]:
+    """Return broker truth for *symbol*: flat, open, or unverified.
+
+    Broker position snapshot is the only authority allowed to prove that an
+    unknown/replayed order has no live exposure. Missing or failed broker access
+    deliberately fails closed as ``unverified``.
+    """
+
+    fetcher = _resolve_broker_position_fetcher(manager)
+    if fetcher is None:
+        return "unverified", 0, "broker_position_fetcher_missing"
+    try:
+        payload = fetcher()
+        if inspect.isawaitable(payload):
+            with suppress(Exception):
+                close = getattr(payload, "close", None)
+                if callable(close):
+                    close()
+            return "unverified", 0, "async_broker_position_fetcher_unsupported"
+        snapshot = decode_position_snapshot(payload)
+        qty = int(snapshot.quantity_for(symbol))
+    except PositionSnapshotError as exc:
+        return "unverified", 0, f"position_snapshot_invalid:{exc}"
+    except Exception as exc:  # noqa: BLE001 - broker boundary must fail closed
+        return "unverified", 0, f"broker_position_fetch_failed:{type(exc).__name__}:{exc}"
+    return ("flat", 0, None) if qty == 0 else ("open", qty, None)
+
+
+def _clear_symbol_quarantine(manager: Any, symbol: str) -> None:
+    exposures = getattr(manager, "_quarantined_broker_exposures", None)
+    if isinstance(exposures, dict):
+        exposures.pop(symbol, None)
+        with suppress(Exception):
+            manager._quarantined_broker_exposures = exposures
+    unresolved = getattr(manager, "_cost_basis_unresolved_symbols", None)
+    if isinstance(unresolved, set):
+        unresolved.discard(symbol)
+
+
 def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
@@ -249,23 +314,72 @@ def apply_patches() -> None:
     def _handle_filled_order(self: Any, order: Any) -> Any:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
         if intent in _QUARANTINE_INTENTS:
+            symbol = _canonical_key(getattr(order, "symbol", None))
+            state, broker_qty, broker_error = _broker_position_quantity(self, symbol)
             logger = getattr(self, "_logger", None)
-            log = getattr(logger, "warning", None)
-            if callable(log):
-                log(
-                    "MANUAL_ORDER_QUARANTINED order_id=%s symbol=%s side=%s",
+            log_warning = getattr(logger, "warning", None)
+            log_info = getattr(logger, "info", None)
+
+            if state == "flat":
+                _clear_symbol_quarantine(self, symbol)
+                if callable(log_info):
+                    log_info(
+                        "BROKER_FLAT_CONFIRMED_FOR_UNKNOWN_ORDER order_id=%s symbol=%s side=%s",
+                        getattr(order, "order_id", None),
+                        symbol,
+                        getattr(order, "side", None),
+                        extra={
+                            "event": "BROKER_FLAT_CONFIRMED_FOR_UNKNOWN_ORDER",
+                            "order_id": getattr(order, "order_id", None),
+                            "symbol": symbol,
+                            "side": getattr(order, "side", None),
+                            "intent": intent,
+                        },
+                    )
+                return _position_manager.FillApplicationResult(
+                    accounting_finalized=True,
+                    lifecycle_resolved=True,
+                    reason="broker_flat_confirmed_unknown_order",
+                )
+
+            if state == "unverified":
+                if callable(log_warning):
+                    log_warning(
+                        "BROKER_STATE_UNVERIFIED_FOR_UNKNOWN_ORDER order_id=%s symbol=%s side=%s reason=%s",
+                        getattr(order, "order_id", None),
+                        symbol,
+                        getattr(order, "side", None),
+                        broker_error,
+                        extra={
+                            "event": "BROKER_STATE_UNVERIFIED_FOR_UNKNOWN_ORDER",
+                            "order_id": getattr(order, "order_id", None),
+                            "symbol": symbol,
+                            "side": getattr(order, "side", None),
+                            "intent": intent,
+                            "reason": broker_error,
+                        },
+                    )
+                return _position_manager.FillApplicationResult(reason="broker_state_unverified")
+
+            if callable(log_warning):
+                log_warning(
+                    "BROKER_POSITION_QUARANTINED_FOR_UNKNOWN_ORDER order_id=%s symbol=%s side=%s broker_qty=%s",
                     getattr(order, "order_id", None),
-                    getattr(order, "symbol", None),
+                    symbol,
                     getattr(order, "side", None),
+                    broker_qty,
                     extra={
-                        "event": "MANUAL_ORDER_QUARANTINED",
+                        "event": "BROKER_POSITION_QUARANTINED_FOR_UNKNOWN_ORDER",
                         "order_id": getattr(order, "order_id", None),
-                        "symbol": getattr(order, "symbol", None),
+                        "symbol": symbol,
                         "side": getattr(order, "side", None),
                         "intent": intent,
+                        "broker_qty": broker_qty,
                     },
                 )
-            return _position_manager.FillApplicationResult(reason="manual_order_quarantined")
+            return _position_manager.FillApplicationResult(
+                reason="broker_position_unowned_or_cost_basis_unresolved"
+            )
         return _ORIGINALS["PositionManager._handle_filled_order"](self, order)
 
     if "PositionManager.__init__" in _ORIGINALS:
