@@ -125,7 +125,17 @@ def _bind_place_order(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[
         return None
 
 
+def _live_mode(self: Any) -> bool:
+    checker = getattr(self, "is_live_mode", None)
+    if callable(checker):
+        with suppress(Exception):
+            return bool(checker())
+    return str(os.getenv("EXECUTION_MODE", "")).strip().upper() == "LIVE"
+
+
 def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
+    if not _live_mode(self):
+        return _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
     values = _bind_place_order(args, kwargs) or dict(kwargs)
     reason = _entry_geometry_block_reason(
         self,
