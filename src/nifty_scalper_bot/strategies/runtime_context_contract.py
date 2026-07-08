@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 import time
 from typing import Any, Mapping
 
@@ -54,6 +55,25 @@ _DIRECTION_ALIAS_KEYS = (
     "underlying_direction",
     "direction_context",
 )
+_TRUTHY = {"1", "true", "yes", "y", "on"}
+
+
+def _runtime_context_max_age_seconds(default: float = 5.0) -> float:
+    try:
+        return max(float(os.getenv("ORDERFLOW_MAX_CONTEXT_AGE_SECONDS", str(default)) or default), 0.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in _TRUTHY:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
 
 
 def _coerce_direction(value: Any) -> str | None:
@@ -98,11 +118,47 @@ def _coerce_timestamp(value: Any) -> datetime | None:
     return ts.astimezone(timezone.utc)
 
 
+def _derive_freshness_from_age(context: Mapping[str, Any], *keys: str, max_age_seconds: float) -> bool | None:
+    for key in keys:
+        age = _coerce_age_seconds(context.get(key))
+        if age is not None:
+            return age <= max_age_seconds
+    return None
+
+
+def live_direction_context_has_proof(context: Mapping[str, Any], *, max_age_seconds: float | None = None) -> bool:
+    """Return True if live spot/futures context has explicit fresh proof.
+
+    This does not invent a CE/PE direction. It only confirms that the missing
+    direction is not due to absent/stale underlying context. Live trigger logic
+    can then decide whether its own microstructure evidence is strong enough.
+    """
+
+    if not isinstance(context, Mapping):
+        return False
+    max_age = _runtime_context_max_age_seconds() if max_age_seconds is None else max(float(max_age_seconds), 0.0)
+    spot_fresh = _coerce_bool(context.get("spot_fresh"))
+    fut_fresh = _coerce_bool(context.get("fut_fresh"))
+    futures_fresh = _coerce_bool(context.get("futures_fresh"))
+    if fut_fresh is None:
+        fut_fresh = futures_fresh
+    derived_spot = _derive_freshness_from_age(context, "spot_age_seconds", "spot_tick_age_s", max_age_seconds=max_age)
+    derived_fut = _derive_freshness_from_age(context, "futures_age_seconds", "futures_tick_age_s", max_age_seconds=max_age)
+    if spot_fresh is None:
+        spot_fresh = derived_spot
+    if fut_fresh is None:
+        fut_fresh = derived_fut
+    context_age = _coerce_age_seconds(context.get("context_age_seconds"))
+    context_age_ok = context_age is None or context_age <= max_age
+    return bool(context_age_ok and (spot_fresh or fut_fresh))
+
+
 def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(context, Mapping):
         return {}
 
     preserved = {key: context[key] for key in _LIVE_DIRECTION_CONTEXT_KEYS if key in context}
+    max_age = _runtime_context_max_age_seconds()
 
     if "direction_bias" not in preserved:
         for key in _DIRECTION_ALIAS_KEYS:
@@ -115,6 +171,12 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
         if direction is not None:
             preserved["direction_bias"] = direction
 
+    derived_spot = _derive_freshness_from_age(context, "spot_age_seconds", "spot_tick_age_s", max_age_seconds=max_age)
+    derived_fut = _derive_freshness_from_age(context, "futures_age_seconds", "futures_tick_age_s", max_age_seconds=max_age)
+    if "spot_fresh" not in preserved and derived_spot is not None:
+        preserved["spot_fresh"] = derived_spot
+    if "fut_fresh" not in preserved and derived_fut is not None:
+        preserved["fut_fresh"] = derived_fut
     if "futures_fresh" in preserved and "fut_fresh" not in preserved:
         preserved["fut_fresh"] = bool(preserved["futures_fresh"])
     if "fut_fresh" in preserved and "futures_fresh" not in preserved:
@@ -129,6 +191,7 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
             if ts is not None:
                 preserved["context_age_seconds"] = max(0.0, time.time() - ts.timestamp())
                 break
+    preserved["live_direction_context_proof"] = live_direction_context_has_proof(preserved, max_age_seconds=max_age)
 
     return preserved
 
