@@ -43,18 +43,18 @@ jobs:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q tests/execution/test_operator_exit_intent_contract.py tests/execution/test_protective_order_intent_patch.py tests/execution/test_entry_geometry_guard.py tests/execution/test_manual_exit_classification.py tests/execution/test_manual_order_quarantine.py tests/risk/test_risk_check_order_daily_limits.py
-      - name: Tests execution
+      - name: Notification registry help tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/execution
-      - name: Tests risk
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'registry or help or registered'
+      - name: Notification emergency tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/risk
-      - name: Tests notifications
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k emergency
+      - name: Notification remaining tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'not emergency and not registry and not help and not registered'
       - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: "false"
