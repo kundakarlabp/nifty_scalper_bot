@@ -88,7 +88,95 @@ def _log_future_rejected(symbol: str, ts: pd.Timestamp, source: str) -> None:
         f"future_candle_rejected symbol={symbol} incoming_ts={ts.isoformat()} source={source}",
         interval_sec=30.0,
         level=logging.WARNING,
-        extra={"event": "future_candle_rejected", "symbol": symbol, "incoming_ts": ts.isoformat(), "source": source, "total_dropped": _DROPPED_CANDLES.value},
+        extra={
+            "event": "future_candle_rejected",
+            "symbol": symbol,
+            "incoming_ts": ts.isoformat(),
+            "source": source,
+            "total_dropped": _DROPPED_CANDLES.value,
+        },
+    )
+
+
+def _log_candle_store_out_of_order(
+    *,
+    symbol: str,
+    incoming_ts: pd.Timestamp,
+    last_ts: pd.Timestamp,
+    incoming_candle: "Candle",
+    last_candle: "Candle | None",
+    source: str,
+    store_size: int,
+    age_delta_s: float,
+) -> None:
+    """Emit high-signal diagnostics for monotonicity failures."""
+
+    _DROPPED_CANDLES.increment()
+    last_close = float(last_candle.close) if last_candle is not None else None
+    extra = {
+        "event": "candle_store_out_of_order",
+        "symbol": symbol,
+        "incoming_ts": incoming_ts.isoformat(),
+        "last_ts": last_ts.isoformat(),
+        "incoming_close": float(incoming_candle.close),
+        "last_close": last_close,
+        "incoming_volume": float(incoming_candle.volume),
+        "age_delta_s": float(age_delta_s),
+        "store_size": int(store_size),
+        "source": source,
+        "reason": "incoming_before_last_store_ts",
+        "total_dropped": _DROPPED_CANDLES.value,
+    }
+    log_throttled(
+        LOGGER,
+        f"candle_store_out_of_order:{symbol}",
+        (
+            "candle_store_out_of_order symbol=%s incoming_ts=%s last_ts=%s "
+            "age_delta_s=%.1f incoming_close=%s last_close=%s store_size=%d source=%s"
+        )
+        % (
+            symbol,
+            incoming_ts.isoformat(),
+            last_ts.isoformat(),
+            age_delta_s,
+            float(incoming_candle.close),
+            last_close,
+            store_size,
+            source,
+        ),
+        interval_sec=30.0,
+        level=logging.WARNING,
+        extra=extra,
+    )
+
+
+def _log_pipeline_store_rejected(candle: "Candle", exc: DataIntegrityError, *, source: str) -> None:
+    log_throttled(
+        LOGGER,
+        f"pipeline_candle_store_rejected:{candle.symbol}:{source}",
+        (
+            "pipeline_candle_store_rejected symbol=%s incoming_ts=%s "
+            "error_type=%s reason=%s source=%s"
+        )
+        % (
+            candle.symbol,
+            candle.timestamp.isoformat(),
+            type(exc).__name__,
+            exc,
+            source,
+        ),
+        interval_sec=30.0,
+        level=logging.WARNING,
+        extra={
+            "event": "pipeline_candle_store_rejected",
+            "symbol": candle.symbol,
+            "incoming_ts": candle.timestamp.isoformat(),
+            "incoming_close": float(candle.close),
+            "incoming_volume": float(candle.volume),
+            "error_type": type(exc).__name__,
+            "reason": str(exc),
+            "source": source,
+        },
     )
 
 
@@ -119,7 +207,15 @@ class Candle:
     volume: float
 
     def as_dict(self) -> dict[str, Any]:
-        return {"symbol": self.symbol, "timestamp": self.timestamp, "open": self.open, "high": self.high, "low": self.low, "close": self.close, "volume": self.volume}
+        return {
+            "symbol": self.symbol,
+            "timestamp": self.timestamp,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "volume": self.volume,
+        }
 
 
 class TickValidator:
@@ -140,7 +236,13 @@ class TickValidator:
                     f"future_tick_rejected symbol={symbol_raw} tick_ts={ts.isoformat()}",
                     interval_sec=30.0,
                     level=logging.WARNING,
-                    extra={"event": "future_tick_rejected", "symbol": str(symbol_raw).strip().upper(), "tick_ts": ts.isoformat(), "total_dropped": _DROPPED_TICKS.value},
+                    extra={
+                        "event": "future_tick_rejected",
+                        "symbol": str(symbol_raw).strip().upper(),
+                        "tick_ts": ts.isoformat(),
+                        "source": str(raw.get("source") or "tick_validator"),
+                        "total_dropped": _DROPPED_TICKS.value,
+                    },
                 )
                 return None
             ltp_raw = raw.get("ltp") or raw.get("last_price") or raw.get("close")
@@ -164,7 +266,10 @@ class TickValidator:
             return ValidatedTick(symbol=str(symbol_raw).strip().upper(), timestamp=ts, ltp=ltp, volume=volume)
         except (DataIntegrityError, ValueError, TypeError) as exc:
             _DROPPED_TICKS.increment()
-            LOGGER.error("tick_rejected", extra={"event": "tick_rejected", "reason": str(exc), "total_dropped": _DROPPED_TICKS.value})
+            LOGGER.error(
+                "tick_rejected",
+                extra={"event": "tick_rejected", "reason": str(exc), "total_dropped": _DROPPED_TICKS.value},
+            )
             return None
 
 
@@ -202,7 +307,28 @@ class CandleBuilder:
             last = None
         if last is not None and ts < last:
             _DROPPED_TICKS.increment()
-            log_throttled(LOGGER, f"tick_out_of_order:{sym}", f"tick_out_of_order symbol={sym} tick_ts={ts.isoformat()} last_ts={last.isoformat()} total_dropped={_DROPPED_TICKS.value}", interval_sec=30.0, level=logging.DEBUG, extra={"event": "tick_out_of_order", "symbol": sym, "tick_ts": ts.isoformat(), "last_ts": last.isoformat(), "total_dropped": _DROPPED_TICKS.value})
+            log_throttled(
+                LOGGER,
+                f"tick_out_of_order:{sym}",
+                (
+                    "tick_out_of_order symbol=%s tick_ts=%s last_ts=%s "
+                    "age_delta_s=%.1f ltp=%s volume=%s total_dropped=%d"
+                )
+                % (sym, ts.isoformat(), last.isoformat(), (last - ts).total_seconds(), tick.ltp, tick.volume, _DROPPED_TICKS.value),
+                interval_sec=30.0,
+                level=logging.DEBUG,
+                extra={
+                    "event": "tick_out_of_order",
+                    "symbol": sym,
+                    "tick_ts": ts.isoformat(),
+                    "last_ts": last.isoformat(),
+                    "age_delta_s": (last - ts).total_seconds(),
+                    "ltp": float(tick.ltp),
+                    "volume": float(tick.volume),
+                    "source": "candle_builder",
+                    "total_dropped": _DROPPED_TICKS.value,
+                },
+            )
             return None
         self._last_ts[sym] = ts
         active = self._active.get(sym)
@@ -211,7 +337,37 @@ class CandleBuilder:
             self._active[sym] = _init_candle(sym, minute, tick.ltp, tick.volume)
         elif minute < pd.Timestamp(active["timestamp"]):
             _DROPPED_TICKS.increment()
-            log_throttled(LOGGER, f"tick_late_bucket:{sym}", f"tick_out_of_order symbol={sym} tick_minute={minute.isoformat()} current_minute={pd.Timestamp(active['timestamp']).isoformat()} total_dropped={_DROPPED_TICKS.value}", interval_sec=30.0, level=logging.DEBUG, extra={"event": "tick_out_of_order", "symbol": sym, "tick_ts": ts.isoformat(), "tick_minute": minute.isoformat(), "last_ts": last.isoformat() if last is not None else None, "source": "candle_builder", "total_dropped": _DROPPED_TICKS.value})
+            active_minute = pd.Timestamp(active["timestamp"])
+            log_throttled(
+                LOGGER,
+                f"tick_late_bucket:{sym}",
+                (
+                    "tick_out_of_order symbol=%s tick_minute=%s current_minute=%s "
+                    "last_ts=%s ltp=%s source=candle_builder total_dropped=%d"
+                )
+                % (
+                    sym,
+                    minute.isoformat(),
+                    active_minute.isoformat(),
+                    last.isoformat() if last is not None else None,
+                    tick.ltp,
+                    _DROPPED_TICKS.value,
+                ),
+                interval_sec=30.0,
+                level=logging.DEBUG,
+                extra={
+                    "event": "tick_out_of_order",
+                    "symbol": sym,
+                    "tick_ts": ts.isoformat(),
+                    "tick_minute": minute.isoformat(),
+                    "current_minute": active_minute.isoformat(),
+                    "last_ts": last.isoformat() if last is not None else None,
+                    "ltp": float(tick.ltp),
+                    "volume": float(tick.volume),
+                    "source": "candle_builder",
+                    "total_dropped": _DROPPED_TICKS.value,
+                },
+            )
             return None
         elif minute > pd.Timestamp(active["timestamp"]):
             closed = _finalize(active)
@@ -221,7 +377,10 @@ class CandleBuilder:
         if closed is not None:
             if not _check_ohlc(closed):
                 _DROPPED_CANDLES.increment()
-                LOGGER.error("candle_ohlc_violation", extra={"event": "candle_ohlc_violation", "symbol": sym, "candle": closed.as_dict(), "total_dropped": _DROPPED_CANDLES.value})
+                LOGGER.error(
+                    "candle_ohlc_violation",
+                    extra={"event": "candle_ohlc_violation", "symbol": sym, "candle": closed.as_dict(), "total_dropped": _DROPPED_CANDLES.value},
+                )
                 return None
             LOGGER.debug("candle_closed", extra={"event": "candle_closed", "symbol": sym, "ts": closed.timestamp.isoformat()})
         return closed
@@ -234,7 +393,10 @@ class CandleBuilder:
             candle = _finalize(active)
             if candle and not _check_ohlc(candle):
                 _DROPPED_CANDLES.increment()
-                LOGGER.error("candle_ohlc_violation", extra={"event": "candle_ohlc_violation", "symbol": symbol, "candle": candle.as_dict(), "total_dropped": _DROPPED_CANDLES.value})
+                LOGGER.error(
+                    "candle_ohlc_violation",
+                    extra={"event": "candle_ohlc_violation", "symbol": symbol, "candle": candle.as_dict(), "total_dropped": _DROPPED_CANDLES.value},
+                )
                 return None
             return candle
 
@@ -251,11 +413,27 @@ def _update_candle(candle: dict[str, Any], price: float, volume: float) -> None:
 
 
 def _finalize(candle: dict[str, Any]) -> Candle:
-    return Candle(symbol=str(candle["symbol"]), timestamp=_to_ist_timestamp(candle["timestamp"]), open=float(candle["open"]), high=float(candle["high"]), low=float(candle["low"]), close=float(candle["close"]), volume=float(candle["volume"]))
+    return Candle(
+        symbol=str(candle["symbol"]),
+        timestamp=_to_ist_timestamp(candle["timestamp"]),
+        open=float(candle["open"]),
+        high=float(candle["high"]),
+        low=float(candle["low"]),
+        close=float(candle["close"]),
+        volume=float(candle["volume"]),
+    )
 
 
 def _normalize_candle_timestamp(candle: Candle) -> Candle:
-    return Candle(symbol=candle.symbol, timestamp=_to_ist_timestamp(candle.timestamp), open=candle.open, high=candle.high, low=candle.low, close=candle.close, volume=candle.volume)
+    return Candle(
+        symbol=candle.symbol,
+        timestamp=_to_ist_timestamp(candle.timestamp),
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
+    )
 
 
 def _check_ohlc(c: Candle) -> bool:
@@ -279,7 +457,8 @@ class CandleStore:
                 self._store[normalized_candle.symbol] = deque(maxlen=self._maxlen)
             buf = self._store[normalized_candle.symbol]
             if buf:
-                last_ts = _to_ist_timestamp(buf[-1].timestamp).floor("1min")
+                last_candle = buf[-1]
+                last_ts = _to_ist_timestamp(last_candle.timestamp).floor("1min")
                 if _is_future_timestamp(last_ts):
                     log_throttled(
                         LOGGER,
@@ -292,20 +471,50 @@ class CandleStore:
                             "symbol": normalized_candle.symbol,
                             "last_ts": last_ts.isoformat(),
                             "incoming_ts": incoming_ts.isoformat(),
+                            "last_close": float(last_candle.close),
+                            "incoming_close": float(normalized_candle.close),
+                            "store_size": len(buf),
                             "source": "candle_store",
                         },
                     )
                     buf.clear()
                     last_ts = None
+                    last_candle = None
                 if last_ts is not None and incoming_ts == last_ts:
                     return
                 if last_ts is not None and incoming_ts < last_ts:
                     age_delta = max(0.0, (last_ts - incoming_ts).total_seconds())
                     if age_delta <= _overlap_seconds():
-                        LOGGER.debug("candle_store_overlap_duplicate symbol=%s incoming_ts=%s last_ts=%s age_delta_s=%.1f", normalized_candle.symbol, incoming_ts.isoformat(), last_ts.isoformat(), age_delta, extra={"event": "candle_store_overlap_duplicate", "symbol": normalized_candle.symbol, "incoming_ts": incoming_ts.isoformat(), "last_ts": last_ts.isoformat(), "age_delta_s": age_delta, "source": "candle_store", "reason": "hydration_live_boundary_overlap"})
+                        LOGGER.debug(
+                            "candle_store_overlap_duplicate symbol=%s incoming_ts=%s last_ts=%s age_delta_s=%.1f",
+                            normalized_candle.symbol,
+                            incoming_ts.isoformat(),
+                            last_ts.isoformat(),
+                            age_delta,
+                            extra={
+                                "event": "candle_store_overlap_duplicate",
+                                "symbol": normalized_candle.symbol,
+                                "incoming_ts": incoming_ts.isoformat(),
+                                "last_ts": last_ts.isoformat(),
+                                "incoming_close": float(normalized_candle.close),
+                                "last_close": float(last_candle.close) if last_candle is not None else None,
+                                "age_delta_s": age_delta,
+                                "store_size": len(buf),
+                                "source": "candle_store",
+                                "reason": "hydration_live_boundary_overlap",
+                            },
+                        )
                         return
-                    _DROPPED_CANDLES.increment()
-                    log_throttled(LOGGER, f"candle_store_out_of_order:{normalized_candle.symbol}", f"candle_store_out_of_order symbol={normalized_candle.symbol} incoming_ts={incoming_ts.isoformat()} last_ts={last_ts.isoformat()} source=candle_store", interval_sec=30.0, level=logging.WARNING, extra={"event": "candle_store_out_of_order", "symbol": normalized_candle.symbol, "incoming_ts": incoming_ts.isoformat(), "last_ts": last_ts.isoformat(), "source": "candle_store", "total_dropped": _DROPPED_CANDLES.value})
+                    _log_candle_store_out_of_order(
+                        symbol=normalized_candle.symbol,
+                        incoming_ts=incoming_ts,
+                        last_ts=last_ts,
+                        incoming_candle=normalized_candle,
+                        last_candle=last_candle,
+                        source="candle_store",
+                        store_size=len(buf),
+                        age_delta_s=age_delta,
+                    )
                     raise DataIntegrityError("candle store timestamps must be monotonic")
             buf.append(normalized_candle)
 
@@ -328,13 +537,27 @@ class CandleStore:
                     if _is_future_timestamp(ts):
                         _log_future_rejected(symbol, ts, "seed")
                         continue
-                    c = Candle(symbol=symbol, timestamp=ts, open=float(row.get("open") or row.get("close") or 0), high=float(row.get("high") or row.get("close") or 0), low=float(row.get("low") or row.get("close") or 0), close=float(row.get("close") or 0), volume=float(row.get("volume") or 0))
+                    c = Candle(
+                        symbol=symbol,
+                        timestamp=ts,
+                        open=float(row.get("open") or row.get("close") or 0),
+                        high=float(row.get("high") or row.get("close") or 0),
+                        low=float(row.get("low") or row.get("close") or 0),
+                        close=float(row.get("close") or 0),
+                        volume=float(row.get("volume") or 0),
+                    )
                     if not _check_ohlc(c):
-                        LOGGER.warning("candle_store_seed_rejected", extra={"event": "candle_store_seed_rejected", "symbol": symbol, "incoming_ts": c.timestamp.isoformat(), "source": "seed", "reason": "ohlc_invalid"})
+                        LOGGER.warning(
+                            "candle_store_seed_rejected",
+                            extra={"event": "candle_store_seed_rejected", "symbol": symbol, "incoming_ts": c.timestamp.isoformat(), "source": "seed", "reason": "ohlc_invalid"},
+                        )
                         continue
                     by_minute[c.timestamp] = c
                 except (TypeError, ValueError, DataIntegrityError) as exc:
-                    LOGGER.warning("candle_store_seed_rejected", extra={"event": "candle_store_seed_rejected", "symbol": symbol, "source": "seed", "reason": type(exc).__name__})
+                    LOGGER.warning(
+                        "candle_store_seed_rejected",
+                        extra={"event": "candle_store_seed_rejected", "symbol": symbol, "source": "seed", "reason": type(exc).__name__},
+                    )
             self._store[symbol] = deque((by_minute[key] for key in sorted(by_minute)), maxlen=self._maxlen)
         LOGGER.info("candle_store_seeded", extra={"event": "candle_store_seeded", "symbol": symbol, "bars": len(self._store[symbol])})
 
@@ -365,7 +588,7 @@ class MarketDataPipeline:
             try:
                 self.store.push(candle)
             except DataIntegrityError as exc:
-                log_throttled(LOGGER, f"pipeline_candle_store_rejected:{candle.symbol}", f"pipeline_candle_store_rejected symbol={candle.symbol} incoming_ts={candle.timestamp.isoformat()} error_type={type(exc).__name__} reason={exc} source=market_data_pipeline", interval_sec=30.0, level=logging.WARNING, extra={"event": "pipeline_candle_store_rejected", "symbol": candle.symbol, "incoming_ts": candle.timestamp.isoformat(), "error_type": type(exc).__name__, "reason": str(exc), "source": "market_data_pipeline"})
+                _log_pipeline_store_rejected(candle, exc, source="market_data_pipeline")
                 return None
         return candle
 
@@ -378,7 +601,11 @@ class MarketDataPipeline:
     def flush(self, symbol: str) -> Optional[Candle]:
         candle = self.builder.flush(symbol)
         if candle is not None:
-            self.store.push(candle)
+            try:
+                self.store.push(candle)
+            except DataIntegrityError as exc:
+                _log_pipeline_store_rejected(candle, exc, source="market_data_pipeline_flush")
+                return None
         return candle
 
 
@@ -400,4 +627,11 @@ def pipeline_health() -> dict:
     syms = pl.store.symbols()
     candle_counts = {sym: len(pl.store.get(sym)) for sym in syms}
     ready = [sym for sym, cnt in candle_counts.items() if cnt >= MIN_REQUIRED_CANDLES]
-    return {"dropped_ticks": get_dropped_ticks(), "dropped_candles": get_dropped_candles(), "total_symbols": len(syms), "ready_symbols": len(ready), "candle_counts": candle_counts, "ready": ready}
+    return {
+        "dropped_ticks": get_dropped_ticks(),
+        "dropped_candles": get_dropped_candles(),
+        "total_symbols": len(syms),
+        "ready_symbols": len(ready),
+        "candle_counts": candle_counts,
+        "ready": ready,
+    }
