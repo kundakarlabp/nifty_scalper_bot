@@ -178,24 +178,6 @@ def cancel_pending_orders(self: Any) -> dict[str, Any]:
     return {"cancelled": cancelled, "failed": failed}
 
 
-def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, Any]:
-    """Fail closed immediately: pause entries, latch kill flag, cancel open orders."""
-
-    with suppress(Exception):
-        trading_switch().pause()
-    setattr(self, "_kill_switch_engaged_at", time.time())
-    setattr(self, "_kill_switch_reason", str(reason))
-    cancel_result = cancel_pending_orders(self)
-    _logger(self).critical(
-        "OPERATOR_EMERGENCY_STOP reason=%s cancelled=%s failed=%s",
-        reason,
-        len(cancel_result.get("cancelled", [])),
-        len(cancel_result.get("failed", [])),
-        extra={"event": "OPERATOR_EMERGENCY_STOP", "reason": reason, **cancel_result},
-    )
-    return {"kill_switch": True, "reason": str(reason), **cancel_result}
-
-
 def _place_flatten_order(self: Any, symbol: str, qty: int) -> str | None:
     side = "SELL" if qty > 0 else "BUY"
     quantity = abs(int(qty))
@@ -206,21 +188,28 @@ def _place_flatten_order(self: Any, symbol: str, qty: int) -> str | None:
         side=side,
         quantity=quantity,
         order_type="MARKET",
-        tag="FLATTEN_TELEGRAM",
+        tag="EXIT_FLATTEN_TELEGRAM",
         check_risk=False,
         product="MIS",
+        intent="REDUCE",
+        strategy_name="operator_flatten",
     )
     return str(order_id) if order_id else None
 
 
-def flatten_all(self: Any, reason: str = "telegram_flatten") -> dict[str, Any]:
+def flatten_all(
+    self: Any,
+    reason: str = "telegram_flatten",
+    *,
+    cancel_first: bool = True,
+) -> dict[str, Any]:
     """Cancel pending orders and market-flatten all non-zero broker/local rows."""
 
     with suppress(Exception):
         trading_switch().pause()
     setattr(self, "_kill_switch_engaged_at", time.time())
     setattr(self, "_kill_switch_reason", str(reason))
-    cancel_result = cancel_pending_orders(self)
+    cancel_result = cancel_pending_orders(self) if cancel_first else {"cancelled": [], "failed": []}
 
     submitted: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -252,6 +241,32 @@ def flatten_all(self: Any, reason: str = "telegram_flatten") -> dict[str, Any]:
     return result
 
 
+def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, Any]:
+    """Fail closed immediately: pause entries, latch kill flag, cancel orders, flatten exposure."""
+
+    with suppress(Exception):
+        trading_switch().pause()
+    setattr(self, "_kill_switch_engaged_at", time.time())
+    setattr(self, "_kill_switch_reason", str(reason))
+    cancel_result = cancel_pending_orders(self)
+    flatten_result = flatten_all(self, reason=reason, cancel_first=False)
+    _logger(self).critical(
+        "OPERATOR_EMERGENCY_STOP reason=%s cancelled=%s failed=%s flattened=%s flatten_failed=%s",
+        reason,
+        len(cancel_result.get("cancelled", [])),
+        len(cancel_result.get("failed", [])),
+        len(flatten_result.get("submitted", [])),
+        len(flatten_result.get("failed", [])),
+        extra={
+            "event": "OPERATOR_EMERGENCY_STOP",
+            "reason": reason,
+            "cancel": cancel_result,
+            "flatten": flatten_result,
+        },
+    )
+    return {"kill_switch": True, "reason": str(reason), "cancel": cancel_result, "flatten": flatten_result}
+
+
 def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
@@ -271,4 +286,10 @@ def apply_patches() -> None:
     _PATCH_APPLIED = True
 
 
-__all__ = ["apply_patches", "emergency_stop", "flatten_all", "cancel_pending_orders"]
+__all__ = [
+    "apply_patches",
+    "emergency_stop",
+    "flatten_all",
+    "cancel_pending_orders",
+    "_place_flatten_order",
+]

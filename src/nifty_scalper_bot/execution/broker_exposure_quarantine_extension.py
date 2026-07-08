@@ -7,6 +7,7 @@ position/P&L accounting until cost basis is recovered.
 
 from __future__ import annotations
 
+from contextlib import suppress
 import time
 from typing import Any
 
@@ -40,6 +41,58 @@ def _row_symbol(row: Any) -> str:
     return _canonical(row.get("symbol") or row.get("tradingsymbol"))
 
 
+def _order_symbol(order: Any) -> str:
+    return _canonical(getattr(order, "symbol", "") or getattr(order, "tradingsymbol", ""))
+
+
+def _order_side(order: Any) -> str:
+    return str(getattr(order, "side", "") or getattr(order, "transaction_type", "")).strip().upper()
+
+
+def _order_quantity(order: Any) -> int:
+    for name in ("filled_quantity", "quantity", "qty"):
+        raw = getattr(order, name, None)
+        if raw is None:
+            continue
+        with suppress(Exception):
+            return abs(int(float(raw or 0)))
+    return 0
+
+
+def _position_for_symbol(manager: Any, symbol: str) -> Any | None:
+    positions = getattr(manager, "_positions", None)
+    if isinstance(positions, dict):
+        return positions.get(symbol) or positions.get(_canonical(symbol))
+    getter = getattr(manager, "get_open_positions", None)
+    if callable(getter):
+        with suppress(Exception):
+            for position in getter() or []:
+                if _canonical(getattr(position, "symbol", "")) == symbol:
+                    return position
+    return None
+
+
+def _is_manual_reduction_order(manager: Any, order: Any) -> bool:
+    symbol = _order_symbol(order)
+    qty = _order_quantity(order)
+    side = _order_side(order)
+    if not symbol or qty <= 0 or side not in {"BUY", "SELL"}:
+        return False
+    existing = _position_for_symbol(manager, symbol)
+    if existing is None:
+        return False
+    existing_side = str(getattr(existing, "side", "") or "").strip().upper()
+    with suppress(Exception):
+        existing_qty = abs(int(float(getattr(existing, "quantity", 0) or 0)))
+    if existing_qty <= 0 or qty > existing_qty:
+        return False
+    if existing_side == "LONG" and side == "SELL":
+        return True
+    if existing_side == "SHORT" and side == "BUY":
+        return True
+    return False
+
+
 def _quarantined_exposure(row: dict[str, Any], reason: str) -> dict[str, Any]:
     symbol = _row_symbol(row)
     qty = _net_quantity(row)
@@ -65,13 +118,10 @@ def _quarantined_exposure(row: dict[str, Any], reason: str) -> dict[str, Any]:
 
 
 def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
-    symbol = _canonical(getattr(order, "symbol", ""))
+    symbol = _order_symbol(order)
     if not symbol:
         return None
-    try:
-        qty = int(getattr(order, "filled_quantity", 0) or getattr(order, "quantity", 0) or 0)
-    except Exception:
-        qty = 0
+    qty = _order_quantity(order)
     try:
         price = float(
             getattr(order, "average_price", 0.0)
@@ -86,7 +136,7 @@ def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
         "tradingsymbol": symbol,
         "quantity": abs(qty),
         "signed_quantity": qty,
-        "side": str(getattr(order, "side", "") or "").upper(),
+        "side": _order_side(order),
         "product": str(getattr(order, "product", "MIS") or "MIS").upper(),
         "average_price": price,
         "status": "MANUAL_ORDER_QUARANTINED",
@@ -163,7 +213,39 @@ def apply_patches() -> None:
 
     def _handle_filled_order(self: Any, order: Any) -> Any:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
-        result = _ORIGINALS["PositionManager._handle_filled_order"](self, order)
+        original = _ORIGINALS["PositionManager._handle_filled_order"]
+        if intent in _MANUAL_INTENTS and _is_manual_reduction_order(self, order):
+            original_intent = getattr(order, "intent", None)
+            with suppress(Exception):
+                setattr(order, "intent", "REDUCE")
+            result = original(self, order)
+            with suppress(Exception):
+                setattr(order, "intent", original_intent)
+            symbol = _order_symbol(order)
+            exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
+            exposures.pop(symbol, None)
+            self._quarantined_broker_exposures = exposures
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "warning", None)
+            if callable(log):
+                log(
+                    "MANUAL_EXIT_RECOGNISED order_id=%s symbol=%s side=%s qty=%s",
+                    getattr(order, "order_id", None),
+                    symbol,
+                    _order_side(order),
+                    _order_quantity(order),
+                    extra={
+                        "event": "MANUAL_EXIT_RECOGNISED",
+                        "order_id": getattr(order, "order_id", None),
+                        "symbol": symbol,
+                        "side": _order_side(order),
+                        "quantity": _order_quantity(order),
+                        "intent": "REDUCE",
+                    },
+                )
+            return result
+
+        result = original(self, order)
         if intent in _MANUAL_INTENTS:
             exposure = _manual_order_exposure(order, intent)
             if exposure is not None:
@@ -186,4 +268,10 @@ def apply_patches() -> None:
 
 apply_patches()
 
-__all__ = ["apply_patches", "_build_exposures", "_manual_order_exposure", "_quarantined_exposure"]
+__all__ = [
+    "apply_patches",
+    "_build_exposures",
+    "_manual_order_exposure",
+    "_quarantined_exposure",
+    "_is_manual_reduction_order",
+]
