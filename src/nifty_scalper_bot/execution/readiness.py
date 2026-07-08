@@ -241,6 +241,17 @@ class HydrationStatus:
     last_bar_ts: datetime | None = None
     live_merge_applied: bool = False
 
+    def __post_init__(self) -> None:
+        if self.role not in {"selected_ce", "selected_pe"} or not self.ready_for_execution:
+            return
+        bid_ask_valid = bool(self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > self.bid)
+        if bid_ask_valid:
+            return
+        self.ready_for_execution = False
+        blocker = f"{self.role}_quote_missing"
+        if blocker not in self.blocker_reasons:
+            self.blocker_reasons.append(blocker)
+
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-friendly hydration snapshot."""
         payload = asdict(self)
