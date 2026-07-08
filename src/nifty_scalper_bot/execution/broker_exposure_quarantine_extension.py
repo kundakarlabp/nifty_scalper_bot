@@ -82,7 +82,6 @@ def _is_manual_reduction_order(manager: Any, order: Any) -> bool:
     if existing is None:
         return False
     existing_side = str(getattr(existing, "side", "") or "").strip().upper()
-    existing_qty = 0
     with suppress(Exception):
         existing_qty = abs(int(float(getattr(existing, "quantity", 0) or 0)))
     if existing_qty <= 0 or qty > existing_qty:
@@ -140,8 +139,8 @@ def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
         "side": _order_side(order),
         "product": str(getattr(order, "product", "MIS") or "MIS").upper(),
         "average_price": price,
-        "status": "MANUAL_ORDER_QUARANTINED",
-        "reason": "manual_order_quarantined",
+        "status": "BROKER_POSITION_QUARANTINED",
+        "reason": "broker_position_unowned_or_cost_basis_unresolved",
         "intent": intent,
         "order_id": str(getattr(order, "order_id", "") or ""),
         "managed_position": False,
@@ -192,8 +191,16 @@ def apply_patches() -> None:
 
     def current_entry_protection_blocker(self: Any, symbol: str | None = None) -> str | None:
         exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
-        if exposures and (symbol is None or _canonical(symbol) in exposures):
-            return "broker_exposure_quarantined"
+        if exposures:
+            if symbol is None:
+                exposure = next(iter(exposures.values()))
+            else:
+                exposure = exposures.get(_canonical(symbol))
+            if exposure is not None:
+                reason = str(exposure.get("reason") or "")
+                if reason == "broker_state_unverified":
+                    return "broker_state_unverified"
+                return "broker_exposure_quarantined"
         original = _ORIGINALS.get("PositionManager.current_entry_protection_blocker")
         if callable(original):
             return original(self, symbol)
@@ -245,9 +252,21 @@ def apply_patches() -> None:
 
         result = original(self, order)
         if intent in _MANUAL_INTENTS:
+            symbol = _order_symbol(order)
+            result_reason = str(getattr(result, "reason", "") or "")
+            exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
+            if result_reason == "broker_flat_confirmed_unknown_order":
+                exposures.pop(symbol, None)
+                self._quarantined_broker_exposures = exposures
+                return result
             exposure = _manual_order_exposure(order, intent)
             if exposure is not None:
-                exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
+                if result_reason == "broker_state_unverified":
+                    exposure["status"] = "BROKER_STATE_UNVERIFIED"
+                    exposure["reason"] = "broker_state_unverified"
+                    exposure["requires_history_recovery"] = False
+                elif result_reason:
+                    exposure["reason"] = result_reason
                 exposures[exposure["symbol"]] = exposure
                 self._quarantined_broker_exposures = exposures
         return result
