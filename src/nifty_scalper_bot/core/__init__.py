@@ -58,6 +58,24 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
         extra={"event": "BOOT_LOG_RATE_CONTROL_FAILED", "error_type": type(exc).__name__},
     )
 
+try:
+    from nifty_scalper_bot.core.market_data_hardening_bootstrap import (
+        install_market_data_hardening_or_raise as _install_market_data_hardening,
+    )
+
+    _install_market_data_hardening(get_logger(__name__))
+except Exception as exc:  # noqa: BLE001 - fail closed only for real live mode
+    get_logger(__name__).error(
+        "MARKET_DATA_HARDENING_BOOTSTRAP_FAILED error=%s",
+        exc,
+        extra={
+            "event": "MARKET_DATA_HARDENING_BOOTSTRAP_FAILED",
+            "error_type": type(exc).__name__,
+        },
+    )
+    if _real_live_mode_requested():
+        raise RuntimeError("market_data_hardening_bootstrap_failed") from exc
+
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
 
 _LOGGER = get_logger(__name__)
