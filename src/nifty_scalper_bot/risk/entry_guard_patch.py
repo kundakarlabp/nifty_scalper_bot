@@ -1,7 +1,7 @@
 """Final risk guard patch for order-entry SSOT enforcement.
 
 The production order path calls RiskManager.check_order() immediately before
-broker submission.  Daily trade count and open-position failsafes must therefore
+broker submission. Daily trade count and open-position failsafes must therefore
 live here, not only in read-only/status helpers.
 """
 
@@ -73,30 +73,34 @@ def _daily_limit_block_reason(manager: Any) -> tuple[str, str] | None:
 
 
 def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bool, str]:
-    blocker = _daily_limit_block_reason(self)
-    if blocker is not None:
-        reason, code = blocker
-        self._last_rejection = code
-        trip = getattr(self, "_trip_breaker", None)
-        if callable(trip):
-            with suppress(Exception):
-                trip(reason)
-        logger = getattr(self, "_logger", None)
-        log = getattr(logger, "critical", None)
-        if callable(log):
-            log(
-                "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
-                reason,
-                getattr(signal, "symbol", None),
-                extra={
-                    "event": "RISK_FINAL_GATE_BLOCK",
-                    "reason": reason,
-                    "code": code,
-                    "symbol": getattr(signal, "symbol", None),
-                    "final_order_gate": True,
-                },
-            )
-        return False, reason
+    # Preserve the original priority for non-live calls and pre-existing breakers.
+    # The added SSOT limits are production-entry guards, not replacements for the
+    # existing live-disabled/breaker semantics.
+    if live_enabled and not bool(getattr(self, "_breaker_tripped", False)):
+        blocker = _daily_limit_block_reason(self)
+        if blocker is not None:
+            reason, code = blocker
+            self._last_rejection = code
+            trip = getattr(self, "_trip_breaker", None)
+            if callable(trip):
+                with suppress(Exception):
+                    trip(reason)
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "critical", None)
+            if callable(log):
+                log(
+                    "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
+                    reason,
+                    getattr(signal, "symbol", None),
+                    extra={
+                        "event": "RISK_FINAL_GATE_BLOCK",
+                        "reason": reason,
+                        "code": code,
+                        "symbol": getattr(signal, "symbol", None),
+                        "final_order_gate": True,
+                    },
+                )
+            return False, reason
     return _ORIGINAL_CHECK_ORDER(self, signal, live_enabled)
 
 
