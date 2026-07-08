@@ -26,6 +26,28 @@ from nifty_scalper_bot.execution.native_entry_gate import (
     configure_provider,
 )
 
+_EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket_id"}
+
+
+def _strip_exit_identity_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Remove exit identity metadata unsupported by core.place_order.
+
+    The live bracket safety layer attaches immutable exit metadata to protective
+    order requests. The native entry gate needs to see the original kwargs to
+    classify the request as protective, but the base OrderManager.place_order
+    currently does not accept these metadata-only fields. Strip them only at the
+    delegation boundary so exits cannot fail with a TypeError before reaching the
+    broker.
+    """
+
+    cleaned = dict(kwargs)
+    identity = {
+        key: cleaned.pop(key)
+        for key in list(_EXIT_IDENTITY_KWARGS)
+        if key in cleaned
+    }
+    return cleaned, identity
+
 
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
@@ -86,7 +108,10 @@ class RuntimeOrderManager(_core.OrderManager):
         blocked = self._blocked("place_order", args, kwargs)
         if blocked is not NO_BLOCK:
             return blocked
-        return super().place_order(*args, **kwargs)
+        cleaned_kwargs, identity = _strip_exit_identity_kwargs(kwargs)
+        if identity:
+            self._last_exit_identity_kwargs = dict(identity)
+        return super().place_order(*args, **cleaned_kwargs)
 
     def _update_from_response(
         self,
@@ -113,4 +138,4 @@ class RuntimeOrderManager(_core.OrderManager):
         return updated
 
 
-__all__ = ["RuntimeOrderManager"]
+__all__ = ["RuntimeOrderManager", "_strip_exit_identity_kwargs"]
