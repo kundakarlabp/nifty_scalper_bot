@@ -1,4 +1,4 @@
-"""Rate controls for unchanged boot diagnostics.
+"""Rate controls for unchanged boot and live-readiness diagnostics.
 
 This module is observational only. It does not alter contracts, orders,
 strategy scores, or readiness decisions.
@@ -27,6 +27,18 @@ BOOTSTRAP_EVENTS = {
     "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
     "SELECTED_OPTION_SUBSCRIPTION_STATE",
 }
+READINESS_EVENTS = {
+    "READINESS_BLOCKER_SUMMARY",
+    "LIVE_READINESS_COMPUTED",
+    "LIVE_VALIDATION_CHECKLIST",
+}
+ORDERFLOW_EVENTS = {
+    "ORDERFLOW_TRIGGER_DECISION",
+    "ORDERFLOW_DIRECTION_BIAS_CONFLICT",
+}
+
+
+THROTTLED_EVENTS = CONTRACT_EVENTS | RUNNER_EVENTS | BOOTSTRAP_EVENTS | READINESS_EVENTS | ORDERFLOW_EVENTS
 
 
 def _event(record: logging.LogRecord) -> str:
@@ -46,7 +58,6 @@ def _fingerprint(record: logging.LogRecord) -> tuple[Any, ...]:
         getattr(record, "pe_symbol", None),
         getattr(record, "futures_symbol", None),
         getattr(record, "atm_strike", None),
-        getattr(record, "expiry", None),
         getattr(record, "option_count", None),
         getattr(record, "token_count", None),
         getattr(record, "count", None),
@@ -54,6 +65,17 @@ def _fingerprint(record: logging.LogRecord) -> tuple[Any, ...]:
         getattr(record, "ready", None),
         getattr(record, "fresh_tick", None),
         getattr(record, "subscribed", None),
+        getattr(record, "primary_blocker", None),
+        tuple(getattr(record, "blockers", ()) or ()),
+        tuple(getattr(record, "secondary_blockers", ()) or ()),
+        getattr(record, "data_hard_ready", None),
+        getattr(record, "evaluation_ready", None),
+        getattr(record, "execution_ready", None),
+        getattr(record, "live_orders_armed", None),
+        getattr(record, "trigger_block_reason", None),
+        getattr(record, "trigger_conditions_met", None),
+        getattr(record, "side", None),
+        getattr(record, "contract_side", None),
     )
 
 
@@ -67,7 +89,7 @@ class BootLogRateControl(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         event = _event(record)
-        if event not in CONTRACT_EVENTS and event not in RUNNER_EVENTS and event not in BOOTSTRAP_EVENTS:
+        if event not in THROTTLED_EVENTS:
             return True
         fp = _fingerprint(record)
         now = time.monotonic()
@@ -83,12 +105,14 @@ def _installed(logger: logging.Logger) -> bool:
 
 
 def apply_filters() -> None:
-    """Install idempotent boot diagnostic rate controls."""
+    """Install idempotent boot/live diagnostic rate controls."""
 
     for name in (
         "nifty_scalper_bot.core.instrument_manager",
         "nifty_scalper_bot.core.app",
+        "nifty_scalper_bot.execution.readiness",
         "nifty_scalper_bot.strategies.runner",
+        "nifty_scalper_bot.strategies.elite_strategies.order_flow",
     ):
         logger = logging.getLogger(name)
         if not _installed(logger):
