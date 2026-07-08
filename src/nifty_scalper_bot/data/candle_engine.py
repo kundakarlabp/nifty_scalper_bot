@@ -8,41 +8,32 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Mapping
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
+from nifty_scalper_bot.data.time_contract import (
+    IST,
+    coerce_market_timestamp,
+    future_delta_seconds,
+    is_future_market_timestamp,
+    normalize_market_tick_timestamp,
+    normalized_symbol,
+)
 from nifty_scalper_bot.data.validator import Tick, validate_tick
 from nifty_scalper_bot.utils.logging import log_throttled
 
 LOGGER = logging.getLogger(__name__)
 FetchHistoricalFn = Callable[[str], pd.DataFrame | None]
 FetchRecentFn = Callable[[str], pd.DataFrame | None]
-IST = ZoneInfo("Asia/Kolkata")
 _OHLC_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
 
 
 def _to_ist_timestamp(value: Any) -> pd.Timestamp:
     try:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            raw = float(value)
-            if raw > 1e12:
-                ts = pd.to_datetime(raw, unit="ms", utc=True, errors="coerce")
-            elif raw > 946684800:
-                ts = pd.to_datetime(raw, unit="s", utc=True, errors="coerce")
-            else:
-                ts = pd.NaT
-        else:
-            ts = pd.Timestamp(value)
-    except Exception:
+        return coerce_market_timestamp(value)
+    except ValueError:
         return pd.NaT
-    if pd.isna(ts):
-        return pd.NaT
-    ts = pd.Timestamp(ts)
-    if ts.tzinfo is None:
-        return ts.tz_localize(IST)
-    return ts.tz_convert(IST)
 
 
 def _future_grace_seconds() -> float:
@@ -52,10 +43,11 @@ def _future_grace_seconds() -> float:
         return 120.0
 
 
-def _is_future_timestamp(ts: pd.Timestamp) -> bool:
+def _is_future_timestamp(ts: pd.Timestamp, *, now: pd.Timestamp | None = None) -> bool:
     if pd.isna(ts):
         return False
-    return bool(ts > pd.Timestamp.now(tz=IST) + pd.Timedelta(seconds=_future_grace_seconds()))
+    now_ts = now or pd.Timestamp.now(tz=IST)
+    return is_future_market_timestamp(ts, now=now_ts, grace_seconds=_future_grace_seconds())
 
 
 def _series_to_ist(values: Any) -> pd.Series:
@@ -90,6 +82,24 @@ def sanitize(df: pd.DataFrame | None) -> pd.DataFrame:
     return cleaned[list(_OHLC_COLUMNS)]
 
 
+def _tick_value(tick: Mapping[str, Any] | Tick, key: str, default: Any = None) -> Any:
+    if isinstance(tick, Mapping):
+        return tick.get(key, default)
+    return getattr(tick, key, default)
+
+
+def _tick_symbol(tick: Mapping[str, Any] | Tick, engine_symbol: str | None) -> str:
+    value = _tick_value(tick, "symbol") or _tick_value(tick, "trading_symbol") or engine_symbol
+    return normalized_symbol(value)
+
+
+def _tick_timestamp(tick: Mapping[str, Any] | Tick) -> tuple[pd.Timestamp, str, Any]:
+    if isinstance(tick, Mapping):
+        normalized_ts = normalize_market_tick_timestamp(tick)
+        return normalized_ts.timestamp, normalized_ts.source, normalized_ts.raw_value
+    return coerce_market_timestamp(tick.timestamp), getattr(tick, "timestamp_source", "tick.timestamp"), tick.timestamp
+
+
 @dataclass(slots=True)
 class CandleEngine:
     """Build deterministic 1-minute candles from validated ticks."""
@@ -100,27 +110,76 @@ class CandleEngine:
     current_candle: dict[str, Any] | None = None
     last_candle_close: datetime | None = None
     _last_tick_ts: pd.Timestamp | None = None
+    symbol: str | None = None
 
     def on_tick(self, tick: Mapping[str, Any]) -> dict[str, Any] | None:
         if self.interval != "1min":
             raise ValueError(f"Unsupported interval: {self.interval}")
-        raw_ts = tick.get("timestamp") if isinstance(tick, dict) else getattr(tick, "timestamp", None)
-        timestamp = _to_ist_timestamp(raw_ts)
-        if pd.isna(timestamp) or getattr(timestamp, "year", 1970) < 2020:
-            log_throttled(LOGGER, "candle_tick_bad_timestamp", "CANDLE_TICK_DROPPED reason=bad_timestamp", interval_sec=10.0, level=logging.WARNING)
-            return None
-        if _is_future_timestamp(timestamp):
+        try:
+            symbol = _tick_symbol(tick, self.symbol)
+        except ValueError:
             log_throttled(
                 LOGGER,
-                f"candle_tick_future:{getattr(self, 'symbol', 'unknown')}",
-                "CANDLE_TICK_DROPPED reason=future_timestamp symbol=%s tick_ts=%s" % (getattr(self, "symbol", "unknown"), timestamp.isoformat()),
+                "candle_tick_missing_symbol",
+                "CANDLE_TICK_DROPPED reason=missing_symbol",
+                interval_sec=10.0,
+                level=logging.WARNING,
+                extra={"event": "candle_tick_dropped", "reason": "missing_symbol"},
+            )
+            return None
+        self.symbol = symbol
+        try:
+            timestamp, timestamp_source, raw_ts = _tick_timestamp(tick)
+        except ValueError:
+            log_throttled(
+                LOGGER,
+                f"candle_tick_bad_timestamp:{symbol}",
+                f"CANDLE_TICK_DROPPED reason=bad_timestamp symbol={symbol}",
+                interval_sec=10.0,
+                level=logging.WARNING,
+                extra={"event": "candle_tick_dropped", "symbol": symbol, "reason": "bad_timestamp"},
+            )
+            return None
+        if pd.isna(timestamp) or getattr(timestamp, "year", 1970) < 2020:
+            log_throttled(
+                LOGGER,
+                f"candle_tick_bad_timestamp:{symbol}",
+                f"CANDLE_TICK_DROPPED reason=bad_timestamp symbol={symbol}",
+                interval_sec=10.0,
+                level=logging.WARNING,
+                extra={"event": "candle_tick_dropped", "symbol": symbol, "reason": "bad_timestamp"},
+            )
+            return None
+        now_ist = pd.Timestamp.now(tz=IST)
+        if _is_future_timestamp(timestamp, now=now_ist):
+            future_by_sec = future_delta_seconds(timestamp, now=now_ist)
+            log_throttled(
+                LOGGER,
+                f"candle_tick_future:{symbol}",
+                (
+                    "CANDLE_TICK_DROPPED reason=future_timestamp symbol=%s raw_ts=%r "
+                    "tick_ts_ist=%s now_ist=%s future_by_sec=%.3f timestamp_source=%s"
+                )
+                % (symbol, raw_ts, timestamp.isoformat(), now_ist.isoformat(), future_by_sec, timestamp_source),
                 interval_sec=30.0,
                 level=logging.WARNING,
+                extra={
+                    "event": "candle_tick_dropped",
+                    "reason": "future_timestamp",
+                    "symbol": symbol,
+                    "raw_ts": repr(raw_ts),
+                    "tick_ts_ist": timestamp.isoformat(),
+                    "now_ist": now_ist.isoformat(),
+                    "future_by_sec": float(future_by_sec),
+                    "timestamp_source": timestamp_source,
+                },
             )
             return None
         validated = tick if isinstance(tick, Tick) else validate_tick(dict(tick))
         payload = validated.to_dict()
-        timestamp = _to_ist_timestamp(payload["timestamp"])
+        payload["symbol"] = symbol
+        payload["timestamp"] = timestamp
+        payload["timestamp_source"] = timestamp_source
         minute = timestamp.floor("1min")
 
         if self._last_tick_ts is not None:
@@ -128,8 +187,8 @@ class CandleEngine:
             if not pd.isna(last_ts) and timestamp < last_ts:
                 log_throttled(
                     LOGGER,
-                    f"tick_out_of_order_{getattr(self, 'symbol', 'unknown')}",
-                    "tick_out_of_order symbol=%s tick_ts=%s last_ts=%s" % (getattr(self, "symbol", "unknown"), timestamp.isoformat(), last_ts.isoformat()),
+                    f"tick_out_of_order_{symbol}",
+                    "tick_out_of_order symbol=%s tick_ts=%s last_ts=%s" % (symbol, timestamp.isoformat(), last_ts.isoformat()),
                     interval_sec=10.0,
                     level=logging.DEBUG,
                 )
@@ -138,14 +197,14 @@ class CandleEngine:
         finalized: dict[str, Any] | None = None
         if self.current_candle is None:
             self.current_candle = self._start_candle(payload, minute)
-            LOGGER.debug("candle_created", extra={"event": "candle_created", "minute": minute.isoformat()})
+            LOGGER.debug("candle_created", extra={"event": "candle_created", "symbol": symbol, "minute": minute.isoformat()})
         else:
             current_minute = _to_ist_timestamp(self.current_candle["timestamp"])
             if minute < current_minute:
                 log_throttled(
                     LOGGER,
-                    f"tick_out_of_order_minute_{getattr(self, 'symbol', 'unknown')}",
-                    "tick_out_of_order symbol=%s tick_minute=%s current_minute=%s" % (getattr(self, "symbol", "unknown"), minute.isoformat(), current_minute.isoformat()),
+                    f"tick_out_of_order_minute_{symbol}",
+                    "tick_out_of_order symbol=%s tick_minute=%s current_minute=%s" % (symbol, minute.isoformat(), current_minute.isoformat()),
                     interval_sec=10.0,
                     level=logging.DEBUG,
                 )
@@ -153,7 +212,7 @@ class CandleEngine:
             if minute > current_minute:
                 finalized = self._finalize_current_candle()
                 self.current_candle = self._start_candle(payload, minute)
-                LOGGER.debug("candle_created", extra={"event": "candle_created", "minute": minute.isoformat()})
+                LOGGER.debug("candle_created", extra={"event": "candle_created", "symbol": symbol, "minute": minute.isoformat()})
             else:
                 self._update_candle(payload)
         self._last_tick_ts = timestamp
@@ -180,14 +239,28 @@ class CandleEngine:
         incoming_ts = _to_ist_timestamp(candle.get("timestamp"))
         if pd.isna(incoming_ts):
             raise DataIntegrityError("candle timestamp is invalid")
-        if _is_future_timestamp(incoming_ts):
+        now_ist = pd.Timestamp.now(tz=IST)
+        symbol = self.symbol or "symbol_unset"
+        if _is_future_timestamp(incoming_ts, now=now_ist):
+            future_by_sec = future_delta_seconds(incoming_ts, now=now_ist)
             log_throttled(
                 LOGGER,
-                f"candle_future_{getattr(self, 'symbol', 'unknown')}",
-                "future_candle_rejected symbol=%s incoming_ts=%s source=candle_engine" % (getattr(self, "symbol", "unknown"), incoming_ts.isoformat()),
+                f"candle_future_{symbol}",
+                (
+                    "future_candle_rejected symbol=%s incoming_ts=%s now_ist=%s "
+                    "future_by_sec=%.3f source=candle_engine"
+                )
+                % (symbol, incoming_ts.isoformat(), now_ist.isoformat(), future_by_sec),
                 interval_sec=30.0,
                 level=logging.WARNING,
-                extra={"event": "future_candle_rejected", "symbol": getattr(self, "symbol", "unknown"), "incoming_ts": incoming_ts.isoformat(), "source": "candle_engine"},
+                extra={
+                    "event": "future_candle_rejected",
+                    "symbol": symbol,
+                    "incoming_ts": incoming_ts.isoformat(),
+                    "now_ist": now_ist.isoformat(),
+                    "future_by_sec": float(future_by_sec),
+                    "source": "candle_engine",
+                },
             )
             self.current_candle = None
             return None
@@ -198,11 +271,11 @@ class CandleEngine:
                 if incoming_ts < last_ts:
                     log_throttled(
                         LOGGER,
-                        f"candle_out_of_order_{getattr(self, 'symbol', 'unknown')}",
-                        "candle_out_of_order symbol=%s incoming_ts=%s last_ts=%s source=candle_engine" % (getattr(self, "symbol", "unknown"), incoming_ts.isoformat(), last_ts.isoformat()),
+                        f"candle_out_of_order_{symbol}",
+                        "candle_out_of_order symbol=%s incoming_ts=%s last_ts=%s source=candle_engine" % (symbol, incoming_ts.isoformat(), last_ts.isoformat()),
                         interval_sec=30.0,
                         level=logging.WARNING,
-                        extra={"event": "candle_out_of_order", "symbol": getattr(self, "symbol", "unknown"), "incoming_ts": incoming_ts.isoformat(), "last_ts": last_ts.isoformat(), "source": "candle_engine"},
+                        extra={"event": "candle_out_of_order", "symbol": symbol, "incoming_ts": incoming_ts.isoformat(), "last_ts": last_ts.isoformat(), "source": "candle_engine"},
                     )
                     raise DataIntegrityError("candle timestamps must be monotonic")
                 if incoming_ts == last_ts:
@@ -220,7 +293,7 @@ class CandleEngine:
             raise DataIntegrityError("candle timestamps must be monotonic")
         self.df = frame
         self.last_candle_close = incoming_ts.to_pydatetime()
-        LOGGER.debug("candle_finalized", extra={"event": "candle_finalized", "timestamp": incoming_ts.isoformat()})
+        LOGGER.debug("candle_finalized", extra={"event": "candle_finalized", "symbol": symbol, "timestamp": incoming_ts.isoformat()})
         return candle
 
     def flush(self) -> dict[str, Any] | None:

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import datetime as _dt
 from dataclasses import dataclass
 from typing import Any, Mapping
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
-
-IST = ZoneInfo("Asia/Kolkata")
+from nifty_scalper_bot.data.time_contract import (
+    coerce_market_timestamp,
+    normalize_market_tick_timestamp,
+    normalized_symbol,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,7 @@ class Tick:
     timestamp: pd.Timestamp
     ltp: float
     volume: float = 0.0
+    timestamp_source: str = "unknown"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -27,30 +29,28 @@ class Tick:
             "timestamp": self.timestamp,
             "ltp": self.ltp,
             "volume": self.volume,
+            "timestamp_source": self.timestamp_source,
         }
 
 
 def _to_ist(value: Any) -> pd.Timestamp:
     try:
-        ts = pd.Timestamp(value)
-    except Exception as exc:  # noqa: BLE001
+        return coerce_market_timestamp(value)
+    except ValueError as exc:
         raise DataIntegrityError("Invalid timestamp") from exc
-    if pd.isna(ts):
-        raise DataIntegrityError("Invalid timestamp")
-    if ts.tzinfo is None:
-        return ts.tz_localize(IST)
-    return ts.tz_convert(IST)
 
 
 def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
-    symbol_raw = raw_tick.get("symbol")
-    if symbol_raw is None or str(symbol_raw).strip() == "":
-        raise DataIntegrityError("Missing symbol")
+    try:
+        symbol = normalized_symbol(raw_tick.get("symbol") or raw_tick.get("trading_symbol"))
+    except ValueError as exc:
+        raise DataIntegrityError("Missing symbol") from exc
 
-    timestamp_raw = raw_tick.get("timestamp") or raw_tick.get("exchange_timestamp")
-    if timestamp_raw is None:
-        timestamp_raw = _dt.datetime.now(IST)
-    timestamp = _to_ist(timestamp_raw)
+    try:
+        normalized_ts = normalize_market_tick_timestamp(raw_tick)
+    except ValueError as exc:
+        raise DataIntegrityError("Missing or invalid timestamp") from exc
+    timestamp = normalized_ts.timestamp
 
     ltp_raw = raw_tick.get("ltp") or raw_tick.get("last_price")
     if ltp_raw is None:
@@ -75,8 +75,9 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
         volume = 0.0
 
     return Tick(
-        symbol=str(symbol_raw),
+        symbol=symbol,
         timestamp=timestamp,
         ltp=ltp,
         volume=volume,
+        timestamp_source=normalized_ts.source,
     )
