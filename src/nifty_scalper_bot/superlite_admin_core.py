@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import HTTPException, Request
 
@@ -28,8 +28,13 @@ SECRET_RE = re.compile(
     r"(?i)(api[_ -]?key|api[_ -]?secret|access[_ -]?token|request[_ -]?token|password)"
     r"\s*[:=]\s*\S+"
 )
-PAIR_RE = re.compile(
-    r"CONTRACT_SSOT_ATM_PAIR_SELECTED.*?selected_ce=(\S+).*?selected_pe=(\S+).*?atm_strike=(\S+)"
+SELECTED_PAIR_LOG_PATTERNS = (
+    re.compile(
+        r"ACTIVE_DYNAMIC_BASKET_COMMITTED.*?selected_ce=(\S+).*?selected_pe=(\S+).*?atm_strike=(\S+)"
+    ),
+    re.compile(
+        r"CONTRACT_SSOT_ATM_PAIR_SELECTED.*?selected_ce=(\S+).*?selected_pe=(\S+).*?atm_strike=(\S+)"
+    ),
 )
 ENV_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 STATUS_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
@@ -215,6 +220,71 @@ def _service_process_known() -> bool | None:
         return None
 
 
+def _clean_selected_value(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text in {"None", "none", "null", "—", "-"} else text
+
+
+def _normalise_selected_payload(payload: Mapping[str, Any] | None, *, source: str) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    ce = _clean_selected_value(
+        payload.get("ce")
+        or payload.get("selected_ce")
+        or payload.get("atm_ce")
+        or payload.get("call")
+    )
+    pe = _clean_selected_value(
+        payload.get("pe")
+        or payload.get("selected_pe")
+        or payload.get("atm_pe")
+        or payload.get("put")
+    )
+    atm = payload.get("atm") or payload.get("atm_strike") or payload.get("strike")
+    if not ce and not pe:
+        return {}
+    result: dict[str, Any] = {"source": source}
+    if ce:
+        result["ce"] = ce
+    if pe:
+        result["pe"] = pe
+    if atm not in (None, ""):
+        result["atm"] = atm
+    for key in ("ce_ready", "pe_ready", "execution_ready", "evaluation_ready", "basket_version"):
+        if key in payload:
+            result[key] = payload[key]
+    return result
+
+
+def _extract_selected_from_structured(*payloads: Mapping[str, Any]) -> dict[str, Any]:
+    for payload_index, payload in enumerate(payloads):
+        if not isinstance(payload, Mapping):
+            continue
+        source_name = "health_trading" if payload_index == 0 else "trading_status"
+        for key in ("selected", "selected_options", "active_selection", "active_basket"):
+            selected = _normalise_selected_payload(payload.get(key), source=f"{source_name}.{key}")
+            if selected:
+                return selected
+        selected = _normalise_selected_payload(payload, source=f"{source_name}.top_level")
+        if selected:
+            return selected
+    return {}
+
+
+def _extract_selected_from_logs(recent_logs: str) -> dict[str, Any]:
+    for line in reversed(str(recent_logs or "").splitlines()):
+        for pattern in SELECTED_PAIR_LOG_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                return {
+                    "ce": match.group(1),
+                    "pe": match.group(2),
+                    "atm": match.group(3),
+                    "source": "journal:active_dynamic_basket" if "ACTIVE_DYNAMIC_BASKET_COMMITTED" in line else "journal:contract_ssot",
+                }
+    return {}
+
+
 def status_snapshot() -> dict[str, Any]:
     now = time.monotonic()
     if now - float(STATUS_CACHE["at"]) < 5 and STATUS_CACHE["data"]:
@@ -227,14 +297,8 @@ def status_snapshot() -> dict[str, Any]:
     execution_only = {"not_live_mode", "market_closed", "exchange_holiday", "outside_session"}
     operational_blockers = [value for value in blockers if value not in execution_only]
     recent = bounded_logs(180)
-    pair: dict[str, str] = {}
-    for line in reversed(recent.splitlines()):
-        match = PAIR_RE.search(line)
-        if match:
-            pair = {"ce": match.group(1), "pe": match.group(2), "atm": match.group(3)}
-            break
+    selected_options = _extract_selected_from_structured(trading, mode) or _extract_selected_from_logs(recent)
     running, remote = _git_ref("HEAD"), _git_ref("origin/main")
-    structured_selected = trading.get("selected") or trading.get("selected_options") or mode.get("selected") or mode.get("selected_options") or {}
     data = {
         "service_process_known": _service_process_known(),
         "process_up": bool(livez) and engine_http_responsive,
@@ -257,7 +321,8 @@ def status_snapshot() -> dict[str, Any]:
         "primary_blocker": trading.get("primary_blocker") or (blockers[0] if blockers else None),
         "blockers": blockers,
         "operational_blockers": operational_blockers,
-        "selected": structured_selected or pair,
+        "selected": selected_options,
+        "selected_source": selected_options.get("source") if isinstance(selected_options, Mapping) else None,
         "running": running,
         "remote": remote,
         "stale": running not in {"—", ""} and remote not in {"—", ""} and running != remote,
