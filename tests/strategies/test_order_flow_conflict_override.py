@@ -105,3 +105,54 @@ def test_no_bias_not_conflict_gated(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
     assert sig.metadata["trigger_block_reason"] != "direction_bias_conflict"
+
+
+def test_no_bias_without_spot_or_futures_live_proof_still_blocks(monkeypatch, strat):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
+
+    assert sig.metadata["trigger_conditions_met"] is False
+    assert sig.metadata["trigger_block_reason"] == "direction_context_missing_live"
+    assert sig.metadata.get("direction_context_live_proof") is not True
+
+
+def test_no_bias_with_fresh_spot_live_proof_can_trigger(monkeypatch, strat):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    sig = _eval(
+        strat,
+        "NFO:NIFTY26MAY24000CE",
+        _ind(
+            "",
+            "UP",
+            buy=400,
+            sell=80,
+            spot_fresh=True,
+            spot_tick_age_s=0.25,
+        ),
+    )
+
+    assert sig.metadata["trigger_conditions_met"] is True
+    assert sig.metadata["trigger_block_reason"] == ""
+    assert sig.metadata["direction_context_ok"] is True
+    assert sig.metadata["direction_context_live_proof"] is True
+
+
+def test_no_bias_with_stale_spot_and_futures_proof_still_blocks(monkeypatch, strat):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    sig = _eval(
+        strat,
+        "NFO:NIFTY26MAY24000CE",
+        _ind(
+            "",
+            "UP",
+            buy=400,
+            sell=80,
+            spot_fresh=False,
+            fut_fresh=False,
+            spot_tick_age_s=30.0,
+            futures_tick_age_s=30.0,
+        ),
+    )
+
+    assert sig.metadata["trigger_conditions_met"] is False
+    assert sig.metadata["trigger_block_reason"] == "direction_context_missing_live"
