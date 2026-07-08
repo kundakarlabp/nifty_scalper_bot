@@ -9,7 +9,7 @@ class FakeRuntimeOrderManager:
         self.cancelled = []
         self._broker = SimpleNamespace(
             get_positions=lambda: [
-                {"tradingsymbol": "NIFTY24JUL24000CE", "quantity": 75}
+                {"tradingsymbol": "NFO:NIFTY24JUL24000CE", "quantity": 75}
             ],
             get_orders=lambda: [],
         )
