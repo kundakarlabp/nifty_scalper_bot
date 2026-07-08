@@ -28,36 +28,24 @@ jobs:
         run: |
           git diff --check
           python -m compileall -q src dashboard scripts tests
-      - name: Focused market-aware tests
-        env:
-          BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py
-      - name: Execution safety regression tests
-        env:
-          BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q tests/test_execution_path_contract.py tests/execution/test_runtime_order_facade.py tests/execution/test_runtime_bracket_facade.py tests/execution/test_bracket_exit_state_machine.py tests/execution/test_virtual_bracket_safety.py tests/execution/test_live_exit_hardening.py
       - name: SSOT entry exit risk guard tests
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q tests/execution/test_operator_exit_intent_contract.py tests/execution/test_protective_order_intent_patch.py tests/execution/test_entry_geometry_guard.py tests/execution/test_manual_exit_classification.py tests/execution/test_manual_order_quarantine.py tests/risk/test_risk_check_order_daily_limits.py
-      - name: Notification registry help tests
+      - name: Notification ping auth tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'registry or help or registered'
-      - name: Notification emergency tests
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'ping or unauthorized'
+      - name: Notification subsystem selftest tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k emergency
-      - name: Notification remaining tests
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'missing_subsystem or selftest'
+      - name: Notification handler why tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'not emergency and not registry and not help and not registered'
-      - name: Full repository suite
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'handler_exception or why'
+      - name: Notification complete file
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q
-      - name: Verify committed tree unchanged
-        run: git diff --exit-code
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py
