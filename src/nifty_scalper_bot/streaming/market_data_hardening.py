@@ -12,6 +12,13 @@ from nifty_scalper_bot.streaming.websocket_manager import ConnectionState
 _INSTALLED_ATTR = "_market_data_hardening_installed"
 _ORIGINAL_BUILD_ATTR = "_market_data_hardening_original_build_ticker"
 _ORIGINAL_TRADING_WINDOW_ATTR = "_market_data_hardening_original_is_within_trading_window"
+_ORIGINAL_CLOSE_METHODS_ATTR = "_market_data_hardening_original_close_sensitive_methods"
+_CLOSE_SENSITIVE_ASYNC_METHODS = (
+    "disconnect",
+    "_connect_once",
+    "_reconnect_loop",
+    "_replace_ticker",
+)
 
 
 def install_websocket_market_data_hardening(manager_cls: type[Any]) -> None:
@@ -35,8 +42,40 @@ def install_websocket_market_data_hardening(manager_cls: type[Any]) -> None:
         setattr(manager_cls, _ORIGINAL_TRADING_WINDOW_ATTR, original_window)
         setattr(manager_cls, "_is_within_trading_window", _is_within_trading_window_hardened)
 
+    _install_close_sensitive_method_guards(manager_cls)
     setattr(manager_cls, "_on_ticks", _hardened_on_ticks)
     setattr(manager_cls, _INSTALLED_ATTR, True)
+
+
+def _install_close_sensitive_method_guards(manager_cls: type[Any]) -> None:
+    """Wrap cleanup/reconnect methods so an existing ticker is safe before close."""
+
+    originals: dict[str, Any] = {}
+    for method_name in _CLOSE_SENSITIVE_ASYNC_METHODS:
+        original = getattr(manager_cls, method_name, None)
+        if not callable(original):
+            continue
+        originals[method_name] = original
+
+        async def _with_safe_current_ticker(
+            self: Any,
+            *args: Any,
+            __original: Any = original,
+            **kwargs: Any,
+        ) -> Any:
+            _wrap_current_ticker_close(self)
+            return await __original(self, *args, **kwargs)
+
+        setattr(manager_cls, method_name, _with_safe_current_ticker)
+
+    setattr(manager_cls, _ORIGINAL_CLOSE_METHODS_ATTR, originals)
+
+
+def _wrap_current_ticker_close(manager: Any) -> None:
+    """Make any ticker already attached to the manager close-safe."""
+    ticker = getattr(manager, "_ticker", None)
+    if ticker is not None:
+        _wrap_ticker_close(manager, ticker)
 
 
 def _wrap_ticker_close(manager: Any, ticker: Any) -> None:
