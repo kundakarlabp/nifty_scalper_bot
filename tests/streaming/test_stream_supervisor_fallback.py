@@ -17,30 +17,63 @@ def test_spot_stale_only_does_not_activate_poll_fallback() -> None:
             lagging=False,
             futures_fresh=True,
             options_fresh=True,
+            quote_stale_ms=120000,
+            feed_health={"spot_age_ms": 10**9},
+            data_age_ms=10**9,
         )
         is False
     )
 
 
-def test_futures_stale_activates_poll_fallback() -> None:
+def test_futures_stale_requires_age_threshold_when_websocket_healthy() -> None:
     assert (
         _polling_fallback_degraded(
             ws_ok=True,
             lagging=False,
             futures_fresh=False,
             options_fresh=True,
+            quote_stale_ms=120000,
+            feed_health={"futures_age_ms": 70},
+            data_age_ms=70,
+        )
+        is False
+    )
+    assert (
+        _polling_fallback_degraded(
+            ws_ok=True,
+            lagging=False,
+            futures_fresh=False,
+            options_fresh=True,
+            quote_stale_ms=120000,
+            feed_health={"futures_age_ms": 120000},
+            data_age_ms=120000,
         )
         is True
     )
 
 
-def test_options_stale_activates_poll_fallback() -> None:
+def test_options_stale_requires_selected_age_threshold_when_websocket_healthy() -> None:
     assert (
         _polling_fallback_degraded(
             ws_ok=True,
             lagging=False,
             futures_fresh=True,
             options_fresh=False,
+            quote_stale_ms=120000,
+            feed_health={"selected_ce_age_ms": 70, "selected_pe_age_ms": 60},
+            data_age_ms=70,
+        )
+        is False
+    )
+    assert (
+        _polling_fallback_degraded(
+            ws_ok=True,
+            lagging=False,
+            futures_fresh=True,
+            options_fresh=False,
+            quote_stale_ms=120000,
+            feed_health={"selected_ce_age_ms": 120000, "selected_pe_age_ms": 60},
+            data_age_ms=120000,
         )
         is True
     )
@@ -53,6 +86,8 @@ def test_ws_disconnected_activates_poll_fallback() -> None:
             lagging=False,
             futures_fresh=True,
             options_fresh=True,
+            quote_stale_ms=120000,
+            data_age_ms=10,
         )
         is True
     )
@@ -65,6 +100,8 @@ def test_lagging_event_loop_activates_poll_fallback() -> None:
             lagging=True,
             futures_fresh=True,
             options_fresh=True,
+            quote_stale_ms=120000,
+            data_age_ms=10,
         )
         is True
     )
@@ -136,9 +173,10 @@ async def test_stale_futures_activates_polling_fallback(
     monkeypatch.setattr(app, "is_market_open_now", lambda: True)
     ctx = _supervisor_ctx(
         is_connected=lambda: True,
-        data_age_ms=100,
+        data_age_ms=120000,
         feed_health={
             "futures_fresh": False,
+            "futures_age_ms": 120000,
             "options_fresh": True,
             "spot_fresh": True,
             "spot_symbol": "NSE:NIFTY",
@@ -276,3 +314,50 @@ async def test_missing_quote_or_websocket_failure_allows_fallback(monkeypatch: p
     )
 
     fallback.start.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_fallback_health_exception_logs_without_raising(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "is_market_open_now", lambda: True)
+
+    def bad_health() -> dict[str, object]:
+        raise RuntimeError("health boom")
+
+    ctx = SimpleNamespace(
+        websocket_manager=SimpleNamespace(is_connected=MagicMock(return_value=True)),
+        market_data_manager=SimpleNamespace(
+            trading_feed_health=bad_health,
+            data_age_ms=MagicMock(return_value=70),
+        ),
+    )
+    fallback = _Fallback(running=False)
+
+    with caplog.at_level(logging.WARNING, logger="nifty_scalper_bot.core.app"):
+        await app._polling_failover_supervisor_iteration(
+            ctx, fallback, quote_stale_ms=120000, degraded_since=0.0, recovered_since=None, activate_after=0.0
+        )
+
+    assert "POLLING_FALLBACK_HEALTH_FAILED" in caplog.text
+    fallback.start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fallback_start_exception_is_nonfatal(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "is_market_open_now", lambda: True)
+    ctx = _supervisor_ctx(is_connected=MagicMock(return_value=False), data_age_ms=10)
+    fallback = _Fallback(running=False)
+    fallback.start.side_effect = RuntimeError("start boom")
+
+    with caplog.at_level(logging.WARNING, logger="nifty_scalper_bot.core.app"):
+        await app._polling_failover_supervisor_iteration(
+            ctx, fallback, quote_stale_ms=120000, degraded_since=0.0, recovered_since=None, activate_after=0.0
+        )
+
+    assert "POLLING_FALLBACK_START_FAILED" in caplog.text
+    assert "start boom" in caplog.text
