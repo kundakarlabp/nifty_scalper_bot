@@ -29,11 +29,6 @@ class _BadCloseTicker:
         raise RuntimeError("close failed")
 
 
-class _GoodTicker:
-    def close(self) -> None:
-        return None
-
-
 def test_ws_batch_ingress_suppresses_legacy_callback_when_mdm_present() -> None:
     install_websocket_market_data_hardening(WebSocketManager)
     callback_ticks: list[dict] = []
