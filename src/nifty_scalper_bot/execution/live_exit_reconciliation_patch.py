@@ -48,6 +48,13 @@ def _strict_live(self: Any) -> bool:
     return False
 
 
+def _original_reconcile(self: Any, bracket: Any, *, requested_by: str) -> bool:
+    original = _ORIGINALS.get("BoundBracketManager._reconcile_exit_state")
+    if callable(original):
+        return bool(original(self, bracket, requested_by=requested_by))
+    return False
+
+
 def _block_release(self: Any, bracket: Any, *, reason: str, payload: Mapping[str, Any]) -> None:
     blocker = getattr(self, "_block_ledger_release", None)
     if callable(blocker):
@@ -87,9 +94,6 @@ def _defer_close(
         bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
         bracket.entry_status = bracket.exit_state
         bracket.last_exit_error = reason
-        # If the broker snapshot is already flat, stop repeated SL/TP submissions;
-        # ledger/unresolved-exit ownership remains latched until fill identity is
-        # available and the release store is cleared.
         if mark_position_flat:
             bracket.position_flat_confirmed = True
             bracket.active = False
@@ -118,13 +122,13 @@ def _defer_close(
 def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str) -> bool:
     """Reconcile exit without closing LIVE brackets on provisional flat proof.
 
-    In the incident log the broker position snapshot turned flat while the linked
-    exit order still reported OPEN PENDING. The old implementation closed the
-    bracket immediately, recorded a provisional exit price, and let the runner
-    re-adopt the same symbol as an orphan before the broker COMPLETE update
-    arrived. This method requires terminal fill proof before durable close in
-    live mode.
+    Non-live/test execution delegates to the original runtime method. The
+    production-only change is that strict LIVE mode requires terminal broker fill
+    identity before durable bracket close.
     """
+
+    if not _strict_live(self):
+        return _original_reconcile(self, bracket, requested_by=requested_by)
 
     now = time.time()
     with self._lock:
@@ -148,7 +152,6 @@ def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str)
     filled = False
     fill_price: float | None = None
     order_status = ""
-    status_payload: Mapping[str, Any] = {}
     try:
         if order_id:
             raw_status = self._get_broker_order_status(str(order_id))
@@ -206,9 +209,8 @@ def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str)
         filled,
     )
 
-    strict = _strict_live(self)
     if filled:
-        if strict and fill_price is None:
+        if fill_price is None:
             _defer_close(
                 self,
                 bracket,
@@ -224,10 +226,7 @@ def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str)
         _legacy.LOGGER.info("EXIT_FILLED_CONFIRMED bracket_id=%s order_id=%s", bracket.bracket_id, order_id)
         return True
 
-    if flat and order_id and strict:
-        # Position flat alone is not enough when the linked exit order is still
-        # OPEN/PENDING. Wait for broker terminal status to avoid wrong fill price
-        # and orphan re-adoption.
+    if flat and order_id:
         if order_status in _OPEN_OR_PENDING_STATUSES or order_status not in _TERMINAL_FILLED:
             with self._lock:
                 bracket.exit_pending = True
@@ -253,7 +252,7 @@ def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str)
             )
             return False
 
-    if flat and not order_id and strict:
+    if flat and not order_id:
         _defer_close(
             self,
             bracket,
@@ -265,28 +264,6 @@ def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str)
             mark_position_flat=True,
         )
         return False
-
-    if flat and not order_id:
-        if requested_by != "direct_pre_submit":
-            self._close_bracket(bracket, close_source="reconciled_flat", exit_price=fill_price)
-            _legacy.LOGGER.info(
-                "EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s",
-                bracket.bracket_id,
-                bracket.symbol,
-            )
-            return True
-        _legacy.LOGGER.info(
-            "EXIT_RECONCILED_FLAT_IGNORED_WITHOUT_ORDER bracket_id=%s symbol=%s requested_by=%s",
-            bracket.bracket_id,
-            bracket.symbol,
-            requested_by,
-        )
-        return False
-
-    if flat:
-        self._close_bracket(bracket, close_source="reconciled_flat", exit_price=fill_price)
-        _legacy.LOGGER.info("EXIT_RECONCILED_FLAT bracket_id=%s symbol=%s", bracket.bracket_id, bracket.symbol)
-        return True
 
     with self._lock:
         age_basis = float(bracket.last_exit_attempt_at or bracket.exit_triggered_at or now)
@@ -300,6 +277,8 @@ def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str)
 
 def _ledger_or_exit_managed(self: Any, symbol: str) -> bool:
     original = _ORIGINALS.get("BoundBracketManager.is_symbol_managed")
+    if not _strict_live(self):
+        return bool(original(self, symbol)) if callable(original) else False
     if callable(original):
         with suppress(Exception):
             if bool(original(self, symbol)):
