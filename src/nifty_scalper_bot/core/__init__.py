@@ -76,6 +76,20 @@ except Exception as exc:  # noqa: BLE001 - fail closed only for real live mode
     if _real_live_mode_requested():
         raise RuntimeError("market_data_hardening_bootstrap_failed") from exc
 
+try:
+    from . import app as _app_module
+    from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _apply_polling_failover_runtime
+
+    _apply_polling_failover_runtime(_app_module)
+except Exception as exc:  # noqa: BLE001 - fail closed only for real live mode
+    get_logger(__name__).error(
+        "POLLING_FAILOVER_RUNTIME_PATCH_FAILED error=%s",
+        exc,
+        extra={"event": "POLLING_FAILOVER_RUNTIME_PATCH_FAILED", "error_type": type(exc).__name__},
+    )
+    if _real_live_mode_requested():
+        raise RuntimeError("polling_failover_runtime_patch_failed") from exc
+
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
 
 _LOGGER = get_logger(__name__)
@@ -102,8 +116,10 @@ def __getattr__(name: str) -> Any:
         try:
             from . import app as _app_module
             from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
+            from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
 
             _ready_adapter(_app_module)
+            _polling_adapter(_app_module)
             _App = _app_module.NiftyScalperApp
         except Exception as exc:  # noqa: BLE001
             _LOGGER.error(
