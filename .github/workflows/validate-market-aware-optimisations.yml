@@ -53,13 +53,23 @@ jobs:
           print(' '.join(str(p) for p in sorted(files)))
           PY
           )
-      - name: Execution tests n-z
+      - name: Execution tests n-r
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q $(python - <<'PY'
           from pathlib import Path
-          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() > 'm']
+          files = [p for p in Path('tests/execution').glob('test_*.py') if 'n' <= p.name[5].lower() <= 'r']
+          print(' '.join(str(p) for p in sorted(files)))
+          PY
+          )
+      - name: Execution tests s-z
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: |
+          python -m pytest -q $(python - <<'PY'
+          from pathlib import Path
+          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() >= 's']
           print(' '.join(str(p) for p in sorted(files)))
           PY
           )
