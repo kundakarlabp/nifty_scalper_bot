@@ -67,11 +67,12 @@ def _install_operator_execution_hygiene() -> None:
 
         def _patched_execution_items(snap: Mapping[str, Any]) -> dict[str, Any]:
             items = dict(original(snap))
-            items["execution_block_reason"] = snap.get("execution_block_reason")
+            raw_execution_reason = snap.get("execution_block_reason")
+            items["execution_block_reason"] = "None" if raw_execution_reason is None else raw_execution_reason
             last_order_rejection = snap.get("last_order_rejection")
             has_current_blocker = bool(
                 snap.get("live_block_reason")
-                or snap.get("execution_block_reason")
+                or raw_execution_reason
                 or snap.get("current_execution_blocker")
                 or snap.get("current_pnl_reconciliation_blocker")
                 or snap.get("current_risk_breaker_reason")
