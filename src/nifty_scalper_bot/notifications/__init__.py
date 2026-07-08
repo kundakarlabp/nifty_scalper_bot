@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 
 
@@ -35,9 +36,23 @@ def _install_alert_log_hygiene() -> None:
 
 def _install_operator_command_aliases() -> None:
     try:
-        from nifty_scalper_bot.notifications.operator_command_aliases import apply_patches
-
-        apply_patches()
+        _operator = importlib.import_module("nifty_scalper_bot.notifications.operator_telegram")
+        existing = {spec.name for spec in _operator.OPERATOR_COMMANDS}
+        if "flat" not in existing:
+            flat_spec = _operator.CommandSpec(
+                "flat",
+                "alias for confirmed flatten of bot-owned open positions",
+                _operator.cmd_flatten,
+                "Control",
+                "confirmed-destructive",
+            )
+            names = [spec.name for spec in _operator.OPERATOR_COMMANDS]
+            try:
+                insert_at = names.index("flatten") + 1
+            except ValueError:
+                insert_at = len(_operator.OPERATOR_COMMANDS)
+            _operator.OPERATOR_COMMANDS.insert(insert_at, flat_spec)
+            _operator.OPERATOR_COMMAND_NAMES = tuple(spec.name for spec in _operator.OPERATOR_COMMANDS)
     except Exception:
         return
 
