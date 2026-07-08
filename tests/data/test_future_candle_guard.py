@@ -1,11 +1,12 @@
 from collections import deque
 from datetime import datetime, timedelta
+import logging
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
-from nifty_scalper_bot.data.pipeline import Candle, CandleStore
+from nifty_scalper_bot.data.pipeline import Candle, CandleStore, MarketDataPipeline
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.data.validator import validate_tick
 
@@ -69,3 +70,44 @@ def test_candle_store_quarantines_future_tail_before_valid_current_bar() -> None
     candles = store.get(sym)
     assert len(candles) == 1
     assert candles[0].timestamp.floor("1min") == current
+
+
+def test_candle_store_out_of_order_log_has_forensic_fields(caplog: pytest.LogCaptureFixture) -> None:
+    store = CandleStore()
+    sym = "NFO:TEST"
+    base = pd.Timestamp.now(tz=IST).floor("1min") - pd.Timedelta(minutes=10)
+    last = base + pd.Timedelta(minutes=5)
+    incoming = base
+    store.push(Candle(sym, last, 105, 106, 104, 105, 7))
+
+    with caplog.at_level(logging.WARNING, logger="nifty_scalper_bot.data.pipeline"):
+        with pytest.raises(DataIntegrityError):
+            store.push(Candle(sym, incoming, 101, 102, 100, 101, 3))
+
+    record = next(rec for rec in caplog.records if getattr(rec, "event", "") == "candle_store_out_of_order")
+    assert record.symbol == sym
+    assert record.incoming_ts == incoming.isoformat()
+    assert record.last_ts == last.isoformat()
+    assert record.incoming_close == 101.0
+    assert record.last_close == 105.0
+    assert record.store_size == 1
+    assert record.source == "candle_store"
+    assert record.reason == "incoming_before_last_store_ts"
+
+
+def test_pipeline_flush_future_candle_is_rejected_without_raise() -> None:
+    pipeline = MarketDataPipeline()
+    sym = "NFO:TEST"
+    future = pd.Timestamp.now(tz=IST) + pd.Timedelta(minutes=10)
+    pipeline.builder._active[sym] = {
+        "symbol": sym,
+        "timestamp": future,
+        "open": 100.0,
+        "high": 100.0,
+        "low": 100.0,
+        "close": 100.0,
+        "volume": 1.0,
+    }
+
+    assert pipeline.flush(sym) is None
+    assert pipeline.get_candles(sym) == []
