@@ -9,7 +9,6 @@ import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.data.time_contract import (
-    IST,
     coerce_market_timestamp,
     normalize_market_tick_timestamp,
     normalized_symbol,
