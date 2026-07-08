@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
+from nifty_scalper_bot.execution.readiness import (
+    quote_timestamp_quality_allows_hard_readiness,
+    resolve_quote_bid_ask_spread,
+)
 
 
 def _value(payload: Mapping[str, Any] | object | None, key: str) -> Any:
@@ -87,6 +90,7 @@ class ExecutionQuoteReadiness:
 
 
 def evaluate_execution_quote(symbol: str, payload: Mapping[str, Any] | object | None, *, live_mode: bool, max_tick_age_ms: float, max_spread_pct: float, require_depth: bool, min_real_ticks_last_60s: int = 0) -> ExecutionQuoteReadiness:
+    timestamp_quality_ok = quote_timestamp_quality_allows_hard_readiness(payload)
     bid, ask, derived_spread_pct, _bid_ask_source = resolve_quote_bid_ask_spread(payload)
     has_bid_ask = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
     spread_pct = _float(payload, "spread_pct")
@@ -101,7 +105,9 @@ def evaluate_execution_quote(symbol: str, payload: Mapping[str, Any] | object | 
     real_ticks, derived = resolve_real_tick_count(payload, tick_age_ms=tick_age_ms, max_age_ms=max_tick_age_ms, has_bid_ask=has_bid_ask)
 
     reason = "ready"
-    if not has_bid_ask:
+    if live_mode and not timestamp_quality_ok:
+        reason = "timestamp_quality_unusable"
+    elif not has_bid_ask:
         reason = "bid_ask_missing"
     elif live_mode and tick_age_ms is None:
         reason = "tick_age_missing"
