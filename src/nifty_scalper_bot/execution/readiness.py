@@ -1,8 +1,7 @@
-"""Pure readiness helpers used by the live arming gate.
+"""Readiness helpers used by the live arming gate.
 
-Keeping the readiness decision in a side-effect-free helper makes the live
-trading arming logic easy to unit-test and ensures the same rules are applied
-consistently from app startup, health endpoints, and supervisor checks.
+The decision functions keep arming semantics deterministic while emitting compact,
+rate-controlled diagnostics for operator validation.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from typing import Mapping
 
 LOGGER = logging.getLogger(__name__)
 _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
+_TRUTHY = {"1", "true", "yes", "y", "on"}
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -138,6 +138,91 @@ def _canonical_blocker(reason: object) -> str:
     return _BLOCKER_ALIASES.get(text, text)
 
 
+def _checklist_logging_enabled() -> bool:
+    raw = os.getenv("LIVE_VALIDATION_CHECKLIST_LOGS", "true")
+    return str(raw or "true").strip().lower() in _TRUTHY
+
+
+def build_live_validation_checklist(
+    decision: ReadinessDecision,
+    *,
+    market_name: str,
+    canonical_blockers: list[str],
+    emergency_state: Mapping[str, object],
+    broker_state: Mapping[str, object],
+    risk_state: Mapping[str, object],
+    live_mode: bool,
+    evaluation_ready: bool,
+    execution_ready: bool,
+) -> dict[str, object]:
+    """Return compact operator checklist for live arming validation."""
+
+    market_open = market_name in {"open", "marketstate.open"}
+    broker_auth_ok = not bool(broker_state.get("broker_auth_invalid") or broker_state.get("broker_session_invalid"))
+    broker_balance_ok = not bool(
+        broker_state.get("broker_balance_unavailable")
+        or broker_state.get("broker_balance_valid") is False
+    )
+    emergency_clear = not bool(emergency_state.get("emergency_stop_active") or emergency_state.get("kill_switch_active"))
+    risk_green = not bool(risk_state.get("risk_halt") or risk_state.get("daily_loss_limit"))
+    return {
+        "live_mode": bool(live_mode),
+        "market_open": bool(market_open),
+        "evaluation_ready": bool(evaluation_ready),
+        "execution_ready": bool(execution_ready),
+        "broker_auth_ok": bool(broker_auth_ok),
+        "broker_balance_ok": bool(broker_balance_ok),
+        "emergency_clear": bool(emergency_clear),
+        "risk_green": bool(risk_green),
+        "primary_blocker": decision.primary_blocker,
+        "blockers": list(decision.blocker_list),
+        "secondary_blockers": list(decision.secondary_blockers),
+        "raw_blockers": list(dict.fromkeys(canonical_blockers)),
+        "live_orders_armed": bool(decision.live_orders_armed),
+    }
+
+
+def _emit_live_validation_checklist(
+    decision: ReadinessDecision,
+    *,
+    market_name: str,
+    canonical_blockers: list[str],
+    emergency_state: Mapping[str, object],
+    broker_state: Mapping[str, object],
+    risk_state: Mapping[str, object],
+    live_mode: bool,
+    evaluation_ready: bool,
+    execution_ready: bool,
+) -> None:
+    if not live_mode or not _checklist_logging_enabled():
+        return
+    checklist = build_live_validation_checklist(
+        decision,
+        market_name=market_name,
+        canonical_blockers=canonical_blockers,
+        emergency_state=emergency_state,
+        broker_state=broker_state,
+        risk_state=risk_state,
+        live_mode=live_mode,
+        evaluation_ready=evaluation_ready,
+        execution_ready=execution_ready,
+    )
+    LOGGER.info(
+        "LIVE_VALIDATION_CHECKLIST live_mode=%s market_open=%s evaluation_ready=%s execution_ready=%s broker_auth_ok=%s broker_balance_ok=%s emergency_clear=%s risk_green=%s live_orders_armed=%s primary_blocker=%s",
+        checklist["live_mode"],
+        checklist["market_open"],
+        checklist["evaluation_ready"],
+        checklist["execution_ready"],
+        checklist["broker_auth_ok"],
+        checklist["broker_balance_ok"],
+        checklist["emergency_clear"],
+        checklist["risk_green"],
+        checklist["live_orders_armed"],
+        checklist["primary_blocker"],
+        extra={"event": "LIVE_VALIDATION_CHECKLIST", **checklist},
+    )
+
+
 def normalize_readiness_blockers(
     blockers: list[str] | tuple[str, ...] | set[str],
     market_state: object = None,
@@ -199,7 +284,7 @@ def normalize_readiness_blockers(
     primary = ordered_visible[0] if ordered_visible else None
     armed = bool(live_mode and not primary and evaluation_ready and execution_ready)
     human = "ready" if primary is None else primary
-    return ReadinessDecision(
+    decision = ReadinessDecision(
         primary_blocker=primary,
         blocker_list=ordered_visible,
         secondary_blockers=ordered_secondary,
@@ -208,6 +293,18 @@ def normalize_readiness_blockers(
         execution_ready=bool(execution_ready and not primary),
         human_reason=human,
     )
+    _emit_live_validation_checklist(
+        decision,
+        market_name=market_name,
+        canonical_blockers=canonical,
+        emergency_state=emergency_state,
+        broker_state=broker_state,
+        risk_state=risk_state,
+        live_mode=live_mode,
+        evaluation_ready=evaluation_ready,
+        execution_ready=execution_ready,
+    )
+    return decision
 
 
 @dataclass(slots=True)
