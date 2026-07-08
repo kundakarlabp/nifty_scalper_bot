@@ -40,7 +40,7 @@ def test_unknown_buy_fill_does_not_scale_existing_long_position(tmp_path):
     assert exposures[SYMBOL]["reason"] == "manual_order_quarantined"
 
 
-def test_unknown_sell_fill_does_not_close_existing_long_position(tmp_path):
+def test_unknown_sell_fill_is_recognized_as_manual_exit_for_existing_long_position(tmp_path):
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.open_position(SYMBOL, "LONG", 65, 75.0, order_id="entry-1")
     order = Order(
@@ -59,16 +59,14 @@ def test_unknown_sell_fill_does_not_close_existing_long_position(tmp_path):
 
     manager.update_order_status(order.order_id, "COMPLETE", fill_price=80.0)
 
-    position = manager.get_position(SYMBOL)
-    assert position is not None
-    assert position.quantity == 65
-    assert manager.get_realized_pnl() == 0.0
+    assert manager.get_position(SYMBOL) is None
+    assert manager.get_realized_pnl() == 325.0
     terminal = manager._terminal_orders[order.order_id]
-    assert terminal.pnl_applied is False
-    assert terminal.lifecycle_resolved is False
-    exposures = manager.get_quarantined_broker_exposures()
-    assert exposures[SYMBOL]["status"] == "MANUAL_ORDER_QUARANTINED"
-    assert exposures[SYMBOL]["side"] == "SELL"
+    assert terminal.intent == "REDUCE"
+    assert terminal.lifecycle_applied is True
+    assert terminal.pnl_applied is True
+    assert terminal.lifecycle_resolved is True
+    assert manager.get_quarantined_broker_exposures() == {}
 
 
 def test_unresolved_broker_cost_basis_blocks_entries_without_sync_exception(tmp_path):

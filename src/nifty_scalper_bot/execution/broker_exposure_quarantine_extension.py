@@ -215,12 +215,9 @@ def apply_patches() -> None:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
         original = _ORIGINALS["PositionManager._handle_filled_order"]
         if intent in _MANUAL_INTENTS and _is_manual_reduction_order(self, order):
-            original_intent = getattr(order, "intent", None)
             with suppress(Exception):
                 setattr(order, "intent", "REDUCE")
             result = original(self, order)
-            with suppress(Exception):
-                setattr(order, "intent", original_intent)
             symbol = _order_symbol(order)
             exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
             exposures.pop(symbol, None)
