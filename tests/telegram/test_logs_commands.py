@@ -88,3 +88,21 @@ async def test_cmd_dumplogs_no_chat_falls_back_to_reply(
 async def test_logs_commands_registered() -> None:
     names = {spec.name for spec in ot.OPERATOR_COMMANDS}
     assert {"logs", "dumplogs"} <= names
+
+
+async def test_cmd_logs_reads_tail_in_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    reply = AsyncMock()
+    monkeypatch.setattr(ot, "safe_reply", reply)
+    called = {"value": False}
+
+    async def fake_to_thread(fn):
+        called["value"] = True
+        return fn()
+
+    monkeypatch.setattr(ot.asyncio, "to_thread", fake_to_thread)
+    update = SimpleNamespace(effective_message=SimpleNamespace(text="/logs 20"))
+
+    await ot.cmd_logs(update, SimpleNamespace(), service=None)
+
+    assert called["value"] is True
+    reply.assert_awaited_once()

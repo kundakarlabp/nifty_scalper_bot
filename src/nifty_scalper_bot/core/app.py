@@ -421,6 +421,8 @@ async def _polling_failover_supervisor_iteration(
     spot_fresh = bool(feed_health.get("spot_fresh"))
     spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
     spot_age_ms = feed_health.get("spot_age_ms")
+    futures_age_ms = feed_health.get("futures_age_ms")
+    options_age_ms = feed_health.get("options_age_ms")
     auth_tick_age_ms = _safe_supervisor_call("market_data_manager.data_age_ms", getattr(mdm, "data_age_ms", None), default=quote_stale_ms + 1)
     try:
         lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
@@ -437,6 +439,31 @@ async def _polling_failover_supervisor_iteration(
         degraded_since = degraded_since or now_mono
         running = bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False))
         if now_mono - degraded_since >= activate_after and not running:
+            stale_age_ms = options_age_ms if not options_fresh else futures_age_ms if not futures_fresh else spot_age_ms
+            try:
+                stale_age_within_threshold = (
+                    stale_age_ms is not None and float(stale_age_ms) < float(quote_stale_ms)
+                )
+            except (TypeError, ValueError):
+                stale_age_within_threshold = False
+            if ws_ok and not lagging and stale_age_within_threshold:
+                _fallback_reason = "futures_stale" if not futures_fresh else "options_stale" if not options_fresh else "within_stale_threshold"
+                log_throttled(
+                    LOGGER,
+                    f"polling_fallback_skipped:{spot_symbol}:{_fallback_reason}:within_threshold",
+                    "POLLING_FALLBACK_SKIPPED reason=%s age_ms=%s threshold_ms=%s ws_ok=%s"
+                    % (_fallback_reason, stale_age_ms, quote_stale_ms, ws_ok),
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "POLLING_FALLBACK_SKIPPED",
+                        "reason": _fallback_reason,
+                        "age_ms": stale_age_ms,
+                        "threshold_ms": quote_stale_ms,
+                        "ws_ok": ws_ok,
+                    },
+                )
+                return degraded_since, recovered_since
             if (
                 spot_age_ms is not None
                 and float(spot_age_ms) <= float(quote_stale_ms)
@@ -5750,6 +5777,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bracket_manager=bracket_manager,
     )
     strategy_runner.attach_persistent_state(persistent_state)
+    if hasattr(order_manager, "entry_order_failed_callback"):
+        order_manager.entry_order_failed_callback = strategy_runner.notify_entry_order_failed
     market_data_manager.subscribe_bars(strategy_runner.ingest_historical_bar)
     strategy_runner.restore_trades(persistent_state.load_trades())
     settings.enable_live = bool(live_toggle_env)

@@ -352,8 +352,9 @@ async def test_stale_rejections_do_not_become_current_execution_reason() -> None
     await _handler(app, "check_execution").callback(update, DummyContext())  # type: ignore[arg-type]
 
     reply = update.effective_message.replies[-1]
-    assert "stale_last_skip_reason: margin_api_down" in reply
-    assert "execution_block_reason: None" in reply
+    assert "recent_last_order_rejection: margin_api_down" in reply
+    assert "execution_block_reason: none" in reply
+    assert "current_execution_blocker: none" in reply
 
 
 def test_registered_command_handlers_are_sorted_unique() -> None:

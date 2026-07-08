@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 
 @dataclass(slots=True)
@@ -89,9 +91,8 @@ class OneMinuteBarBuilder:
             raise ValueError("price must be positive")
 
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        else:
-            timestamp = timestamp.astimezone(timezone.utc)
+            timestamp = timestamp.replace(tzinfo=IST)
+        timestamp = timestamp.astimezone(timezone.utc)
         bucket_start = timestamp.replace(second=0, microsecond=0)
 
         if self._current is None:

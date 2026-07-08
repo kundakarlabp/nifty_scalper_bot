@@ -811,9 +811,9 @@ class StrategyRunner:
         # RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS=30
         # SIGNAL_REJECT_COOLDOWN_SECONDS=15
         # RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE=5
-        self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "60") or 60))
-        self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
-        self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "3") or 3))
+        self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "20") or 20))
+        self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "30") or 30))
+        self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "5") or 5))
         self._last_execution_halted_log_ts: float = 0.0
         self._runtime_data_hard_ready = False
         self._runtime_evaluation_ready = False
@@ -3701,6 +3701,17 @@ class StrategyRunner:
         return self._directional_dedup_key(
             underlying=underlying, option_side=option_side, reason=reason
         )
+
+    @staticmethod
+    def _reason_order_cooldown_key(
+        *, underlying: str, reason_key: str, option_side: str | None
+    ) -> str:
+        """Return the reason cooldown key while preserving legacy non-option behavior."""
+
+        side = str(option_side or "").upper()
+        if side in {"CE", "PE"}:
+            return f"{underlying}:{side}:{reason_key}"
+        return f"{underlying}:{reason_key}"
 
     def _mark_directional_dedup_submitted(
         self, *, underlying: str, option_side: str, reason: str, order_id: str
@@ -13215,12 +13226,17 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "non_option_symbol")
             reason_key = str(signal.reason or "unknown")
-            underlying_reason_key = f"{underlying}:{reason_key}"
+            initial_option_side = infer_option_side(trade_symbol or base_symbol or signal.symbol, getattr(signal, "metadata", {}) or {})
+            underlying_reason_key = self._reason_order_cooldown_key(
+                underlying=underlying,
+                option_side=initial_option_side,
+                reason_key=reason_key,
+            )
             reject_cooldown_key = f"{base_symbol}:{reason_key}:score_below_threshold"
             reject_last_ts = self._signal_reject_cooldown_ts.get(reject_cooldown_key)
-            if reject_last_ts is not None and (now_epoch - float(reject_last_ts)) < float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "60") or "60"):
+            if reject_last_ts is not None and (now_epoch - float(reject_last_ts)) < float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15"):
                 reject_age = now_epoch - float(reject_last_ts)
-                required_seconds = float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "60") or "60")
+                required_seconds = float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15")
                 self._logger.info("SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s", base_symbol, "score_below_threshold", trace_id)
                 self._logger.info(
                     "SCORE_REJECT_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
@@ -14458,7 +14474,7 @@ class StrategyRunner:
                     base_symbol, signal.action, strategy_name, failure_cd_until - now_epoch, trace_id,
                     extra={"event": "ORDER_FAILURE_COOLDOWN_ACTIVE", "symbol": base_symbol, "side": signal.action, "strategy": strategy_name, "cooldown_until": failure_cd_until, "trace_id": trace_id},
                 )
-                return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")
+                return _reject_after_dedup(reason="order_failure_cooldown_active")
 
             execution_symbol = normalize_symbol(trade_symbol or base_symbol)
             state_ok, state_reason, state_details = self._prepare_order_state_for_submission(
@@ -14982,7 +14998,13 @@ class StrategyRunner:
                     order_id, base_symbol, exit_side, qty,
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
-                self._reason_last_signal_ts[f"{underlying}:{reason_key}"] = now_epoch
+                self._reason_last_signal_ts[
+                    self._reason_order_cooldown_key(
+                        underlying=underlying,
+                        option_side=infer_option_side(base_symbol, getattr(signal, "metadata", {}) or {}),
+                        reason_key=reason_key,
+                    )
+                ] = now_epoch
                 try:
                     self._record_trade(
                         base_symbol,
