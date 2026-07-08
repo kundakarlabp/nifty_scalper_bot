@@ -135,3 +135,17 @@ def test_readiness_true_when_all_layers_have_bars_and_quote_depth_valid() -> Non
     assert status.ready_for_execution is True
     assert status.tradable_quote is True
     assert status.depth_available is True
+
+
+def test_synthetic_timestamp_quote_does_not_make_selected_option_execution_ready() -> None:
+    quote = {
+        **_quote(),
+        "timestamp_quality": "synthetic",
+    }
+
+    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+
+    assert status.ready_for_evaluation is True
+    assert status.ready_for_execution is False
+    assert status.tradable_quote is True
+    assert "selected_ce_quote_missing" in status.blocker_reasons

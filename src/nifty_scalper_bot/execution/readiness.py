@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Mapping
 
 LOGGER = logging.getLogger(__name__)
+_UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -240,6 +241,17 @@ class HydrationStatus:
     last_bar_ts: datetime | None = None
     live_merge_applied: bool = False
 
+    def __post_init__(self) -> None:
+        if self.role not in {"selected_ce", "selected_pe"} or not self.ready_for_execution:
+            return
+        bid_ask_valid = bool(self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > self.bid)
+        if bid_ask_valid:
+            return
+        self.ready_for_execution = False
+        blocker = f"{self.role}_quote_missing"
+        if blocker not in self.blocker_reasons:
+            self.blocker_reasons.append(blocker)
+
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-friendly hydration snapshot."""
         payload = asdict(self)
@@ -271,9 +283,27 @@ class HistoryReadinessPolicy:
         )
 
 
+def _quote_getter(payload: dict | object):
+    return payload.get if isinstance(payload, dict) else lambda key, default=None: getattr(payload, key, default)
+
+
+def quote_timestamp_quality_allows_hard_readiness(quote: dict | object | None) -> bool:
+    """Return False when a quote explicitly carries synthetic/invalid time proof.
+
+    Missing timestamp_quality remains backward-compatible; explicit unusable
+    quality is treated as hard-negative for bid/ask readiness and live arming.
+    """
+
+    if quote is None:
+        return True
+    getter = _quote_getter(quote)
+    quality = str(getter("timestamp_quality", "") or "").strip().lower()
+    return quality not in _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES
+
+
 def _quote_float(payload: dict | object, *keys: str) -> float | None:
     """Return first positive-compatible float field from a quote-like mapping."""
-    getter = payload.get if isinstance(payload, dict) else lambda key, default=None: getattr(payload, key, default)
+    getter = _quote_getter(payload)
     for key in keys:
         value = getter(key, None)
         if value is None:
@@ -292,10 +322,13 @@ def resolve_quote_bid_ask_spread(quote: dict | object) -> tuple[float | None, fl
 
     Fresh WebSocket FULL quotes are tradable when either top-level bid/ask or
     depth.buy[0]/depth.sell[0] contains a valid crossed-safe best bid/ask.
+    Quotes explicitly tagged synthetic/unknown/invalid cannot prove readiness.
     """
     if quote is None:
         return None, None, None, "missing"
-    getter = quote.get if isinstance(quote, dict) else lambda key, default=None: getattr(quote, key, default)
+    if not quote_timestamp_quality_allows_hard_readiness(quote):
+        return None, None, None, "timestamp_quality_unusable"
+    getter = _quote_getter(quote)
     bid: float | None = None
     ask: float | None = None
     source = "missing"
@@ -357,7 +390,6 @@ class QuoteReadiness:
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
-
 def evaluate_quote_readiness(
     symbol: str,
     quote: dict | object | None,
@@ -374,15 +406,18 @@ def evaluate_quote_readiness(
     """
     if quote is None:
         return QuoteReadiness(symbol=symbol, ltp_ready=False, depth_available=False, bid_ask_available=False, tradable_quote_ready=False, reason="quote_missing")
-    getter = quote.get if isinstance(quote, dict) else lambda key, default=None: getattr(quote, key, default)
+    getter = _quote_getter(quote)
     ltp = _quote_float(quote, "ltp", "last_price", "last_traded_price")
     ltp_ready = bool(ltp is not None and ltp > 0)
     depth = getter("depth", None)
     depth_available = bool(getter("depth_available", False) or depth)
     bid, ask, spread_pct, source = resolve_quote_bid_ask_spread(quote)
     bid_ask_available = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
+    timestamp_quality_ok = quote_timestamp_quality_allows_hard_readiness(quote)
     if not ltp_ready:
         reason = "ltp_missing"
+    elif not timestamp_quality_ok:
+        reason = "timestamp_quality_unusable"
     elif not bid_ask_available:
         raw_bid = _quote_float(quote, "bid", "bid_price", "best_bid", "best_bid_price")
         raw_ask = _quote_float(quote, "ask", "ask_price", "best_ask", "best_ask_price")
