@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from nifty_scalper_bot.risk import OrderSignal, RiskManager
 
 
-def test_check_order_enforces_max_trades_per_day_at_final_gate():
+def test_check_order_enforces_max_trades_per_day_at_final_gate(monkeypatch):
     manager = RiskManager.__new__(RiskManager)
     manager.settings = SimpleNamespace(max_trades_per_day=3, max_open_positions=0)
     manager.position_manager = SimpleNamespace(
@@ -12,7 +12,7 @@ def test_check_order_enforces_max_trades_per_day_at_final_gate():
     )
     manager._last_rejection = None
     trips = []
-    manager._trip_breaker = lambda reason: trips.append(reason)
+    monkeypatch.setattr(RiskManager, "_trip_breaker", lambda self, reason: trips.append(reason))
 
     allowed, reason = manager.check_order(
         OrderSignal(
@@ -32,7 +32,7 @@ def test_check_order_enforces_max_trades_per_day_at_final_gate():
     assert trips == ["max_trades_per_day breached: 3/3"]
 
 
-def test_check_order_enforces_max_open_positions_at_final_gate():
+def test_check_order_enforces_max_open_positions_at_final_gate(monkeypatch):
     manager = RiskManager.__new__(RiskManager)
     manager.settings = SimpleNamespace(max_trades_per_day=0, max_open_positions=1)
     manager.position_manager = SimpleNamespace(
@@ -41,7 +41,7 @@ def test_check_order_enforces_max_open_positions_at_final_gate():
     )
     manager._last_rejection = None
     trips = []
-    manager._trip_breaker = lambda reason: trips.append(reason)
+    monkeypatch.setattr(RiskManager, "_trip_breaker", lambda self, reason: trips.append(reason))
 
     allowed, reason = manager.check_order(
         OrderSignal(
