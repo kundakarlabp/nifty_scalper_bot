@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from nifty_scalper_bot.execution import position_identity_extension as identity_ext
 from nifty_scalper_bot.execution.position_manager import Order, PositionManager
 
@@ -7,11 +9,22 @@ from nifty_scalper_bot.execution.position_manager import Order, PositionManager
 SYMBOL = "NFO:NIFTY2670724250PE"
 
 
-def test_unknown_buy_fill_does_not_scale_existing_long_position(tmp_path):
-    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
-    manager.open_position(SYMBOL, "LONG", 65, 75.0, order_id="entry-1")
-    order = Order(
-        order_id="manual-buy",
+class BrokerPositions:
+    def __init__(self, payload=None, exc: Exception | None = None) -> None:
+        self.payload = {"net": []} if payload is None else payload
+        self.exc = exc
+        self.calls = 0
+
+    def get_positions(self):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.payload
+
+
+def _unknown_buy(order_id: str = "manual-buy") -> Order:
+    return Order(
+        order_id=order_id,
         symbol=SYMBOL,
         side="BUY",
         order_type="MARKET",
@@ -22,6 +35,25 @@ def test_unknown_buy_fill_does_not_scale_existing_long_position(tmp_path):
         fill_price=80.0,
         intent="UNKNOWN",
     )
+
+
+def test_unknown_buy_fill_with_broker_open_does_not_scale_existing_long_position(tmp_path):
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.set_broker_client(
+        BrokerPositions(
+            {
+                "net": [
+                    {
+                        "tradingsymbol": "NIFTY2670724250PE",
+                        "quantity": 130,
+                        "average_price": 80.0,
+                    }
+                ]
+            }
+        )
+    )
+    manager.open_position(SYMBOL, "LONG", 65, 75.0, order_id="entry-1")
+    order = _unknown_buy()
     manager._orders[order.order_id] = order
 
     manager.update_order_status(order.order_id, "COMPLETE", fill_price=80.0)
@@ -35,9 +67,63 @@ def test_unknown_buy_fill_does_not_scale_existing_long_position(tmp_path):
     assert terminal.lifecycle_applied is False
     assert terminal.lifecycle_resolved is False
     exposures = manager.get_quarantined_broker_exposures()
-    assert exposures[SYMBOL]["status"] == "MANUAL_ORDER_QUARANTINED"
+    assert exposures[SYMBOL]["status"] == "BROKER_POSITION_QUARANTINED"
     assert exposures[SYMBOL]["order_id"] == "manual-buy"
-    assert exposures[SYMBOL]["reason"] == "manual_order_quarantined"
+    assert exposures[SYMBOL]["reason"] == "broker_position_unowned_or_cost_basis_unresolved"
+
+
+def test_unknown_buy_fill_with_broker_flat_is_resolved_without_quarantine(tmp_path, caplog):
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    broker = BrokerPositions({"net": []})
+    manager.set_broker_client(broker)
+    order = _unknown_buy("replayed-buy")
+    manager._orders[order.order_id] = order
+
+    with caplog.at_level("INFO"):
+        manager.update_order_status(order.order_id, "COMPLETE", fill_price=80.0)
+
+    assert broker.calls == 1
+    assert manager.get_position(SYMBOL) is None
+    assert manager.get_quarantined_broker_exposures() == {}
+    terminal = manager._terminal_orders[order.order_id]
+    assert terminal.lifecycle_applied is False
+    assert terminal.accounting_finalized is True
+    assert terminal.lifecycle_resolved is True
+    assert order.order_id not in manager._unresolved_terminal_orders
+    assert "BROKER_FLAT_CONFIRMED_FOR_UNKNOWN_ORDER" in caplog.text
+    assert "MANUAL_ORDER_QUARANTINED" not in caplog.text
+
+
+def test_unknown_buy_fill_with_broker_fetch_failure_fails_closed(tmp_path):
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.set_broker_client(BrokerPositions(exc=RuntimeError("kite down")))
+    order = _unknown_buy("unverified-buy")
+    manager._orders[order.order_id] = order
+
+    manager.update_order_status(order.order_id, "COMPLETE", fill_price=80.0)
+
+    assert manager.get_position(SYMBOL) is None
+    terminal = manager._terminal_orders[order.order_id]
+    assert terminal.lifecycle_resolved is False
+    assert order.order_id in manager._unresolved_terminal_orders
+    exposures = manager.get_quarantined_broker_exposures()
+    assert exposures[SYMBOL]["status"] == "BROKER_STATE_UNVERIFIED"
+    assert exposures[SYMBOL]["reason"] == "broker_state_unverified"
+    assert manager.current_entry_protection_blocker(SYMBOL) == "broker_state_unverified"
+
+
+def test_unknown_buy_fill_without_broker_fetcher_fails_closed(tmp_path):
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    order = _unknown_buy("no-fetcher-buy")
+    manager._orders[order.order_id] = order
+
+    manager.update_order_status(order.order_id, "COMPLETE", fill_price=80.0)
+
+    assert manager.get_position(SYMBOL) is None
+    exposures = manager.get_quarantined_broker_exposures()
+    assert exposures[SYMBOL]["status"] == "BROKER_STATE_UNVERIFIED"
+    assert exposures[SYMBOL]["reason"] == "broker_state_unverified"
+    assert manager.current_entry_protection_blocker(SYMBOL) == "broker_state_unverified"
 
 
 def test_unknown_sell_fill_is_recognized_as_manual_exit_for_existing_long_position(tmp_path):
