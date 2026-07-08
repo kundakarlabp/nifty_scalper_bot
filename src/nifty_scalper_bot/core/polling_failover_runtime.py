@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import inspect
 import logging
+import sys
 import time
 from typing import Any, Mapping
 
 from nifty_scalper_bot.core.polling_failover import decide_polling_fallback
 
 _PATCH_ATTR = "_polling_failover_runtime_patch_installed"
+_APP_MODULE_NAME = "nifty_scalper_bot.core.app"
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
 
@@ -162,6 +164,14 @@ def _polling_fallback_degraded(
     ).activate
 
 
+def _resolve_market_open_callable(ctx: Any) -> Any:
+    ctx_hook = getattr(ctx, "is_market_open_now", None)
+    if ctx_hook is not None:
+        return ctx_hook
+    app_module = sys.modules.get(_APP_MODULE_NAME)
+    return getattr(app_module, "is_market_open_now", None)
+
+
 async def _polling_failover_supervisor_iteration(
     ctx: Any,
     fallback: Any,
@@ -176,10 +186,7 @@ async def _polling_failover_supervisor_iteration(
     Returns the updated ``(degraded_since, recovered_since)`` state.
     """
 
-    market_open_fn = getattr(ctx, "is_market_open_now", None)
-    if market_open_fn is None:
-        market_open_fn = globals().get("is_market_open_now")
-    _called, market_open = _safe_callable(market_open_fn, name="is_market_open_now", default=False)
+    _called, market_open = _safe_callable(_resolve_market_open_callable(ctx), name="is_market_open_now", default=False)
     if not bool(market_open):
         await _stop_fallback_safely(fallback, reason="market_closed")
         return None, time.monotonic()
