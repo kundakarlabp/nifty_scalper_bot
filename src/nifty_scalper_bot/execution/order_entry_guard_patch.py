@@ -11,6 +11,7 @@ from nifty_scalper_bot.execution import order_manager_core as _core
 
 _PATCH_APPLIED = False
 _ORIGINAL_PLACE_ORDER: Any = None
+_CORE_PLACE_ORDER_SIGNATURE = inspect.signature(_core.OrderManager.place_order)
 _ENTRY_INTENTS = {"ENTRY", "SCALE_IN", "REVERSAL"}
 
 
@@ -118,8 +119,7 @@ def _entry_geometry_block_reason(
 
 def _bind_place_order(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any] | None:
     try:
-        signature = inspect.signature(_core.OrderManager.place_order)
-        bound = signature.bind_partial(None, *args, **dict(kwargs))
+        bound = _CORE_PLACE_ORDER_SIGNATURE.bind_partial(None, *args, **dict(kwargs))
         return {key: value for key, value in bound.arguments.items() if key != "self"}
     except Exception:
         return None

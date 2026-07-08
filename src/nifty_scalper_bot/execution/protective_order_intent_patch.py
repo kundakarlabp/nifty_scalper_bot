@@ -1,6 +1,6 @@
 """Protective order intent SSOT patch.
 
-RuntimeOrderManager is the final broker-order choke point.  Protective exits must
+RuntimeOrderManager is the final broker-order choke point. Protective exits must
 arrive there with explicit EXIT/REDUCE intent before the native entry gate runs;
 tag text alone is not a live-mode proof of safety.
 """
@@ -15,6 +15,7 @@ from nifty_scalper_bot.execution import order_manager_core as _core
 
 _PATCH_APPLIED = False
 _ORIGINAL_PLACE_ORDER: Any = None
+_CORE_PLACE_ORDER_SIGNATURE = inspect.signature(_core.OrderManager.place_order)
 
 _EXIT_TAG_PREFIXES = (
     "EXIT",
@@ -58,8 +59,7 @@ def _normalise_protective_intent_kwargs(kwargs: Mapping[str, Any]) -> dict[str, 
 
 def _bind_place_order(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any] | None:
     try:
-        signature = inspect.signature(_core.OrderManager.place_order)
-        bound = signature.bind_partial(None, *args, **dict(kwargs))
+        bound = _CORE_PLACE_ORDER_SIGNATURE.bind_partial(None, *args, **dict(kwargs))
         return {key: value for key, value in bound.arguments.items() if key != "self"}
     except Exception:
         return None
