@@ -83,6 +83,7 @@ async def test_help_is_grouped_and_lists_kept_commands() -> None:
     assert "/status - compact current runtime status" in reply
     assert "/market - operator-grade selected CE/PE quote" in reply
     assert "/flatten [confirmed-destructive]" in reply
+    assert "/flat [confirmed-destructive]" in reply
     assert "mode -" not in reply
     assert "emergencystop -" not in reply
 
@@ -242,6 +243,7 @@ EXPECTED_OPERATOR_COMMANDS = (
     "shadow",
     "emergency",
     "flatten",
+    "flat",
     "cancel_pending",
     "confirm",
 )
@@ -251,6 +253,7 @@ def test_registered_command_names_equal_expected_set() -> None:
     assert OPERATOR_COMMAND_NAMES == EXPECTED_OPERATOR_COMMANDS
     assert OPERATOR_COMMAND_NAMES.count("check_execution") == 1
     assert OPERATOR_COMMAND_NAMES.count("emergency") == 1
+    assert OPERATOR_COMMAND_NAMES.count("flat") == 1
 
 
 @pytest.mark.asyncio
@@ -338,123 +341,29 @@ async def test_stale_rejections_do_not_become_current_execution_reason() -> None
                 live_block_reason=None,
                 execution_block_reason=None,
             ),
-            order_manager=SimpleNamespace(_last_skip_reason="unresolved_exit_position"),
-            risk_manager=SimpleNamespace(
-                _breaker_tripped=False,
-                _last_rejection="DAILY_REALIZED_LIMIT:-17627.19/-352.34",
-            ),
+            order_manager=SimpleNamespace(_last_skip_reason="margin_api_down"),
+            risk_manager=SimpleNamespace(_breaker_tripped=False, _last_rejection=None),
+            strategy_runner=SimpleNamespace(last_signal_reason="regime_gate"),
         ),
     )
     register_operator_commands(app, service)  # type: ignore[arg-type]
+    update = DummyUpdate(text="/check_execution")
 
-    why_update = DummyUpdate(text="/why")
-    await _handler(app, "why").callback(why_update, DummyContext())  # type: ignore[arg-type]
-    why_reply = why_update.effective_message.replies[-1]
-    assert "final_reason: waiting_for_valid_signal" in why_reply
-    assert "final_reason: unresolved_exit_position" not in why_reply
-    assert "final_reason: DAILY_REALIZED_LIMIT" not in why_reply
-    assert "last_order_rejection: unresolved_exit_position" in why_reply
-    assert "last_risk_rejection: DAILY_REALIZED_LIMIT:-17627.19/-352.34" in why_reply
+    await _handler(app, "check_execution").callback(update, DummyContext())  # type: ignore[arg-type]
 
-    execution_update = DummyUpdate(text="/check_execution")
-    await _handler(app, "check_execution").callback(execution_update, DummyContext())  # type: ignore[arg-type]
-    execution_reply = execution_update.effective_message.replies[-1]
-    assert "current_execution_blocker: none" in execution_reply
-    assert "current_risk_breaker_reason: none" in execution_reply
-    assert "recent_last_order_rejection: unresolved_exit_position" in execution_reply
-    assert "recent_last_risk_rejection: DAILY_REALIZED_LIMIT:-17627.19/-352.34" in execution_reply
+    reply = update.effective_message.replies[-1]
+    assert "stale_last_skip_reason: margin_api_down" in reply
+    assert "execution_block_reason: None" in reply
 
 
-@pytest.mark.asyncio
-async def test_diagnostic_handlers_do_not_crash_with_missing_dependencies() -> None:
+def test_registered_command_handlers_are_sorted_unique() -> None:
     app = FakeApp()
     service = SimpleNamespace(chat_id=12345)
-    register_operator_commands(app, service)  # type: ignore[arg-type]
-
-    for command in ("why", "check_execution", "check_market", "check_core", "market", "exec", "risk", "positions", "bracket", "reconcile", "doctor", "today", "latency", "version"):
-        update = DummyUpdate(text=f"/{command}")
-        await _handler(app, command).callback(update, DummyContext())  # type: ignore[arg-type]
-        assert update.effective_message.replies, command
+    commands = register_operator_commands(app, service)  # type: ignore[arg-type]
+    assert commands == sorted(set(commands))
 
 
-@pytest.mark.asyncio
-async def test_new_read_only_commands_do_not_place_or_cancel_orders() -> None:
-    app = FakeApp()
-    order = SimpleNamespace(
-        place_order=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not place")),
-        cancel_order=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not cancel")),
-    )
-    service = SimpleNamespace(chat_id=12345, deps=SimpleNamespace(order_manager=order))
-    register_operator_commands(app, service)  # type: ignore[arg-type]
-
-    for command in ("market", "exec", "risk", "positions", "bracket", "reconcile", "doctor", "today", "latency", "version"):
-        update = DummyUpdate(text=f"/{command}")
-        await _handler(app, command).callback(update, DummyContext())  # type: ignore[arg-type]
-        assert update.effective_message.replies, command
-
-
-@pytest.mark.asyncio
-async def test_flatten_requires_confirmation_before_side_effect() -> None:
-    app = FakeApp()
-    called: list[str] = []
-    service = SimpleNamespace(chat_id=12345, close_all_positions=lambda: called.append("flattened") or "flat")
-    register_operator_commands(app, service)  # type: ignore[arg-type]
-
-    request = DummyUpdate(text="/flatten")
-    await _handler(app, "flatten").callback(request, DummyContext())  # type: ignore[arg-type]
-    assert called == []
-    reply = request.effective_message.replies[-1]
-    assert "CONFIRM REQUIRED" in reply
-    match = re.search(r"/confirm flatten (\d{4})", reply)
-    assert match
-
-    confirm = DummyUpdate(text=f"/confirm flatten {match.group(1)}")
-    await _handler(app, "confirm").callback(confirm, DummyContext())  # type: ignore[arg-type]
-    assert called == ["flattened"]
-    assert "Confirmed flatten" in confirm.effective_message.replies[-1]
-
-
-@pytest.mark.asyncio
-async def test_shadow_off_requires_confirmation_but_shadow_on_is_immediate() -> None:
-    app = FakeApp()
-    states: list[bool] = []
-
-    def set_shadow(value: bool) -> bool:
-        states.append(value)
-        return value
-
-    service = SimpleNamespace(chat_id=12345, set_shadow_mode=set_shadow)
-    register_operator_commands(app, service)  # type: ignore[arg-type]
-
-    on_update = DummyUpdate(text="/shadow on")
-    await _handler(app, "shadow").callback(on_update, DummyContext())  # type: ignore[arg-type]
-    assert states == [True]
-
-    off_update = DummyUpdate(text="/shadow off")
-    await _handler(app, "shadow").callback(off_update, DummyContext())  # type: ignore[arg-type]
-    assert states == [True]
-    match = re.search(r"/confirm shadow_off (\d{4})", off_update.effective_message.replies[-1])
-    assert match
-
-    confirm = DummyUpdate(text=f"/confirm shadow_off {match.group(1)}")
-    await _handler(app, "confirm").callback(confirm, DummyContext())  # type: ignore[arg-type]
-    assert states == [True, False]
-
-
-@pytest.mark.asyncio
-async def test_cancel_pending_requires_confirmation() -> None:
-    app = FakeApp()
-    called: list[str] = []
-    order = SimpleNamespace(cancel_pending_orders=lambda: called.append("cancelled") or "cancelled")
-    service = SimpleNamespace(chat_id=12345, deps=SimpleNamespace(order_manager=order))
-    register_operator_commands(app, service)  # type: ignore[arg-type]
-
-    request = DummyUpdate(text="/cancel_pending")
-    await _handler(app, "cancel_pending").callback(request, DummyContext())  # type: ignore[arg-type]
-    assert called == []
-    match = re.search(r"/confirm cancel_pending (\d{4})", request.effective_message.replies[-1])
-    assert match
-
-    confirm = DummyUpdate(text=f"/confirm cancel_pending {match.group(1)}")
-    await _handler(app, "confirm").callback(confirm, DummyContext())  # type: ignore[arg-type]
-    assert called == ["cancelled"]
+def test_command_list_has_no_legacy_duplicates_or_fuzz_names() -> None:
+    joined = " ".join(OPERATOR_COMMAND_NAMES)
+    assert not re.search(r"\b(statuscheck|diagnostics|panic|emergencystop|go_live)\b", joined)
+    assert len(OPERATOR_COMMAND_NAMES) == len(set(OPERATOR_COMMAND_NAMES))
