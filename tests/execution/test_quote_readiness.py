@@ -5,6 +5,7 @@ from nifty_scalper_bot.execution.quote_readiness import (
     resolve_real_tick_count,
     resolve_tick_age_ms,
 )
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 
 
 def test_missing_age_never_becomes_fresh_in_live_mode():
@@ -47,6 +48,31 @@ def test_quote_age_seconds_allows_live_orderflow_quote():
     assert result.allowed is True
     assert result.reason == "ready"
     assert result.tick_age_ms == 100
+
+
+def test_synthetic_timestamp_quality_blocks_live_quote_readiness():
+    payload = {
+        "bid": 99.9,
+        "ask": 100.1,
+        "tick_age_ms": 100,
+        "depth_available": True,
+        "tradable_quote": True,
+        "timestamp_quality": "synthetic",
+    }
+
+    result = evaluate_execution_quote(
+        "NFO:NIFTY26JUN24000CE",
+        payload,
+        live_mode=True,
+        max_tick_age_ms=2500,
+        max_spread_pct=0.75,
+        require_depth=True,
+    )
+    bid, ask, spread, source = resolve_quote_bid_ask_spread(payload)
+
+    assert result.allowed is False
+    assert result.reason == "timestamp_quality_unusable"
+    assert (bid, ask, spread, source) == (None, None, None, "timestamp_quality_unusable")
 
 
 def test_fresh_ms_quote_can_prove_one_recent_update():
