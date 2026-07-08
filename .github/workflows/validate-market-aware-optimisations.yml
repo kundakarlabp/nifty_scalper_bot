@@ -38,6 +38,11 @@ jobs:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q tests/test_execution_path_contract.py tests/execution/test_runtime_order_facade.py tests/execution/test_runtime_bracket_facade.py tests/execution/test_bracket_exit_state_machine.py tests/execution/test_virtual_bracket_safety.py tests/execution/test_live_exit_hardening.py
+      - name: SSOT entry exit risk guard tests
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: |
+          python -m pytest -q tests/execution/test_operator_exit_intent_contract.py tests/execution/test_protective_order_intent_patch.py tests/execution/test_entry_geometry_guard.py tests/execution/test_manual_exit_classification.py tests/execution/test_manual_order_quarantine.py tests/risk/test_risk_check_order_daily_limits.py
       - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: "false"
