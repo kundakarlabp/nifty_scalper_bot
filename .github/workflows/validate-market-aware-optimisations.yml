@@ -53,26 +53,18 @@ jobs:
           print(' '.join(str(p) for p in sorted(files)))
           PY
           )
-      - name: Execution tests q-only
+      - name: Runtime bracket facade explicit
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q $(python - <<'PY'
-          from pathlib import Path
-          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() == 'q']
-          print(' '.join(str(p) for p in sorted(files)))
-          PY
-          )
-      - name: Execution tests r-only
+        run: python -m pytest -q tests/execution/test_runtime_bracket_facade.py
+      - name: Runtime order facade explicit
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q $(python - <<'PY'
-          from pathlib import Path
-          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() == 'r']
-          print(' '.join(str(p) for p in sorted(files)))
-          PY
-          )
+        run: python -m pytest -q tests/execution/test_runtime_order_facade.py
+      - name: Runtime order exit identity explicit
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: python -m pytest -q tests/execution/test_runtime_order_exit_identity_kwargs.py
       - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: "false"
