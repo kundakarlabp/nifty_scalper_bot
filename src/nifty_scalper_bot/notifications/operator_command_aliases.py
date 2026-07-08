@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 _PATCH_APPLIED = False
 
 
@@ -9,7 +11,7 @@ def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
         return
-    from nifty_scalper_bot.notifications import operator_telegram as _operator
+    _operator = importlib.import_module("nifty_scalper_bot.notifications.operator_telegram")
 
     existing = {spec.name for spec in _operator.OPERATOR_COMMANDS}
     if "flat" not in existing:

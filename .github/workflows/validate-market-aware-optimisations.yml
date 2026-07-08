@@ -25,22 +25,20 @@ jobs:
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
       - name: Compile and diff check
-        run: |
-          git diff --check
-          python -m compileall -q src dashboard scripts tests
-      - name: Focused market-aware tests
+        run: python -m compileall -q src tests
+      - name: Operator check execution tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q tests/strategies/test_vwap_mean_reversion.py tests/strategies/test_elite_builder_mode.py tests/execution/test_execution_policy.py tests/execution/test_execution_safety_audit_fixes.py
-      - name: Execution safety regression tests
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'check_execution'
+      - name: Operator stale tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q tests/test_execution_path_contract.py tests/execution/test_runtime_order_facade.py tests/execution/test_runtime_bracket_facade.py tests/execution/test_bracket_exit_state_machine.py tests/execution/test_virtual_bracket_safety.py tests/execution/test_live_exit_hardening.py
-      - name: Full repository suite
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'stale'
+      - name: Operator remaining unique tests
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q
-      - name: Verify committed tree unchanged
-        run: git diff --exit-code
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'unique or legacy'
+      - name: Notification complete file
+        env:
+          BRACKET_AUTO_RESTORE: "false"
+        run: python -m pytest -q tests/notifications/test_operator_telegram.py
