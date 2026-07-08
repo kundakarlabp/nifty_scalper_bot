@@ -43,33 +43,33 @@ jobs:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q tests/execution/test_operator_exit_intent_contract.py tests/execution/test_protective_order_intent_patch.py tests/execution/test_entry_geometry_guard.py tests/execution/test_manual_exit_classification.py tests/execution/test_manual_order_quarantine.py tests/risk/test_risk_check_order_daily_limits.py
-      - name: Execution tests a-m
+      - name: Execution tests a-p
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q $(python - <<'PY'
           from pathlib import Path
-          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() <= 'm']
+          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() <= 'p']
           print(' '.join(str(p) for p in sorted(files)))
           PY
           )
-      - name: Execution tests n-p
+      - name: Execution tests q-only
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q $(python - <<'PY'
           from pathlib import Path
-          files = [p for p in Path('tests/execution').glob('test_*.py') if 'n' <= p.name[5].lower() <= 'p']
+          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() == 'q']
           print(' '.join(str(p) for p in sorted(files)))
           PY
           )
-      - name: Execution tests q-r
+      - name: Execution tests r-only
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q $(python - <<'PY'
           from pathlib import Path
-          files = [p for p in Path('tests/execution').glob('test_*.py') if 'q' <= p.name[5].lower() <= 'r']
+          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() == 'r']
           print(' '.join(str(p) for p in sorted(files)))
           PY
           )
