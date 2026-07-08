@@ -43,21 +43,18 @@ jobs:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q tests/execution/test_operator_exit_intent_contract.py tests/execution/test_protective_order_intent_patch.py tests/execution/test_entry_geometry_guard.py tests/execution/test_manual_exit_classification.py tests/execution/test_manual_order_quarantine.py tests/risk/test_risk_check_order_daily_limits.py
-      - name: Tests architecture core data dashboard
+      - name: Tests execution
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q tests/architecture tests/core tests/data tests/dashboard
-      - name: Tests execution risk notifications
+        run: python -m pytest -q tests/execution
+      - name: Tests risk
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q tests/execution tests/risk tests/notifications
-      - name: Tests strategies integration root
+        run: python -m pytest -q tests/risk
+      - name: Tests notifications
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: |
-          python -m pytest -q tests/strategies tests/integration tests/test_*.py
+        run: python -m pytest -q tests/notifications
       - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: "false"
