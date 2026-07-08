@@ -82,6 +82,7 @@ def _is_manual_reduction_order(manager: Any, order: Any) -> bool:
     if existing is None:
         return False
     existing_side = str(getattr(existing, "side", "") or "").strip().upper()
+    existing_qty = 0
     with suppress(Exception):
         existing_qty = abs(int(float(getattr(existing, "quantity", 0) or 0)))
     if existing_qty <= 0 or qty > existing_qty:
@@ -190,15 +191,21 @@ def apply_patches() -> None:
         return _ORIGINALS["PositionManager.synchronize_with_broker"](self, broker_positions)
 
     def current_entry_protection_blocker(self: Any, symbol: str | None = None) -> str | None:
-        exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
-        if exposures:
-            if symbol is None:
-                exposure = next(iter(exposures.values()))
-            else:
+        exposures = getattr(self, "_quarantined_broker_exposures", {}) or {}
+        if isinstance(exposures, dict) and exposures:
+            if symbol is not None:
                 exposure = exposures.get(_canonical(symbol))
-            if exposure is not None:
-                reason = str(exposure.get("reason") or "")
-                if reason == "broker_state_unverified":
+                if exposure is not None:
+                    reason = str(exposure.get("reason") or "")
+                    if reason == "broker_state_unverified":
+                        return "broker_state_unverified"
+                    return "broker_exposure_quarantined"
+            else:
+                if any(
+                    str(exposure.get("reason") or "") == "broker_state_unverified"
+                    for exposure in exposures.values()
+                    if isinstance(exposure, dict)
+                ):
                     return "broker_state_unverified"
                 return "broker_exposure_quarantined"
         original = _ORIGINALS.get("PositionManager.current_entry_protection_blocker")
