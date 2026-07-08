@@ -33,8 +33,18 @@ def _install_alert_log_hygiene() -> None:
         return
 
 
+def _install_operator_command_aliases() -> None:
+    try:
+        from nifty_scalper_bot.notifications.operator_command_aliases import apply_patches
+
+        apply_patches()
+    except Exception:
+        return
+
+
 _install_telegram_log_filters()
 _install_alert_log_hygiene()
+_install_operator_command_aliases()
 
 __all__ = [
     "TelegramEnhancedNotifier",
