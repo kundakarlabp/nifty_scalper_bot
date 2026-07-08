@@ -183,6 +183,23 @@ class CandleBuilder:
         ts = tick.timestamp
         minute = ts.floor("1min")
         last = self._last_ts.get(sym)
+        if last is not None and _is_future_timestamp(last):
+            log_throttled(
+                LOGGER,
+                f"future_last_ts_quarantined:{sym}",
+                f"future_last_ts_quarantined symbol={sym} last_ts={last.isoformat()} incoming_ts={ts.isoformat()}",
+                interval_sec=30.0,
+                level=logging.WARNING,
+                extra={
+                    "event": "future_last_ts_quarantined",
+                    "symbol": sym,
+                    "last_ts": last.isoformat(),
+                    "incoming_ts": ts.isoformat(),
+                    "source": "candle_builder",
+                },
+            )
+            self._last_ts.pop(sym, None)
+            last = None
         if last is not None and ts < last:
             _DROPPED_TICKS.increment()
             log_throttled(LOGGER, f"tick_out_of_order:{sym}", f"tick_out_of_order symbol={sym} tick_ts={ts.isoformat()} last_ts={last.isoformat()} total_dropped={_DROPPED_TICKS.value}", interval_sec=30.0, level=logging.DEBUG, extra={"event": "tick_out_of_order", "symbol": sym, "tick_ts": ts.isoformat(), "last_ts": last.isoformat(), "total_dropped": _DROPPED_TICKS.value})
@@ -263,9 +280,26 @@ class CandleStore:
             buf = self._store[normalized_candle.symbol]
             if buf:
                 last_ts = _to_ist_timestamp(buf[-1].timestamp).floor("1min")
-                if incoming_ts == last_ts:
+                if _is_future_timestamp(last_ts):
+                    log_throttled(
+                        LOGGER,
+                        f"future_last_ts_quarantined:{normalized_candle.symbol}:store",
+                        f"future_last_ts_quarantined symbol={normalized_candle.symbol} last_ts={last_ts.isoformat()} incoming_ts={incoming_ts.isoformat()} source=candle_store",
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                        extra={
+                            "event": "future_last_ts_quarantined",
+                            "symbol": normalized_candle.symbol,
+                            "last_ts": last_ts.isoformat(),
+                            "incoming_ts": incoming_ts.isoformat(),
+                            "source": "candle_store",
+                        },
+                    )
+                    buf.clear()
+                    last_ts = None
+                if last_ts is not None and incoming_ts == last_ts:
                     return
-                if incoming_ts < last_ts:
+                if last_ts is not None and incoming_ts < last_ts:
                     age_delta = max(0.0, (last_ts - incoming_ts).total_seconds())
                     if age_delta <= _overlap_seconds():
                         LOGGER.debug("candle_store_overlap_duplicate symbol=%s incoming_ts=%s last_ts=%s age_delta_s=%.1f", normalized_candle.symbol, incoming_ts.isoformat(), last_ts.isoformat(), age_delta, extra={"event": "candle_store_overlap_duplicate", "symbol": normalized_candle.symbol, "incoming_ts": incoming_ts.isoformat(), "last_ts": last_ts.isoformat(), "age_delta_s": age_delta, "source": "candle_store", "reason": "hydration_live_boundary_overlap"})

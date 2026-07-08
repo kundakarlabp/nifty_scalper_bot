@@ -841,6 +841,7 @@ class OrderManager:
         self._history_persisted_ids: set[str] = set()
         self._notifier: TelegramEnhancedNotifier | None = None
         self._bracket_manager: BracketManager | None = None
+        self.entry_order_failed_callback: Callable[..., None] | None = None
         self._lock = RLock()
         self._stop_event = Event()
         self._monitor_thread: Thread | None = None
@@ -5928,6 +5929,26 @@ class OrderManager:
                         raise
 
                 self._confirm_position_protection_for_fill(order)
+
+            is_failed_entry_terminal = (
+                status_raw in {"REJECTED", "CANCELLED", "CANCELED", "FAILED", "EXPIRED"}
+                and old_status != new_status
+                and str(getattr(order, "intent", "") or "").upper() in {"ENTRY", "UNKNOWN", ""}
+            )
+            if is_failed_entry_terminal and callable(self.entry_order_failed_callback):
+                try:
+                    self.entry_order_failed_callback(
+                        order_id=str(order_id),
+                        symbol=str(order.symbol),
+                        reason=status_raw.lower(),
+                    )
+                except Exception:
+                    self._logger.exception(
+                        "ENTRY_ORDER_FAILED_CALLBACK_ERROR order_id=%s symbol=%s status=%s",
+                        order_id,
+                        order.symbol,
+                        status_raw,
+                    )
 
             # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
             # _check_zombie_orders cancels stuck PENDING orders after 45s via

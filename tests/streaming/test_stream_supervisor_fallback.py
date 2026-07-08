@@ -205,3 +205,74 @@ async def test_noncallable_market_session_state_is_handled(
     assert "POLLING_SUPERVISOR_NONCALLABLE" in caplog.text
     assert "is_market_open_now" in caplog.text
     assert "Failure in polling failover supervisor" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_options_stale_but_age_below_threshold_does_not_start_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app, "is_market_open_now", lambda: True)
+    ctx = _supervisor_ctx(
+        is_connected=MagicMock(return_value=True),
+        data_age_ms=70,
+        feed_health={
+            "futures_fresh": True,
+            "options_fresh": False,
+            "options_age_ms": 70,
+            "spot_fresh": True,
+            "spot_symbol": "NSE:NIFTY",
+            "spot_age_ms": 70,
+        },
+    )
+    fallback = _Fallback(running=False)
+
+    await app._polling_failover_supervisor_iteration(
+        ctx, fallback, quote_stale_ms=120000, degraded_since=0.0, recovered_since=None, activate_after=0.0
+    )
+
+    fallback.start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_options_stale_at_threshold_starts_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app, "is_market_open_now", lambda: True)
+    ctx = _supervisor_ctx(
+        is_connected=MagicMock(return_value=True),
+        data_age_ms=120000,
+        feed_health={
+            "futures_fresh": True,
+            "options_fresh": False,
+            "options_age_ms": 120000,
+            "spot_fresh": True,
+            "spot_symbol": "NSE:NIFTY",
+            "spot_age_ms": 70,
+        },
+    )
+    fallback = _Fallback(running=False)
+
+    await app._polling_failover_supervisor_iteration(
+        ctx, fallback, quote_stale_ms=120000, degraded_since=0.0, recovered_since=None, activate_after=0.0
+    )
+
+    fallback.start.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_missing_quote_or_websocket_failure_allows_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app, "is_market_open_now", lambda: True)
+    ctx = _supervisor_ctx(
+        is_connected=MagicMock(return_value=False),
+        data_age_ms=10,
+        feed_health={
+            "futures_fresh": True,
+            "options_fresh": True,
+            "spot_fresh": True,
+            "spot_symbol": "NSE:NIFTY",
+            "spot_age_ms": 10,
+        },
+    )
+    fallback = _Fallback(running=False)
+
+    await app._polling_failover_supervisor_iteration(
+        ctx, fallback, quote_stale_ms=120000, degraded_since=0.0, recovered_since=None, activate_after=0.0
+    )
+
+    fallback.start.assert_called_once()

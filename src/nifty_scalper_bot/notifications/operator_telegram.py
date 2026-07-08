@@ -9,6 +9,7 @@ Runtime role:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 import inspect
@@ -709,8 +710,9 @@ async def cmd_errors(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any)
 
 async def cmd_logs(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:
     del service
-    n = _parse_count(update, default=80, lo=10, hi=400)
-    text = "\n".join(_log_ring_tail(n)) or "No logs buffered yet."
+    n = _parse_count(update, default=80, lo=10, hi=200)
+    text = await asyncio.to_thread(lambda: "\n".join(_log_ring_tail(n)))
+    text = text or "No logs buffered yet."
     if len(text) > 3500:
         text = "…(truncated)…\n" + text[-3500:]
     await safe_reply(update, text)
@@ -721,8 +723,9 @@ async def cmd_dumplogs(update: Update, _: ContextTypes.DEFAULT_TYPE, service: An
     import io
     import time as _time
 
-    n = _parse_count(update, default=1500, lo=50, hi=5000)
-    text = "\n".join(_log_ring_tail(n)) or "No logs buffered yet."
+    n = _parse_count(update, default=1500, lo=50, hi=2000)
+    text = await asyncio.to_thread(lambda: "\n".join(_log_ring_tail(n)))
+    text = (text or "No logs buffered yet.")[-200_000:]
     bio = io.BytesIO(text.encode("utf-8"))
     bio.name = f"niftybot-logs-{_time.strftime('%Y%m%d-%H%M%S')}.txt"
     chat = getattr(update, "effective_chat", None)

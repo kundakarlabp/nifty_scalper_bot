@@ -1,6 +1,8 @@
+from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 
 from nifty_scalper_bot.data.pipeline import Candle, CandleStore
@@ -27,3 +29,43 @@ def test_future_candle_is_rejected_without_store_write() -> None:
     with pytest.raises(DataIntegrityError):
         store.push(Candle("NFO:TEST", ts, 100, 100, 100, 100, 1))
     assert store.get("NFO:TEST") == []
+
+
+def test_one_minute_bar_builder_localizes_naive_ist_to_utc() -> None:
+    from nifty_scalper_bot.strategies.bar_builder import OneMinuteBarBuilder
+
+    builder = OneMinuteBarBuilder()
+    builder.update(100, 1, datetime(2026, 1, 2, 12, 52))
+    closed = builder.update(101, 1, datetime(2026, 1, 2, 12, 53))
+
+    assert closed is not None
+    assert closed.timestamp.isoformat() == "2026-01-02T07:22:00+00:00"
+
+
+def test_candle_builder_quarantines_future_last_ts_then_accepts_current_bar() -> None:
+    from nifty_scalper_bot.data.pipeline import CandleBuilder, ValidatedTick
+
+    builder = CandleBuilder()
+    sym = "NFO:TEST"
+    builder._last_ts[sym] = pd.Timestamp.now(tz=IST) + pd.Timedelta(minutes=10)
+    now = pd.Timestamp.now(tz=IST).floor("1min")
+
+    assert builder.on_tick(ValidatedTick(sym, now, 100, 1)) is None
+    closed = builder.on_tick(ValidatedTick(sym, now + pd.Timedelta(minutes=1), 101, 1))
+
+    assert closed is not None
+    assert closed.timestamp == now
+
+
+def test_candle_store_quarantines_future_tail_before_valid_current_bar() -> None:
+    store = CandleStore()
+    sym = "NFO:TEST"
+    future = pd.Timestamp.now(tz=IST) + pd.Timedelta(minutes=10)
+    current = pd.Timestamp.now(tz=IST).floor("1min")
+    store._store[sym] = deque([Candle(sym, future, 100, 100, 100, 100, 1)])
+
+    store.push(Candle(sym, current, 101, 101, 101, 101, 1))
+
+    candles = store.get(sym)
+    assert len(candles) == 1
+    assert candles[0].timestamp.floor("1min") == current
