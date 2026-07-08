@@ -43,28 +43,21 @@ jobs:
           BRACKET_AUTO_RESTORE: "false"
         run: |
           python -m pytest -q tests/execution/test_operator_exit_intent_contract.py tests/execution/test_protective_order_intent_patch.py tests/execution/test_entry_geometry_guard.py tests/execution/test_manual_exit_classification.py tests/execution/test_manual_order_quarantine.py tests/risk/test_risk_check_order_daily_limits.py
-      - name: Execution tests a-p
+      - name: Tests architecture core data dashboard
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: |
-          python -m pytest -q $(python - <<'PY'
-          from pathlib import Path
-          files = [p for p in Path('tests/execution').glob('test_*.py') if p.name[5].lower() <= 'p']
-          print(' '.join(str(p) for p in sorted(files)))
-          PY
-          )
-      - name: Runtime bracket facade explicit
+          python -m pytest -q tests/architecture tests/core tests/data tests/dashboard
+      - name: Tests execution risk notifications
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/execution/test_runtime_bracket_facade.py
-      - name: Runtime order facade explicit
+        run: |
+          python -m pytest -q tests/execution tests/risk tests/notifications
+      - name: Tests strategies integration root
         env:
           BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/execution/test_runtime_order_facade.py
-      - name: Runtime order exit identity explicit
-        env:
-          BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/execution/test_runtime_order_exit_identity_kwargs.py
+        run: |
+          python -m pytest -q tests/strategies tests/integration tests/test_*.py
       - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: "false"
