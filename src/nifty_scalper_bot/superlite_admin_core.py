@@ -243,7 +243,7 @@ def _normalise_selected_payload(payload: Mapping[str, Any] | None, *, source: st
     atm = payload.get("atm") or payload.get("atm_strike") or payload.get("strike")
     if not ce and not pe:
         return {}
-    result: dict[str, Any] = {"source": source}
+    result: dict[str, Any] = {"_source": source}
     if ce:
         result["ce"] = ce
     if pe:
@@ -280,7 +280,7 @@ def _extract_selected_from_logs(recent_logs: str) -> dict[str, Any]:
                     "ce": match.group(1),
                     "pe": match.group(2),
                     "atm": match.group(3),
-                    "source": "journal:active_dynamic_basket" if "ACTIVE_DYNAMIC_BASKET_COMMITTED" in line else "journal:contract_ssot",
+                    "_source": "journal:active_dynamic_basket" if "ACTIVE_DYNAMIC_BASKET_COMMITTED" in line else "journal:contract_ssot",
                 }
     return {}
 
@@ -298,6 +298,7 @@ def status_snapshot() -> dict[str, Any]:
     operational_blockers = [value for value in blockers if value not in execution_only]
     recent = bounded_logs(180)
     selected_options = _extract_selected_from_structured(trading, mode) or _extract_selected_from_logs(recent)
+    selected_source = selected_options.pop("_source", None) if isinstance(selected_options, dict) else None
     running, remote = _git_ref("HEAD"), _git_ref("origin/main")
     data = {
         "service_process_known": _service_process_known(),
@@ -322,7 +323,7 @@ def status_snapshot() -> dict[str, Any]:
         "blockers": blockers,
         "operational_blockers": operational_blockers,
         "selected": selected_options,
-        "selected_source": selected_options.get("source") if isinstance(selected_options, Mapping) else None,
+        "selected_source": selected_source,
         "running": running,
         "remote": remote,
         "stale": running not in {"—", ""} and remote not in {"—", ""} and running != remote,
