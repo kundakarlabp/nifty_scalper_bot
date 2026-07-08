@@ -82,6 +82,7 @@ def _is_manual_reduction_order(manager: Any, order: Any) -> bool:
     if existing is None:
         return False
     existing_side = str(getattr(existing, "side", "") or "").strip().upper()
+    existing_qty = 0
     with suppress(Exception):
         existing_qty = abs(int(float(getattr(existing, "quantity", 0) or 0)))
     if existing_qty <= 0 or qty > existing_qty:

@@ -12,6 +12,7 @@ from typing import Any
 
 _PATCH_APPLIED = False
 _ORIGINAL_CHECK_ORDER: Any = None
+_REDUCING_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
 
 
 def _call_count(owner: Any, *names: str) -> int:
@@ -39,6 +40,58 @@ def _open_position_count(position_manager: Any) -> int:
         with suppress(Exception):
             return len(value)
     return 0
+
+
+def _position_symbol(position: Any) -> str:
+    return str(getattr(position, "symbol", "") or getattr(position, "tradingsymbol", "") or "").strip()
+
+
+def _signal_symbol(signal: Any) -> str:
+    return str(getattr(signal, "symbol", "") or getattr(signal, "tradingsymbol", "") or "").strip()
+
+
+def _position_quantity(position: Any) -> int:
+    with suppress(Exception):
+        return abs(int(float(getattr(position, "quantity", 0) or 0)))
+    return 0
+
+
+def _iter_open_positions(position_manager: Any) -> list[Any]:
+    positions = getattr(position_manager, "_positions", None)
+    if isinstance(positions, dict):
+        return list(positions.values())
+    getter = getattr(position_manager, "get_open_positions", None)
+    if callable(getter):
+        with suppress(Exception):
+            return list(getter() or [])
+    value = getattr(position_manager, "open_positions", None)
+    if callable(value):
+        with suppress(Exception):
+            return list(value() or [])
+    if value is not None and not isinstance(value, str):
+        with suppress(Exception):
+            return list(value)
+    return []
+
+
+def _is_reducing_order(position_manager: Any, signal: Any) -> bool:
+    intent = str(getattr(signal, "intent", "") or "").strip().upper()
+    reduce_only = bool(getattr(signal, "reduce_only", False))
+    side = str(getattr(signal, "side", "") or getattr(signal, "transaction_type", "") or "").strip().upper()
+    symbol = _signal_symbol(signal)
+    if intent in _REDUCING_INTENTS or reduce_only:
+        return True
+    if not symbol or side not in {"BUY", "SELL"}:
+        return False
+    for position in _iter_open_positions(position_manager):
+        if _position_symbol(position) != symbol or _position_quantity(position) <= 0:
+            continue
+        existing_side = str(getattr(position, "side", "") or "").strip().upper()
+        if existing_side == "LONG" and side == "SELL":
+            return True
+        if existing_side == "SHORT" and side == "BUY":
+            return True
+    return False
 
 
 def _daily_limit_block_reason(manager: Any) -> tuple[str, str] | None:
@@ -75,7 +128,12 @@ def _daily_limit_block_reason(manager: Any) -> tuple[str, str] | None:
 def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bool, str]:
     # Preserve the original priority for non-live calls and pre-existing breakers.
     # The added SSOT limits are production-entry guards, not replacements for the
-    # existing live-disabled/breaker semantics.
+    # existing live-disabled/breaker semantics. Protective exits/reductions must
+    # never be blocked by entry-only daily trade/open-position limits.
+    position_manager = getattr(self, "position_manager", None)
+    if position_manager is not None and _is_reducing_order(position_manager, signal):
+        return _ORIGINAL_CHECK_ORDER(self, signal, live_enabled)
+
     if live_enabled and not bool(getattr(self, "_breaker_tripped", False)):
         blocker = _daily_limit_block_reason(self)
         if blocker is not None:
@@ -119,4 +177,4 @@ def apply_patches() -> None:
     _PATCH_APPLIED = True
 
 
-__all__ = ["apply_patches", "_daily_limit_block_reason"]
+__all__ = ["apply_patches", "_daily_limit_block_reason", "_is_reducing_order"]
