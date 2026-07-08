@@ -8,15 +8,21 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
+from nifty_scalper_bot.data.time_contract import (
+    IST,
+    coerce_market_timestamp,
+    future_delta_seconds,
+    is_future_market_timestamp,
+    normalize_market_tick_timestamp,
+    normalized_symbol,
+)
 from nifty_scalper_bot.utils.logging import log_throttled
 
 LOGGER = logging.getLogger(__name__)
-IST = ZoneInfo("Asia/Kolkata")
 MIN_REQUIRED_CANDLES: int = 50
 
 
@@ -41,24 +47,9 @@ _DROPPED_CANDLES = _Counter()
 
 def _to_ist_timestamp(value: Any) -> pd.Timestamp:
     try:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            raw = float(value)
-            if raw > 1e12:
-                ts = pd.to_datetime(raw, unit="ms", utc=True, errors="coerce")
-            elif raw > 946684800:
-                ts = pd.to_datetime(raw, unit="s", utc=True, errors="coerce")
-            else:
-                ts = pd.NaT
-        else:
-            ts = pd.Timestamp(value)
-    except Exception as exc:  # noqa: BLE001
+        return coerce_market_timestamp(value)
+    except ValueError as exc:
         raise DataIntegrityError(f"unparseable timestamp: {value!r}") from exc
-    if pd.isna(ts):
-        raise DataIntegrityError(f"unparseable timestamp: {value!r}")
-    ts = pd.Timestamp(ts)
-    if ts.tzinfo is None:
-        return ts.tz_localize(IST)
-    return ts.tz_convert(IST)
 
 
 def _future_grace_seconds() -> float:
@@ -77,21 +68,29 @@ def _overlap_seconds() -> float:
 
 def _is_future_timestamp(ts: pd.Timestamp, *, now: pd.Timestamp | None = None) -> bool:
     now_ts = now or pd.Timestamp.now(tz=IST)
-    return bool(ts > now_ts + pd.Timedelta(seconds=_future_grace_seconds()))
+    return is_future_market_timestamp(ts, now=now_ts, grace_seconds=_future_grace_seconds())
 
 
 def _log_future_rejected(symbol: str, ts: pd.Timestamp, source: str) -> None:
     _DROPPED_CANDLES.increment()
+    now_ist = pd.Timestamp.now(tz=IST)
+    future_by_sec = future_delta_seconds(ts, now=now_ist)
     log_throttled(
         LOGGER,
         f"future_candle_rejected:{symbol}:{source}",
-        f"future_candle_rejected symbol={symbol} incoming_ts={ts.isoformat()} source={source}",
+        (
+            "future_candle_rejected symbol=%s incoming_ts=%s now_ist=%s "
+            "future_by_sec=%.3f source=%s"
+        )
+        % (symbol, ts.isoformat(), now_ist.isoformat(), future_by_sec, source),
         interval_sec=30.0,
         level=logging.WARNING,
         extra={
             "event": "future_candle_rejected",
             "symbol": symbol,
             "incoming_ts": ts.isoformat(),
+            "now_ist": now_ist.isoformat(),
+            "future_by_sec": float(future_by_sec),
             "source": source,
             "total_dropped": _DROPPED_CANDLES.value,
         },
@@ -194,6 +193,8 @@ class ValidatedTick:
     timestamp: pd.Timestamp
     ltp: float
     volume: float = 0.0
+    timestamp_source: str = "unknown"
+    raw_timestamp: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,25 +222,39 @@ class Candle:
 class TickValidator:
     def validate(self, raw: Mapping[str, Any]) -> Optional[ValidatedTick]:
         try:
-            symbol_raw = raw.get("symbol") or raw.get("trading_symbol")
-            if not symbol_raw or str(symbol_raw).strip() == "":
-                raise DataIntegrityError("missing symbol")
-            ts_raw = raw.get("exchange_timestamp") or raw.get("timestamp") or raw.get("ts")
-            if ts_raw is None:
-                raise DataIntegrityError("missing timestamp")
-            ts = _to_ist_timestamp(ts_raw)
-            if _is_future_timestamp(ts):
+            symbol = normalized_symbol(raw.get("symbol") or raw.get("trading_symbol"))
+            normalized_ts = normalize_market_tick_timestamp(raw)
+            ts = normalized_ts.timestamp
+            now_ist = pd.Timestamp.now(tz=IST)
+            if _is_future_timestamp(ts, now=now_ist):
                 _DROPPED_TICKS.increment()
+                future_by_sec = future_delta_seconds(ts, now=now_ist)
                 log_throttled(
                     LOGGER,
-                    f"future_tick_rejected:{symbol_raw}",
-                    f"future_tick_rejected symbol={symbol_raw} tick_ts={ts.isoformat()}",
+                    f"future_tick_rejected:{symbol}",
+                    (
+                        "future_tick_rejected symbol=%s raw_ts=%r tick_ts_ist=%s now_ist=%s "
+                        "future_by_sec=%.3f timestamp_source=%s"
+                    )
+                    % (
+                        symbol,
+                        normalized_ts.raw_value,
+                        ts.isoformat(),
+                        now_ist.isoformat(),
+                        future_by_sec,
+                        normalized_ts.source,
+                    ),
                     interval_sec=30.0,
                     level=logging.WARNING,
                     extra={
                         "event": "future_tick_rejected",
-                        "symbol": str(symbol_raw).strip().upper(),
+                        "symbol": symbol,
+                        "raw_ts": repr(normalized_ts.raw_value),
                         "tick_ts": ts.isoformat(),
+                        "tick_ts_ist": ts.isoformat(),
+                        "now_ist": now_ist.isoformat(),
+                        "future_by_sec": float(future_by_sec),
+                        "timestamp_source": normalized_ts.source,
                         "source": str(raw.get("source") or "tick_validator"),
                         "total_dropped": _DROPPED_TICKS.value,
                     },
@@ -263,12 +278,25 @@ class TickValidator:
                 volume = float(volume_raw if volume_raw is not None else 0.0)
             except (TypeError, ValueError):
                 volume = 0.0
-            return ValidatedTick(symbol=str(symbol_raw).strip().upper(), timestamp=ts, ltp=ltp, volume=volume)
+            return ValidatedTick(
+                symbol=symbol,
+                timestamp=ts,
+                ltp=ltp,
+                volume=volume,
+                timestamp_source=normalized_ts.source,
+                raw_timestamp=normalized_ts.raw_value,
+            )
         except (DataIntegrityError, ValueError, TypeError) as exc:
             _DROPPED_TICKS.increment()
             LOGGER.error(
                 "tick_rejected",
-                extra={"event": "tick_rejected", "reason": str(exc), "total_dropped": _DROPPED_TICKS.value},
+                extra={
+                    "event": "tick_rejected",
+                    "reason": str(exc),
+                    "symbol": str(raw.get("symbol") or raw.get("trading_symbol") or "").strip().upper() or None,
+                    "timestamp_source": "missing_or_invalid",
+                    "total_dropped": _DROPPED_TICKS.value,
+                },
             )
             return None
 
