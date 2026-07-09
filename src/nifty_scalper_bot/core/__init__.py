@@ -89,10 +89,12 @@ _LOGGER = get_logger(__name__)
 
 def _apply_app_runtime_patches(app_module: Any) -> None:
     from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
+    from nifty_scalper_bot.core.live_entry_preflight_safety import apply_app_patch as _live_entry_preflight_adapter
     from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
 
     _ready_adapter(app_module)
     _polling_adapter(app_module)
+    _live_entry_preflight_adapter(app_module)
 
 
 class _CoreAppPatchLoader(importlib.abc.Loader):
