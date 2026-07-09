@@ -629,7 +629,15 @@ def resolve_history_policy(
         required = max(option_min, 1)
         target = max(required, generic_required)
         priority = 1
-    market_closed_context = role == "option_context" and get_runtime_market_mode() != "OPEN" and phase != "recovery"
+    # Only explicit closed sessions block option-context broker fetch.
+    # A transient UNKNOWN mode (startup, clock lag, calendar hiccup near open)
+    # must NOT keep context strategies cold: UNKNOWN != "OPEN" previously
+    # evaluated as closed and suppressed SMC/context votes.
+    market_closed_context = (
+        role == "option_context"
+        and get_runtime_market_mode() in {"PRE_MARKET", "POST_MARKET", "HOLIDAY"}
+        and phase != "recovery"
+    )
     _role_caps = {
         "selected_option": int(os.getenv("HYDRATION_CAP_SELECTED_OPTION", "75") or 75),
         "option_context": int(os.getenv("HYDRATION_CAP_OPTION_CONTEXT", "50") or 50),
