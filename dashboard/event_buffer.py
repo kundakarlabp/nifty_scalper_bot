@@ -73,7 +73,8 @@ def parse_event(line: str) -> dict[str, str] | None:
     values = fields(message)
     expected_rejection = any(x in upper for x in EXPECTED_REJECTIONS)
     soft_non_gating_history = _soft_non_gating_history_message(upper, values)
-    if any(x in upper for x in IGNORE) and not soft_non_gating_history:
+    history_diagnostic = "CANONICAL_HISTORY_RESULT" in upper or "RUNNER_HISTORY_SYNC_RESULT" in upper
+    if any(x in upper for x in IGNORE) and not (soft_non_gating_history or history_diagnostic):
         return None
     if not soft_non_gating_history and not expected_rejection and not any(x in upper for x in EVENTS):
         return None
