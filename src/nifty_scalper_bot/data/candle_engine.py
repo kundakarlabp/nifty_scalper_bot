@@ -118,36 +118,59 @@ class CandleEngine:
         try:
             symbol = _tick_symbol(tick, self.symbol)
         except ValueError:
+            raw_ts_for_key = _tick_value(tick, "timestamp") or _tick_value(
+                tick, "exchange_timestamp"
+            )
             log_throttled(
                 LOGGER,
-                "candle_tick_missing_symbol",
+                f"candle_tick_missing_symbol:{raw_ts_for_key!r}",
                 "CANDLE_TICK_DROPPED reason=missing_symbol",
                 interval_sec=10.0,
                 level=logging.WARNING,
-                extra={"event": "candle_tick_dropped", "reason": "missing_symbol"},
+                extra={
+                    "event": "candle_tick_dropped",
+                    "reason": "missing_symbol",
+                    "raw_ts": repr(raw_ts_for_key),
+                    "bypass_filters": True,
+                },
             )
             return None
         self.symbol = symbol
         try:
             timestamp, timestamp_source, raw_ts = _tick_timestamp(tick)
         except ValueError:
+            raw_ts_for_key = _tick_value(tick, "timestamp") or _tick_value(
+                tick, "exchange_timestamp"
+            )
             log_throttled(
                 LOGGER,
-                f"candle_tick_bad_timestamp:{symbol}",
+                f"candle_tick_bad_timestamp:{symbol}:{raw_ts_for_key!r}",
                 f"CANDLE_TICK_DROPPED reason=bad_timestamp symbol={symbol}",
                 interval_sec=10.0,
                 level=logging.WARNING,
-                extra={"event": "candle_tick_dropped", "symbol": symbol, "reason": "bad_timestamp"},
+                extra={
+                    "event": "candle_tick_dropped",
+                    "symbol": symbol,
+                    "reason": "bad_timestamp",
+                    "raw_ts": repr(raw_ts_for_key),
+                    "bypass_filters": True,
+                },
             )
             return None
         if pd.isna(timestamp) or getattr(timestamp, "year", 1970) < 2020:
             log_throttled(
                 LOGGER,
-                f"candle_tick_bad_timestamp:{symbol}",
+                f"candle_tick_bad_timestamp:{symbol}:{raw_ts!r}",
                 f"CANDLE_TICK_DROPPED reason=bad_timestamp symbol={symbol}",
                 interval_sec=10.0,
                 level=logging.WARNING,
-                extra={"event": "candle_tick_dropped", "symbol": symbol, "reason": "bad_timestamp"},
+                extra={
+                    "event": "candle_tick_dropped",
+                    "symbol": symbol,
+                    "reason": "bad_timestamp",
+                    "raw_ts": repr(raw_ts),
+                    "bypass_filters": True,
+                },
             )
             return None
         now_ist = pd.Timestamp.now(tz=IST)
@@ -155,7 +178,7 @@ class CandleEngine:
             future_by_sec = future_delta_seconds(timestamp, now=now_ist)
             log_throttled(
                 LOGGER,
-                f"candle_tick_future:{symbol}",
+                f"candle_tick_future:{symbol}:{timestamp.isoformat()}",
                 (
                     "CANDLE_TICK_DROPPED reason=future_timestamp symbol=%s raw_ts=%r "
                     "tick_ts_ist=%s now_ist=%s future_by_sec=%.3f timestamp_source=%s"
@@ -172,6 +195,7 @@ class CandleEngine:
                     "now_ist": now_ist.isoformat(),
                     "future_by_sec": float(future_by_sec),
                     "timestamp_source": timestamp_source,
+                    "bypass_filters": True,
                 },
             )
             return None
