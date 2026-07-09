@@ -14,6 +14,10 @@ class _DataHubHook:
     _nifty_scalper_datahub_synthetic_guard_hook = True
 
 
+class _PlainFinder:
+    pass
+
+
 class _Mdm:
     _freshness_hardening_installed = True
 
@@ -27,7 +31,7 @@ class _DataHub:
 
 
 def test_runtime_install_proof_uses_context_instances(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _DataHubHook(), *sys.meta_path])
+    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _DataHubHook(), _PlainFinder()])
     ctx = SimpleNamespace(
         market_data_manager=_Mdm(),
         websocket_manager=_Ws(),
@@ -45,7 +49,7 @@ def test_runtime_install_proof_uses_context_instances(monkeypatch) -> None:
 
 
 def test_runtime_install_proof_reports_duplicate_import_hooks(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _CoreHook(), _DataHubHook(), *sys.meta_path])
+    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _CoreHook(), _DataHubHook()])
 
     proof = build_runtime_install_proof(None)
 
@@ -55,7 +59,7 @@ def test_runtime_install_proof_reports_duplicate_import_hooks(monkeypatch) -> No
 
 
 def test_runtime_install_proof_all_required_requires_every_marker(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _DataHubHook(), *sys.meta_path])
+    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _DataHubHook()])
     partial_ctx = SimpleNamespace(
         market_data_manager=_Mdm(),
         websocket_manager=None,
