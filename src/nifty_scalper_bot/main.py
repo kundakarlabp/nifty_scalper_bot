@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
+from nifty_scalper_bot.core.runtime_install_proof import build_runtime_install_proof
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 
@@ -323,6 +324,7 @@ def livez():
         "bot_loaded": app.state.bot is not None,
         "engine_http_responsive": True,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
+        "install_proof": build_runtime_install_proof(_latest_context()),
     }
 
 
@@ -422,6 +424,7 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
         "broker_authentication": auth_state,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
         "tick_pressure": tick_pressure,
+        "install_proof": build_runtime_install_proof(ctx),
         "build_sha": STARTUP_BUILD_SHA,
     }
 
@@ -509,6 +512,7 @@ def health_trading():
                 "live_orders_armed": False,
                 "primary_blocker": "startup_incomplete",
                 "blockers": ["startup_incomplete"],
+                "install_proof": build_runtime_install_proof(None),
             },
         )
     decision = getattr(ctx, "readiness_decision", None)
@@ -622,7 +626,7 @@ def trading_status():
     exec_mode = os.getenv("EXECUTION_MODE", "SHADOW")
 
     ctx = _latest_context()
-    structured = _structured_runtime_status(ctx) if ctx is not None else {}
+    structured = _structured_runtime_status(ctx) if ctx is not None else {"install_proof": build_runtime_install_proof(None)}
     return {
         "enable_live": enable_live,
         "execution_mode": exec_mode,
