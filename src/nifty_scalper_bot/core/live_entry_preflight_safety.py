@@ -44,6 +44,24 @@ def _truthy_attr(ctx: Any, *names: str, default: bool = False) -> bool:
     return bool(default)
 
 
+def _has_broker_truth_state(ctx: Any) -> bool:
+    return any(
+        hasattr(ctx, name)
+        for name in (
+            "position_reconciliation_completed",
+            "position_reconciliation_failed",
+            "broker_orders_reconciled",
+            "order_reconciliation_completed",
+            "orders_reconciled",
+            "startup_order_reconciliation_completed",
+            "broker_position_mismatch",
+            "position_mismatch",
+            "unprotected_broker_position",
+            "unprotected_broker_positions",
+        )
+    )
+
+
 def _real_live_preflight_requested(ctx: Any) -> bool:
     """Return True only for actual live entry execution, not LIVE-shaped tests."""
 
@@ -57,7 +75,7 @@ def _real_live_preflight_requested(ctx: Any) -> bool:
     ).strip().upper()
     live_enabled = _env_true("ENABLE_LIVE") or _env_true("ENABLE_LIVE_TRADING")
     paper_shadow = _env_true("PAPER_MODE") or _env_true("PAPER__ENABLED") or _env_true("SHADOW_MODE")
-    return bool(mode == "LIVE" and live_enabled and not paper_shadow)
+    return bool(mode == "LIVE" and live_enabled and not paper_shadow and _has_broker_truth_state(ctx))
 
 
 def _safe_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
