@@ -18,7 +18,6 @@ DETAIL_COLUMNS = [
     "rows", "incoming_ts", "last_ts", "blocker", "failure_reason",
     "trace_id", "accepted",
 ]
-
 EXPECTED_REJECTIONS = {
     "CANDIDATE_REJECTED",
     "SIGNAL_REJECTED",
@@ -53,15 +52,29 @@ EVENT_WORDS = {
     "SIGNAL", "ORDER", "FILLED", "ENTRY", "EXIT", "TARGET", "STOP", "PNL",
     "POSITION", "BROKER", "AUTH", "READY", "BLOCKER", "RISK", "COOLDOWN",
     "ERROR", "FAIL", "WARN", "DEGRADED", "STARTUP", "SHUTDOWN", "HYDRATION",
-    "SUBSCRIPTION", "RECONCIL", "CONTRACT_SSOT", "LIVE_READINESS",
+    "HISTORY", "SUBSCRIPTION", "RECONCIL", "CONTRACT_SSOT", "LIVE_READINESS",
 }
 NULLS = {"", "none", "null", "nil", "false", "0", "unknown", "n/a", "na"}
+SOFT_HISTORY_ROLES = {"option_context"}
+SOFT_HISTORY_FAILURE_REASONS = {"broker_fetch_not_allowed"}
 TRADE_WORDS = {"ORDER_SENT", "ORDER_PLACED", "ORDER_FILLED", "FILLED", "ENTRY", "EXIT", "TARGET_HIT", "STOP_HIT", "STOP_LOSS", "PNL", "POSITION_OPENED", "POSITION_CLOSED", "TRADE_ATTEMPT"}
-NON_TRADE_SYSTEM_WORDS = {"READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE"}
+NON_TRADE_SYSTEM_WORDS = {"READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE", "CANONICAL_HISTORY_RESULT", "RUNNER_HISTORY_SYNC_RESULT"}
 
 
 def fields(message: str) -> dict[str, str]:
     return {key.lower(): value for key, value in FIELD.findall(message)}
+
+
+def _soft_non_gating_history_message(upper: str, values: dict[str, str]) -> bool:
+    """Return True for expected non-selected option-context history misses."""
+
+    role = values.get("role", "").strip().lower()
+    failure = values.get("failure_reason", "").strip().lower()
+    return (
+        "CANONICAL_HISTORY_RESULT" in upper
+        and role in SOFT_HISTORY_ROLES
+        and failure in SOFT_HISTORY_FAILURE_REASONS
+    )
 
 
 def _detail_fields(message: str, values: dict[str, str]) -> dict[str, str]:
@@ -82,6 +95,8 @@ def _fieldnames(rows: list[dict[str, str]]) -> list[str]:
 
 
 def _explicit_failure(upper: str, values: dict[str, str]) -> bool:
+    if _soft_non_gating_history_message(upper, values):
+        return False
     if any(token in upper for token in HARD_ERRORS):
         return True
     if any(token in upper for token in EXPECTED_REJECTIONS):
@@ -101,16 +116,17 @@ def parse_event(line: str) -> dict[str, str] | None:
     message = SECRET.sub(r"\1=[REDACTED]", line[stamp.end():].strip())
     upper = message.upper()
     values = fields(message)
+    soft_non_gating_history = _soft_non_gating_history_message(upper, values)
     if _explicit_failure(upper, values):
         kind = "ERROR"
     else:
-        if any(token in upper for token in BENIGN):
+        if any(token in upper for token in BENIGN) and not soft_non_gating_history:
             return None
-        if not any(token in upper for token in EVENT_WORDS):
+        if not soft_non_gating_history and not any(token in upper for token in EVENT_WORDS):
             return None
         if "WARN" in upper or "DEGRADED" in upper:
             kind = "WARNING"
-        elif any(token in upper for token in NON_TRADE_SYSTEM_WORDS):
+        elif soft_non_gating_history or any(token in upper for token in NON_TRADE_SYSTEM_WORDS):
             kind = "SYSTEM"
         elif any(token in upper for token in TRADE_WORDS):
             kind = "TRADE"
