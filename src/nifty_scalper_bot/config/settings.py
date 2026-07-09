@@ -231,16 +231,25 @@ def _env_float(*names: str, default: float, minimum: float | None = None) -> flo
                 continue
             try:
                 value = float(candidate)
-            except ValueError as exc:  # pragma: no cover - defensive
-                raise ConfigurationError(
-                    f"Invalid float for {name!s}: {raw_value!r}"
-                ) from exc
+            except ValueError:
+                # Fail-soft: a typo'd tuning variable must not kill the whole
+                # settings import (a partial module then surfaces as cryptic
+                # AttributeErrors elsewhere and bricks startup - 2026-07-09).
+                LOGGER.error(
+                    "SETTINGS_ENV_INVALID name=%s raw=%r using_default=%r",
+                    name, raw_value, default,
+                    extra={"event": "SETTINGS_ENV_INVALID", "env_name": name},
+                )
+                value = float(default)
             source_name = name
             break
         if minimum is not None and value < minimum:
-            raise ConfigurationError(
-                f"Invalid float for {source_name!s}: {value!r} < minimum {minimum!r}"
+            LOGGER.error(
+                "SETTINGS_ENV_BELOW_MINIMUM name=%s value=%r minimum=%r using_default=%r",
+                source_name, value, minimum, default,
+                extra={"event": "SETTINGS_ENV_INVALID", "env_name": source_name},
             )
+            value = float(default) if float(default) >= minimum else float(minimum)
         LOGGER.debug(
             "Condition met: settings_env_float_resolved",
             extra={
@@ -303,16 +312,24 @@ def _env_int(*names: str, default: int, minimum: int | None = None) -> int:
                 continue
             try:
                 value = int(candidate)
-            except ValueError as exc:  # pragma: no cover - defensive
-                raise ConfigurationError(
-                    f"Invalid integer for {name!s}: {raw_value!r}"
-                ) from exc
+            except ValueError:
+                # Fail-soft (see _env_float): never kill the settings import
+                # over a malformed tuning variable.
+                LOGGER.error(
+                    "SETTINGS_ENV_INVALID name=%s raw=%r using_default=%r",
+                    name, raw_value, default,
+                    extra={"event": "SETTINGS_ENV_INVALID", "env_name": name},
+                )
+                value = int(default)
             source_name = name
             break
         if minimum is not None and value < minimum:
-            raise ConfigurationError(
-                f"Invalid integer for {source_name!s}: {value!r} < minimum {minimum!r}"
+            LOGGER.error(
+                "SETTINGS_ENV_BELOW_MINIMUM name=%s value=%r minimum=%r using_default=%r",
+                source_name, value, minimum, default,
+                extra={"event": "SETTINGS_ENV_INVALID", "env_name": source_name},
             )
+            value = int(default) if int(default) >= minimum else int(minimum)
         LOGGER.debug(
             "Condition met: settings_env_int_resolved",
             extra={

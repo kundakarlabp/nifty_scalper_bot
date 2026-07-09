@@ -9454,9 +9454,22 @@ class MarketDataManager:
             # which defaulted to NSE, so all NFO instruments silently returned None.
             _suffix = clean_symbol.upper()
             _exchange = "NFO" if any(_suffix.endswith(s) for s in ("FUT", "CE", "PE")) else "NSE"
+            # Zerodha's instrument dump lists index spot instruments under
+            # their full names ("NIFTY 50", "NIFTY BANK"), not the short
+            # aliases used across the bot ("NIFTY") — root cause of the
+            # 2026-07-09 SPOT_TOKEN_RESOLUTION_FAILED for NSE:NIFTY.
+            _aliases = {clean_symbol, _suffix}
+            _index_alias = {
+                "NIFTY": "NIFTY 50",
+                "NIFTY50": "NIFTY 50",
+                "BANKNIFTY": "NIFTY BANK",
+                "FINNIFTY": "NIFTY FIN SERVICE",
+            }.get(_suffix)
+            if _index_alias:
+                _aliases.add(_index_alias)
             instruments = self._broker.instruments(_exchange)
             for ins in instruments:
-                if ins["tradingsymbol"] == clean_symbol:
+                if ins["tradingsymbol"] in _aliases:
                     t = int(ins["instrument_token"])
                     self.register_symbol(symbol, t) # Cache it
                     return t
