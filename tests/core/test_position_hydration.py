@@ -53,6 +53,17 @@ class _DataHub:
         self.rows = list(rows)
 
 
+class _BrokerClient:
+    def __init__(self, positions: list[dict[str, Any]] | None = None, error: Exception | None = None) -> None:
+        self._positions = list(positions or [])
+        self._error = error
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        if self._error is not None:
+            raise self._error
+        return list(self._positions)
+
+
 def test_hydrate_positions_prefers_broker_snapshot() -> None:
     persisted = [
         SimpleNamespace(
@@ -72,8 +83,7 @@ def test_hydrate_positions_prefers_broker_snapshot() -> None:
     manager = _PositionManager()
     data_hub = _DataHub()
 
-    broker_client = SimpleNamespace(get_positions=lambda: broker_positions)
-
+    broker_client = _BrokerClient(broker_positions)
     result = _hydrate_positions(
         position_manager=manager,
         persistent_state=_PersistentState(persisted),
@@ -100,9 +110,7 @@ def test_hydrate_positions_prefers_broker_snapshot() -> None:
     ]
 
 
-def test_hydrate_positions_falls_back_to_persisted_state(
-    monkeypatch,
-) -> None:
+def test_hydrate_positions_falls_back_to_persisted_state() -> None:
     persisted = [
         SimpleNamespace(
             symbol="NIFTY25O2025450PE",
@@ -114,18 +122,10 @@ def test_hydrate_positions_falls_back_to_persisted_state(
     manager = _PositionManager()
     data_hub = _DataHub()
 
-    def _raise_fetch(*args, **kwargs) -> list[dict[str, Any]]:
-        raise RuntimeError("broker unavailable")
-
-    monkeypatch.setattr(
-        "nifty_scalper_bot.core.app._fetch_positions_with_retry",
-        _raise_fetch,
-    )
-
     result = _hydrate_positions(
         position_manager=manager,
         persistent_state=_PersistentState(persisted),
-        broker_client=object(),
+        broker_client=_BrokerClient(error=RuntimeError("broker unavailable")),
         data_hub=data_hub,
         max_attempts=1,
         backoff_min=0.1,
