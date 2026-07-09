@@ -196,3 +196,51 @@ def test_auth_latch_reprobes_and_self_heals_on_success() -> None:
     client._reset_transient_state()  # success path
     assert client._auth_invalid is False
     client._raise_if_authentication_latched()  # gate open again
+
+
+def test_settings_import_survives_malformed_env(monkeypatch) -> None:
+    """2026-07-09 incident: a malformed tuning env var killed the settings
+    module mid-import; the partial module then surfaced as cryptic
+    AttributeErrors (USE_REGIME_ADAPTIVE, REGIME_TREND_SIZING_MULT) and the
+    bot entered degraded mode. Tunables must fail soft to their defaults."""
+    import importlib
+
+    monkeypatch.setenv("REGIME_TREND_SIZING_MULT", "not-a-number")
+    monkeypatch.setenv("MAX_LOTS_PER_TRADE", "banana")
+    monkeypatch.setenv("MIN_LOTS_PER_TRADE", "0")  # below minimum -> clamp
+    import nifty_scalper_bot.config.settings as settings_module
+
+    reloaded = importlib.reload(settings_module)
+    try:
+        assert reloaded.REGIME_TREND_SIZING_MULT == 1.15
+        assert reloaded.MAX_LOTS_PER_TRADE == 2
+        assert reloaded.MIN_LOTS_PER_TRADE == 1
+        assert reloaded.USE_REGIME_ADAPTIVE is True
+    finally:
+        monkeypatch.delenv("REGIME_TREND_SIZING_MULT")
+        monkeypatch.delenv("MAX_LOTS_PER_TRADE")
+        monkeypatch.delenv("MIN_LOTS_PER_TRADE")
+        importlib.reload(settings_module)
+
+
+def test_spot_index_token_resolves_via_zerodha_full_name() -> None:
+    """NSE:NIFTY must resolve although Zerodha lists the index as 'NIFTY 50'."""
+    import logging as _logging
+
+    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+
+    mdm = MarketDataManager.__new__(MarketDataManager)
+    mdm._logger = _logging.getLogger("test")
+    mdm._token_by_symbol = {}
+    mdm._canonical_symbol = lambda s: s
+    registered: dict = {}
+    mdm.register_symbol = lambda s, t: registered.__setitem__(s, t)
+
+    class _Broker:
+        def instruments(self, exchange):
+            assert exchange == "NSE"
+            return [{"tradingsymbol": "NIFTY 50", "instrument_token": 256265}]
+
+    mdm._broker = _Broker()
+    assert mdm._resolve_token("NSE:NIFTY") == 256265
+    assert registered["NSE:NIFTY"] == 256265

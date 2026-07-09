@@ -4481,6 +4481,31 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     ensure_multiproc_dir(clear_stale=True)
     settings = settings or get_settings()
+    # Verify market-data hardening at explicit startup (moved from
+    # core/__init__ import time — see #792 canonical-hooks decision).
+    # Definition sites already install; this confirms and fails closed
+    # for real live mode.
+    try:
+        from nifty_scalper_bot.core.market_data_hardening_bootstrap import (
+            install_market_data_hardening_or_raise,
+        )
+
+        install_market_data_hardening_or_raise(LOGGER)
+    except Exception as _hard_exc:  # noqa: BLE001
+        LOGGER.error(
+            "MARKET_DATA_HARDENING_BOOTSTRAP_FAILED error=%s",
+            _hard_exc,
+            extra={
+                "event": "MARKET_DATA_HARDENING_BOOTSTRAP_FAILED",
+                "error_type": type(_hard_exc).__name__,
+            },
+        )
+        from nifty_scalper_bot.core import _real_live_mode_requested
+
+        if _real_live_mode_requested():
+            raise RuntimeError(
+                "market_data_hardening_bootstrap_failed"
+            ) from _hard_exc
     fingerprint = _build_startup_fingerprint()
     LOGGER.info(
         "startup_fingerprint version=%s release=%s",
