@@ -27,6 +27,11 @@ class TradeGate:
         for key, expected in checks:
             if state.get(key, expected) != expected:
                 return GateResult(False, key, state)
+        preflight_ready = state.get('live_entry_preflight_ready')
+        preflight_blockers = list(state.get('live_entry_preflight_blockers') or [])
+        if preflight_ready is False or preflight_blockers:
+            reason = str(state.get('live_entry_preflight_primary_blocker') or (preflight_blockers[0] if preflight_blockers else 'live_entry_preflight_failed'))
+            return GateResult(False, reason, state)
         max_daily_loss = abs(float(state.get('max_daily_loss', 0.0)))
         if max_daily_loss > 0 and float(state.get('daily_loss', 0.0)) <= -max_daily_loss:
             return GateResult(False, 'daily_loss_limit', state)
