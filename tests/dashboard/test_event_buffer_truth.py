@@ -58,6 +58,50 @@ def test_superlite_none_failure_reason_is_not_error():
     assert event["type"] == "SYSTEM"
 
 
+def test_event_buffer_none_failure_reason_is_not_error():
+    event = MODULE.parse_event(
+        "[2026-06-26 00:00:00 IST] RUNNER_HISTORY_SYNC_RESULT "
+        "symbol=NFO:X success=False failure_reason=None"
+    )
+    assert event is not None
+    assert event["type"] == "SYSTEM"
+
+
+def test_non_gating_option_context_history_miss_is_system_not_error():
+    line = (
+        "[2026-07-08 01:13:00 IST] ✅ CANONICAL_HISTORY_RESULT "
+        "symbol=NFO:NIFTY2671424450PE role=option_context phase=startup "
+        "reason=startup_hydration required_bars=50 target_bars=50 mdm_bars=1 "
+        "runner_bars=1 indicator_bars=1 minimum_ready=False target_ready=False "
+        "failure_reason=broker_fetch_not_allowed"
+    )
+
+    event = MODULE.parse_event(line)
+    assert event is not None
+    assert event["type"] == "SYSTEM"
+
+    superlite_event = SUPERLITE.parse_event(line)
+    assert superlite_event is not None
+    assert superlite_event["type"] == "SYSTEM"
+    assert superlite_event["failure_reason"] == "broker_fetch_not_allowed"
+
+
+def test_selected_option_history_failure_remains_error():
+    line = (
+        "[2026-07-08 01:13:00 IST] CANONICAL_HISTORY_RESULT "
+        "symbol=NFO:NIFTY2671424400CE role=selected_option required_bars=30 "
+        "mdm_bars=1 runner_bars=1 indicator_bars=1 failure_reason=broker_fetch_not_allowed"
+    )
+
+    event = MODULE.parse_event(line)
+    assert event is not None
+    assert event["type"] == "ERROR"
+
+    superlite_event = SUPERLITE.parse_event(line)
+    assert superlite_event is not None
+    assert superlite_event["type"] == "ERROR"
+
+
 def test_superlite_indicator_error_is_visible():
     event = SUPERLITE.parse_event(
         "[2026-06-26 00:00:00 IST] INDICATOR_COMPUTE_ERROR symbol=NFO:X"

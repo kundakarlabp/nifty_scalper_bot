@@ -13,14 +13,60 @@ STAMP = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} IST)\]")
 SECRET = re.compile(r"(?i)(api[_ -]?key|api[_ -]?secret|access[_ -]?token|request[_ -]?token|password)\s*[:=]\s*\S+")
 TRACE = re.compile(r"\btrace_id=([^\s,}]+)")
 RESULT = re.compile(r"\baccepted=([^\s]+).*?\breason=([^\s]+)")
+FIELD = re.compile(r"\b([a-zA-Z][a-zA-Z0-9_]*)=([^\s,}]+)")
+HISTORY_DIAGNOSTICS = ("CANONICAL_HISTORY_RESULT", "RUNNER_HISTORY_SYNC_RESULT")
 EVENTS = ("SIGNAL","ORDER","FILLED","ENTRY","EXIT","TARGET","STOP","PNL","POSITION",
           "BROKER","AUTH","READY","BLOCKER","RISK","COOLDOWN","ERROR","FAIL","WARN",
           "DEGRADED","OPERATIONAL","STARTUP","SHUTDOWN","READINESS","CANDLE")
 TRADE_MARKERS = ("ORDER_SENT", "ORDER_PLACED", "ORDER_FILLED", "FILLED", "ENTRY", "EXIT", "TARGET_HIT", "STOP_HIT", "STOP_LOSS", "PNL", "POSITION_OPENED", "POSITION_CLOSED", "TRADE_ATTEMPT")
-NON_TRADE_SYSTEM_MARKERS = ("READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE")
+NON_TRADE_SYSTEM_MARKERS = ("READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE", *HISTORY_DIAGNOSTICS)
 IGNORE = ("HEARTBEAT","POLLING","INDICATOR","NO SIGNAL","MARKET CLOSED","OUTSIDE SESSION")
 EXPECTED_REJECTIONS = ("CANDIDATE_REJECTED", "SIGNAL_REJECTED", "SIGNAL_EXECUTION_RESULT", "ORDER_READINESS_REJECTED")
 HARD_ERRORS = ("TRACEBACK", "CRITICAL", "UNHANDLED EXCEPTION", "RUNNER_ON_TICK_ERROR", "ORDER_FAILED", "STARTUP_FAILED", "HANDLER CRASHED", "FATAL")
+NULLS = {"", "none", "null", "nil", "false", "0", "unknown", "n/a", "na"}
+SOFT_HISTORY_ROLES = {"option_context"}
+SOFT_HISTORY_FAILURE_REASONS = {"broker_fetch_not_allowed"}
+
+
+def fields(message: str) -> dict[str, str]:
+    return {key.lower(): value for key, value in FIELD.findall(message)}
+
+
+def _history_diagnostic(upper: str) -> bool:
+    return any(token in upper for token in HISTORY_DIAGNOSTICS)
+
+
+def _soft_non_gating_history_message(upper: str, values: dict[str, str]) -> bool:
+    """Return True for expected non-selected option-context history misses.
+
+    The runtime may suppress broker history fetches for non-gating option-context
+    strikes, especially outside market hours. Those diagnostics must remain
+    visible as SYSTEM events, not ERROR rows, while selected-option failures
+    continue to surface as hard blockers.
+    """
+
+    role = values.get("role", "").strip().lower()
+    failure = values.get("failure_reason", "").strip().lower()
+    return (
+        "CANONICAL_HISTORY_RESULT" in upper
+        and role in SOFT_HISTORY_ROLES
+        and failure in SOFT_HISTORY_FAILURE_REASONS
+    )
+
+
+def _explicit_failure(upper: str, values: dict[str, str], *, expected_rejection: bool) -> bool:
+    if _soft_non_gating_history_message(upper, values):
+        return False
+    if any(token in upper for token in HARD_ERRORS):
+        return True
+    if expected_rejection:
+        return False
+    if re.search(r"\b[A-Z0-9_]+_(?:ERROR|FAILED|FAILURE)\b", upper):
+        return True
+    for key in ("error", "failure_reason"):
+        if key in values and values[key].strip().lower() not in NULLS:
+            return True
+    return False
 
 
 def parse_event(line: str) -> dict[str, str] | None:
@@ -29,16 +75,19 @@ def parse_event(line: str) -> dict[str, str] | None:
         return None
     message = SECRET.sub(r"\1=[REDACTED]", line[match.end():].strip())
     upper = message.upper()
+    values = fields(message)
     expected_rejection = any(x in upper for x in EXPECTED_REJECTIONS)
-    if any(x in upper for x in IGNORE) or (
-        not expected_rejection and not any(x in upper for x in EVENTS)
-    ):
+    soft_non_gating_history = _soft_non_gating_history_message(upper, values)
+    history_diagnostic = _history_diagnostic(upper)
+    if any(x in upper for x in IGNORE) and not history_diagnostic:
         return None
-    if any(x in upper for x in HARD_ERRORS) or (("ERROR" in upper or "FAILED" in upper or "FAILURE" in upper) and not expected_rejection):
+    if not history_diagnostic and not expected_rejection and not any(x in upper for x in EVENTS):
+        return None
+    if _explicit_failure(upper, values, expected_rejection=expected_rejection):
         kind = "ERROR"
     elif any(x in upper for x in ("WARN", "DEGRADED")):
         kind = "WARNING"
-    elif any(x in upper for x in NON_TRADE_SYSTEM_MARKERS):
+    elif history_diagnostic or any(x in upper for x in NON_TRADE_SYSTEM_MARKERS):
         kind = "SYSTEM"
     elif any(x in upper for x in TRADE_MARKERS):
         kind = "TRADE"
