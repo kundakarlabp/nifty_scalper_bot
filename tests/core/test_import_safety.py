@@ -4,13 +4,27 @@ import importlib
 import sys
 
 
+def _reset_core_modules() -> None:
+    for name in list(sys.modules):
+        if name == "nifty_scalper_bot.core" or name.startswith("nifty_scalper_bot.core.app"):
+            sys.modules.pop(name, None)
+
+
 def test_core_package_import_does_not_eagerly_import_app_module() -> None:
-    sys.modules.pop("nifty_scalper_bot.core", None)
-    sys.modules.pop("nifty_scalper_bot.core.app", None)
+    _reset_core_modules()
 
     importlib.import_module("nifty_scalper_bot.core")
 
     assert "nifty_scalper_bot.core.app" not in sys.modules
+
+
+def test_direct_core_app_import_applies_polling_patch_without_lazy_getattr() -> None:
+    _reset_core_modules()
+
+    app_module = importlib.import_module("nifty_scalper_bot.core.app")
+
+    assert getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
+    assert callable(getattr(app_module, "_polling_failover_supervisor_iteration", None))
 
 
 def test_core_lazy_app_resolution_applies_polling_patch() -> None:
