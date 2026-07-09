@@ -1063,3 +1063,62 @@ def test_bracket_tp1_partial_fires_once_on_live_class(monkeypatch, tmp_path) -> 
         assert len(placed) == 1, "TP1 partial must fire exactly one exit order"
     finally:
         bm._running = False
+
+
+def test_fill_reanchor_and_controller_trailing_on_executed_range(
+    monkeypatch, tmp_path
+) -> None:
+    """Signal->executed coordination on the live class: a slipped broker fill
+    must re-anchor entry/SL/TP1 to the executed range (tick-rounded), sync the
+    adaptive controller's anchor, and controller-path trailing must ratchet on
+    a rally even with degraded/unavailable ATR (the old absolute 20.0-point
+    fallback trail distance left trailing silently dead on option premiums)."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class _OM:
+        def place_reduce_only_exit(self, intent):
+            return "X"
+
+        def place_order(self, **kwargs):
+            return "X"
+
+        def get_order_status(self, _oid):
+            return {"status": "COMPLETE"}
+
+    class _IndicatorEngine:  # bare: SafeATRProvider yields degraded ATR
+        pass
+
+    sym = "NFO:NIFTYEXECRANGE24050CE"
+    bm = BracketManager(order_manager=_OM(), indicator_engine=_IndicatorEngine())
+    bm._running = False
+    try:
+        bm.register_virtual_bracket(
+            order_id="ex-1", symbol=sym, side="BUY", qty=65,
+            price=145.15, sl=143.15, tp=160.0,
+            activate_immediately=False, trailing_atr_mult=1.5,
+        )
+        controller = bm._trailing_controllers.get("ex-1")
+        assert controller is not None, "adaptive controller must attach"
+
+        bm.confirm_entry_fill("ex-1", 146.00)  # +0.85 slippage vs signal
+        bracket = bm.get_bracket("ex-1")
+
+        # Re-anchored to broker fill, tick-rounded.
+        assert bracket.entry_price == 146.00
+        assert bracket.entry_fill_price == 146.00
+        assert bracket.sl_trigger_price > 143.15
+        assert round(bracket.sl_trigger_price / 0.05, 6) % 1 == 0
+        # Controller anchor synced to executed range.
+        assert float(controller.entry_price) == 146.00
+        assert float(controller.current_sl) == bracket.sl_trigger_price
+
+        # Controller-path trailing ratchets on a rally despite degraded ATR.
+        sl_path = []
+        for px in (147.0, 149.0, 151.0, 153.0, 151.5, 155.0):
+            bm.on_tick(sym, px)
+            sl_path.append(bracket.sl_trigger_price)
+        assert sl_path[-1] > 146.00, "trailing must lock profit above entry"
+        assert all(b >= a for a, b in zip(sl_path, sl_path[1:]))
+        assert all(round(v / 0.05, 6) % 1 == 0 for v in sl_path)
+    finally:
+        bm._running = False
