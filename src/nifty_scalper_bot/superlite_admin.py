@@ -10,10 +10,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from nifty_scalper_bot import admin_dashboard as dashboard
+from nifty_scalper_bot.admin_install_proof_display import install_proof_display
 from nifty_scalper_bot.ops.service_control import memory_snapshot
 from nifty_scalper_bot.superlite_admin_core import (
     APP_DIR,
     ENGINE_SERVICE,
+    _http_json,
     bounded_logs,
     read_env,
     restart,
@@ -91,6 +93,15 @@ def _logs(
     return bounded_logs(lines, contains)
 
 
+def _engine_install_proof() -> dict:
+    for path in ("/health/trading", "/trading/status", "/livez"):
+        payload = _http_json(path)
+        proof = payload.get("install_proof") if isinstance(payload, dict) else None
+        if isinstance(proof, dict):
+            return dict(proof)
+    return {}
+
+
 # Keep the familiar dashboard and forms, but run them outside the engine and
 # replace blocking helpers with bounded control-plane implementations.
 dashboard._check_auth = _guard
@@ -120,5 +131,9 @@ def healthz() -> dict[str, str]:
 @app.get("/admin/api/status")
 def status() -> JSONResponse:
     data = status_snapshot()
+    proof = data.get("install_proof") if isinstance(data.get("install_proof"), dict) else _engine_install_proof()
+    data["install_proof"] = proof
+    data["install_proof_display"] = install_proof_display(proof)
+    data["hardening_all_installed"] = data["install_proof_display"].get("all_installed")
     data["host_memory"] = memory_snapshot()
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
