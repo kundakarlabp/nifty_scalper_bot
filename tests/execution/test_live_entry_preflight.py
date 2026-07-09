@@ -13,10 +13,12 @@ from nifty_scalper_bot.execution.live_entry_preflight import (
 )
 
 
-NOW = datetime.now(timezone.utc)
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _proof(symbol: str = "NFO:TESTCE") -> SelectedOptionProof:
+    now = _now()
     return SelectedOptionProof(
         symbol=symbol,
         quote_present=True,
@@ -24,10 +26,10 @@ def _proof(symbol: str = "NFO:TESTCE") -> SelectedOptionProof:
         timestamp_quality="exchange",
         timestamp_source="exchange_timestamp",
         candle_count=5,
-        last_candle_ts=NOW - timedelta(seconds=30),
+        last_candle_ts=now - timedelta(seconds=30),
         last_candle_close=100.0,
         max_candle_age_seconds=180.0,
-        now=NOW,
+        now=now,
     )
 
 
@@ -85,6 +87,7 @@ def test_live_entry_preflight_blocks_each_broker_truth(field: str, blocker: str)
 
 
 def test_live_entry_preflight_rejects_received_at_timestamp_source() -> None:
+    now = _now()
     bad = SelectedOptionProof(
         symbol="NFO:TESTCE",
         quote_present=True,
@@ -92,9 +95,9 @@ def test_live_entry_preflight_rejects_received_at_timestamp_source() -> None:
         timestamp_quality="received_at",
         timestamp_source="received_at",
         candle_count=5,
-        last_candle_ts=NOW - timedelta(seconds=30),
+        last_candle_ts=now - timedelta(seconds=30),
         last_candle_close=100.0,
-        now=NOW,
+        now=now,
     )
 
     decision = evaluate_live_entry_preflight(
@@ -113,6 +116,7 @@ def test_live_entry_preflight_rejects_received_at_timestamp_source() -> None:
 
 
 def test_live_entry_preflight_requires_recent_valid_candle() -> None:
+    now = _now()
     stale = SelectedOptionProof(
         symbol="NFO:TESTCE",
         quote_present=True,
@@ -120,10 +124,10 @@ def test_live_entry_preflight_requires_recent_valid_candle() -> None:
         timestamp_quality="exchange",
         timestamp_source="exchange_timestamp",
         candle_count=5,
-        last_candle_ts=NOW - timedelta(minutes=30),
+        last_candle_ts=now - timedelta(minutes=30),
         last_candle_close=100.0,
         max_candle_age_seconds=180.0,
-        now=NOW,
+        now=now,
     )
 
     decision = evaluate_live_entry_preflight(
@@ -141,6 +145,7 @@ def test_live_entry_preflight_requires_recent_valid_candle() -> None:
 
 class _MDM:
     def __init__(self) -> None:
+        now = _now()
         self._snapshots = {
             "NFO:TESTCE": SimpleNamespace(
                 ltp=100.0,
@@ -160,8 +165,8 @@ class _MDM:
             ),
         }
         self._bars = {
-            "NFO:TESTCE": [{"timestamp": NOW - timedelta(seconds=30), "close": 100.0}],
-            "NFO:TESTPE": [{"timestamp": NOW - timedelta(seconds=30), "close": 100.0}],
+            "NFO:TESTCE": [{"timestamp": now - timedelta(seconds=30), "close": 100.0}],
+            "NFO:TESTPE": [{"timestamp": now - timedelta(seconds=30), "close": 100.0}],
         }
 
     def get_symbol_snapshot(self, symbol: str):
