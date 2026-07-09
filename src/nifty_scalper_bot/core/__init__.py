@@ -93,10 +93,6 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
 
     _ready_adapter(app_module)
     _polling_adapter(app_module)
-    if _core_env_true("LIVE_ENTRY_PREFLIGHT_REQUIRED"):
-        from nifty_scalper_bot.core.live_entry_preflight_safety import apply_app_patch as _live_entry_preflight_adapter
-
-        _live_entry_preflight_adapter(app_module)
 
 
 class _CoreAppPatchLoader(importlib.abc.Loader):
