@@ -108,13 +108,16 @@ async def _stop_fallback_safely(fallback: Any, *, reason: str) -> None:
     try:
         running_fn = getattr(fallback, "is_running", None)
         running = bool(running_fn()) if callable(running_fn) else bool(getattr(fallback, "_running", False))
+        if not running:
+            # Already stopped: repeating set_websocket_mode(True) every healthy
+            # supervisor iteration is redundant async churn / noisy telemetry.
+            return
         mode_fn = getattr(fallback, "set_websocket_mode", None)
         if callable(mode_fn):
             await _maybe_await(mode_fn(True))
-        if running:
-            stop_fn = getattr(fallback, "stop", None)
-            if callable(stop_fn):
-                await _maybe_await(stop_fn())
+        stop_fn = getattr(fallback, "stop", None)
+        if callable(stop_fn):
+            await _maybe_await(stop_fn())
     except Exception as exc:  # noqa: BLE001 - supervisor must remain non-fatal
         LOGGER.warning(
             "POLLING_FALLBACK_STOP_FAILED reason=%s error_type=%s error=%s",

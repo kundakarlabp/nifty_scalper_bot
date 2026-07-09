@@ -774,6 +774,12 @@ class TelegramBot:
                 self._heartbeat_task = None
             self._bg_task_started = False
 
+            # 1. Drain pending alerts and stop internal workers FIRST — the
+            # final alert flush sends via application.bot, which needs PTB's
+            # HTTPX layer still initialized ("HTTPXRequest is not initialized"
+            # shutdown errors came from draining after application.shutdown()).
+            await self.shutdown()
+
             if self.application.updater is not None:
                 with suppress(Exception):
                     await self.application.updater.stop()
@@ -781,9 +787,7 @@ class TelegramBot:
                 await self.application.stop()
             with suppress(Exception):
                 await self.application.shutdown()
-            
-            # 2. Call internal shutdown for other tasks (loops, workers)
-            await self.shutdown()
+
             release_polling_owner(token=self.deps.token, owner=type(self).__name__)
             self._started = False
             log.info("✅ Telegram Bot: Shutdown complete.")
