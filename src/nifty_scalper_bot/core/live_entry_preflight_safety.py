@@ -1,13 +1,14 @@
 """Runtime patch that enforces live-entry broker/market preflight.
 
 The patch wraps app._recompute_and_push_runtime_readiness after the app module is
-loaded. It only tightens LIVE entry arming; it does not change evaluation or
-market-data observation readiness.
+loaded. It only tightens real LIVE entry arming; it does not change evaluation,
+shadow/paper-mode tests, or market-data observation readiness.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -21,6 +22,11 @@ from nifty_scalper_bot.execution.live_entry_preflight import (
 LOGGER = logging.getLogger(__name__)
 _PATCH_ATTR = "_live_entry_preflight_patch_applied"
 _ORIGINAL_ATTR = "_live_entry_preflight_original_recompute"
+_TRUTHY = {"1", "true", "yes", "y", "on", "live"}
+
+
+def _env_true(name: str) -> bool:
+    return str(os.getenv(name, "") or "").strip().lower() in _TRUTHY
 
 
 def _get(payload: Mapping[str, Any] | object | None, key: str, default: Any = None) -> Any:
@@ -36,6 +42,22 @@ def _truthy_attr(ctx: Any, *names: str, default: bool = False) -> bool:
         if hasattr(ctx, name):
             return bool(getattr(ctx, name))
     return bool(default)
+
+
+def _real_live_preflight_requested(ctx: Any) -> bool:
+    """Return True only for actual live entry execution, not LIVE-shaped tests."""
+
+    explicit_required = bool(getattr(ctx, "live_entry_preflight_required", False)) or _env_true("LIVE_ENTRY_PREFLIGHT_REQUIRED")
+    if explicit_required:
+        return True
+    mode = str(
+        getattr(getattr(ctx, "settings", None), "execution_mode", None)
+        or os.getenv("EXECUTION_MODE", "PAPER")
+        or "PAPER"
+    ).strip().upper()
+    live_enabled = _env_true("ENABLE_LIVE") or _env_true("ENABLE_LIVE_TRADING")
+    paper_shadow = _env_true("PAPER_MODE") or _env_true("PAPER__ENABLED") or _env_true("SHADOW_MODE")
+    return bool(mode == "LIVE" and live_enabled and not paper_shadow)
 
 
 def _safe_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -247,8 +269,7 @@ def apply_app_patch(app_module: Any) -> None:
 
     async def _wrapped(ctx: Any, *, reason: str) -> None:
         await original(ctx, reason=reason)
-        live_mode = str(getattr(getattr(ctx, "settings", None), "execution_mode", "PAPER") or "PAPER").upper() == "LIVE"
-        if not live_mode or not bool(getattr(ctx, "live_orders_armed", False)):
+        if not _real_live_preflight_requested(ctx) or not bool(getattr(ctx, "live_orders_armed", False)):
             return
         snapshot = build_context_live_entry_preflight(ctx)
         decision = evaluate_live_entry_preflight(snapshot)
