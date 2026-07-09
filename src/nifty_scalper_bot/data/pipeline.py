@@ -153,7 +153,10 @@ def _log_candle_store_out_of_order(
 def _log_pipeline_store_rejected(candle: "Candle", exc: DataIntegrityError, *, source: str) -> None:
     log_throttled(
         LOGGER,
-        f"pipeline_candle_store_rejected:{candle.symbol}:{source}",
+        (
+            f"pipeline_candle_store_rejected:{candle.symbol}:"
+            f"{source}:{candle.timestamp.isoformat()}"
+        ),
         (
             "pipeline_candle_store_rejected symbol=%s incoming_ts=%s "
             "error_type=%s reason=%s source=%s"
@@ -176,6 +179,7 @@ def _log_pipeline_store_rejected(candle: "Candle", exc: DataIntegrityError, *, s
             "error_type": type(exc).__name__,
             "reason": str(exc),
             "source": source,
+            "bypass_filters": True,
         },
     )
 
@@ -232,7 +236,7 @@ class TickValidator:
                 future_by_sec = future_delta_seconds(ts, now=now_ist)
                 log_throttled(
                     LOGGER,
-                    f"future_tick_rejected:{symbol}",
+                    f"future_tick_rejected:{symbol}:{ts.isoformat()}",
                     (
                         "future_tick_rejected symbol=%s raw_ts=%r tick_ts_ist=%s now_ist=%s "
                         "future_by_sec=%.3f timestamp_source=%s"
@@ -258,6 +262,7 @@ class TickValidator:
                         "timestamp_source": normalized_ts.source,
                         "source": str(raw.get("source") or "tick_validator"),
                         "total_dropped": _DROPPED_TICKS.value,
+                        "bypass_filters": True,
                     },
                 )
                 return None
