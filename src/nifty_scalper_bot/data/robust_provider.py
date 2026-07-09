@@ -17,10 +17,13 @@ try:
         wait_exponential,
     )
 except Exception:  # dependency-free fallback for clean/partially-initialized envs
-    sys.modules.pop("tenacity", None)
-    sys.modules.pop("tenacity.asyncio", None)
     import asyncio
+    import sys
     import time
+
+    for _name in tuple(sys.modules):
+        if _name == "tenacity" or _name.startswith("tenacity."):
+            sys.modules.pop(_name, None)
 
     def stop_after_attempt(attempts: int) -> int:
         return int(attempts)
@@ -209,25 +212,32 @@ class RobustDataProvider:
         except Exception:
             LOGGER.exception("DATA_PROVIDER_NOTIFY_FAILED event=%s", event)
 
-    
     def get_profile(self) -> dict:
         """
-        World-class FIX: Proxies non-critical status calls (like get_profile) 
-        synchronously to the underlying broker client for startup checks.
+        Proxy non-critical status calls to the underlying broker client.
+
+        This intentionally preserves the historical non-throwing startup contract:
+        profile failures are diagnostics, not a reason to crash tooling/startup.
         """
         profile_fn = getattr(self._broker, 'get_profile', None) 
         if callable(profile_fn):
             try:
-                # Assuming the underlying call is synchronous, use to_thread to be safe 
-                # if this code is ever called from an async context outside startup.
-                # However, for the simple startup probe, we rely on the client being synchronous.
-                # Since the current environment is synchronous during init:
                 return profile_fn()
             except Exception as exc:
                 LOGGER.warning("Profile fetch failed via proxy: %s", exc)
-        
-        # Fallback if method or client is missing/failing
-        return {"user_id": "unavailable", "user_name": "unavailable", "broker": "unknown"}    
+        return {"user_id": "unavailable", "user_name": "unavailable", "broker": "unknown"}
+
+    def get_margins(self) -> dict:
+        """Proxy broker margins with startup diagnostics and non-throwing fallback."""
+        margins_fn = getattr(self._broker, 'get_margins', None)
+        if callable(margins_fn):
+            try:
+                payload = margins_fn()
+                return payload if isinstance(payload, dict) else {}
+            except Exception as exc:
+                self._logger.warning("BROKER_MARGINS_FETCH_FAILED: %s", exc)
+        return {}
+
     def _validate_response(
         self,
         response: Any,
@@ -246,13 +256,9 @@ class RobustDataProvider:
         Raises:
             DataFetchError: If response structure invalid
         """
-        # Handle None response
         if response is None:
             raise DataFetchError("Broker returned None response")
-            
-        # Handle error responses
         if isinstance(response, dict):
-            # Check for explicit error
             if "error" in response or "status" in response and response["status"] == "error":
                 error_msg = response.get("error", "Unknown error")
                 error_code = response.get("code", "NO_CODE")
@@ -260,8 +266,6 @@ class RobustDataProvider:
                     f"Broker API error: {error_msg} (code: {error_code})"
                 )
                 raise DataFetchError(f"Broker error: {error_msg}")
-                
-            # Validate expected key exists
             if expected_key not in response:
                 LOGGER.error(
                     f"Response missing '{expected_key}' key. "
@@ -270,9 +274,8 @@ class RobustDataProvider:
                 raise DataFetchError(
                     f"Response missing expected key: {expected_key}"
                 )
-                
         return response
-        
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -285,44 +288,18 @@ class RobustDataProvider:
         operation_name: str = "fetch",
         expected_key: str = "result"
     ) -> Any:
-        """
-        Fetch data with full protection.
-        
-        Args:
-            fetch_fn: Async function to call broker API
-            operation_name: Human-readable operation name for logging
-            expected_key: Expected response key to validate
-            
-        Returns:
-            Validated data from response[expected_key]
-            
-        Raises:
-            DataFetchError: If all retries exhausted or circuit open
-        """
-        # Check circuit breaker
+        """Fetch data with validation while preserving the historical async API."""
         if not self.circuit.allow_request():
             raise DataFetchError(
                 f"Circuit breaker OPEN - {operation_name} blocked"
             )
-            
         try:
-            # Call broker API
             response = await asyncio.to_thread(fetch_fn)
-            
-            # Validate response structure
             validated = self._validate_response(response, expected_key)
-            
-            # Record success
             self.circuit.record_success()
-            
-            # Return extracted data
             return validated[expected_key]
-            
         except Exception as exc:
-            # Record failure
             self.circuit.record_failure()
-            
-            # Notify if critical
             if self.circuit.state == CircuitState.OPEN and self.notifier:
                 self._notify_failure(
                     "DATA_PROVIDER_FAILURE",
@@ -332,74 +309,109 @@ class RobustDataProvider:
                         "circuit_state": self.circuit.state.value,
                     },
                 )
-                
-            # Re-raise for retry logic
             raise
-            
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((Exception,)),
+        before_sleep=before_sleep_log(LOGGER, logging.WARNING)
+    )
+    def _fetch_positions_with_retry(self) -> list[dict[str, Any]]:
+        real_client = getattr(self, "client", getattr(self, "_broker", None))
+        if not real_client:
+            return []
+        method = getattr(real_client, "positions", getattr(real_client, "get_positions", None))
+        if not callable(method):
+            self._logger.warning("Broker client missing positions/get_positions method")
+            return []
+        raw_response = method()
+        if asyncio.iscoroutine(raw_response):
+            raise DataFetchError("positions method returned coroutine in synchronous fetch path")
+        return self._normalise_position_response(raw_response)
+
+    def _normalise_position_response(self, raw_response: Any) -> list[dict[str, Any]]:
+        if raw_response is None:
+            return []
+        if isinstance(raw_response, dict):
+            data = raw_response.get("net", raw_response.get("data", []))
+        elif isinstance(raw_response, list):
+            data = raw_response
+        else:
+            raise DataFetchError(f"Invalid positions response type: {type(raw_response)}")
+        if not isinstance(data, list):
+            raise DataFetchError(f"Invalid positions payload type: {type(data)}")
+        return [item for item in data if isinstance(item, dict)]
+
     async def get_positions(self) -> list[dict[str, Any]]:
-        """
-        Fetch positions with intelligent fallback (sync/async, list/dict, method names).
-        """
+        """Fetch positions with the existing async public contract plus stricter broker truth."""
+        if not self.circuit.allow_request():
+            self._notify_failure(
+                "BROKER_POSITION_FETCH_BLOCKED",
+                {"error": "circuit_open", "circuit_state": self.circuit.state.value},
+            )
+            return []
         try:
-            # 1. Access the real client
             real_client = getattr(self, "client", getattr(self, "_broker", None))
-            if not real_client:
+            method = getattr(real_client, "positions", getattr(real_client, "get_positions", None)) if real_client else None
+            if not callable(method):
+                self._logger.warning("Broker client missing positions/get_positions method")
                 return []
-
-            # 2. Intelligent Fetcher
-            async def _execute_fetch():
-                # Try standard method name 'positions' (Zerodha) first
-                method = getattr(real_client, "positions", getattr(real_client, "get_positions", None))
-                
-                if not method:
-                    self._logger.warning("Broker client missing positions/get_positions method")
-                    return []
-
-                if asyncio.iscoroutinefunction(method):
-                    return await method()
-                else:
-                    return await asyncio.to_thread(method)
-
-            raw_response = await _execute_fetch()
-
-            # 3. Robust Normalization (The "World-Class" Part)
-            # Zerodha returns {'net': [...], 'day': [...]}
-            # Some brokers return [...]
-            data = []
-            if isinstance(raw_response, dict):
-                data = raw_response.get("net", raw_response.get("data", []))
-            elif isinstance(raw_response, list):
-                data = raw_response
-
-            if not isinstance(data, list):
-                return []
-                
+            if asyncio.iscoroutinefunction(method):
+                raw_response = await method()
+                data = self._normalise_position_response(raw_response)
+                self.circuit.record_success()
+                return data
+            data = await asyncio.to_thread(self._fetch_positions_with_retry)
+            self.circuit.record_success()
             return data
-
         except Exception as exc:
-            self._logger.error(f"Robust position fetch failed: {exc}")
-            return [] # Return empty list to prevent crash
+            self.circuit.record_failure()
+            self._logger.error("Robust position fetch failed: %s", exc)
+            self._notify_failure(
+                "BROKER_POSITION_FETCH_FAILED",
+                {"error": str(exc), "error_type": type(exc).__name__},
+            )
+            return []
+
+    async def get_positions_async(self) -> list[dict[str, Any]]:
+        return await self.get_positions()
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch quotes with full validation."""
-        
         def _fetch() -> Any:
-            return self._broker.quote(symbols)
-            
+            quote_fn = getattr(self._broker, "quote", None)
+            if not callable(quote_fn):
+                raise DataFetchError("Broker client missing quote method")
+            return quote_fn(symbols)
         try:
             quotes = await self.fetch_with_validation(
                 _fetch,
                 operation_name="get_quotes",
                 expected_key="data"
             )
-            
             if not isinstance(quotes, dict):
                 raise DataFetchError(
                     f"Expected dict of quotes, got {type(quotes)}"
                 )
-                
             return quotes
-            
         except DataFetchError:
             LOGGER.error("Quote fetch failed after retries")
+            return {}
+
+    async def safe_quote_any(self, symbols: list[str]) -> dict[str, Any]:
+        """Fetch quotes using broker quote_any when present."""
+        quote_any = getattr(self.client, 'quote_any', None)
+        if not callable(quote_any):
+            return {}
+        try:
+            result = quote_any(symbols)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result if isinstance(result, dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            self._notify_failure(
+                "BROKER_QUOTE_FETCH_FAILED",
+                {"error": str(exc), "error_type": type(exc).__name__, "symbols": list(symbols)},
+            )
             return {}
