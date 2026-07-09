@@ -2,20 +2,23 @@
 
 import asyncio
 import logging
+import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, TypeVar
-from dataclasses import dataclass
 
 try:
     from tenacity import (
+        before_sleep_log,
         retry,
+        retry_if_exception_type,
         stop_after_attempt,
         wait_exponential,
-        retry_if_exception_type,
-        before_sleep_log,
     )
-except ImportError:  # dependency-free fallback for clean envs
+except Exception:  # dependency-free fallback for clean/partially-initialized envs
+    sys.modules.pop("tenacity", None)
+    sys.modules.pop("tenacity.asyncio", None)
     import asyncio
     import time
 

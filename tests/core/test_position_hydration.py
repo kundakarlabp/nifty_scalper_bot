@@ -19,6 +19,10 @@ class _PositionManager:
         self.restored: list[Any] | None = None
         self.synced: list[dict[str, Any]] | None = None
         self._positions: list[Any] = []
+        self.broker_client: Any | None = None
+
+    def set_broker_client(self, broker_client: Any | None) -> None:
+        self.broker_client = broker_client
 
     def restore_positions(self, positions: list[Any]) -> None:
         self.restored = list(positions)
@@ -49,9 +53,7 @@ class _DataHub:
         self.rows = list(rows)
 
 
-def test_hydrate_positions_prefers_broker_snapshot(
-    monkeypatch,
-) -> None:
+def test_hydrate_positions_prefers_broker_snapshot() -> None:
     persisted = [
         SimpleNamespace(
             symbol="PERSISTED",
@@ -69,15 +71,13 @@ def test_hydrate_positions_prefers_broker_snapshot(
     ]
     manager = _PositionManager()
     data_hub = _DataHub()
-    monkeypatch.setattr(
-        "nifty_scalper_bot.core.app._fetch_positions_with_retry",
-        lambda *args, **kwargs: broker_positions,
-    )
+
+    broker_client = SimpleNamespace(get_positions=lambda: broker_positions)
 
     result = _hydrate_positions(
         position_manager=manager,
         persistent_state=_PersistentState(persisted),
-        broker_client=object(),
+        broker_client=broker_client,
         data_hub=data_hub,
         max_attempts=1,
         backoff_min=0.1,
@@ -88,6 +88,7 @@ def test_hydrate_positions_prefers_broker_snapshot(
     )
 
     assert result == broker_positions
+    assert manager.broker_client is broker_client
     assert manager.restored is None
     assert manager.synced == broker_positions
     assert data_hub.rows == [

@@ -54,30 +54,32 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
     core_hook_count = _hook_count(_CORE_APP_HOOK_ATTR)
     datahub_hook_count = _hook_count(_DATAHUB_HOOK_ATTR)
 
-    market_data_manager_hardened = bool(
-        getattr(mdm_cls, "_freshness_hardening_installed", False)
-        or _class_attr(
+    if ctx is not None:
+        market_data_manager_hardened = bool(
+            getattr(mdm_cls, "_freshness_hardening_installed", False)
+        )
+        websocket_hardened = bool(
+            getattr(ws_cls, "_market_data_hardening_installed", False)
+        )
+        datahub_guarded = bool(
+            getattr(datahub_cls, "_synthetic_timestamp_guard_installed", False)
+        )
+    else:
+        market_data_manager_hardened = _class_attr(
             "nifty_scalper_bot.data.market_data_manager",
             "MarketDataManager",
             "_freshness_hardening_installed",
         )
-    )
-    websocket_hardened = bool(
-        getattr(ws_cls, "_market_data_hardening_installed", False)
-        or _class_attr(
+        websocket_hardened = _class_attr(
             "nifty_scalper_bot.streaming.websocket_manager",
             "WebSocketManager",
             "_market_data_hardening_installed",
         )
-    )
-    datahub_guarded = bool(
-        getattr(datahub_cls, "_synthetic_timestamp_guard_installed", False)
-        or _class_attr(
+        datahub_guarded = _class_attr(
             "nifty_scalper_bot.data.data_hub",
             "DataHub",
             "_synthetic_timestamp_guard_installed",
         )
-    )
     polling_failover_patched = bool(
         _module_attr("nifty_scalper_bot.core.app", "_polling_failover_runtime_patch_installed")
     )

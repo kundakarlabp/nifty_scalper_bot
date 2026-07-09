@@ -1851,6 +1851,10 @@ def _hydrate_positions(
     jitter_fraction: float,
     total_timeout_sec: float,
 ) -> list[Mapping[str, object]] | None:
+    set_broker_client = getattr(position_manager, "set_broker_client", None)
+    if callable(set_broker_client):
+        set_broker_client(broker_client)
+
     persisted_positions = persistent_state.load_positions()
     broker_positions: list[Mapping[str, object]] | None
     try:
@@ -1971,7 +1975,10 @@ class TradingSessionGuard:
 
     def evaluate(self) -> TradingSessionStatus:
         now = datetime.now(timezone.utc)
-        base_guard = build_session_guard(
+        guard_builder = getattr(
+            import_module(__name__), "build_session_guard", build_session_guard
+        )
+        base_guard = guard_builder(
             now=now,
             override=self._allow_out_of_hours,
             market_open=self._market_open,
@@ -2164,7 +2171,10 @@ class TradingSessionGuard:
         return payload
 
     def _is_market_open(self, now_utc: datetime) -> bool:
-        guard = build_session_guard(
+        guard_builder = getattr(
+            import_module(__name__), "build_session_guard", build_session_guard
+        )
+        guard = guard_builder(
             now=now_utc,
             override=self._allow_out_of_hours,
             market_open=self._market_open,
