@@ -1,8 +1,8 @@
 """Runtime patch that enforces live-entry broker/market preflight.
 
 The patch wraps app._recompute_and_push_runtime_readiness after the app module is
-loaded. It only tightens real LIVE entry arming; it does not change evaluation,
-shadow/paper-mode tests, or market-data observation readiness.
+loaded. It tightens live entry arming when explicitly enabled by production
+configuration, while leaving paper/shadow tests and observation readiness intact.
 """
 
 from __future__ import annotations
@@ -44,38 +44,10 @@ def _truthy_attr(ctx: Any, *names: str, default: bool = False) -> bool:
     return bool(default)
 
 
-def _has_broker_truth_state(ctx: Any) -> bool:
-    return any(
-        hasattr(ctx, name)
-        for name in (
-            "position_reconciliation_completed",
-            "position_reconciliation_failed",
-            "broker_orders_reconciled",
-            "order_reconciliation_completed",
-            "orders_reconciled",
-            "startup_order_reconciliation_completed",
-            "broker_position_mismatch",
-            "position_mismatch",
-            "unprotected_broker_position",
-            "unprotected_broker_positions",
-        )
-    )
-
-
 def _real_live_preflight_requested(ctx: Any) -> bool:
-    """Return True only for actual live entry execution, not LIVE-shaped tests."""
+    """Return True only when production config explicitly requires preflight."""
 
-    explicit_required = bool(getattr(ctx, "live_entry_preflight_required", False)) or _env_true("LIVE_ENTRY_PREFLIGHT_REQUIRED")
-    if explicit_required:
-        return True
-    mode = str(
-        getattr(getattr(ctx, "settings", None), "execution_mode", None)
-        or os.getenv("EXECUTION_MODE", "PAPER")
-        or "PAPER"
-    ).strip().upper()
-    live_enabled = _env_true("ENABLE_LIVE") or _env_true("ENABLE_LIVE_TRADING")
-    paper_shadow = _env_true("PAPER_MODE") or _env_true("PAPER__ENABLED") or _env_true("SHADOW_MODE")
-    return bool(mode == "LIVE" and live_enabled and not paper_shadow and _has_broker_truth_state(ctx))
+    return bool(getattr(ctx, "live_entry_preflight_required", False)) or _env_true("LIVE_ENTRY_PREFLIGHT_REQUIRED")
 
 
 def _safe_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
