@@ -1851,6 +1851,10 @@ def _hydrate_positions(
     jitter_fraction: float,
     total_timeout_sec: float,
 ) -> list[Mapping[str, object]] | None:
+    set_broker_client = getattr(position_manager, "set_broker_client", None)
+    if callable(set_broker_client):
+        set_broker_client(broker_client)
+
     persisted_positions = persistent_state.load_positions()
     broker_positions: list[Mapping[str, object]] | None
     try:

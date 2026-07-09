@@ -125,10 +125,11 @@ def _log_candle_store_out_of_order(
         "source": source,
         "reason": "incoming_before_last_store_ts",
         "total_dropped": _DROPPED_CANDLES.value,
+        "bypass_filters": True,
     }
     log_throttled(
         LOGGER,
-        f"candle_store_out_of_order:{symbol}",
+        f"candle_store_out_of_order:{symbol}:{incoming_ts.isoformat()}:{last_ts.isoformat()}",
         (
             "candle_store_out_of_order symbol=%s incoming_ts=%s last_ts=%s "
             "age_delta_s=%.1f incoming_close=%s last_close=%s store_size=%d source=%s"
