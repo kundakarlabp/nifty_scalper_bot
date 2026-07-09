@@ -24,6 +24,7 @@ from nifty_scalper_bot.execution.order_entry_guard_patch import apply_patches as
 import nifty_scalper_bot.data.quote_identity_extension as _quote_identity_extension
 import nifty_scalper_bot.execution.bracket_ownership_extension as _bracket_ownership_extension
 import nifty_scalper_bot.execution.broker_exposure_quarantine_extension as _broker_exposure_quarantine_extension
+import nifty_scalper_bot.execution.broker_order_ledger_patch as _broker_order_ledger_patch
 import nifty_scalper_bot.execution.trade_plan_identity_guard as _trade_plan_identity_guard
 
 _apply_live_safety_identity_patches()
@@ -34,6 +35,7 @@ _apply_protective_order_intent_patches()
 _apply_order_entry_guard_patches()
 _quote_identity_extension.apply_patches()
 _broker_exposure_quarantine_extension.apply_patches()
+_broker_order_ledger_patch.apply_patches()
 _bracket_ownership_extension.apply_patches()
 _trade_plan_identity_guard.apply_patches()
 
