@@ -65,6 +65,17 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
     )
 
 try:
+    from nifty_scalper_bot.core.status_log_hygiene import apply_logging_filters as _apply_status_log_hygiene
+
+    _apply_status_log_hygiene()
+except Exception as exc:  # noqa: BLE001 - observability hygiene must not crash tooling imports
+    get_logger(__name__).error(
+        "STATUS_LOG_HYGIENE_INSTALL_FAILED error=%s",
+        exc,
+        extra={"event": "STATUS_LOG_HYGIENE_INSTALL_FAILED", "error_type": type(exc).__name__},
+    )
+
+try:
     from nifty_scalper_bot.core.market_data_hardening_bootstrap import (
         install_market_data_hardening_or_raise as _install_market_data_hardening,
     )
