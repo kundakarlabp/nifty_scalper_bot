@@ -53,9 +53,7 @@ class _DataHub:
         self.rows = list(rows)
 
 
-def test_hydrate_positions_prefers_broker_snapshot(
-    monkeypatch,
-) -> None:
+def test_hydrate_positions_prefers_broker_snapshot() -> None:
     persisted = [
         SimpleNamespace(
             symbol="PERSISTED",
@@ -73,12 +71,8 @@ def test_hydrate_positions_prefers_broker_snapshot(
     ]
     manager = _PositionManager()
     data_hub = _DataHub()
-    monkeypatch.setattr(
-        "nifty_scalper_bot.core.app._fetch_positions_with_retry",
-        lambda *args, **kwargs: broker_positions,
-    )
 
-    broker_client = object()
+    broker_client = SimpleNamespace(get_positions=lambda: broker_positions)
 
     result = _hydrate_positions(
         position_manager=manager,

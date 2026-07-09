@@ -9,6 +9,7 @@ import does not eagerly load DataHub.
 
 from __future__ import annotations
 
+import importlib
 import importlib.abc
 import importlib.machinery
 import sys
@@ -92,6 +93,15 @@ def _install_datahub_guard_import_hook() -> None:
 
 
 _install_datahub_guard_import_hook()
+
+
+def __getattr__(name: str) -> ModuleType:
+    if name == "rest":
+        module = importlib.import_module("nifty_scalper_bot.data.rest")
+        setattr(sys.modules[__name__], name, module)
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "Instrument",

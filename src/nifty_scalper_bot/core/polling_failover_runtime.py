@@ -17,6 +17,7 @@ from nifty_scalper_bot.core.polling_failover import decide_polling_fallback
 
 _PATCH_ATTR = "_polling_failover_runtime_patch_installed"
 _APP_MODULE_NAME = "nifty_scalper_bot.core.app"
+_APP_MODULE_REF: Any | None = None
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
 
@@ -38,7 +39,7 @@ def _safe_callable(value: Any, *, name: str, default: Any = None) -> tuple[bool,
                 exc,
                 extra={
                     "event": "POLLING_SUPERVISOR_CALL_FAILED",
-                    "name": name,
+                    "dependency": name,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 },
@@ -49,7 +50,11 @@ def _safe_callable(value: Any, *, name: str, default: Any = None) -> tuple[bool,
             "POLLING_SUPERVISOR_NONCALLABLE name=%s value_type=%s",
             name,
             type(value).__name__,
-            extra={"event": "POLLING_SUPERVISOR_NONCALLABLE", "name": name, "value_type": type(value).__name__},
+            extra={
+                "event": "POLLING_SUPERVISOR_NONCALLABLE",
+                "dependency": name,
+                "value_type": type(value).__name__,
+            },
         )
     return False, value if isinstance(value, bool) else default
 
@@ -164,12 +169,12 @@ def _polling_fallback_degraded(
     ).activate
 
 
-def _resolve_market_open_callable(ctx: Any) -> Any:
+def _resolve_market_open_callable(ctx: Any, app_module: Any | None = None) -> Any:
     ctx_hook = getattr(ctx, "is_market_open_now", None)
     if ctx_hook is not None:
         return ctx_hook
-    app_module = sys.modules.get(_APP_MODULE_NAME)
-    return getattr(app_module, "is_market_open_now", None)
+    module = app_module or _APP_MODULE_REF or sys.modules.get(_APP_MODULE_NAME)
+    return getattr(module, "is_market_open_now", None)
 
 
 async def _polling_failover_supervisor_iteration(
@@ -180,25 +185,38 @@ async def _polling_failover_supervisor_iteration(
     degraded_since: float | None,
     recovered_since: float | None,
     activate_after: float,
+    _app_module: Any | None = None,
 ) -> tuple[float | None, float | None]:
     """One non-fatal polling failover supervisor iteration.
 
     Returns the updated ``(degraded_since, recovered_since)`` state.
     """
 
-    _called, market_open = _safe_callable(_resolve_market_open_callable(ctx), name="is_market_open_now", default=False)
+    _called, market_open = _safe_callable(
+        _resolve_market_open_callable(ctx, _app_module),
+        name="is_market_open_now",
+        default=False,
+    )
     if not bool(market_open):
         await _stop_fallback_safely(fallback, reason="market_closed")
         return None, time.monotonic()
 
     ws_mgr = getattr(ctx, "websocket_manager", None)
     is_connected = getattr(ws_mgr, "is_connected", None)
-    _called_ws, ws_state = _safe_callable(is_connected, name="websocket_manager.is_connected", default=False)
+    _called_ws, ws_state = _safe_callable(
+        is_connected,
+        name="websocket_manager.is_connected",
+        default=False,
+    )
     ws_ok = bool(ws_state)
     mdm = getattr(ctx, "market_data_manager", None)
     feed_health = _safe_feed_health(mdm)
     data_age_ms = _safe_data_age_ms(mdm)
-    lagging = bool(feed_health.get("lagging") or feed_health.get("event_loop_lagging") or getattr(ctx, "event_loop_lagging", False))
+    lagging = bool(
+        feed_health.get("lagging")
+        or feed_health.get("event_loop_lagging")
+        or getattr(ctx, "event_loop_lagging", False)
+    )
     futures_fresh = _bool(feed_health, "futures_fresh", True)
     options_fresh = _bool(feed_health, "options_fresh", True)
     decision = decide_polling_fallback(
@@ -235,10 +253,36 @@ async def _polling_failover_supervisor_iteration(
 def apply_app_patch(app_module: Any) -> bool:
     """Install runtime polling fallback helpers on ``core.app``."""
 
+    global _APP_MODULE_REF
+    _APP_MODULE_REF = app_module
     if bool(getattr(app_module, _PATCH_ATTR, False)):
         return False
+
+    async def _installed_polling_failover_supervisor_iteration(
+        ctx: Any,
+        fallback: Any,
+        *,
+        quote_stale_ms: float,
+        degraded_since: float | None,
+        recovered_since: float | None,
+        activate_after: float,
+    ) -> tuple[float | None, float | None]:
+        return await _polling_failover_supervisor_iteration(
+            ctx,
+            fallback,
+            quote_stale_ms=quote_stale_ms,
+            degraded_since=degraded_since,
+            recovered_since=recovered_since,
+            activate_after=activate_after,
+            _app_module=app_module,
+        )
+
     setattr(app_module, "_polling_fallback_degraded", _polling_fallback_degraded)
-    setattr(app_module, "_polling_failover_supervisor_iteration", _polling_failover_supervisor_iteration)
+    setattr(
+        app_module,
+        "_polling_failover_supervisor_iteration",
+        _installed_polling_failover_supervisor_iteration,
+    )
     setattr(app_module, _PATCH_ATTR, True)
     return True
 

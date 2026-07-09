@@ -177,7 +177,13 @@ class LogThrottle:
             "LOG_THROTTLE_SUMMARY total_suppressed=%s top_keys=%s",
             total_suppressed,
             keys,
-            extra={"event": "LOG_THROTTLE_SUMMARY", "total_suppressed": total_suppressed, "top_keys": keys, "keys_count": len(top)},
+            extra={
+                "event": "LOG_THROTTLE_SUMMARY",
+                "reason": "throttle_summary",
+                "total_suppressed": total_suppressed,
+                "top_keys": keys,
+                "keys_count": len(top),
+            },
         )
 
     def log_on_change(self, logger: logging.Logger, *, key: str, state: Any, message: str, reminder_seconds: float = 600, level: int = logging.INFO, extra: dict[str, Any] | None = None) -> bool:
