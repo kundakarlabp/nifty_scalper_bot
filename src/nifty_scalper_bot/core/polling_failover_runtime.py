@@ -185,6 +185,7 @@ async def _polling_failover_supervisor_iteration(
     degraded_since: float | None,
     recovered_since: float | None,
     activate_after: float,
+    recover_cooldown: float = 10.0,
     _app_module: Any | None = None,
 ) -> tuple[float | None, float | None]:
     """One non-fatal polling failover supervisor iteration.
@@ -242,8 +243,14 @@ async def _polling_failover_supervisor_iteration(
     )
     now = time.monotonic()
     if not decision.activate:
-        await _stop_fallback_safely(fallback, reason="feed_recovered")
-        return None, recovered_since or now
+        # Anti-flap hysteresis (mirrors core.app:_polling_failover_supervisor_
+        # iteration): only stop the fallback after recover_cooldown seconds of
+        # continuous recovery, so a briefly healthy feed cannot bounce the
+        # REST poller on/off.
+        recovered_since = recovered_since or now
+        if now - recovered_since >= max(0.0, float(recover_cooldown or 0.0)):
+            await _stop_fallback_safely(fallback, reason="feed_recovered")
+        return None, recovered_since
     degraded_since = degraded_since or now
     if now - degraded_since >= max(0.0, float(activate_after or 0.0)):
         await _start_fallback_safely(fallback, decision_reason=decision.reason)
@@ -266,6 +273,7 @@ def apply_app_patch(app_module: Any) -> bool:
         degraded_since: float | None,
         recovered_since: float | None,
         activate_after: float,
+        recover_cooldown: float = 10.0,
     ) -> tuple[float | None, float | None]:
         return await _polling_failover_supervisor_iteration(
             ctx,
@@ -274,6 +282,7 @@ def apply_app_patch(app_module: Any) -> bool:
             degraded_since=degraded_since,
             recovered_since=recovered_since,
             activate_after=activate_after,
+            recover_cooldown=recover_cooldown,
             _app_module=app_module,
         )
 
