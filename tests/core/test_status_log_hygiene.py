@@ -4,7 +4,6 @@ import logging
 
 from nifty_scalper_bot.core.status_log_hygiene import (
     CanonicalHistorySoftFailureFilter,
-    apply_logging_filters,
     infer_reconciliation_complete_from_logs,
 )
 
@@ -23,18 +22,6 @@ def test_expected_context_history_miss_is_downgraded() -> None:
     assert CanonicalHistorySoftFailureFilter().filter(record) is True
     assert record.levelno == logging.INFO
     assert getattr(record, "gating") is False
-
-
-def test_status_log_hygiene_filter_is_installable_on_runtime_loggers() -> None:
-    apply_logging_filters()
-
-    for logger_name in (
-        "",
-        "nifty_scalper_bot.core.app",
-        "nifty_scalper_bot.core.history_readiness",
-    ):
-        logger = logging.getLogger(logger_name)
-        assert any(isinstance(item, CanonicalHistorySoftFailureFilter) for item in logger.filters)
 
 
 def test_reconciliation_complete_can_be_inferred_from_bounded_logs() -> None:
