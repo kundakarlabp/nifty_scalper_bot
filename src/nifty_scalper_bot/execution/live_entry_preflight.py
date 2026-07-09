@@ -191,8 +191,15 @@ def evaluate_live_entry_preflight(snapshot: LiveEntryPreflightSnapshot | Mapping
     if not snap.local_positions_match_broker:
         blockers.append("broker_position_mismatch")
 
-    if not snap.selected_options:
+    expected_ce = str(snap.context.get("selected_ce") or "")
+    expected_pe = str(snap.context.get("selected_pe") or "")
+    proven_symbols = {str(proof.symbol or "") for proof in snap.selected_options}
+    if expected_ce or expected_pe:
+        if not expected_ce or not expected_pe or expected_ce not in proven_symbols or expected_pe not in proven_symbols:
+            blockers.append("selected_option_candle_unproven")
+    elif not snap.selected_options:
         blockers.append("selected_option_candle_unproven")
+
     for proof in snap.selected_options:
         details = proof.to_dict()
         quote_ok = bool(proof.quote_present and proof.quote_tradable)
