@@ -45,6 +45,21 @@ def test_live_entry_preflight_allows_only_when_all_truths_hold() -> None:
     assert decision.blockers == ()
 
 
+def test_live_entry_preflight_blocks_missing_selected_side_proof() -> None:
+    decision = evaluate_live_entry_preflight(
+        {
+            "broker_positions_fetched": True,
+            "broker_orders_reconciled": True,
+            "local_positions_match_broker": True,
+            "context": {"selected_ce": "NFO:TESTCE", "selected_pe": "NFO:TESTPE"},
+            "selected_options": [_proof("NFO:TESTCE")],
+        }
+    )
+
+    assert decision.ready is False
+    assert "selected_option_candle_unproven" in decision.blockers
+
+
 @pytest.mark.parametrize(
     ("field", "blocker"),
     [
