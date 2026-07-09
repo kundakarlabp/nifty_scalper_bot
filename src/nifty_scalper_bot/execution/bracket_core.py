@@ -1093,8 +1093,17 @@ class BracketManager:
                 and AdaptiveTrailingController
             ):
                 try:
+                    # Fallback trail distance must be premium-relative: the old
+                    # absolute 20.0 points is ~13% on a ~150 option premium, so
+                    # with stale/unavailable ATR the controller proposed stops
+                    # far below the current SL and the monotonic guard rejected
+                    # every update — trailing silently dead on the controller
+                    # path while the legacy fallback math trails at ~2-3%.
+                    _fallback_trail = max(
+                        round(max(float(price or 0.0), 1.0) * 0.02, 2), 0.25
+                    )
                     spec = TrailingSpec(
-                        trail_by=20.0, # Fallback
+                        trail_by=_fallback_trail,  # ~2% of entry premium
                         step=0.25,      # Tighter early trailing step
                         activation=0.3 # Earlier activation threshold
                     )
@@ -1203,16 +1212,17 @@ class BracketManager:
                 if old_price > 0 and old_price != fill_price:
                     price_diff_pct = (fill_price - old_price) / old_price
                     
-                    # Adjust SL proportionally
+                    # Adjust SL proportionally (tick-rounded: round(x, 2) put
+                    # SL/TP on the 0.01 grid, e.g. 143.99 — invalid NSE tick)
                     if bracket.sl_trigger_price > 0:
-                        bracket.sl_trigger_price = round(
-                            bracket.sl_trigger_price * (1 + price_diff_pct), 2
+                        bracket.sl_trigger_price = _round_to_tick(
+                            bracket.sl_trigger_price * (1 + price_diff_pct)
                         )
                     
                     # Adjust TP proportionally
                     if bracket.tp_trigger_price > 0:
-                        bracket.tp_trigger_price = round(
-                            bracket.tp_trigger_price * (1 + price_diff_pct), 2
+                        bracket.tp_trigger_price = _round_to_tick(
+                            bracket.tp_trigger_price * (1 + price_diff_pct)
                         )
                     
                     LOGGER.info(
