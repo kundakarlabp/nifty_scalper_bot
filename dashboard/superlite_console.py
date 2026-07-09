@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from dashboard.superlite_events import csv_bytes, deduplicate_events, filter_events, parse_event
+from nifty_scalper_bot.admin_install_proof_display import install_proof_display
 
 IST = ZoneInfo("Asia/Kolkata")
 ADMIN_API = os.getenv("BOT_ADMIN_API_URL", "http://127.0.0.1:8081").rstrip("/")
@@ -122,6 +123,20 @@ def engine_display_status(status: dict) -> str:
     return "ENGINE UP, TRADING BLOCKED"
 
 
+def hook_count_label(proof_display: dict) -> str:
+    counts = proof_display.get("hook_counts") if isinstance(proof_display, dict) else {}
+    if not isinstance(counts, dict) or not counts:
+        return "—"
+    return f"core:{counts.get('core_app', '—')} data:{counts.get('datahub', '—')}"
+
+
+def missing_hardening_label(proof_display: dict) -> str:
+    missing = proof_display.get("missing") if isinstance(proof_display, dict) else []
+    if not missing:
+        return "NONE"
+    return ", ".join(str(item) for item in missing[:3]) + ("…" if len(missing) > 3 else "")
+
+
 def feed_html(rows: list[dict[str, str]]) -> str:
     if not rows:
         return '<div class="feed"><div class="row"><span></span><span></span><span class="muted">No matching actionable events.</span></div></div>'
@@ -184,6 +199,8 @@ def render() -> None:
     recon = status.get("reconciliation") or {}
     selected = status.get("selected") or {}
     memory = status.get("host_memory") or {}
+    proof = status.get("install_proof") or {}
+    proof_status = status.get("install_proof_display") or install_proof_display(proof)
     pnl_total, closed = pnl_summary(rows_all)
     primary = status.get("primary_blocker") or next((b for b in status.get("blockers", []) if b), "—")
     engine_status = engine_display_status(status)
@@ -193,29 +210,38 @@ def render() -> None:
     recon_label = reconciliation_display_label(recon_state, recon)
     mem_pct = memory.get("mem_used_pct")
     mem_css = "bad" if isinstance(mem_pct, (int, float)) and mem_pct >= 90 else "warn" if isinstance(mem_pct, (int, float)) and mem_pct >= 75 else "ok"
+    hardening_css = str(proof_status.get("css") or "warn")
     st.markdown(
         '<div class="cards">'
         + card("Engine", engine_status, "ok" if status.get("operational_ready") else "warn")
         + card("Primary blocker", primary, "warn" if primary != "—" else "ok")
-        + card("Memory", f"{mem_pct if mem_pct is not None else '—'}%", mem_css)
+        + card("Hardening", proof_status.get("label") or "UNKNOWN", hardening_css)
         + card("Broker", broker_label, "ok" if broker_label.startswith("YES") else "warn")
         + card("Reconciled", recon_label, "ok" if recon_label.startswith("YES") else "warn")
+        + '</div><div class="cards">'
+        + card("Hook counts", hook_count_label(proof_status), hardening_css)
+        + card("Missing hardening", missing_hardening_label(proof_status), "ok" if not proof_status.get("missing") else "bad")
+        + card("Memory", f"{mem_pct if mem_pct is not None else '—'}%", mem_css)
+        + card("Error events", sum(row.get("type") == "ERROR" for row in rows), "bad" if any(row.get("type") == "ERROR" for row in rows) else "")
+        + card("Log realised P&L", f"₹{pnl_total:,.2f} · {closed} closed", "ok" if pnl_total >= 0 else "bad")
         + '</div><div class="cards">'
         + card("Visible events", len(rows))
         + card("Trade events", sum(row.get("type") == "TRADE" for row in rows))
         + card("Signal events", sum(row.get("type") == "SIGNAL" for row in rows))
-        + card("Error events", sum(row.get("type") == "ERROR" for row in rows), "bad" if any(row.get("type") == "ERROR" for row in rows) else "")
-        + card("Log realised P&L", f"₹{pnl_total:,.2f} · {closed} closed", "ok" if pnl_total >= 0 else "bad")
+        + card("Running", status.get("running") or "—")
+        + card("Remote", status.get("remote") or "—", "warn" if status.get("stale") else "")
         + '</div><div class="cards">'
         + card("ATM", selected.get("atm") or "—")
         + card("Selected CE", selected.get("ce") or "—")
         + card("Selected PE", selected.get("pe") or "—")
-        + card("Running", status.get("running") or "—")
-        + card("Remote", status.get("remote") or "—", "warn" if status.get("stale") else "")
+        + card("Mode", status.get("mode") or status.get("execution_mode") or "—")
+        + card("Selected source", status.get("selected_source") or "—")
         + "</div>" + feed_html(rows),
         unsafe_allow_html=True,
     )
     st.download_button("Download current filtered events", csv_bytes(rows), file_name=f"niftybot-events-{datetime.now(IST):%Y%m%d-%H%M}.csv", mime="text/csv", width="stretch")
+    with st.expander("Hardening install proof", expanded=False):
+        st.json({"display": proof_status, "install_proof": proof})
     with st.expander("Technical status", expanded=False):
         st.json(status)
 
