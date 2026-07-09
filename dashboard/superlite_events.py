@@ -18,6 +18,7 @@ DETAIL_COLUMNS = [
     "rows", "incoming_ts", "last_ts", "blocker", "failure_reason",
     "trace_id", "accepted",
 ]
+HISTORY_DIAGNOSTICS = {"CANONICAL_HISTORY_RESULT", "RUNNER_HISTORY_SYNC_RESULT"}
 EXPECTED_REJECTIONS = {
     "CANDIDATE_REJECTED",
     "SIGNAL_REJECTED",
@@ -52,17 +53,22 @@ EVENT_WORDS = {
     "SIGNAL", "ORDER", "FILLED", "ENTRY", "EXIT", "TARGET", "STOP", "PNL",
     "POSITION", "BROKER", "AUTH", "READY", "BLOCKER", "RISK", "COOLDOWN",
     "ERROR", "FAIL", "WARN", "DEGRADED", "STARTUP", "SHUTDOWN", "HYDRATION",
-    "HISTORY", "SUBSCRIPTION", "RECONCIL", "CONTRACT_SSOT", "LIVE_READINESS",
+    "SUBSCRIPTION", "RECONCIL", "CONTRACT_SSOT", "LIVE_READINESS",
+    *HISTORY_DIAGNOSTICS,
 }
 NULLS = {"", "none", "null", "nil", "false", "0", "unknown", "n/a", "na"}
 SOFT_HISTORY_ROLES = {"option_context"}
 SOFT_HISTORY_FAILURE_REASONS = {"broker_fetch_not_allowed"}
 TRADE_WORDS = {"ORDER_SENT", "ORDER_PLACED", "ORDER_FILLED", "FILLED", "ENTRY", "EXIT", "TARGET_HIT", "STOP_HIT", "STOP_LOSS", "PNL", "POSITION_OPENED", "POSITION_CLOSED", "TRADE_ATTEMPT"}
-NON_TRADE_SYSTEM_WORDS = {"READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE", "CANONICAL_HISTORY_RESULT", "RUNNER_HISTORY_SYNC_RESULT"}
+NON_TRADE_SYSTEM_WORDS = {"READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE", *HISTORY_DIAGNOSTICS}
 
 
 def fields(message: str) -> dict[str, str]:
     return {key.lower(): value for key, value in FIELD.findall(message)}
+
+
+def _history_diagnostic(upper: str) -> bool:
+    return any(token in upper for token in HISTORY_DIAGNOSTICS)
 
 
 def _soft_non_gating_history_message(upper: str, values: dict[str, str]) -> bool:
@@ -116,17 +122,17 @@ def parse_event(line: str) -> dict[str, str] | None:
     message = SECRET.sub(r"\1=[REDACTED]", line[stamp.end():].strip())
     upper = message.upper()
     values = fields(message)
-    soft_non_gating_history = _soft_non_gating_history_message(upper, values)
+    history_diagnostic = _history_diagnostic(upper)
     if _explicit_failure(upper, values):
         kind = "ERROR"
     else:
-        if any(token in upper for token in BENIGN) and not soft_non_gating_history:
+        if any(token in upper for token in BENIGN) and not history_diagnostic:
             return None
-        if not soft_non_gating_history and not any(token in upper for token in EVENT_WORDS):
+        if not history_diagnostic and not any(token in upper for token in EVENT_WORDS):
             return None
         if "WARN" in upper or "DEGRADED" in upper:
             kind = "WARNING"
-        elif soft_non_gating_history or any(token in upper for token in NON_TRADE_SYSTEM_WORDS):
+        elif history_diagnostic or any(token in upper for token in NON_TRADE_SYSTEM_WORDS):
             kind = "SYSTEM"
         elif any(token in upper for token in TRADE_WORDS):
             kind = "TRADE"
