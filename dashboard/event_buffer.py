@@ -14,11 +14,12 @@ SECRET = re.compile(r"(?i)(api[_ -]?key|api[_ -]?secret|access[_ -]?token|reques
 TRACE = re.compile(r"\btrace_id=([^\s,}]+)")
 RESULT = re.compile(r"\baccepted=([^\s]+).*?\breason=([^\s]+)")
 FIELD = re.compile(r"\b([a-zA-Z][a-zA-Z0-9_]*)=([^\s,}]+)")
+HISTORY_DIAGNOSTICS = ("CANONICAL_HISTORY_RESULT", "RUNNER_HISTORY_SYNC_RESULT")
 EVENTS = ("SIGNAL","ORDER","FILLED","ENTRY","EXIT","TARGET","STOP","PNL","POSITION",
           "BROKER","AUTH","READY","BLOCKER","RISK","COOLDOWN","ERROR","FAIL","WARN",
-          "DEGRADED","OPERATIONAL","STARTUP","SHUTDOWN","READINESS","CANDLE","HISTORY")
+          "DEGRADED","OPERATIONAL","STARTUP","SHUTDOWN","READINESS","CANDLE")
 TRADE_MARKERS = ("ORDER_SENT", "ORDER_PLACED", "ORDER_FILLED", "FILLED", "ENTRY", "EXIT", "TARGET_HIT", "STOP_HIT", "STOP_LOSS", "PNL", "POSITION_OPENED", "POSITION_CLOSED", "TRADE_ATTEMPT")
-NON_TRADE_SYSTEM_MARKERS = ("READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE", "CANONICAL_HISTORY_RESULT", "RUNNER_HISTORY_SYNC_RESULT")
+NON_TRADE_SYSTEM_MARKERS = ("READINESS", "BLOCKER", "CANDLE", "HEARTBEAT", "SUMMARY", "SELECTED_OPTION_SUBSCRIPTION_STATE", "RUNNER_EVAL_DECISION", "NO_TRADE", *HISTORY_DIAGNOSTICS)
 IGNORE = ("HEARTBEAT","POLLING","INDICATOR","NO SIGNAL","MARKET CLOSED","OUTSIDE SESSION")
 EXPECTED_REJECTIONS = ("CANDIDATE_REJECTED", "SIGNAL_REJECTED", "SIGNAL_EXECUTION_RESULT", "ORDER_READINESS_REJECTED")
 HARD_ERRORS = ("TRACEBACK", "CRITICAL", "UNHANDLED EXCEPTION", "RUNNER_ON_TICK_ERROR", "ORDER_FAILED", "STARTUP_FAILED", "HANDLER CRASHED", "FATAL")
@@ -29,6 +30,10 @@ SOFT_HISTORY_FAILURE_REASONS = {"broker_fetch_not_allowed"}
 
 def fields(message: str) -> dict[str, str]:
     return {key.lower(): value for key, value in FIELD.findall(message)}
+
+
+def _history_diagnostic(upper: str) -> bool:
+    return any(token in upper for token in HISTORY_DIAGNOSTICS)
 
 
 def _soft_non_gating_history_message(upper: str, values: dict[str, str]) -> bool:
@@ -73,16 +78,16 @@ def parse_event(line: str) -> dict[str, str] | None:
     values = fields(message)
     expected_rejection = any(x in upper for x in EXPECTED_REJECTIONS)
     soft_non_gating_history = _soft_non_gating_history_message(upper, values)
-    history_diagnostic = "CANONICAL_HISTORY_RESULT" in upper or "RUNNER_HISTORY_SYNC_RESULT" in upper
-    if any(x in upper for x in IGNORE) and not (soft_non_gating_history or history_diagnostic):
+    history_diagnostic = _history_diagnostic(upper)
+    if any(x in upper for x in IGNORE) and not history_diagnostic:
         return None
-    if not soft_non_gating_history and not expected_rejection and not any(x in upper for x in EVENTS):
+    if not history_diagnostic and not expected_rejection and not any(x in upper for x in EVENTS):
         return None
     if _explicit_failure(upper, values, expected_rejection=expected_rejection):
         kind = "ERROR"
     elif any(x in upper for x in ("WARN", "DEGRADED")):
         kind = "WARNING"
-    elif soft_non_gating_history or any(x in upper for x in NON_TRADE_SYSTEM_MARKERS):
+    elif history_diagnostic or any(x in upper for x in NON_TRADE_SYSTEM_MARKERS):
         kind = "SYSTEM"
     elif any(x in upper for x in TRADE_MARKERS):
         kind = "TRADE"
