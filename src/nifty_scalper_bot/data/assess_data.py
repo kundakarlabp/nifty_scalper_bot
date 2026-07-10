@@ -64,6 +64,17 @@ def assess_datahub_fresh(
         if freshness_ms is None:
             raise TypeError("freshness_ms is required for single-symbol mode")
 
+        is_fresh = getattr(hub, "is_fresh", None)
+        if callable(is_fresh):
+            ok, meta = is_fresh(symbols, threshold_ms=float(freshness_ms))
+            payload = dict(meta or {})
+            payload.setdefault("symbol", symbols)
+            payload.setdefault("limit_ms", freshness_ms)
+            if "age_ms" not in payload and "effective_ms" in payload:
+                payload["age_ms"] = payload.get("effective_ms")
+            detail = str(payload.get("reason") or "ok")
+            return bool(ok), detail, payload
+
         quote = hub.get_quote(symbols, allow_pull=False)
         if not quote:
             return False, "no_quote", {"symbol": symbols}
