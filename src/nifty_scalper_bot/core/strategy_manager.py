@@ -4484,10 +4484,9 @@ class StrategyManager(_BaseStrategyManager):
                 spread_pct = float(md0.get("spread_pct") or indicators.get("spread_pct") or 999.0)
             except (TypeError, ValueError):
                 spread_pct = 999.0
-            try:
-                context_age = float(md0.get("context_age_seconds") or indicators.get("context_age_seconds") or 999.0)
-            except (TypeError, ValueError):
-                context_age = 999.0
+            context_age = resolve_context_age_seconds(
+                md0 if md0.get("context_age_seconds") is not None else indicators
+            )
             try:
                 bid = float(md0.get("bid") or indicators.get("bid") or 0.0)
             except (TypeError, ValueError):
