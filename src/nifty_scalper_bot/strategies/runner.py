@@ -136,6 +136,7 @@ from nifty_scalper_bot.utils.market_hours import (
     post_market_suppress_candle_gap_warnings,
     is_market_hours_cached,
     is_market_open_now,
+    is_nifty_option_symbol,
     stale_threshold_for_symbol,
 )
 from nifty_scalper_bot.utils.metrics import Counter, signals_generated_total
@@ -6820,6 +6821,11 @@ class StrategyRunner:
         now_wall = time.time()
         stale_count = 0
         stale_symbols: list[str] = []
+        active_option_symbols = {
+            normalize_symbol(str(sym))
+            for sym in (getattr(self, "_active_option_symbols", set()) or set())
+            if sym
+        }
 
         for symbol, engine in self._candle_engines.items():
             if symbol not in self._active_symbols:
@@ -6841,6 +6847,22 @@ class StrategyRunner:
                             extra={"event": "BACKFILL_SKIPPED_REMOVED_SYMBOL", "symbol": symbol},
                         )
                     continue
+            if (
+                is_nifty_option_symbol(symbol)
+                and symbol not in active_option_symbols
+                and not self._is_selected_option_symbol(symbol)
+            ):
+                if self._should_log_throttled(f"ws_stale_skipped_inactive_option:{symbol}", 300.0):
+                    self._logger.debug(
+                        "WS_STALE_SKIPPED symbol=%s reason=outside_active_option_basket",
+                        symbol,
+                        extra={
+                            "event": "WS_STALE_SKIPPED",
+                            "symbol": symbol,
+                            "reason": "outside_active_option_basket",
+                        },
+                    )
+                continue
             # 1. Use .get() to prevent KeyError on newly subscribed symbols
             stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -346,6 +347,37 @@ def test_historical_bar_writes_only_canonical_ohlc_not_raw_ticks() -> None:
     assert len(mdm._raw_tick_history["NSE:NIFTY"]) == 0
     assert mdm.is_ohlc_ready("NSE:NIFTY", required_bars=1) is True
     assert mdm.is_tick_ready("NSE:NIFTY") is False
+
+
+def test_feed_health_uses_selected_options_not_context_option_staleness() -> None:
+    mdm = _storage_mdm()
+    now = time.time()
+    selected_ce = "NFO:NIFTY2671423950CE"
+    selected_pe = "NFO:NIFTY2671423950PE"
+    stale_context = "NFO:NIFTY2671424100PE"
+    mdm._tick_stale_threshold_ms = 60_000
+    mdm._resolve_symbol_key_safe = lambda symbol: str(symbol)
+    mdm._active_subscribed_symbols = {selected_ce, selected_pe, stale_context}
+    mdm._last_tick_wallclock = {
+        "NSE:NIFTY": now,
+        "NFO:NIFTY26JULFUT": now,
+        selected_ce: now,
+        selected_pe: now,
+        stale_context: now - 3600,
+    }
+    mdm._last_tick_time = dict(mdm._last_tick_wallclock)
+    mdm.set_readiness_requirements(
+        spot_symbol="NSE:NIFTY",
+        futures_symbol="NFO:NIFTY26JULFUT",
+        atm_ce_symbol=selected_ce,
+        atm_pe_symbol=selected_pe,
+        option_symbols=[selected_ce, selected_pe, stale_context],
+    )
+
+    health = mdm.trading_feed_health(max_age_ms=60_000)
+
+    assert health["options_fresh"] is True
+    assert health["option_symbols"] == [selected_ce, selected_pe]
 
 
 def test_live_tick_writes_raw_tick_history_without_implying_ohlc_ready() -> None:
