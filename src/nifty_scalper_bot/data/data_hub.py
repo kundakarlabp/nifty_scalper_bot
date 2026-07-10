@@ -53,6 +53,63 @@ LOGGER = logging.getLogger(__name__)
 Tick = Dict[str, Any]
 TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
+_UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
+_WS_SOURCES = {"ws", "websocket", "stream"}
+
+
+def _valid_timestamp_ms(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, datetime):
+            ts = pd.Timestamp(value)
+        elif isinstance(value, (int, float)):
+            raw = float(value)
+            if raw <= 0:
+                return None
+            seconds = raw / 1000.0 if raw > 1e11 else raw
+            ts = pd.Timestamp(datetime.fromtimestamp(seconds, tz=timezone.utc))
+        else:
+            ts = pd.to_datetime(value, utc=True, errors="coerce")
+        if pd.isna(ts) or getattr(ts, "year", 1970) < 2020:
+            return None
+        return float(pd.Timestamp(ts).timestamp() * 1000.0)
+    except Exception:
+        return None
+
+
+def _timestamp_quality(payload: Mapping[str, Any]) -> str:
+    explicit = str(payload.get("timestamp_quality") or "").strip().lower()
+    if explicit:
+        return explicit
+    if _valid_timestamp_ms(payload.get("exchange_timestamp")) is not None:
+        return "exchange"
+    if _valid_timestamp_ms(payload.get("timestamp")) is not None:
+        return "broker"
+    if _valid_timestamp_ms(payload.get("received_at")) is not None:
+        return "received_at"
+    if any(
+        key in payload
+        for key in ("exchange_timestamp", "timestamp", "received_at")
+    ):
+        return "invalid"
+    return "synthetic"
+
+
+def _quote_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
+    for key in ("timestamp_ms", "exchange_timestamp", "timestamp", "received_at"):
+        value = payload.get(key)
+        if key == "timestamp_ms":
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is not None and parsed > 0:
+                return parsed if parsed > 1e11 else parsed * 1000.0
+        parsed = _valid_timestamp_ms(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 class SubscriptionState(str, Enum):
@@ -823,8 +880,6 @@ class DataHub:
         payload["source"] = source
         if seed:
             payload["seed"] = True
-        if "timestamp" not in payload:
-            payload["timestamp"] = pd.Timestamp.utcnow().isoformat()
         self._ingest_tick_impl(payload)
 
     def _normalize_tick_symbol(self, tick: Tick) -> str:
@@ -866,6 +921,7 @@ class DataHub:
     def _canonicalize_tick_payload(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
         """Args: payload. Returns: canonicalized tick or None. Raises: None."""
         tick = dict(payload)
+        timestamp_quality = _timestamp_quality(tick)
         symbol = str(tick.get("symbol") or "").strip()
         token_raw = tick.get("instrument_token") or tick.get("token")
         price_raw = tick.get("ltp") or tick.get("last_price") or tick.get("price")
@@ -902,6 +958,12 @@ class DataHub:
             tick["tradable_quote"] = True
         else:
             tick.setdefault("tradable_quote", False)
+        if timestamp_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+            tick["synthetic_timestamp"] = True
+            tick["hard_readiness_eligible"] = False
+            tick["tradable_quote"] = False
+        else:
+            tick.setdefault("hard_readiness_eligible", True)
         tick.setdefault("quote_source", tick.get("source"))
         tick.update(
             {
@@ -912,6 +974,7 @@ class DataHub:
                 "last_price": price,
                 "timestamp": ts_iso,
                 "timestamp_ms": ts_ms,
+                "timestamp_quality": timestamp_quality,
                 "received_at": received_at,
             }
         )
@@ -1695,6 +1758,20 @@ class DataHub:
         quote = self.get_quote(symbol, allow_pull=False)
         if not quote:
             return None
+        quality = str(quote.get("timestamp_quality") or "").strip().lower()
+        guarded = bool(require_ws or max_age_seconds is not None)
+        if guarded and quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+            return None
+        quote_source = str(quote.get("source") or "").strip().lower()
+        if require_ws and quote_source not in _WS_SOURCES:
+            return None
+        if max_age_seconds is not None:
+            ts_ms = _quote_timestamp_ms(quote)
+            if ts_ms is None:
+                return None
+            age_s = max(0.0, time.time() - (ts_ms / 1000.0))
+            if age_s > max(0.0, float(max_age_seconds)):
+                return None
         return self._tick_price(quote)
 
 
