@@ -6734,12 +6734,28 @@ class StrategyRunner:
                 with self._eval_gate_lock:
                     self._eval_in_progress_symbols.discard(normalized_symbol)
         except Exception as exc:
-            LOGGER.error(
-                "Critical error in _on_tick for %s: %s",
-                symbol,
-                exc,
-                exc_info=True,
-            )
+            from nifty_scalper_bot.data.source import DataIntegrityError as _DIErr
+
+            if isinstance(exc, _DIErr):
+                # Stale/out-of-order candle contaminating the live stream is
+                # quarantined by the engine's monotonic guard; treat it as a
+                # dropped candle (throttled warning), not a repeating CRITICAL
+                # storm per tick (2026-07-10: hundreds of _on_tick criticals
+                # from one 09:39 candle arriving after 11:16).
+                if self._should_log_throttled(f"candle_ooo:{symbol}", 60.0):
+                    self._logger.warning(
+                        "candle_out_of_order symbol=%s dropped=%s",
+                        symbol,
+                        exc,
+                        extra={"event": "candle_out_of_order", "symbol": symbol},
+                    )
+            else:
+                LOGGER.error(
+                    "Critical error in _on_tick for %s: %s",
+                    symbol,
+                    exc,
+                    exc_info=True,
+                )
         finally:
             now = time.monotonic()
             self._emit_composite_reports()
@@ -12024,6 +12040,36 @@ class StrategyRunner:
                         "trace_id": trace_id,
                     },
                 )
+                # Global execution arming dominates symbol readiness: while
+                # live orders are not armed, stop BEFORE the order path
+                # (materializing plans + order requests just to be rejected by
+                # the native gate wastes the event loop and floods logs —
+                # 2026-07-10 RCA: ORDER_PATH_ENTERED live_orders_armed=False).
+                if (
+                    getattr(self, "_live_mode", False)
+                    and not getattr(self, "_runtime_live_orders_armed", True)
+                ):
+                    if self._should_log_throttled(
+                        f"signal_prep_unarmed:{symbol}", 30.0
+                    ):
+                        self._logger.warning(
+                            "RUNNER_SIGNAL_PREP_BLOCKED_UNARMED symbol=%s "
+                            "trace_id=%s broker_attempted=False",
+                            symbol,
+                            trace_id,
+                            extra={
+                                "event": "RUNNER_SIGNAL_PREP_BLOCKED_UNARMED",
+                                "symbol": symbol,
+                                "trace_id": trace_id,
+                            },
+                        )
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase10_execute",
+                        reason="live_orders_not_armed",
+                        allowed=False,
+                    )
+                    return
                 scheduled, prepare_reason = self._schedule_signal_preparation(
                     signal, price, now, trace_id
                 )

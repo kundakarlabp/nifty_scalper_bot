@@ -3275,7 +3275,7 @@ class RuntimeSelfChecker:
         last_tick_ts = getattr(streamer, "last_tick_ts", None)
         if last_tick_ts is not None:
             with suppress(Exception):
-                recent_tick_age = max(0.0, time.time() - float(last_tick_ts))
+                recent_tick_age = max(0.0, time_module.time() - float(last_tick_ts))
             if recent_tick_age > 10.0:
                 connected = False
                 detail = "no_recent_ticks"
@@ -4748,9 +4748,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 last_tick = getattr(market_data_manager, "last_tick_time", 0)
 
                 # If we have received data before (>0) but it's now stale (>180s)
-                if last_tick > 0 and (time.time() - last_tick > 180):
+                if last_tick > 0 and (time_module.time() - last_tick > 180):
                     logger.critical(
-                        f"🚨 FATAL: No data for {int(time.time() - last_tick)}s. Zombie Mode detected. Exiting."
+                        f"🚨 FATAL: No data for {int(time_module.time() - last_tick)}s. Zombie Mode detected. Exiting."
                     )
                     os._exit(
                         1
@@ -12563,7 +12563,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
                     # 3. Identify Ghosts (Managed but no Position)
                     ghosts = managed_symbols - real_positions
 
-                    _ghost_now = time.time()
+                    _ghost_now = time_module.time()
                     for ghost_sym in ghosts:
                         # Double check if it actually has active brackets inside
                         if bm.is_symbol_managed(ghost_sym):
