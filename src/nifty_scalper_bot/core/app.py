@@ -3093,6 +3093,37 @@ class RuntimeSelfChecker:
                     return 30000.0
                 return float(adaptive_ms)
 
+            def _basket_value(basket: object, key: str) -> object:
+                if isinstance(basket, Mapping):
+                    return basket.get(key)
+                return getattr(basket, key, None)
+
+            def _critical_symbols() -> set[str]:
+                basket = getattr(self._context, "active_contract_basket", None)
+                if basket is None:
+                    get_basket = getattr(hub, "get_active_contract_basket", None)
+                    if callable(get_basket):
+                        try:
+                            basket = get_basket()
+                        except Exception:
+                            basket = None
+                universe = getattr(self._context, "active_trading_universe", None)
+                selected: set[str] = set()
+                for source in (basket, universe):
+                    if source is None:
+                        continue
+                    for key in (
+                        "spot_symbol",
+                        "futures_symbol",
+                        "selected_ce",
+                        "selected_pe",
+                    ):
+                        value = _basket_value(source, key)
+                        if value:
+                            selected.add(canonical(str(value)))
+                selected.add("NSE:NIFTY")
+                return {sym for sym in selected if sym}
+
             per_symbol: list[tuple[str, bool, dict[str, object], float]] = []
             for s in symbols:
                 threshold_ms = _threshold_for_symbol(s)
@@ -3101,10 +3132,11 @@ class RuntimeSelfChecker:
 
             fresh = [item for item in per_symbol if item[1]]
             stale = [item for item in per_symbol if not item[1]]
+            selected_critical = _critical_symbols()
             critical = [
                 item
                 for item in per_symbol
-                if str(item[0]).upper().startswith("NFO:") or str(item[0]).upper() == "NSE:NIFTY"
+                if canonical(str(item[0])) in selected_critical
             ] or per_symbol
             all_critical_stale = not any(item[1] for item in critical)
             if hard_ready and symbols and stale and not all_critical_stale:
@@ -3112,6 +3144,7 @@ class RuntimeSelfChecker:
                     "fresh_symbols": len(fresh),
                     "stale_symbols": len(stale),
                     "live_symbols": len(symbols),
+                    "critical_symbols": len(critical),
                 }
 
             symbol, ok, meta, symbol_threshold_ms = fresh[0] if fresh else per_symbol[0]
