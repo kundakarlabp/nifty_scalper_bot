@@ -95,6 +95,12 @@ def _coerce_age_seconds(value: Any) -> float | None:
     return age
 
 
+def resolve_context_age_seconds(context: Mapping[str, Any], default: float = 999.0) -> float:
+    """Return normalized context age, failing closed for missing/invalid values."""
+    age = _coerce_age_seconds(context.get("context_age_seconds")) if isinstance(context, Mapping) else None
+    return age if age is not None else float(default)
+
+
 def _coerce_timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
