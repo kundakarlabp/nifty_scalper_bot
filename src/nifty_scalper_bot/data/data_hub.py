@@ -55,6 +55,13 @@ TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
 _UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
 _WS_SOURCES = {"ws", "websocket", "stream"}
+_QUOTE_IDENTITY_KEYS = (
+    "symbol",
+    "tradingsymbol",
+    "trading_symbol",
+    "instrument_symbol",
+    "exchange_symbol",
+)
 
 
 def _valid_timestamp_ms(value: Any) -> float | None:
@@ -110,6 +117,26 @@ def _quote_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def _quote_symbol_hint(quote: Mapping[str, Any]) -> str:
+    for key in _QUOTE_IDENTITY_KEYS:
+        value = quote.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    instrument = quote.get("instrument")
+    if isinstance(instrument, Mapping):
+        for key in _QUOTE_IDENTITY_KEYS:
+            value = instrument.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    meta = quote.get("meta") or quote.get("metadata")
+    if isinstance(meta, Mapping):
+        for key in _QUOTE_IDENTITY_KEYS:
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return ""
 
 
 class SubscriptionState(str, Enum):
@@ -656,6 +683,51 @@ class DataHub:
                     return int(self._quote_update_versions[mapped_symbol])
         return None
 
+    def _stamp_quote_identity(self, requested_symbol: object, quote: Any) -> Any:
+        if not isinstance(quote, Mapping):
+            return quote
+        stamped = dict(quote)
+        symbol = self._canonical_quote_symbol(
+            requested_symbol
+        ) or self._canonical_quote_symbol(
+            _quote_symbol_hint(stamped)
+        )
+        if not symbol:
+            return stamped
+        stamped["quote_identity_source"] = (
+            stamped.get("quote_identity_source") or "datahub_quote_contract"
+        )
+        stamped["symbol"] = symbol
+        stamped["tradingsymbol"] = symbol
+        stamped["trading_symbol"] = symbol
+        stamped["instrument_symbol"] = symbol
+        stamped["exchange_symbol"] = symbol
+        token = self._token_from_symbol(symbol)
+        if token is not None:
+            stamped["instrument_token"] = token
+            stamped["token"] = token
+        version = self.quote_update_version(symbol)
+        if version is not None:
+            stamped["quote_update_version"] = int(version)
+        quality = str(stamped.get("timestamp_quality") or "").strip().lower()
+        stamped["quote_identity_timestamp_source"] = quality or "unknown"
+        if quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+            stamped["quote_identity_timestamp_rejected"] = True
+            return stamped
+        ts_ms = _quote_timestamp_ms(stamped)
+        if ts_ms is None:
+            stamped["quote_identity_timestamp_rejected"] = True
+            return stamped
+        stamped["last_tick_ts_ms"] = ts_ms
+        age_ms = max(0.0, self._now() * 1000.0 - ts_ms)
+        stamped["tick_age_ms"] = age_ms
+        stamped["quote_age_ms"] = age_ms
+        stamped["last_tick_age_ms"] = age_ms
+        stamped["market_data_age_ms"] = age_ms
+        stamped["quote_age_s"] = age_ms / 1000.0
+        stamped["last_tick_age_s"] = age_ms / 1000.0
+        stamped["market_data_age_s"] = age_ms / 1000.0
+        return stamped
 
     def _token_from_symbol(self, symbol: str) -> int | None:
         """Resolve instrument token from symbol aliases. Args: symbol. Returns: token. Raises: none."""
@@ -978,7 +1050,7 @@ class DataHub:
                 "received_at": received_at,
             }
         )
-        return to_json_safe(tick)
+        return to_json_safe(self._stamp_quote_identity(symbol, tick))
 
     def _tick_price(self, tick: dict[str, Any]) -> float | None:
         for key in ("ltp", "last_price", "price", "close"):
@@ -1293,19 +1365,19 @@ class DataHub:
                 tok = int(str(symbol).strip())
                 tick = self._ticks.get(tok) or self._token_quotes.get(tok)
                 if tick is not None:
-                    return dict(tick)
+                    return self._stamp_quote_identity(symbol, tick)
             token = self._token_by_symbol.get(lookup)
             if token is not None:
                 tick = self._ticks.get(token) or self._token_quotes.get(token)
                 if tick is not None:
-                    return dict(tick)
+                    return self._stamp_quote_identity(symbol, tick)
             tick = self._quotes.get(lookup)
             if tick is not None:
-                return dict(tick)
+                return self._stamp_quote_identity(symbol, tick)
             for alias in self._symbol_aliases.get(lookup, set()):
                 t = self._quotes.get(alias)
                 if t is not None:
-                    return dict(t)
+                    return self._stamp_quote_identity(symbol, t)
         if allow_pull:
             pulled = self.pull_quote(symbol) or None
             if pulled is not None:
@@ -1316,7 +1388,8 @@ class DataHub:
     def get_tick_by_token(self, token: int) -> Optional[Tick]:
         with self._lock:
             tick = self._ticks.get(token)
-            return dict(tick) if tick else None
+            symbol = self._symbol_by_token.get(int(token))
+            return self._stamp_quote_identity(symbol or token, tick) if tick else None
 
     def subscribe(self, symbol: str, callback: Optional[TickListener] = None):
         return self.subscribe_ticks(symbol, callback)
