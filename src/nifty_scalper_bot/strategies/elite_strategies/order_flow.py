@@ -8,6 +8,7 @@ from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import OrderFlowStrategyConfig
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
+from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -134,7 +135,11 @@ class OrderFlowStrategy(EliteStrategy):
             if total_bid + total_ask <= 0:
                 allow_fallback = str(os.getenv('ORDERFLOW_ALLOW_LTP_TICK_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
                 strict_spread_required = str(os.getenv('ORDERFLOW_REQUIRE_SPREAD_IN_STRICT_MODE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
-                stale_age_s = float(indicators.get('data_age_seconds') or 0.0)
+                stale_age_s = (
+                    quote_readiness.tick_age_ms / 1000.0
+                    if quote_readiness.tick_age_ms is not None
+                    else float('inf')
+                )
                 if not allow_fallback:
                     self._no_vote('missing_depth')
                     return None
@@ -293,10 +298,7 @@ class OrderFlowStrategy(EliteStrategy):
             direction_context_ok = (direction in {'CE', 'PE'}) or (not is_live_mode) or allow_without_direction_live
             max_context_age = safe_float_env('ORDERFLOW_MAX_CONTEXT_AGE_SECONDS', 5.0)
             age_raw = indicators.get('context_age_seconds')
-            try:
-                context_age_ok = age_raw is not None and float(age_raw) <= max_context_age
-            except (TypeError, ValueError):
-                context_age_ok = False
+            context_age_ok = resolve_context_age_seconds(indicators) <= max_context_age
             if bias_invalidated_by_microstructure:
                 LOGGER.info(
                     'ORDERFLOW_STALE_BIAS_INVALIDATED symbol=%s side=%s stale_bias=%s '
