@@ -163,6 +163,7 @@ RELAX_REGIME_FILTER = (
     os.getenv("RELAX_REGIME_FILTER", "true").lower() != "false"
 )  # default True: regime starts with no snapshot
 MIN_EVAL_INTERVAL_SECONDS = 5.0
+_CANDIDATE_RANK_MISSING_TICK_AGE_MS = 999000.0
 _IST = ZoneInfo("Asia/Kolkata")
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on", "enable", "enabled"}
@@ -13093,16 +13094,22 @@ class StrategyRunner:
         if spread_pct_raw is None:
             spread_pct_raw = metadata.get("spread_pct")
         spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else 999.0
-        tick_age_ms_raw = metadata.get("candidate_tick_age_ms")
-        if tick_age_ms_raw is None:
-            tick_age_ms_raw = metadata.get("tick_age_ms")
-        if tick_age_ms_raw is not None:
-            tick_age_ms = float(tick_age_ms_raw)
-        else:
-            tick_age_s_raw = metadata.get("candidate_tick_age_s")
-            if tick_age_s_raw is None:
-                tick_age_s_raw = metadata.get("tick_age_s")
-            tick_age_ms = float(tick_age_s_raw) * 1000.0 if tick_age_s_raw is not None else 999000.0
+        tick_age_ms = resolve_tick_age_ms(
+            {
+                "tick_age_ms": metadata.get("candidate_tick_age_ms")
+                if metadata.get("candidate_tick_age_ms") is not None
+                else metadata.get("tick_age_ms"),
+                "tick_age_s": metadata.get("candidate_tick_age_s")
+                if metadata.get("candidate_tick_age_s") is not None
+                else metadata.get("tick_age_s"),
+                "quote_age_ms": metadata.get("quote_age_ms"),
+                "quote_age_s": metadata.get("quote_age_s"),
+                "last_tick_age_ms": metadata.get("last_tick_age_ms"),
+                "market_data_age_ms": metadata.get("market_data_age_ms"),
+            }
+        )
+        if tick_age_ms is None:
+            tick_age_ms = _CANDIDATE_RANK_MISSING_TICK_AGE_MS
         depth_available = bool(
             selected_snapshot.get("depth_available") or selected_snapshot.get("depth")
         )
