@@ -4620,7 +4620,13 @@ class MarketDataManager:
     def _active_option_symbols(self) -> list[str]:
         """Return currently active option symbols used for hard feed checks."""
         requirements = dict(self._readiness_requirements)
-        symbols = [str(s) for s in requirements.get("options") or [] if s]
+        selected = [
+            str(requirements.get("atm_ce") or ""),
+            str(requirements.get("atm_pe") or ""),
+        ]
+        symbols = [s for s in selected if s and s.endswith(("CE", "PE"))]
+        if not symbols:
+            symbols = [str(s) for s in requirements.get("options") or [] if s]
         if not symbols:
             with self._lock:
                 symbols = [
