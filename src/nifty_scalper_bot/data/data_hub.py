@@ -1941,8 +1941,6 @@ class DataHub:
         if not quote:
             return False, {"reason": "no_tick", "symbol": sym, "threshold_ms": threshold}
         source = str(quote.get("source") or "ws").lower()
-        if source == "historical":
-            return True, {"source": source, "threshold_ms": threshold, "reason": None}
         now_ms = self._now() * 1000.0
         ts_ms = self._timestamp_ms(quote.get("timestamp"))
         effective_ms = max(0.0, now_ms - ts_ms)
