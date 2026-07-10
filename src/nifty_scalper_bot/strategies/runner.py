@@ -95,7 +95,10 @@ from nifty_scalper_bot.data.source import (
 )
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
-from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
+from nifty_scalper_bot.execution.quote_readiness import (
+    evaluate_execution_quote,
+    resolve_tick_age_ms,
+)
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy, resolve_quote_bid_ask_spread
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
@@ -13707,9 +13710,13 @@ class StrategyRunner:
                     else:
                         strike_distance = float(distance_raw or 999.0)
                     is_selected = bool(lone.get("is_selected_option")) or lone_symbol == selected_symbol
-                    tick_age_raw = lone.get("tick_age_s")
-                    tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 999.0
-                    is_fresh = tick_age_s <= (float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0)
+                    tick_age_ms = resolve_tick_age_ms(lone)
+                    tick_age_s = None if tick_age_ms is None else tick_age_ms / 1000.0
+                    max_quote_age_s = (
+                        float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
+                        / 1000.0
+                    )
+                    is_fresh = bool(tick_age_s is not None and tick_age_s <= max_quote_age_s)
                     ltp = float(lone.get("ltp") or 0.0)
                     bid = float(lone.get("bid") or 0.0)
                     ask = float(lone.get("ask") or 0.0)
