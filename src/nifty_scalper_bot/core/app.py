@@ -89,6 +89,7 @@ from nifty_scalper_bot.data.robust_provider import (
 )
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
+from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds
 from nifty_scalper_bot.execution.readiness import evaluate_quote_readiness, normalize_readiness_blockers
 from nifty_scalper_bot.utils.market_hours import (
     get_runtime_market_mode,
@@ -7879,8 +7880,8 @@ def _best_fresh_option(
         try:
             snap = ctx.market_data_manager.get_symbol_snapshot(sym) if ctx.market_data_manager is not None else None
             ltp = float(getattr(snap, "ltp", 0.0) or 0.0)
-            age = float(getattr(snap, "tick_age_s", 9999.0) or 9999.0)
-            quote_fresh = ltp > 0 and age <= max_age_s
+            age = resolve_tick_age_seconds(snap)
+            quote_fresh = ltp > 0 and age is not None and age <= max_age_s
         except Exception:
             quote_fresh = False
         score = 3 if quote_fresh else 0
@@ -7948,10 +7949,10 @@ def _fresh_option_quote(
     try:
         snap = ctx.market_data_manager.get_symbol_snapshot(symbol)
         ltp = float(getattr(snap, "ltp", 0.0) or 0.0)
-        age = float(getattr(snap, "tick_age_s", 9999.0) or 9999.0)
+        age = resolve_tick_age_seconds(snap)
     except Exception:
         return None
-    return symbol if ltp > 0 and age <= max_age_s else None
+    return symbol if ltp > 0 and age is not None and age <= max_age_s else None
 
 
 
@@ -8267,7 +8268,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if snap is None: return False
         age_limit=max_age_s or _tick_age_threshold()
         ltp=float(getattr(snap,'ltp',0.0) or 0.0)
-        age=getattr(snap,'tick_age_s',None)
+        age=resolve_tick_age_seconds(snap)
         if ltp<=0: return False
         if age is not None:
             return float(age)<=age_limit
@@ -11620,7 +11621,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             datahub_bars[sym] = 0
                                     try:
                                         snap = ctx.market_data_manager.get_symbol_snapshot(sym)
-                                        if float(getattr(snap, "ltp", 0.0) or 0.0) > 0 and float(getattr(snap, "tick_age_s", 9999.0) or 9999.0) <= 60.0:
+                                        age = resolve_tick_age_seconds(snap)
+                                        if float(getattr(snap, "ltp", 0.0) or 0.0) > 0 and age is not None and age <= 60.0:
                                             fresh_quote_symbols.append(sym)
                                     except Exception:
                                         pass

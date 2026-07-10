@@ -98,6 +98,7 @@ from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
 from nifty_scalper_bot.execution.quote_readiness import (
     evaluate_execution_quote,
     resolve_tick_age_ms,
+    resolve_tick_age_seconds,
 )
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy, resolve_quote_bid_ask_spread
 from nifty_scalper_bot.execution.order_state_machine import (
@@ -3544,9 +3545,7 @@ class StrategyRunner:
                 or (strike_distance is not None and strike_distance <= near_threshold)
             )
             spread_pct = ((ask - bid) / ltp * 100.0) if has_bid_ask and ltp > 0 else None
-            tick_age_raw = getattr(snapshot, "tick_age_s", None)
-            tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 0.0
-            tick_age_s = max(0.0, tick_age_s)
+            tick_age_s = resolve_tick_age_seconds(snapshot) or 0.0
             real_ticks_raw = getattr(snapshot, "real_ticks_last_60s", None)
             real_ticks_last_60s = int(real_ticks_raw) if real_ticks_raw is not None else 0
             if ltp > 0 and real_ticks_last_60s < 1:
@@ -5828,7 +5827,7 @@ class StrategyRunner:
         if self._market_data and hasattr(self._market_data, "get_symbol_snapshot"):
             snap = self._market_data.get_symbol_snapshot("NSE:NIFTY")
             if snap and getattr(snap, "ltp", None):
-                tick_age = float(getattr(snap, "tick_age_s", 0.0) or 0.0)
+                tick_age = resolve_tick_age_seconds(snap) or 0.0
                 return {
                     "symbol": "NSE:NIFTY",
                     "ltp": float(getattr(snap, "ltp")),
@@ -7828,9 +7827,9 @@ class StrategyRunner:
         """Return whether an existing quote/tick for symbol is fresh enough for live gates."""
         limit = float(os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0)
         if quote is not None:
-            age = _extract_float(quote, "tick_age_s", "quote_age_s", "data_age_seconds", "age_s")
-            if age is not None:
-                return age <= limit
+            age_ms = resolve_tick_age_ms(quote)
+            if age_ms is not None:
+                return age_ms <= limit * 1000.0
             ts_raw = quote.get("timestamp") or quote.get("received_at") or quote.get("exchange_timestamp")
             if ts_raw is not None:
                 try:
