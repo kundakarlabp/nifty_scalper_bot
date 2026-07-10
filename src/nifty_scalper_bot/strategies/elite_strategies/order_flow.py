@@ -135,7 +135,11 @@ class OrderFlowStrategy(EliteStrategy):
             if total_bid + total_ask <= 0:
                 allow_fallback = str(os.getenv('ORDERFLOW_ALLOW_LTP_TICK_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
                 strict_spread_required = str(os.getenv('ORDERFLOW_REQUIRE_SPREAD_IN_STRICT_MODE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
-                stale_age_s = float(indicators.get('data_age_seconds') or 0.0)
+                stale_age_s = (
+                    quote_readiness.tick_age_ms / 1000.0
+                    if quote_readiness.tick_age_ms is not None
+                    else float('inf')
+                )
                 if not allow_fallback:
                     self._no_vote('missing_depth')
                     return None
