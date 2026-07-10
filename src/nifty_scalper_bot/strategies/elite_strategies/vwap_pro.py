@@ -6,6 +6,7 @@ from typing import Any
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
+from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -209,10 +210,7 @@ class VWAPProStrategy(EliteStrategy):
             min_score_default = '5.8' if is_live else '5.0'
             min_trend_score_default = '5.5' if is_live else '4.5'
             min_score = float(os.getenv('VWAP_PRO_MIN_TREND_ALIGNED_SCORE', min_trend_score_default) if trend_alignment else os.getenv('VWAP_PRO_MIN_SCORE', min_score_default))
-            try:
-                context_age_seconds = float(indicators.get("context_age_seconds") or 999.0)
-            except (TypeError, ValueError):
-                context_age_seconds = 999.0
+            context_age_seconds = resolve_context_age_seconds(indicators)
             try:
                 underlying_direction_confidence = float(
                     indicators.get("underlying_direction_confidence")

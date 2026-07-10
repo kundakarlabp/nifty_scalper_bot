@@ -7,6 +7,7 @@ from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
+from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
@@ -58,10 +59,7 @@ class SMCStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
             direction = str(indicators.get("direction_bias") or "").upper()
             stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
-            try:
-                context_age_seconds = float(indicators.get("context_age_seconds") or 999.0)
-            except (TypeError, ValueError):
-                context_age_seconds = 999.0
+            context_age_seconds = resolve_context_age_seconds(indicators)
             underlying_direction = str(indicators.get("underlying_direction_bias") or "").upper()
             effective_direction = underlying_direction or direction
             if str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper() == 'LIVE' and not effective_direction:

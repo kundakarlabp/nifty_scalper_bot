@@ -4,6 +4,7 @@ from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.runtime_context_contract import (
     live_direction_context_has_proof,
     normalise_live_direction_context,
+    resolve_context_age_seconds,
 )
 
 
@@ -101,3 +102,9 @@ def test_live_direction_context_proof_derives_freshness_from_spot_or_futures_age
     assert stale["spot_fresh"] is False
     assert stale["fut_fresh"] is False
     assert live_direction_context_has_proof(stale) is False
+
+
+def test_resolve_context_age_seconds_uses_canonical_safe_default() -> None:
+    assert resolve_context_age_seconds({"context_age_seconds": "1.5"}) == 1.5
+    assert resolve_context_age_seconds({"context_age_seconds": "invalid"}) == 999.0
+    assert resolve_context_age_seconds({}) == 999.0
