@@ -11621,7 +11621,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             datahub_bars[sym] = 0
                                     try:
                                         snap = ctx.market_data_manager.get_symbol_snapshot(sym)
-                                        if float(getattr(snap, "ltp", 0.0) or 0.0) > 0 and float(getattr(snap, "tick_age_s", 9999.0) or 9999.0) <= 60.0:
+                                        age = resolve_tick_age_seconds(snap)
+                                        if float(getattr(snap, "ltp", 0.0) or 0.0) > 0 and age is not None and age <= 60.0:
                                             fresh_quote_symbols.append(sym)
                                     except Exception:
                                         pass
