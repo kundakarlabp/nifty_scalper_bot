@@ -5,7 +5,10 @@ from nifty_scalper_bot.execution.quote_readiness import (
     resolve_real_tick_count,
     resolve_tick_age_ms,
 )
-from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
+from nifty_scalper_bot.execution.readiness import (
+    evaluate_quote_readiness,
+    resolve_quote_bid_ask_spread,
+)
 
 
 def test_missing_age_never_becomes_fresh_in_live_mode():
@@ -48,6 +51,26 @@ def test_quote_age_seconds_allows_live_orderflow_quote():
     assert result.allowed is True
     assert result.reason == "ready"
     assert result.tick_age_ms == 100
+
+
+def test_quote_age_seconds_allows_runtime_quote_readiness():
+    result = evaluate_quote_readiness(
+        "NFO:NIFTY26JUN24000CE",
+        {
+            "ltp": 100.0,
+            "bid": 99.9,
+            "ask": 100.1,
+            "quote_age_s": 0.10,
+            "depth_available": True,
+            "tradable_quote": True,
+        },
+        require_fresh=True,
+        max_age_s=2.5,
+        max_spread_pct=0.75,
+    )
+
+    assert result.tradable_quote_ready is True
+    assert result.reason == "ready"
 
 
 def test_synthetic_timestamp_quality_blocks_live_quote_readiness():
