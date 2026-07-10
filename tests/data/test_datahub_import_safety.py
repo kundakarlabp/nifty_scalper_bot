@@ -6,7 +6,9 @@ import sys
 
 def _reset_data_modules() -> None:
     for name in list(sys.modules):
-        if name == "nifty_scalper_bot.data" or name.startswith("nifty_scalper_bot.data.data_hub"):
+        if name == "nifty_scalper_bot.data" or name.startswith(
+            "nifty_scalper_bot.data.data_hub"
+        ):
             sys.modules.pop(name, None)
 
 
@@ -23,7 +25,15 @@ def test_direct_datahub_import_installs_synthetic_timestamp_guard() -> None:
 
     module = importlib.import_module("nifty_scalper_bot.data.data_hub")
 
-    assert getattr(module.DataHub, "_synthetic_timestamp_guard_installed", False) is True
+    assert (
+        getattr(module.DataHub, "_synthetic_timestamp_guard_installed", False) is True
+    )
+    assert module.DataHub.store_quote.__module__ == "nifty_scalper_bot.data.data_hub"
+    assert (
+        module.DataHub._canonicalize_tick_payload.__module__
+        == "nifty_scalper_bot.data.data_hub"
+    )
+    assert module.DataHub.get_cached_ltp.__module__ == "nifty_scalper_bot.data.data_hub"
 
 
 def test_direct_datahub_import_synthetic_quote_is_guarded() -> None:

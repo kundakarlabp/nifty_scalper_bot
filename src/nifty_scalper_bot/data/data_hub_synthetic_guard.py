@@ -52,7 +52,9 @@ def _timestamp_quality(payload: Mapping[str, Any]) -> str:
         return "broker"
     if _valid_timestamp_ms(payload.get("received_at")) is not None:
         return "received_at"
-    if any(key in payload for key in ("exchange_timestamp", "timestamp", "received_at")):
+    if any(
+        key in payload for key in ("exchange_timestamp", "timestamp", "received_at")
+    ):
         return "invalid"
     return "synthetic"
 
@@ -98,20 +100,53 @@ def install_datahub_synthetic_timestamp_guard(datahub_cls: type[Any]) -> bool:
 
     if bool(getattr(datahub_cls, _PATCH_ATTR, False)):
         return False
+    native_module = "nifty_scalper_bot.data.data_hub"
+    store_quote_module = getattr(
+        getattr(datahub_cls, "store_quote", None), "__module__", ""
+    )
+    canonicalize_module = getattr(
+        getattr(datahub_cls, "_canonicalize_tick_payload", None), "__module__", ""
+    )
+    cached_ltp_module = getattr(
+        getattr(datahub_cls, "get_cached_ltp", None), "__module__", ""
+    )
+    if (
+        store_quote_module == native_module
+        and canonicalize_module == native_module
+        and cached_ltp_module == native_module
+    ):
+        setattr(datahub_cls, _PATCH_ATTR, True)
+        return False
     originals = {
         "store_quote": getattr(datahub_cls, "store_quote"),
-        "_canonicalize_tick_payload": getattr(datahub_cls, "_canonicalize_tick_payload"),
+        "_canonicalize_tick_payload": getattr(
+            datahub_cls, "_canonicalize_tick_payload"
+        ),
         "get_cached_ltp": getattr(datahub_cls, "get_cached_ltp"),
     }
 
-    def store_quote(self: Any, symbol: str, quote_data: dict[str, Any], source: str = "ws", seed: bool = False) -> None:
+    def store_quote(
+        self: Any,
+        symbol: str,
+        quote_data: dict[str, Any],
+        source: str = "ws",
+        seed: bool = False,
+    ) -> None:
         payload = dict(quote_data or {})
-        if not any(payload.get(key) not in (None, "") for key in ("exchange_timestamp", "timestamp", "received_at", "timestamp_quality")):
+        time_keys = (
+            "exchange_timestamp",
+            "timestamp",
+            "received_at",
+            "timestamp_quality",
+        )
+        if not any(payload.get(key) not in (None, "") for key in time_keys):
             payload["timestamp_quality"] = "synthetic"
             payload["synthetic_timestamp"] = True
         return originals["store_quote"](self, symbol, payload, source=source, seed=seed)
 
-    def _canonicalize_tick_payload(self: Any, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    def _canonicalize_tick_payload(
+        self: Any, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
         input_payload = dict(payload or {})
         quality = _timestamp_quality(input_payload)
         tick = originals["_canonicalize_tick_payload"](self, input_payload)
@@ -135,7 +170,9 @@ def install_datahub_synthetic_timestamp_guard(datahub_cls: type[Any]) -> bool:
     ) -> float | None:
         mdm_cached = getattr(getattr(self, "_mdm", None), "get_cached_ltp", None)
         if callable(mdm_cached):
-            return mdm_cached(symbol, max_age_seconds=max_age_seconds, require_ws=require_ws)
+            return mdm_cached(
+                symbol, max_age_seconds=max_age_seconds, require_ws=require_ws
+            )
         quote = self.get_quote(symbol, allow_pull=False)
         if not quote:
             return None
@@ -143,7 +180,8 @@ def install_datahub_synthetic_timestamp_guard(datahub_cls: type[Any]) -> bool:
         guarded = bool(require_ws or max_age_seconds is not None)
         if guarded and quality in _UNUSABLE_TIMESTAMP_QUALITIES:
             return None
-        if require_ws and str(quote.get("source") or "").strip().lower() not in _WS_SOURCES:
+        quote_source = str(quote.get("source") or "").strip().lower()
+        if require_ws and quote_source not in _WS_SOURCES:
             return None
         if max_age_seconds is not None:
             ts_ms = _quote_timestamp_ms(quote)
