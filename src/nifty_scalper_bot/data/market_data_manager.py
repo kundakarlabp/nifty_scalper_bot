@@ -4420,7 +4420,6 @@ class MarketDataManager:
     ) -> dict[str, Any]:
         """Classify readiness into hard-trading and soft-spot states."""
         if not requirements:
-            any_ready = any(count >= min_bars for count in bars.values())
             spot_fresh = False
             try:
                 spot_fresh = bool(
@@ -4428,13 +4427,11 @@ class MarketDataManager:
                 )
             except Exception:
                 spot_fresh = False
-            missing: list[str] = []
-            if not any_ready:
-                missing.append("readiness_requirements_missing")
+            missing: list[str] = ["readiness_requirements_missing"]
             if not spot_fresh:
                 missing.append("fresh_spot_tick_missing")
             return {
-                "hard_ready": bool(any_ready),
+                "hard_ready": False,
                 "spot_ready": bool(spot_fresh),
                 "missing_hard": missing,
             }
