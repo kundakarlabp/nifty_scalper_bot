@@ -7,4 +7,11 @@ try:
 except Exception:
     pass
 
+try:
+    from nifty_scalper_bot.runtime_live_safety_hotfixes import install_live_safety_hotfixes
+
+    install_live_safety_hotfixes()
+except Exception:
+    pass
+
 __all__: list[str] = []
