@@ -7827,9 +7827,9 @@ class StrategyRunner:
         """Return whether an existing quote/tick for symbol is fresh enough for live gates."""
         limit = float(os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0)
         if quote is not None:
-            age = _extract_float(quote, "tick_age_s", "quote_age_s", "data_age_seconds", "age_s")
-            if age is not None:
-                return age <= limit
+            age_ms = resolve_tick_age_ms(quote)
+            if age_ms is not None:
+                return age_ms <= limit * 1000.0
             ts_raw = quote.get("timestamp") or quote.get("received_at") or quote.get("exchange_timestamp")
             if ts_raw is not None:
                 try:
