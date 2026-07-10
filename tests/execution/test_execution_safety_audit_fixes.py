@@ -1122,3 +1122,62 @@ def test_fill_reanchor_and_controller_trailing_on_executed_range(
         assert all(round(v / 0.05, 6) % 1 == 0 for v in sl_path)
     finally:
         bm._running = False
+
+
+def test_live_entry_registers_pending_order_with_position_manager(
+    monkeypatch, tmp_path
+) -> None:
+    """2026-07-10 incident: place_order registered the order locally and with
+    the bracket manager but NOT with the PositionManager, so the broker fill
+    for the bot's OWN live entry arrived as an unknown order (intent=UNKNOWN),
+    was quarantined every sync, blocked all new entries, and left the position
+    on a wide guard bracket. The pending-order sync must happen at submit."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
+
+    class _Broker:
+        def place_order(self, **_k):
+            return {"order_id": "LIVE-ENTRY-1"}
+
+        def get_orders(self):
+            return []
+
+        def get_positions(self):
+            return []
+
+    class _Positions:
+        def __init__(self):
+            self.pending: dict = {}
+
+        def has_open_position(self, _s):
+            return False
+
+        def get_open_positions(self):
+            return []
+
+        def add_pending_order(self, **kwargs):
+            self.pending[kwargs["order_id"]] = kwargs
+
+    om = OrderManager(_Broker(), _Positions(), object())
+    monkeypatch.setattr(om, "_lot_size_for_symbol", lambda _s: 65)
+    bm = BracketManager(order_manager=om)
+    bm._running = False
+    om.set_bracket_manager(bm)
+    try:
+        oid = om.place_order(
+            symbol="NFO:NIFTY2671424100CE", side="BUY", quantity=65,
+            order_type=OrderType.LIMIT, price=160.45,
+            stop_loss=151.20, take_profit=177.10,
+            intent="ENTRY", check_risk=False, signal_id="sig-0710",
+        )
+        assert oid
+        pending = om._positions.pending.get(oid)
+        assert pending is not None, "pending order must reach PositionManager"
+        assert str(pending["intent"]).upper() == "ENTRY"
+        assert pending["qty"] == 65
+        # The freshly registered bracket is pending entry — the ghost sweeper's
+        # skip condition (entry_confirmed False) must hold for it.
+        bracket = bm.get_bracket(oid)
+        assert bracket is not None and bracket.entry_confirmed is False
+    finally:
+        bm._running = False
