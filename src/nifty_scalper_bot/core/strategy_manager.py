@@ -2896,6 +2896,9 @@ class StrategyManager(_BaseStrategyManager):
             max_context_age = self._live_context_max_age_seconds()
             now_ts = time.time()
             def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:
+                age_seconds = resolve_tick_age_seconds(ctx)
+                if age_seconds is not None:
+                    return age_seconds <= max_context_age
                 try:
                     ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
                     return ts > 0 and (now_ts - ts) <= max_context_age
