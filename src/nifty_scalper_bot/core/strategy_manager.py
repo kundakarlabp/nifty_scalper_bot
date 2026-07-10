@@ -42,6 +42,7 @@ from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_th
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds
+from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
 
 log = get_logger(__name__)
 
@@ -2896,6 +2897,9 @@ class StrategyManager(_BaseStrategyManager):
             max_context_age = self._live_context_max_age_seconds()
             now_ts = time.time()
             def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:
+                age_seconds = resolve_tick_age_seconds(ctx)
+                if age_seconds is not None:
+                    return age_seconds <= max_context_age
                 try:
                     ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
                     return ts > 0 and (now_ts - ts) <= max_context_age
@@ -4284,10 +4288,7 @@ class StrategyManager(_BaseStrategyManager):
 
         direction_bias = str(indicator_map.get("direction_bias") or indicator_map.get("underlying_direction_bias") or "").upper()
         max_context_age = self._live_context_max_age_seconds()
-        try:
-            context_age_seconds = float(indicator_map.get("context_age_seconds"))
-        except (TypeError, ValueError):
-            context_age_seconds = 999.0
+        context_age_seconds = resolve_context_age_seconds(indicator_map)
         spread_pct = float(metadata.get("spread_pct") or indicator_map.get("spread_pct") or 999.0)
         selected_ok_combined = bool(selected_ok or near_atm)
         quote_depth_ok = bool(metadata.get("quote_depth_valid") or indicator_map.get("quote_depth_valid") or metadata.get("tradable_quote") or indicator_map.get("tradable_quote"))
@@ -4483,10 +4484,9 @@ class StrategyManager(_BaseStrategyManager):
                 spread_pct = float(md0.get("spread_pct") or indicators.get("spread_pct") or 999.0)
             except (TypeError, ValueError):
                 spread_pct = 999.0
-            try:
-                context_age = float(md0.get("context_age_seconds") or indicators.get("context_age_seconds") or 999.0)
-            except (TypeError, ValueError):
-                context_age = 999.0
+            context_age = resolve_context_age_seconds(
+                md0 if md0.get("context_age_seconds") is not None else indicators
+            )
             try:
                 bid = float(md0.get("bid") or indicators.get("bid") or 0.0)
             except (TypeError, ValueError):
@@ -4564,13 +4564,9 @@ class StrategyManager(_BaseStrategyManager):
             or ""
         ).upper()
         direction_aligned = direction_bias in {"CE", "PE"} and direction_bias == str(best_vote.side).upper()
-        age_raw = md0.get("context_age_seconds")
-        if age_raw is None:
-            age_raw = indicators.get("context_age_seconds")
-        try:
-            context_age_seconds = float(age_raw) if age_raw is not None else 999.0
-        except (TypeError, ValueError):
-            context_age_seconds = 999.0
+        context_age_seconds = resolve_context_age_seconds(
+            md0 if md0.get("context_age_seconds") is not None else indicators
+        )
         context_fresh = bool(
             md0.get("context_fresh")
             if md0.get("context_fresh") is not None
