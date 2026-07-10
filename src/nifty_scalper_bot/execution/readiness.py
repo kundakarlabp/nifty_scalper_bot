@@ -414,6 +414,31 @@ def _quote_float(payload: dict | object, *keys: str) -> float | None:
     return None
 
 
+def _quote_age_seconds(payload: dict | object) -> float | None:
+    age_ms = _quote_float(
+        payload,
+        "tick_age_ms",
+        "quote_age_ms",
+        "last_tick_age_ms",
+        "market_data_age_ms",
+    )
+    if age_ms is not None:
+        return max(0.0, age_ms / 1000.0)
+    age_s = _quote_float(
+        payload,
+        "tick_age_s",
+        "quote_age_s",
+        "data_age_seconds",
+        "age_s",
+        "age_seconds",
+        "last_tick_age_s",
+        "market_data_age_s",
+    )
+    if age_s is not None:
+        return max(0.0, age_s)
+    return None
+
+
 def resolve_quote_bid_ask_spread(quote: dict | object) -> tuple[float | None, float | None, float | None, str]:
     """Resolve bid/ask/spread from top-level fields or Zerodha depth.
 
@@ -525,7 +550,7 @@ def evaluate_quote_readiness(
     else:
         reason = "ready"
     if reason == "ready" and require_fresh:
-        age = _quote_float(quote, "tick_age_s", "age_s")
+        age = _quote_age_seconds(quote)
         if age is None:
             ts = _quote_float(quote, "timestamp_ms", "last_tick_ts_ms")
             if ts and ts > 10_000_000_000:
