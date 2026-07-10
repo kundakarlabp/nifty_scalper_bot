@@ -572,7 +572,7 @@ When modifying these files:
 
 ## Do not merge automatically
 
-Agents must not merge PRs into `main`.
+Agents must not merge PRs into `main` unless instructed specifically otherwise.
 
 The user should merge only after:
 
