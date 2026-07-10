@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from typing import Any, Mapping
 
+from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_ms
 from nifty_scalper_bot.strategies.runtime_context_contract import live_direction_context_has_proof
 
 _PATCH_ATTR = "_live_direction_context_proof_patch_installed"
@@ -49,7 +50,7 @@ def _can_upgrade_direction_context_block(metadata: Mapping[str, Any], indicators
     min_score = _safe_float(metadata.get("trigger_min_score"))
     spread = _safe_float(metadata.get("spread_pct"))
     max_spread = _safe_float(metadata.get("trigger_max_spread_pct"))
-    tick_age_ms = _safe_float(metadata.get("tick_age_ms"))
+    tick_age_ms = resolve_tick_age_ms(metadata)
     max_tick_age_ms = _safe_float(os.getenv("LIVE_MAX_TICK_AGE_MS", "2500") or 2500)
     if score is None or min_score is None or score < min_score:
         return False
