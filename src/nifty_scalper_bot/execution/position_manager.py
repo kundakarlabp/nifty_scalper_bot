@@ -3158,9 +3158,21 @@ class PositionManager:
             return FillApplicationResult(reason="cumulative_quantity_exceeds_order")
         qty = cumulative_qty - previous_qty
         if qty <= 0:
-            self._logger.warning(
-                "Ignoring non-incremental fill for order %s", order.order_id
-            )
+            # Correct idempotency drop — but the same terminal fill can be
+            # replayed by every reconcile cycle; warn once per (order,
+            # cumulative snapshot) instead of flooding logs and Telegram.
+            _dedupe_key = (str(order.order_id), int(cumulative_qty))
+            _seen = getattr(self, "_non_incremental_fill_warned", None)
+            if _seen is None:
+                _seen = set()
+                self._non_incremental_fill_warned = _seen
+            if _dedupe_key not in _seen:
+                _seen.add(_dedupe_key)
+                self._logger.warning(
+                    "Ignoring non-incremental fill for order %s (cumulative=%s; further replays suppressed)",
+                    order.order_id,
+                    cumulative_qty,
+                )
             return FillApplicationResult(reason="non_incremental_cumulative_quantity")
 
         cumulative_avg = order.fill_price

@@ -1181,3 +1181,40 @@ def test_live_entry_registers_pending_order_with_position_manager(
         assert bracket is not None and bracket.entry_confirmed is False
     finally:
         bm._running = False
+
+
+def test_non_incremental_fill_warning_dedupes_per_snapshot(tmp_path) -> None:
+    """2026-07-10 RCA: the same terminal fill replayed by every reconcile
+    cycle flooded logs/Telegram with identical warnings. The idempotency drop
+    stays; the warning fires once per (order, cumulative snapshot)."""
+    import logging
+
+    from nifty_scalper_bot.execution.position_manager import PositionManager
+
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        "OID-1", "NFO:NIFTY2671424100CE", "BUY", 65, 160.45, "LIMIT", intent="ENTRY"
+    )
+    manager.apply_broker_order_update(
+        "OID-1", {"status": "COMPLETE", "filled_quantity": 65, "average_price": 160.45}
+    )
+
+    records: list = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    manager._logger.addHandler(handler)
+    try:
+        for _ in range(5):  # replayed terminal fill, five reconcile cycles
+            manager.apply_broker_order_update(
+                "OID-1",
+                {"status": "COMPLETE", "filled_quantity": 65, "average_price": 160.45},
+            )
+    finally:
+        manager._logger.removeHandler(handler)
+    warnings = [m for m in records if "non-incremental" in m]
+    assert len(warnings) == 1, warnings
+    assert manager.get_position("NFO:NIFTY2671424100CE").quantity == 65
