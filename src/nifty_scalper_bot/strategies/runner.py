@@ -95,6 +95,7 @@ from nifty_scalper_bot.data.source import (
 )
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
+from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy, resolve_quote_bid_ask_spread
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
@@ -3187,7 +3188,10 @@ class StrategyRunner:
         reason = "runtime_not_marked_ready"
         tick_age_ms = None
         bid = ask = None
+        spread_pct = None
         tradable_quote = False
+        depth_available = False
+        ltp = 0.0
         lot_size_resolved = False
         lot_size = 0
         max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
@@ -3228,13 +3232,34 @@ class StrategyRunner:
                     "depth": getattr(snap, "depth", None),
                     "depth_available": getattr(snap, "depth_available", False),
                     "tradable_quote": getattr(snap, "tradable_quote", False),
+                    "spread_pct": getattr(snap, "spread_pct", None),
+                    "tick_age_ms": getattr(snap, "tick_age_ms", None),
                     "tick_age_s": getattr(snap, "tick_age_s", None),
+                    "real_ticks_last_60s": getattr(snap, "real_ticks_last_60s", None),
                     "source": getattr(snap, "source", None),
                 }
-                bid, ask, spread_pct, quote_source = resolve_quote_bid_ask_spread(quote)
+                max_spread_pct = float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5")
+                quote_readiness = evaluate_execution_quote(
+                    normalized,
+                    quote,
+                    live_mode=True,
+                    max_tick_age_ms=float(max_quote_age_ms),
+                    max_spread_pct=max_spread_pct,
+                    require_depth=False,
+                    min_real_ticks_last_60s=0,
+                )
+                bid = quote_readiness.bid
+                ask = quote_readiness.ask
+                spread_pct = quote_readiness.spread_pct
+                quote_source = getattr(snap, "source", None)
                 ltp = _extract_float(quote, "ltp", "last_price") or 0.0
-                tradable_quote = bool(ltp > 0 and bid is not None and ask is not None and bid > 0 and ask > bid and spread_pct is not None)
-                tick_age_ms = int(max(0.0, float(getattr(snap, "tick_age_s", 9999.0) or 9999.0) * 1000.0))
+                tradable_quote = bool(quote_readiness.tradable_quote and ltp > 0)
+                tick_age_ms = (
+                    int(quote_readiness.tick_age_ms)
+                    if quote_readiness.tick_age_ms is not None
+                    else None
+                )
+                depth_available = quote_readiness.depth_available
             else:
                 reason = "quote_missing"
         lot_size_key_used: str | None = None
@@ -3266,23 +3291,14 @@ class StrategyRunner:
                 history_count = int(getattr(snap, "real_ticks_last_60s", 0) or 0)
             except (TypeError, ValueError):
                 history_count = 0
-            spread_ok = bool(spread_pct is not None and spread_pct <= float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5"))
-        else:
-            spread_ok = False
         min_history = int(os.getenv("RUNNER_MIN_REAL_TICKS_60S", "1") or "1")
         allow_fresh_without_tick_count = _env_flag("RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT", default=True)
         if snap is None:
             reason = "quote_missing"
-        elif (locals().get("ltp") or 0.0) <= 0:
+        elif ltp <= 0:
             reason = "ltp_missing"
-        elif bid is None or ask is None or bid <= 0 or ask <= 0:
-            reason = "bid_ask_missing"
-        elif ask <= bid:
-            reason = "bid_ask_crossed"
-        elif tick_age_ms is None or tick_age_ms > max_quote_age_ms:
-            reason = "quote_stale"
-        elif not spread_ok:
-            reason = "spread_too_wide"
+        elif not quote_readiness.allowed:
+            reason = quote_readiness.reason
         elif not lot_size_resolved or lot_size <= 0:
             reason = "lot_size_unresolved"
         elif history_count < min_history and not allow_fresh_without_tick_count:
@@ -3299,7 +3315,11 @@ class StrategyRunner:
             self._runtime_execution_ready_by_symbol[runtime_key] = True
             self._runtime_symbol_last_ready_at[runtime_key] = time.time()
             self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, runtime_key, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
-        depth_available = bool(getattr(snap, "depth_available", False) or getattr(snap, "depth", None)) if snap is not None else False
+        depth_available = (
+            bool(depth_available or getattr(snap, "depth_available", False) or getattr(snap, "depth", None))
+            if snap is not None
+            else False
+        )
         self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s spread_pct=%s tradable_quote=%s depth_available=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, spread_pct, tradable_quote, depth_available, lot_size_resolved)
         return ExecutionReadinessResult(final_ready, reason, {"symbol": normalized, "runtime_key": runtime_key, "tick_age_ms": tick_age_ms, "bid": bid, "ask": ask, "spread_pct": spread_pct, "quote_source": quote_source, "snapshot_key_used": snapshot_key_used, "tradable_quote": tradable_quote, "depth_available": depth_available, "lot_size_resolved": lot_size_resolved})
 
