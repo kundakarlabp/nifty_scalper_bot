@@ -16,6 +16,11 @@ class DummyMDM:
 def test_quote_contract_adds_identity_and_tick_age():
     hub = DataHub(DummyMDM(), clock=lambda: 1000.0)
     try:
+        assert DataHub.get_quote.__module__ == "nifty_scalper_bot.data.data_hub"
+        assert (
+            DataHub._canonicalize_tick_payload.__module__
+            == "nifty_scalper_bot.data.data_hub"
+        )
         hub.ingest_tick(
             {
                 "symbol": "NIFTY24JAN100CE",
@@ -30,12 +35,10 @@ def test_quote_contract_adds_identity_and_tick_age():
         assert quote["tradingsymbol"] == "NFO:NIFTY24JAN100CE"
         assert quote["instrument_token"] == 12345
         assert quote["quote_update_version"] == 1
-        assert quote["quote_identity_timestamp_source"] in {
-            "hub_clock_fallback",
-            "hub_clock_for_timestamp_future_guard",
-        }
-        assert quote["tick_age_ms"] == 0.0
-        assert quote["quote_age_s"] == 0.0
+        assert quote["timestamp_quality"] == "synthetic"
+        assert quote["quote_identity_timestamp_source"] == "synthetic"
+        assert "tick_age_ms" not in quote
+        assert "quote_age_s" not in quote
     finally:
         hub.close()
 
@@ -44,7 +47,9 @@ def test_quote_identity_falls_back_to_arrival_when_timestamp_is_future():
     now_epoch = 1_783_415_880.0  # 2026-07-07 14:48 IST
     hub = SimpleNamespace(
         _now=lambda: now_epoch,
-        _canonical_quote_symbol=lambda symbol: f"NFO:{symbol}" if ":" not in str(symbol) else str(symbol),
+        _canonical_quote_symbol=lambda symbol: (
+            f"NFO:{symbol}" if ":" not in str(symbol) else str(symbol)
+        ),
         quote_update_version=lambda _symbol: 7,
     )
     quote = {
@@ -58,6 +63,9 @@ def test_quote_identity_falls_back_to_arrival_when_timestamp_is_future():
     stamped = stamp_quote_identity(hub, "NIFTY24JAN100CE", quote)
 
     assert stamped["quote_update_version"] == 7
-    assert stamped["quote_identity_timestamp_source"] == "received_at_for_timestamp_future_guard"
+    assert (
+        stamped["quote_identity_timestamp_source"]
+        == "received_at_for_timestamp_future_guard"
+    )
     assert stamped["tick_age_ms"] == 0.0
     assert stamped["quote_age_s"] == 0.0

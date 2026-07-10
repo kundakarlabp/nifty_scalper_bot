@@ -116,15 +116,25 @@ def _now_ms(hub: Any) -> float:
     return time.time() * 1000.0
 
 
-def _received_at_ms(hub: Any, quote: Mapping[str, Any], *, now_ms: float) -> float | None:
-    for key in ("received_at", "arrival_time", "ingested_at", "updated_at", "last_update_time"):
+def _received_at_ms(
+    hub: Any, quote: Mapping[str, Any], *, now_ms: float
+) -> float | None:
+    for key in (
+        "received_at",
+        "arrival_time",
+        "ingested_at",
+        "updated_at",
+        "last_update_time",
+    ):
         value = _coerce_arrival_ms(quote.get(key))
         if value is not None and value <= now_ms + _future_grace_ms():
             return value
     return None
 
 
-def _resolve_quote_timestamp_ms(hub: Any, quote: Mapping[str, Any]) -> tuple[float | None, str]:
+def _resolve_quote_timestamp_ms(
+    hub: Any, quote: Mapping[str, Any]
+) -> tuple[float | None, str]:
     now_ms = _now_ms(hub)
     received_ms = _received_at_ms(hub, quote, now_ms=now_ms)
     candidates = (
@@ -151,8 +161,14 @@ def _resolve_quote_timestamp_ms(hub: Any, quote: Mapping[str, Any]) -> tuple[flo
 def stamp_quote_identity(hub: Any, requested_symbol: object, quote: Any) -> Any:
     if not isinstance(quote, Mapping):
         return quote
+    native = getattr(hub, "_stamp_quote_identity", None)
+    if callable(native):
+        with suppress(Exception):
+            return native(requested_symbol, quote)
     stamped = dict(quote)
-    symbol = _canonical(hub, requested_symbol) or _canonical(hub, _quote_symbol_hint(stamped))
+    symbol = _canonical(hub, requested_symbol) or _canonical(
+        hub, _quote_symbol_hint(stamped)
+    )
     if not symbol:
         return stamped
     stamped["symbol"] = symbol
@@ -170,6 +186,14 @@ def stamp_quote_identity(hub: Any, requested_symbol: object, quote: Any) -> Any:
             version = version_getter(symbol)
             if version is not None:
                 stamped["quote_update_version"] = int(version)
+    quality = str(stamped.get("timestamp_quality") or "").strip().lower()
+    if quality in {"synthetic", "unknown", "invalid"}:
+        stamped["quote_identity_timestamp_source"] = quality
+        stamped["quote_identity_timestamp_rejected"] = True
+        stamped["quote_identity_source"] = (
+            stamped.get("quote_identity_source") or "datahub_quote_contract"
+        )
+        return stamped
     ts_ms, ts_source = _resolve_quote_timestamp_ms(hub, stamped)
     stamped["quote_identity_timestamp_source"] = ts_source
     if ts_ms is not None:
@@ -184,7 +208,9 @@ def stamp_quote_identity(hub: Any, requested_symbol: object, quote: Any) -> Any:
         stamped["market_data_age_s"] = age_ms / 1000.0
     else:
         stamped["quote_identity_timestamp_rejected"] = True
-    stamped["quote_identity_source"] = stamped.get("quote_identity_source") or "datahub_quote_contract"
+    stamped["quote_identity_source"] = (
+        stamped.get("quote_identity_source") or "datahub_quote_contract"
+    )
     return stamped
 
 
@@ -196,11 +222,17 @@ def apply_patches() -> None:
     if cls is None or getattr(cls, "_quote_identity_contract_patch", False):
         _PATCH_APPLIED = True
         return
+    if callable(getattr(cls, "_stamp_quote_identity", None)):
+        cls._quote_identity_contract_patch = True
+        _PATCH_APPLIED = True
+        return
     _ORIGINALS["DataHub._canonicalize_tick_payload"] = cls._canonicalize_tick_payload
     _ORIGINALS["DataHub.get_quote"] = cls.get_quote
     _ORIGINALS["DataHub.get_tick_by_token"] = cls.get_tick_by_token
 
-    def _canonicalize_tick_payload(self: Any, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    def _canonicalize_tick_payload(
+        self: Any, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
         tick = _ORIGINALS["DataHub._canonicalize_tick_payload"](self, payload)
         if tick is None:
             return None
