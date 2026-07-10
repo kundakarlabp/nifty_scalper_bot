@@ -8579,9 +8579,9 @@ class StrategyRunner:
         limit = float(max_age_s or os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0)
         quote = self._get_cached_quote_for_live_entry(symbol)
         if isinstance(quote, Mapping):
-            age = _extract_float(quote, "tick_age_s", "age_s")
-            if age is not None:
-                return age <= limit
+            age_ms = resolve_tick_age_ms(quote)
+            if age_ms is not None:
+                return age_ms <= limit * 1000.0
         for source in (self._market_data, self._data_hub):
             if source is None:
                 continue
