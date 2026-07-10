@@ -349,6 +349,18 @@ def test_historical_bar_writes_only_canonical_ohlc_not_raw_ticks() -> None:
     assert mdm.is_tick_ready("NSE:NIFTY") is False
 
 
+def test_missing_readiness_requirements_fail_closed_even_with_ready_bars() -> None:
+    mdm = _storage_mdm()
+    mdm._tick_stale_threshold_ms = 60_000
+    mdm._is_symbol_fresh = lambda *_a, **_k: True
+
+    state = mdm._readiness_state({"NFO:NIFTY26JUL24000CE": 5}, 2, {})
+
+    assert state["hard_ready"] is False
+    assert state["spot_ready"] is True
+    assert state["missing_hard"] == ["readiness_requirements_missing"]
+
+
 def test_feed_health_uses_selected_options_not_context_option_staleness() -> None:
     mdm = _storage_mdm()
     now = time.time()
