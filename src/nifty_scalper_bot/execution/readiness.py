@@ -414,7 +414,7 @@ def _quote_float(payload: dict | object, *keys: str) -> float | None:
     return None
 
 
-def _quote_age_seconds(payload: dict | object) -> float | None:
+def resolve_quote_age_seconds(payload: dict | object) -> float | None:
     age_ms = _quote_float(
         payload,
         "tick_age_ms",
@@ -550,7 +550,7 @@ def evaluate_quote_readiness(
     else:
         reason = "ready"
     if reason == "ready" and require_fresh:
-        age = _quote_age_seconds(quote)
+        age = resolve_quote_age_seconds(quote)
         if age is None:
             ts = _quote_float(quote, "timestamp_ms", "last_tick_ts_ms")
             if ts and ts > 10_000_000_000:

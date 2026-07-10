@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from nifty_scalper_bot.execution.readiness import (
     quote_timestamp_quality_allows_hard_readiness,
     resolve_quote_bid_ask_spread,
+    resolve_quote_age_seconds,
 )
 
 
@@ -33,13 +34,8 @@ def _float(payload: Mapping[str, Any] | object | None, *keys: str) -> float | No
 
 
 def resolve_tick_age_ms(payload: Mapping[str, Any] | object | None) -> float | None:
-    age_ms = _float(payload, "tick_age_ms", "quote_age_ms", "last_tick_age_ms", "market_data_age_ms")
-    if age_ms is not None:
-        return max(0.0, age_ms)
-    age_s = _float(payload, "tick_age_s", "quote_age_s", "data_age_seconds", "age_s", "age_seconds", "last_tick_age_s", "market_data_age_s")
-    if age_s is not None:
-        return max(0.0, age_s * 1000.0)
-    return None
+    age_s = resolve_quote_age_seconds(payload)
+    return None if age_s is None else age_s * 1000.0
 
 
 def resolve_tick_age_seconds(payload: Mapping[str, Any] | object | None) -> float | None:
