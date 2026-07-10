@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 
 
@@ -25,6 +26,8 @@ def test_direct_core_app_import_applies_polling_patch_without_lazy_getattr() -> 
 
     assert getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
     assert callable(getattr(app_module, "_polling_failover_supervisor_iteration", None))
+    assert app_module._polling_fallback_degraded.__module__ == app_module.__name__
+    assert "quote_stale_ms" in inspect.signature(app_module._polling_fallback_degraded).parameters
 
 
 def test_core_lazy_app_resolution_applies_polling_patch() -> None:
