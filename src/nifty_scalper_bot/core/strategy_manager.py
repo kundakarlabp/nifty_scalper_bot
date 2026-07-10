@@ -41,6 +41,7 @@ from nifty_scalper_bot.utils.log_throttle import maybe_emit_strategy_rejection_s
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
+from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds
 
 log = get_logger(__name__)
 
@@ -2313,14 +2314,7 @@ class StrategyManager(_BaseStrategyManager):
 
     @staticmethod
     def _context_tick_age_seconds(ctx: t.Mapping[str, t.Any]) -> float | None:
-        raw = ctx.get("tick_age_ms")
-        if raw is None:
-            return None
-        try:
-            age_ms = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return age_ms / 1000.0 if age_ms >= 0 else None
+        return resolve_tick_age_seconds(ctx)
 
     def _strategy_required_indicator_union(self) -> set[str]:
         required = set(getattr(self, "_required_indicators", set()) or set())
