@@ -339,18 +339,21 @@ def _polling_fallback_degraded(
     lagging: bool,
     futures_fresh: bool,
     options_fresh: bool,
+    quote_stale_ms: float = 120000.0,
+    feed_health: Mapping[str, Any] | None = None,
+    data_age_ms: float | None = None,
 ) -> bool:
-    """Evaluate fallback degrade state using trading-critical feed health."""
+    """Runtime boolean wrapper around the canonical polling fallback decision."""
 
-    if not ws_ok:
-        return True
-    if lagging:
-        return True
-    if not futures_fresh:
-        return True
-    if not options_fresh:
-        return True
-    return False
+    return decide_polling_fallback(
+        ws_ok=ws_ok,
+        lagging=lagging,
+        futures_fresh=futures_fresh,
+        options_fresh=options_fresh,
+        quote_stale_ms=quote_stale_ms,
+        feed_health=feed_health,
+        data_age_ms=data_age_ms,
+    ).activate
 
 
 
@@ -408,12 +411,31 @@ async def _polling_failover_supervisor_iteration(
 
     ws_ok = bool(_safe_supervisor_call("websocket_manager.is_connected", getattr(getattr(ctx, "websocket_manager", None), "is_connected", None), default=False))
     mdm = getattr(ctx, "market_data_manager", None)
-    feed_health = _safe_supervisor_call(
-        "market_data_manager.trading_feed_health",
-        getattr(mdm, "trading_feed_health", None),
-        max_age_ms=quote_stale_ms,
-        default={},
-    )
+    feed_health_getter = getattr(mdm, "trading_feed_health", None)
+    if callable(feed_health_getter):
+        try:
+            feed_health = feed_health_getter(max_age_ms=quote_stale_ms)
+        except TypeError:
+            try:
+                feed_health = feed_health_getter()
+            except Exception as exc:
+                LOGGER.warning(
+                    "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
+                    type(exc).__name__,
+                    exc,
+                    extra={"event": "POLLING_FALLBACK_HEALTH_FAILED", "error_type": type(exc).__name__, "error": str(exc)},
+                )
+                feed_health = {}
+        except Exception as exc:
+            LOGGER.warning(
+                "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+                extra={"event": "POLLING_FALLBACK_HEALTH_FAILED", "error_type": type(exc).__name__, "error": str(exc)},
+            )
+            feed_health = {}
+    else:
+        feed_health = {}
     if not isinstance(feed_health, Mapping):
         feed_health = {}
     futures_fresh = bool(feed_health.get("futures_fresh"))
@@ -421,78 +443,52 @@ async def _polling_failover_supervisor_iteration(
     spot_fresh = bool(feed_health.get("spot_fresh"))
     spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
     spot_age_ms = feed_health.get("spot_age_ms")
-    futures_age_ms = feed_health.get("futures_age_ms")
-    options_age_ms = feed_health.get("options_age_ms")
     auth_tick_age_ms = _safe_supervisor_call("market_data_manager.data_age_ms", getattr(mdm, "data_age_ms", None), default=quote_stale_ms + 1)
     try:
         lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
     except (TypeError, ValueError):
         lagging = True
-    degraded = _polling_fallback_degraded(
+    try:
+        decision_data_age_ms = float(auth_tick_age_ms) if auth_tick_age_ms is not None else None
+    except (TypeError, ValueError):
+        decision_data_age_ms = None
+    decision = decide_polling_fallback(
         ws_ok=ws_ok,
         lagging=lagging,
         futures_fresh=futures_fresh,
         options_fresh=options_fresh,
+        quote_stale_ms=quote_stale_ms,
+        feed_health=feed_health,
+        data_age_ms=decision_data_age_ms,
     )
-    if degraded:
+    if decision.activate:
         recovered_since = None
         degraded_since = degraded_since or now_mono
         running = bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False))
         if now_mono - degraded_since >= activate_after and not running:
-            stale_age_ms = options_age_ms if not options_fresh else futures_age_ms if not futures_fresh else spot_age_ms
-            try:
-                stale_age_within_threshold = (
-                    stale_age_ms is not None and float(stale_age_ms) < float(quote_stale_ms)
-                )
-            except (TypeError, ValueError):
-                stale_age_within_threshold = False
-            if ws_ok and not lagging and stale_age_within_threshold:
-                _fallback_reason = "futures_stale" if not futures_fresh else "options_stale" if not options_fresh else "within_stale_threshold"
-                log_throttled(
-                    LOGGER,
-                    f"polling_fallback_skipped:{spot_symbol}:{_fallback_reason}:within_threshold",
-                    "POLLING_FALLBACK_SKIPPED reason=%s age_ms=%s threshold_ms=%s ws_ok=%s"
-                    % (_fallback_reason, stale_age_ms, quote_stale_ms, ws_ok),
-                    interval_sec=60.0,
-                    level=logging.INFO,
-                    extra={
-                        "event": "POLLING_FALLBACK_SKIPPED",
-                        "reason": _fallback_reason,
-                        "age_ms": stale_age_ms,
-                        "threshold_ms": quote_stale_ms,
-                        "ws_ok": ws_ok,
-                    },
-                )
-                return degraded_since, recovered_since
-            if (
-                spot_age_ms is not None
-                and float(spot_age_ms) <= float(quote_stale_ms)
-                and ws_ok
-                and spot_fresh
-                and futures_fresh
-                and options_fresh
-                and not lagging
-            ):
-                log_throttled(
-                    LOGGER,
-                    f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",
-                    "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s" % (spot_age_ms, quote_stale_ms, ws_ok),
-                    interval_sec=60.0,
-                    level=logging.INFO,
-                    extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "within_spot_stale_threshold", "age_ms": spot_age_ms, "threshold_ms": quote_stale_ms, "ws_ok": ws_ok},
-                )
-                return degraded_since, recovered_since
-            _fallback_reason = "ws_disconnected" if not ws_ok else "tick_lag" if lagging else "futures_stale" if not futures_fresh else "options_stale"
             log_state_change(
                 LOGGER,
                 "POLLING_FALLBACK_ACTIVATE",
-                (_fallback_reason, ws_ok, lagging, futures_fresh, options_fresh),
+                (decision.reason, ws_ok, lagging, futures_fresh, options_fresh),
                 level=logging.WARNING,
-                msg="POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s" % (_fallback_reason, spot_age_ms, quote_stale_ms, ws_ok, lagging),
-                extra={"event": "poll_fallback_activate", "reason": _fallback_reason, "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
+                msg="POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s" % (decision.reason, decision.max_age_ms, quote_stale_ms, ws_ok, lagging),
+                extra={"event": "poll_fallback_activate", "reason": decision.reason, "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
             )
-            _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), False)
-            _safe_supervisor_call("polling_fallback.start", getattr(polling_fallback, "start", None))
+            try:
+                mode_fn = getattr(polling_fallback, "set_websocket_mode", None)
+                if callable(mode_fn):
+                    mode_fn(False)
+                start_fn = getattr(polling_fallback, "start", None)
+                if callable(start_fn):
+                    start_fn()
+            except Exception as exc:
+                LOGGER.warning(
+                    "POLLING_FALLBACK_START_FAILED reason=%s error_type=%s error=%s",
+                    decision.reason,
+                    type(exc).__name__,
+                    exc,
+                    extra={"event": "POLLING_FALLBACK_START_FAILED", "reason": decision.reason, "error_type": type(exc).__name__, "error": str(exc)},
+                )
         return degraded_since, recovered_since
 
     if not spot_fresh:
@@ -1199,6 +1195,7 @@ from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.option_universe import OptionUniverseManager
+from nifty_scalper_bot.core.polling_failover import decide_polling_fallback
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.unified_manager import UnifiedManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
