@@ -12563,9 +12563,42 @@ async def _reconcile_state(ctx: BotContext) -> None:
                     # 3. Identify Ghosts (Managed but no Position)
                     ghosts = managed_symbols - real_positions
 
+                    _ghost_now = time.time()
                     for ghost_sym in ghosts:
                         # Double check if it actually has active brackets inside
                         if bm.is_symbol_managed(ghost_sym):
+                            # NEVER kill a bracket that is awaiting its entry
+                            # fill or was activated moments ago. Broker fill
+                            # latency means the local position lags the bracket
+                            # by seconds: on 2026-07-10 this sweeper deleted the
+                            # pending bracket of a REAL in-flight order one
+                            # second after submit; the fill then arrived
+                            # orphaned -> own-order quarantine -> new entries
+                            # blocked and the position left on a wide guard SL.
+                            _in_fill_window = False
+                            for _bid in list(
+                                (getattr(bm, "_symbol_map", {}) or {}).get(ghost_sym) or []
+                            ):
+                                _b = (getattr(bm, "_brackets", {}) or {}).get(_bid)
+                                if _b is None:
+                                    continue
+                                if not getattr(_b, "entry_confirmed", False):
+                                    _in_fill_window = True
+                                    break
+                                _fill_ts = getattr(_b, "entry_fill_ts", None)
+                                if _fill_ts and _ghost_now - float(_fill_ts) < 120.0:
+                                    _in_fill_window = True
+                                    break
+                            if _in_fill_window:
+                                LOGGER.info(
+                                    "GHOST_SWEEP_SKIPPED_PENDING_ENTRY symbol=%s",
+                                    ghost_sym,
+                                    extra={
+                                        "event": "GHOST_SWEEP_SKIPPED_PENDING_ENTRY",
+                                        "symbol": ghost_sym,
+                                    },
+                                )
+                                continue
                             LOGGER.warning(
                                 f"👻 GHOST BRACKET DETECTED: {ghost_sym} has protection but no Open Position. "
                                 "Performing Safety Cleanup..."

@@ -3196,6 +3196,38 @@ class OrderManager:
                         signal_id=signal_id,
                     )
                     self._register_order(details)
+                    # Sync PositionManager's pending-order registry so the
+                    # incoming broker fill is attributed to OUR order (intent
+                    # preserved), not synthesized as an unknown order and
+                    # quarantined. 2026-07-10: this sync existed only on the
+                    # reconcile path, so a live entry's own fill arrived as
+                    # intent=UNKNOWN -> BROKER_POSITION_QUARANTINED_FOR_
+                    # UNKNOWN_ORDER every sync -> all new entries blocked and
+                    # the position left on a wide guard bracket.
+                    if hasattr(self._positions, "add_pending_order"):
+                        try:
+                            self._positions.add_pending_order(
+                                order_id=details.order_id,
+                                symbol=details.symbol,
+                                side=details.side,
+                                qty=details.quantity,
+                                price=details.price,
+                                order_type=details.order_type,
+                                intent=details.intent,
+                                bracket_id=details.bracket_id,
+                                signal_id=details.signal_id,
+                                signal_fingerprint=details.signal_fingerprint,
+                            )
+                        except Exception as _pm_sync_exc:  # noqa: BLE001
+                            self._logger.error(
+                                "POSITION_MANAGER_PENDING_SYNC_FAILED order_id=%s error=%s",
+                                details.order_id,
+                                _pm_sync_exc,
+                                extra={
+                                    "event": "POSITION_MANAGER_PENDING_SYNC_FAILED",
+                                    "order_id": details.order_id,
+                                },
+                            )
                     # Local order record now owns the symbol — release the
                     # single-position gate's in-flight reservation.
                     with self._lock:
