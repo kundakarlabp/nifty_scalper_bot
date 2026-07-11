@@ -8,8 +8,7 @@ import sys
 from typing import Any
 
 import nifty_scalper_bot.execution as execution
-from nifty_scalper_bot.execution import bracket_core
-from nifty_scalper_bot.execution import bracket_manager
+from nifty_scalper_bot.execution import bracket_core, bracket_manager
 from nifty_scalper_bot.execution.ownership import BoundBracketManager
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 
@@ -64,7 +63,7 @@ def test_runtime_manager_binds_provider_without_replacing_order_methods(
 
 
 def test_bracket_module_is_safe_when_imported_before_package() -> None:
-    code = r'''
+    code = r"""
 import json
 import importlib
 bm = importlib.import_module("nifty_scalper_bot.execution.bracket_manager")
@@ -76,7 +75,7 @@ print(json.dumps({
     "package": id(execution.BracketManager),
     "module": bm.BracketManager.__module__,
 }))
-'''
+"""
     completed = subprocess.run(
         [sys.executable, "-c", code],
         check=True,
@@ -92,3 +91,26 @@ print(json.dumps({
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
     assert payload["before"] == payload["after"] == payload["package"]
     assert payload["module"] == "nifty_scalper_bot.execution.ownership"
+
+
+def test_runtime_bracket_reconciliation_comes_from_canonical_without_patch(
+    tmp_path, monkeypatch
+) -> None:
+    from nifty_scalper_bot.execution.canonical_bracket_manager import (
+        CanonicalBracketManager,
+    )
+
+    monkeypatch.setenv(
+        "BRACKET_FILL_LEDGER_PATH", str(tmp_path / "facade-canonical.db")
+    )
+    reconcile_before = BoundBracketManager._reconcile_exit_state
+    rescue_before = BoundBracketManager._rescue_stale_exit_order
+    order_manager = _OrderManager()
+    manager = bracket_manager.BracketManager(order_manager=order_manager)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+
+    assert isinstance(manager, CanonicalBracketManager)
+    assert BoundBracketManager._reconcile_exit_state is reconcile_before
+    assert BoundBracketManager._rescue_stale_exit_order is rescue_before
+    assert "CanonicalBracketManager" in rescue_before.__qualname__

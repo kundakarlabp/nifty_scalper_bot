@@ -92,3 +92,94 @@ def test_live_exit_patch_apply_is_deprecated_no_method_reassignment():
     with pytest.warns(DeprecationWarning):
         live_exit_reconciliation_patch.apply_patches()
     assert BoundBracketManager._reconcile_exit_state is before
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, False, True, "", " ", "abc", "NaN", float("nan"), float("inf"), 1.5, {}, []],
+)
+def test_authoritative_quantity_normalization_rejects_unknown_values(value):
+    from nifty_scalper_bot.execution.broker_position_evidence import (
+        normalize_authoritative_quantity,
+    )
+
+    assert normalize_authoritative_quantity(value) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0, 0), (0.0, 0), ("0", 0), (65, 65), (-65, -65), ("65", 65), ("-65", -65)],
+)
+def test_authoritative_quantity_normalization_accepts_integer_values(value, expected):
+    from nifty_scalper_bot.execution.broker_position_evidence import (
+        normalize_authoritative_quantity,
+    )
+
+    assert normalize_authoritative_quantity(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, False, True, "", " ", "abc", "NaN", float("nan"), float("inf"), 1.5, {}, []],
+)
+def test_canonical_broker_position_evidence_unknown_quantities_fail_closed(value):
+    from nifty_scalper_bot.execution.canonical_bracket_manager import (
+        CanonicalBracketManager,
+    )
+
+    manager = CanonicalBracketManager.__new__(CanonicalBracketManager)
+    manager._authoritative_position_quantity = lambda _symbol: value  # type: ignore[attr-defined]
+    evidence = manager._broker_position_evidence("NFO:NIFTY2670124000CE")
+    assert evidence.state is BrokerPositionState.UNKNOWN
+    assert evidence.net_quantity is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected", "qty"),
+    [
+        (0, BrokerPositionState.FLAT_CONFIRMED, 0),
+        (0.0, BrokerPositionState.FLAT_CONFIRMED, 0),
+        ("0", BrokerPositionState.FLAT_CONFIRMED, 0),
+        (65, BrokerPositionState.NON_FLAT_CONFIRMED, 65),
+        (-65, BrokerPositionState.NON_FLAT_CONFIRMED, -65),
+        ("65", BrokerPositionState.NON_FLAT_CONFIRMED, 65),
+        ("-65", BrokerPositionState.NON_FLAT_CONFIRMED, -65),
+    ],
+)
+def test_canonical_broker_position_evidence_accepts_valid_integer_quantities(
+    value, expected, qty
+):
+    from nifty_scalper_bot.execution.canonical_bracket_manager import (
+        CanonicalBracketManager,
+    )
+
+    manager = CanonicalBracketManager.__new__(CanonicalBracketManager)
+    manager._authoritative_position_quantity = lambda _symbol: value  # type: ignore[attr-defined]
+    evidence = manager._broker_position_evidence("NFO:NIFTY2670124000CE")
+    assert evidence.state is expected
+    assert evidence.net_quantity == qty
+
+
+def test_non_empty_unrelated_positions_are_symbol_unresolved_not_flat():
+    evidence = evidence_from_positions(
+        "NFO:NIFTY2670124000CE",
+        [{"tradingsymbol": "BANKNIFTY2670150000CE", "quantity": 0}],
+    )
+    assert evidence.state is BrokerPositionState.SYMBOL_UNRESOLVED
+    assert evidence.net_quantity is None
+
+
+def test_non_mapping_position_row_is_unknown():
+    evidence = evidence_from_positions("NFO:NIFTY2670124000CE", [object()])  # type: ignore[list-item]
+    assert evidence.state is BrokerPositionState.UNKNOWN
+    assert evidence.net_quantity is None
+
+
+def test_positions_generator_failure_is_api_error():
+    def broken_rows():
+        raise RuntimeError("broker stream failed")
+        yield {}  # pragma: no cover
+
+    evidence = evidence_from_positions("NFO:NIFTY2670124000CE", broken_rows())
+    assert evidence.state is BrokerPositionState.API_ERROR
+    assert evidence.net_quantity is None

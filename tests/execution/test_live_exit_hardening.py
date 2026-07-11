@@ -446,3 +446,114 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
         assert orders == ["exit"]
     finally:
         bm._running = False
+
+
+def test_flat_nonterminal_grace_expiry_invokes_rescue_without_reset(monkeypatch):
+    manager, order_manager, broker = _manager()
+    bracket = _make_stale_exit(manager)
+    broker.positions = []
+    manager._exit_fill_confirmation_grace_seconds = 10.0
+    fake_time = {"value": 100.0}
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.canonical_bracket_manager.time.monotonic",
+        lambda: fake_time["value"],
+    )
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN PENDING"
+    )
+    first_since = bracket.flat_nonterminal_since_monotonic
+    assert first_since == 100.0
+    assert broker.cancel_calls == []
+    assert order_manager.place_calls == []
+
+    fake_time["value"] = 105.0
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN PENDING"
+    )
+    assert bracket.flat_nonterminal_since_monotonic == first_since
+    assert broker.cancel_calls == []
+    assert order_manager.place_calls == []
+
+    fake_time["value"] = 111.0
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN PENDING"
+    )
+    assert bracket.flat_nonterminal_since_monotonic == first_since
+    assert broker.cancel_calls == ["old-exit"]
+    assert order_manager.place_calls == []
+    assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
+
+
+@pytest.mark.parametrize("failure", ["none", "exception"])
+def test_unknown_position_truth_does_not_close_or_duplicate_exit(monkeypatch, failure):
+    manager, order_manager, broker = _manager()
+    bracket = _make_stale_exit(manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    if failure == "none":
+        monkeypatch.setattr(
+            manager, "_authoritative_position_quantity", lambda _symbol: None
+        )
+    else:
+        def _raise(_symbol):
+            raise RuntimeError("broker unavailable")
+        monkeypatch.setattr(manager, "_authoritative_position_quantity", _raise)
+
+    result = manager._reconcile_exit_state(bracket, requested_by="watchdog")
+    assert result is False
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert bracket.position_flat_confirmed is False
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN PENDING"
+    )
+    assert broker.cancel_calls == []
+    assert order_manager.place_calls == []
+    assert manager.has_unresolved_exit() is True
+
+
+def test_repeated_exit_triggers_are_idempotent_while_pending():
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.entry_confirmed = True
+    bracket.active = True
+    bracket.entry_status = "ACTIVE"
+    bracket.last_ltp = 150.0
+    bracket.previous_ltp = 150.0
+    bracket.sl_trigger_price = 149.0
+
+    for _ in range(4):
+        manager._process_exit_state(
+            bracket,
+            {"qty": 65, "reason": "HARD_SL_BREACH"},
+            now=time.time(),
+        )
+
+    assert len(order_manager.place_calls) == 1
+    assert bracket.exit_order_id == "rescue-1"
+    assert bracket.remaining_quantity == 65
+
+
+def test_bracket_flat_nonterminal_timing_round_trips_without_monotonic(tmp_path):
+    from nifty_scalper_bot.execution.bracket_core import BracketState
+
+    state = BracketState(
+        entry_order_id="entry-persist",
+        symbol=SYMBOL,
+        side="BUY",
+        quantity=65,
+        entry_price=100.0,
+        sl_trigger_price=90.0,
+        tp_trigger_price=120.0,
+    )
+    state.flat_nonterminal_since_monotonic = 123.45
+    state.flat_nonterminal_since_utc = "2026-07-11T10:00:00+00:00"
+    payload = state.to_dict()
+    assert payload["flat_nonterminal_since_utc"] == state.flat_nonterminal_since_utc
+    assert "flat_nonterminal_since_monotonic" not in payload
+
+    manager, _, _ = _manager()
+    restored = manager._decode_restored_bracket("entry-persist", payload)
+    assert restored.flat_nonterminal_since_utc == "2026-07-11T10:00:00+00:00"
+    assert restored.flat_nonterminal_since_monotonic is None
