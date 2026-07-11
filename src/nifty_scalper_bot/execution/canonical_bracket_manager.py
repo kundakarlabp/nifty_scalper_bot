@@ -461,6 +461,27 @@ class CanonicalBracketManager(HardenedBracketManager):
     ) -> None:
         """Cancel/replace stale exits without treating a non-flat fill as closure."""
 
+        if self._safe_position_flat(bracket.symbol):
+            _since = getattr(bracket, "_flat_nonterminal_since", None)
+            import time as _t
+
+            if _since is None or (_t.time() - float(_since)) < 10.0:
+                # Broker already FLAT: the exit filled and only the order
+                # status is propagating. Cancel-racing a filled order is pure
+                # churn ('Skipping cancel: Already FILLED', 2026-07-10);
+                # the reconcile loop confirms and closes within the grace.
+                _legacy.LOGGER.info(
+                    "EXIT_RESCUE_SKIPPED_FLAT_LATENCY bracket_id=%s order_id=%s status=%s",
+                    bracket.bracket_id,
+                    order_id,
+                    status,
+                    extra={
+                        "event": "EXIT_RESCUE_SKIPPED_FLAT_LATENCY",
+                        "bracket_id": bracket.bracket_id,
+                        "order_id": order_id,
+                    },
+                )
+                return
         with self._lock:
             if bracket.exit_in_progress:
                 return

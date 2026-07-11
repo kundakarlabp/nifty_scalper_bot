@@ -338,3 +338,113 @@ def test_stale_atr_degrades_to_bounded_fallback_instead_of_disabling_trailing() 
     assert controller.trailing_active is True
     assert updates
     assert 80.0 < updates[-1] < 102.0
+
+
+def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path):
+    """2026-07-10 15:00 lifecycle: broker went FLAT while the exit order status
+    still read OPEN PENDING (normal 1-3s propagation lag). Within the grace
+    window the reconcile must defer at INFO (not WARNING), stamp
+    _flat_nonterminal_since, and the stale-order rescue must SKIP instead of
+    cancel-racing an already-filled order; once the status turns COMPLETE the
+    bracket closes. Exactly one exit order end-to-end."""
+    import logging
+
+    from nifty_scalper_bot.execution.bracket_manager import BracketManager
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    status = {"value": "OPEN PENDING", "flat": False}
+    orders: list = []
+
+    class _OM:
+        def place_reduce_only_exit(self, intent):
+            orders.append("exit")
+            return "EXIT-1"
+
+        def place_order(self, **kwargs):
+            orders.append("exit")
+            return "EXIT-1"
+
+        def get_order_status(self, _oid):
+            return {
+                "status": status["value"],
+                "average_price": 102.90 if status["value"] == "COMPLETE" else None,
+            }
+
+    om = _OM()
+
+    class _BrokerStub:
+        def get_positions(self):
+            if status["flat"]:
+                return []
+            return [{"symbol": "NFO:NIFTYLAT24200PE", "quantity": 65}]
+
+        def get_order_status(self, oid):
+            return om.get_order_status(oid)
+
+    om._broker = _BrokerStub()
+    bm = BracketManager(order_manager=om)
+    bm._running = False
+    bm._exit_reconcile_interval_seconds = 0.0
+    bm._filled_position_sync_grace_seconds = 0.0
+    try:
+        bm.register_virtual_bracket(
+            order_id="lat-1", symbol="NFO:NIFTYLAT24200PE", side="BUY", qty=65,
+            price=103.30, sl=97.85, tp=115.45, activate_immediately=False,
+        )
+        bm.confirm_entry_fill("lat-1", 103.75)
+        bracket = bm.get_bracket("lat-1")
+        for px in (104.5, 105.3, 106.15, 102.95):
+            bm.on_tick("NFO:NIFTYLAT24200PE", px)
+        assert bracket.exit_pending is True and orders == ["exit"]
+
+        # Broker flat, order status lagging: force the authoritative flat view
+        # and the strict-live reconcile path (the branch production runs).
+        status["flat"] = True
+        monkeypatch.setattr(
+            type(bm), "_position_flat_for_symbol", lambda self, s: True
+        )
+        from nifty_scalper_bot.execution import live_exit_reconciliation_patch as _lerp
+
+        monkeypatch.setattr(_lerp, "_strict_live", lambda _self: True)
+        records: list = []
+
+        class _Cap(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        from nifty_scalper_bot.execution import bracket_core
+
+        _prev_level = bracket_core.LOGGER.level
+        bracket_core.LOGGER.setLevel(logging.INFO)
+        bracket_core.LOGGER.addHandler(_Cap())
+        try:
+            result = bm._reconcile_exit_state(bracket, requested_by="watchdog")
+        finally:
+            bracket_core.LOGGER.setLevel(_prev_level)
+            bracket_core.LOGGER.handlers = [
+                h for h in bracket_core.LOGGER.handlers if not isinstance(h, _Cap)
+            ]
+        assert result is False
+        assert getattr(bracket, "_flat_nonterminal_since", None) is not None
+        lag_logs = [r for r in records if "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL" in r.getMessage()]
+        assert lag_logs and all(r.levelno == logging.INFO for r in lag_logs), [
+            (r.levelname, r.getMessage()[:60]) for r in lag_logs
+        ]
+
+        # Rescue must skip while flat inside the grace window (no cancel race).
+        bm._rescue_stale_exit_order(
+            bracket, order_id="EXIT-1", qty=65, status="OPEN PENDING"
+        )
+        assert orders == ["exit"]
+        assert bracket.exit_in_progress is False
+
+        # Status propagates -> closure completes with the real fill price.
+        status["value"] = "COMPLETE"
+        closed = bm._reconcile_exit_state(bracket, requested_by="watchdog")
+        if not closed:  # strict-live filled handoff may need one follow-up pass
+            closed = bm._reconcile_exit_state(bracket, requested_by="watchdog")
+        assert closed is True
+        assert bracket.exit_state == "CLOSED"
+        assert orders == ["exit"]
+    finally:
+        bm._running = False

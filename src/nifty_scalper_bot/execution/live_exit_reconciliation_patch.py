@@ -16,6 +16,11 @@ from contextlib import suppress
 import time
 from typing import Any, Mapping
 
+# Broker-flat + non-terminal exit-order status is expected for a few seconds
+# after a fill (order endpoint propagation lag). Below this age: INFO + no
+# rescue; above: WARNING and normal escalation.
+_FLAT_FILL_CONFIRM_GRACE_SEC = 10.0
+
 from nifty_scalper_bot.execution import bracket_core as _legacy
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -228,13 +233,27 @@ def _patched_reconcile_exit_state(self: Any, bracket: Any, *, requested_by: str)
 
     if flat and order_id:
         if order_status in _OPEN_OR_PENDING_STATUSES or order_status not in _TERMINAL_FILLED:
+            _now = time.time()
             with self._lock:
                 bracket.exit_pending = True
                 bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
                 bracket.entry_status = bracket.exit_state
                 bracket.position_flat_confirmed = False
-                bracket.updated_at = time.time()
-            _legacy.LOGGER.warning(
+                bracket.updated_at = _now
+                if getattr(bracket, "_flat_nonterminal_since", None) is None:
+                    bracket._flat_nonterminal_since = _now
+            _flat_age = _now - float(bracket._flat_nonterminal_since)
+            # Broker flat while the order status is still propagating is the
+            # NORMAL fill-latency shape (Kite orders endpoint lags fills by
+            # 1-3s; 2026-07-10 15:00 produced 3 warnings + watchdog + rescue
+            # for an already-FILLED exit). Inside the grace window this is
+            # informational; only a genuinely stuck confirmation escalates.
+            _log = (
+                _legacy.LOGGER.info
+                if _flat_age < _FLAT_FILL_CONFIRM_GRACE_SEC
+                else _legacy.LOGGER.warning
+            )
+            _log(
                 "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL bracket_id=%s symbol=%s order_id=%s order_status=%s fill_price=%s close_deferred=True",
                 bracket.bracket_id,
                 bracket.symbol,
