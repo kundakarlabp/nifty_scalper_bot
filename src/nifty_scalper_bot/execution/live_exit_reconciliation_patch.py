@@ -13,6 +13,7 @@ runtime execution hardening from package import hooks.
 from __future__ import annotations
 
 from contextlib import suppress
+import warnings
 import time
 from typing import Any, Mapping
 
@@ -330,17 +331,15 @@ def _ledger_or_exit_managed(self: Any, symbol: str) -> bool:
 
 
 def apply_patches() -> None:
+    """Deprecated compatibility shim; canonical managers own this behavior now."""
     global _PATCH_APPLIED
-    if _PATCH_APPLIED:
-        return
-    from nifty_scalper_bot.execution.ownership import BoundBracketManager
-
-    if not getattr(BoundBracketManager, "_live_exit_reconciliation_patch", False):
-        _ORIGINALS["BoundBracketManager._reconcile_exit_state"] = BoundBracketManager._reconcile_exit_state
-        _ORIGINALS["BoundBracketManager.is_symbol_managed"] = BoundBracketManager.is_symbol_managed
-        BoundBracketManager._reconcile_exit_state = _patched_reconcile_exit_state
-        BoundBracketManager.is_symbol_managed = _ledger_or_exit_managed
-        BoundBracketManager._live_exit_reconciliation_patch = True
+    if not _PATCH_APPLIED:
+        warnings.warn(
+            "live_exit_reconciliation_patch.apply_patches() is deprecated; "
+            "exit reconciliation is implemented in CanonicalBracketManager",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     _PATCH_APPLIED = True
 
 

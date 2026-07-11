@@ -403,9 +403,6 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
         monkeypatch.setattr(
             type(bm), "_position_flat_for_symbol", lambda self, s: True
         )
-        from nifty_scalper_bot.execution import live_exit_reconciliation_patch as _lerp
-
-        monkeypatch.setattr(_lerp, "_strict_live", lambda _self: True)
         records: list = []
 
         class _Cap(logging.Handler):
@@ -425,7 +422,8 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
                 h for h in bracket_core.LOGGER.handlers if not isinstance(h, _Cap)
             ]
         assert result is False
-        assert getattr(bracket, "_flat_nonterminal_since", None) is not None
+        assert bracket.flat_nonterminal_since_monotonic is not None
+        assert bracket.flat_nonterminal_since_utc is not None
         lag_logs = [r for r in records if "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL" in r.getMessage()]
         assert lag_logs and all(r.levelno == logging.INFO for r in lag_logs), [
             (r.levelname, r.getMessage()[:60]) for r in lag_logs

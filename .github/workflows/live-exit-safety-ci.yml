@@ -33,6 +33,12 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Compile production, dashboard and agent tooling
         run: python -m compileall -q src dashboard scripts
+      - name: Ruff lint
+        run: ruff check .
+      - name: Black format check
+        run: black --check .
+      - name: Mypy typecheck
+        run: mypy src
       - name: Validate agent context and test planning
         run: |
           python -m pytest -q tests/tools
