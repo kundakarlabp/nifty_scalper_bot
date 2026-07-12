@@ -5,11 +5,14 @@ rate-controlled diagnostics for operator validation.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
-import os
+
 import logging
+import os
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Mapping
+
+from nifty_scalper_bot.config.env_utils import parse_float_env
 
 LOGGER = logging.getLogger(__name__)
 _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
@@ -28,7 +31,12 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
             name,
             raw,
             default,
-            extra={"event": "INVALID_HISTORY_POLICY_ENV", "env_name": name, "value": raw, "default": default},
+            extra={
+                "event": "INVALID_HISTORY_POLICY_ENV",
+                "env_name": name,
+                "value": raw,
+                "default": default,
+            },
         )
         return max(default, minimum)
 
@@ -36,7 +44,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 def _safe_positive_int(value: object, fallback: int) -> int:
     fallback_value = max(int(fallback), 1)
     try:
-        parsed = int(float(value))
+        parsed = int(float(str(value)))
     except (TypeError, ValueError):
         return fallback_value
     if parsed <= 0:
@@ -46,7 +54,7 @@ def _safe_positive_int(value: object, fallback: int) -> int:
 
 def _safe_non_negative_int(value: object, fallback: int = 0) -> int:
     try:
-        parsed = int(float(value))
+        parsed = int(float(str(value)))
     except (TypeError, ValueError):
         return max(int(fallback), 0)
     return max(parsed, 0)
@@ -158,13 +166,21 @@ def build_live_validation_checklist(
     """Return compact operator checklist for live arming validation."""
 
     market_open = market_name in {"open", "marketstate.open"}
-    broker_auth_ok = not bool(broker_state.get("broker_auth_invalid") or broker_state.get("broker_session_invalid"))
+    broker_auth_ok = not bool(
+        broker_state.get("broker_auth_invalid")
+        or broker_state.get("broker_session_invalid")
+    )
     broker_balance_ok = not bool(
         broker_state.get("broker_balance_unavailable")
         or broker_state.get("broker_balance_valid") is False
     )
-    emergency_clear = not bool(emergency_state.get("emergency_stop_active") or emergency_state.get("kill_switch_active"))
-    risk_green = not bool(risk_state.get("risk_halt") or risk_state.get("daily_loss_limit"))
+    emergency_clear = not bool(
+        emergency_state.get("emergency_stop_active")
+        or emergency_state.get("kill_switch_active")
+    )
+    risk_green = not bool(
+        risk_state.get("risk_halt") or risk_state.get("daily_loss_limit")
+    )
     return {
         "live_mode": bool(live_mode),
         "market_open": bool(market_open),
@@ -208,7 +224,10 @@ def _emit_live_validation_checklist(
         execution_ready=execution_ready,
     )
     LOGGER.info(
-        "LIVE_VALIDATION_CHECKLIST live_mode=%s market_open=%s evaluation_ready=%s execution_ready=%s broker_auth_ok=%s broker_balance_ok=%s emergency_clear=%s risk_green=%s live_orders_armed=%s primary_blocker=%s",
+        "LIVE_VALIDATION_CHECKLIST live_mode=%s market_open=%s "
+        "evaluation_ready=%s execution_ready=%s broker_auth_ok=%s "
+        "broker_balance_ok=%s emergency_clear=%s risk_green=%s "
+        "live_orders_armed=%s primary_blocker=%s",
         checklist["live_mode"],
         checklist["market_open"],
         checklist["evaluation_ready"],
@@ -249,7 +268,10 @@ def normalize_readiness_blockers(
         canonical.append("broker_auth_invalid")
     if broker_state.get("broker_session_invalid"):
         canonical.append("broker_session_invalid")
-    if broker_state.get("broker_balance_unavailable") or broker_state.get("broker_balance_valid") is False:
+    if (
+        broker_state.get("broker_balance_unavailable")
+        or broker_state.get("broker_balance_valid") is False
+    ):
         canonical.append("broker_balance_unavailable")
     if risk_state.get("risk_halt"):
         canonical.append("risk_halt")
@@ -264,9 +286,27 @@ def normalize_readiness_blockers(
             canonical.append("market_closed")
     canonical = list(dict.fromkeys(canonical))
 
-    high_priority = {"emergency_stop_active", "kill_switch_active", "broker_auth_invalid", "broker_session_invalid", "broker_balance_unavailable", "position_reconciliation_failed", "position_reconciliation_incomplete", "unresolved_exit_position", "unprotected_broker_position"}
+    high_priority = {
+        "emergency_stop_active",
+        "kill_switch_active",
+        "broker_auth_invalid",
+        "broker_session_invalid",
+        "broker_balance_unavailable",
+        "position_reconciliation_failed",
+        "position_reconciliation_incomplete",
+        "unresolved_exit_position",
+        "unprotected_broker_position",
+    }
     has_high_priority = any(item in canonical for item in high_priority)
-    market_blocker = "exchange_holiday" if "exchange_holiday" in canonical else "outside_session" if "outside_session" in canonical else "market_closed" if "market_closed" in canonical else None
+    market_blocker = (
+        "exchange_holiday"
+        if "exchange_holiday" in canonical
+        else (
+            "outside_session"
+            if "outside_session" in canonical
+            else "market_closed" if "market_closed" in canonical else None
+        )
+    )
     secondary: list[str] = []
     visible = canonical
     if market_blocker and not has_high_priority:
@@ -339,9 +379,17 @@ class HydrationStatus:
     live_merge_applied: bool = False
 
     def __post_init__(self) -> None:
-        if self.role not in {"selected_ce", "selected_pe"} or not self.ready_for_execution:
+        if (
+            self.role not in {"selected_ce", "selected_pe"}
+            or not self.ready_for_execution
+        ):
             return
-        bid_ask_valid = bool(self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > self.bid)
+        bid_ask_valid = bool(
+            self.bid is not None
+            and self.ask is not None
+            and self.bid > 0
+            and self.ask > self.bid
+        )
         if bid_ask_valid:
             return
         self.ready_for_execution = False
@@ -376,12 +424,19 @@ class HistoryReadinessPolicy:
             smc_min_bars=_env_int("SMC_MIN_BARS_REQUIRED", 30),
             allow_synthetic_option_bars_for_eval=str(
                 os.getenv("ALLOW_SYNTHETIC_OPTION_BARS_FOR_EVAL", "false")
-            ).strip().lower() in {"1", "true", "yes", "on"},
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"},
         )
 
 
 def _quote_getter(payload: dict | object):
-    return payload.get if isinstance(payload, dict) else lambda key, default=None: getattr(payload, key, default)
+    return (
+        payload.get
+        if isinstance(payload, dict)
+        else lambda key, default=None: getattr(payload, key, default)
+    )
 
 
 def quote_timestamp_quality_allows_hard_readiness(quote: dict | object | None) -> bool:
@@ -414,6 +469,31 @@ def _quote_float(payload: dict | object, *keys: str) -> float | None:
     return None
 
 
+def resolve_max_quote_age_seconds(
+    seconds_env: str,
+    legacy_ms_env: str,
+    *,
+    default_seconds: float,
+) -> float:
+    """Resolve quote max-age config once into canonical seconds.
+
+    Prefer the seconds setting. Fall back to a legacy millisecond setting for
+    deployment compatibility. Malformed/commented values safely use defaults.
+    """
+    raw_seconds = os.getenv(seconds_env)
+    if raw_seconds is not None and raw_seconds.strip():
+        return max(
+            0.0,
+            parse_float_env(raw_seconds, default_seconds),
+        )
+    legacy_default_ms = default_seconds * 1000.0
+    legacy_ms = parse_float_env(
+        os.getenv(legacy_ms_env),
+        legacy_default_ms,
+    )
+    return max(0.0, legacy_ms / 1000.0)
+
+
 def resolve_quote_age_seconds(payload: dict | object) -> float | None:
     age_ms = _quote_float(
         payload,
@@ -439,7 +519,9 @@ def resolve_quote_age_seconds(payload: dict | object) -> float | None:
     return None
 
 
-def resolve_quote_bid_ask_spread(quote: dict | object) -> tuple[float | None, float | None, float | None, str]:
+def resolve_quote_bid_ask_spread(
+    quote: dict | object,
+) -> tuple[float | None, float | None, float | None, str]:
     """Resolve bid/ask/spread from top-level fields or Zerodha depth.
 
     Fresh WebSocket FULL quotes are tradable when either top-level bid/ask or
@@ -457,26 +539,46 @@ def resolve_quote_bid_ask_spread(quote: dict | object) -> tuple[float | None, fl
 
     raw_bid = _quote_float(quote, "bid", "bid_price")
     raw_ask = _quote_float(quote, "ask", "ask_price")
-    if raw_bid is not None and raw_bid > 0 and raw_ask is not None and raw_ask > raw_bid:
+    if (
+        raw_bid is not None
+        and raw_bid > 0
+        and raw_ask is not None
+        and raw_ask > raw_bid
+    ):
         bid, ask, source = raw_bid, raw_ask, "top_level"
 
     if bid is None:
         raw_bid = _quote_float(quote, "best_bid", "best_bid_price")
         raw_ask = _quote_float(quote, "best_ask", "best_ask_price")
-        if raw_bid is not None and raw_bid > 0 and raw_ask is not None and raw_ask > raw_bid:
+        if (
+            raw_bid is not None
+            and raw_bid > 0
+            and raw_ask is not None
+            and raw_ask > raw_bid
+        ):
             bid, ask, source = raw_bid, raw_ask, "best_bid_ask"
 
     if bid is None:
         depth = getter("depth", None)
-        buy_levels = sell_levels = []
+        buy_levels: list[object] = []
+        sell_levels: list[object] = []
         if isinstance(depth, dict):
-            buy_levels = depth.get("buy") or []
-            sell_levels = depth.get("sell") or []
+            buy_levels = list(depth.get("buy") or [])
+            sell_levels = list(depth.get("sell") or [])
         buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
-        sell_top = sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+        sell_top = (
+            sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+        )
         raw_bid = _quote_float(buy_top, "price") if isinstance(buy_top, dict) else None
-        raw_ask = _quote_float(sell_top, "price") if isinstance(sell_top, dict) else None
-        if raw_bid is not None and raw_bid > 0 and raw_ask is not None and raw_ask > raw_bid:
+        raw_ask = (
+            _quote_float(sell_top, "price") if isinstance(sell_top, dict) else None
+        )
+        if (
+            raw_bid is not None
+            and raw_bid > 0
+            and raw_ask is not None
+            and raw_ask > raw_bid
+        ):
             bid, ask, source = raw_bid, raw_ask, "depth"
 
     spread_pct: float | None = None
@@ -485,13 +587,16 @@ def resolve_quote_bid_ask_spread(quote: dict | object) -> tuple[float | None, fl
         spread_pct = ((ask - bid) / mid) * 100.0
     else:
         precomputed = _quote_float(quote, "spread_pct")
-        has_quote_proof = bool(getter("tradable_quote", False) or getter("depth_available", False) or getter("depth", None))
+        has_quote_proof = bool(
+            getter("tradable_quote", False)
+            or getter("depth_available", False)
+            or getter("depth", None)
+        )
         if precomputed is not None and precomputed > 0 and has_quote_proof:
             spread_pct = precomputed
             if source == "missing":
                 source = "derived_only"
     return bid, ask, spread_pct, source
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,6 +617,7 @@ class QuoteReadiness:
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
+
 def evaluate_quote_readiness(
     symbol: str,
     quote: dict | object | None,
@@ -520,21 +626,30 @@ def evaluate_quote_readiness(
     require_fresh: bool = True,
     max_age_s: float | None = None,
 ) -> QuoteReadiness:
-    """Return canonical quote readiness for startup, runtime, execution, Telegram, and health.
+    """Return canonical quote readiness for runtime, execution, and health.
 
     Tradable quote readiness is stricter than LTP readiness: bid and ask must be
     present, positive, non-crossed, fresh when age is known, and within the
     configured spread limit.
     """
     if quote is None:
-        return QuoteReadiness(symbol=symbol, ltp_ready=False, depth_available=False, bid_ask_available=False, tradable_quote_ready=False, reason="quote_missing")
+        return QuoteReadiness(
+            symbol=symbol,
+            ltp_ready=False,
+            depth_available=False,
+            bid_ask_available=False,
+            tradable_quote_ready=False,
+            reason="quote_missing",
+        )
     getter = _quote_getter(quote)
     ltp = _quote_float(quote, "ltp", "last_price", "last_traded_price")
     ltp_ready = bool(ltp is not None and ltp > 0)
     depth = getter("depth", None)
     depth_available = bool(getter("depth_available", False) or depth)
     bid, ask, spread_pct, source = resolve_quote_bid_ask_spread(quote)
-    bid_ask_available = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
+    bid_ask_available = bool(
+        bid is not None and ask is not None and bid > 0 and ask > bid
+    )
     timestamp_quality_ok = quote_timestamp_quality_allows_hard_readiness(quote)
     if not ltp_ready:
         reason = "ltp_missing"
@@ -543,7 +658,13 @@ def evaluate_quote_readiness(
     elif not bid_ask_available:
         raw_bid = _quote_float(quote, "bid", "bid_price", "best_bid", "best_bid_price")
         raw_ask = _quote_float(quote, "ask", "ask_price", "best_ask", "best_ask_price")
-        if raw_bid is not None and raw_ask is not None and raw_bid > 0 and raw_ask > 0 and raw_ask <= raw_bid:
+        if (
+            raw_bid is not None
+            and raw_ask is not None
+            and raw_bid > 0
+            and raw_ask > 0
+            and raw_ask <= raw_bid
+        ):
             reason = "bid_ask_crossed"
         else:
             reason = "bid_ask_missing"
@@ -559,7 +680,12 @@ def evaluate_quote_readiness(
             reason = "quote_age_unknown"
         elif max_age_s is not None and age > max_age_s:
             reason = "quote_stale"
-    if reason == "ready" and max_spread_pct is not None and spread_pct is not None and spread_pct > max_spread_pct:
+    if (
+        reason == "ready"
+        and max_spread_pct is not None
+        and spread_pct is not None
+        and spread_pct > max_spread_pct
+    ):
         reason = "spread_too_wide"
     return QuoteReadiness(
         symbol=symbol,
@@ -573,6 +699,7 @@ def evaluate_quote_readiness(
         spread_pct=spread_pct,
         source=source,
     )
+
 
 def quote_has_tradable_bid_ask(quote: dict | object) -> bool:
     """Return True when quote has valid top-level/depth bid-ask proof."""

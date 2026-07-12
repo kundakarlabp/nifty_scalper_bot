@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from nifty_scalper_bot.core import app
 
-
 SYMBOL = "NFO:NIFTY26MAY23300CE"
 
 
@@ -26,7 +25,11 @@ def _bars(count: int) -> list[dict[str, object]]:
 
 
 class _Provider:
-    def __init__(self, bars_by_symbol: dict[str, list[dict[str, object]]], quote: dict[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        bars_by_symbol: dict[str, list[dict[str, object]]],
+        quote: dict[str, object] | None = None,
+    ) -> None:
         self._bars = bars_by_symbol
         self._quote = quote or {}
         self._token_by_symbol = {SYMBOL: 12345}
@@ -54,11 +57,15 @@ class _Indicator:
 
 
 class _Runner:
-    def __init__(self, rows: list[dict[str, object]], indicator_rows: list[dict[str, object]]) -> None:
+    def __init__(
+        self, rows: list[dict[str, object]], indicator_rows: list[dict[str, object]]
+    ) -> None:
         self._symbol_history = {SYMBOL: list(rows)}
         self._indicator_engine = _Indicator(indicator_rows)
 
-    def reseed_history_from_bars(self, symbol: str, rows, source: str = "test", min_bars: int = 1) -> int:
+    def reseed_history_from_bars(
+        self, symbol: str, rows, source: str = "test", min_bars: int = 1
+    ) -> int:
         self._symbol_history[symbol] = list(rows)
         self._indicator_engine.rows = list(rows)
         return len(list(rows))
@@ -76,7 +83,13 @@ def _quote() -> dict[str, object]:
     }
 
 
-def _ctx(mdm_rows: int, datahub_rows: int, runner_rows: int, indicator_rows: int, quote: dict[str, object] | None = None):
+def _ctx(
+    mdm_rows: int,
+    datahub_rows: int,
+    runner_rows: int,
+    indicator_rows: int,
+    quote: dict[str, object] | None = None,
+):
     return SimpleNamespace(
         market_data_manager=_Provider({SYMBOL: _bars(mdm_rows)}, quote),
         data_hub=_Provider({SYMBOL: _bars(datahub_rows)}, quote),
@@ -86,7 +99,9 @@ def _ctx(mdm_rows: int, datahub_rows: int, runner_rows: int, indicator_rows: int
 
 
 def test_mdm_30_bars_propagate_to_datahub_30_bars() -> None:
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, _quote()), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, _quote()), SYMBOL, "selected_ce", 30
+    )
 
     assert status.mdm_bars == 30
     assert status.datahub_bars == 30
@@ -105,7 +120,9 @@ def test_datahub_30_bars_propagate_to_runner_30_bars() -> None:
 
 def test_runner_30_bars_propagate_to_indicator_30_bars() -> None:
     ctx = _ctx(30, 30, 0, 0, _quote())
-    ctx.strategy_runner.reseed_history_from_bars(SYMBOL, ctx.data_hub.get_ohlc_bars(SYMBOL), min_bars=30)
+    ctx.strategy_runner.reseed_history_from_bars(
+        SYMBOL, ctx.data_hub.get_ohlc_bars(SYMBOL), min_bars=30
+    )
 
     status = app.build_symbol_hydration_status(ctx, SYMBOL, "selected_ce", 30)
 
@@ -114,9 +131,16 @@ def test_runner_30_bars_propagate_to_indicator_30_bars() -> None:
 
 
 def test_hydration_status_consistent_counts_across_all_layers() -> None:
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, _quote()), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, _quote()), SYMBOL, "selected_ce", 30
+    )
 
-    assert (status.mdm_bars, status.datahub_bars, status.runner_bars, status.indicator_bars) == (30, 30, 30, 30)
+    assert (
+        status.mdm_bars,
+        status.datahub_bars,
+        status.runner_bars,
+        status.indicator_bars,
+    ) == (30, 30, 30, 30)
     assert status.ready_for_evaluation is True
 
 
@@ -130,7 +154,9 @@ def test_datahub_bars_do_not_gate_readiness() -> None:
 
 
 def test_readiness_true_when_all_layers_have_bars_and_quote_depth_valid() -> None:
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, _quote()), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, _quote()), SYMBOL, "selected_ce", 30
+    )
 
     assert status.ready_for_evaluation is True
     assert status.ready_for_execution is True
@@ -138,13 +164,17 @@ def test_readiness_true_when_all_layers_have_bars_and_quote_depth_valid() -> Non
     assert status.depth_available is True
 
 
-def test_synthetic_timestamp_quote_does_not_make_selected_option_execution_ready() -> None:
+def test_synthetic_timestamp_quote_does_not_make_selected_option_execution_ready() -> (
+    None
+):
     quote = {
         **_quote(),
         "timestamp_quality": "synthetic",
     }
 
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
 
     assert status.ready_for_evaluation is True
     assert status.ready_for_execution is False
@@ -152,10 +182,12 @@ def test_synthetic_timestamp_quote_does_not_make_selected_option_execution_ready
     assert "timestamp_quality_unusable" in status.blocker_reasons
 
 
-def test_selected_option_execution_ready_with_top_level_bid_ask_without_depth_flag() -> None:
+def test_top_level_bid_ask_without_depth_flag_is_execution_ready() -> None:
     quote = {"ltp": 100.5, "bid": 100.0, "ask": 101.0, "tick_age_s": 1.0}
 
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
 
     assert status.ready_for_execution is True
     assert status.tradable_quote is True
@@ -169,7 +201,9 @@ def test_selected_option_execution_ready_with_depth_top_of_book() -> None:
         "tick_age_s": 1.0,
     }
 
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
 
     assert status.ready_for_execution is True
     assert status.bid == 100.0
@@ -179,7 +213,9 @@ def test_selected_option_execution_ready_with_depth_top_of_book() -> None:
 def test_stale_quote_does_not_make_selected_option_execution_ready() -> None:
     quote = {**_quote(), "tick_age_s": 120.0}
 
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
 
     assert status.ready_for_execution is False
     assert "quote_stale" in status.blocker_reasons
@@ -189,7 +225,9 @@ def test_unknown_quote_age_does_not_make_selected_option_execution_ready() -> No
     quote = dict(_quote())
     quote.pop("tick_age_s")
 
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
 
     assert status.ready_for_execution is False
     assert "quote_age_unknown" in status.blocker_reasons
@@ -198,7 +236,96 @@ def test_unknown_quote_age_does_not_make_selected_option_execution_ready() -> No
 def test_wide_spread_does_not_make_selected_option_execution_ready() -> None:
     quote = {**_quote(), "bid": 100.0, "ask": 130.0}
 
-    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
 
     assert status.ready_for_execution is False
     assert "spread_too_wide" in status.blocker_reasons
+
+
+def test_hydration_live_tick_max_age_legacy_ms_env_still_applies(monkeypatch) -> None:
+    monkeypatch.delenv("HYDRATION_LIVE_TICK_MAX_AGE_SECONDS", raising=False)
+    monkeypatch.setenv("HYDRATION_LIVE_TICK_MAX_AGE_MS", "2500")
+    quote = {**_quote(), "tick_age_s": 3.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is False
+    assert "quote_stale" in status.blocker_reasons
+
+
+def test_hydration_live_tick_max_age_seconds_env_takes_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_LIVE_TICK_MAX_AGE_SECONDS", "5")
+    monkeypatch.setenv("HYDRATION_LIVE_TICK_MAX_AGE_MS", "2500")
+    quote = {**_quote(), "tick_age_s": 3.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is True
+
+
+def test_malformed_hydration_age_env_falls_back_without_crashing(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_LIVE_TICK_MAX_AGE_SECONDS", "bad # comment")
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "bad # comment")
+    quote = {**_quote(), "tick_age_s": 59.0, "bid": 100.0, "ask": 101.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is True
+
+
+def test_whitespace_spread_env_falls_back_to_legacy_spread(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "   ")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 103.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is False
+    assert "spread_too_wide" in status.blocker_reasons
+
+
+def test_empty_spread_env_falls_back_to_legacy_spread(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 103.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is False
+    assert "spread_too_wide" in status.blocker_reasons
+
+
+def test_canonical_spread_env_takes_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "5")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 103.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is True
+
+
+def test_malformed_spread_env_uses_default_without_crashing(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "bad # comment")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 111.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is True

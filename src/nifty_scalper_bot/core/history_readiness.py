@@ -35,24 +35,25 @@ Safe-edit notes:
 from __future__ import annotations
 
 import os
-from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
+from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.core.active_basket import pick_atm_option_symbols_from_basket
 from nifty_scalper_bot.core.history_roles import (
     resolve_symbol_history_role as _shared_resolve_symbol_history_role,
 )
 from nifty_scalper_bot.execution.readiness import (
-    HistoryReadinessPolicy,
     HydrationStatus,
     evaluate_quote_readiness,
+    resolve_max_quote_age_seconds,
 )
-from nifty_scalper_bot.utils.market_hours import get_runtime_market_mode
 from nifty_scalper_bot.utils.logging import get_logger
-
-from typing import TYPE_CHECKING
+from nifty_scalper_bot.utils.market_hours import get_runtime_market_mode
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.core.app import BotContext
@@ -78,7 +79,9 @@ def _count_bars_from_provider(provider: Any, symbol: str, *, limit: int = 500) -
         return 0
 
 
-def _get_bars_from_provider(provider: Any, symbol: str, *, limit: int = 500) -> list[Any]:
+def _get_bars_from_provider(
+    provider: Any, symbol: str, *, limit: int = 500
+) -> list[Any]:
     """Read cached OHLC bars from a provider without triggering historical fetch."""
     if provider is None or not symbol:
         return []
@@ -100,7 +103,12 @@ def _bar_timestamp(row: Any) -> datetime | None:
     """Extract a UTC timestamp from a cached bar-like object."""
     value = None
     if isinstance(row, Mapping):
-        value = row.get("timestamp") or row.get("start") or row.get("date") or row.get("time")
+        value = (
+            row.get("timestamp")
+            or row.get("start")
+            or row.get("date")
+            or row.get("time")
+        )
     else:
         value = getattr(row, "timestamp", None) or getattr(row, "start", None)
     try:
@@ -109,7 +117,9 @@ def _bar_timestamp(row: Any) -> datetime | None:
         if isinstance(value, (int, float)):
             return datetime.fromtimestamp(float(value), tz=timezone.utc)
         if value:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
     except (TypeError, ValueError):
         return None
     return None
@@ -172,15 +182,35 @@ def _basket_get(basket: Any, key: str, default: Any = None) -> Any:
 
 
 def _basket_option_symbols(basket: Any) -> list[str]:
-    raw = _basket_get(basket, "option_symbols", None) or _basket_get(basket, "symbols", ()) or ()
+    raw = (
+        _basket_get(basket, "option_symbols", None)
+        or _basket_get(basket, "symbols", ())
+        or ()
+    )
     return [str(sym) for sym in raw if str(sym).endswith(("CE", "PE"))]
 
 
 def _active_selection_symbols(ctx: "BotContext") -> tuple[str | None, str | None]:
     """Read selected CE/PE directly from active basket without mutating context."""
-    basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
-    ce = str(_basket_get(basket, "selected_ce", None) or _basket_get(basket, "atm_ce", None) or "") or None
-    pe = str(_basket_get(basket, "selected_pe", None) or _basket_get(basket, "atm_pe", None) or "") or None
+    basket = getattr(ctx, "active_contract_basket", None) or getattr(
+        ctx, "active_trading_universe", None
+    )
+    ce = (
+        str(
+            _basket_get(basket, "selected_ce", None)
+            or _basket_get(basket, "atm_ce", None)
+            or ""
+        )
+        or None
+    )
+    pe = (
+        str(
+            _basket_get(basket, "selected_pe", None)
+            or _basket_get(basket, "atm_pe", None)
+            or ""
+        )
+        or None
+    )
     return ce, pe
 
 
@@ -228,7 +258,11 @@ def build_symbol_hydration_status(
                     token = None
 
     mdm_bars = _count_bars_from_provider(mdm, normalized)
-    datahub_bars = _count_bars_from_provider(datahub, normalized) if datahub is not None else mdm_bars
+    datahub_bars = (
+        _count_bars_from_provider(datahub, normalized)
+        if datahub is not None
+        else mdm_bars
+    )
     runner_bars = 0
     indicator_bars = 0
     if runner is not None:
@@ -244,11 +278,25 @@ def build_symbol_hydration_status(
                 indicator_bars = 0
         if runner_bars == 0 and indicator_bars > 0:
             runner_bars = indicator_bars
-    bars_for_ts = _get_bars_from_provider(mdm, normalized) or _get_bars_from_provider(datahub, normalized)
-    timestamps = [ts for ts in (_bar_timestamp(row) for row in bars_for_ts) if ts is not None]
+    bars_for_ts = _get_bars_from_provider(mdm, normalized) or _get_bars_from_provider(
+        datahub, normalized
+    )
+    timestamps = [
+        ts for ts in (_bar_timestamp(row) for row in bars_for_ts) if ts is not None
+    ]
     quote = _get_cached_quote(ctx, normalized)
-    max_quote_age_s = float(os.getenv("HYDRATION_LIVE_TICK_MAX_AGE_MS", "60000") or 60000) / 1000.0
-    max_spread = float(os.getenv("HYDRATION_MAX_SPREAD_PCT", os.getenv("MAX_OPTION_SPREAD_PCT", "12")) or 12)
+    max_quote_age_s = resolve_max_quote_age_seconds(
+        "HYDRATION_LIVE_TICK_MAX_AGE_SECONDS",
+        "HYDRATION_LIVE_TICK_MAX_AGE_MS",
+        default_seconds=60.0,
+    )
+    raw_spread = os.getenv("HYDRATION_MAX_SPREAD_PCT")
+    if raw_spread is None or not raw_spread.strip():
+        raw_spread = os.getenv("MAX_OPTION_SPREAD_PCT")
+    max_spread = max(
+        0.0,
+        parse_float_env(raw_spread, 12.0),
+    )
     quote_ready = evaluate_quote_readiness(
         normalized,
         dict(quote) if isinstance(quote, Mapping) else quote,
@@ -263,30 +311,46 @@ def build_symbol_hydration_status(
     # do not require a separate depth flag unless final order preflight does so.
     depth_available = bool(quote_ready.depth_available or quote_ready.bid_ask_available)
     tradable_quote = bool(quote_ready.tradable_quote_ready)
-    live_tick_fresh = quote_ready.reason not in {"quote_age_unknown", "quote_stale", "timestamp_quality_unusable", "quote_missing"}
+    live_tick_fresh = quote_ready.reason not in {
+        "quote_age_unknown",
+        "quote_stale",
+        "timestamp_quality_unusable",
+        "quote_missing",
+    }
     exchange = normalized.split(":", 1)[0] if ":" in normalized else None
-    tradingsymbol = normalized.split(":", 1)[1] if ":" in normalized else normalized or None
+    tradingsymbol = (
+        normalized.split(":", 1)[1] if ":" in normalized else normalized or None
+    )
     gating_counts = [mdm_bars, runner_bars, indicator_bars]
     blockers: list[str] = []
     if not normalized:
         blockers.append(f"{role}_symbol_missing")
-    if token is None and role in {"selected_ce", "selected_pe", "option_context", "futures_context"}:
-        blockers.append("option_token_missing" if role.startswith("selected_") or role == "option_context" else "futures_token_missing")
+    if token is None and role in {
+        "selected_ce",
+        "selected_pe",
+        "option_context",
+        "futures_context",
+    }:
+        blockers.append(
+            "option_token_missing"
+            if role.startswith("selected_") or role == "option_context"
+            else "futures_token_missing"
+        )
     if required > 0 and any(count < required for count in gating_counts):
         blockers.append(f"{role}_history_cold")
     selected_role = role in {"selected_ce", "selected_pe"}
     if selected_role and quote_ready.reason != "ready":
         blockers.append(quote_ready.reason)
-    ready_for_evaluation = bool(normalized and required >= 0 and all(count >= required for count in gating_counts))
+    ready_for_evaluation = bool(
+        normalized
+        and required >= 0
+        and all(count >= required for count in gating_counts)
+    )
     ready_for_execution = bool(
         ready_for_evaluation
         and (
             not selected_role
-            or (
-                token is not None
-                and tradable_quote
-                and quote_ready.reason == "ready"
-            )
+            or (token is not None and tradable_quote and quote_ready.reason == "ready")
         )
     )
     status = HydrationStatus(
@@ -313,10 +377,15 @@ def build_symbol_hydration_status(
         blocker_reasons=list(dict.fromkeys(blockers)),
         first_bar_ts=min(timestamps) if timestamps else None,
         last_bar_ts=max(timestamps) if timestamps else None,
-        live_merge_applied=bool(mdm_bars and datahub_bars and (mdm_bars == datahub_bars)),
+        live_merge_applied=bool(
+            mdm_bars and datahub_bars and (mdm_bars == datahub_bars)
+        ),
     )
     LOGGER.debug(
-        "HYDRATION_PROPAGATION_RESULT symbol=%s role=%s required_bars=%s mdm_bars=%s datahub_bars=%s runner_bars=%s indicator_bars=%s tradable_quote=%s depth_available=%s ready_for_evaluation=%s ready_for_execution=%s blockers=%s",
+        "HYDRATION_PROPAGATION_RESULT symbol=%s role=%s required_bars=%s "
+        "mdm_bars=%s datahub_bars=%s runner_bars=%s indicator_bars=%s "
+        "tradable_quote=%s depth_available=%s ready_for_evaluation=%s "
+        "ready_for_execution=%s blockers=%s",
         status.symbol,
         status.role,
         status.required_bars,
@@ -334,7 +403,9 @@ def build_symbol_hydration_status(
     return status
 
 
-def _hydration_status_map(ctx: "BotContext", *, required_option_bars: int, required_context_bars: int) -> dict[str, HydrationStatus]:
+def _hydration_status_map(
+    ctx: "BotContext", *, required_option_bars: int, required_context_bars: int
+) -> dict[str, HydrationStatus]:
     """Build hydration statuses using ActiveContractBasket as selected-symbol SSOT.
 
     Production safety invariant: a newly selected active basket must beat stale
@@ -342,24 +413,62 @@ def _hydration_status_map(ctx: "BotContext", *, required_option_bars: int, requi
     24350 to 24400, readiness must immediately evaluate 24400 and block until
     24400 has enough bars/quote/depth; it must never arm stale 24350.
     """
-    from nifty_scalper_bot.core.app import ensure_bot_context_runtime_fields, get_active_contract_selection
+    from nifty_scalper_bot.core.app import (
+        ensure_bot_context_runtime_fields,
+        get_active_contract_selection,
+    )
 
     ensure_bot_context_runtime_fields(ctx)
     runner = getattr(ctx, "strategy_runner", None)
-    basket_obj = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None) or {}
+    basket_obj = (
+        getattr(ctx, "active_contract_basket", None)
+        or getattr(ctx, "active_trading_universe", None)
+        or {}
+    )
     selection = get_active_contract_selection(ctx)
 
-    selected_ce = str(selection.selected_ce or _basket_get(basket_obj, "selected_ce", None) or _basket_get(basket_obj, "atm_ce", None) or getattr(runner, "_pending_selected_ce", None) or getattr(ctx, "selected_ce", None) or "")
-    selected_pe = str(selection.selected_pe or _basket_get(basket_obj, "selected_pe", None) or _basket_get(basket_obj, "atm_pe", None) or getattr(runner, "_pending_selected_pe", None) or getattr(ctx, "selected_pe", None) or "")
-    futures_symbol = str(selection.futures_symbol or _basket_get(basket_obj, "futures_symbol", None) or _basket_get(basket_obj, "future_symbol", None) or getattr(ctx, "active_futures_symbol", None) or "")
-    spot_symbol = str(_basket_get(basket_obj, "spot_symbol", None) or getattr(ctx, "nifty_symbol", None) or "NSE:NIFTY")
-    option_symbols = list(selection.option_symbols or _basket_option_symbols(basket_obj))
+    selected_ce = str(
+        selection.selected_ce
+        or _basket_get(basket_obj, "selected_ce", None)
+        or _basket_get(basket_obj, "atm_ce", None)
+        or getattr(runner, "_pending_selected_ce", None)
+        or getattr(ctx, "selected_ce", None)
+        or ""
+    )
+    selected_pe = str(
+        selection.selected_pe
+        or _basket_get(basket_obj, "selected_pe", None)
+        or _basket_get(basket_obj, "atm_pe", None)
+        or getattr(runner, "_pending_selected_pe", None)
+        or getattr(ctx, "selected_pe", None)
+        or ""
+    )
+    futures_symbol = str(
+        selection.futures_symbol
+        or _basket_get(basket_obj, "futures_symbol", None)
+        or _basket_get(basket_obj, "future_symbol", None)
+        or getattr(ctx, "active_futures_symbol", None)
+        or ""
+    )
+    spot_symbol = str(
+        _basket_get(basket_obj, "spot_symbol", None)
+        or getattr(ctx, "nifty_symbol", None)
+        or "NSE:NIFTY"
+    )
+    option_symbols = list(
+        selection.option_symbols or _basket_option_symbols(basket_obj)
+    )
 
     old_ce = getattr(ctx, "selected_ce", None)
     old_pe = getattr(ctx, "selected_pe", None)
-    if (selection.selected_ce and old_ce and str(old_ce) != str(selection.selected_ce)) or (selection.selected_pe and old_pe and str(old_pe) != str(selection.selected_pe)):
+    if (
+        selection.selected_ce and old_ce and str(old_ce) != str(selection.selected_ce)
+    ) or (
+        selection.selected_pe and old_pe and str(old_pe) != str(selection.selected_pe)
+    ):
         LOGGER.warning(
-            "ACTIVE_SELECTION_DRIFT_BLOCKED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=history_readiness",
+            "ACTIVE_SELECTION_DRIFT_BLOCKED old_ce=%s old_pe=%s new_ce=%s "
+            "new_pe=%s source=history_readiness",
             old_ce,
             old_pe,
             selection.selected_ce,
@@ -387,14 +496,22 @@ def _hydration_status_map(ctx: "BotContext", *, required_option_bars: int, requi
     for sym, role in role_by_symbol.items():
         if not sym:
             continue
-        required = required_context_bars if role in {"spot", "futures_context"} else required_option_bars
+        required = (
+            required_context_bars
+            if role in {"spot", "futures_context"}
+            else required_option_bars
+        )
         statuses[sym] = build_symbol_hydration_status(ctx, sym, role, required)
-    ctx.hydration_status_by_symbol = {sym: status.to_dict() for sym, status in statuses.items()}
+    ctx.hydration_status_by_symbol = {
+        sym: status.to_dict() for sym, status in statuses.items()
+    }
     ctx.last_hydration_status_at = datetime.now(timezone.utc)
     return statuses
 
 
-def _status_for_role(statuses: Mapping[str, HydrationStatus], role: str) -> HydrationStatus | None:
+def _status_for_role(
+    statuses: Mapping[str, HydrationStatus], role: str
+) -> HydrationStatus | None:
     for status in statuses.values():
         if status.role == role:
             return status
@@ -402,7 +519,7 @@ def _status_for_role(statuses: Mapping[str, HydrationStatus], role: str) -> Hydr
 
 
 def _count_symbol_bars(ctx: "BotContext", symbol: str | None) -> int:
-    """Count hydrated bars for symbol. Args: ctx/symbol. Returns: bars count. Raises: none."""
+    """Count hydrated bars for symbol."""
     if not symbol or ctx.market_data_manager is None:
         return 0
     try:
@@ -411,8 +528,10 @@ def _count_symbol_bars(ctx: "BotContext", symbol: str | None) -> int:
         return 0
 
 
-def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str | None, str | None]:
-    """Compatibility wrapper for basket symbol selection. Args: basket. Returns: ce/pe. Raises: none."""
+def _pick_atm_option_symbols_from_basket(
+    basket: dict[str, object],
+) -> tuple[str | None, str | None]:
+    """Compatibility wrapper for basket symbol selection."""
     return pick_atm_option_symbols_from_basket(basket)
 
 
@@ -487,8 +606,20 @@ def compute_history_readiness(
     indicator_bars: int,
 ) -> HistoryReadiness:
     """Compute current-state history readiness without mutation."""
-    minimum_ready = bool(mdm_bars >= required_bars and runner_bars >= required_bars and indicator_bars >= required_bars)
-    return HistoryReadiness(symbol, role, required_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready)
+    minimum_ready = bool(
+        mdm_bars >= required_bars
+        and runner_bars >= required_bars
+        and indicator_bars >= required_bars
+    )
+    return HistoryReadiness(
+        symbol,
+        role,
+        required_bars,
+        mdm_bars,
+        runner_bars,
+        indicator_bars,
+        minimum_ready,
+    )
 
 
 def resolve_symbol_history_role(ctx: "BotContext", symbol: str) -> str:
@@ -505,19 +636,30 @@ def resolve_symbol_history_role(ctx: "BotContext", symbol: str) -> str:
             return obj.get(name)
         return getattr(obj, name, None)
 
-    manager = getattr(ctx, "position_manager", None) or getattr(runner, "_position_manager", None)
+    manager = getattr(ctx, "position_manager", None) or getattr(
+        runner, "_position_manager", None
+    )
     open_symbols: list[str] = []
     try:
-        if manager is not None and callable(getattr(manager, "get_open_positions", None)):
-            open_symbols = [str(getattr(p, "symbol", p)) for p in manager.get_open_positions()]
+        if manager is not None and callable(
+            getattr(manager, "get_open_positions", None)
+        ):
+            open_symbols = [
+                str(getattr(p, "symbol", p)) for p in manager.get_open_positions()
+            ]
     except Exception:
         open_symbols = []
     return _shared_resolve_symbol_history_role(
         symbol=symbol,
-        selected_ce=_attr(basket, "selected_ce") or getattr(runner, "_active_selected_ce", None),
-        selected_pe=_attr(basket, "selected_pe") or getattr(runner, "_active_selected_pe", None),
-        spot_symbol=getattr(ctx, "spot_symbol", None) or getattr(runner, "_spot_symbol", None) or "NSE:NIFTY",
-        futures_symbol=getattr(runner, "_active_futures_symbol", None) or getattr(ctx, "active_futures_symbol", None),
+        selected_ce=_attr(basket, "selected_ce")
+        or getattr(runner, "_active_selected_ce", None),
+        selected_pe=_attr(basket, "selected_pe")
+        or getattr(runner, "_active_selected_pe", None),
+        spot_symbol=getattr(ctx, "spot_symbol", None)
+        or getattr(runner, "_spot_symbol", None)
+        or "NSE:NIFTY",
+        futures_symbol=getattr(runner, "_active_futures_symbol", None)
+        or getattr(ctx, "active_futures_symbol", None),
         open_position_symbols=open_symbols,
     )
 
@@ -534,9 +676,14 @@ def compute_selected_option_history_readiness(
     none.
     """
     active_ce, active_pe = _active_selection_symbols(ctx)
-    if active_ce and active_pe and (selected_ce != active_ce or selected_pe != active_pe):
+    if (
+        active_ce
+        and active_pe
+        and (selected_ce != active_ce or selected_pe != active_pe)
+    ):
         LOGGER.warning(
-            "SELECTED_OPTION_HISTORY_DRIFT_CORRECTED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=active_contract_basket",
+            "SELECTED_OPTION_HISTORY_DRIFT_CORRECTED old_ce=%s old_pe=%s "
+            "new_ce=%s new_pe=%s source=active_contract_basket",
             selected_ce,
             selected_pe,
             active_ce,
@@ -554,7 +701,13 @@ def compute_selected_option_history_readiness(
 
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
-    option_min = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
+    option_min = int(
+        os.getenv(
+            "READINESS_OPTION_EXEC_MIN_BARS",
+            os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS)),
+        )
+        or _DEFAULT_OPT_MIN_BARS
+    )
     required = max(option_min, int(getattr(runner, "_option_required_bars", 0) or 0))
 
     def _readiness(sym: str | None) -> HistoryReadiness | None:
@@ -564,14 +717,30 @@ def compute_selected_option_history_readiness(
             mdm_bars = len(mdm.get_ohlc_bars(sym) or []) if mdm is not None else 0
         except Exception:
             mdm_bars = 0
-        runner_bars = int(runner.runner_history_count(sym)) if runner is not None and callable(getattr(runner, "runner_history_count", None)) else 0
-        if runner is not None and callable(getattr(runner, "indicator_history_count", None)):
+        runner_bars = (
+            int(runner.runner_history_count(sym))
+            if runner is not None
+            and callable(getattr(runner, "runner_history_count", None))
+            else 0
+        )
+        if runner is not None and callable(
+            getattr(runner, "indicator_history_count", None)
+        ):
             indicator_bars = int(runner.indicator_history_count(sym))
-        elif runner is not None and callable(getattr(runner, "_history_count_for_symbol", None)):
+        elif runner is not None and callable(
+            getattr(runner, "_history_count_for_symbol", None)
+        ):
             indicator_bars = int(runner._history_count_for_symbol(sym))
         else:
             indicator_bars = 0
-        return compute_history_readiness(symbol=sym, role="selected_option", required_bars=required, mdm_bars=mdm_bars, runner_bars=runner_bars, indicator_bars=indicator_bars)
+        return compute_history_readiness(
+            symbol=sym,
+            role="selected_option",
+            required_bars=required,
+            mdm_bars=mdm_bars,
+            runner_bars=runner_bars,
+            indicator_bars=indicator_bars,
+        )
 
     ce = _readiness(selected_ce)
     pe = _readiness(selected_pe)
@@ -589,7 +758,9 @@ def compute_selected_option_history_readiness(
                 blocker = "selected_option_history_cold"
         else:
             blocker = "selected_option_not_set"
-    return SelectedOptionHistoryReadiness(selected_ce, selected_pe, ce, pe, both_ready, blocker)
+    return SelectedOptionHistoryReadiness(
+        selected_ce, selected_pe, ce, pe, both_ready, blocker
+    )
 
 
 def resolve_history_policy(
@@ -604,14 +775,29 @@ def resolve_history_policy(
     runner = getattr(ctx, "strategy_runner", None)
     role = str(role or "option_context")
     phase = str(phase or "dynamic_update")
-    option_min = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
-    context_env = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
-    context_min = max(context_env, int(getattr(runner, "_context_required_bars", 0) or 0))
+    option_min = int(
+        os.getenv(
+            "READINESS_OPTION_EXEC_MIN_BARS",
+            os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS)),
+        )
+        or _DEFAULT_OPT_MIN_BARS
+    )
+    context_env = int(
+        os.getenv(
+            "READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")
+        )
+        or 20
+    )
+    context_min = max(
+        context_env, int(getattr(runner, "_context_required_bars", 0) or 0)
+    )
     from nifty_scalper_bot.core.app import _symbol_history_requirement
 
     generic_required = _symbol_history_requirement(ctx)
     if role == "selected_option":
-        required = max(option_min, int(getattr(runner, "_option_required_bars", 0) or 0))
+        required = max(
+            option_min, int(getattr(runner, "_option_required_bars", 0) or 0)
+        )
         target = max(required, generic_required)
         priority = 10
     elif role in {"spot_context", "futures_context"}:
@@ -639,16 +825,28 @@ def resolve_history_policy(
         "selected_option": int(os.getenv("HYDRATION_CAP_SELECTED_OPTION", "75") or 75),
         "option_context": int(os.getenv("HYDRATION_CAP_OPTION_CONTEXT", "50") or 50),
         "spot_context": int(os.getenv("HYDRATION_CAP_SPOT_CONTEXT", "100") or 100),
-        "futures_context": int(os.getenv("HYDRATION_CAP_FUTURES_CONTEXT", "100") or 100),
-        "recovery_or_open_position": int(os.getenv("HYDRATION_CAP_RECOVERY", "100") or 100),
+        "futures_context": int(
+            os.getenv("HYDRATION_CAP_FUTURES_CONTEXT", "100") or 100
+        ),
+        "recovery_or_open_position": int(
+            os.getenv("HYDRATION_CAP_RECOVERY", "100") or 100
+        ),
     }
     role_cap = _role_caps.get(role, int(os.getenv("HYDRATION_CAP_DEFAULT", "75") or 75))
     _deep_caps = {
-        "selected_option": int(os.getenv("HYDRATION_DEEP_SELECTED_OPTION", "300") or 300),
-        "option_context": int(os.getenv("HYDRATION_DEEP_OPTION_CONTEXT", str(role_cap)) or role_cap),
+        "selected_option": int(
+            os.getenv("HYDRATION_DEEP_SELECTED_OPTION", "300") or 300
+        ),
+        "option_context": int(
+            os.getenv("HYDRATION_DEEP_OPTION_CONTEXT", str(role_cap)) or role_cap
+        ),
         "spot_context": int(os.getenv("HYDRATION_DEEP_SPOT_CONTEXT", "300") or 300),
-        "futures_context": int(os.getenv("HYDRATION_DEEP_FUTURES_CONTEXT", "300") or 300),
-        "recovery_or_open_position": int(os.getenv("HYDRATION_DEEP_RECOVERY", "300") or 300),
+        "futures_context": int(
+            os.getenv("HYDRATION_DEEP_FUTURES_CONTEXT", "300") or 300
+        ),
+        "recovery_or_open_position": int(
+            os.getenv("HYDRATION_DEEP_RECOVERY", "300") or 300
+        ),
     }
     deep_cap = max(role_cap, _deep_caps.get(role, role_cap))
     safety_max = int(os.getenv("HYDRATION_MAX_BARS", "0") or 0)
