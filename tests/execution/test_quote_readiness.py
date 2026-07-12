@@ -95,7 +95,12 @@ def test_synthetic_timestamp_quality_blocks_live_quote_readiness():
 
     assert result.allowed is False
     assert result.reason == "timestamp_quality_unusable"
-    assert (bid, ask, spread, source) == (None, None, None, "timestamp_quality_unusable")
+    assert (bid, ask, spread, source) == (
+        None,
+        None,
+        None,
+        "timestamp_quality_unusable",
+    )
 
 
 def test_fresh_ms_quote_can_prove_one_recent_update():
@@ -118,3 +123,15 @@ def test_quote_age_seconds_does_not_invent_tick_count():
     )
     assert ticks == 0
     assert derived is False
+
+
+def test_canonical_quote_age_converts_milliseconds_to_seconds():
+    from nifty_scalper_bot.execution.readiness import resolve_quote_age_seconds
+
+    assert resolve_quote_age_seconds({"quote_age_ms": 2500}) == 2.5
+
+
+def test_canonical_quote_age_keeps_seconds_unchanged():
+    from nifty_scalper_bot.execution.readiness import resolve_quote_age_seconds
+
+    assert resolve_quote_age_seconds({"quote_age_s": 2.5}) == 2.5
