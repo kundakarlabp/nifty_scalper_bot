@@ -7,7 +7,7 @@ name = "nifty-scalper-bot"
 version = "0.1.0"
 description = "Typed scaffolding for a Nifty intraday scalper bot"
 authors = [{ name = "Refactor Assistant" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "scipy>=1.13,<2",
     "numpy>=1.26,<3",
@@ -62,7 +62,7 @@ known_first_party = ["nifty_scalper_bot", "tests"]
 src_paths = ["src", "tests"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 mypy_path = "src"
 namespace_packages = true

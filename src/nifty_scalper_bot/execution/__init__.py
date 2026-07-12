@@ -17,7 +17,6 @@ from nifty_scalper_bot.execution.bracket_manager import BoundBracketManager, Bra
 from nifty_scalper_bot.execution.order_manager import OrderManager, RuntimeOrderManager
 from nifty_scalper_bot.execution.live_safety_identity import apply_patches as _apply_live_safety_identity_patches
 from nifty_scalper_bot.execution.position_identity_extension import apply_patches as _apply_position_identity_extension_patches
-from nifty_scalper_bot.execution.live_exit_reconciliation_patch import apply_patches as _apply_live_exit_reconciliation_patches
 from nifty_scalper_bot.execution.operator_control_patch import apply_patches as _apply_operator_control_patches
 from nifty_scalper_bot.execution.protective_order_intent_patch import apply_patches as _apply_protective_order_intent_patches
 from nifty_scalper_bot.execution.order_entry_guard_patch import apply_patches as _apply_order_entry_guard_patches
@@ -29,7 +28,6 @@ import nifty_scalper_bot.execution.trade_plan_identity_guard as _trade_plan_iden
 
 _apply_live_safety_identity_patches()
 _apply_position_identity_extension_patches()
-_apply_live_exit_reconciliation_patches()
 _apply_operator_control_patches()
 _apply_protective_order_intent_patches()
 _apply_order_entry_guard_patches()

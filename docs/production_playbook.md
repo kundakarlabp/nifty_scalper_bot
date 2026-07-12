@@ -170,3 +170,12 @@ curl -fsS http://127.0.0.1:8081/admin/api/status
 ```
 
 The updater status file expires transient states such as `fetching`, `validating`, and `deploying` after `BOT_UPDATER_STALE_TIMEOUT_SECONDS` and reports `stale_interrupted` while preserving the previous state/message for diagnosis.
+
+## Lifecycle reconciliation hardening
+
+- `EXECUTION_MODE` is the canonical execution-mode setting. Keep production in `SHADOW` or `PAPER` until explicit live arming checks pass; legacy live flags are aliases and must not contradict live mode.
+- `EXECUTION_EXIT_FILL_CONFIRMATION_GRACE_SECONDS` controls the single exit fill/status propagation grace used by reconciliation and stale-exit rescue. Default: `10.0` seconds.
+- `flat_confirmed` means an authoritative broker-position snapshot found zero net quantity for the exact option symbol. `unknown`, stale, malformed, or API-error evidence is not flat and must not close the lifecycle.
+- Broker order statuses are normalized before lifecycle decisions. Unknown order statuses require diagnostics and must not be treated as filled.
+- Runtime imports must not monkey-patch exit reconciliation. The canonical bracket manager owns exit lifecycle behavior; compatibility shims may warn but must not change live behavior.
+- These checks improve correctness, determinism, and observability only. They do not prove strategy profitability or account for slippage, brokerage, taxes, or market-regime expectancy.

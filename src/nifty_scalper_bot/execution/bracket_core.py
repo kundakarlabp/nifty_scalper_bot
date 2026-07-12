@@ -263,6 +263,8 @@ class BracketState:
     last_exit_summary_at: float = 0.0
     closed_at: float | None = None
     position_flat_confirmed: bool = False
+    flat_nonterminal_since_monotonic: float | None = None
+    flat_nonterminal_since_utc: str | None = None
     close_source: str | None = None
     exit_price: float | None = None
     escalated_at: float | None = None
@@ -372,6 +374,7 @@ class BracketState:
             "next_exit_attempt_at": self.next_exit_attempt_at,
             "closed_at": self.closed_at,
             "position_flat_confirmed": self.position_flat_confirmed,
+            "flat_nonterminal_since_utc": self.flat_nonterminal_since_utc,
             "close_source": self.close_source,
             "exit_price": self.exit_price,
             "escalated_at": self.escalated_at,
@@ -2853,6 +2856,8 @@ class BracketManager:
             bracket.exit_in_progress = False
             bracket.active = False
             bracket.position_flat_confirmed = True
+            bracket.flat_nonterminal_since_monotonic = None
+            bracket.flat_nonterminal_since_utc = None
             bracket.exit_state = BracketExitLifecycle.CLOSED.value
             bracket.entry_status = "CLOSED"
             bracket.pending_exit_order_id = None
@@ -3412,6 +3417,7 @@ class BracketManager:
             last_exit_summary_at=float(payload.get("last_exit_summary_at", 0.0) or 0.0),
             closed_at=payload.get("closed_at"),
             position_flat_confirmed=bool(payload.get("position_flat_confirmed", False)),
+            flat_nonterminal_since_utc=payload.get("flat_nonterminal_since_utc") or payload.get("_flat_nonterminal_since_utc"),
             close_source=payload.get("close_source"),
             exit_price=payload.get("exit_price"),
             escalated_at=payload.get("escalated_at"),

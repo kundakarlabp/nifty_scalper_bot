@@ -695,3 +695,8 @@ Useful defaults:
 - `DATAHUB_QUOTE_CHECKPOINT_INTERVAL_SECONDS=15`
 - `EVENT_LOOP_LAG_WARN_MS=500`
 - `BOT_UPDATER_STALE_TIMEOUT_SECONDS=900`
+
+
+### Canonical lifecycle safety settings
+
+The bot defaults to non-live execution. `EXECUTION_MODE` is the canonical routing mode (`DISABLED`, `SHADOW`, `PAPER`, `LIVE`); legacy `ENABLE_LIVE`/`ENABLE_LIVE_TRADING` flags are compatibility aliases and must not contradict `EXECUTION_MODE=LIVE`. Exit reconciliation uses one propagation grace value, `EXECUTION_EXIT_FILL_CONFIRMATION_GRACE_SECONDS` (default `10.0`), before stale-exit rescue escalates a broker-flat but non-terminal order-status mismatch. Broker API errors or unknown position evidence are never treated as flat. Passing code and tests validates lifecycle correctness only; it does not prove strategy profitability.

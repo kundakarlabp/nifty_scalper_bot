@@ -18,11 +18,21 @@ from __future__ import annotations
 from contextlib import suppress
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import bracket_manager as _legacy
 from nifty_scalper_bot.execution.hardened_bracket_manager import (
     HardenedBracketManager,
+)
+from nifty_scalper_bot.execution.broker_position_evidence import (
+    BrokerPositionEvidence,
+    BrokerPositionState,
+    normalize_authoritative_quantity,
+)
+from nifty_scalper_bot.execution.order_state import (
+    DomainOrderState,
+    map_broker_order_status,
 )
 
 
@@ -40,6 +50,16 @@ class CanonicalBracketManager(HardenedBracketManager):
             _legacy.parse_float_env(
                 os.getenv("EXIT_FILLED_POSITION_SYNC_GRACE_SECONDS"),
                 1.5,
+            ),
+        )
+        self._exit_fill_confirmation_grace_seconds = max(
+            0.001,
+            _legacy.parse_float_env(
+                os.getenv(
+                    "EXECUTION_EXIT_FILL_CONFIRMATION_GRACE_SECONDS",
+                    os.getenv("EXIT_FILL_CONFIRMATION_GRACE_SECONDS"),
+                ),
+                10.0,
             ),
         )
         super().__init__(*args, **kwargs)
@@ -187,7 +207,9 @@ class CanonicalBracketManager(HardenedBracketManager):
             bracket.exit_executed = False
             bracket.active = True
             bracket.position_flat_confirmed = False
-            bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value
+            bracket.exit_state = (
+                _legacy.BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value
+            )
             bracket.entry_status = bracket.exit_state
             bracket.last_exit_error = (
                 f"{self._FILLED_SYNC_PREFIX}:"
@@ -226,7 +248,10 @@ class CanonicalBracketManager(HardenedBracketManager):
     ) -> bool:
         previous_remaining = int(bracket.remaining_quantity or 0)
         expected_residual = max(previous_remaining - int(target.quantity or 0), 0)
-        if residual_quantity >= previous_remaining or residual_quantity > expected_residual:
+        if (
+            residual_quantity >= previous_remaining
+            or residual_quantity > expected_residual
+        ):
             return False
 
         fill_price = self._extract_status_price(status_payload)
@@ -316,7 +341,9 @@ class CanonicalBracketManager(HardenedBracketManager):
             bracket.exit_executed = False
             bracket.active = True
             bracket.position_flat_confirmed = False
-            bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+            bracket.exit_state = (
+                _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+            )
             bracket.entry_status = bracket.exit_state
             bracket.last_exit_error = error
             bracket.escalated_at = bracket.escalated_at or now
@@ -385,7 +412,111 @@ class CanonicalBracketManager(HardenedBracketManager):
                     requested_by=requested_by,
                 )
 
-            if status in _legacy._FILLED_STATUSES:
+            mapped_status = map_broker_order_status(status)
+            if mapped_status.state is not DomainOrderState.FILLED:
+                flat_evidence = self._broker_position_evidence(bracket.symbol)
+                if flat_evidence.state is not BrokerPositionState.FLAT_CONFIRMED:
+                    bracket.flat_nonterminal_since_monotonic = None
+                    bracket.flat_nonterminal_since_utc = None
+                strict_live = bool(getattr(self, "_is_live_execution", lambda: True)())
+                if (
+                    strict_live
+                    and flat_evidence.state not in {
+                        BrokerPositionState.FLAT_CONFIRMED,
+                        BrokerPositionState.NON_FLAT_CONFIRMED,
+                    }
+                ):
+                    with self._lock:
+                        bracket.exit_pending = True
+                        bracket.exit_in_progress = False
+                        bracket.position_flat_confirmed = False
+                        bracket.last_exit_error = (
+                            f"broker_position_{flat_evidence.state.value}"
+                        )
+                        age_basis = float(
+                            bracket.last_exit_attempt_at
+                            or bracket.exit_triggered_at
+                            or time.time()
+                        )
+                        age = time.time() - age_basis
+                        if age >= float(
+                            getattr(
+                                self,
+                                "_exit_unresolved_escalation_seconds",
+                                0.0,
+                            )
+                            or 0.0
+                        ):
+                            bracket.exit_state = (
+                                _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                            )
+                            bracket.entry_status = bracket.exit_state
+                            bracket.escalated_at = bracket.escalated_at or time.time()
+                            bracket._market_escalation_fired = True
+                        bracket.updated_at = time.time()
+                    _legacy.LOGGER.warning(
+                        "EXIT_RECONCILE_DEFERRED_BROKER_POSITION_UNKNOWN bracket_id=%s symbol=%s order_id=%s state=%s",
+                        bracket.bracket_id,
+                        bracket.symbol,
+                        order_id,
+                        flat_evidence.state.value,
+                        extra={
+                            "event": "EXIT_RECONCILE_DEFERRED_BROKER_POSITION_UNKNOWN",
+                            "bracket_id": bracket.bracket_id,
+                            "symbol": bracket.symbol,
+                            "order_id": str(order_id),
+                            "broker_position_state": flat_evidence.state.value,
+                            "error": flat_evidence.error,
+                        },
+                    )
+                    return False
+                if flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED:
+                    now_monotonic = time.monotonic()
+                    since = getattr(bracket, "flat_nonterminal_since_monotonic", None)
+                    if since is None:
+                        bracket.flat_nonterminal_since_monotonic = now_monotonic
+                        bracket.flat_nonterminal_since_utc = datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                        age = 0.0
+                    else:
+                        age = now_monotonic - float(since)
+                    with self._lock:
+                        bracket.exit_pending = True
+                        bracket.exit_in_progress = False
+                        bracket.position_flat_confirmed = False
+                        bracket.exit_state = (
+                            _legacy.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+                        )
+                        bracket.entry_status = "EXIT_PENDING"
+                        bracket.updated_at = time.time()
+                    log = (
+                        _legacy.LOGGER.info
+                        if age < self._exit_fill_confirmation_grace_seconds
+                        else _legacy.LOGGER.warning
+                    )
+                    log(
+                        "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL bracket_id=%s symbol=%s order_id=%s order_status=%s age_seconds=%.3f grace_seconds=%.3f close_deferred=True",
+                        bracket.bracket_id,
+                        bracket.symbol,
+                        order_id,
+                        mapped_status.raw_status or "UNKNOWN",
+                        age,
+                        self._exit_fill_confirmation_grace_seconds,
+                        extra={
+                            "event": "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL",
+                            "bracket_id": bracket.bracket_id,
+                            "symbol": bracket.symbol,
+                            "order_id": str(order_id),
+                            "order_status": mapped_status.raw_status or "UNKNOWN",
+                            "broker_position_state": flat_evidence.state.value,
+                            "age_seconds": age,
+                            "grace_seconds": self._exit_fill_confirmation_grace_seconds,
+                        },
+                    )
+                    return False
+
+            if mapped_status.state is DomainOrderState.FILLED:
                 residual = self._broker_position_quantity(bracket.symbol)
                 if residual == 0:
                     self._clear_fill_sync_state(bracket)
@@ -451,6 +582,72 @@ class CanonicalBracketManager(HardenedBracketManager):
             return
         super()._process_exit_state(bracket, action, now=now)
 
+    def _broker_position_evidence(self, symbol: str) -> BrokerPositionEvidence:
+        """Return typed broker-position truth; unknown/API errors fail closed."""
+        now = datetime.now(timezone.utc)
+        try:
+            qty = self._authoritative_position_quantity(symbol)
+        except Exception as exc:  # noqa: BLE001 - broker boundary
+            _legacy.LOGGER.error(
+                "BROKER_POSITION_EVIDENCE_API_ERROR symbol=%s error_type=%s",
+                _legacy.normalize_symbol(symbol),
+                type(exc).__name__,
+                extra={
+                    "event": "BROKER_POSITION_EVIDENCE_API_ERROR",
+                    "symbol": _legacy.normalize_symbol(symbol),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return BrokerPositionEvidence(
+                BrokerPositionState.API_ERROR,
+                _legacy.normalize_symbol(symbol),
+                None,
+                now,
+                0.0,
+                "authoritative_position_quantity",
+                type(exc).__name__,
+            )
+        parsed_qty = normalize_authoritative_quantity(qty)
+        if parsed_qty is None:
+            _legacy.LOGGER.warning(
+                "BROKER_POSITION_EVIDENCE_UNKNOWN symbol=%s raw_type=%s",
+                _legacy.normalize_symbol(symbol),
+                type(qty).__name__,
+                extra={
+                    "event": "BROKER_POSITION_EVIDENCE_UNKNOWN",
+                    "symbol": _legacy.normalize_symbol(symbol),
+                    "raw_type": type(qty).__name__,
+                },
+            )
+            return BrokerPositionEvidence(
+                BrokerPositionState.UNKNOWN,
+                _legacy.normalize_symbol(symbol),
+                None,
+                now,
+                0.0,
+                "authoritative_position_quantity",
+                "invalid_quantity",
+            )
+        state = (
+            BrokerPositionState.FLAT_CONFIRMED
+            if parsed_qty == 0
+            else BrokerPositionState.NON_FLAT_CONFIRMED
+        )
+        return BrokerPositionEvidence(
+            state,
+            _legacy.normalize_symbol(symbol),
+            parsed_qty,
+            now,
+            0.0,
+            "authoritative_position_quantity",
+        )
+
+    def _safe_position_flat(self, symbol: str) -> bool:
+        return (
+            self._broker_position_evidence(symbol).state
+            is BrokerPositionState.FLAT_CONFIRMED
+        )
+
     def _rescue_stale_exit_order(
         self,
         bracket: Any,
@@ -461,11 +658,50 @@ class CanonicalBracketManager(HardenedBracketManager):
     ) -> None:
         """Cancel/replace stale exits without treating a non-flat fill as closure."""
 
-        if self._safe_position_flat(bracket.symbol):
-            _since = getattr(bracket, "_flat_nonterminal_since", None)
-            import time as _t
+        flat_evidence = self._broker_position_evidence(bracket.symbol)
+        strict_live = bool(getattr(self, "_is_live_execution", lambda: True)())
+        if strict_live and flat_evidence.state not in {
+            BrokerPositionState.FLAT_CONFIRMED,
+            BrokerPositionState.NON_FLAT_CONFIRMED,
+        }:
+            with self._lock:
+                bracket.exit_in_progress = False
+                bracket.exit_pending = True
+                bracket.position_flat_confirmed = False
+                bracket.last_exit_error = f"broker_position_{flat_evidence.state.value}"
+                bracket.updated_at = time.time()
+            _legacy.LOGGER.warning(
+                "EXIT_RESCUE_DEFERRED_BROKER_POSITION_UNKNOWN bracket_id=%s symbol=%s order_id=%s state=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                order_id,
+                flat_evidence.state.value,
+                extra={
+                    "event": "EXIT_RESCUE_DEFERRED_BROKER_POSITION_UNKNOWN",
+                    "bracket_id": bracket.bracket_id,
+                    "symbol": bracket.symbol,
+                    "order_id": str(order_id),
+                    "broker_position_state": flat_evidence.state.value,
+                    "error": flat_evidence.error,
+                },
+            )
+            return
+        if flat_evidence.state is BrokerPositionState.NON_FLAT_CONFIRMED:
+            bracket.flat_nonterminal_since_monotonic = None
+            bracket.flat_nonterminal_since_utc = None
+        if flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED:
+            now_monotonic = time.monotonic()
+            _since = getattr(bracket, "flat_nonterminal_since_monotonic", None)
+            if _since is None:
+                bracket.flat_nonterminal_since_monotonic = now_monotonic
+                bracket.flat_nonterminal_since_utc = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                _flat_age = 0.0
+            else:
+                _flat_age = now_monotonic - float(_since)
 
-            if _since is None or (_t.time() - float(_since)) < 10.0:
+            if _flat_age < self._exit_fill_confirmation_grace_seconds:
                 # Broker already FLAT: the exit filled and only the order
                 # status is propagating. Cancel-racing a filled order is pure
                 # churn ('Skipping cancel: Already FILLED', 2026-07-10);
@@ -523,7 +759,8 @@ class CanonicalBracketManager(HardenedBracketManager):
                 requested_by="stale_rescue_filled",
             )
             return
-        if self._safe_position_flat(bracket.symbol):
+        flat_evidence = self._broker_position_evidence(bracket.symbol)
+        if flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED:
             with self._lock:
                 bracket.exit_in_progress = False
             self._close_bracket(

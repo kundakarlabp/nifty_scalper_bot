@@ -40,6 +40,7 @@ from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from importlib import import_module
 from importlib import metadata as importlib_metadata
 import inspect
@@ -1185,7 +1186,6 @@ def _emit_trading_universe_summary(
 
 
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
