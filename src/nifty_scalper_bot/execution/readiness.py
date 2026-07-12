@@ -44,7 +44,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 def _safe_positive_int(value: object, fallback: int) -> int:
     fallback_value = max(int(fallback), 1)
     try:
-        parsed = int(float(value))
+        parsed = int(float(str(value)))
     except (TypeError, ValueError):
         return fallback_value
     if parsed <= 0:
@@ -54,7 +54,7 @@ def _safe_positive_int(value: object, fallback: int) -> int:
 
 def _safe_non_negative_int(value: object, fallback: int = 0) -> int:
     try:
-        parsed = int(float(value))
+        parsed = int(float(str(value)))
     except (TypeError, ValueError):
         return max(int(fallback), 0)
     return max(parsed, 0)
@@ -224,7 +224,10 @@ def _emit_live_validation_checklist(
         execution_ready=execution_ready,
     )
     LOGGER.info(
-        "LIVE_VALIDATION_CHECKLIST live_mode=%s market_open=%s evaluation_ready=%s execution_ready=%s broker_auth_ok=%s broker_balance_ok=%s emergency_clear=%s risk_green=%s live_orders_armed=%s primary_blocker=%s",
+        "LIVE_VALIDATION_CHECKLIST live_mode=%s market_open=%s "
+        "evaluation_ready=%s execution_ready=%s broker_auth_ok=%s "
+        "broker_balance_ok=%s emergency_clear=%s risk_green=%s "
+        "live_orders_armed=%s primary_blocker=%s",
         checklist["live_mode"],
         checklist["market_open"],
         checklist["evaluation_ready"],
@@ -478,10 +481,16 @@ def resolve_max_quote_age_seconds(
     deployment compatibility. Malformed/commented values safely use defaults.
     """
     raw_seconds = os.getenv(seconds_env)
-    if raw_seconds not in (None, ""):
-        return max(0.0, parse_float_env(raw_seconds, default_seconds))
+    if raw_seconds is not None and raw_seconds.strip():
+        return max(
+            0.0,
+            parse_float_env(raw_seconds, default_seconds),
+        )
     legacy_default_ms = default_seconds * 1000.0
-    legacy_ms = parse_float_env(os.getenv(legacy_ms_env), legacy_default_ms)
+    legacy_ms = parse_float_env(
+        os.getenv(legacy_ms_env),
+        legacy_default_ms,
+    )
     return max(0.0, legacy_ms / 1000.0)
 
 
@@ -551,10 +560,11 @@ def resolve_quote_bid_ask_spread(
 
     if bid is None:
         depth = getter("depth", None)
-        buy_levels = sell_levels = []
+        buy_levels: list[object] = []
+        sell_levels: list[object] = []
         if isinstance(depth, dict):
-            buy_levels = depth.get("buy") or []
-            sell_levels = depth.get("sell") or []
+            buy_levels = list(depth.get("buy") or [])
+            sell_levels = list(depth.get("sell") or [])
         buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
         sell_top = (
             sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}

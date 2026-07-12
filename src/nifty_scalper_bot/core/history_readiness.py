@@ -290,8 +290,12 @@ def build_symbol_hydration_status(
         "HYDRATION_LIVE_TICK_MAX_AGE_MS",
         default_seconds=60.0,
     )
-    max_spread = parse_float_env(
-        os.getenv("HYDRATION_MAX_SPREAD_PCT", os.getenv("MAX_OPTION_SPREAD_PCT")), 12.0
+    raw_spread = os.getenv("HYDRATION_MAX_SPREAD_PCT")
+    if raw_spread is None or not raw_spread.strip():
+        raw_spread = os.getenv("MAX_OPTION_SPREAD_PCT")
+    max_spread = max(
+        0.0,
+        parse_float_env(raw_spread, 12.0),
     )
     quote_ready = evaluate_quote_readiness(
         normalized,
@@ -378,7 +382,10 @@ def build_symbol_hydration_status(
         ),
     )
     LOGGER.debug(
-        "HYDRATION_PROPAGATION_RESULT symbol=%s role=%s required_bars=%s mdm_bars=%s datahub_bars=%s runner_bars=%s indicator_bars=%s tradable_quote=%s depth_available=%s ready_for_evaluation=%s ready_for_execution=%s blockers=%s",
+        "HYDRATION_PROPAGATION_RESULT symbol=%s role=%s required_bars=%s "
+        "mdm_bars=%s datahub_bars=%s runner_bars=%s indicator_bars=%s "
+        "tradable_quote=%s depth_available=%s ready_for_evaluation=%s "
+        "ready_for_execution=%s blockers=%s",
         status.symbol,
         status.role,
         status.required_bars,
@@ -460,7 +467,8 @@ def _hydration_status_map(
         selection.selected_pe and old_pe and str(old_pe) != str(selection.selected_pe)
     ):
         LOGGER.warning(
-            "ACTIVE_SELECTION_DRIFT_BLOCKED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=history_readiness",
+            "ACTIVE_SELECTION_DRIFT_BLOCKED old_ce=%s old_pe=%s new_ce=%s "
+            "new_pe=%s source=history_readiness",
             old_ce,
             old_pe,
             selection.selected_ce,
@@ -511,7 +519,7 @@ def _status_for_role(
 
 
 def _count_symbol_bars(ctx: "BotContext", symbol: str | None) -> int:
-    """Count hydrated bars for symbol. Args: ctx/symbol. Returns: bars count. Raises: none."""
+    """Count hydrated bars for symbol."""
     if not symbol or ctx.market_data_manager is None:
         return 0
     try:
@@ -523,7 +531,7 @@ def _count_symbol_bars(ctx: "BotContext", symbol: str | None) -> int:
 def _pick_atm_option_symbols_from_basket(
     basket: dict[str, object],
 ) -> tuple[str | None, str | None]:
-    """Compatibility wrapper for basket symbol selection. Args: basket. Returns: ce/pe. Raises: none."""
+    """Compatibility wrapper for basket symbol selection."""
     return pick_atm_option_symbols_from_basket(basket)
 
 
@@ -674,7 +682,8 @@ def compute_selected_option_history_readiness(
         and (selected_ce != active_ce or selected_pe != active_pe)
     ):
         LOGGER.warning(
-            "SELECTED_OPTION_HISTORY_DRIFT_CORRECTED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=active_contract_basket",
+            "SELECTED_OPTION_HISTORY_DRIFT_CORRECTED old_ce=%s old_pe=%s "
+            "new_ce=%s new_pe=%s source=active_contract_basket",
             selected_ce,
             selected_pe,
             active_ce,

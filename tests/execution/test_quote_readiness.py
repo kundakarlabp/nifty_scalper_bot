@@ -135,3 +135,59 @@ def test_canonical_quote_age_keeps_seconds_unchanged():
     from nifty_scalper_bot.execution.readiness import resolve_quote_age_seconds
 
     assert resolve_quote_age_seconds({"quote_age_s": 2.5}) == 2.5
+
+
+def test_max_quote_age_seconds_blank_env_uses_legacy_ms(monkeypatch):
+    from nifty_scalper_bot.execution.readiness import resolve_max_quote_age_seconds
+
+    monkeypatch.setenv("TEST_MAX_AGE_SECONDS", "   ")
+    monkeypatch.setenv("TEST_MAX_AGE_MS", "2500")
+
+    assert (
+        resolve_max_quote_age_seconds(
+            "TEST_MAX_AGE_SECONDS", "TEST_MAX_AGE_MS", default_seconds=60.0
+        )
+        == 2.5
+    )
+
+
+def test_max_quote_age_seconds_empty_env_uses_legacy_ms(monkeypatch):
+    from nifty_scalper_bot.execution.readiness import resolve_max_quote_age_seconds
+
+    monkeypatch.setenv("TEST_MAX_AGE_SECONDS", "")
+    monkeypatch.setenv("TEST_MAX_AGE_MS", "2500")
+
+    assert (
+        resolve_max_quote_age_seconds(
+            "TEST_MAX_AGE_SECONDS", "TEST_MAX_AGE_MS", default_seconds=60.0
+        )
+        == 2.5
+    )
+
+
+def test_max_quote_age_seconds_valid_env_takes_precedence(monkeypatch):
+    from nifty_scalper_bot.execution.readiness import resolve_max_quote_age_seconds
+
+    monkeypatch.setenv("TEST_MAX_AGE_SECONDS", "5")
+    monkeypatch.setenv("TEST_MAX_AGE_MS", "2500")
+
+    assert (
+        resolve_max_quote_age_seconds(
+            "TEST_MAX_AGE_SECONDS", "TEST_MAX_AGE_MS", default_seconds=60.0
+        )
+        == 5.0
+    )
+
+
+def test_max_quote_age_seconds_invalid_non_empty_uses_default(monkeypatch):
+    from nifty_scalper_bot.execution.readiness import resolve_max_quote_age_seconds
+
+    monkeypatch.setenv("TEST_MAX_AGE_SECONDS", "bad # comment")
+    monkeypatch.setenv("TEST_MAX_AGE_MS", "2500")
+
+    assert (
+        resolve_max_quote_age_seconds(
+            "TEST_MAX_AGE_SECONDS", "TEST_MAX_AGE_MS", default_seconds=60.0
+        )
+        == 60.0
+    )

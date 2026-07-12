@@ -279,3 +279,53 @@ def test_malformed_hydration_age_env_falls_back_without_crashing(monkeypatch) ->
     )
 
     assert status.ready_for_execution is True
+
+
+def test_whitespace_spread_env_falls_back_to_legacy_spread(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "   ")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 103.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is False
+    assert "spread_too_wide" in status.blocker_reasons
+
+
+def test_empty_spread_env_falls_back_to_legacy_spread(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 103.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is False
+    assert "spread_too_wide" in status.blocker_reasons
+
+
+def test_canonical_spread_env_takes_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "5")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 103.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is True
+
+
+def test_malformed_spread_env_uses_default_without_crashing(monkeypatch) -> None:
+    monkeypatch.setenv("HYDRATION_MAX_SPREAD_PCT", "bad # comment")
+    monkeypatch.setenv("MAX_OPTION_SPREAD_PCT", "1.5")
+    quote = {**_quote(), "bid": 100.0, "ask": 111.0}
+
+    status = app.build_symbol_hydration_status(
+        _ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30
+    )
+
+    assert status.ready_for_execution is True
