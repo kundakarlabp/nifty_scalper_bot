@@ -66,6 +66,7 @@ class _Runner:
 
 def _quote() -> dict[str, object]:
     return {
+        "ltp": 100.5,
         "bid": 100.0,
         "ask": 101.0,
         "tradable_quote": True,
@@ -147,5 +148,57 @@ def test_synthetic_timestamp_quote_does_not_make_selected_option_execution_ready
 
     assert status.ready_for_evaluation is True
     assert status.ready_for_execution is False
+    assert status.tradable_quote is False
+    assert "timestamp_quality_unusable" in status.blocker_reasons
+
+
+def test_selected_option_execution_ready_with_top_level_bid_ask_without_depth_flag() -> None:
+    quote = {"ltp": 100.5, "bid": 100.0, "ask": 101.0, "tick_age_s": 1.0}
+
+    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+
+    assert status.ready_for_execution is True
     assert status.tradable_quote is True
-    assert "selected_ce_quote_missing" in status.blocker_reasons
+    assert status.depth_available is True
+
+
+def test_selected_option_execution_ready_with_depth_top_of_book() -> None:
+    quote = {
+        "ltp": 100.5,
+        "depth": {"buy": [{"price": 100.0}], "sell": [{"price": 101.0}]},
+        "tick_age_s": 1.0,
+    }
+
+    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+
+    assert status.ready_for_execution is True
+    assert status.bid == 100.0
+    assert status.ask == 101.0
+
+
+def test_stale_quote_does_not_make_selected_option_execution_ready() -> None:
+    quote = {**_quote(), "tick_age_s": 120.0}
+
+    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+
+    assert status.ready_for_execution is False
+    assert "quote_stale" in status.blocker_reasons
+
+
+def test_unknown_quote_age_does_not_make_selected_option_execution_ready() -> None:
+    quote = dict(_quote())
+    quote.pop("tick_age_s")
+
+    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+
+    assert status.ready_for_execution is False
+    assert "quote_age_unknown" in status.blocker_reasons
+
+
+def test_wide_spread_does_not_make_selected_option_execution_ready() -> None:
+    quote = {**_quote(), "bid": 100.0, "ask": 130.0}
+
+    status = app.build_symbol_hydration_status(_ctx(30, 30, 30, 30, quote), SYMBOL, "selected_ce", 30)
+
+    assert status.ready_for_execution is False
+    assert "spread_too_wide" in status.blocker_reasons

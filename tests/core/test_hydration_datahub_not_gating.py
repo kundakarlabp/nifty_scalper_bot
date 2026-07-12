@@ -66,5 +66,4 @@ async def test_genuine_history_shortfall_still_blocks() -> None:
     ctx = _ctx(mdm_n=51, datahub_n=51, runner_n=10, indicator_n=46, sym=SYM)
     status = build_symbol_hydration_status(ctx, SYM, "selected_ce", 30)
     assert status.ready_for_evaluation is False
-    assert "insufficient_bars" in status.blocker_reasons
-    assert "runner_bars_missing" in status.blocker_reasons
+    assert "selected_ce_history_cold" in status.blocker_reasons
