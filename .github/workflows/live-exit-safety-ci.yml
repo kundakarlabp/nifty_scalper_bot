@@ -6,23 +6,15 @@ name: Live Exit Safety CI
 
 on:
   pull_request:
+    branches:
+      - main
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
-x-safety-files: &safety_files
-  - src/nifty_scalper_bot/core/app.py
-  - src/nifty_scalper_bot/execution/__init__.py
-  - src/nifty_scalper_bot/execution/bracket_core.py
-  - src/nifty_scalper_bot/execution/broker_position_evidence.py
-  - src/nifty_scalper_bot/execution/canonical_bracket_manager.py
-  - src/nifty_scalper_bot/execution/live_exit_reconciliation_patch.py
-  - src/nifty_scalper_bot/execution/order_state.py
-  - tests/core/test_eod_flatten_schedule.py
-  - tests/execution/test_broker_position_and_order_state.py
-  - tests/execution/test_live_exit_hardening.py
 
 jobs:
   changed-code-quality:
