@@ -8407,9 +8407,20 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
             context_only_blockers,
             extra={"event": "CONTEXT_SYMBOL_BLOCKERS_NON_GATING", "blockers": context_only_blockers},
         )
+    quote_quality_blockers = {
+        "quote_missing",
+        "ltp_missing",
+        "quote_age_unknown",
+        "quote_stale",
+        "timestamp_quality_unusable",
+        "bid_ask_missing",
+        "bid_ask_crossed",
+        "spread_too_wide",
+        "quote_not_tradable",
+    }
     hydration_hard_blockers = [
         blocker for blocker in status_blockers
-        if not (blocker.endswith("_quote_missing") or blocker.endswith("_depth_missing") or blocker == "spread_too_wide" or blocker.endswith("_token_missing") or blocker == "option_token_missing")
+        if not (blocker.endswith("_quote_missing") or blocker.endswith("_depth_missing") or blocker in quote_quality_blockers or blocker.endswith("_token_missing") or blocker == "option_token_missing")
     ]
     if hydration_hard_blockers:
         basket_hard_ready = False
@@ -8434,6 +8445,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     )
     selected_history_blockers = {
         "selected_option_history_cold",
+        "selected_ce_history_cold",
+        "selected_pe_history_cold",
         "selected_ce_history_missing",
         "selected_pe_history_missing",
         "ce_eval_bars_missing",

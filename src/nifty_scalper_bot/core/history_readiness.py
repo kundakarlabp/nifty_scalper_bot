@@ -47,7 +47,7 @@ from nifty_scalper_bot.core.history_roles import (
 from nifty_scalper_bot.execution.readiness import (
     HistoryReadinessPolicy,
     HydrationStatus,
-    resolve_quote_bid_ask_spread,
+    evaluate_quote_readiness,
 )
 from nifty_scalper_bot.utils.market_hours import get_runtime_market_mode
 from nifty_scalper_bot.utils.logging import get_logger
@@ -247,23 +247,23 @@ def build_symbol_hydration_status(
     bars_for_ts = _get_bars_from_provider(mdm, normalized) or _get_bars_from_provider(datahub, normalized)
     timestamps = [ts for ts in (_bar_timestamp(row) for row in bars_for_ts) if ts is not None]
     quote = _get_cached_quote(ctx, normalized)
-    bid, ask, spread_pct, _source = resolve_quote_bid_ask_spread(dict(quote))
-    depth = quote.get("depth") if isinstance(quote, Mapping) else None
-    depth_available = bool(quote.get("depth_available") or depth)
-    tradable_quote = bool(quote.get("tradable_quote") or (bid is not None and ask is not None and ask > bid))
-    live_tick_fresh = False
-    age_ms_fn = getattr(mdm, "symbol_data_age_ms", None)
-    if callable(age_ms_fn):
-        try:
-            live_tick_fresh = float(age_ms_fn(normalized)) <= float(os.getenv("HYDRATION_LIVE_TICK_MAX_AGE_MS", "60000"))
-        except (TypeError, ValueError):
-            live_tick_fresh = False
-    if not live_tick_fresh and isinstance(quote, Mapping):
-        try:
-            age_s = quote.get("tick_age_s") or quote.get("age_s")
-            live_tick_fresh = age_s is not None and float(age_s) <= 60.0
-        except (TypeError, ValueError):
-            live_tick_fresh = False
+    max_quote_age_s = float(os.getenv("HYDRATION_LIVE_TICK_MAX_AGE_MS", "60000") or 60000) / 1000.0
+    max_spread = float(os.getenv("HYDRATION_MAX_SPREAD_PCT", os.getenv("MAX_OPTION_SPREAD_PCT", "12")) or 12)
+    quote_ready = evaluate_quote_readiness(
+        normalized,
+        dict(quote) if isinstance(quote, Mapping) else quote,
+        max_spread_pct=max_spread,
+        require_fresh=True,
+        max_age_s=max_quote_age_s,
+    )
+    bid = quote_ready.bid
+    ask = quote_ready.ask
+    spread_pct = quote_ready.spread_pct
+    # Top-level bid/ask and depth top-of-book are both canonical quote proof;
+    # do not require a separate depth flag unless final order preflight does so.
+    depth_available = bool(quote_ready.depth_available or quote_ready.bid_ask_available)
+    tradable_quote = bool(quote_ready.tradable_quote_ready)
+    live_tick_fresh = quote_ready.reason not in {"quote_age_unknown", "quote_stale", "timestamp_quality_unusable", "quote_missing"}
     exchange = normalized.split(":", 1)[0] if ":" in normalized else None
     tradingsymbol = normalized.split(":", 1)[1] if ":" in normalized else normalized or None
     gating_counts = [mdm_bars, runner_bars, indicator_bars]
@@ -273,25 +273,22 @@ def build_symbol_hydration_status(
     if token is None and role in {"selected_ce", "selected_pe", "option_context", "futures_context"}:
         blockers.append("option_token_missing" if role.startswith("selected_") or role == "option_context" else "futures_token_missing")
     if required > 0 and any(count < required for count in gating_counts):
-        blockers.append(f"{role}_history_missing")
-        blockers.append("insufficient_bars")
-        if mdm_bars < required:
-            blockers.append("mdm_bars_missing")
-        if runner_bars < required:
-            blockers.append("runner_bars_missing")
-        if indicator_bars < required:
-            blockers.append("indicator_bars_missing")
+        blockers.append(f"{role}_history_cold")
     selected_role = role in {"selected_ce", "selected_pe"}
-    if selected_role:
-        if not tradable_quote:
-            blockers.append(f"{role}_quote_missing")
-        if not depth_available:
-            blockers.append(f"{role}_depth_missing")
-        max_spread = float(os.getenv("HYDRATION_MAX_SPREAD_PCT", os.getenv("MAX_OPTION_SPREAD_PCT", "12")) or 12)
-        if spread_pct is not None and spread_pct > max_spread:
-            blockers.append("spread_too_wide")
+    if selected_role and quote_ready.reason != "ready":
+        blockers.append(quote_ready.reason)
     ready_for_evaluation = bool(normalized and required >= 0 and all(count >= required for count in gating_counts))
-    ready_for_execution = bool(ready_for_evaluation and (not selected_role or (tradable_quote and depth_available and "spread_too_wide" not in blockers)))
+    ready_for_execution = bool(
+        ready_for_evaluation
+        and (
+            not selected_role
+            or (
+                token is not None
+                and tradable_quote
+                and quote_ready.reason == "ready"
+            )
+        )
+    )
     status = HydrationStatus(
         symbol=normalized,
         role=role,
