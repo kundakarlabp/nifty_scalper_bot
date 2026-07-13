@@ -10,7 +10,11 @@ from nifty_scalper_bot.execution.broker_recovery import (
     classify_broker_failure,
     decide_recovery,
 )
-from nifty_scalper_bot.execution.entry_recovery import install_entry_recovery
+from nifty_scalper_bot.execution.entry_recovery import (
+    install_entry_recovery,
+    lots_to_quantity,
+    quantity_to_exact_lots,
+)
 from nifty_scalper_bot.execution.order_manager import TradePlan, TradePlanSubmitResult
 
 
@@ -235,6 +239,10 @@ class _Order:
     fill_price: float = 101.5
     average_price: float = 101.5
     status: Any = None
+    requested_lots: int = 2
+    resolved_lot_size: int = 50
+    quantity: int = 100
+    intent: str = "ENTRY"
 
 
 class _PartialManager:
@@ -242,18 +250,26 @@ class _PartialManager:
         self._logger = _Logger()
         self._broker = _Broker()
         self._broker.status_payload = {
-            "status": "CANCELLED",
+            "status": "PARTIALLY_FILLED",
             "filled_quantity": 50,
+            "pending_quantity": 50,
             "average_price": 101.5,
         }
+        self._broker.positions_payload = [
+            {"tradingsymbol": "NIFTY2662324050PE", "quantity": 50}
+        ]
         self._last_order_decision: dict[str, Any] = {}
         self.uncertain: list[str] = []
         self.confirmed: list[tuple[str, int, float]] = []
         self._bracket_manager = SimpleNamespace(
-            confirm_partial_entry_fill=lambda order_id, qty, price: (
-                self.confirmed.append((order_id, qty, price)) or True
-            )
+            confirm_partial_entry_fill=self._confirm_partial_entry_fill
         )
+
+    def _confirm_partial_entry_fill(
+        self, order_id: str, qty: int, price: float
+    ) -> bool:
+        self.confirmed.append((order_id, qty, price))
+        return True
 
     def submit_trade_plan_result(self, _plan: Any) -> TradePlanSubmitResult:
         return _accept()
@@ -269,15 +285,15 @@ class _PartialManager:
 install_entry_recovery(_PartialManager)
 
 
-def test_multi_lot_partial_entry_cancels_remainder_and_arms_completed_lot() -> None:
+def test_exact_lot_helpers_do_not_floor_malformed_quantities() -> None:
+    assert quantity_to_exact_lots(100, 50) == 2
+    assert quantity_to_exact_lots(49, 50) is None
+    assert lots_to_quantity(2, 50) == 100
+
+
+def test_partial_entry_cancels_remainder_and_arms_completed_whole_lot() -> None:
     manager = _PartialManager()
-    manager._broker.positions_payload = [
-        {"tradingsymbol": "NIFTY2662324050PE", "quantity": 50}
-    ]
     order = _Order()
-    order.quantity = 100
-    order.requested_lots = 2
-    order.resolved_lot_size = 50
 
     updated = manager._update_from_response(
         order,
@@ -299,24 +315,15 @@ def test_multi_lot_partial_entry_cancels_remainder_and_arms_completed_lot() -> N
     )
 
 
-def test_one_lot_complete_fill_protects_exact_lot_quantity() -> None:
+def test_one_lot_complete_fill_activates_full_lot_protection_without_cancel() -> None:
     manager = _PartialManager()
-    manager._broker.positions_payload = [
-        {"tradingsymbol": "NIFTY2662324050PE", "quantity": 50}
-    ]
+    order = _Order(requested_lots=1, quantity=50, filled_quantity=50)
     manager._broker.status_payload = {
         "status": "COMPLETE",
         "filled_quantity": 50,
         "pending_quantity": 0,
         "average_price": 101.5,
     }
-    manager._bracket_manager = SimpleNamespace(
-        confirm_partial_entry_fill=lambda order_id, qty, price: True
-    )
-    order = _Order(filled_quantity=50)
-    order.quantity = 50
-    order.requested_lots = 1
-    order.resolved_lot_size = 50
 
     manager._update_from_response(
         order,
@@ -328,53 +335,40 @@ def test_one_lot_complete_fill_protects_exact_lot_quantity() -> None:
         },
     )
 
-    assert order.entry_lifecycle_state["broker_filled_lots"] == 1
-    assert order.entry_lifecycle_state["protected_lots"] == 1
-    assert order.entry_lifecycle_state["protected_quantity"] == 50
-    assert manager._last_order_decision["block_reason"] == "ENTRY_FULL_LOT_PROTECTED"
+    assert manager._broker.cancel_calls == []
+    assert manager.confirmed == [("entry-partial", 50, 101.5)]
+    assert order.entry_lifecycle_state["state"] == "ENTRY_PROTECTED"
+    assert manager._last_order_decision["block_reason"] == "entry_full_lot_protected"
 
 
 def test_non_lot_broker_fill_latches_invariant_without_protection() -> None:
     manager = _PartialManager()
-    order = _Order(filled_quantity=25)
-    order.quantity = 50
-    order.requested_lots = 1
-    order.resolved_lot_size = 50
-    manager._bracket_manager = SimpleNamespace(
-        confirm_partial_entry_fill=lambda *_args: (_ for _ in ()).throw(
-            AssertionError("must not protect")
-        )
-    )
+    order = _Order(requested_lots=1, quantity=50, filled_quantity=20)
 
     manager._update_from_response(
         order,
         {
-            "status": "COMPLETE",
-            "filled_quantity": 25,
-            "pending_quantity": 25,
+            "status": "PARTIALLY_FILLED",
+            "filled_quantity": 20,
+            "pending_quantity": 30,
             "average_price": 101.5,
         },
     )
 
-    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
+    assert manager.confirmed == []
     assert (
         manager._last_order_decision["block_reason"]
         == "broker_quantity_lot_invariant_violation"
     )
+    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
 
 
-def test_protection_none_is_not_verified_success() -> None:
+def test_none_protection_result_is_not_verified_success() -> None:
     manager = _PartialManager()
-    manager._broker.positions_payload = [
-        {"tradingsymbol": "NIFTY2662324050PE", "quantity": 50}
-    ]
     manager._bracket_manager = SimpleNamespace(
         confirm_partial_entry_fill=lambda *_args: None
     )
-    order = _Order(filled_quantity=50)
-    order.quantity = 50
-    order.requested_lots = 1
-    order.resolved_lot_size = 50
+    order = _Order(requested_lots=1, quantity=50, filled_quantity=50)
 
     manager._update_from_response(
         order,
@@ -386,5 +380,5 @@ def test_protection_none_is_not_verified_success() -> None:
         },
     )
 
-    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
     assert manager._last_order_decision["block_reason"] == "entry_protection_failed"
+    assert order.entry_lifecycle_state["protected_lots"] == 0

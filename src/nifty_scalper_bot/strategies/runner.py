@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """Event-driven strategy runner: the evaluation loop that turns data into orders.
 
 Runtime role:
@@ -29,23 +28,26 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+from collections import defaultdict, deque
+from contextlib import suppress
 import dataclasses
+from dataclasses import dataclass, field
+from datetime import datetime, time as dt_time, timedelta, timezone
+from enum import Enum
 import hashlib
-import inspect
 import json
+import inspect
 import logging
 import os
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
+from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
+from pathlib import Path
 import re
 import threading
 import time
 import time as time_module
-from collections import defaultdict, deque
-from contextlib import suppress
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from datetime import time as dt_time
-from enum import Enum
-from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -64,11 +66,6 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from nifty_scalper_bot.config.defaults import (
-    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
-)
-from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
-from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -92,31 +89,23 @@ from nifty_scalper_bot.data.candle_engine import (
     sanitize,
     validate_dataframe,
 )
+from nifty_scalper_bot.data.pipeline import (
+    MarketDataPipeline,
+    get_pipeline,
+    MIN_REQUIRED_CANDLES as PIPELINE_MIN_CANDLES,
+)
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.data.normalizers import normalize_history_row
-from nifty_scalper_bot.data.pipeline import (
-    MIN_REQUIRED_CANDLES as PIPELINE_MIN_CANDLES,
-)
-from nifty_scalper_bot.data.pipeline import (
-    MarketDataPipeline,
-    get_pipeline,
-)
 from nifty_scalper_bot.data.source import (
     DataIntegrityError,
     ensure_ltp,
     is_symbol_valid,
 )
-from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
-from nifty_scalper_bot.execution.order_state_machine import (
-    ExecutionState,
-    OrderStateMachine,
-)
-from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.execution.quote_readiness import (
     evaluate_execution_quote,
     resolve_tick_age_ms,
@@ -126,13 +115,18 @@ from nifty_scalper_bot.execution.readiness import (
     HistoryReadinessPolicy,
     resolve_quote_bid_ask_spread,
 )
+from nifty_scalper_bot.execution.order_state_machine import (
+    ExecutionState,
+    OrderStateMachine,
+)
+from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
+from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
+from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.risk.position_sizing import (
     RiskManager as DeterministicRiskManager,
-)
-from nifty_scalper_bot.risk.position_sizing import (
     RiskSnapshot,
 )
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
@@ -152,8 +146,6 @@ from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.log_throttle import (
     log_on_change,
-)
-from nifty_scalper_bot.utils.log_throttle import (
     log_throttled as log_throttled_live,
 )
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
@@ -163,10 +155,10 @@ from nifty_scalper_bot.utils.market_hours import (
     get_market_session_state,
     get_market_state,
     get_runtime_market_mode,
+    post_market_suppress_candle_gap_warnings,
     is_market_hours_cached,
     is_market_open_now,
     is_nifty_option_symbol,
-    post_market_suppress_candle_gap_warnings,
     stale_threshold_for_symbol,
 )
 from nifty_scalper_bot.utils.metrics import Counter, signals_generated_total
@@ -4772,9 +4764,9 @@ class StrategyRunner:
         dedup_key_context: dict[str, str] | None = None
         try:
             from nifty_scalper_bot.data.pipeline import (  # noqa: PLC0415
-                get_dropped_candles,
-                get_dropped_ticks,
                 get_pipeline,
+                get_dropped_ticks,
+                get_dropped_candles,
             )
 
             _pl = get_pipeline()
@@ -18024,45 +18016,59 @@ class StrategyRunner:
             except Exception:
                 _resolved_lot_size = 0
             _basket = getattr(self, "_active_contract_basket", None) or {}
-            if _basket:
+            _selection = None
+            with suppress(Exception):
                 _selection = active_contract_selection_from_basket(_basket)
-                _basket_version = _selection.basket_version
-                _selection_timestamp = _selection.selected_at
-                if isinstance(_basket, Mapping):
-                    _contract_expiry = _basket.get("expiry") or _basket.get(
-                        "contract_expiry"
+            if _selection is not None:
+                _basket_version = getattr(_selection, "basket_version", None)
+                _contract_expiry = getattr(_selection, "expiry", None)
+                _selection_timestamp = getattr(_selection, "committed_at", None)
+                _token_map = getattr(_selection, "token_by_symbol", None) or {}
+                if isinstance(_token_map, Mapping):
+                    _instrument_token = _token_map.get(order_symbol) or _token_map.get(
+                        str(order_symbol).split(":", 1)[-1]
                     )
-                else:
-                    _contract_expiry = getattr(_basket, "expiry", None) or getattr(
-                        _basket, "contract_expiry", None
-                    )
-                _token_map = dict(_selection.token_by_symbol or {})
+            elif isinstance(_basket, Mapping):
+                _basket_version = _basket.get("basket_version") or _basket.get(
+                    "version"
+                )
+                _contract_expiry = _basket.get("expiry") or _basket.get(
+                    "contract_expiry"
+                )
+                _selection_timestamp = _basket.get("selected_at") or _basket.get(
+                    "committed_at"
+                )
+                _token_map = dict(_basket.get("token_by_symbol") or {})
                 _instrument_token = _token_map.get(order_symbol) or _token_map.get(
                     str(order_symbol).split(":", 1)[-1]
                 )
                 if not _instrument_token and order_symbol == str(
-                    _selection.selected_ce or ""
+                    _basket.get("selected_ce") or ""
                 ):
-                    _instrument_token = _selection.selected_ce_token
+                    _instrument_token = _basket.get("selected_ce_token")
                 if not _instrument_token and order_symbol == str(
-                    _selection.selected_pe or ""
+                    _basket.get("selected_pe") or ""
                 ):
-                    _instrument_token = _selection.selected_pe_token
-            _identity_parts = [
-                str(datetime.now(timezone.utc).date()),
+                    _instrument_token = _basket.get("selected_pe_token")
+            _identity_parts = (
                 str(signal.deterministic_id or ""),
-                str(strategy_name),
+                str(strategy_name or "runner"),
                 str(_basket_version or ""),
                 str(_instrument_token or ""),
-                str(signal.action),
+                str(signal.action or ""),
                 str(_requested_lots),
-            ]
+                str(
+                    getattr(self, "_session_date", "")
+                    or datetime.now(timezone.utc).date()
+                ),
+            )
             _identity_seed = "|".join(_identity_parts)
             _identity_digest = hashlib.sha256(
                 _identity_seed.encode("utf-8")
-            ).hexdigest()[:16]
-            _client_order_id = f"entry:{_identity_digest}"
-            _broker_tag = f"rn{_identity_digest[:10]}"
+            ).hexdigest()[:20]
+            _client_order_id = f"nfo:{_identity_digest}"
+            _trade_lifecycle_id = f"tl:{_identity_digest}"
+            _broker_tag = f"r{_identity_digest[:12]}"
             plan = TradePlan(
                 symbol=order_symbol,
                 side=signal.action,
@@ -18080,7 +18086,7 @@ class StrategyRunner:
                 max_spread_pct=max_spread_pct,
                 min_depth_qty=min_depth_qty,
                 allow_market_entry=allow_market_entry,
-                trade_lifecycle_id=_client_order_id,
+                trade_lifecycle_id=_trade_lifecycle_id,
                 client_order_id=_client_order_id,
                 basket_version=_basket_version,
                 instrument_token=(

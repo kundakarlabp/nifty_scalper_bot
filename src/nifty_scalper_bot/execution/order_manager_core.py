@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """Order lifecycle management: the live order path.
 
 Runtime role:
@@ -137,7 +136,7 @@ if TYPE_CHECKING:
     from nifty_scalper_bot.notifications.telegram_enhanced import (
         TelegramEnhancedNotifier,
     )
-    from nifty_scalper_bot.risk.risk_manager import OrderSignal, RiskManager
+    from nifty_scalper_bot.risk.risk_manager import RiskManager
 else:  # pragma: no cover - typing only
     MarketDataManager = Any
     BaseBrokerClient = Any
@@ -2043,7 +2042,7 @@ class OrderManager:
                 info = self._resolver.resolve_by_symbol(symbol)
                 if info and "exchange" in info:
                     return info["exchange"]
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -2062,7 +2061,7 @@ class OrderManager:
                 info = self._resolver.resolve_by_symbol(symbol)
                 if info and "tradingsymbol" in info:
                     return info["tradingsymbol"]
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -2302,7 +2301,7 @@ class OrderManager:
                 raise exc
 
         if not isinstance(response, dict):
-            raise ExecutionError("Invalid broker response payload")
+            raise OrderPlacementError("invalid_broker_response_payload")
         return response
 
     def place_order(
@@ -2324,8 +2323,8 @@ class OrderManager:
         trace_id: str | None = None,
         intent: OrderIntent | str | None = None,
         intended_position_side: Literal["LONG", "SHORT"] | None = None,
-        trade_lifecycle_id: str | None = None,
         client_order_id: str | None = None,
+        trade_lifecycle_id: str | None = None,
         linked_entry_order_id: str | None = None,
         bracket_id: str | None = None,
         basket_version: int | str | None = None,
@@ -2497,10 +2496,34 @@ class OrderManager:
             take_profit = self._round_to_tick(take_profit)
         # ---------------------------------------------------------
         # 🛡️ DETECT EXIT vs ENTRY (must be BEFORE any guard)
+        normalized_symbol = normalize_symbol(symbol)
+        normalized_side = str(side).strip().upper()
         normalized_tag = (tag or "").lower()
         is_system_exit = any(
             x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
         )
+
+        entry_blocker = getattr(self, "current_entry_blocker", None)
+        entry_block = (
+            entry_blocker()
+            if callable(entry_blocker)
+            else getattr(self, "_entry_lifecycle_blocker", None)
+        )
+        if normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"} and entry_block:
+            details = (
+                dict(entry_block)
+                if isinstance(entry_block, Mapping)
+                else {"block_reason": str(entry_block)}
+            )
+            reason = str(details.get("block_reason") or "entry_reconciliation_pending")
+            _log_order_decision(
+                allowed=False,
+                block_reason=reason,
+                details=details,
+                broker_attempted=False,
+            )
+            self.set_last_skip_reason(reason)
+            return None
 
         if not is_system_exit and self._bracket_manager is not None:
             has_unresolved_exit = getattr(
@@ -3416,6 +3439,13 @@ class OrderManager:
                         intent=cast(OrderIntent, normalized_intent),
                         intended_position_side=intended_position_side,
                         signal_id=signal_id,
+                        client_order_id=client_order_id,
+                        trade_lifecycle_id=trade_lifecycle_id,
+                        linked_entry_order_id=linked_entry_order_id,
+                        bracket_id=bracket_id,
+                        basket_version=basket_version,
+                        instrument_token=instrument_token,
+                        contract_expiry=contract_expiry,
                     )
                     self._register_order(details)
                     # Sync PositionManager's pending-order registry so the
@@ -3576,7 +3606,7 @@ class OrderManager:
                         "retryable": True,
                     },
                 )
-                raise ExecutionError(
+                raise OrderPlacementError(
                     f"missing_order_id: broker response did not include order_id payload={response!r}"
                 )
 
@@ -4003,8 +4033,6 @@ class OrderManager:
             "client_order_id": plan.client_order_id,
             "signal_id": plan.signal_id,
             "symbol": normalize_symbol(plan.symbol),
-            "requested_lots": plan.requested_lots,
-            "resolved_lot_size": plan.resolved_lot_size,
             "requested_quantity": plan.quantity,
             "filled_quantity": 0,
             "protected_quantity": 0,
@@ -4026,40 +4054,41 @@ class OrderManager:
         for source in sources:
             if source is None:
                 continue
-            try:
-                selection = active_contract_selection_from_basket(source)
-            except Exception:  # noqa: BLE001
-                selection = None
-            if selection is not None:
-                selected = (selection.selected_ce, selection.selected_pe)
-                selected_norm = {normalize_symbol(str(x)) for x in selected if x}
-                option_symbols = {
-                    normalize_symbol(str(x)) for x in selection.option_symbols if x
+            selection_obj = None
+            with suppress(Exception):
+                selection_obj = active_contract_selection_from_basket(source)
+            if selection_obj is not None:
+                selected = {
+                    normalize_symbol(
+                        str(getattr(selection_obj, "selected_ce", "") or "")
+                    ),
+                    normalize_symbol(
+                        str(getattr(selection_obj, "selected_pe", "") or "")
+                    ),
                 }
-                if symbol not in selected_norm and symbol not in option_symbols:
+                if symbol not in selected:
                     continue
-                token_map = dict(selection.token_by_symbol or {})
-                token = token_map.get(symbol) or token_map.get(symbol.split(":", 1)[-1])
-                if symbol == normalize_symbol(str(selection.selected_ce or "")):
-                    token = token or selection.selected_ce_token
-                    side = "CE"
-                elif symbol == normalize_symbol(str(selection.selected_pe or "")):
-                    token = token or selection.selected_pe_token
-                    side = "PE"
-                else:
-                    side = symbol[-2:] if symbol.endswith(("CE", "PE")) else None
-                expiry = getattr(source, "expiry", None)
-                if isinstance(source, Mapping):
-                    expiry = source.get("expiry") or source.get("contract_expiry")
+                token_by_symbol = getattr(selection_obj, "token_by_symbol", None) or {}
+                token = None
+                if isinstance(token_by_symbol, Mapping):
+                    token = token_by_symbol.get(symbol) or token_by_symbol.get(
+                        symbol.split(":", 1)[-1]
+                    )
+                if token is None and symbol == normalize_symbol(
+                    str(getattr(selection_obj, "selected_ce", "") or "")
+                ):
+                    token = getattr(selection_obj, "selected_ce_token", None)
+                if token is None and symbol == normalize_symbol(
+                    str(getattr(selection_obj, "selected_pe", "") or "")
+                ):
+                    token = getattr(selection_obj, "selected_pe_token", None)
                 return {
                     "symbol": symbol,
                     "instrument_token": int(token) if token not in (None, "") else None,
-                    "basket_version": selection.basket_version,
-                    "contract_expiry": expiry,
-                    "selected_at": selection.selected_at,
-                    "option_side": side,
+                    "basket_version": getattr(selection_obj, "basket_version", None),
+                    "contract_expiry": getattr(selection_obj, "expiry", None),
+                    "selected_at": getattr(selection_obj, "committed_at", None),
                 }
-
             if not isinstance(source, Mapping):
                 continue
             token_map = dict(source.get("token_by_symbol") or {})
@@ -4070,13 +4099,10 @@ class OrderManager:
             }:
                 continue
             token = token_map.get(symbol) or token_map.get(symbol.split(":", 1)[-1])
-            option_side = symbol[-2:] if symbol.endswith(("CE", "PE")) else None
             if symbol == normalize_symbol(str(source.get("selected_ce") or "")):
                 token = token or source.get("selected_ce_token")
-                option_side = "CE"
             if symbol == normalize_symbol(str(source.get("selected_pe") or "")):
                 token = token or source.get("selected_pe_token")
-                option_side = "PE"
             return {
                 "symbol": symbol,
                 "instrument_token": int(token) if token not in (None, "") else None,
@@ -4084,7 +4110,6 @@ class OrderManager:
                 "contract_expiry": source.get("expiry")
                 or source.get("contract_expiry"),
                 "selected_at": source.get("selected_at") or source.get("committed_at"),
-                "option_side": option_side,
             }
         return None
 
@@ -4177,7 +4202,7 @@ class OrderManager:
                     ),
                 )
             max_lots = int(os.getenv("MAX_LOTS_PER_TRADE", "1") or "1")
-            if max_lots <= 1 and plan.requested_lots != 1:
+            if max_lots <= 1 and int(plan.requested_lots) != 1:
                 return OrderPreflightResult(
                     False,
                     "invalid_entry_lot_quantity",
@@ -4213,9 +4238,9 @@ class OrderManager:
                     ),
                 )
             if (
-                plan.basket_version is None
-                or active.get("basket_version") is None
-                or str(plan.basket_version) != str(active.get("basket_version"))
+                plan.basket_version is not None
+                and active.get("basket_version") is not None
+                and str(plan.basket_version) != str(active.get("basket_version"))
             ):
                 return OrderPreflightResult(
                     False,
@@ -4228,7 +4253,7 @@ class OrderManager:
                         actual_value=plan.basket_version,
                     ),
                 )
-            if active.get("instrument_token") is None or int(
+            if active.get("instrument_token") is not None and int(
                 plan.instrument_token
             ) != int(active["instrument_token"]):
                 return OrderPreflightResult(
@@ -4243,9 +4268,9 @@ class OrderManager:
                     ),
                 )
             if (
-                not plan.contract_expiry
-                or not active.get("contract_expiry")
-                or str(plan.contract_expiry) != str(active.get("contract_expiry"))
+                plan.contract_expiry
+                and active.get("contract_expiry")
+                and str(plan.contract_expiry) != str(active.get("contract_expiry"))
             ):
                 return OrderPreflightResult(
                     False,
@@ -4256,20 +4281,6 @@ class OrderManager:
                         "contract_expiry_mismatch",
                         required_value=active.get("contract_expiry"),
                         actual_value=plan.contract_expiry,
-                    ),
-                )
-            if active.get("option_side") and not symbol.endswith(
-                str(active.get("option_side"))
-            ):
-                return OrderPreflightResult(
-                    False,
-                    "stale_contract_selection",
-                    OrderManager._trade_plan_rejection_details(
-                        self,
-                        plan,
-                        "stale_contract_selection",
-                        required_value=active.get("option_side"),
-                        actual_value=symbol[-2:],
                     ),
                 )
         if lot_size > 0 and plan.quantity % lot_size != 0 and is_entry:
@@ -4719,11 +4730,6 @@ class OrderManager:
                 product=plan.product,
                 intent=plan.intent,
                 intended_position_side=plan.intended_position_side,
-                trade_lifecycle_id=plan.trade_lifecycle_id,
-                client_order_id=plan.client_order_id,
-                basket_version=plan.basket_version,
-                instrument_token=plan.instrument_token,
-                contract_expiry=plan.contract_expiry,
             )
         except Exception as exc:  # noqa: BLE001
             err = self._sanitize_broker_error(exc)
@@ -4885,8 +4891,8 @@ class OrderManager:
             product=product,
             intent=intent,
             intended_position_side=intended_position_side,
-            trade_lifecycle_id=trade_lifecycle_id,
             client_order_id=client_order_id,
+            trade_lifecycle_id=trade_lifecycle_id,
             basket_version=basket_version,
             instrument_token=instrument_token,
             contract_expiry=contract_expiry,
@@ -6804,7 +6810,7 @@ class OrderManager:
                 elif hasattr(self._positions, "update_from_order"):
                     try:
                         self._positions.update_from_order(order)
-                    except Exception as e:
+                    except Exception:
                         self._logger.exception("Unhandled exception", exc_info=True)
                         raise
 
@@ -6874,7 +6880,7 @@ class OrderManager:
             if hasattr(self, "save_orders"):
                 try:
                     self.save_orders()
-                except Exception as e:
+                except Exception:
                     self._logger.exception("Unhandled exception", exc_info=True)
                     raise
 
@@ -7195,7 +7201,7 @@ class OrderManager:
                 _price_source = self._data_hub or self._market_data
                 if _price_source is not None:
                     _exit_ltp = _price_source.get_latest_price(symbol)
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -7211,7 +7217,7 @@ class OrderManager:
             )
 
             if not exit_id:
-                self._logger.error(f"❌ Soft Exit Failed: place_order returned None")
+                self._logger.error("❌ Soft Exit Failed: place_order returned None")
                 return None
 
         except Exception as e:
@@ -7743,7 +7749,7 @@ class OrderManager:
         for oid in zombies:
             try:
                 self.cancel_order(oid)
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -10885,7 +10891,7 @@ class OrderManager:
                     is False
                 ):
                     payload["instrument_token"] = int(instrument_token)
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise  # Default to not sending if settings fail
 
@@ -12046,7 +12052,7 @@ class OrderManager:
             "signal_id": order.signal_id,
             "requested_lots": order.requested_lots,
             "resolved_lot_size": order.resolved_lot_size,
-            "entry_lifecycle_state": dict(order.entry_lifecycle_state or {}),
+            "entry_lifecycle_state": order.entry_lifecycle_state,
         }
 
     def _serialize_bracket_state(self, state: BracketState) -> BracketDict:
@@ -12170,7 +12176,11 @@ class OrderManager:
                 signal_id=payload.get("signal_id"),
                 requested_lots=int(payload.get("requested_lots", 0) or 0),
                 resolved_lot_size=int(payload.get("resolved_lot_size", 0) or 0),
-                entry_lifecycle_state=dict(payload.get("entry_lifecycle_state") or {}),
+                entry_lifecycle_state=(
+                    payload.get("entry_lifecycle_state")
+                    if isinstance(payload.get("entry_lifecycle_state"), dict)
+                    else None
+                ),
             )
         except Exception as e:
             logger = getattr(self, "_logger", logging.getLogger(__name__))
@@ -13470,7 +13480,7 @@ class OrderManager:
                                     float(ltp),
                                     tick_exchange_epoch(tick_data),
                                 )
-                        except Exception as e:
+                        except Exception:
                             self._logger.exception("Unhandled exception", exc_info=True)
                             raise
 
@@ -13531,7 +13541,7 @@ class OrderManager:
                 self._adopt_orphan_position(
                     symbol, {"qty": quantity, "price": base_price}
                 )
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 

@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """File purpose:
     Implement the single production order manager used by the trading runtime.
 
@@ -14,13 +13,15 @@ Operational constraints:
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from nifty_scalper_bot.execution import order_manager_core as _core
 from nifty_scalper_bot.execution.entry_recovery import (
     _finalize_partial_entry,
     _recover_submit,
-    current_entry_blocker,
+)
+from nifty_scalper_bot.execution.entry_recovery import (
+    current_entry_blocker as _current_entry_blocker,
 )
 from nifty_scalper_bot.execution.native_entry_gate import (
     NO_BLOCK,
@@ -63,8 +64,8 @@ class RuntimeOrderManager(_core.OrderManager):
     def set_unresolved_exit_provider(self, provider: Any | None) -> None:
         configure_provider(self, provider)
 
-    def current_entry_blocker(self) -> Any | None:
-        return current_entry_blocker(self)
+    def current_entry_blocker(self) -> Mapping[str, Any] | None:
+        return _current_entry_blocker(self)
 
     def _blocked(
         self,

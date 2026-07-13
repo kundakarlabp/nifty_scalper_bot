@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """Bounded recovery for the authoritative runner-facing entry path.
 
 Wraps existing OrderManager methods without replacing the class. Recovery stays
@@ -391,8 +390,9 @@ def _instrument_lookup(manager: Any) -> Callable[[str], int] | None:
     )
     for candidate in candidates:
         if callable(candidate):
+            fn = candidate
 
-            def _lookup(symbol: str, fn: Callable[..., Any] = candidate) -> int:
+            def _lookup(symbol: str) -> int:
                 return int(fn(symbol) or 0)
 
             return _lookup
@@ -403,7 +403,9 @@ def _lot_size(manager: Any, symbol: str) -> int:
     try:
         lot, _source = resolve_lot_size(symbol, _instrument_lookup(manager))
         return max(1, int(lot))
-    except Exception:
+    except Exception as exc:
+        if _manager_live_mode(manager):
+            raise ValueError(f"lot_size_unresolved:{symbol}") from exc
         for key in (
             "NIFTY_LOT_SIZE",
             "INSTRUMENTS__NIFTY_LOT_SIZE",
@@ -418,27 +420,11 @@ def _lot_size(manager: Any, symbol: str) -> int:
                 continue
             if lot > 0:
                 return lot
-        if _manager_live_mode(manager):
-            raise
         return 65 if "NIFTY" in _symbol_key(symbol) else 1
 
 
 def _whole_lot_quantity(quantity: int, lot: int) -> int:
     return 0 if quantity <= 0 or lot <= 0 else (int(quantity) // int(lot)) * int(lot)
-
-
-def quantity_to_exact_lots(quantity: int, lot_size: int) -> int | None:
-    if quantity < 0 or lot_size <= 0:
-        return None
-    if quantity % lot_size != 0:
-        return None
-    return quantity // lot_size
-
-
-def lots_to_quantity(lots: int, lot_size: int) -> int:
-    if lots < 0 or lot_size <= 0:
-        raise ValueError("invalid lots or lot size")
-    return lots * lot_size
 
 
 def _affordable_quantity(manager: Any, plan: Any, fresh_price: float) -> int:
@@ -508,23 +494,12 @@ def _broker_positions(manager: Any) -> list[Mapping[str, Any]] | None:
 def _reconcile_intent(
     manager: Any, plan: Any
 ) -> tuple[str, str | None, dict[str, Any]]:
-    live = _is_live_entry(manager, plan)
-    immutable = {
-        str(getattr(plan, "client_order_id", "") or "").upper(),
-        str(getattr(plan, "trade_lifecycle_id", "") or "").upper(),
-    } - {""}
-    if live and not immutable:
-        return "unknown", None, {"reason": "entry_identity_mismatch"}
-
+    keys = [
+        str(getattr(plan, name, "") or "") for name in ("signal_id", "trace_id", "tag")
+    ]
     finder = getattr(manager, "_find_open_order", None)
     if callable(finder):
-        for key in (
-            immutable
-            if live
-            else {
-                str(getattr(plan, name, "") or "") for name in ("signal_id", "trace_id")
-            }
-        ):
+        for key in keys:
             if not key:
                 continue
             try:
@@ -533,16 +508,29 @@ def _reconcile_intent(
                 order = None
             if isinstance(order, Mapping):
                 oid = str(order.get("order_id") or order.get("id") or "")
-                if oid and (
-                    not live or _broker_order_matches_plan(order, plan, immutable)
-                ):
+                if oid:
                     return "order_found", oid, {"order": dict(order)}
 
     orders = _broker_orders(manager)
     if orders is None:
         return "unknown", None, {"reason": "orders_unavailable"}
+    wanted_symbol = _symbol_key(plan.symbol)
+    wanted = {key.upper() for key in keys if key}
     for order in orders:
-        if not _broker_order_matches_plan(order, plan, immutable if live else set()):
+        if (
+            _symbol_key(order.get("tradingsymbol") or order.get("symbol"))
+            != wanted_symbol
+        ):
+            continue
+        candidates = {
+            str(order.get(key) or "").upper()
+            for key in ("tag", "client_order_id", "guid")
+        }
+        if wanted and not any(
+            key == candidate or (key and candidate and key[-8:] in candidate)
+            for key in wanted
+            for candidate in candidates
+        ):
             continue
         if str(order.get("status") or "").upper() not in {
             "REJECTED",
@@ -556,7 +544,6 @@ def _reconcile_intent(
     positions = _broker_positions(manager)
     if positions is None:
         return "unknown", None, {"reason": "positions_unavailable"}
-    wanted_symbol = _symbol_key(plan.symbol)
     for position in positions:
         if (
             _symbol_key(position.get("tradingsymbol") or position.get("symbol"))
@@ -576,43 +563,6 @@ def _reconcile_intent(
         if qty > 0:
             return "exposure_found", None, {"position": dict(position), "quantity": qty}
     return "absent", None, {}
-
-
-def _broker_order_matches_plan(
-    order: Mapping[str, Any], plan: Any, immutable: set[str]
-) -> bool:
-    wanted_symbol = _symbol_key(getattr(plan, "symbol", ""))
-    if _symbol_key(order.get("tradingsymbol") or order.get("symbol")) != wanted_symbol:
-        return False
-    if immutable:
-        candidates = {
-            str(order.get(key) or "").upper()
-            for key in ("client_order_id", "guid", "tag")
-        }
-        candidates |= {
-            str(order.get("meta", {}).get(key) or "").upper()
-            for key in ("client_order_id", "trade_lifecycle_id")
-            if isinstance(order.get("meta"), Mapping)
-        }
-        if not immutable.intersection(candidates):
-            return False
-    token = getattr(plan, "instrument_token", None)
-    if token not in (None, ""):
-        raw_token = order.get("instrument_token") or order.get("token")
-        if raw_token not in (None, "") and int(raw_token) != int(token):
-            return False
-    side = str(getattr(plan, "side", "") or "").upper()
-    if side and str(
-        order.get("transaction_type") or order.get("side") or ""
-    ).upper() not in {"", side}:
-        return False
-    intent = str(order.get("intent") or order.get("order_intent") or "ENTRY").upper()
-    if intent not in {"ENTRY", "UNKNOWN", ""}:
-        return False
-    product = str(getattr(plan, "product", "") or "").upper()
-    if product and str(order.get("product") or "").upper() not in {"", product}:
-        return False
-    return True
 
 
 def _annotate(result: Any, decision: RecoveryDecision, **extra: Any) -> Any:
@@ -753,65 +703,41 @@ def _is_entry_order(order: Any) -> bool:
     )
 
 
-def _broker_position_quantity(manager: Any, symbol: str) -> int | None:
-    positions = _broker_positions(manager)
-    if positions is None:
+def quantity_to_exact_lots(quantity: int, lot_size: int) -> int | None:
+    """Return exact lot count, or None when quantity is not lot-valid."""
+    if quantity < 0 or lot_size <= 0:
         return None
-    wanted = _symbol_key(symbol)
-    for position in positions:
-        if (
-            _symbol_key(position.get("tradingsymbol") or position.get("symbol"))
-            != wanted
-        ):
-            continue
-        try:
-            return abs(
-                int(
-                    float(
-                        position.get("quantity", position.get("net_quantity", 0)) or 0
-                    )
-                )
-            )
-        except (TypeError, ValueError):
-            return None
-    return 0
+    if quantity % lot_size != 0:
+        return None
+    return quantity // lot_size
 
 
-def _order_lot_size(manager: Any, order: Any) -> int:
-    lot = int(getattr(order, "resolved_lot_size", 0) or 0)
-    if lot > 0:
-        return lot
-    state = getattr(order, "entry_lifecycle_state", None)
-    if isinstance(state, Mapping):
-        lot = int(state.get("resolved_lot_size") or 0)
-        if lot > 0:
-            return lot
-    return _lot_size(manager, str(getattr(order, "symbol", "")))
+def lots_to_quantity(lots: int, lot_size: int) -> int:
+    """Convert lots to broker quantity without implicit coercion."""
+    if lots < 0 or lot_size <= 0:
+        raise ValueError("invalid_lot_conversion")
+    return lots * lot_size
 
 
-def _requested_lots(order: Any, lot_size: int) -> int:
-    lots = int(getattr(order, "requested_lots", 0) or 0)
-    if lots > 0:
-        return lots
-    qty = int(getattr(order, "quantity", 0) or 0)
-    exact = quantity_to_exact_lots(qty, lot_size)
-    return int(exact or 0)
-
-
-def _partial_state(order: Any, *, lot_size: int, requested_lots: int) -> dict[str, Any]:
+def _partial_state(order: Any) -> dict[str, Any]:
     state = getattr(order, "entry_lifecycle_state", None)
     if not isinstance(state, dict):
-        requested_quantity = lots_to_quantity(requested_lots, lot_size)
+        requested_quantity = int(getattr(order, "quantity", 0) or 0)
+        lot_size = int(getattr(order, "resolved_lot_size", 0) or 0)
+        requested_lots = int(getattr(order, "requested_lots", 0) or 0)
+        if requested_lots <= 0 and lot_size > 0:
+            exact = quantity_to_exact_lots(requested_quantity, lot_size)
+            requested_lots = exact or 0
         state = {
-            "state": "ENTRY_SUBMITTED",
+            "state": "ENTRY_OPEN",
             "requested_lots": requested_lots,
             "resolved_lot_size": lot_size,
             "requested_quantity": requested_quantity,
             "broker_filled_lots": 0,
-            "broker_pending_lots": requested_lots,
+            "broker_pending_lots": 0,
             "broker_cancelled_lots": 0,
             "broker_filled_quantity": 0,
-            "broker_pending_quantity": requested_quantity,
+            "broker_pending_quantity": 0,
             "broker_cancelled_quantity": 0,
             "protected_lots": 0,
             "protected_quantity": 0,
@@ -823,9 +749,6 @@ def _partial_state(order: Any, *, lot_size: int, requested_lots: int) -> dict[st
             "last_error": None,
         }
         setattr(order, "entry_lifecycle_state", state)
-    state.setdefault("requested_lots", requested_lots)
-    state.setdefault("resolved_lot_size", lot_size)
-    state.setdefault("requested_quantity", lots_to_quantity(requested_lots, lot_size))
     return state
 
 
@@ -833,47 +756,92 @@ def _payload_int(payload: Mapping[str, Any], *keys: str, default: int = 0) -> in
     for key in keys:
         if key not in payload:
             continue
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
         try:
-            return int(float(payload.get(key) or 0))
+            return int(float(str(value)))
         except (TypeError, ValueError):
             continue
-    return default
+    return int(default)
+
+
+def _broker_position_quantity(manager: Any, symbol: str) -> int | None:
+    positions = _broker_positions(manager)
+    if positions is None:
+        return None
+    wanted = _symbol_key(symbol)
+    for position in positions:
+        if (
+            _symbol_key(position.get("tradingsymbol") or position.get("symbol"))
+            != wanted
+        ):
+            continue
+        value = position.get("quantity", position.get("net_quantity"))
+        if value in (None, ""):
+            return None
+        try:
+            return abs(int(float(value)))
+        except (TypeError, ValueError):
+            return None
+    return 0
+
+
+def _protection_verified(
+    result: Any, expected_lots: int, expected_quantity: int
+) -> bool:
+    if result is True:
+        return True
+    if result is None or result is False:
+        return False
+    accepted = bool(getattr(result, "accepted", False))
+    protected_lots = getattr(result, "protected_lots", expected_lots)
+    protected_quantity = getattr(result, "protected_quantity", expected_quantity)
+    persisted = getattr(result, "persisted", True)
+    try:
+        return bool(
+            accepted
+            and int(protected_lots) == expected_lots
+            and int(protected_quantity) == expected_quantity
+            and persisted
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _latch_entry_blocker(
     manager: Any,
+    order: Any,
     reason: str,
     *,
-    order: Any,
-    state: dict[str, Any],
+    state: Mapping[str, Any],
     broker_attempted: bool = True,
-    **details: Any,
 ) -> None:
-    payload = {
-        "block_reason": reason,
+    details = {
         "broker_attempted": broker_attempted,
         "retryable": False,
         "trade_lifecycle_id": getattr(order, "trade_lifecycle_id", None),
-        "client_order_id": getattr(order, "client_order_id", None),
         "symbol": getattr(order, "symbol", None),
         "order_id": getattr(order, "order_id", None),
         "bracket_id": getattr(order, "bracket_id", None),
+        "requested_quantity": state.get("requested_quantity"),
         "requested_lots": state.get("requested_lots"),
         "resolved_lot_size": state.get("resolved_lot_size"),
-        "requested_quantity": state.get("requested_quantity"),
         "filled_quantity": state.get("broker_filled_quantity"),
+        "filled_lots": state.get("broker_filled_lots"),
         "protected_quantity": state.get("protected_quantity"),
+        "protected_lots": state.get("protected_lots"),
         "broker_position_quantity": state.get("broker_position_quantity"),
-        **details,
+        "broker_position_lots": state.get("broker_position_lots"),
+        "entry_lifecycle_state": state.get("state"),
     }
-    setattr(manager, "_last_order_decision", payload)
-    setattr(manager, "_entry_lifecycle_blocker", payload)
-    setter = getattr(manager, "set_last_skip_reason", None)
-    if callable(setter):
-        try:
-            setter(reason)
-        except Exception:
-            pass
+    blocker = {
+        "block_reason": reason,
+        "broker_attempted": broker_attempted,
+        "details": details,
+    }
+    setattr(manager, "_entry_lifecycle_blocker", blocker)
+    setattr(manager, "_last_order_decision", blocker)
 
 
 def current_entry_blocker(manager: Any) -> Mapping[str, Any] | None:
@@ -881,134 +849,142 @@ def current_entry_blocker(manager: Any) -> Mapping[str, Any] | None:
     return blocker if isinstance(blocker, Mapping) else None
 
 
+def _resolve_order_lot_size(manager: Any, order: Any, state: Mapping[str, Any]) -> int:
+    lot_size = int(
+        getattr(order, "resolved_lot_size", 0) or state.get("resolved_lot_size") or 0
+    )
+    if lot_size > 0:
+        return lot_size
+    symbol = str(getattr(order, "symbol", "") or "")
+    if symbol:
+        resolved = _lot_size(manager, symbol)
+        if resolved > 0:
+            return resolved
+    raise ValueError("lot_size_unresolved")
+
+
 def _finalize_partial_entry(
     manager: Any, order: Any, payload: Mapping[str, Any]
 ) -> None:
-    status = (
-        str(
-            payload.get("status")
-            or getattr(
-                getattr(order, "status", None), "name", getattr(order, "status", "")
-            )
-        )
-        .upper()
-        .replace(" ", "_")
+    if not _is_entry_order(order):
+        return
+    raw_status = payload.get("status") or getattr(
+        getattr(order, "status", None), "name", getattr(order, "status", "")
     )
-    if status not in {
+    status = str(raw_status or "").strip().upper().replace("_", " ")
+    handled = {
         "OPEN",
+        "PARTIALLY FILLED",
         "PARTIALLY_FILLED",
-        "CANCEL_PENDING",
+        "CANCEL PENDING",
         "CANCELLED",
         "CANCELED",
         "COMPLETE",
         "FILLED",
         "REJECTED",
         "EXPIRED",
-    }:
-        return
-    if not _is_entry_order(order):
+    }
+    if status not in handled:
         return
     order_id = str(getattr(order, "order_id", "") or "")
     if not order_id:
         return
 
-    try:
-        lot_size = _order_lot_size(manager, order)
-    except Exception as exc:  # noqa: BLE001
-        setattr(
-            manager,
-            "_last_order_decision",
-            {
-                "block_reason": "lot_size_unresolved",
-                "broker_attempted": True,
-                "details": {"order_id": order_id, "error_type": type(exc).__name__},
-            },
-        )
-        return
-    requested_lots = _requested_lots(order, lot_size)
-    if requested_lots <= 0:
-        return
-    state = _partial_state(order, lot_size=lot_size, requested_lots=requested_lots)
+    state = _partial_state(order)
     now = time.time()
     state["last_reconcile_at"] = now
+    try:
+        lot_size = _resolve_order_lot_size(manager, order, state)
+    except ValueError:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "lot_size_unresolved"
+        _latch_entry_blocker(manager, order, "lot_size_unresolved", state=state)
+        return
 
+    requested_quantity = int(
+        state.get("requested_quantity") or getattr(order, "quantity", 0) or 0
+    )
+    requested_lots = int(
+        getattr(order, "requested_lots", 0) or state.get("requested_lots") or 0
+    )
+    if requested_lots <= 0:
+        exact_requested = quantity_to_exact_lots(requested_quantity, lot_size)
+        if exact_requested is None:
+            state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+            state["last_error"] = "invalid_entry_lot_quantity"
+            _latch_entry_blocker(
+                manager, order, "invalid_entry_lot_quantity", state=state
+            )
+            return
+        requested_lots = exact_requested
     requested_quantity = lots_to_quantity(requested_lots, lot_size)
-    broker_filled_qty = _payload_int(
+    state.update(
+        {
+            "requested_lots": requested_lots,
+            "resolved_lot_size": lot_size,
+            "requested_quantity": requested_quantity,
+        }
+    )
+
+    broker_filled = _payload_int(
         payload,
         "filled_quantity",
         "filled",
         default=int(getattr(order, "filled_quantity", 0) or 0),
     )
-    broker_pending_qty = _payload_int(
+    broker_pending = _payload_int(
         payload,
         "pending_quantity",
         "pending",
-        default=max(requested_quantity - broker_filled_qty, 0),
+        default=max(requested_quantity - broker_filled, 0),
     )
-    broker_cancelled_qty = _payload_int(
-        payload, "cancelled_quantity", "cancelled", default=0
+    broker_cancelled = _payload_int(
+        payload,
+        "cancelled_quantity",
+        "cancelled",
+        default=int(state.get("broker_cancelled_quantity") or 0),
     )
-
-    filled_lots = quantity_to_exact_lots(broker_filled_qty, lot_size)
-    pending_lots = quantity_to_exact_lots(broker_pending_qty, lot_size)
-    cancelled_lots = quantity_to_exact_lots(broker_cancelled_qty, lot_size)
-    if filled_lots is None or pending_lots is None or cancelled_lots is None:
-        state.update(
-            {
-                "state": "ENTRY_RECONCILIATION_UNKNOWN",
-                "broker_filled_quantity": broker_filled_qty,
-                "broker_pending_quantity": broker_pending_qty,
-                "broker_cancelled_quantity": broker_cancelled_qty,
-                "last_error": "broker_quantity_lot_invariant_violation",
-            }
-        )
-        _latch_entry_blocker(
-            manager, "broker_quantity_lot_invariant_violation", order=order, state=state
-        )
-        _log(
-            manager,
-            "critical",
-            "BROKER_QUANTITY_LOT_INVARIANT_VIOLATION "
-            "order_id=%s symbol=%s filled=%s pending=%s cancelled=%s lot_size=%s",
-            order_id,
-            getattr(order, "symbol", ""),
-            broker_filled_qty,
-            broker_pending_qty,
-            broker_cancelled_qty,
-            lot_size,
-            event="BROKER_QUANTITY_LOT_INVARIANT_VIOLATION",
-        )
-        return
+    filled_lots = quantity_to_exact_lots(broker_filled, lot_size)
+    pending_lots = quantity_to_exact_lots(broker_pending, lot_size)
+    cancelled_lots = quantity_to_exact_lots(broker_cancelled, lot_size)
     if (
-        filled_lots > requested_lots
-        or pending_lots > requested_lots
-        or cancelled_lots > requested_lots
+        filled_lots is None
+        or pending_lots is None
+        or cancelled_lots is None
+        or filled_lots > requested_lots
     ):
         state.update(
             {
                 "state": "ENTRY_RECONCILIATION_UNKNOWN",
-                "broker_filled_quantity": broker_filled_qty,
-                "broker_pending_quantity": broker_pending_qty,
-                "broker_cancelled_quantity": broker_cancelled_qty,
+                "broker_filled_quantity": broker_filled,
+                "broker_pending_quantity": broker_pending,
+                "broker_cancelled_quantity": broker_cancelled,
                 "last_error": "broker_quantity_lot_invariant_violation",
             }
         )
         _latch_entry_blocker(
-            manager, "broker_quantity_lot_invariant_violation", order=order, state=state
+            manager, order, "broker_quantity_lot_invariant_violation", state=state
+        )
+        _log(
+            manager,
+            "critical",
+            "BROKER_QUANTITY_LOT_INVARIANT_VIOLATION order_id=%s symbol=%s filled=%s pending=%s cancelled=%s lot_size=%s",
+            order_id,
+            getattr(order, "symbol", ""),
+            broker_filled,
+            broker_pending,
+            broker_cancelled,
+            lot_size,
+            event="BROKER_QUANTITY_LOT_INVARIANT_VIOLATION",
         )
         return
 
-    previous_filled_lots = int(state.get("broker_filled_lots") or 0)
-    if filled_lots < previous_filled_lots:
+    previous_lots = int(state.get("broker_filled_lots") or 0)
+    if filled_lots < previous_lots:
         state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
         state["last_error"] = "entry_fill_quantity_regressed"
         _latch_entry_blocker(
-            manager,
-            "entry_fill_quantity_regressed",
-            order=order,
-            state=state,
-            actual_value=filled_lots,
-            required_value=previous_filled_lots,
+            manager, order, "entry_fill_quantity_regressed", state=state
         )
         return
 
@@ -1017,104 +993,89 @@ def _finalize_partial_entry(
             "broker_filled_lots": filled_lots,
             "broker_pending_lots": pending_lots,
             "broker_cancelled_lots": cancelled_lots,
-            "broker_filled_quantity": broker_filled_qty,
-            "broker_pending_quantity": broker_pending_qty,
-            "broker_cancelled_quantity": broker_cancelled_qty,
+            "broker_filled_quantity": broker_filled,
+            "broker_pending_quantity": broker_pending,
+            "broker_cancelled_quantity": broker_cancelled,
         }
     )
 
+    terminal = status in {
+        "COMPLETE",
+        "FILLED",
+        "CANCELLED",
+        "CANCELED",
+        "REJECTED",
+        "EXPIRED",
+    }
     if filled_lots == 0:
         if status in {"CANCELLED", "CANCELED"}:
             state["state"] = "ENTRY_CANCELLED"
             state["terminal_confirmed_at"] = now
-            if getattr(manager, "_entry_lifecycle_blocker", None):
-                setattr(manager, "_entry_lifecycle_blocker", None)
+            setattr(manager, "_entry_lifecycle_blocker", None)
         elif status in {"REJECTED", "EXPIRED"}:
             state["state"] = "ENTRY_REJECTED"
             state["terminal_confirmed_at"] = now
-        elif status in {"CANCEL_PENDING"}:
+            setattr(manager, "_entry_lifecycle_blocker", None)
+        elif status == "CANCEL PENDING":
             state["state"] = "ENTRY_CANCEL_PENDING"
+            _latch_entry_blocker(
+                manager, order, "entry_reconciliation_pending", state=state
+            )
         else:
             state["state"] = "ENTRY_OPEN"
         return
 
-    broker_position_qty = _broker_position_quantity(
+    broker_position = _broker_position_quantity(
         manager, str(getattr(order, "symbol", ""))
     )
-    state["broker_position_quantity"] = broker_position_qty
-    broker_position_lots = (
-        None
-        if broker_position_qty is None
-        else quantity_to_exact_lots(broker_position_qty, lot_size)
-    )
-    state["broker_position_lots"] = broker_position_lots
-    if broker_position_qty is None:
+    state["broker_position_quantity"] = broker_position
+    if broker_position is None:
         state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
         state["last_error"] = "broker_position_unknown_with_possible_exposure"
         _latch_entry_blocker(
             manager,
+            order,
             "broker_position_unknown_with_possible_exposure",
-            order=order,
             state=state,
         )
         return
+    broker_position_lots = quantity_to_exact_lots(broker_position, lot_size)
     if broker_position_lots is None:
         state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
         state["last_error"] = "broker_quantity_lot_invariant_violation"
         _latch_entry_blocker(
-            manager, "broker_quantity_lot_invariant_violation", order=order, state=state
+            manager, order, "broker_quantity_lot_invariant_violation", state=state
         )
         return
+    state["broker_position_lots"] = broker_position_lots
     if broker_position_lots != filled_lots:
         state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
         state["last_error"] = "entry_reconciliation_pending"
         _latch_entry_blocker(
-            manager, "entry_reconciliation_pending", order=order, state=state
+            manager, order, "entry_reconciliation_pending", state=state
         )
         return
 
     if (
-        status in {"PARTIALLY_FILLED", "OPEN"}
+        requested_lots > 1
+        and 0 < filled_lots < requested_lots
         and pending_lots > 0
-        and filled_lots < requested_lots
+        and not state.get("cancel_requested_at")
     ):
-        state["state"] = "ENTRY_PARTIALLY_FILLED"
-        if requested_lots > 1 and not state.get("cancel_requested_at"):
-            cancel = getattr(getattr(manager, "_broker", None), "cancel_order", None)
-            if callable(cancel):
-                try:
-                    cancel(order_id)
-                    state["cancel_requested_at"] = now
-                    state["state"] = "ENTRY_CANCEL_PENDING"
-                except TypeError:
-                    try:
-                        cancel(order_id=order_id)
-                        state["cancel_requested_at"] = now
-                        state["state"] = "ENTRY_CANCEL_PENDING"
-                    except Exception as exc:  # noqa: BLE001
-                        state["last_error"] = (
-                            f"entry_cancel_failed:{type(exc).__name__}"
-                        )
-                        _latch_entry_blocker(
-                            manager, "entry_cancel_failed", order=order, state=state
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    state["last_error"] = f"entry_cancel_failed:{type(exc).__name__}"
-                    _latch_entry_blocker(
-                        manager, "entry_cancel_failed", order=order, state=state
-                    )
+        cancel = getattr(getattr(manager, "_broker", None), "cancel_order", None)
+        if callable(cancel):
+            try:
+                cancel(order_id)
+            except TypeError:
+                cancel(order_id=order_id)
+            except Exception as exc:  # noqa: BLE001
+                state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+                state["last_error"] = f"entry_cancel_failed:{type(exc).__name__}"
+                _latch_entry_blocker(manager, order, "entry_cancel_failed", state=state)
+                return
+            state["cancel_requested_at"] = now
+            state["state"] = "ENTRY_CANCEL_PENDING"
 
-    confirmer = getattr(
-        getattr(manager, "_bracket_manager", None), "confirm_partial_entry_fill", None
-    )
-    if not callable(confirmer):
-        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
-        state["last_error"] = "entry_protection_failed"
-        _latch_entry_blocker(
-            manager, "entry_protection_failed", order=order, state=state
-        )
-        return
-    protected_qty = lots_to_quantity(filled_lots, lot_size)
     try:
         average = float(
             payload.get("average_price")
@@ -1125,54 +1086,82 @@ def _finalize_partial_entry(
         )
     except (TypeError, ValueError):
         average = 0.0
-    result = confirmer(order_id, protected_qty, average)
-    accepted = bool(getattr(result, "accepted", result is True))
-    if not accepted:
+    if average <= 0:
         state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
-        state["last_error"] = "entry_protection_failed"
+        state["last_error"] = "entry_reconciliation_pending"
         _latch_entry_blocker(
-            manager, "entry_protection_failed", order=order, state=state
-        )
-        _log(
-            manager,
-            "critical",
-            "ENTRY_PROTECTION_FAILED order_id=%s symbol=%s filled_lots=%s",
-            order_id,
-            getattr(order, "symbol", ""),
-            filled_lots,
-            event="ENTRY_PROTECTION_FAILED",
+            manager, order, "entry_reconciliation_pending", state=state
         )
         return
-    state["protected_lots"] = filled_lots
-    state["protected_quantity"] = protected_qty
-    if filled_lots == requested_lots and status in {"COMPLETE", "FILLED"}:
-        state["state"] = "ENTRY_PROTECTED"
+
+    desired_quantity = lots_to_quantity(filled_lots, lot_size)
+    if int(state.get("protected_lots") or 0) > filled_lots:
+        state["state"] = "ENTRY_PROTECTION_FAILED"
+        state["last_error"] = "entry_protection_failed"
+        _latch_entry_blocker(manager, order, "entry_protection_failed", state=state)
+        return
+
+    confirmer = getattr(
+        getattr(manager, "_bracket_manager", None), "confirm_partial_entry_fill", None
+    )
+    if not callable(confirmer):
+        state["state"] = "ENTRY_PROTECTION_FAILED"
+        state["last_error"] = "entry_protection_failed"
+        _latch_entry_blocker(manager, order, "entry_protection_failed", state=state)
+        return
+    if int(state.get("protected_lots") or 0) < filled_lots:
+        result = confirmer(order_id, desired_quantity, average)
+        if not _protection_verified(result, filled_lots, desired_quantity):
+            state["state"] = "ENTRY_PROTECTION_FAILED"
+            state["last_error"] = "entry_protection_failed"
+            _latch_entry_blocker(manager, order, "entry_protection_failed", state=state)
+            _log(
+                manager,
+                "critical",
+                "ENTRY_PROTECTION_FAILED order_id=%s symbol=%s filled_lots=%s quantity=%s",
+                order_id,
+                getattr(order, "symbol", ""),
+                filled_lots,
+                desired_quantity,
+                event="ENTRY_PROTECTION_FAILED",
+            )
+            return
+        state["protected_lots"] = filled_lots
+        state["protected_quantity"] = desired_quantity
+
+    if terminal:
         state["terminal_confirmed_at"] = now
+    state["state"] = (
+        "ENTRY_PROTECTED"
+        if filled_lots == requested_lots
+        else "ENTRY_PROTECTION_PENDING"
+    )
+    if terminal and state["protected_lots"] == broker_position_lots:
         setattr(manager, "_entry_lifecycle_blocker", None)
-        setattr(
-            manager,
-            "_last_order_decision",
-            {
-                "block_reason": "ENTRY_FULL_LOT_PROTECTED",
-                "broker_attempted": True,
-                "details": dict(state),
-            },
-        )
-        _log(
-            manager,
-            "critical",
-            "ENTRY_FULL_LOT_PROTECTED order_id=%s symbol=%s filled_lots=%s quantity=%s",
-            order_id,
-            getattr(order, "symbol", ""),
-            filled_lots,
-            protected_qty,
-            event="ENTRY_FULL_LOT_PROTECTED",
+        reason = (
+            "entry_full_lot_protected"
+            if filled_lots == requested_lots
+            else "entry_whole_lot_partial_protected"
         )
     else:
-        state["state"] = "ENTRY_PROTECTED"
-        _latch_entry_blocker(
-            manager, "entry_reconciliation_pending", order=order, state=state
-        )
+        reason = "entry_reconciliation_pending"
+        _latch_entry_blocker(manager, order, reason, state=state)
+    setattr(
+        manager,
+        "_last_order_decision",
+        {"block_reason": reason, "broker_attempted": True, "details": dict(state)},
+    )
+    _log(
+        manager,
+        "critical",
+        "ENTRY_LOT_PROTECTION_UPDATED order_id=%s symbol=%s filled_lots=%s protected_lots=%s state=%s",
+        order_id,
+        getattr(order, "symbol", ""),
+        filled_lots,
+        state.get("protected_lots"),
+        state.get("state"),
+        event="ENTRY_LOT_PROTECTION_UPDATED",
+    )
 
 
 def install_entry_recovery(order_manager_class: type[Any]) -> None:
@@ -1230,7 +1219,7 @@ __all__ = [
     "install_entry_recovery",
     "_recover_submit",
     "_finalize_partial_entry",
+    "current_entry_blocker",
     "quantity_to_exact_lots",
     "lots_to_quantity",
-    "current_entry_blocker",
 ]
