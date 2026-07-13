@@ -16,7 +16,6 @@ from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import bracket_manager as _legacy
 
-
 _LegacyBracketManager = _legacy.BracketManager
 
 
@@ -234,14 +233,19 @@ class HardenedBracketManager(_LegacyBracketManager):
                 return False
             current = float(target.sl_trigger_price)
             ltp = float(target.last_ltp or 0.0)
-            if target.side == "BUY":
+            allowed = getattr(self, "_is_trail_candidate_allowed", None)
+            if callable(allowed):
+                if not bool(allowed(target, proposed, ltp)):
+                    return False
+            elif target.side == "BUY":
                 if proposed <= current or (ltp > 0 and proposed >= ltp):
                     return False
-            else:
-                if proposed >= current or (ltp > 0 and proposed <= ltp):
-                    return False
+            elif proposed >= current or (ltp > 0 and proposed <= ltp):
+                return False
             target.sl_trigger_price = proposed
             target.updated_at = time.time()
+            target.last_trail_price = ltp or None
+            target.trail_revision = int(getattr(target, "trail_revision", 0) or 0) + 1
 
         with suppress(Exception):
             self.save_state()
@@ -264,7 +268,11 @@ class HardenedBracketManager(_LegacyBracketManager):
         try:
             notify = getattr(self, "_should_notify_trail", None)
             emit = getattr(self, "_notify_event", None)
-            if callable(notify) and callable(emit) and notify(target.bracket_id, proposed, current):
+            if (
+                callable(notify)
+                and callable(emit)
+                and notify(target.bracket_id, proposed, current)
+            ):
                 emit(
                     "TRAILING_SL_UPDATED",
                     {
@@ -406,7 +414,11 @@ class HardenedBracketManager(_LegacyBracketManager):
         )
 
         cancel_requested = self._cancel_exit_order(order_id)
-        terminal = self._wait_for_cancel_or_fill(order_id) if cancel_requested else "unconfirmed"
+        terminal = (
+            self._wait_for_cancel_or_fill(order_id)
+            if cancel_requested
+            else "unconfirmed"
+        )
         if terminal == "filled" or self._safe_position_flat(bracket.symbol):
             with self._lock:
                 bracket.exit_in_progress = False
@@ -500,8 +512,8 @@ class HardenedBracketManager(_LegacyBracketManager):
                     _legacy.BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
                 )
                 bracket.entry_status = bracket.exit_state
-                bracket.next_exit_attempt_at = time.time() + self._retry_delay_for_attempt(
-                    max(attempt, 1)
+                bracket.next_exit_attempt_at = (
+                    time.time() + self._retry_delay_for_attempt(max(attempt, 1))
                 )
             else:
                 self._escalate_exit_locked(bracket, "rescue_submit_failed")
@@ -539,7 +551,9 @@ class HardenedBracketManager(_LegacyBracketManager):
             extra={
                 "event": "EXIT_CANCEL_REQUEST_FAILED",
                 "order_id": order_id,
-                "error_type": type(last_error).__name__ if last_error else "missing_cancel_api",
+                "error_type": (
+                    type(last_error).__name__ if last_error else "missing_cancel_api"
+                ),
             },
         )
         return False
@@ -573,9 +587,14 @@ class HardenedBracketManager(_LegacyBracketManager):
             return False
 
     def _escalate_exit_locked(self, bracket: Any, reason: str) -> None:
-        order_key = str(bracket.exit_order_id or bracket.pending_exit_order_id or "none")
+        order_key = str(
+            bracket.exit_order_id or bracket.pending_exit_order_id or "none"
+        )
         key = (str(bracket.bracket_id), order_key)
-        if bracket.escalated_at is not None or key in self._exit_escalation_notifications:
+        if (
+            bracket.escalated_at is not None
+            or key in self._exit_escalation_notifications
+        ):
             bracket.exit_pending = True
             bracket.exit_state = (
                 _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value

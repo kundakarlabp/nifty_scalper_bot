@@ -22,7 +22,6 @@ from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 from nifty_scalper_bot.utils.errors import BrokerError
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 
-
 SYMBOL = "NFO:NIFTY2662324050PE"
 
 
@@ -52,7 +51,9 @@ def test_none_broker_snapshot_fails_closed_and_preserves_position(tmp_path) -> N
     assert manager.get_position(SYMBOL) is not None
 
 
-def test_malformed_broker_snapshot_fails_closed_and_preserves_position(tmp_path) -> None:
+def test_malformed_broker_snapshot_fails_closed_and_preserves_position(
+    tmp_path,
+) -> None:
     manager = _position_manager(tmp_path)
     manager.set_broker_client(
         SimpleNamespace(
@@ -83,7 +84,9 @@ def test_explicit_empty_snapshot_is_authoritative_flat(tmp_path) -> None:
     assert flattened == [[SYMBOL]]
 
 
-def test_broker_realised_field_updates_daily_realised_without_using_total_pnl(tmp_path) -> None:
+def test_broker_realised_field_updates_daily_realised_without_using_total_pnl(
+    tmp_path,
+) -> None:
     manager = _position_manager(tmp_path)
     manager.establish_pnl_session_baseline(-100.0)
     manager.synchronize_with_broker(
@@ -101,7 +104,9 @@ def test_broker_realised_field_updates_daily_realised_without_using_total_pnl(tm
     assert manager.get_realized_pnl() == pytest.approx(-25.5)
 
 
-def test_update_from_order_uses_fill_price_and_existing_fill_lifecycle(tmp_path) -> None:
+def test_update_from_order_uses_fill_price_and_existing_fill_lifecycle(
+    tmp_path,
+) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     order = Order(
         order_id="entry-1",
@@ -200,7 +205,10 @@ def test_explicit_short_entry_still_opens_short(tmp_path) -> None:
     assert position is not None
     assert position.side == "SHORT"
     assert position.quantity == 65
-    assert manager.current_entry_protection_blocker(SYMBOL) == "entry_protection_incomplete"
+    assert (
+        manager.current_entry_protection_blocker(SYMBOL)
+        == "entry_protection_incomplete"
+    )
     manager.confirm_entry_protection("short-entry", "short-bracket", 65)
     assert manager.current_entry_protection_blocker(SYMBOL) is None
 
@@ -278,7 +286,9 @@ def test_confirmed_incident_delayed_entry_after_exit_stays_flat(tmp_path) -> Non
 
 def test_partial_fills_apply_only_cumulative_delta(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
-    manager.add_pending_order("partial-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+    manager.add_pending_order(
+        "partial-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY"
+    )
 
     manager.apply_broker_order_update(
         "partial-entry",
@@ -321,7 +331,9 @@ def test_partial_exit_fill_reduces_only_cumulative_delta(tmp_path) -> None:
     assert manager.get_realized_pnl() == pytest.approx((99.0 - 100.0) * 65)
 
 
-def test_simultaneous_duplicate_complete_update_is_single_lifecycle_mutation(tmp_path) -> None:
+def test_simultaneous_duplicate_complete_update_is_single_lifecycle_mutation(
+    tmp_path,
+) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.add_pending_order(
         "duplicate-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY"
@@ -369,7 +381,9 @@ def test_unresolved_terminal_exit_is_retained_for_reconciliation(tmp_path) -> No
 
 def test_variable_average_partial_entry_uses_incremental_notional(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
-    manager.add_pending_order("avg-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+    manager.add_pending_order(
+        "avg-entry", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY"
+    )
 
     manager.apply_broker_order_update(
         "avg-entry",
@@ -407,21 +421,29 @@ def test_variable_average_partial_exit_uses_incremental_notional(tmp_path) -> No
     assert manager.get_realized_pnl() == pytest.approx((98.0 - 100.0) * 65)
 
 
-def test_new_entry_same_symbol_after_previous_trade_uses_distinct_lifecycle(tmp_path) -> None:
+def test_new_entry_same_symbol_after_previous_trade_uses_distinct_lifecycle(
+    tmp_path,
+) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
-    manager.add_pending_order("entry-a", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+    manager.add_pending_order(
+        "entry-a", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY"
+    )
     manager.apply_broker_order_update(
         "entry-a",
         {"status": "COMPLETE", "filled_quantity": 65, "average_price": 100.0},
     )
-    manager.add_pending_order("exit-a", SYMBOL, "SELL", 65, 101.0, "MARKET", intent="EXIT")
+    manager.add_pending_order(
+        "exit-a", SYMBOL, "SELL", 65, 101.0, "MARKET", intent="EXIT"
+    )
     manager.apply_broker_order_update(
         "exit-a",
         {"status": "COMPLETE", "filled_quantity": 65, "average_price": 101.0},
     )
     assert manager.get_position(SYMBOL) is None
 
-    manager.add_pending_order("entry-b", SYMBOL, "BUY", 65, 102.0, "MARKET", intent="ENTRY")
+    manager.add_pending_order(
+        "entry-b", SYMBOL, "BUY", 65, 102.0, "MARKET", intent="ENTRY"
+    )
     manager.apply_broker_order_update(
         "entry-b",
         {"status": "COMPLETE", "filled_quantity": 65, "average_price": 102.0},
@@ -432,7 +454,10 @@ def test_new_entry_same_symbol_after_previous_trade_uses_distinct_lifecycle(tmp_
     assert position.order_id == "entry-b"
     assert position.quantity == 65
     assert manager._orders.get("entry-b") is not None
-    assert manager._terminal_orders["entry-a"].trade_lifecycle_id != manager._terminal_orders["entry-b"].trade_lifecycle_id
+    assert (
+        manager._terminal_orders["entry-a"].trade_lifecycle_id
+        != manager._terminal_orders["entry-b"].trade_lifecycle_id
+    )
 
 
 def test_status_regression_after_filled_is_noop(tmp_path) -> None:
@@ -456,10 +481,13 @@ def test_status_regression_after_filled_is_noop(tmp_path) -> None:
     assert manager._terminal_orders["regression-entry"].normalized_status == "FILLED"
 
 
-
-def test_duplicate_and_invalid_cumulative_updates_do_not_mutate_position(tmp_path) -> None:
+def test_duplicate_and_invalid_cumulative_updates_do_not_mutate_position(
+    tmp_path,
+) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
-    manager.add_pending_order("bad-partial", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY")
+    manager.add_pending_order(
+        "bad-partial", SYMBOL, "BUY", 65, 100.0, "MARKET", intent="ENTRY"
+    )
     manager.apply_broker_order_update(
         "bad-partial",
         {"status": "PARTIALLY FILLED", "filled_quantity": 25, "average_price": 100.0},
@@ -486,7 +514,9 @@ def test_duplicate_and_invalid_cumulative_updates_do_not_mutate_position(tmp_pat
 def test_resolved_terminal_eviction_preserves_unresolved_records(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager._max_terminal_orders = 1
-    manager.add_pending_order("unresolved", SYMBOL, "SELL", 65, 99.0, "MARKET", intent="EXIT")
+    manager.add_pending_order(
+        "unresolved", SYMBOL, "SELL", 65, 99.0, "MARKET", intent="EXIT"
+    )
     manager.apply_broker_order_update(
         "unresolved",
         {"status": "COMPLETE", "filled_quantity": 65, "average_price": 99.0},
@@ -516,7 +546,9 @@ def test_pnl_reconciliation_mismatch_exposes_entry_blocker(tmp_path) -> None:
     assert manager.current_pnl_reconciliation_blocker() == "pnl_reconciliation_mismatch"
 
 
-def test_entry_bracket_id_alone_does_not_resolve_without_protection_ack(tmp_path) -> None:
+def test_entry_bracket_id_alone_does_not_resolve_without_protection_ack(
+    tmp_path,
+) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.add_pending_order(
         "entry-protect",
@@ -538,7 +570,10 @@ def test_entry_bracket_id_alone_does_not_resolve_without_protection_ack(tmp_path
     assert metadata.bracket_applied is False
     assert metadata.lifecycle_resolved is False
     assert metadata.protection_confirmed is False
-    assert manager.current_entry_protection_blocker(SYMBOL) == "entry_protection_incomplete"
+    assert (
+        manager.current_entry_protection_blocker(SYMBOL)
+        == "entry_protection_incomplete"
+    )
 
     with pytest.raises(ValueError):
         manager.confirm_entry_protection("entry-protect", "metadata-only", 25)
@@ -587,6 +622,7 @@ def test_session_pnl_baseline_survives_restart_and_resets_by_ist_day(tmp_path) -
         "session_opening_realized_baseline"
     ] == pytest.approx(-1200.0)
 
+
 def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     manager = BracketManager(order_manager=SimpleNamespace())
@@ -607,7 +643,9 @@ def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> N
     assert manager.get_bracket("exit-order") is None
 
 
-def test_exit_tag_text_is_not_authoritative_for_entry_bracket(tmp_path, monkeypatch) -> None:
+def test_exit_tag_text_is_not_authoritative_for_entry_bracket(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     manager = BracketManager(order_manager=SimpleNamespace())
     _stop(manager)
@@ -636,7 +674,9 @@ def _stop(manager: BracketManager) -> None:
     manager._watchdog_thread.join(timeout=1.0)
 
 
-def test_direct_long_bracket_registration_normalizes_and_triggers_sl(tmp_path, monkeypatch) -> None:
+def test_direct_long_bracket_registration_normalizes_and_triggers_sl(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     manager = BracketManager(order_manager=SimpleNamespace())
     _stop(manager)
@@ -658,7 +698,9 @@ def test_direct_long_bracket_registration_normalizes_and_triggers_sl(tmp_path, m
     assert action["type"] == "SL"
 
 
-def test_bracket_state_is_written_and_restored_with_ledger_recovery_fields(tmp_path, monkeypatch) -> None:
+def test_bracket_state_is_written_and_restored_with_ledger_recovery_fields(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     manager = BracketManager(order_manager=SimpleNamespace())
     _stop(manager)
@@ -689,7 +731,9 @@ def test_bracket_state_is_written_and_restored_with_ledger_recovery_fields(tmp_p
     assert restored_bracket._ledger_pending_exit_price == pytest.approx(89.5)
 
 
-def test_confirmed_fill_remains_active_when_snapshot_persistence_fails(tmp_path, monkeypatch) -> None:
+def test_confirmed_fill_remains_active_when_snapshot_persistence_fails(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     manager = BracketManager(order_manager=SimpleNamespace())
     _stop(manager)
@@ -702,7 +746,9 @@ def test_confirmed_fill_remains_active_when_snapshot_persistence_fails(tmp_path,
         sl=90.0,
         tp=120.0,
     )
-    monkeypatch.setattr(manager, "save_state", lambda: (_ for _ in ()).throw(OSError("disk")))
+    monkeypatch.setattr(
+        manager, "save_state", lambda: (_ for _ in ()).throw(OSError("disk"))
+    )
     manager.confirm_entry_fill("entry-1", 101.0)
     bracket = manager.get_bracket("entry-1")
     assert bracket is not None
@@ -710,7 +756,9 @@ def test_confirmed_fill_remains_active_when_snapshot_persistence_fails(tmp_path,
     assert bracket.entry_confirmed is True
 
 
-def test_metrics_failure_does_not_undo_registered_protection(tmp_path, monkeypatch) -> None:
+def test_metrics_failure_does_not_undo_registered_protection(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     manager = BracketManager(order_manager=SimpleNamespace())
     _stop(manager)
@@ -720,7 +768,9 @@ def test_metrics_failure_does_not_undo_registered_protection(tmp_path, monkeypat
             raise RuntimeError("metrics down")
 
     monkeypatch.setattr(bracket_core, "METRICS_AVAILABLE", True)
-    monkeypatch.setattr(bracket_core, "METRICS", SimpleNamespace(brackets_created=_Counter()))
+    monkeypatch.setattr(
+        bracket_core, "METRICS", SimpleNamespace(brackets_created=_Counter())
+    )
     manager.register_virtual_bracket(
         order_id="entry-1",
         symbol=SYMBOL,
@@ -775,7 +825,9 @@ def test_zero_spread_limit_is_strict_and_none_explicitly_disables_guard() -> Non
     assert plan.spread_pct > 0
 
 
-def test_invalid_later_row_does_not_partially_mutate_existing_position(tmp_path) -> None:
+def test_invalid_later_row_does_not_partially_mutate_existing_position(
+    tmp_path,
+) -> None:
     manager = _position_manager(tmp_path)
     original = manager.get_position(SYMBOL)
     assert original is not None
@@ -931,9 +983,7 @@ def test_incident_single_lot_lifecycle_no_false_exit_no_second_entry(
         assert entry_id, "incident entry must be accepted"
 
         # Exactly one bracket, qty 65 — no duplicate registration.
-        ce_brackets = [
-            b for b in bm._brackets.values() if b.symbol == ce
-        ]
+        ce_brackets = [b for b in bm._brackets.values() if b.symbol == ce]
         assert len(ce_brackets) == 1
         bracket = ce_brackets[0]
         assert bracket.quantity == 65
@@ -978,7 +1028,9 @@ def test_incident_single_lot_lifecycle_no_false_exit_no_second_entry(
         bm._running = False
 
 
-def test_bracket_lifecycle_trailing_and_exits_on_live_class(monkeypatch, tmp_path) -> None:
+def test_bracket_lifecycle_trailing_and_exits_on_live_class(
+    monkeypatch, tmp_path
+) -> None:
     """End-to-end lifecycle on the LIVE production class (full MRO), exercising
     the fallback trailing path (_apply_trailing_math): SL must ratchet up on a
     rally, stay monotonic on pullback, stay tick-rounded, fire the trailed-SL
@@ -1003,8 +1055,14 @@ def test_bracket_lifecycle_trailing_and_exits_on_live_class(monkeypatch, tmp_pat
     bm._running = False
     try:
         bm.register_virtual_bracket(
-            order_id="lc-1", symbol=sym, side="BUY", qty=65,
-            price=145.15, sl=143.0, tp=152.0, activate_immediately=False,
+            order_id="lc-1",
+            symbol=sym,
+            side="BUY",
+            qty=65,
+            price=145.15,
+            sl=143.0,
+            tp=152.0,
+            activate_immediately=False,
         )
         bm.confirm_entry_fill("lc-1", 145.15)
         bracket = bm.get_bracket("lc-1")
@@ -1049,18 +1107,24 @@ def test_bracket_tp1_partial_fires_once_on_live_class(monkeypatch, tmp_path) -> 
     bm._running = False
     try:
         bm.register_virtual_bracket(
-            order_id="lc-2", symbol=sym, side="BUY", qty=65,
-            price=145.15, sl=143.0, tp=152.0,
-            tp1_price=149.0, tp1_qty=25, activate_immediately=False,
+            order_id="lc-2",
+            symbol=sym,
+            side="BUY",
+            qty=65,
+            price=145.15,
+            sl=143.0,
+            tp=152.0,
+            tp1_price=149.0,
+            tp1_qty=25,
+            activate_immediately=False,
         )
         bm.confirm_entry_fill("lc-2", 145.15)
         bracket = bm.get_bracket("lc-2")
-        assert [(t.name, t.quantity) for t in bracket.tp_levels] == [("TP1", 25)]
+        assert bracket.tp_levels == []
 
         bm.on_tick(sym, 149.1)
-        assert bracket.exit_pending is True
-        assert "TP1" in str(bracket.exit_reason or "")
-        assert len(placed) == 1, "TP1 partial must fire exactly one exit order"
+        assert bracket.exit_pending is False
+        assert len(placed) == 0, "one-lot brackets must not fire sub-lot TP1 exits"
     finally:
         bm._running = False
 
@@ -1093,9 +1157,15 @@ def test_fill_reanchor_and_controller_trailing_on_executed_range(
     bm._running = False
     try:
         bm.register_virtual_bracket(
-            order_id="ex-1", symbol=sym, side="BUY", qty=65,
-            price=145.15, sl=143.15, tp=160.0,
-            activate_immediately=False, trailing_atr_mult=1.5,
+            order_id="ex-1",
+            symbol=sym,
+            side="BUY",
+            qty=65,
+            price=145.15,
+            sl=143.15,
+            tp=160.0,
+            activate_immediately=False,
+            trailing_atr_mult=1.5,
         )
         controller = bm._trailing_controllers.get("ex-1")
         assert controller is not None, "adaptive controller must attach"
@@ -1165,10 +1235,16 @@ def test_live_entry_registers_pending_order_with_position_manager(
     om.set_bracket_manager(bm)
     try:
         oid = om.place_order(
-            symbol="NFO:NIFTY2671424100CE", side="BUY", quantity=65,
-            order_type=OrderType.LIMIT, price=160.45,
-            stop_loss=151.20, take_profit=177.10,
-            intent="ENTRY", check_risk=False, signal_id="sig-0710",
+            symbol="NFO:NIFTY2671424100CE",
+            side="BUY",
+            quantity=65,
+            order_type=OrderType.LIMIT,
+            price=160.45,
+            stop_loss=151.20,
+            take_profit=177.10,
+            intent="ENTRY",
+            check_risk=False,
+            signal_id="sig-0710",
         )
         assert oid
         pending = om._positions.pending.get(oid)

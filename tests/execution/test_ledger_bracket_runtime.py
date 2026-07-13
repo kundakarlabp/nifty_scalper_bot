@@ -6,7 +6,6 @@ from typing import Any
 from nifty_scalper_bot.execution.bracket_manager import BracketExitLifecycle
 from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
 
-
 SYMBOL = "NFO:NIFTY2662324050PE"
 
 
@@ -47,7 +46,9 @@ class _OrderManager:
         return None
 
 
-def _manager(monkeypatch, tmp_path) -> tuple[LedgerBracketManager, _OrderManager, _Broker]:
+def _manager(
+    monkeypatch, tmp_path
+) -> tuple[LedgerBracketManager, _OrderManager, _Broker]:
     monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "lifecycle.db"))
     broker = _Broker()
     order_manager = _OrderManager(broker)
@@ -60,12 +61,12 @@ def _manager(monkeypatch, tmp_path) -> tuple[LedgerBracketManager, _OrderManager
         order_id="entry-1",
         symbol=SYMBOL,
         side="BUY",
-        qty=65,
+        qty=130,
         price=100.0,
         sl=90.0,
         tp=120.0,
         tp1_price=110.0,
-        tp1_qty=25,
+        tp1_qty=65,
         activate_immediately=False,
     )
     return manager, order_manager, broker
@@ -90,11 +91,15 @@ def _mark_filled_exit(
     bracket.pending_exit_order_id = order_id
     bracket.exit_triggered_at = time.time()
     broker.statuses[order_id] = {"status": "COMPLETE", "average_price": price}
-    broker.positions = [] if residual == 0 else [{"symbol": SYMBOL, "quantity": residual}]
+    broker.positions = (
+        [] if residual == 0 else [{"symbol": SYMBOL, "quantity": residual}]
+    )
     return bracket
 
 
-def test_scaled_fills_persist_and_close_uses_exact_weighted_pnl(monkeypatch, tmp_path) -> None:
+def test_scaled_fills_persist_and_close_uses_exact_weighted_pnl(
+    monkeypatch, tmp_path
+) -> None:
     manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
     manager.confirm_entry_fill("entry-1", 100.0)
 
@@ -104,10 +109,10 @@ def test_scaled_fills_persist_and_close_uses_exact_weighted_pnl(monkeypatch, tmp
         order_id="tp1-order",
         reason="TP1 Hit (110.00)",
         price=110.0,
-        residual=40,
+        residual=65,
     )
     assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
-    assert bracket.remaining_quantity == 40
+    assert bracket.remaining_quantity == 65
     assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
 
     ordering: list[str] = []
@@ -126,15 +131,15 @@ def test_scaled_fills_persist_and_close_uses_exact_weighted_pnl(monkeypatch, tmp
     assert manager._fill_ledger is not None
     fills = manager._fill_ledger.load_fills(bracket.bracket_id)
     assert [(fill.kind, fill.quantity, fill.price) for fill in fills] == [
-        ("ENTRY", 65, 100.0),
-        ("EXIT", 25, 110.0),
-        ("EXIT", 40, 95.0),
+        ("ENTRY", 130, 100.0),
+        ("EXIT", 65, 110.0),
+        ("EXIT", 65, 95.0),
     ]
     pnl = manager._fill_ledger.realized_pnl(bracket.bracket_id)
-    assert pnl.gross_pnl == 50.0
+    assert pnl.gross_pnl == 325.0
     assert pnl.complete is True
     assert ordering == ["save", "hook"]
-    assert bracket.ledger_realized_pnl["gross_pnl"] == 50.0
+    assert bracket.ledger_realized_pnl["gross_pnl"] == 325.0
     assert manager.has_unresolved_exit() is False
 
 
@@ -165,10 +170,10 @@ def test_partial_exit_persistence_failure_keeps_residual_protected_and_blocks_en
         order_id="tp1-failed-ledger",
         reason="TP1 Hit (110.00)",
         price=110.0,
-        residual=40,
+        residual=65,
     )
     assert manager._reconcile_exit_state(bracket, requested_by="tp1-failure") is False
-    assert bracket.remaining_quantity == 40
+    assert bracket.remaining_quantity == 65
     assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
     assert bracket.sl_trigger_price == bracket.entry_price
     assert manager.has_unresolved_exit() is True

@@ -13,7 +13,6 @@ from nifty_scalper_bot.execution.canonical_bracket_manager import (
     CanonicalBracketManager,
 )
 
-
 SYMBOL = "NFO:NIFTY2662324050PE"
 
 
@@ -25,9 +24,7 @@ def isolated_bracket_store(tmp_path, monkeypatch) -> None:
 class _Broker:
     def __init__(self) -> None:
         self.statuses: dict[str, dict[str, Any]] = {}
-        self.positions: list[dict[str, Any]] = [
-            {"symbol": SYMBOL, "quantity": 65}
-        ]
+        self.positions: list[dict[str, Any]] = [{"symbol": SYMBOL, "quantity": 130}]
         self.cancel_terminal_status = "CANCELLED"
 
     def get_order_status(self, order_id: str) -> dict[str, Any]:
@@ -80,12 +77,12 @@ def _manager(
         order_id="entry-1",
         symbol=SYMBOL,
         side="BUY",
-        qty=65,
+        qty=130,
         price=100.0,
         sl=90.0,
         tp=120.0,
         tp1_price=110.0,
-        tp1_qty=25,
+        tp1_qty=65,
         activate_immediately=False,
     )
     manager.confirm_entry_fill("entry-1", fill_price)
@@ -141,14 +138,14 @@ def test_confirmed_tp1_fill_keeps_residual_position_open_and_protected() -> None
         broker,
         order_id="tp1-exit",
         reason="TP1 Hit (110.00)",
-        residual_quantity=40,
+        residual_quantity=65,
         average_price=110.10,
     )
 
     closed = manager._reconcile_exit_state(bracket, requested_by="post_submit")
 
     assert closed is False
-    assert bracket.remaining_quantity == 40
+    assert bracket.remaining_quantity == 65
     assert bracket.tp_levels[0].executed is True
     assert bracket.sl_trigger_price == bracket.entry_price
     assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
@@ -177,10 +174,10 @@ def test_tp1_tick_submit_then_fill_reconciles_through_live_path() -> None:
         "status": "COMPLETE",
         "average_price": 110.05,
     }
-    broker.positions = [{"symbol": SYMBOL, "quantity": 40}]
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65}]
     manager.on_tick(SYMBOL, 110.5)
 
-    assert bracket.remaining_quantity == 40
+    assert bracket.remaining_quantity == 65
     assert bracket.tp_levels[0].executed is True
     assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
     assert bracket.exit_pending is False
@@ -194,7 +191,7 @@ def test_completed_order_waits_for_positions_endpoint_to_catch_up() -> None:
         broker,
         order_id="tp1-sync",
         reason="TP1 Hit (110.00)",
-        residual_quantity=65,
+        residual_quantity=130,
         average_price=110.05,
     )
 
@@ -204,10 +201,10 @@ def test_completed_order_waits_for_positions_endpoint_to_catch_up() -> None:
     assert bracket.tp_levels[0].executed is False
     assert order_manager.place_calls == []
 
-    broker.positions = [{"symbol": SYMBOL, "quantity": 40}]
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65}]
     assert manager._reconcile_exit_state(bracket, requested_by="sync_second") is False
     assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
-    assert bracket.remaining_quantity == 40
+    assert bracket.remaining_quantity == 65
     assert bracket.tp_levels[0].executed is True
     assert bracket.exit_order_id is None
 

@@ -13,7 +13,6 @@ from nifty_scalper_bot.execution.order_manager import OrderManager
 from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
-
 SYMBOL = "NFO:NIFTY2662324050PE"
 
 
@@ -91,12 +90,12 @@ def _register(bracket_manager: BracketManager) -> Any:
         order_id="entry-1",
         symbol=SYMBOL,
         side="BUY",
-        qty=65,
+        qty=130,
         price=100.0,
         sl=90.0,
         tp=120.0,
         tp1_price=110.0,
-        tp1_qty=25,
+        tp1_qty=65,
         activate_immediately=False,
     )
     bracket_manager.confirm_entry_fill("entry-1", 100.0)
@@ -127,9 +126,7 @@ def _filled_exit(
         "average_price": price,
     }
     broker.positions = (
-        []
-        if residual == 0
-        else [{"tradingsymbol": SYMBOL, "quantity": residual}]
+        [] if residual == 0 else [{"tradingsymbol": SYMBOL, "quantity": residual}]
     )
 
 
@@ -152,10 +149,12 @@ def test_public_composition_runs_entry_tp1_final_pnl_and_release(
         order_id="tp1-order",
         reason="TP1 Hit (110.00)",
         price=110.0,
-        residual=40,
+        residual=65,
     )
-    assert bracket_manager._reconcile_exit_state(bracket, requested_by="e2e_tp1") is False
-    assert bracket.remaining_quantity == 40
+    assert (
+        bracket_manager._reconcile_exit_state(bracket, requested_by="e2e_tp1") is False
+    )
+    assert bracket.remaining_quantity == 65
     assert bracket.tp_levels[0].executed is True
     assert bracket.sl_trigger_price == bracket.entry_price
     assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
@@ -169,21 +168,26 @@ def test_public_composition_runs_entry_tp1_final_pnl_and_release(
         price=95.0,
         residual=0,
     )
-    assert bracket_manager._reconcile_exit_state(bracket, requested_by="e2e_final") is True
+    assert (
+        bracket_manager._reconcile_exit_state(bracket, requested_by="e2e_final") is True
+    )
     assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
     assert bracket.position_flat_confirmed is True
     assert releases == [SYMBOL]
 
     assert bracket_manager._fill_ledger is not None
     pnl = bracket_manager._fill_ledger.realized_pnl(bracket.bracket_id)
-    assert pnl.entry_quantity == 65
-    assert pnl.exit_quantity == 65
-    assert pnl.gross_pnl == 50.0
+    assert pnl.entry_quantity == 130
+    assert pnl.exit_quantity == 130
+    assert pnl.gross_pnl == 325.0
     assert pnl.complete is True
     assert "PARTIAL_EXIT_CONFIRMED" in events
     assert "BRACKET_CLOSED" in events
-    assert order_manager._blocked(
-        "submit_trade_plan",
-        tuple(),
-        {"symbol": SYMBOL},
-    ) is NO_BLOCK
+    assert (
+        order_manager._blocked(
+            "submit_trade_plan",
+            tuple(),
+            {"symbol": SYMBOL},
+        )
+        is NO_BLOCK
+    )
