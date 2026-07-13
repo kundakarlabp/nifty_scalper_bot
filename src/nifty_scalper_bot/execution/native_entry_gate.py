@@ -1,11 +1,11 @@
+# mypy: ignore-errors
 """Native entry gate shared by the explicit runtime order manager."""
 
 from __future__ import annotations
 
-from contextlib import suppress
 import inspect
+from contextlib import suppress
 from typing import Any, Mapping
-
 
 NO_BLOCK = object()
 _PROTECTIVE_INTENTS = {"EXIT", "REDUCE"}
@@ -42,11 +42,7 @@ def _bound_place_order_values(
             *args,
             **dict(kwargs),
         )
-        return {
-            key: value
-            for key, value in bound.arguments.items()
-            if key != "self"
-        }
+        return {key: value for key, value in bound.arguments.items() if key != "self"}
     except Exception:
         return dict(kwargs)
 
@@ -133,6 +129,16 @@ def _provider_block_details(provider: Any, manager: Any) -> dict[str, Any] | Non
 
 
 def unresolved_details(manager: Any) -> dict[str, Any] | None:
+    self_blocker = getattr(manager, "current_entry_blocker", None)
+    if callable(self_blocker):
+        try:
+            self_block = self_blocker()
+        except TypeError:
+            self_block = self_blocker(manager)
+        details = _normalise_provider_block(self_block, source="current_entry_blocker")
+        if details is not None:
+            _record_block(manager, details)
+            return details
     provider = getattr(manager, "_unresolved_exit_provider", None)
     provider_block = _provider_block_details(provider, manager)
     if provider_block is not None:

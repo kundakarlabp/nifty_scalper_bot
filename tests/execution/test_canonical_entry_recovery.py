@@ -138,14 +138,19 @@ def test_classifier_prefers_trigger_error_and_marks_terminal_auth() -> None:
     auth = decide_recovery("Invalid access token; session expired")
     assert auth.failure is BrokerFailure.AUTHENTICATION
     assert auth.retryable is False
-    assert classify_broker_failure("HTTP 503 service unavailable") is BrokerFailure.TRANSIENT
+    assert (
+        classify_broker_failure("HTTP 503 service unavailable")
+        is BrokerFailure.TRANSIENT
+    )
 
 
 def test_price_reject_refreshes_and_rebuilds_geometry_once() -> None:
-    manager = _RecoveryManager([
-        _reject("invalid limit price: price out of range"),
-        _accept(),
-    ])
+    manager = _RecoveryManager(
+        [
+            _reject("invalid limit price: price out of range"),
+            _accept(),
+        ]
+    )
 
     result = manager.submit_trade_plan_result(_plan())
 
@@ -162,10 +167,12 @@ def test_price_reject_refreshes_and_rebuilds_geometry_once() -> None:
 
 
 def test_margin_reject_resizes_to_affordable_lot_and_reruns_original() -> None:
-    manager = _RecoveryManager([
-        _reject("insufficient funds; required margin exceeds available margin"),
-        _accept("resized-order"),
-    ])
+    manager = _RecoveryManager(
+        [
+            _reject("insufficient funds; required margin exceeds available margin"),
+            _accept("resized-order"),
+        ]
+    )
 
     result = manager.submit_trade_plan_result(_plan(quantity=100))
 
@@ -243,8 +250,8 @@ class _PartialManager:
         self.uncertain: list[str] = []
         self.confirmed: list[tuple[str, int, float]] = []
         self._bracket_manager = SimpleNamespace(
-            confirm_partial_entry_fill=lambda order_id, qty, price: self.confirmed.append(
-                (order_id, qty, price)
+            confirm_partial_entry_fill=lambda order_id, qty, price: (
+                self.confirmed.append((order_id, qty, price)) or True
             )
         )
 
@@ -262,17 +269,122 @@ class _PartialManager:
 install_entry_recovery(_PartialManager)
 
 
-def test_partial_entry_cancels_remainder_and_arms_actual_quantity() -> None:
+def test_multi_lot_partial_entry_cancels_remainder_and_arms_completed_lot() -> None:
     manager = _PartialManager()
+    manager._broker.positions_payload = [
+        {"tradingsymbol": "NIFTY2662324050PE", "quantity": 50}
+    ]
     order = _Order()
+    order.quantity = 100
+    order.requested_lots = 2
+    order.resolved_lot_size = 50
 
     updated = manager._update_from_response(
         order,
-        {"status": "PARTIALLY_FILLED", "filled_quantity": 50, "average_price": 101.5},
+        {
+            "status": "PARTIALLY_FILLED",
+            "filled_quantity": 50,
+            "pending_quantity": 50,
+            "average_price": 101.5,
+        },
     )
 
     assert updated is order
     assert manager._broker.cancel_calls == ["entry-partial"]
     assert manager.confirmed == [("entry-partial", 50, 101.5)]
-    assert manager.uncertain == ["client-partial"]
-    assert manager._last_order_decision["block_reason"] == "partial_entry_fill_reconciled"
+    assert order.entry_lifecycle_state["broker_filled_lots"] == 1
+    assert order.entry_lifecycle_state["protected_lots"] == 1
+    assert (
+        manager._last_order_decision["block_reason"] == "entry_reconciliation_pending"
+    )
+
+
+def test_one_lot_complete_fill_protects_exact_lot_quantity() -> None:
+    manager = _PartialManager()
+    manager._broker.positions_payload = [
+        {"tradingsymbol": "NIFTY2662324050PE", "quantity": 50}
+    ]
+    manager._broker.status_payload = {
+        "status": "COMPLETE",
+        "filled_quantity": 50,
+        "pending_quantity": 0,
+        "average_price": 101.5,
+    }
+    manager._bracket_manager = SimpleNamespace(
+        confirm_partial_entry_fill=lambda order_id, qty, price: True
+    )
+    order = _Order(filled_quantity=50)
+    order.quantity = 50
+    order.requested_lots = 1
+    order.resolved_lot_size = 50
+
+    manager._update_from_response(
+        order,
+        {
+            "status": "COMPLETE",
+            "filled_quantity": 50,
+            "pending_quantity": 0,
+            "average_price": 101.5,
+        },
+    )
+
+    assert order.entry_lifecycle_state["broker_filled_lots"] == 1
+    assert order.entry_lifecycle_state["protected_lots"] == 1
+    assert order.entry_lifecycle_state["protected_quantity"] == 50
+    assert manager._last_order_decision["block_reason"] == "ENTRY_FULL_LOT_PROTECTED"
+
+
+def test_non_lot_broker_fill_latches_invariant_without_protection() -> None:
+    manager = _PartialManager()
+    order = _Order(filled_quantity=25)
+    order.quantity = 50
+    order.requested_lots = 1
+    order.resolved_lot_size = 50
+    manager._bracket_manager = SimpleNamespace(
+        confirm_partial_entry_fill=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("must not protect")
+        )
+    )
+
+    manager._update_from_response(
+        order,
+        {
+            "status": "COMPLETE",
+            "filled_quantity": 25,
+            "pending_quantity": 25,
+            "average_price": 101.5,
+        },
+    )
+
+    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
+    assert (
+        manager._last_order_decision["block_reason"]
+        == "broker_quantity_lot_invariant_violation"
+    )
+
+
+def test_protection_none_is_not_verified_success() -> None:
+    manager = _PartialManager()
+    manager._broker.positions_payload = [
+        {"tradingsymbol": "NIFTY2662324050PE", "quantity": 50}
+    ]
+    manager._bracket_manager = SimpleNamespace(
+        confirm_partial_entry_fill=lambda *_args: None
+    )
+    order = _Order(filled_quantity=50)
+    order.quantity = 50
+    order.requested_lots = 1
+    order.resolved_lot_size = 50
+
+    manager._update_from_response(
+        order,
+        {
+            "status": "COMPLETE",
+            "filled_quantity": 50,
+            "pending_quantity": 0,
+            "average_price": 101.5,
+        },
+    )
+
+    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
+    assert manager._last_order_decision["block_reason"] == "entry_protection_failed"

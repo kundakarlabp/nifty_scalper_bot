@@ -5,7 +5,6 @@ from typing import Any
 import nifty_scalper_bot.execution  # noqa: F401 - applies runtime safety patches
 from nifty_scalper_bot.execution import order_manager_core as core
 
-
 GOOD_SYMBOL = "NFO:NIFTY2670724250PE"
 BAD_SYMBOL = "NFO:NIFTY2670724300PE"
 
@@ -13,6 +12,14 @@ BAD_SYMBOL = "NFO:NIFTY2670724300PE"
 class _Manager:
     def __init__(self, quote: dict[str, Any]) -> None:
         self.quote = dict(quote)
+        self._active_contract_basket = {
+            "selected_pe": GOOD_SYMBOL,
+            "option_symbols": [GOOD_SYMBOL],
+            "token_by_symbol": {GOOD_SYMBOL: 12345},
+            "selected_pe_token": 12345,
+            "basket_version": "basket-1",
+            "expiry": "2026-07-30",
+        }
 
     def _lot_size_for_symbol(self, _symbol: str) -> int:
         return 65
@@ -48,7 +55,9 @@ def _plan(symbol: str = GOOD_SYMBOL) -> core.TradePlan:
         signal_id="sig-identity",
         trade_lifecycle_id="life-identity",
         client_order_id="client-identity",
+        basket_version="basket-1",
         instrument_token=12345,
+        contract_expiry="2026-07-30",
         requested_lots=1,
         resolved_lot_size=65,
     )
@@ -81,6 +90,7 @@ def test_live_trade_plan_allows_matching_quote_identity() -> None:
 
     assert result.allowed is True
 
+
 def test_live_trade_plan_requires_lifecycle_identity_before_broker_attempt(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -94,7 +104,9 @@ def test_live_trade_plan_requires_lifecycle_identity_before_broker_attempt(monke
         stop_loss=83.0,
         take_profit=96.0,
         signal_id="sig-1",
-        instrument_token=123,
+        basket_version="basket-1",
+        instrument_token=12345,
+        contract_expiry="2026-07-30",
         requested_lots=1,
         resolved_lot_size=65,
     )
@@ -122,7 +134,9 @@ def test_live_trade_plan_rejects_invalid_requested_lot_quantity(monkeypatch):
         signal_id="sig-1",
         trade_lifecycle_id="life-1",
         client_order_id="client-1",
-        instrument_token=123,
+        basket_version="basket-1",
+        instrument_token=12345,
+        contract_expiry="2026-07-30",
         requested_lots=1,
         resolved_lot_size=65,
     )
@@ -155,7 +169,9 @@ def test_order_details_persists_lifecycle_contract_identity() -> None:
         signal_id="sig-1",
     )
 
-    payload = core.OrderManager._serialize(m := object.__new__(core.OrderManager), order)
+    payload = core.OrderManager._serialize(
+        m := object.__new__(core.OrderManager), order
+    )
     restored = core.OrderManager._order_from_dict(m, payload)
 
     assert restored.trade_lifecycle_id == "life-1"
@@ -163,3 +179,36 @@ def test_order_details_persists_lifecycle_contract_identity() -> None:
     assert restored.bracket_id == "bracket-1"
     assert restored.instrument_token == 123
     assert restored.contract_expiry == "2026-07-30"
+
+
+def test_live_trade_plan_without_active_basket_fails_closed(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = _Manager({"tradingsymbol": "NIFTY2670724250PE"})
+    manager._active_contract_basket = None
+    manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+
+    result = core.OrderManager._validate_trade_plan(manager, _plan())
+
+    assert result.allowed is False
+    assert result.reason == "active_contract_unavailable"
+    assert result.details["broker_attempted"] is False
+
+
+def test_live_trade_plan_rejects_more_than_one_lot(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("MAX_LOTS_PER_TRADE", "1")
+    manager = _Manager({"tradingsymbol": "NIFTY2670724250PE"})
+    manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    plan = _plan()
+    plan = (
+        core.replace(plan, quantity=130, requested_lots=2)
+        if hasattr(core, "replace")
+        else plan
+    )
+
+    result = core.OrderManager._validate_trade_plan(manager, plan)
+
+    assert result.allowed is False
+    assert result.reason == "invalid_entry_lot_quantity"

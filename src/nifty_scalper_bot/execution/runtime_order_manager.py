@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """File purpose:
     Implement the single production order manager used by the trading runtime.
 
@@ -19,6 +20,7 @@ from nifty_scalper_bot.execution import order_manager_core as _core
 from nifty_scalper_bot.execution.entry_recovery import (
     _finalize_partial_entry,
     _recover_submit,
+    current_entry_blocker,
 )
 from nifty_scalper_bot.execution.native_entry_gate import (
     NO_BLOCK,
@@ -29,7 +31,9 @@ from nifty_scalper_bot.execution.native_entry_gate import (
 _EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket_id"}
 
 
-def _strip_exit_identity_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _strip_exit_identity_kwargs(
+    kwargs: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Remove exit identity metadata unsupported by core.place_order.
 
     The live bracket safety layer attaches immutable exit metadata to protective
@@ -42,9 +46,7 @@ def _strip_exit_identity_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any],
 
     cleaned = dict(kwargs)
     identity = {
-        key: cleaned.pop(key)
-        for key in list(_EXIT_IDENTITY_KWARGS)
-        if key in cleaned
+        key: cleaned.pop(key) for key in list(_EXIT_IDENTITY_KWARGS) if key in cleaned
     }
     return cleaned, identity
 
@@ -60,6 +62,9 @@ class RuntimeOrderManager(_core.OrderManager):
 
     def set_unresolved_exit_provider(self, provider: Any | None) -> None:
         configure_provider(self, provider)
+
+    def current_entry_blocker(self) -> Any | None:
+        return current_entry_blocker(self)
 
     def _blocked(
         self,

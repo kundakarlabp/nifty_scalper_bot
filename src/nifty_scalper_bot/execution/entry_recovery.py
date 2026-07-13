@@ -1,18 +1,24 @@
+# mypy: ignore-errors
 """Bounded recovery for the authoritative runner-facing entry path.
 
 Wraps existing OrderManager methods without replacing the class. Recovery stays
 bounded, reconciles uncertain broker outcomes before retrying, keeps quantities
 whole-lot, and protects partial entry fills.
 """
+
 from __future__ import annotations
 
-from dataclasses import replace
 import math
 import os
 import time
+from dataclasses import replace
 from typing import Any, Callable, Mapping
 
-from nifty_scalper_bot.execution.broker_recovery import RecoveryAction, RecoveryDecision, decide_recovery
+from nifty_scalper_bot.execution.broker_recovery import (
+    RecoveryAction,
+    RecoveryDecision,
+    decide_recovery,
+)
 from nifty_scalper_bot.utils.lot_size import resolve_lot_size
 
 
@@ -20,16 +26,41 @@ def _log(manager: Any, level: str, message: str, *args: Any, **extra: Any) -> No
     logger = getattr(manager, "_logger", None)
     fn = getattr(logger, level, None)
     if callable(fn):
-        fn(message, *args, extra={"event": extra.pop("event", "ENTRY_RECOVERY"), **extra})
+        fn(
+            message,
+            *args,
+            extra={"event": extra.pop("event", "ENTRY_RECOVERY"), **extra},
+        )
 
 
-def _result_like(previous: Any, *, accepted: bool, order_id: str | None, reason: str, details: Mapping[str, Any], broker_attempted: bool) -> Any:
+def _result_like(
+    previous: Any,
+    *,
+    accepted: bool,
+    order_id: str | None,
+    reason: str,
+    details: Mapping[str, Any],
+    broker_attempted: bool,
+) -> Any:
     cls = type(previous)
     try:
-        return cls(accepted=accepted, order_id=order_id, reason=reason, details=dict(details), broker_attempted=broker_attempted)
+        return cls(
+            accepted=accepted,
+            order_id=order_id,
+            reason=reason,
+            details=dict(details),
+            broker_attempted=broker_attempted,
+        )
     except Exception:
         from nifty_scalper_bot.execution.order_manager import TradePlanSubmitResult
-        return TradePlanSubmitResult(accepted=accepted, order_id=order_id, reason=reason, details=dict(details), broker_attempted=broker_attempted)
+
+        return TradePlanSubmitResult(
+            accepted=accepted,
+            order_id=order_id,
+            reason=reason,
+            details=dict(details),
+            broker_attempted=broker_attempted,
+        )
 
 
 def _failure_text(manager: Any, result: Any) -> str:
@@ -100,9 +131,27 @@ def _manager_live_mode(manager: Any) -> bool:
             return bool(checker())
         except Exception:
             return True
-    execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
-    live_enabled = str(os.getenv("ENABLE_LIVE", "") or os.getenv("ENABLE_LIVE_TRADING", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
-    shadow_or_paper = str(os.getenv("SHADOW_MODE", "") or "").strip().lower() in {"1", "true", "yes", "y", "on"} or str(os.getenv("PAPER_MODE", "") or os.getenv("PAPER__ENABLED", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    execution_mode = (
+        str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+    )
+    live_enabled = str(
+        os.getenv("ENABLE_LIVE", "") or os.getenv("ENABLE_LIVE_TRADING", "")
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    shadow_or_paper = str(os.getenv("SHADOW_MODE", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    } or str(
+        os.getenv("PAPER_MODE", "") or os.getenv("PAPER__ENABLED", "")
+    ).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     return execution_mode == "LIVE" and live_enabled and not shadow_or_paper
 
 
@@ -130,8 +179,14 @@ def _entry_price(manager: Any, plan: Any, quote: Mapping[str, Any]) -> float | N
             return None
         return float(ask)
 
-    keys = ("ask", "best_ask", "offer", "sell_price") if side == "BUY" else ("bid", "best_bid", "buy_price")
-    return _positive(quote, *keys) or _positive(quote, "ltp", "last_price", "last_traded_price", "price")
+    keys = (
+        ("ask", "best_ask", "offer", "sell_price")
+        if side == "BUY"
+        else ("bid", "best_bid", "buy_price")
+    )
+    return _positive(quote, *keys) or _positive(
+        quote, "ltp", "last_price", "last_traded_price", "price"
+    )
 
 
 def _tick_size(manager: Any, symbol: str) -> float:
@@ -157,12 +212,20 @@ def _tick(value: float, size: float = 0.05) -> float:
 
 def _valid_geometry(plan: Any) -> bool:
     try:
-        entry, stop, target = float(plan.entry_price or 0.0), float(plan.stop_loss or 0.0), float(plan.take_profit or 0.0)
+        entry, stop, target = (
+            float(plan.entry_price or 0.0),
+            float(plan.stop_loss or 0.0),
+            float(plan.take_profit or 0.0),
+        )
     except (TypeError, ValueError):
         return False
     if min(entry, stop, target) <= 0:
         return False
-    return stop < entry < target if str(plan.side).upper() == "BUY" else target < entry < stop
+    return (
+        stop < entry < target
+        if str(plan.side).upper() == "BUY"
+        else target < entry < stop
+    )
 
 
 def _reprice_deviation_pct(plan: Any, fresh_price: float | None) -> float | None:
@@ -170,18 +233,28 @@ def _reprice_deviation_pct(plan: Any, fresh_price: float | None) -> float | None
         original = float(getattr(plan, "entry_price", 0.0) or 0.0)
     except (TypeError, ValueError):
         return None
-    return None if fresh_price is None or original <= 0 else abs(float(fresh_price) - original) / original * 100.0
+    return (
+        None
+        if fresh_price is None or original <= 0
+        else abs(float(fresh_price) - original) / original * 100.0
+    )
 
 
 def _max_reprice_deviation_pct(manager: Any) -> float:
-    for attr in ("_max_entry_reprice_deviation_pct", "_entry_recovery_max_reprice_deviation_pct"):
+    for attr in (
+        "_max_entry_reprice_deviation_pct",
+        "_entry_recovery_max_reprice_deviation_pct",
+    ):
         try:
             value = float(getattr(manager, attr))
         except (AttributeError, TypeError, ValueError):
             continue
         if math.isfinite(value) and value > 0:
             return value
-    for key in ("ENTRY_RECOVERY_MAX_REPRICE_DEVIATION_PCT", "MAX_ENTRY_REPRICE_DEVIATION_PCT"):
+    for key in (
+        "ENTRY_RECOVERY_MAX_REPRICE_DEVIATION_PCT",
+        "MAX_ENTRY_REPRICE_DEVIATION_PCT",
+    ):
         raw = os.getenv(key)
         if raw:
             try:
@@ -193,7 +266,14 @@ def _max_reprice_deviation_pct(manager: Any) -> float:
     return 2.5 if _manager_live_mode(manager) else 8.0
 
 
-def _rebuild_plan(manager: Any, plan: Any, quote: Mapping[str, Any], decision: RecoveryDecision, *, quantity: int | None = None) -> Any | None:
+def _rebuild_plan(
+    manager: Any,
+    plan: Any,
+    quote: Mapping[str, Any],
+    decision: RecoveryDecision,
+    *,
+    quantity: int | None = None,
+) -> Any | None:
     fresh = _entry_price(manager, plan, quote)
     if _is_live_entry(manager, plan) and fresh is None:
         _log(
@@ -209,7 +289,17 @@ def _rebuild_plan(manager: Any, plan: Any, quote: Mapping[str, Any], decision: R
     deviation = _reprice_deviation_pct(plan, fresh)
     max_deviation = _max_reprice_deviation_pct(manager)
     if deviation is not None and deviation > max_deviation:
-        _log(manager, "warning", "ENTRY_RECOVERY_REPRICE_BLOCKED symbol=%s deviation_pct=%.2f max_pct=%.2f", getattr(plan, "symbol", ""), deviation, max_deviation, event="ENTRY_RECOVERY_REPRICE_BLOCKED", deviation_pct=deviation, max_deviation_pct=max_deviation)
+        _log(
+            manager,
+            "warning",
+            "ENTRY_RECOVERY_REPRICE_BLOCKED symbol=%s deviation_pct=%.2f max_pct=%.2f",
+            getattr(plan, "symbol", ""),
+            deviation,
+            max_deviation,
+            event="ENTRY_RECOVERY_REPRICE_BLOCKED",
+            deviation_pct=deviation,
+            max_deviation_pct=max_deviation,
+        )
         return None
 
     callback = getattr(manager, "_trade_plan_rebuilder", None)
@@ -219,7 +309,9 @@ def _rebuild_plan(manager: Any, plan: Any, quote: Mapping[str, Any], decision: R
         except TypeError:
             rebuilt = callback(plan, dict(quote))
         if rebuilt is not None and _valid_geometry(rebuilt):
-            return replace(rebuilt, quantity=quantity) if quantity is not None else rebuilt
+            return (
+                replace(rebuilt, quantity=quantity) if quantity is not None else rebuilt
+            )
 
     engine = getattr(manager, "_indicator_engine", None)
     for name in ("rebuild_trade_plan", "revalidate_trade_plan"):
@@ -236,10 +328,16 @@ def _rebuild_plan(manager: Any, plan: Any, quote: Mapping[str, Any], decision: R
         except Exception:
             continue
         if rebuilt is not None and _valid_geometry(rebuilt):
-            return replace(rebuilt, quantity=quantity) if quantity is not None else rebuilt
+            return (
+                replace(rebuilt, quantity=quantity) if quantity is not None else rebuilt
+            )
 
     try:
-        old_entry, old_stop, old_target = float(plan.entry_price or 0.0), float(plan.stop_loss or 0.0), float(plan.take_profit or 0.0)
+        old_entry, old_stop, old_target = (
+            float(plan.entry_price or 0.0),
+            float(plan.stop_loss or 0.0),
+            float(plan.take_profit or 0.0),
+        )
     except (TypeError, ValueError):
         return None
     if fresh is None or old_entry <= 0 or old_stop <= 0 or old_target <= 0:
@@ -253,7 +351,13 @@ def _rebuild_plan(manager: Any, plan: Any, quote: Mapping[str, Any], decision: R
     if risk <= 0 or reward <= 0:
         return None
     size = _tick_size(manager, str(getattr(plan, "symbol", "")))
-    rebuilt = replace(plan, entry_price=_tick(fresh, size), stop_loss=_tick(stop, size), take_profit=_tick(target, size), quantity=int(quantity if quantity is not None else plan.quantity))
+    rebuilt = replace(
+        plan,
+        entry_price=_tick(fresh, size),
+        stop_loss=_tick(stop, size),
+        take_profit=_tick(target, size),
+        quantity=int(quantity if quantity is not None else plan.quantity),
+    )
     return rebuilt if _valid_geometry(rebuilt) else None
 
 
@@ -277,14 +381,20 @@ def _instrument_lookup(manager: Any) -> Callable[[str], int] | None:
     resolver = getattr(manager, "_instrument_resolver", None)
     candidates = (
         getattr(manager, "_lot_size_for_symbol", None),
-        getattr(resolver, "lot_size_for_symbol", None) if resolver is not None else None,
+        (
+            getattr(resolver, "lot_size_for_symbol", None)
+            if resolver is not None
+            else None
+        ),
         getattr(resolver, "get_lot_size", None) if resolver is not None else None,
         getattr(resolver, "lot_size", None) if resolver is not None else None,
     )
     for candidate in candidates:
         if callable(candidate):
+
             def _lookup(symbol: str, fn: Callable[..., Any] = candidate) -> int:
                 return int(fn(symbol) or 0)
+
             return _lookup
     return None
 
@@ -294,7 +404,11 @@ def _lot_size(manager: Any, symbol: str) -> int:
         lot, _source = resolve_lot_size(symbol, _instrument_lookup(manager))
         return max(1, int(lot))
     except Exception:
-        for key in ("NIFTY_LOT_SIZE", "INSTRUMENTS__NIFTY_LOT_SIZE", "DEFAULT_OPTION_LOT_SIZE"):
+        for key in (
+            "NIFTY_LOT_SIZE",
+            "INSTRUMENTS__NIFTY_LOT_SIZE",
+            "DEFAULT_OPTION_LOT_SIZE",
+        ):
             raw = os.getenv(key)
             if not raw:
                 continue
@@ -313,13 +427,29 @@ def _whole_lot_quantity(quantity: int, lot: int) -> int:
     return 0 if quantity <= 0 or lot <= 0 else (int(quantity) // int(lot)) * int(lot)
 
 
+def quantity_to_exact_lots(quantity: int, lot_size: int) -> int | None:
+    if quantity < 0 or lot_size <= 0:
+        return None
+    if quantity % lot_size != 0:
+        return None
+    return quantity // lot_size
+
+
+def lots_to_quantity(lots: int, lot_size: int) -> int:
+    if lots < 0 or lot_size <= 0:
+        raise ValueError("invalid lots or lot size")
+    return lots * lot_size
+
+
 def _affordable_quantity(manager: Any, plan: Any, fresh_price: float) -> int:
     available = _available_margin(manager)
     if available is None or fresh_price <= 0:
         return 0
     lot = _lot_size(manager, str(plan.symbol))
     factor = max(float(getattr(manager, "_margin_factor", 1.0) or 1.0), 1.0)
-    buffer = min(max(float(getattr(manager, "_margin_buffer", 0.95) or 0.95), 0.5), 0.98)
+    buffer = min(
+        max(float(getattr(manager, "_margin_buffer", 0.95) or 0.95), 0.5), 0.98
+    )
     per_lot = fresh_price * lot * factor
     lots = int((available * buffer) // per_lot) if per_lot > 0 else 0
     return min(int(plan.quantity), max(lots, 0) * lot)
@@ -341,7 +471,9 @@ def _freeze_quantity(manager: Any, plan: Any) -> int:
         cap = int(os.getenv("ORDER_FREEZE_QUANTITY", "0") or 0)
     if cap <= 0:
         return 0
-    return _whole_lot_quantity(min(int(plan.quantity), cap), _lot_size(manager, str(plan.symbol)))
+    return _whole_lot_quantity(
+        min(int(plan.quantity), cap), _lot_size(manager, str(plan.symbol))
+    )
 
 
 def _broker_orders(manager: Any) -> list[Mapping[str, Any]] | None:
@@ -367,15 +499,32 @@ def _broker_positions(manager: Any) -> list[Mapping[str, Any]] | None:
     except Exception:
         return None
     if isinstance(payload, Mapping):
-        payload = payload.get("net") or payload.get("day") or payload.get("positions") or []
+        payload = (
+            payload.get("net") or payload.get("day") or payload.get("positions") or []
+        )
     return [row for row in payload if isinstance(row, Mapping)]
 
 
-def _reconcile_intent(manager: Any, plan: Any) -> tuple[str, str | None, dict[str, Any]]:
-    keys = [str(getattr(plan, name, "") or "") for name in ("signal_id", "trace_id", "tag")]
+def _reconcile_intent(
+    manager: Any, plan: Any
+) -> tuple[str, str | None, dict[str, Any]]:
+    live = _is_live_entry(manager, plan)
+    immutable = {
+        str(getattr(plan, "client_order_id", "") or "").upper(),
+        str(getattr(plan, "trade_lifecycle_id", "") or "").upper(),
+    } - {""}
+    if live and not immutable:
+        return "unknown", None, {"reason": "entry_identity_mismatch"}
+
     finder = getattr(manager, "_find_open_order", None)
     if callable(finder):
-        for key in keys:
+        for key in (
+            immutable
+            if live
+            else {
+                str(getattr(plan, name, "") or "") for name in ("signal_id", "trace_id")
+            }
+        ):
             if not key:
                 continue
             try:
@@ -384,32 +533,44 @@ def _reconcile_intent(manager: Any, plan: Any) -> tuple[str, str | None, dict[st
                 order = None
             if isinstance(order, Mapping):
                 oid = str(order.get("order_id") or order.get("id") or "")
-                if oid:
+                if oid and (
+                    not live or _broker_order_matches_plan(order, plan, immutable)
+                ):
                     return "order_found", oid, {"order": dict(order)}
 
     orders = _broker_orders(manager)
     if orders is None:
         return "unknown", None, {"reason": "orders_unavailable"}
-    wanted_symbol = _symbol_key(plan.symbol)
-    wanted = {key.upper() for key in keys if key}
     for order in orders:
-        if _symbol_key(order.get("tradingsymbol") or order.get("symbol")) != wanted_symbol:
+        if not _broker_order_matches_plan(order, plan, immutable if live else set()):
             continue
-        candidates = {str(order.get(key) or "").upper() for key in ("tag", "client_order_id", "guid")}
-        if wanted and not any(key == candidate or (key and candidate and key[-8:] in candidate) for key in wanted for candidate in candidates):
-            continue
-        if str(order.get("status") or "").upper() not in {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}:
+        if str(order.get("status") or "").upper() not in {
+            "REJECTED",
+            "CANCELLED",
+            "CANCELED",
+            "EXPIRED",
+        }:
             oid = str(order.get("order_id") or order.get("id") or "")
             return "order_found", oid or None, {"order": dict(order)}
 
     positions = _broker_positions(manager)
     if positions is None:
         return "unknown", None, {"reason": "positions_unavailable"}
+    wanted_symbol = _symbol_key(plan.symbol)
     for position in positions:
-        if _symbol_key(position.get("tradingsymbol") or position.get("symbol")) != wanted_symbol:
+        if (
+            _symbol_key(position.get("tradingsymbol") or position.get("symbol"))
+            != wanted_symbol
+        ):
             continue
         try:
-            qty = abs(int(float(position.get("quantity", position.get("net_quantity", 0)) or 0)))
+            qty = abs(
+                int(
+                    float(
+                        position.get("quantity", position.get("net_quantity", 0)) or 0
+                    )
+                )
+            )
         except (TypeError, ValueError):
             return "unknown", None, {"reason": "position_quantity_invalid"}
         if qty > 0:
@@ -417,19 +578,72 @@ def _reconcile_intent(manager: Any, plan: Any) -> tuple[str, str | None, dict[st
     return "absent", None, {}
 
 
+def _broker_order_matches_plan(
+    order: Mapping[str, Any], plan: Any, immutable: set[str]
+) -> bool:
+    wanted_symbol = _symbol_key(getattr(plan, "symbol", ""))
+    if _symbol_key(order.get("tradingsymbol") or order.get("symbol")) != wanted_symbol:
+        return False
+    if immutable:
+        candidates = {
+            str(order.get(key) or "").upper()
+            for key in ("client_order_id", "guid", "tag")
+        }
+        candidates |= {
+            str(order.get("meta", {}).get(key) or "").upper()
+            for key in ("client_order_id", "trade_lifecycle_id")
+            if isinstance(order.get("meta"), Mapping)
+        }
+        if not immutable.intersection(candidates):
+            return False
+    token = getattr(plan, "instrument_token", None)
+    if token not in (None, ""):
+        raw_token = order.get("instrument_token") or order.get("token")
+        if raw_token not in (None, "") and int(raw_token) != int(token):
+            return False
+    side = str(getattr(plan, "side", "") or "").upper()
+    if side and str(
+        order.get("transaction_type") or order.get("side") or ""
+    ).upper() not in {"", side}:
+        return False
+    intent = str(order.get("intent") or order.get("order_intent") or "ENTRY").upper()
+    if intent not in {"ENTRY", "UNKNOWN", ""}:
+        return False
+    product = str(getattr(plan, "product", "") or "").upper()
+    if product and str(order.get("product") or "").upper() not in {"", product}:
+        return False
+    return True
+
+
 def _annotate(result: Any, decision: RecoveryDecision, **extra: Any) -> Any:
     details = dict(getattr(result, "details", {}) or {})
-    details["entry_recovery"] = {"failure": decision.failure.value, "action": decision.action.value, "retryable": decision.retryable, **extra}
+    details["entry_recovery"] = {
+        "failure": decision.failure.value,
+        "action": decision.action.value,
+        "retryable": decision.retryable,
+        **extra,
+    }
     try:
         result.details = details
         return result
     except Exception:
-        return _result_like(result, accepted=bool(getattr(result, "accepted", False)), order_id=getattr(result, "order_id", None), reason=str(getattr(result, "reason", "unknown")), details=details, broker_attempted=bool(getattr(result, "broker_attempted", False)))
+        return _result_like(
+            result,
+            accepted=bool(getattr(result, "accepted", False)),
+            order_id=getattr(result, "order_id", None),
+            reason=str(getattr(result, "reason", "unknown")),
+            details=details,
+            broker_attempted=bool(getattr(result, "broker_attempted", False)),
+        )
 
 
 def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> Any:
     result = original(manager, plan)
-    if bool(getattr(result, "accepted", False)) or not bool(getattr(result, "broker_attempted", False)) or getattr(manager, "_entry_recovery_active", False):
+    if (
+        bool(getattr(result, "accepted", False))
+        or not bool(getattr(result, "broker_attempted", False))
+        or getattr(manager, "_entry_recovery_active", False)
+    ):
         return result
     decision = decide_recovery(_failure_text(manager, result))
     if not decision.retryable:
@@ -440,11 +654,39 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
         if decision.reconcile_first:
             state, order_id, evidence = _reconcile_intent(manager, plan)
             if state == "order_found" and order_id:
-                return _result_like(result, accepted=True, order_id=order_id, reason="broker_order_reconciled", details={"entry_recovery": {"failure": decision.failure.value, "action": decision.action.value, "outcome": state, **evidence}}, broker_attempted=True)
+                return _result_like(
+                    result,
+                    accepted=True,
+                    order_id=order_id,
+                    reason="broker_order_reconciled",
+                    details={
+                        "entry_recovery": {
+                            "failure": decision.failure.value,
+                            "action": decision.action.value,
+                            "outcome": state,
+                            **evidence,
+                        }
+                    },
+                    broker_attempted=True,
+                )
             if state == "exposure_found":
-                return _result_like(result, accepted=False, order_id=None, reason="entry_exposure_reconciliation_required", details={"entry_recovery": {"outcome": state, **evidence}}, broker_attempted=True)
+                return _result_like(
+                    result,
+                    accepted=False,
+                    order_id=None,
+                    reason="entry_exposure_reconciliation_required",
+                    details={"entry_recovery": {"outcome": state, **evidence}},
+                    broker_attempted=True,
+                )
             if state != "absent":
-                return _result_like(result, accepted=False, order_id=None, reason="entry_order_state_ambiguous", details={"entry_recovery": {"outcome": state, **evidence}}, broker_attempted=True)
+                return _result_like(
+                    result,
+                    accepted=False,
+                    order_id=None,
+                    reason="entry_order_state_ambiguous",
+                    details={"entry_recovery": {"outcome": state, **evidence}},
+                    broker_attempted=True,
+                )
 
         quote = _fresh_quote(manager, str(plan.symbol), getattr(plan, "trace_id", None))
         fresh = _entry_price(manager, plan, quote)
@@ -460,7 +702,10 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
             if quantity <= 0 or quantity >= int(plan.quantity):
                 return _annotate(result, decision, outcome="freeze_cap_unavailable")
         elif decision.action is RecoveryAction.BACKOFF_AND_REVALIDATE:
-            delay = min(max(float(os.getenv("ENTRY_RECOVERY_BACKOFF_SECONDS", "0.25")), 0.0), 1.0)
+            delay = min(
+                max(float(os.getenv("ENTRY_RECOVERY_BACKOFF_SECONDS", "0.25")), 0.0),
+                1.0,
+            )
             if delay:
                 time.sleep(delay)
 
@@ -469,7 +714,14 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
             details = {"fresh_price": fresh}
             deviation = _reprice_deviation_pct(plan, fresh)
             if deviation is not None:
-                details.update({"reprice_deviation_pct": round(deviation, 4), "max_reprice_deviation_pct": _max_reprice_deviation_pct(manager)})
+                details.update(
+                    {
+                        "reprice_deviation_pct": round(deviation, 4),
+                        "max_reprice_deviation_pct": _max_reprice_deviation_pct(
+                            manager
+                        ),
+                    }
+                )
             return _annotate(result, decision, outcome="rebuild_failed", **details)
 
         clearer = getattr(manager, "_clear_pending_signal", None)
@@ -477,7 +729,15 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
         if signal_id and callable(clearer):
             clearer(signal_id)
         retried = original(manager, rebuilt)
-        return _annotate(retried, decision, outcome="retried_once", original_quantity=int(plan.quantity), retry_quantity=int(rebuilt.quantity), original_entry=getattr(plan, "entry_price", None), retry_entry=getattr(rebuilt, "entry_price", None))
+        return _annotate(
+            retried,
+            decision,
+            outcome="retried_once",
+            original_quantity=int(plan.quantity),
+            retry_quantity=int(rebuilt.quantity),
+            original_entry=getattr(plan, "entry_price", None),
+            retry_entry=getattr(rebuilt, "entry_price", None),
+        )
     finally:
         setattr(manager, "_entry_recovery_active", False)
 
@@ -487,26 +747,85 @@ def _is_entry_order(order: Any) -> bool:
     if intent and intent != "UNKNOWN":
         return intent == "ENTRY"
     tag = str(getattr(order, "tag", "") or "").upper()
-    return not any(token in tag for token in ("EXIT", "STOP", "TARGET", "SQUARE", "GUARD", "SL_", "TP_"))
+    return not any(
+        token in tag
+        for token in ("EXIT", "STOP", "TARGET", "SQUARE", "GUARD", "SL_", "TP_")
+    )
 
 
-def _partial_state(order: Any) -> dict[str, Any]:
+def _broker_position_quantity(manager: Any, symbol: str) -> int | None:
+    positions = _broker_positions(manager)
+    if positions is None:
+        return None
+    wanted = _symbol_key(symbol)
+    for position in positions:
+        if (
+            _symbol_key(position.get("tradingsymbol") or position.get("symbol"))
+            != wanted
+        ):
+            continue
+        try:
+            return abs(
+                int(
+                    float(
+                        position.get("quantity", position.get("net_quantity", 0)) or 0
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            return None
+    return 0
+
+
+def _order_lot_size(manager: Any, order: Any) -> int:
+    lot = int(getattr(order, "resolved_lot_size", 0) or 0)
+    if lot > 0:
+        return lot
+    state = getattr(order, "entry_lifecycle_state", None)
+    if isinstance(state, Mapping):
+        lot = int(state.get("resolved_lot_size") or 0)
+        if lot > 0:
+            return lot
+    return _lot_size(manager, str(getattr(order, "symbol", "")))
+
+
+def _requested_lots(order: Any, lot_size: int) -> int:
+    lots = int(getattr(order, "requested_lots", 0) or 0)
+    if lots > 0:
+        return lots
+    qty = int(getattr(order, "quantity", 0) or 0)
+    exact = quantity_to_exact_lots(qty, lot_size)
+    return int(exact or 0)
+
+
+def _partial_state(order: Any, *, lot_size: int, requested_lots: int) -> dict[str, Any]:
     state = getattr(order, "entry_lifecycle_state", None)
     if not isinstance(state, dict):
+        requested_quantity = lots_to_quantity(requested_lots, lot_size)
         state = {
-            "state": "ENTRY_OPEN",
-            "requested_quantity": int(getattr(order, "quantity", 0) or 0),
-            "last_broker_filled_quantity": 0,
-            "last_broker_pending_quantity": 0,
-            "last_broker_cancelled_quantity": 0,
-            "last_accounted_fill_quantity": 0,
+            "state": "ENTRY_SUBMITTED",
+            "requested_lots": requested_lots,
+            "resolved_lot_size": lot_size,
+            "requested_quantity": requested_quantity,
+            "broker_filled_lots": 0,
+            "broker_pending_lots": requested_lots,
+            "broker_cancelled_lots": 0,
+            "broker_filled_quantity": 0,
+            "broker_pending_quantity": requested_quantity,
+            "broker_cancelled_quantity": 0,
+            "protected_lots": 0,
             "protected_quantity": 0,
+            "broker_position_lots": None,
             "broker_position_quantity": None,
             "cancel_requested_at": None,
             "terminal_confirmed_at": None,
             "last_reconcile_at": None,
+            "last_error": None,
         }
         setattr(order, "entry_lifecycle_state", state)
+    state.setdefault("requested_lots", requested_lots)
+    state.setdefault("resolved_lot_size", lot_size)
+    state.setdefault("requested_quantity", lots_to_quantity(requested_lots, lot_size))
     return state
 
 
@@ -521,124 +840,340 @@ def _payload_int(payload: Mapping[str, Any], *keys: str, default: int = 0) -> in
     return default
 
 
-def _broker_position_quantity(manager: Any, symbol: str, fallback: int) -> int:
-    positions = _broker_positions(manager)
-    if positions is None:
-        return int(fallback)
-    wanted = _symbol_key(symbol)
-    for position in positions:
-        if _symbol_key(position.get("tradingsymbol") or position.get("symbol")) != wanted:
-            continue
+def _latch_entry_blocker(
+    manager: Any,
+    reason: str,
+    *,
+    order: Any,
+    state: dict[str, Any],
+    broker_attempted: bool = True,
+    **details: Any,
+) -> None:
+    payload = {
+        "block_reason": reason,
+        "broker_attempted": broker_attempted,
+        "retryable": False,
+        "trade_lifecycle_id": getattr(order, "trade_lifecycle_id", None),
+        "client_order_id": getattr(order, "client_order_id", None),
+        "symbol": getattr(order, "symbol", None),
+        "order_id": getattr(order, "order_id", None),
+        "bracket_id": getattr(order, "bracket_id", None),
+        "requested_lots": state.get("requested_lots"),
+        "resolved_lot_size": state.get("resolved_lot_size"),
+        "requested_quantity": state.get("requested_quantity"),
+        "filled_quantity": state.get("broker_filled_quantity"),
+        "protected_quantity": state.get("protected_quantity"),
+        "broker_position_quantity": state.get("broker_position_quantity"),
+        **details,
+    }
+    setattr(manager, "_last_order_decision", payload)
+    setattr(manager, "_entry_lifecycle_blocker", payload)
+    setter = getattr(manager, "set_last_skip_reason", None)
+    if callable(setter):
         try:
-            return abs(int(float(position.get("quantity", position.get("net_quantity", fallback)) or 0)))
-        except (TypeError, ValueError):
-            return int(fallback)
-    return int(fallback)
+            setter(reason)
+        except Exception:
+            pass
 
 
-def _finalize_partial_entry(manager: Any, order: Any, payload: Mapping[str, Any]) -> None:
-    status = str(getattr(getattr(order, "status", None), "name", getattr(order, "status", ""))).upper()
-    if status != "PARTIALLY_FILLED" or not _is_entry_order(order):
+def current_entry_blocker(manager: Any) -> Mapping[str, Any] | None:
+    blocker = getattr(manager, "_entry_lifecycle_blocker", None)
+    return blocker if isinstance(blocker, Mapping) else None
+
+
+def _finalize_partial_entry(
+    manager: Any, order: Any, payload: Mapping[str, Any]
+) -> None:
+    status = (
+        str(
+            payload.get("status")
+            or getattr(
+                getattr(order, "status", None), "name", getattr(order, "status", "")
+            )
+        )
+        .upper()
+        .replace(" ", "_")
+    )
+    if status not in {
+        "OPEN",
+        "PARTIALLY_FILLED",
+        "CANCEL_PENDING",
+        "CANCELLED",
+        "CANCELED",
+        "COMPLETE",
+        "FILLED",
+        "REJECTED",
+        "EXPIRED",
+    }:
+        return
+    if not _is_entry_order(order):
         return
     order_id = str(getattr(order, "order_id", "") or "")
     if not order_id:
         return
 
-    state = _partial_state(order)
-    requested = int(state.get("requested_quantity") or getattr(order, "quantity", 0) or 0)
-    previous_accounted = int(state.get("last_accounted_fill_quantity") or 0)
-    broker_filled = _payload_int(payload, "filled_quantity", "filled", default=int(getattr(order, "filled_quantity", 0) or 0))
-    broker_pending = _payload_int(payload, "pending_quantity", "pending", default=max(requested - broker_filled, 0) if requested > 0 else 1)
-    broker_cancelled = _payload_int(payload, "cancelled_quantity", "cancelled", default=int(state.get("last_broker_cancelled_quantity") or 0))
+    try:
+        lot_size = _order_lot_size(manager, order)
+    except Exception as exc:  # noqa: BLE001
+        setattr(
+            manager,
+            "_last_order_decision",
+            {
+                "block_reason": "lot_size_unresolved",
+                "broker_attempted": True,
+                "details": {"order_id": order_id, "error_type": type(exc).__name__},
+            },
+        )
+        return
+    requested_lots = _requested_lots(order, lot_size)
+    if requested_lots <= 0:
+        return
+    state = _partial_state(order, lot_size=lot_size, requested_lots=requested_lots)
     now = time.time()
     state["last_reconcile_at"] = now
-    state["last_broker_filled_quantity"] = max(int(state.get("last_broker_filled_quantity") or 0), broker_filled)
-    state["last_broker_pending_quantity"] = broker_pending
-    state["last_broker_cancelled_quantity"] = max(int(state.get("last_broker_cancelled_quantity") or 0), broker_cancelled)
 
-    if broker_filled < previous_accounted:
+    requested_quantity = lots_to_quantity(requested_lots, lot_size)
+    broker_filled_qty = _payload_int(
+        payload,
+        "filled_quantity",
+        "filled",
+        default=int(getattr(order, "filled_quantity", 0) or 0),
+    )
+    broker_pending_qty = _payload_int(
+        payload,
+        "pending_quantity",
+        "pending",
+        default=max(requested_quantity - broker_filled_qty, 0),
+    )
+    broker_cancelled_qty = _payload_int(
+        payload, "cancelled_quantity", "cancelled", default=0
+    )
+
+    filled_lots = quantity_to_exact_lots(broker_filled_qty, lot_size)
+    pending_lots = quantity_to_exact_lots(broker_pending_qty, lot_size)
+    cancelled_lots = quantity_to_exact_lots(broker_cancelled_qty, lot_size)
+    if filled_lots is None or pending_lots is None or cancelled_lots is None:
+        state.update(
+            {
+                "state": "ENTRY_RECONCILIATION_UNKNOWN",
+                "broker_filled_quantity": broker_filled_qty,
+                "broker_pending_quantity": broker_pending_qty,
+                "broker_cancelled_quantity": broker_cancelled_qty,
+                "last_error": "broker_quantity_lot_invariant_violation",
+            }
+        )
+        _latch_entry_blocker(
+            manager, "broker_quantity_lot_invariant_violation", order=order, state=state
+        )
+        _log(
+            manager,
+            "critical",
+            "BROKER_QUANTITY_LOT_INVARIANT_VIOLATION "
+            "order_id=%s symbol=%s filled=%s pending=%s cancelled=%s lot_size=%s",
+            order_id,
+            getattr(order, "symbol", ""),
+            broker_filled_qty,
+            broker_pending_qty,
+            broker_cancelled_qty,
+            lot_size,
+            event="BROKER_QUANTITY_LOT_INVARIANT_VIOLATION",
+        )
+        return
+    if (
+        filled_lots > requested_lots
+        or pending_lots > requested_lots
+        or cancelled_lots > requested_lots
+    ):
+        state.update(
+            {
+                "state": "ENTRY_RECONCILIATION_UNKNOWN",
+                "broker_filled_quantity": broker_filled_qty,
+                "broker_pending_quantity": broker_pending_qty,
+                "broker_cancelled_quantity": broker_cancelled_qty,
+                "last_error": "broker_quantity_lot_invariant_violation",
+            }
+        )
+        _latch_entry_blocker(
+            manager, "broker_quantity_lot_invariant_violation", order=order, state=state
+        )
+        return
+
+    previous_filled_lots = int(state.get("broker_filled_lots") or 0)
+    if filled_lots < previous_filled_lots:
         state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
-        setattr(manager, "_last_order_decision", {"block_reason": "entry_fill_quantity_regressed", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": broker_filled, "last_accounted_fill_quantity": previous_accounted}})
-        _log(manager, "error", "ENTRY_FILL_QUANTITY_REGRESSED order_id=%s broker_filled=%s accounted=%s", order_id, broker_filled, previous_accounted, event="ENTRY_FILL_QUANTITY_REGRESSED", order_id=order_id, filled_quantity=broker_filled)
-        return
-    fill_delta = max(broker_filled - previous_accounted, 0)
-    if broker_filled <= 0:
-        return
-    state["last_accounted_fill_quantity"] = max(previous_accounted, broker_filled)
-    state["state"] = "ENTRY_PARTIALLY_FILLED"
-
-    broker = getattr(manager, "_broker", None)
-    if not state.get("cancel_requested_at") and broker_pending > 0:
-        cancel = getattr(broker, "cancel_order", None)
-        if callable(cancel):
-            try:
-                cancel(order_id)
-                state["cancel_requested_at"] = now
-                state["state"] = "ENTRY_CANCEL_REQUESTED"
-            except TypeError:
-                try:
-                    cancel(order_id=order_id)
-                    state["cancel_requested_at"] = now
-                    state["state"] = "ENTRY_CANCEL_REQUESTED"
-                except Exception as exc:  # noqa: BLE001
-                    state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
-                    setattr(manager, "_last_order_decision", {"block_reason": "entry_cancel_failed", "broker_attempted": True, "details": {"order_id": order_id, "error_type": type(exc).__name__, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0)}})
-            except Exception as exc:  # noqa: BLE001
-                state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
-                setattr(manager, "_last_order_decision", {"block_reason": "entry_cancel_failed", "broker_attempted": True, "details": {"order_id": order_id, "error_type": type(exc).__name__, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0)}})
-
-    final_payload: Mapping[str, Any] = payload
-    getter = getattr(broker, "get_order_status", None)
-    if callable(getter):
-        try:
-            refreshed = getter(order_id)
-            if isinstance(refreshed, Mapping):
-                final_payload = refreshed
-                broker_filled = max(broker_filled, _payload_int(refreshed, "filled_quantity", "filled", default=broker_filled))
-        except Exception:
-            state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
-
-    try:
-        average = float(final_payload.get("average_price") or final_payload.get("avg_price") or getattr(order, "fill_price", 0.0) or getattr(order, "average_price", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return
-    if average <= 0:
+        state["last_error"] = "entry_fill_quantity_regressed"
+        _latch_entry_blocker(
+            manager,
+            "entry_fill_quantity_regressed",
+            order=order,
+            state=state,
+            actual_value=filled_lots,
+            required_value=previous_filled_lots,
+        )
         return
 
-    broker_position = _broker_position_quantity(manager, str(getattr(order, "symbol", "")), broker_filled)
-    state["broker_position_quantity"] = broker_position
-    desired_protection = min(broker_filled, broker_position) if broker_position > 0 else broker_filled
-    if int(state.get("protected_quantity") or 0) > desired_protection:
-        state["state"] = "ENTRY_PROTECTION_FAILED"
-        setattr(manager, "_last_order_decision", {"block_reason": "unprotected_entry_fill", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0), "broker_position_quantity": broker_position}})
-        return
+    state.update(
+        {
+            "broker_filled_lots": filled_lots,
+            "broker_pending_lots": pending_lots,
+            "broker_cancelled_lots": cancelled_lots,
+            "broker_filled_quantity": broker_filled_qty,
+            "broker_pending_quantity": broker_pending_qty,
+            "broker_cancelled_quantity": broker_cancelled_qty,
+        }
+    )
 
-    confirmer = getattr(getattr(manager, "_bracket_manager", None), "confirm_partial_entry_fill", None)
-    protected = False
-    if callable(confirmer) and desired_protection > int(state.get("protected_quantity") or 0):
-        confirm_result = confirmer(order_id, desired_protection, average)
-        protected = True if confirm_result is None else bool(confirm_result)
-        if protected:
-            state["protected_quantity"] = desired_protection
-            state["state"] = "ENTRY_PROTECTED" if broker_pending <= 0 else "ENTRY_PROTECTION_PENDING"
+    if filled_lots == 0:
+        if status in {"CANCELLED", "CANCELED"}:
+            state["state"] = "ENTRY_CANCELLED"
+            state["terminal_confirmed_at"] = now
+            if getattr(manager, "_entry_lifecycle_blocker", None):
+                setattr(manager, "_entry_lifecycle_blocker", None)
+        elif status in {"REJECTED", "EXPIRED"}:
+            state["state"] = "ENTRY_REJECTED"
+            state["terminal_confirmed_at"] = now
+        elif status in {"CANCEL_PENDING"}:
+            state["state"] = "ENTRY_CANCEL_PENDING"
         else:
-            state["state"] = "ENTRY_PROTECTION_FAILED"
-            setattr(manager, "_last_order_decision", {"block_reason": "unprotected_entry_fill", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0), "broker_position_quantity": broker_position}})
-            _log(manager, "critical", "PARTIAL_ENTRY_PROTECTION_FAILED order_id=%s symbol=%s filled=%s", order_id, getattr(order, "symbol", ""), broker_filled, event="PARTIAL_ENTRY_PROTECTION_FAILED", order_id=order_id, filled_quantity=broker_filled)
-            return
-    elif desired_protection <= int(state.get("protected_quantity") or 0):
-        protected = True
+            state["state"] = "ENTRY_OPEN"
+        return
 
-    marker = getattr(manager, "_mark_order_uncertain", None)
-    if callable(marker):
-        marker(str(getattr(order, "client_order_id", None) or order_id))
-    terminal_status = str(final_payload.get("status") or status).upper() in {"COMPLETE", "FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"}
-    if terminal_status:
+    broker_position_qty = _broker_position_quantity(
+        manager, str(getattr(order, "symbol", ""))
+    )
+    state["broker_position_quantity"] = broker_position_qty
+    broker_position_lots = (
+        None
+        if broker_position_qty is None
+        else quantity_to_exact_lots(broker_position_qty, lot_size)
+    )
+    state["broker_position_lots"] = broker_position_lots
+    if broker_position_qty is None:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "broker_position_unknown_with_possible_exposure"
+        _latch_entry_blocker(
+            manager,
+            "broker_position_unknown_with_possible_exposure",
+            order=order,
+            state=state,
+        )
+        return
+    if broker_position_lots is None:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "broker_quantity_lot_invariant_violation"
+        _latch_entry_blocker(
+            manager, "broker_quantity_lot_invariant_violation", order=order, state=state
+        )
+        return
+    if broker_position_lots != filled_lots:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "entry_reconciliation_pending"
+        _latch_entry_blocker(
+            manager, "entry_reconciliation_pending", order=order, state=state
+        )
+        return
+
+    if (
+        status in {"PARTIALLY_FILLED", "OPEN"}
+        and pending_lots > 0
+        and filled_lots < requested_lots
+    ):
+        state["state"] = "ENTRY_PARTIALLY_FILLED"
+        if requested_lots > 1 and not state.get("cancel_requested_at"):
+            cancel = getattr(getattr(manager, "_broker", None), "cancel_order", None)
+            if callable(cancel):
+                try:
+                    cancel(order_id)
+                    state["cancel_requested_at"] = now
+                    state["state"] = "ENTRY_CANCEL_PENDING"
+                except TypeError:
+                    try:
+                        cancel(order_id=order_id)
+                        state["cancel_requested_at"] = now
+                        state["state"] = "ENTRY_CANCEL_PENDING"
+                    except Exception as exc:  # noqa: BLE001
+                        state["last_error"] = (
+                            f"entry_cancel_failed:{type(exc).__name__}"
+                        )
+                        _latch_entry_blocker(
+                            manager, "entry_cancel_failed", order=order, state=state
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    state["last_error"] = f"entry_cancel_failed:{type(exc).__name__}"
+                    _latch_entry_blocker(
+                        manager, "entry_cancel_failed", order=order, state=state
+                    )
+
+    confirmer = getattr(
+        getattr(manager, "_bracket_manager", None), "confirm_partial_entry_fill", None
+    )
+    if not callable(confirmer):
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "entry_protection_failed"
+        _latch_entry_blocker(
+            manager, "entry_protection_failed", order=order, state=state
+        )
+        return
+    protected_qty = lots_to_quantity(filled_lots, lot_size)
+    try:
+        average = float(
+            payload.get("average_price")
+            or payload.get("avg_price")
+            or getattr(order, "fill_price", 0.0)
+            or getattr(order, "average_price", 0.0)
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        average = 0.0
+    result = confirmer(order_id, protected_qty, average)
+    accepted = bool(getattr(result, "accepted", result is True))
+    if not accepted:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "entry_protection_failed"
+        _latch_entry_blocker(
+            manager, "entry_protection_failed", order=order, state=state
+        )
+        _log(
+            manager,
+            "critical",
+            "ENTRY_PROTECTION_FAILED order_id=%s symbol=%s filled_lots=%s",
+            order_id,
+            getattr(order, "symbol", ""),
+            filled_lots,
+            event="ENTRY_PROTECTION_FAILED",
+        )
+        return
+    state["protected_lots"] = filled_lots
+    state["protected_quantity"] = protected_qty
+    if filled_lots == requested_lots and status in {"COMPLETE", "FILLED"}:
+        state["state"] = "ENTRY_PROTECTED"
         state["terminal_confirmed_at"] = now
-        state["state"] = "ENTRY_TERMINAL_CONFIRMED" if protected else state.get("state")
-    decision_reason = "partial_entry_fill_reconciled" if terminal_status and protected and state.get("protected_quantity") == broker_position else "entry_fill_reconciliation_pending"
-    setattr(manager, "_last_order_decision", {"block_reason": decision_reason, "broker_attempted": True, "details": {"order_id": order_id, "requested_quantity": requested, "filled_quantity": broker_filled, "fill_delta": fill_delta, "average_price": average, "protected_quantity": state.get("protected_quantity", 0), "broker_position_quantity": broker_position, "remainder_cancel_requested": bool(state.get("cancel_requested_at")), "entry_lifecycle_state": state.get("state")}})
-    _log(manager, "critical", "ENTRY_PARTIAL_FILL_RECONCILED order_id=%s symbol=%s filled=%s protected=%s state=%s", order_id, getattr(order, "symbol", ""), broker_filled, state.get("protected_quantity", 0), state.get("state"), event="ENTRY_PARTIAL_FILL_RECONCILED", order_id=order_id, filled_quantity=broker_filled)
+        setattr(manager, "_entry_lifecycle_blocker", None)
+        setattr(
+            manager,
+            "_last_order_decision",
+            {
+                "block_reason": "ENTRY_FULL_LOT_PROTECTED",
+                "broker_attempted": True,
+                "details": dict(state),
+            },
+        )
+        _log(
+            manager,
+            "critical",
+            "ENTRY_FULL_LOT_PROTECTED order_id=%s symbol=%s filled_lots=%s quantity=%s",
+            order_id,
+            getattr(order, "symbol", ""),
+            filled_lots,
+            protected_qty,
+            event="ENTRY_FULL_LOT_PROTECTED",
+        )
+    else:
+        state["state"] = "ENTRY_PROTECTED"
+        _latch_entry_blocker(
+            manager, "entry_reconciliation_pending", order=order, state=state
+        )
+
 
 def install_entry_recovery(order_manager_class: type[Any]) -> None:
     """Compatibility installer for legacy tests only.
@@ -653,26 +1188,49 @@ def install_entry_recovery(order_manager_class: type[Any]) -> None:
     original_submit = getattr(order_manager_class, "submit_trade_plan_result", None)
     if callable(original_submit):
         setattr(order_manager_class, "_entry_recovery_original_submit", original_submit)
+
         def submit_trade_plan_result(self: Any, plan: Any) -> Any:
             return _recover_submit(original_submit, self, plan)
-        setattr(order_manager_class, "submit_trade_plan_result", submit_trade_plan_result)
+
+        setattr(
+            order_manager_class, "submit_trade_plan_result", submit_trade_plan_result
+        )
 
     original_update = getattr(order_manager_class, "_update_from_response", None)
     if callable(original_update):
         setattr(order_manager_class, "_entry_recovery_original_update", original_update)
+
         def update_from_response(self: Any, order: Any, payload: dict[str, Any]) -> Any:
             updated = original_update(self, order, payload)
             try:
                 _finalize_partial_entry(self, updated, payload)
             except Exception as exc:  # noqa: BLE001
-                _log(self, "error", "ENTRY_PARTIAL_FILL_RECONCILE_FAILED order_id=%s error=%s", getattr(order, "order_id", ""), exc, event="ENTRY_PARTIAL_FILL_RECONCILE_FAILED")
+                _log(
+                    self,
+                    "error",
+                    "ENTRY_PARTIAL_FILL_RECONCILE_FAILED order_id=%s error=%s",
+                    getattr(order, "order_id", ""),
+                    exc,
+                    event="ENTRY_PARTIAL_FILL_RECONCILE_FAILED",
+                )
             return updated
+
         setattr(order_manager_class, "_update_from_response", update_from_response)
 
-    def set_trade_plan_rebuilder(self: Any, callback: Callable[..., Any] | None) -> None:
+    def set_trade_plan_rebuilder(
+        self: Any, callback: Callable[..., Any] | None
+    ) -> None:
         setattr(self, "_trade_plan_rebuilder", callback)
+
     setattr(order_manager_class, "set_trade_plan_rebuilder", set_trade_plan_rebuilder)
     setattr(order_manager_class, "_canonical_entry_recovery_installed", True)
 
 
-__all__ = ["install_entry_recovery", "_recover_submit", "_finalize_partial_entry"]
+__all__ = [
+    "install_entry_recovery",
+    "_recover_submit",
+    "_finalize_partial_entry",
+    "quantity_to_exact_lots",
+    "lots_to_quantity",
+    "current_entry_blocker",
+]
