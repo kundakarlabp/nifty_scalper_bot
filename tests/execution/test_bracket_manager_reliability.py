@@ -150,3 +150,159 @@ def test_websocket_tick_jump_scenario_triggers_sl() -> None:
     bracket = _wait_for_exit(manager, "entry-5")
     assert bracket is not None
     assert bracket.exit_executed is True
+
+
+def test_trail_update_does_not_exit_same_tick_regression() -> None:
+    order_manager = Mock()
+    order_manager.place_order.return_value = "exit-1"
+    manager = BracketManager(order_manager=order_manager)
+    manager.register_virtual_bracket(
+        order_id="incident-1",
+        symbol="NFO:NIFTY24100CE",
+        side="BUY",
+        qty=65,
+        price=70.80,
+        sl=66.60,
+        tp=78.25,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("incident-1")
+    assert bracket is not None
+    bracket.trailing_config["breakeven_activation_r"] = 0.20
+
+    manager.on_tick("NFO:NIFTY24100CE", 71.65, exchange_ts=1_000.0)
+
+    assert bracket.sl_trigger_price == 70.80
+    assert bracket.exit_pending is False
+    assert order_manager.place_order.call_count == 0
+
+    manager.on_tick("NFO:NIFTY24100CE", 71.40, exchange_ts=1_001.0)
+    assert bracket.exit_pending is False
+    assert order_manager.place_order.call_count == 0
+
+    manager.on_tick("NFO:NIFTY24100CE", 70.75, exchange_ts=1_002.0)
+    assert "SL" in str(bracket.exit_reason or "")
+    assert order_manager.place_order.call_count == 1
+
+
+def test_duplicate_same_tick_has_one_trail_update_and_no_exit() -> None:
+    order_manager = Mock()
+    order_manager.place_order.return_value = "exit-dup"
+    manager = BracketManager(order_manager=order_manager)
+    manager.register_virtual_bracket(
+        "dup-1",
+        "NFO:NIFTY24100CE",
+        "BUY",
+        65,
+        70.80,
+        66.60,
+        78.25,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("dup-1")
+    assert bracket is not None
+    bracket.trailing_config["breakeven_activation_r"] = 0.20
+
+    manager.on_tick("NFO:NIFTY24100CE", 71.65, exchange_ts=2_000.0)
+    manager.on_tick("NFO:NIFTY24100CE", 71.65, exchange_ts=2_000.0)
+
+    assert bracket.sl_trigger_price == 70.80
+    assert bracket.trail_revision == 1
+    assert order_manager.place_order.call_count == 0
+
+
+def test_one_lot_does_not_allocate_sub_lot_tp1_but_two_lot_keeps_whole_lot_tp1() -> (
+    None
+):
+    manager, _ = _build_manager()
+    manager.register_virtual_bracket(
+        "one-lot",
+        "NFO:NIFTYONECE",
+        "BUY",
+        65,
+        100.0,
+        95.0,
+        120.0,
+        tp1_price=110.0,
+        tp1_qty=25,
+    )
+    one = manager.get_bracket("one-lot")
+    assert one is not None
+    assert one.tp_levels == []
+
+    manager.register_virtual_bracket(
+        "two-lot",
+        "NFO:NIFTYTWOCE",
+        "BUY",
+        130,
+        100.0,
+        95.0,
+        120.0,
+        tp1_price=110.0,
+        tp1_qty=65,
+    )
+    two = manager.get_bracket("two-lot")
+    assert two is not None
+    assert [(t.name, t.quantity) for t in two.tp_levels] == [("TP1", 65)]
+
+
+def test_selection_drift_does_not_change_existing_bracket() -> None:
+    manager, _ = _build_manager()
+    manager.register_virtual_bracket(
+        "open-ce", "NFO:NIFTY24100CE", "BUY", 65, 100.0, 95.0, 120.0
+    )
+    manager.confirm_entry_fill("open-ce", 100.0)
+    manager.register_virtual_bracket(
+        "new-ce", "NFO:NIFTY24050CE", "BUY", 65, 100.0, 95.0, 120.0
+    )
+
+    existing = manager.get_bracket("open-ce")
+    assert existing is not None
+    assert existing.symbol == "NFO:NIFTY24100CE"
+    assert existing.active is True
+    assert manager.get_bracket("new-ce") is not None
+
+
+def test_duplicate_callback_submits_one_exit_order_only() -> None:
+    order_manager = Mock()
+    order_manager.place_order.return_value = "exit-once"
+    manager = BracketManager(order_manager=order_manager)
+    manager.register_virtual_bracket(
+        "exit-once",
+        "NFO:NIFTYEXITCE",
+        "BUY",
+        65,
+        100.0,
+        95.0,
+        120.0,
+        activate_immediately=True,
+    )
+
+    manager.on_tick("NFO:NIFTYEXITCE", 94.0, exchange_ts=3_000.0)
+    manager.on_tick("NFO:NIFTYEXITCE", 94.0, exchange_ts=3_000.0)
+
+    assert order_manager.place_order.call_count == 1
+
+
+def test_breakeven_activation_requires_configured_r_threshold() -> None:
+    manager, _ = _build_manager()
+    manager.register_virtual_bracket(
+        "be-1",
+        "NFO:NIFTYBECE",
+        "BUY",
+        65,
+        70.80,
+        66.60,
+        78.25,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("be-1")
+    assert bracket is not None
+
+    manager.on_tick("NFO:NIFTYBECE", 71.65, exchange_ts=4_000.0)
+    assert bracket.sl_trigger_price == 66.60
+
+    manager.on_tick("NFO:NIFTYBECE", 73.95, exchange_ts=4_001.0)
+    assert bracket.sl_trigger_price >= 70.80
+    assert bracket.sl_trigger_price < 73.95
+    assert bracket.exit_pending is False
