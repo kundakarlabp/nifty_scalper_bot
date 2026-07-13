@@ -1,4 +1,3 @@
-# ruff: noqa
 """Thread-safe bracket manager with virtual (internal) SL/TP execution.
 
 Runtime role:

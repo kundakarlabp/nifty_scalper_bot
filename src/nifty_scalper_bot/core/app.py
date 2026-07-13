@@ -1,4 +1,3 @@
-# ruff: noqa
 """Core orchestration for the Nifty scalper trading bot.
 
 Runtime role:
@@ -31,8 +30,6 @@ Safe-edit notes:
 - Polling mode is more reliable for cloud deploys; WebSocket/webhook is only for
   a static public IP with a trusted domain and TLS certificate.
 """
-
-# ruff: noqa: I001
 
 from __future__ import annotations
 

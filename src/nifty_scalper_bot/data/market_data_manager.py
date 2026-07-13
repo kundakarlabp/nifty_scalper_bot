@@ -1,4 +1,3 @@
-# ruff: noqa
 """Central market data manager: the single owner of ticks and OHLC history.
 
 Runtime role:
@@ -369,6 +368,8 @@ class MarketDataManager:
         self._required_symbol_missing_grace_sec = self._parse_float_env(
             "MDM_REQUIRED_SYMBOL_MISSING_GRACE_SECONDS", default=15.0, minimum=0.0
         )
+        self._subscription_divergence_since_mono: float | None = None
+        self._last_symbol_level_recovery_mono: float | None = None
         self._event_loop_lag_seconds: float = 0.0
         self._hydration_status: dict[str, str] = {}
         self._hydration_log_ts: dict[str, float] = {}
@@ -7516,14 +7517,13 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
+        self._store_tick(symbol, tick)
         if source == "ws":
             now_mono = time.monotonic()
             self._last_ws_tick_mono = now_mono
             canonical_symbol = self._canonical_symbol(symbol)
             with self._lock:
                 self._last_valid_live_tick_mono[canonical_symbol] = now_mono
-        self._store_tick(symbol, tick)
-        if source == "ws":
             try:
                 token_value = tick.get("instrument_token") or tick.get("token")
                 token_int = int(token_value) if token_value is not None else None
@@ -8110,9 +8110,7 @@ class MarketDataManager:
             self._zombie_stale_logged = False
             return
         self._monitor_spot_ws_health()
-        if not self._is_ws_healthy():
-            self._zombie_stale_logged = False
-            return
+        ws_healthy = self._is_ws_healthy()
 
         with self._lock:
             required = self._required_live_symbols()
@@ -8170,21 +8168,46 @@ class MarketDataManager:
             heartbeat_age is not None
             and heartbeat_age > self._zombie_tick_threshold_sec
         )
+        desired_tokens = set(getattr(self, "_desired_tokens", set()) or set())
+        confirmed_tokens = set(
+            getattr(self, "_confirmed_subscriptions", set()) or set()
+        )
         subscription_divergence = bool(
-            getattr(self, "_desired_tokens", set())
-            and getattr(self, "_confirmed_subscriptions", set())
-            and (set(self._desired_tokens) - set(self._confirmed_subscriptions))
+            desired_tokens and confirmed_tokens and (desired_tokens - confirmed_tokens)
+        )
+        if subscription_divergence:
+            self._subscription_divergence_since_mono = (
+                self._subscription_divergence_since_mono or now_mono
+            )
+        else:
+            self._subscription_divergence_since_mono = None
+        divergence_age = (
+            0.0
+            if self._subscription_divergence_since_mono is None
+            else now_mono - self._subscription_divergence_since_mono
+        )
+        recovery_after_divergence = (
+            self._last_symbol_level_recovery_mono is not None
+            and self._subscription_divergence_since_mono is not None
+            and self._last_symbol_level_recovery_mono
+            >= self._subscription_divergence_since_mono
+        )
+        subscription_transport_failure = (
+            subscription_divergence
+            and divergence_age >= self._required_symbol_missing_grace_sec
+            and recovery_after_divergence
         )
         transport_failure = (
             heartbeat_stale
             or (spot_stale and fut_stale)
             or stale_ratio >= 0.70
-            or subscription_divergence
+            or subscription_transport_failure
         )
         if stale_or_missing_symbols and not transport_failure:
             for sym in stale_or_missing_symbols:
                 age = self.time_since_last_live_ws_tick(sym)
                 self.request_fallback_refresh(sym, reason="ws_symbol_stale_recovery")
+                self._last_symbol_level_recovery_mono = now_mono
                 self._logger.warning(
                     "WS_SYMBOL_STALE_RECOVERY symbol=%s required=%s stale_age_s=%s heartbeat_age_s=%s reason=%s",
                     sym,
@@ -8202,6 +8225,9 @@ class MarketDataManager:
                         "required": sym in required,
                         "stale_age_s": age,
                         "heartbeat_age_s": heartbeat_age,
+                        "ws_healthy": ws_healthy,
+                        "subscription_divergence": subscription_divergence,
+                        "subscription_divergence_age_s": divergence_age,
                         "reason": (
                             "missing_first_ws_tick"
                             if sym in missing_symbols
@@ -8218,6 +8244,9 @@ class MarketDataManager:
                     "stale_symbols": stale_symbols,
                     "missing_symbols": missing_symbols,
                     "heartbeat_age_s": heartbeat_age,
+                    "ws_healthy": ws_healthy,
+                    "subscription_divergence": subscription_divergence,
+                    "subscription_divergence_age_s": divergence_age,
                     "reason": "no_transport_failure",
                 },
             )
@@ -8254,6 +8283,9 @@ class MarketDataManager:
                 "symbols": stale_symbols,
                 "missing_symbols": missing_symbols,
                 "heartbeat_age_s": heartbeat_age,
+                "ws_healthy": ws_healthy,
+                "subscription_divergence": subscription_divergence,
+                "subscription_divergence_age_s": divergence_age,
                 "reason": "transport_failure",
             },
         )

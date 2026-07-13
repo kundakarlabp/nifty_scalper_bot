@@ -1,4 +1,3 @@
-# ruff: noqa
 """Advanced signal generation utilities with hardened observability.
 
 Runtime role:

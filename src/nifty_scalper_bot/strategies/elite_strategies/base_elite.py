@@ -1,4 +1,3 @@
-# ruff: noqa
 """
 Base abstractions and helpers for elite strategies.
 Production-Grade: Optimized Dispatch & Attribute Injection.

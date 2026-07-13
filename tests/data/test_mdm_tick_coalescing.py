@@ -529,3 +529,72 @@ def test_active_bracket_symbol_remains_required_before_position_reconcile():
     mdm.set_active_bracket_symbols([bracket_symbol])
 
     assert bracket_symbol in mdm._required_live_symbols()
+
+
+def test_unhealthy_ws_still_diagnoses_and_restarts_for_stale_context(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    for sym in required:
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 120.0
+    mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    restarted = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: False)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert restarted == [True]
+
+
+def test_subscription_divergence_needs_grace_and_symbol_recovery(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    for sym in required:
+        mdm._last_valid_live_tick_mono[sym] = now
+    stale = "NFO:NIFTY26JUN24000CE"
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._desired_tokens = {1, 2, 3, 4}
+    mdm._confirmed_subscriptions = {2, 3, 4}
+    mdm._subscription_divergence_since_mono = now - 120.0
+    mdm._required_symbol_missing_grace_sec = 1.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    rest_requests = []
+    restarted = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)),
+    )
+    monkeypatch.setattr(
+        mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert rest_requests == [(stale, "ws_symbol_stale_recovery")]
+    assert restarted == []
+
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._last_symbol_level_recovery_mono = now
+    mdm._check_zombie_ticks()
+
+    assert restarted == [True]

@@ -1,4 +1,3 @@
-# ruff: noqa
 """Utility classes for calculating technical indicators.
 
 This module provides a :class:`PriceHistory` container for efficiently storing
