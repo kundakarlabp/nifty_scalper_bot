@@ -1043,6 +1043,7 @@ class BracketManager:
         trailing_atr_mult: float | None = None,
         activate_immediately: bool = False,
         intent: str | None = None,
+        resolved_lot_size: int | None = None,
     ) -> None:
         """Register a position for virtual bracket monitoring.
 
@@ -1059,6 +1060,7 @@ class BracketManager:
             tp1_qty: Optional first profit target quantity.
             trailing_atr_mult: Optional ATR-based trailing multiplier.
             activate_immediately: Whether the bracket is active on registration.
+            resolved_lot_size: Authoritative instrument lot size for TP allocation.
 
         Returns:
             None.
@@ -1117,14 +1119,15 @@ class BracketManager:
 
             # 3. Setup TP Levels (Partial Exits)
             targets = []
-            resolved_lot_size = max(1, parse_int_env(os.getenv("NIFTY_LOT_SIZE"), 65))
+            lot_size = self._resolve_bracket_lot_size(resolved_lot_size)
             if (
-                abs(qty) > resolved_lot_size
+                lot_size is not None
+                and abs(qty) > lot_size
                 and tp1_price
                 and tp1_qty
-                and tp1_qty >= resolved_lot_size
+                and tp1_qty >= lot_size
                 and tp1_qty < abs(qty)
-                and int(tp1_qty) % resolved_lot_size == 0
+                and int(tp1_qty) % lot_size == 0
             ):
                 targets.append(
                     TargetLevel(price=tp1_price, quantity=tp1_qty, name="TP1")
@@ -1452,6 +1455,61 @@ class BracketManager:
         """Alias for update_market_stats."""
         self.update_market_stats(symbol, atr=atr)
 
+    def _resolve_bracket_lot_size(self, resolved_lot_size: int | None) -> int | None:
+        """Return authoritative lot size for TP splits, or None when unsafe."""
+        try:
+            explicit = int(resolved_lot_size or 0)
+        except (TypeError, ValueError):
+            explicit = 0
+        if explicit > 0:
+            return explicit
+        # Compatibility only: older paper/shadow call sites did not provide the
+        # resolved instrument lot.  In live mode, absence of the authoritative
+        # lot size must not silently create a stale or fractional TP1 split.
+        if self._is_live_execution():
+            return None
+        return max(1, parse_int_env(os.getenv("NIFTY_LOT_SIZE"), 65))
+
+    def _trail_activation_r(self, bracket: BracketState) -> float:
+        try:
+            return float(
+                bracket.trailing_config.get(
+                    "breakeven_activation_r",
+                    os.getenv("TRAIL_BREAKEVEN_ACTIVATION_R", 0.75),
+                )
+            )
+        except (TypeError, ValueError):
+            return 0.75
+
+    def _is_trail_candidate_allowed(
+        self, bracket: BracketState, candidate_sl: float, ltp: float
+    ) -> bool:
+        """Validate one trailing candidate for both controller and fallback paths."""
+        if ltp <= 0 or bracket.entry_price <= 0:
+            return False
+        candidate = _round_to_tick(candidate_sl)
+        current_sl = float(bracket.sl_trigger_price or 0.0)
+        entry = float(bracket.entry_price)
+        initial_sl = float(bracket.initial_sl_trigger_price or current_sl or 0.0)
+        initial_risk = abs(entry - initial_sl)
+        activation_r = self._trail_activation_r(bracket)
+
+        if bracket.side == "BUY":
+            if candidate <= current_sl or candidate >= ltp:
+                return False
+            if candidate >= entry:
+                mfe = max(float(bracket.highest_ltp or entry), ltp) - entry
+                return initial_risk > 0 and mfe >= (initial_risk * activation_r)
+            return True
+
+        if candidate >= current_sl or candidate <= ltp:
+            return False
+        if candidate <= entry:
+            low_water = float(bracket.lowest_ltp or entry)
+            mfe = entry - min(low_water, ltp)
+            return initial_risk > 0 and mfe >= (initial_risk * activation_r)
+        return True
+
     def _virtual_modify_sl(self, order_id: str, price: float) -> bool:
         """Callback for AdaptiveController to update Virtual SL."""
         # Find bracket by iterating (Safety lookup)
@@ -1466,12 +1524,8 @@ class BracketManager:
                 old_sl = target_bracket.sl_trigger_price
                 rounded = _round_to_tick(price)
                 ltp = float(target_bracket.last_ltp or 0.0)
-                if target_bracket.side == "BUY":
-                    if rounded <= old_sl or (ltp > 0 and rounded >= ltp):
-                        return False
-                else:
-                    if rounded >= old_sl or (ltp > 0 and rounded <= ltp):
-                        return False
+                if not self._is_trail_candidate_allowed(target_bracket, rounded, ltp):
+                    return False
                 target_bracket.sl_trigger_price = rounded
                 target_bracket.updated_at = time.time()
                 target_bracket.last_trail_price = ltp or None
@@ -2425,7 +2479,7 @@ class BracketManager:
             if bracket.side == "BUY":
                 current_sl = bracket.sl_trigger_price  # authoritative read under lock
                 rounded_sl = _round_to_tick(new_sl)
-                if rounded_sl > current_sl and rounded_sl < ltp:
+                if self._is_trail_candidate_allowed(bracket, rounded_sl, ltp):
                     old_sl = bracket.sl_trigger_price
                     bracket.sl_trigger_price = rounded_sl
                     bracket.updated_at = time.time()
@@ -2460,7 +2514,7 @@ class BracketManager:
             else:  # SELL
                 current_sl = bracket.sl_trigger_price  # authoritative read under lock
                 rounded_sl = _round_to_tick(new_sl)
-                if rounded_sl < current_sl and rounded_sl > ltp:
+                if self._is_trail_candidate_allowed(bracket, rounded_sl, ltp):
                     old_sl = bracket.sl_trigger_price
                     bracket.sl_trigger_price = rounded_sl
                     bracket.updated_at = time.time()

@@ -25,7 +25,6 @@ from nifty_scalper_bot.execution.hardened_bracket_manager import (
     HardenedBracketManager,
 )
 
-
 SYMBOL = "NFO:NIFTY2662324050PE"
 
 
@@ -38,9 +37,7 @@ class _Broker:
     def __init__(self, *, cancel_confirms: bool = True) -> None:
         self.cancel_confirms = cancel_confirms
         self.statuses: dict[str, str] = {"old-exit": "OPEN PENDING"}
-        self.positions: list[dict[str, Any]] = [
-            {"symbol": SYMBOL, "quantity": 65}
-        ]
+        self.positions: list[dict[str, Any]] = [{"symbol": SYMBOL, "quantity": 65}]
         self.cancel_calls: list[str] = []
 
     def get_order_status(self, order_id: str) -> dict[str, Any]:
@@ -103,7 +100,9 @@ class _DummyController:
         return None
 
 
-def _manager(*, cancel_confirms: bool = True) -> tuple[BracketManager, _OrderManager, _Broker]:
+def _manager(
+    *, cancel_confirms: bool = True
+) -> tuple[BracketManager, _OrderManager, _Broker]:
     broker = _Broker(cancel_confirms=cancel_confirms)
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
@@ -388,21 +387,25 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
     bm._filled_position_sync_grace_seconds = 0.0
     try:
         bm.register_virtual_bracket(
-            order_id="lat-1", symbol="NFO:NIFTYLAT24200PE", side="BUY", qty=65,
-            price=103.30, sl=97.85, tp=115.45, activate_immediately=False,
+            order_id="lat-1",
+            symbol="NFO:NIFTYLAT24200PE",
+            side="BUY",
+            qty=65,
+            price=103.30,
+            sl=97.85,
+            tp=115.45,
+            activate_immediately=False,
         )
         bm.confirm_entry_fill("lat-1", 103.75)
         bracket = bm.get_bracket("lat-1")
-        for px in (104.5, 105.3, 106.15, 102.95):
+        for px in (104.5, 106.8, 108.2, 102.95):
             bm.on_tick("NFO:NIFTYLAT24200PE", px)
         assert bracket.exit_pending is True and orders == ["exit"]
 
         # Broker flat, order status lagging: force the authoritative flat view
         # and the strict-live reconcile path (the branch production runs).
         status["flat"] = True
-        monkeypatch.setattr(
-            type(bm), "_position_flat_for_symbol", lambda self, s: True
-        )
+        monkeypatch.setattr(type(bm), "_position_flat_for_symbol", lambda self, s: True)
         records: list = []
 
         class _Cap(logging.Handler):
@@ -424,7 +427,9 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
         assert result is False
         assert bracket.flat_nonterminal_since_monotonic is not None
         assert bracket.flat_nonterminal_since_utc is not None
-        lag_logs = [r for r in records if "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL" in r.getMessage()]
+        lag_logs = [
+            r for r in records if "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL" in r.getMessage()
+        ]
         assert lag_logs and all(r.levelno == logging.INFO for r in lag_logs), [
             (r.levelname, r.getMessage()[:60]) for r in lag_logs
         ]
@@ -495,8 +500,10 @@ def test_unknown_position_truth_does_not_close_or_duplicate_exit(monkeypatch, fa
             manager, "_authoritative_position_quantity", lambda _symbol: None
         )
     else:
+
         def _raise(_symbol):
             raise RuntimeError("broker unavailable")
+
         monkeypatch.setattr(manager, "_authoritative_position_quantity", _raise)
 
     result = manager._reconcile_exit_state(bracket, requested_by="watchdog")

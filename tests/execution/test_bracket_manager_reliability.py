@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from typing import Mapping
 from unittest.mock import Mock
 
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
 def _build_manager() -> tuple[BracketManager, Mock]:
@@ -306,3 +309,143 @@ def test_breakeven_activation_requires_configured_r_threshold() -> None:
     assert bracket.sl_trigger_price >= 70.80
     assert bracket.sl_trigger_price < 73.95
     assert bracket.exit_pending is False
+
+
+def test_adaptive_controller_trail_callback_uses_same_r_guard() -> None:
+    manager, _ = _build_manager()
+    manager.register_virtual_bracket(
+        "adaptive-r",
+        "NFO:NIFTYADAPTCE",
+        "BUY",
+        65,
+        70.80,
+        66.60,
+        78.25,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("adaptive-r")
+    assert bracket is not None
+    bracket.last_ltp = 71.65
+    bracket.highest_ltp = 71.65
+
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 70.80) is False
+    assert bracket.sl_trigger_price == 66.60
+    assert bracket.trail_revision == 0
+
+    bracket.last_ltp = 73.95
+    bracket.highest_ltp = 73.95
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 70.80) is True
+    assert bracket.sl_trigger_price == 70.80
+    assert bracket.trail_revision == 1
+    assert bracket.exit_pending is False
+
+
+def test_timestampless_duplicate_callback_has_one_trail_revision_and_notification() -> (
+    None
+):
+    order_manager = Mock()
+    order_manager.place_order.return_value = "exit-1"
+    manager = BracketManager(order_manager=order_manager)
+    notifications: list[tuple[str, Mapping[str, object] | None]] = []
+    manager.set_notifier(lambda event, payload: notifications.append((event, payload)))
+    manager.register_virtual_bracket(
+        "no-ts-trail",
+        "NFO:NIFTYNOTSCE",
+        "BUY",
+        65,
+        70.80,
+        66.60,
+        78.25,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("no-ts-trail")
+    assert bracket is not None
+    bracket.trailing_config["breakeven_activation_r"] = 0.20
+
+    manager.process_exit_checks("NFO:NIFTYNOTSCE", 71.65)
+    manager.process_exit_checks("NFO:NIFTYNOTSCE", 71.65)
+
+    assert bracket.sl_trigger_price == 70.80
+    assert bracket.trail_revision == 1
+    assert [event for event, _ in notifications].count("BRACKET_TRAIL_UPDATED") <= 1
+    assert order_manager.place_order.call_count == 0
+
+
+def test_authoritative_resolved_lot_size_controls_tp1_allocation() -> None:
+    manager, _ = _build_manager()
+    manager.register_virtual_bracket(
+        "one-custom-lot",
+        "NFO:NIFTYCUSTOM1CE",
+        "BUY",
+        75,
+        100.0,
+        95.0,
+        120.0,
+        tp1_price=110.0,
+        tp1_qty=25,
+        resolved_lot_size=75,
+    )
+    one = manager.get_bracket("one-custom-lot")
+    assert one is not None
+    assert one.tp_levels == []
+
+    manager.register_virtual_bracket(
+        "two-custom-lot",
+        "NFO:NIFTYCUSTOM2CE",
+        "BUY",
+        150,
+        100.0,
+        95.0,
+        120.0,
+        tp1_price=110.0,
+        tp1_qty=75,
+        resolved_lot_size=75,
+    )
+    two = manager.get_bracket("two-custom-lot")
+    assert two is not None
+    assert [(t.name, t.quantity) for t in two.tp_levels] == [("TP1", 75)]
+
+
+def test_active_selection_drift_path_leaves_open_bracket_untouched(caplog) -> None:
+    manager, order_manager = _build_manager()
+    manager.register_virtual_bracket(
+        "open-ce", "NFO:NIFTY24100CE", "BUY", 65, 100.0, 95.0, 120.0
+    )
+    manager.confirm_entry_fill("open-ce", 100.0)
+    bracket = manager.get_bracket("open-ce")
+    assert bracket is not None
+
+    runner = object.__new__(StrategyRunner)
+    runner._logger = logging.getLogger("test.selection.drift")
+    runner._active_selected_ce = "NFO:NIFTY24100CE"
+    runner._active_selected_pe = "NFO:NIFTY24100PE"
+    runner._active_selection_drift_log_key = None
+    runner._active_selection_sync_log_key = None
+    runner._active_option_symbols = {"NFO:NIFTY24100CE", "NFO:NIFTY24100PE"}
+    runner._active_basket_all_symbols = set()
+    runner._active_basket_token_by_symbol = {}
+    runner._active_futures_symbol = None
+    runner._active_symbols = set()
+    runner._latest_context_snapshots = {}
+    runner._sync_context_history_if_cold = lambda **_kwargs: None
+
+    with caplog.at_level(logging.WARNING, logger="test.selection.drift"):
+        runner.set_active_trading_universe(
+            {
+                "selected_ce": "NFO:NIFTY24050CE",
+                "selected_pe": "NFO:NIFTY24050PE",
+                "option_symbols": ["NFO:NIFTY24050CE", "NFO:NIFTY24050PE"],
+                "symbols": ["NFO:NIFTY24050CE", "NFO:NIFTY24050PE"],
+                "all_symbols": ["NFO:NIFTY24050CE", "NFO:NIFTY24050PE"],
+                "basket_version": "drift-1",
+            }
+        )
+
+    assert runner._active_selection_drift_log_key is not None
+    assert runner._active_selected_ce == "NFO:NIFTY24050CE"
+    assert bracket.symbol == "NFO:NIFTY24100CE"
+    assert bracket.active is True
+    assert bracket.sl_trigger_price == 95.0
+    assert bracket.tp_trigger_price == 120.0
+    assert bracket.remaining_quantity == 65
+    assert order_manager.place_order.call_count == 0
