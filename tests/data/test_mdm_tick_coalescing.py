@@ -374,6 +374,32 @@ async def test_stale_scheduled_drain_with_done_task_is_repaired_once(monkeypatch
     await done_task
     mdm._tick_drain_task = done_task
     mdm._tick_drain_scheduled = True
+    mdm._tick_drain_callbacks_scheduled = 2
+    mdm._tick_drain_callbacks_completed = 1
+    mdm._pending_far_ticks["NFO:NIFTY26JUN24000CE"] = {
+        "symbol": "NFO:NIFTY26JUN24000CE",
+        "last_price": 1,
+        "timestamp": 1,
+    }
+    mdm._schedule_tick_drain_locked(loop)
+    mdm._schedule_tick_drain_locked(loop)
+    await asyncio.sleep(0)
+
+    assert mdm.get_tick_pressure_stats()["callbacks_scheduled"] == 3
+    await _stop_mdm(mdm)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_scheduled_drain_with_pending_is_repaired_once():
+    mdm = _make_mdm()
+    loop = asyncio.get_running_loop()
+    mdm.set_event_loop(loop)
+    cancelled_task = loop.create_task(asyncio.sleep(1))
+    cancelled_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_task
+    mdm._tick_drain_task = cancelled_task
+    mdm._tick_drain_scheduled = True
     mdm._pending_far_ticks["NFO:NIFTY26JUN24000CE"] = {
         "symbol": "NFO:NIFTY26JUN24000CE",
         "last_price": 1,
@@ -407,3 +433,99 @@ async def test_transient_scheduled_active_zero_with_live_task_not_rescheduled():
     with pytest.raises(asyncio.CancelledError):
         await live_task
     await _stop_mdm(mdm)
+
+
+def test_required_symbol_without_first_ws_tick_gets_symbol_recovery(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    missing = "NFO:NIFTY26JUN24000CE"
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    for sym in required - {missing}:
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._required_symbol_since_mono[missing] = now - 120.0
+    mdm._required_symbol_missing_grace_sec = 1.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)),
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("missing one option must not restart globally"),
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert rest_requests == [(missing, "ws_symbol_stale_recovery")]
+
+
+def test_two_stale_options_with_fresh_context_do_not_restart_full_ws(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    for sym in required:
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono["NFO:NIFTY26JUN24000CE"] = now - 120.0
+    mdm._last_valid_live_tick_mono["NFO:NIFTY26JUN24000PE"] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)),
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("two stale options alone must not restart globally"),
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert sorted(symbol for symbol, _reason in rest_requests) == [
+        "NFO:NIFTY26JUN24000CE",
+        "NFO:NIFTY26JUN24000PE",
+    ]
+
+
+def test_record_ws_arrival_fast_does_not_mark_live_ws_freshness():
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    symbol = "NFO:NIFTY26JUN24000CE"
+
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=100.0,
+        raw_tick={"instrument_token": 1, "last_price": 100.0, "timestamp": time.time()},
+    )
+
+    assert mdm.time_since_last_any_tick(symbol) is not None
+    assert mdm.time_since_last_live_ws_tick(symbol) is None
+
+
+def test_active_bracket_symbol_remains_required_before_position_reconcile():
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    bracket_symbol = "NFO:NIFTY26JUN25000CE"
+
+    mdm.set_active_bracket_symbols([bracket_symbol])
+
+    assert bracket_symbol in mdm._required_live_symbols()

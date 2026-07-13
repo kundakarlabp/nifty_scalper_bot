@@ -76,3 +76,39 @@ def test_smc_with_cold_history_is_skipped_before_invocation(caplog):
         "STRATEGY_SKIPPED_HISTORY_COLD" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_real_smc_generate_signal_skips_cold_history_before_evaluate(
+    monkeypatch, caplog
+):
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    called = []
+
+    def _spy(*args, **kwargs):
+        called.append((args, kwargs))
+        raise AssertionError(
+            "SMC _evaluate_signal should not be called below MIN_BARS_REQUIRED"
+        )
+
+    monkeypatch.setattr(strategy, "_evaluate_signal", _spy)
+    indicators = {
+        "high": 101,
+        "low": 99,
+        "close": 100,
+        "open": 100,
+        "atr": 1,
+        "history_count": 6,
+        "history_resolved_count": 6,
+        "option_history_count": 6,
+    }
+
+    with caplog.at_level(logging.INFO):
+        assert (
+            strategy.generate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0) is None
+        )
+
+    assert called == []
+    assert any(
+        "STRATEGY_SKIPPED_HISTORY_COLD" in record.getMessage()
+        for record in caplog.records
+    )

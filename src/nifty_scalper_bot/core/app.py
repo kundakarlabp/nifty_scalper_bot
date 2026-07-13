@@ -1,3 +1,4 @@
+# ruff: noqa
 """Core orchestration for the Nifty scalper trading bot.
 
 Runtime role:
@@ -48,7 +49,9 @@ import hashlib
 import logging
 import math
 import os
-from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
 from pathlib import Path
 import random
 import sqlite3
@@ -82,7 +85,9 @@ from nifty_scalper_bot.core.active_basket import (
     pick_atm_option_symbols_from_basket,
 )
 
-from nifty_scalper_bot.core.history_roles import resolve_symbol_history_role as _shared_resolve_symbol_history_role
+from nifty_scalper_bot.core.history_roles import (
+    resolve_symbol_history_role as _shared_resolve_symbol_history_role,
+)
 
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
@@ -91,7 +96,10 @@ from nifty_scalper_bot.data.robust_provider import (
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds
-from nifty_scalper_bot.execution.readiness import evaluate_quote_readiness, normalize_readiness_blockers
+from nifty_scalper_bot.execution.readiness import (
+    evaluate_quote_readiness,
+    normalize_readiness_blockers,
+)
 from nifty_scalper_bot.utils.market_hours import (
     get_runtime_market_mode,
     post_market_basket_refresh_seconds,
@@ -103,14 +111,14 @@ SYNC_LOCK = threading.Lock()
 instrument_cache_ready = threading.Event()
 
 
-def _basket_attr(basket: Mapping[str, object] | object | None, key: str, default: Any = None) -> Any:
+def _basket_attr(
+    basket: Mapping[str, object] | object | None, key: str, default: Any = None
+) -> Any:
     if basket is None:
         return default
     if isinstance(basket, Mapping):
         return basket.get(key, default)
     return getattr(basket, key, default)
-
-
 
 
 def _next_eod_flatten_time_ist(now_ist: datetime) -> datetime | None:
@@ -123,7 +131,9 @@ def _next_eod_flatten_time_ist(now_ist: datetime) -> datetime | None:
         candidate_day = (now_ist + timedelta(days=day_offset)).date()
         if not is_nse_trading_day(candidate_day):
             continue
-        candidate = datetime.combine(candidate_day, time(15, 24), tzinfo=ZoneInfo("Asia/Kolkata"))
+        candidate = datetime.combine(
+            candidate_day, time(15, 24), tzinfo=ZoneInfo("Asia/Kolkata")
+        )
         if candidate > now_ist:
             return candidate
     return None
@@ -177,7 +187,9 @@ def ensure_bot_context_runtime_fields(ctx: Any) -> None:
             )
             raise
         missing.append(name)
-    if missing and not bool(getattr(ctx, "_bot_context_runtime_fields_patch_logged", False)):
+    if missing and not bool(
+        getattr(ctx, "_bot_context_runtime_fields_patch_logged", False)
+    ):
         LOGGER.warning(
             "BOT_CONTEXT_RUNTIME_FIELDS_INITIALIZED missing=%s",
             missing,
@@ -203,10 +215,13 @@ def _log_bot_context_attribute_missing(exc: AttributeError, *, component: str) -
         },
     )
 
+
 def get_active_contract_selection(ctx: Any) -> ActiveContractSelection:
     """Return canonical selected-contract snapshot from active_contract_basket SSOT."""
     ensure_bot_context_runtime_fields(ctx)
-    basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", None)
+    basket = getattr(ctx, "active_contract_basket", None) or getattr(
+        ctx, "active_trading_universe", None
+    )
     mdm = getattr(ctx, "market_data_manager", None)
     if basket is None and mdm is not None:
         getter = getattr(mdm, "get_active_contract_basket", None)
@@ -217,7 +232,9 @@ def get_active_contract_selection(ctx: Any) -> ActiveContractSelection:
     return selection
 
 
-def _sync_active_selection_from_basket(ctx: Any, selection: ActiveContractSelection) -> None:
+def _sync_active_selection_from_basket(
+    ctx: Any, selection: ActiveContractSelection
+) -> None:
     """Synchronize legacy selected CE/PE fields from active basket only."""
     ensure_bot_context_runtime_fields(ctx)
     new_ce, new_pe = selection.selected_ce, selection.selected_pe
@@ -225,32 +242,65 @@ def _sync_active_selection_from_basket(ctx: Any, selection: ActiveContractSelect
         return
     old_ce = getattr(ctx, "selected_ce", None)
     old_pe = getattr(ctx, "selected_pe", None)
-    drift = bool((old_ce and new_ce and str(old_ce) != str(new_ce)) or (old_pe and new_pe and str(old_pe) != str(new_pe)))
-    drift_key = (str(old_ce), str(old_pe), str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
+    drift = bool(
+        (old_ce and new_ce and str(old_ce) != str(new_ce))
+        or (old_pe and new_pe and str(old_pe) != str(new_pe))
+    )
+    drift_key = (
+        str(old_ce),
+        str(old_pe),
+        str(new_ce),
+        str(new_pe),
+        selection.basket_version or selection.selected_at,
+    )
     if drift and getattr(ctx, "_active_selection_drift_log_key", None) != drift_key:
         setattr(ctx, "_active_selection_drift_log_key", drift_key)
         setattr(ctx, "last_active_selection_drift_at", time_module.time())
         LOGGER.warning(
             "ACTIVE_SELECTION_DRIFT_CORRECTED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=active_contract_basket",
-            old_ce, old_pe, new_ce, new_pe,
-            extra={"event": "ACTIVE_SELECTION_DRIFT_CORRECTED", "old_ce": old_ce, "old_pe": old_pe, "new_ce": new_ce, "new_pe": new_pe, "source": selection.source},
+            old_ce,
+            old_pe,
+            new_ce,
+            new_pe,
+            extra={
+                "event": "ACTIVE_SELECTION_DRIFT_CORRECTED",
+                "old_ce": old_ce,
+                "old_pe": old_pe,
+                "new_ce": new_ce,
+                "new_pe": new_pe,
+                "source": selection.source,
+            },
         )
     ctx.selected_ce = new_ce
     ctx.selected_pe = new_pe
     ctx.atm_ce_symbol = new_ce
     ctx.atm_pe_symbol = new_pe
-    sync_key = (str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
+    sync_key = (
+        str(new_ce),
+        str(new_pe),
+        selection.basket_version or selection.selected_at,
+    )
     if getattr(ctx, "_active_selection_sync_log_key", None) != sync_key:
         setattr(ctx, "_active_selection_sync_log_key", sync_key)
         setattr(ctx, "last_active_selection_synced_at", time_module.time())
         LOGGER.info(
             "ACTIVE_SELECTION_SYNCED selected_ce=%s selected_pe=%s basket_version=%s",
-            new_ce, new_pe, selection.basket_version or selection.selected_at,
-            extra={"event": "ACTIVE_SELECTION_SYNCED", "selected_ce": new_ce, "selected_pe": new_pe, "basket_version": selection.basket_version, "selected_at": selection.selected_at},
+            new_ce,
+            new_pe,
+            selection.basket_version or selection.selected_at,
+            extra={
+                "event": "ACTIVE_SELECTION_SYNCED",
+                "selected_ce": new_ce,
+                "selected_pe": new_pe,
+                "basket_version": selection.basket_version,
+                "selected_at": selection.selected_at,
+            },
         )
 
 
-def _should_skip_post_market_basket_refresh(ctx: Any, *, force: bool = False) -> tuple[bool, float]:
+def _should_skip_post_market_basket_refresh(
+    ctx: Any, *, force: bool = False
+) -> tuple[bool, float]:
     ensure_bot_context_runtime_fields(ctx)
     if force or not post_market_quiet_mode_enabled():
         return False, 0.0
@@ -273,9 +323,21 @@ def _should_skip_post_market_basket_refresh(ctx: Any, *, force: bool = False) ->
         LOGGER.info(
             "ACTIVE_BASKET_REFRESH_SKIPPED reason=post_market_quiet_mode next_refresh_in_s=%d",
             int(remaining),
-            extra={"event": "ACTIVE_BASKET_REFRESH_SKIPPED", "reason": "post_market_quiet_mode", "next_refresh_in_s": int(remaining), "market_mode": mode},
+            extra={
+                "event": "ACTIVE_BASKET_REFRESH_SKIPPED",
+                "reason": "post_market_quiet_mode",
+                "next_refresh_in_s": int(remaining),
+                "market_mode": mode,
+            },
         )
-        LOGGER.info("POST_MARKET_QUIET_MODE_ACTIVE market_state=CLOSED", extra={"event": "POST_MARKET_QUIET_MODE_ACTIVE", "market_state": "CLOSED", "market_mode": mode})
+        LOGGER.info(
+            "POST_MARKET_QUIET_MODE_ACTIVE market_state=CLOSED",
+            extra={
+                "event": "POST_MARKET_QUIET_MODE_ACTIVE",
+                "market_state": "CLOSED",
+                "market_mode": mode,
+            },
+        )
     return True, remaining
 
 
@@ -291,12 +353,12 @@ def _as_bool(value: object, default: bool = False) -> bool:
         return value.strip().lower() in {"1", "true", "yes", "y", "on", "live", "ready"}
     return default
 
+
 async def _maybe_await(value: Any) -> Any:
     """Await possibly-awaitable values. Args: value. Returns: resolved value. Raises: none."""
     if inspect.isawaitable(value):
         return await value
     return value
-
 
 
 def _build_startup_fingerprint() -> dict[str, str]:
@@ -329,7 +391,9 @@ def _build_startup_fingerprint() -> dict[str, str]:
             except Exception:
                 release_id = ""
     if not release_id:
-        digest = hashlib.sha1(version.encode("utf-8"), usedforsecurity=False).hexdigest()
+        digest = hashlib.sha1(
+            version.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()
         release_id = f"cfg-{digest[:12]}"
 
     return {"version": version, "release": release_id}
@@ -358,9 +422,9 @@ def _polling_fallback_degraded(
     ).activate
 
 
-
-
-def _safe_supervisor_call(name: str, fn: Any, *args: Any, default: Any = None, **kwargs: Any) -> Any:
+def _safe_supervisor_call(
+    name: str, fn: Any, *args: Any, default: Any = None, **kwargs: Any
+) -> Any:
     """Call a polling-supervisor dependency only when callable; log controlled diagnostics otherwise."""
 
     if not callable(fn):
@@ -368,7 +432,11 @@ def _safe_supervisor_call(name: str, fn: Any, *args: Any, default: Any = None, *
             "POLLING_SUPERVISOR_NONCALLABLE name=%s type=%s",
             name,
             type(fn).__name__,
-            extra={"event": "POLLING_SUPERVISOR_NONCALLABLE", "dependency": name, "type": type(fn).__name__},
+            extra={
+                "event": "POLLING_SUPERVISOR_NONCALLABLE",
+                "dependency": name,
+                "type": type(fn).__name__,
+            },
         )
         return default
     try:
@@ -378,7 +446,11 @@ def _safe_supervisor_call(name: str, fn: Any, *args: Any, default: Any = None, *
             "POLLING_SUPERVISOR_CALL_FAILED name=%s error=%s",
             name,
             exc,
-            extra={"event": "POLLING_SUPERVISOR_CALL_FAILED", "dependency": name, "error": str(exc)},
+            extra={
+                "event": "POLLING_SUPERVISOR_CALL_FAILED",
+                "dependency": name,
+                "error": str(exc),
+            },
         )
         return default
 
@@ -395,7 +467,9 @@ async def _polling_failover_supervisor_iteration(
 ) -> tuple[float | None, float | None]:
     """Run one polling failover supervisor iteration. Returns updated hysteresis timestamps."""
 
-    market_open = bool(_safe_supervisor_call("is_market_open_now", is_market_open_now, default=False))
+    market_open = bool(
+        _safe_supervisor_call("is_market_open_now", is_market_open_now, default=False)
+    )
     now_mono = time_module.monotonic()
     if not market_open:
         log_throttled(
@@ -404,14 +478,36 @@ async def _polling_failover_supervisor_iteration(
             "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s" % None,
             interval_sec=60.0,
             level=logging.DEBUG,
-            extra={"event": "POLLING_FALLBACK_SKIPPED", "reason": "market_closed", "age_ms": None},
+            extra={
+                "event": "POLLING_FALLBACK_SKIPPED",
+                "reason": "market_closed",
+                "age_ms": None,
+            },
         )
-        if bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False)):
-            _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), True)
-            _safe_supervisor_call("polling_fallback.stop", getattr(polling_fallback, "stop", None))
+        if bool(
+            _safe_supervisor_call(
+                "polling_fallback.is_running",
+                getattr(polling_fallback, "is_running", None),
+                default=False,
+            )
+        ):
+            _safe_supervisor_call(
+                "polling_fallback.set_websocket_mode",
+                getattr(polling_fallback, "set_websocket_mode", None),
+                True,
+            )
+            _safe_supervisor_call(
+                "polling_fallback.stop", getattr(polling_fallback, "stop", None)
+            )
         return None, recovered_since
 
-    ws_ok = bool(_safe_supervisor_call("websocket_manager.is_connected", getattr(getattr(ctx, "websocket_manager", None), "is_connected", None), default=False))
+    ws_ok = bool(
+        _safe_supervisor_call(
+            "websocket_manager.is_connected",
+            getattr(getattr(ctx, "websocket_manager", None), "is_connected", None),
+            default=False,
+        )
+    )
     mdm = getattr(ctx, "market_data_manager", None)
     feed_health_getter = getattr(mdm, "trading_feed_health", None)
     if callable(feed_health_getter):
@@ -425,7 +521,11 @@ async def _polling_failover_supervisor_iteration(
                     "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
                     type(exc).__name__,
                     exc,
-                    extra={"event": "POLLING_FALLBACK_HEALTH_FAILED", "error_type": type(exc).__name__, "error": str(exc)},
+                    extra={
+                        "event": "POLLING_FALLBACK_HEALTH_FAILED",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
                 )
                 feed_health = {}
         except Exception as exc:
@@ -433,7 +533,11 @@ async def _polling_failover_supervisor_iteration(
                 "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
                 type(exc).__name__,
                 exc,
-                extra={"event": "POLLING_FALLBACK_HEALTH_FAILED", "error_type": type(exc).__name__, "error": str(exc)},
+                extra={
+                    "event": "POLLING_FALLBACK_HEALTH_FAILED",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
             )
             feed_health = {}
     else:
@@ -445,13 +549,19 @@ async def _polling_failover_supervisor_iteration(
     spot_fresh = bool(feed_health.get("spot_fresh"))
     spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
     spot_age_ms = feed_health.get("spot_age_ms")
-    auth_tick_age_ms = _safe_supervisor_call("market_data_manager.data_age_ms", getattr(mdm, "data_age_ms", None), default=quote_stale_ms + 1)
+    auth_tick_age_ms = _safe_supervisor_call(
+        "market_data_manager.data_age_ms",
+        getattr(mdm, "data_age_ms", None),
+        default=quote_stale_ms + 1,
+    )
     try:
         lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
     except (TypeError, ValueError):
         lagging = True
     try:
-        decision_data_age_ms = float(auth_tick_age_ms) if auth_tick_age_ms is not None else None
+        decision_data_age_ms = (
+            float(auth_tick_age_ms) if auth_tick_age_ms is not None else None
+        )
     except (TypeError, ValueError):
         decision_data_age_ms = None
     decision = decide_polling_fallback(
@@ -466,15 +576,35 @@ async def _polling_failover_supervisor_iteration(
     if decision.activate:
         recovered_since = None
         degraded_since = degraded_since or now_mono
-        running = bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False))
+        running = bool(
+            _safe_supervisor_call(
+                "polling_fallback.is_running",
+                getattr(polling_fallback, "is_running", None),
+                default=False,
+            )
+        )
         if now_mono - degraded_since >= activate_after and not running:
             log_state_change(
                 LOGGER,
                 "POLLING_FALLBACK_ACTIVATE",
                 (decision.reason, ws_ok, lagging, futures_fresh, options_fresh),
                 level=logging.WARNING,
-                msg="POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s" % (decision.reason, decision.max_age_ms, quote_stale_ms, ws_ok, lagging),
-                extra={"event": "poll_fallback_activate", "reason": decision.reason, "lagging": lagging, "futures_fresh": futures_fresh, "options_fresh": options_fresh, "authoritative_age_ms": auth_tick_age_ms},
+                msg="POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s"
+                % (
+                    decision.reason,
+                    decision.max_age_ms,
+                    quote_stale_ms,
+                    ws_ok,
+                    lagging,
+                ),
+                extra={
+                    "event": "poll_fallback_activate",
+                    "reason": decision.reason,
+                    "lagging": lagging,
+                    "futures_fresh": futures_fresh,
+                    "options_fresh": options_fresh,
+                    "authoritative_age_ms": auth_tick_age_ms,
+                },
             )
             try:
                 mode_fn = getattr(polling_fallback, "set_websocket_mode", None)
@@ -489,7 +619,12 @@ async def _polling_failover_supervisor_iteration(
                     decision.reason,
                     type(exc).__name__,
                     exc,
-                    extra={"event": "POLLING_FALLBACK_START_FAILED", "reason": decision.reason, "error_type": type(exc).__name__, "error": str(exc)},
+                    extra={
+                        "event": "POLLING_FALLBACK_START_FAILED",
+                        "reason": decision.reason,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
                 )
         return degraded_since, recovered_since
 
@@ -503,17 +638,43 @@ async def _polling_failover_supervisor_iteration(
         log_state_change(
             LOGGER,
             f"poll_fallback_skipped_spot_only_stale:{spot_symbol}",
-            ("spot_only_stale", spot_symbol, bool(spot_fresh), bool(futures_fresh), bool(options_fresh)),
+            (
+                "spot_only_stale",
+                spot_symbol,
+                bool(spot_fresh),
+                bool(futures_fresh),
+                bool(options_fresh),
+            ),
             level=logging.INFO,
-            msg="poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s" % (spot_symbol, spot_age_ms),
-            extra={"event": "poll_fallback_skipped_spot_only_stale", "symbol": spot_symbol, "age_ms": spot_age_ms},
+            msg="poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s"
+            % (spot_symbol, spot_age_ms),
+            extra={
+                "event": "poll_fallback_skipped_spot_only_stale",
+                "symbol": spot_symbol,
+                "age_ms": spot_age_ms,
+            },
         )
     degraded_since = None
     recovered_since = recovered_since or now_mono
-    if now_mono - recovered_since >= recover_cooldown and bool(_safe_supervisor_call("polling_fallback.is_running", getattr(polling_fallback, "is_running", None), default=False)):
-        LOGGER.info("Polling fallback deactivate (supervisor) after ws recovery cooldown", extra={"event": "polling_fallback_deactivated"})
-        _safe_supervisor_call("polling_fallback.set_websocket_mode", getattr(polling_fallback, "set_websocket_mode", None), True)
-        _safe_supervisor_call("polling_fallback.stop", getattr(polling_fallback, "stop", None))
+    if now_mono - recovered_since >= recover_cooldown and bool(
+        _safe_supervisor_call(
+            "polling_fallback.is_running",
+            getattr(polling_fallback, "is_running", None),
+            default=False,
+        )
+    ):
+        LOGGER.info(
+            "Polling fallback deactivate (supervisor) after ws recovery cooldown",
+            extra={"event": "polling_fallback_deactivated"},
+        )
+        _safe_supervisor_call(
+            "polling_fallback.set_websocket_mode",
+            getattr(polling_fallback, "set_websocket_mode", None),
+            True,
+        )
+        _safe_supervisor_call(
+            "polling_fallback.stop", getattr(polling_fallback, "stop", None)
+        )
     return degraded_since, recovered_since
 
 
@@ -557,7 +718,9 @@ def select_active_option_symbols(
 ) -> list[str]:
     """Select balanced CE/PE symbols near ATM. Args: option_symbols/atm/max_active. Returns: selected symbols. Raises: none."""
 
-    from nifty_scalper_bot.core.active_basket import extract_symbol_strike  # avoid circular import at module level
+    from nifty_scalper_bot.core.active_basket import (
+        extract_symbol_strike,
+    )  # avoid circular import at module level
 
     safe_limit = max(1, int(max_active or 1))
     unique_symbols = [str(sym) for sym in dict.fromkeys(option_symbols or ()) if sym]
@@ -573,7 +736,11 @@ def select_active_option_symbols(
     fallback: list[str] = []
     for rank, symbol in enumerate(unique_symbols):
         try:
-            side = "CE" if symbol.upper().endswith("CE") else "PE" if symbol.upper().endswith("PE") else ""
+            side = (
+                "CE"
+                if symbol.upper().endswith("CE")
+                else "PE" if symbol.upper().endswith("PE") else ""
+            )
             if not side:
                 fallback.append(symbol)
                 continue
@@ -605,6 +772,7 @@ def select_active_option_symbols(
             selected.append(symbol)
     return selected[:safe_limit]
 
+
 def nearest_available_strike(spot: float, strikes: Sequence[float]) -> int:
     """Pick nearest strike from available list. Args: spot, strikes. Returns: strike. Raises: ValueError."""
     valid = sorted({int(float(s)) for s in strikes if float(s) > 0})
@@ -629,9 +797,9 @@ def _is_selected_trade_symbol(ctx: Any, symbol: str) -> bool:
     return normalized_symbol in selected_symbols
 
 
-
-
-def build_active_trading_basket_symbols(ctx: Any, basket: Mapping[str, object]) -> list[str]:
+def build_active_trading_basket_symbols(
+    ctx: Any, basket: Mapping[str, object]
+) -> list[str]:
     """Build deterministic active basket. Args: ctx,basket. Returns: ordered symbols. Raises: none."""
     max_active_options = max(2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "6") or 6))
     spot = str(basket.get("spot_symbol") or "NSE:NIFTY")
@@ -645,7 +813,9 @@ def build_active_trading_basket_symbols(ctx: Any, basket: Mapping[str, object]) 
         if str(s).endswith(("CE", "PE"))
     ]
     option_symbols = list(dict.fromkeys(option_symbols))
-    near_options = select_active_option_symbols(option_symbols, atm=atm_strike, max_active=max_active_options)
+    near_options = select_active_option_symbols(
+        option_symbols, atm=atm_strike, max_active=max_active_options
+    )
     selected_options: list[str] = []
     for symbol in (selected_ce, selected_pe, *near_options):
         if symbol and symbol not in selected_options:
@@ -683,8 +853,6 @@ def prioritize_startup_hydration_symbols(
     return build_active_trading_basket_symbols(None, basket)
 
 
-
-
 def sync_symbol_history_to_runner(
     ctx: Any,
     symbol: str,
@@ -703,9 +871,23 @@ def sync_symbol_history_to_runner(
             mdm_before = 0
     runner_before = get_runner_history_count(ctx, symbol)
     if runner is None or not callable(getattr(runner, "sync_history_from_mdm", None)):
-        return {"symbol": symbol, "mdm_before": mdm_before, "runner_before": runner_before, "runner_after": runner_before, "required": safe_required_bars, "ready": False, "ingested": 0}
+        return {
+            "symbol": symbol,
+            "mdm_before": mdm_before,
+            "runner_before": runner_before,
+            "runner_after": runner_before,
+            "required": safe_required_bars,
+            "ready": False,
+            "ingested": 0,
+        }
     resolved_role = resolve_symbol_history_role(ctx, symbol)
-    result = runner.sync_history_from_mdm(symbol, required_bars=safe_required_bars, reason=reason, role=resolved_role, request_if_short=False)
+    result = runner.sync_history_from_mdm(
+        symbol,
+        required_bars=safe_required_bars,
+        reason=reason,
+        role=resolved_role,
+        request_if_short=False,
+    )
     runner_after = int(getattr(result, "indicator_bars", 0) or 0)
     ready = bool(getattr(result, "success", False))
     LOGGER.info(
@@ -717,7 +899,15 @@ def sync_symbol_history_to_runner(
         safe_required_bars,
         ready,
     )
-    return {"symbol": symbol, "mdm_before": mdm_before, "runner_before": runner_before, "runner_after": runner_after, "required": safe_required_bars, "ready": ready, "ingested": max(0, runner_after - runner_before)}
+    return {
+        "symbol": symbol,
+        "mdm_before": mdm_before,
+        "runner_before": runner_before,
+        "runner_after": runner_after,
+        "required": safe_required_bars,
+        "ready": ready,
+        "ingested": max(0, runner_after - runner_before),
+    }
 
 
 def get_runner_history_count(ctx: Any, symbol: str) -> int:
@@ -776,20 +966,34 @@ def resolve_active_basket_tokens(
             token = None
         if token is None:
             fatal = symbol in {selected_ce, selected_pe}
-            im_ready = bool(instrument_manager is not None and getattr(instrument_manager, "is_loaded", lambda: True)())
+            im_ready = bool(
+                instrument_manager is not None
+                and getattr(instrument_manager, "is_loaded", lambda: True)()
+            )
             if not im_ready:
                 # Pre-InstrumentManager state: resolution is expected to
                 # succeed on the deferred retry once it loads. Not an error.
                 LOGGER.info(
                     "ACTIVE_BASKET_TOKEN_PENDING symbol=%s fatal_for_live=%s reason=instrument_manager_not_ready",
-                    symbol, fatal,
-                    extra={"event": "ACTIVE_BASKET_TOKEN_PENDING", "symbol": str(symbol), "fatal_for_live": fatal},
+                    symbol,
+                    fatal,
+                    extra={
+                        "event": "ACTIVE_BASKET_TOKEN_PENDING",
+                        "symbol": str(symbol),
+                        "fatal_for_live": fatal,
+                    },
                 )
             else:
-                LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=%s", symbol, fatal)
+                LOGGER.error(
+                    "ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=%s",
+                    symbol,
+                    fatal,
+                )
             continue
         token_map[symbol] = int(token)
-        LOGGER.info("ACTIVE_BASKET_TOKEN_RESOLVED symbol=%s token=%s", symbol, int(token))
+        LOGGER.info(
+            "ACTIVE_BASKET_TOKEN_RESOLVED symbol=%s token=%s", symbol, int(token)
+        )
     LOGGER.info(
         "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
         len(token_map),
@@ -858,12 +1062,22 @@ def _gate_runner_symbol_add(
     add_ready = bool(history_ready if is_option else (quote_ready or mdm_bars >= 1))
     if not add_ready:
         pending_runner_symbols.add(symbol)
-        LOGGER.info("RUNNER_SYMBOL_DEFERRED_UNTIL_READY symbol=%s token=%s runner_bars=%d mdm_bars=%d required_bars=%d source=%s", symbol, token, runner_bars, mdm_bars, required, source)
+        LOGGER.info(
+            "RUNNER_SYMBOL_DEFERRED_UNTIL_READY symbol=%s token=%s runner_bars=%d mdm_bars=%d required_bars=%d source=%s",
+            symbol,
+            token,
+            runner_bars,
+            mdm_bars,
+            required,
+            source,
+        )
         return False
     ctx.strategy_runner.add_symbol(symbol)
     if ctx.data_hub is not None and ctx.strategy_runner is not None:
         canonical_symbol = ctx.data_hub._canonical_quote_symbol(symbol)
-        if hasattr(ctx.strategy_runner, "has_datahub_subscription") and ctx.strategy_runner.has_datahub_subscription(symbol, token):
+        if hasattr(
+            ctx.strategy_runner, "has_datahub_subscription"
+        ) and ctx.strategy_runner.has_datahub_subscription(symbol, token):
             ctx.datahub_runner_subscriptions.add(f"{canonical_symbol}|{token or ''}")
             if token is not None:
                 ctx.datahub_runner_subscriptions.add(f"TOKEN:{int(token)}")
@@ -878,7 +1092,11 @@ def _gate_runner_symbol_add(
         required,
         history_ready,
         source,
-        "history_ready" if history_ready else ("quote_ready_history_pending" if quote_ready else "hydration_failed"),
+        (
+            "history_ready"
+            if history_ready
+            else ("quote_ready_history_pending" if quote_ready else "hydration_failed")
+        ),
         extra={
             "event": "RUNNER_SYMBOL_STATUS",
             "symbol": symbol,
@@ -889,7 +1107,13 @@ def _gate_runner_symbol_add(
             "required_bars": required,
             "history_ready": history_ready,
             "source": source,
-            "reason": "history_ready" if history_ready else ("quote_ready_history_pending" if quote_ready else "hydration_failed"),
+            "reason": (
+                "history_ready"
+                if history_ready
+                else (
+                    "quote_ready_history_pending" if quote_ready else "hydration_failed"
+                )
+            ),
         },
     )
     try:
@@ -905,7 +1129,12 @@ def _gate_runner_symbol_add(
         )
     except Exception:  # pragma: no cover - observability must never raise
         pass
-    LOGGER.info("RUNNER_SYMBOL_ADDED_AFTER_READY symbol=%s token=%s source=%s", symbol, token, source)
+    LOGGER.info(
+        "RUNNER_SYMBOL_ADDED_AFTER_READY symbol=%s token=%s source=%s",
+        symbol,
+        token,
+        source,
+    )
     return True
 
 
@@ -924,8 +1153,12 @@ def _emit_option_symbol_pipeline_status(
     selected_set = {
         str(getattr(ctx, "selected_ce", "") or ""),
         str(getattr(ctx, "selected_pe", "") or ""),
-        str((getattr(ctx, "active_trading_universe", {}) or {}).get("selected_ce") or ""),
-        str((getattr(ctx, "active_trading_universe", {}) or {}).get("selected_pe") or ""),
+        str(
+            (getattr(ctx, "active_trading_universe", {}) or {}).get("selected_ce") or ""
+        ),
+        str(
+            (getattr(ctx, "active_trading_universe", {}) or {}).get("selected_pe") or ""
+        ),
     }
     selected_set.discard("")
     selected = symbol in selected_set or selected
@@ -986,21 +1219,17 @@ def _emit_option_symbol_pipeline_status(
                     debug_status["token_callbacks"] > 0
                 )
                 datahub_quote_present = bool(
-                    debug_status["quote_present"]
-                    or debug_status["token_quote_present"]
+                    debug_status["quote_present"] or debug_status["token_quote_present"]
                 )
-                datahub_token_quote_present = bool(
-                    debug_status["token_quote_present"]
-                )
+                datahub_token_quote_present = bool(debug_status["token_quote_present"])
             else:
                 datahub_callback_registered = symbol_callbacks or token_callbacks
-                datahub_quote_present = (
-                    dh.get_quote(symbol, allow_pull=False) is not None
-                    or (
-                        token_key is not None
-                        and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
-                        is not None
-                    )
+                datahub_quote_present = dh.get_quote(
+                    symbol, allow_pull=False
+                ) is not None or (
+                    token_key is not None
+                    and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
+                    is not None
                 )
                 datahub_token_callback_registered = token_callbacks
                 datahub_token_quote_present = (
@@ -1057,10 +1286,7 @@ def _emit_option_symbol_pipeline_status(
         or datahub_token_callback_registered
         or datahub_runner_subscription_registered
     )
-    effective_quote_present = (
-        datahub_quote_present
-        or datahub_token_quote_present
-    )
+    effective_quote_present = datahub_quote_present or datahub_token_quote_present
     LOGGER.info(
         "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s datahub_quote_present=%s datahub_runner_subscription_registered=%s datahub_token_callback_registered=%s datahub_token_quote_present=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s effective_datahub_delivery=%s effective_quote_present=%s",
         symbol,
@@ -1101,8 +1327,12 @@ def _emit_option_symbol_pipeline_status(
             "datahub_token_quote_present": datahub_token_quote_present,
             "effective_datahub_delivery": effective_datahub_delivery,
             "effective_quote_present": effective_quote_present,
-            "datahub_debug_status": debug_status if "debug_status" in locals() else None,
-            "message_bus_tick_owner": getattr(ctx, "message_bus_tick_owner", "data_hub"),
+            "datahub_debug_status": (
+                debug_status if "debug_status" in locals() else None
+            ),
+            "message_bus_tick_owner": getattr(
+                ctx, "message_bus_tick_owner", "data_hub"
+            ),
             "mdm_tracked": mdm_tracked,
             "mdm_has_subscriber": mdm_has_subscriber,
             "mdm_active_subscribed": mdm_active_subscribed,
@@ -1143,9 +1373,7 @@ def _emit_trading_universe_summary(
     try:
         if dh is not None:
             datahub_pending = len(getattr(dh, "_pending_live_symbols", set()))
-            datahub_subscribed = len(
-                getattr(dh, "_mdm_subscribed_symbols", set())
-            )
+            datahub_subscribed = len(getattr(dh, "_mdm_subscribed_symbols", set()))
     except Exception:  # pragma: no cover - defensive
         pass
     mdm_registered = 0
@@ -1155,7 +1383,9 @@ def _emit_trading_universe_summary(
             mdm_registered = len(getattr(mdm, "_token_by_symbol", {}))
             last_tick_map = getattr(mdm, "_last_tick_time", {}) or {}
             live_tick_seen = sum(
-                1 for v in last_tick_map.values() if isinstance(v, (int, float)) and v > 0
+                1
+                for v in last_tick_map.values()
+                if isinstance(v, (int, float)) and v > 0
             )
     except Exception:  # pragma: no cover - defensive
         pass
@@ -1278,7 +1508,12 @@ from nifty_scalper_bot.utils.errors import (
     BrokerBalanceUnavailableError,
     ConfigurationError,
 )
-from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled, setup_logging
+from nifty_scalper_bot.utils.logging import (
+    get_logger,
+    log_state_change,
+    log_throttled,
+    setup_logging,
+)
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     allow_offhours_testing_safe,
@@ -1290,10 +1525,16 @@ from nifty_scalper_bot.utils.market_hours import (
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
-from nifty_scalper_bot.utils.symbols import canonical, normalize_symbol, unique_normalized_symbols
+from nifty_scalper_bot.utils.symbols import (
+    canonical,
+    normalize_symbol,
+    unique_normalized_symbols,
+)
 
 if TYPE_CHECKING:
-    from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
+    from nifty_scalper_bot.notifications.telegram_enhanced import (
+        TelegramEnhancedNotifier,
+    )
     from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
     from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
         TelegramWebhookController,
@@ -1324,7 +1565,9 @@ def _resolve_hydration_market_open_state(logger: logging.Logger = LOGGER) -> boo
 def _load_telegram_enhanced_notifier() -> type[Any] | None:
     """Load Telegram notifier lazily. Args: none. Returns: notifier class or None. Raises: none."""
     try:
-        from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
+        from nifty_scalper_bot.notifications.telegram_enhanced import (
+            TelegramEnhancedNotifier,
+        )
 
         return TelegramEnhancedNotifier
     except Exception as exc:  # noqa: BLE001
@@ -1443,10 +1686,15 @@ _HTTP_CONTROLLER: TelegramWebhookController | None = None
 _LATEST_CTX: "BotContext | None" = None
 
 
-def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None) -> str:
+def _resolve_active_futures_for_basket(
+    ctx: BotContext, requested: object | None
+) -> str:
     """Return authoritative active NIFTY futures symbol for runtime basket."""
     mdm = getattr(ctx, "market_data_manager", None)
-    for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
+    for method_name in (
+        "get_active_nifty_future_symbol_cached",
+        "resolve_active_nifty_future_symbol",
+    ):
         method = getattr(mdm, method_name, None)
         if not callable(method):
             continue
@@ -1466,18 +1714,23 @@ def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None
     active_universe = getattr(ctx, "active_trading_universe", {}) or {}
     if isinstance(active_universe, Mapping):
         canonical = canonical_nifty_future_symbol(
-            active_universe.get("futures_symbol") or active_universe.get("future_symbol")
+            active_universe.get("futures_symbol")
+            or active_universe.get("future_symbol")
         )
         if canonical:
             return canonical
 
     runner = getattr(ctx, "strategy_runner", None)
-    canonical = canonical_nifty_future_symbol(getattr(runner, "_active_futures_symbol", None))
+    canonical = canonical_nifty_future_symbol(
+        getattr(runner, "_active_futures_symbol", None)
+    )
     if canonical:
         return canonical
 
     strategy_manager = getattr(ctx, "strategy_manager", None)
-    canonical = canonical_nifty_future_symbol(getattr(strategy_manager, "_futures_symbol", None))
+    canonical = canonical_nifty_future_symbol(
+        getattr(strategy_manager, "_futures_symbol", None)
+    )
     if canonical:
         return canonical
 
@@ -1500,20 +1753,31 @@ def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None
                     LOGGER.info(
                         "FUTURES_CONTEXT_RESOLVED_FROM_INSTRUMENTS symbol=%s reason=basket_pending_dump_fallback",
                         canonical,
-                        extra={"event": "FUTURES_CONTEXT_RESOLVED_FROM_INSTRUMENTS", "symbol": canonical, "reason": "basket_pending_dump_fallback"},
+                        extra={
+                            "event": "FUTURES_CONTEXT_RESOLVED_FROM_INSTRUMENTS",
+                            "symbol": canonical,
+                            "reason": "basket_pending_dump_fallback",
+                        },
                     )
                     return canonical
         except Exception as exc:  # noqa: BLE001 - fallback is best-effort
             LOGGER.debug(
                 "FUTURES_CONTEXT_INSTRUMENT_FALLBACK_FAILED err=%s",
                 exc,
-                extra={"event": "FUTURES_CONTEXT_INSTRUMENT_FALLBACK_FAILED", "error": str(exc)},
+                extra={
+                    "event": "FUTURES_CONTEXT_INSTRUMENT_FALLBACK_FAILED",
+                    "error": str(exc),
+                },
             )
 
     LOGGER.warning(
         "FUTURES_CONTEXT_UNAVAILABLE requested=%s reason=active_future_unresolved",
         requested,
-        extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "requested_symbol": str(requested or ""), "reason": "active_future_unresolved"},
+        extra={
+            "event": "FUTURES_CONTEXT_UNAVAILABLE",
+            "requested_symbol": str(requested or ""),
+            "reason": "active_future_unresolved",
+        },
     )
     return ""
 
@@ -1998,7 +2262,10 @@ class TradingSessionGuard:
             # [FIX] Auto-refresh stale session (Throttled to prevent Event Loop block)
             if not broker_session_valid:
                 _now_ts = time_module.monotonic()
-                if not hasattr(self, "_last_profile_refresh") or _now_ts - getattr(self, "_last_profile_refresh", 0.0) > 60.0:
+                if (
+                    not hasattr(self, "_last_profile_refresh")
+                    or _now_ts - getattr(self, "_last_profile_refresh", 0.0) > 60.0
+                ):
                     self._last_profile_refresh = _now_ts
                     LOGGER.warning(
                         f"⚠️ Broker session stale (Age: {now - self._session_validated_at}). Attempting auto-refresh..."
@@ -2009,14 +2276,19 @@ class TradingSessionGuard:
                         if ctx:
                             # Try to extract the raw broker client from known context locations
                             raw_client = None
-                            if hasattr(ctx, "market_data_manager") and ctx.market_data_manager:
-                                raw_client = getattr(ctx.market_data_manager, "_provider", None)
+                            if (
+                                hasattr(ctx, "market_data_manager")
+                                and ctx.market_data_manager
+                            ):
+                                raw_client = getattr(
+                                    ctx.market_data_manager, "_provider", None
+                                )
                             elif hasattr(ctx, "order_manager") and ctx.order_manager:
                                 raw_client = getattr(ctx.order_manager, "_broker", None)
 
                             # Unwrap if it's a RobustDataProvider or similar wrapper
                             client = getattr(raw_client, "client", raw_client)
-                            
+
                             # Validate and execute
                             if client and hasattr(client, "get_profile"):
                                 client.get_profile()  # Will raise if failed
@@ -2418,20 +2690,26 @@ def get_http_app() -> FastAPI:
         if mdm:
             symbols = list(getattr(mdm, "_symbol_by_token", {}).values())
 
-        return JSONResponse({
-            "status": "ok" if mdm_status.get("ws_connected") and runner_ready else "degraded",
-            "market_data": {
-                "ws_connected": mdm_status.get("ws_connected", False),
-                "active_symbols_count": len(symbols),
-                "active_symbols": symbols[:20],
-                "last_tick_age": mdm_status.get("last_tick_age", -1),
-            },
-            "strategy": {
-                "ready": runner_ready,
-                "required_candles": getattr(runner, "_required_candles", 0),
-            },
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        return JSONResponse(
+            {
+                "status": (
+                    "ok"
+                    if mdm_status.get("ws_connected") and runner_ready
+                    else "degraded"
+                ),
+                "market_data": {
+                    "ws_connected": mdm_status.get("ws_connected", False),
+                    "active_symbols_count": len(symbols),
+                    "active_symbols": symbols[:20],
+                    "last_tick_age": mdm_status.get("last_tick_age", -1),
+                },
+                "strategy": {
+                    "ready": runner_ready,
+                    "required_candles": getattr(runner, "_required_candles", 0),
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
     @app.get("/health", response_class=JSONResponse)
     async def http_health() -> JSONResponse:
@@ -2448,10 +2726,16 @@ def get_http_app() -> FastAPI:
             },
         )
 
-    def _trading_health_payload(ctx: BotContext | None) -> tuple[int, dict[str, object]]:
+    def _trading_health_payload(
+        ctx: BotContext | None,
+    ) -> tuple[int, dict[str, object]]:
         ctx = get_latest_bot_context()
         if not ctx:
-            return 503, {"status": "starting", "ready": False, "reason": "context_initializing"}
+            return 503, {
+                "status": "starting",
+                "ready": False,
+                "reason": "context_initializing",
+            }
         blockers: list[str] = []
         if bool(getattr(ctx, "broker_auth_invalid", False)):
             blockers.append("broker_auth_invalid")
@@ -2463,7 +2747,9 @@ def get_http_app() -> FastAPI:
             blockers.append("position_reconciliation_failed")
         if not bool(getattr(ctx, "position_reconciliation_completed", False)):
             blockers.append("position_reconciliation_incomplete")
-        if bool(getattr(ctx, "unprotected_broker_positions", set())) or bool(getattr(ctx, "unprotected_broker_position", False)):
+        if bool(getattr(ctx, "unprotected_broker_positions", set())) or bool(
+            getattr(ctx, "unprotected_broker_position", False)
+        ):
             blockers.append("unprotected_broker_position")
         if bool(getattr(ctx, "live_block_reason", None)):
             reason = str(getattr(ctx, "live_block_reason"))
@@ -2476,10 +2762,13 @@ def get_http_app() -> FastAPI:
         payload: dict[str, object] = {
             "status": "ready" if primary is None else "blocked",
             "ready": primary is None,
-            "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False)) and primary is None,
+            "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False))
+            and primary is None,
             "primary_blocker": primary,
             "blockers": blockers,
-            "market_state": str(getattr(ctx, "market_session_state", None) or get_runtime_market_mode()),
+            "market_state": str(
+                getattr(ctx, "market_session_state", None) or get_runtime_market_mode()
+            ),
             "broker": {
                 "ready": bool(getattr(ctx, "broker_ready", False)),
                 "auth_invalid": bool(getattr(ctx, "broker_auth_invalid", False)),
@@ -2488,13 +2777,21 @@ def get_http_app() -> FastAPI:
             },
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
-                "completed": bool(getattr(ctx, "position_reconciliation_completed", False)),
+                "completed": bool(
+                    getattr(ctx, "position_reconciliation_completed", False)
+                ),
                 "failed": bool(getattr(ctx, "position_reconciliation_failed", False)),
                 "error": getattr(ctx, "position_reconciliation_error", None),
-                "unprotected_broker_positions": sorted(getattr(ctx, "unprotected_broker_positions", set()) or []),
+                "unprotected_broker_positions": sorted(
+                    getattr(ctx, "unprotected_broker_positions", set()) or []
+                ),
             },
-            "market_data": {"data_hard_ready": bool(getattr(ctx, "data_hard_ready", False))},
-            "strategy": {"evaluation_ready": bool(getattr(ctx, "evaluation_ready", False))},
+            "market_data": {
+                "data_hard_ready": bool(getattr(ctx, "data_hard_ready", False))
+            },
+            "strategy": {
+                "evaluation_ready": bool(getattr(ctx, "evaluation_ready", False))
+            },
             "uptime_seconds": int(time_module.monotonic() - _START_TIME),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -2515,9 +2812,12 @@ def get_http_app() -> FastAPI:
     async def http_health_legacy() -> JSONResponse:
         ctx = get_latest_bot_context()
         if not ctx:
-            return JSONResponse(status_code=200, content={"status": "starting", "ready": False})
+            return JSONResponse(
+                status_code=200, content={"status": "starting", "ready": False}
+            )
         checks = {
-            "broker": ctx.broker_client is not None and ctx.broker_client.is_connected(),
+            "broker": ctx.broker_client is not None
+            and ctx.broker_client.is_connected(),
             "position_manager": ctx.position_manager is not None,
             "risk_manager": ctx.risk_manager is not None,
             "data_hub": ctx.data_hub is not None,
@@ -2800,6 +3100,7 @@ class BotContext:
     degraded_mode: bool = False
 
     canonical_history_ensurer_injection_failed: bool = False
+
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
     ) -> None:
@@ -3025,15 +3326,31 @@ class RuntimeSelfChecker:
     def _check_broker_balance(self) -> tuple[bool, str, dict[str, object]]:
         if bool(getattr(self._context, "broker_balance_valid", False)):
             return True, "broker_balance_valid", {}
-        return False, "broker_balance_unavailable", {"blocker": "broker_balance_unavailable"}
+        return (
+            False,
+            "broker_balance_unavailable",
+            {"blocker": "broker_balance_unavailable"},
+        )
 
     def _check_position_reconciliation(self) -> tuple[bool, str, dict[str, object]]:
         if bool(getattr(self._context, "position_reconciliation_failed", False)):
-            return False, "position_reconciliation_failed", {"blocker": "position_reconciliation_failed"}
+            return (
+                False,
+                "position_reconciliation_failed",
+                {"blocker": "position_reconciliation_failed"},
+            )
         if not bool(getattr(self._context, "position_reconciliation_completed", False)):
-            return False, "position_reconciliation_incomplete", {"blocker": "position_reconciliation_incomplete"}
+            return (
+                False,
+                "position_reconciliation_incomplete",
+                {"blocker": "position_reconciliation_incomplete"},
+            )
         if bool(getattr(self._context, "unprotected_broker_positions", set())):
-            return False, "unprotected_broker_position", {"blocker": "unprotected_broker_position"}
+            return (
+                False,
+                "unprotected_broker_position",
+                {"blocker": "unprotected_broker_position"},
+            )
         return True, "position_reconciliation_ready", {}
 
     def _check_readiness_consistency(self) -> tuple[bool, str, dict[str, object]]:
@@ -3045,15 +3362,20 @@ class RuntimeSelfChecker:
 
     def _check_canonical_history_ensurer(self) -> tuple[bool, str, dict[str, object]]:
         """Report canonical runtime-history callback injection failures. Args: none. Returns: status tuple. Raises: none."""
-        failed = bool(getattr(self._context, "canonical_history_ensurer_injection_failed", False))
+        failed = bool(
+            getattr(self._context, "canonical_history_ensurer_injection_failed", False)
+        )
         if not failed:
             return True, "canonical_history_ensurer_ready", {}
         reason = "canonical_history_ensurer_injection_failed"
-        return False, reason, {
+        details = {
             "reason": reason,
             "live_block_reason": getattr(self._context, "live_block_reason", None),
-            "execution_block_reason": getattr(self._context, "execution_block_reason", None),
+            "execution_block_reason": getattr(
+                self._context, "execution_block_reason", None
+            ),
         }
+        return False, reason, details
 
     def _check_data_freshness(self) -> tuple[bool, str, dict[str, object]]:
         """Check data freshness for active symbols. Args: None. Returns: status tuple. Raises: None."""
@@ -3080,7 +3402,9 @@ class RuntimeSelfChecker:
 
             interval = getattr(self._context.streamer, "_interval_s", 0.7) or 0.7
             adaptive_ms = max(2000, min(5000, int(float(interval) * 1000.0 * 2.5)))
-            hard_ready_fn = getattr(self._context.market_data_manager, "hard_ready", None)
+            hard_ready_fn = getattr(
+                self._context.market_data_manager, "hard_ready", None
+            )
             hard_ready = bool(hard_ready_fn()) if callable(hard_ready_fn) else False
 
             def _threshold_for_symbol(symbol_name: str) -> float:
@@ -3138,18 +3462,24 @@ class RuntimeSelfChecker:
             ] or per_symbol
             all_critical_stale = not any(item[1] for item in critical)
             if hard_ready and symbols and stale and not all_critical_stale:
-                return True, "partial_stale_ignored", {
-                    "fresh_symbols": len(fresh),
-                    "stale_symbols": len(stale),
-                    "live_symbols": len(symbols),
-                    "critical_symbols": len(critical),
-                }
+                return (
+                    True,
+                    "partial_stale_ignored",
+                    {
+                        "fresh_symbols": len(fresh),
+                        "stale_symbols": len(stale),
+                        "live_symbols": len(symbols),
+                        "critical_symbols": len(critical),
+                    },
+                )
 
             symbol, ok, meta, symbol_threshold_ms = fresh[0] if fresh else per_symbol[0]
 
             if hasattr(hub, "is_fresh"):
                 try:
-                    ok, meta = hub.is_fresh(symbol, threshold_ms=float(symbol_threshold_ms))
+                    ok, meta = hub.is_fresh(
+                        symbol, threshold_ms=float(symbol_threshold_ms)
+                    )
                 except Exception as exc:
                     self._logger.error(
                         "Failure in RuntimeSelfChecker._check_data_freshness: %s",
@@ -3178,7 +3508,9 @@ class RuntimeSelfChecker:
                         },
                     )
                     if not ok:
-                        backoff_seconds = max(0.0, float(symbol_threshold_ms) * 2.0 / 1000.0)
+                        backoff_seconds = max(
+                            0.0, float(symbol_threshold_ms) * 2.0 / 1000.0
+                        )
                         runner = getattr(self._context, "strategy_runner", None)
                         if runner is not None:
                             try:
@@ -3510,9 +3842,7 @@ def _find_existing_nifty_option_symbol(
                         s_up if not s_up.startswith("NFO:") else s_up.split(":", 1)[-1]
                     )
     except Exception as e:
-        LOGGER.exception(
-            "[CRITICAL] unhandled exception", exc_info=True
-        )
+        LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
         raise
 
     return None
@@ -3642,9 +3972,7 @@ def _get_symbols(
                                 ltp = price
                                 break
                 except Exception as e:
-                    LOGGER.exception(
-                        "[CRITICAL] unhandled exception", exc_info=True
-                    )
+                    LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                     raise
         except Exception as exc:
             LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
@@ -3656,7 +3984,9 @@ def _get_symbols(
         )
 
     if ltp <= 0:
-        LOGGER.warning("ATM_SELECTION_BLOCKED reason=spot_unavailable_or_stale age_sec=%s", -1)
+        LOGGER.warning(
+            "ATM_SELECTION_BLOCKED reason=spot_unavailable_or_stale age_sec=%s", -1
+        )
         return []
 
     global _LATEST_CTX
@@ -3690,7 +4020,12 @@ def _get_symbols(
     if not final_symbols:
         raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
 
-    LOGGER.info("ATM_SELECTED spot=%s atm=%s source=fresh_spot_tick strike_source=instrument_dump expiry=%s", float(ltp), atm, nearest_expiry)
+    LOGGER.info(
+        "ATM_SELECTED spot=%s atm=%s source=fresh_spot_tick strike_source=instrument_dump expiry=%s",
+        float(ltp),
+        atm,
+        nearest_expiry,
+    )
     LOGGER.info(
         "RESOLVED_CONTRACTS count=%d expiry=%s",
         len(final_symbols),
@@ -3737,9 +4072,9 @@ def _compute_indicator_readiness(ctx: BotContext) -> bool:
         return False
     for symbol in tradeable_symbols:
         try:
-            if hasattr(indicator_engine, "has_min_bars") and indicator_engine.has_min_bars(
-                symbol, required
-            ):
+            if hasattr(
+                indicator_engine, "has_min_bars"
+            ) and indicator_engine.has_min_bars(symbol, required):
                 return True
             history = (
                 indicator_engine.get_history(symbol)
@@ -3804,7 +4139,11 @@ def _build_canonical_active_basket(
                 "FUTURES_TOKEN_UNRESOLVED symbol=%s err=%s reason=basket_build_futures_optional",
                 futures_symbol,
                 exc,
-                extra={"event": "FUTURES_TOKEN_UNRESOLVED", "symbol": futures_symbol, "reason": "basket_build_futures_optional"},
+                extra={
+                    "event": "FUTURES_TOKEN_UNRESOLVED",
+                    "symbol": futures_symbol,
+                    "reason": "basket_build_futures_optional",
+                },
             )
             futures_symbol = ""
             futures_token = None
@@ -3826,7 +4165,9 @@ def _build_canonical_active_basket(
         raise RuntimeError(f"failed to resolve spot token for {spot_symbol}")
 
     # Use the canonical strike extractor (regex-based, 4-6 digits only).
-    from nifty_scalper_bot.core.active_basket import extract_symbol_strike  # local to avoid circular import at module level
+    from nifty_scalper_bot.core.active_basket import (
+        extract_symbol_strike,
+    )  # local to avoid circular import at module level
 
     def _nearest_side(candidates: list[str], side: str) -> str | None:
         parsed: list[tuple[int, str]] = []
@@ -3996,24 +4337,37 @@ async def reconcile_with_broker(
     Returns:
         None. All errors are caught and logged — startup must not be blocked.
     """
-    logger.info("RECONCILE_START: checking broker for ghost orders and orphan positions")
+    logger.info(
+        "RECONCILE_START: checking broker for ghost orders and orphan positions"
+    )
 
     # ── 1. Fetch live orders ─────────────────────────────────────────────────
     try:
         if inspect.iscoroutinefunction(getattr(broker_client, "get_orders", None)):
             raw_orders = await broker_client.get_orders()
         else:
-            raw_orders = await asyncio.to_thread(_run_sync_locked, broker_client.get_orders)
+            raw_orders = await asyncio.to_thread(
+                _run_sync_locked, broker_client.get_orders
+            )
             if asyncio.iscoroutine(raw_orders):
                 raw_orders = await raw_orders
-                
-        open_orders = [o for o in (raw_orders or []) if isinstance(o, dict) and str(o.get("status", "")).upper() in {"OPEN", "TRIGGER PENDING"}]
-        logger.info("RECONCILE_ORDERS: found %d open orders from broker", len(open_orders))
+
+        open_orders = [
+            o
+            for o in (raw_orders or [])
+            if isinstance(o, dict)
+            and str(o.get("status", "")).upper() in {"OPEN", "TRIGGER PENDING"}
+        ]
+        logger.info(
+            "RECONCILE_ORDERS: found %d open orders from broker", len(open_orders)
+        )
         for o in open_orders:
             oid = o.get("order_id") or o.get("id", "")
             sym = o.get("tradingsymbol") or o.get("symbol", "")
             status = o.get("status", "")
-            logger.info("BROKER_OPEN_ORDER order_id=%s symbol=%s status=%s", oid, sym, status)
+            logger.info(
+                "BROKER_OPEN_ORDER order_id=%s symbol=%s status=%s", oid, sym, status
+            )
     except Exception as exc:
         logger.warning("RECONCILE_ORDERS: failed to fetch broker orders: %s", exc)
 
@@ -4022,17 +4376,23 @@ async def reconcile_with_broker(
         if inspect.iscoroutinefunction(getattr(broker_client, "get_positions", None)):
             raw_positions = await broker_client.get_positions()
         else:
-            raw_positions = await asyncio.to_thread(_run_sync_locked, broker_client.get_positions)
+            raw_positions = await asyncio.to_thread(
+                _run_sync_locked, broker_client.get_positions
+            )
             if asyncio.iscoroutine(raw_positions):
                 raw_positions = await raw_positions
         positions = [p for p in (raw_positions or []) if isinstance(p, dict)]
-        logger.info("RECONCILE_POSITIONS: found %d positions from broker", len(positions))
+        logger.info(
+            "RECONCILE_POSITIONS: found %d positions from broker", len(positions)
+        )
 
         for pos in positions:
             try:
-                sym = str(
-                    pos.get("tradingsymbol") or pos.get("symbol") or ""
-                ).strip().upper()
+                sym = (
+                    str(pos.get("tradingsymbol") or pos.get("symbol") or "")
+                    .strip()
+                    .upper()
+                )
                 if not sym:
                     continue
                 qty = int(pos.get("quantity") or pos.get("net_quantity") or 0)
@@ -4040,14 +4400,19 @@ async def reconcile_with_broker(
                     continue
 
                 avg_price = float(
-                    pos.get("average_price") or pos.get("buy_price") or pos.get("sell_price") or 0.0
+                    pos.get("average_price")
+                    or pos.get("buy_price")
+                    or pos.get("sell_price")
+                    or 0.0
                 )
 
                 # Check if bracket_manager already tracks this symbol
                 is_managed = False
                 if bracket_manager:
                     is_managed = bool(
-                        getattr(bracket_manager, "is_symbol_managed", lambda s: False)(sym)
+                        getattr(bracket_manager, "is_symbol_managed", lambda s: False)(
+                            sym
+                        )
                     )
 
                 if is_managed:
@@ -4056,7 +4421,9 @@ async def reconcile_with_broker(
 
                 logger.warning(
                     "GHOST_POSITION detected: symbol=%s qty=%d avg=%.2f — attaching safety bracket",
-                    sym, qty, avg_price,
+                    sym,
+                    qty,
+                    avg_price,
                 )
 
                 # Attach orphan position. BracketManager computes its own
@@ -4067,7 +4434,9 @@ async def reconcile_with_broker(
                     try:
                         side = "BUY" if qty > 0 else "SELL"
 
-                        attach_fn = getattr(bracket_manager, "attach_orphan_position", None)
+                        attach_fn = getattr(
+                            bracket_manager, "attach_orphan_position", None
+                        )
                         if attach_fn:
                             attach_fn(
                                 symbol=sym,
@@ -4077,15 +4446,20 @@ async def reconcile_with_broker(
                             )
                             logger.warning(
                                 "SAFETY_BRACKET_ATTACHED: symbol=%s qty=%d entry=%.2f",
-                                sym, abs(qty), avg_price,
+                                sym,
+                                abs(qty),
+                                avg_price,
                             )
                         else:
                             logger.warning(
-                                "GHOST_POSITION: bracket_manager has no attach_orphan_position for %s", sym
+                                "GHOST_POSITION: bracket_manager has no attach_orphan_position for %s",
+                                sym,
                             )
                     except Exception as bracket_exc:
                         logger.error(
-                            "SAFETY_BRACKET_FAILED: symbol=%s error=%s", sym, bracket_exc
+                            "SAFETY_BRACKET_FAILED: symbol=%s error=%s",
+                            sym,
+                            bracket_exc,
                         )
             except Exception as pos_exc:
                 logger.warning("RECONCILE_POSITION_ITEM_ERROR: %s", pos_exc)
@@ -4468,10 +4842,14 @@ def _resolve_startup_risk_initial_balance(
 ) -> float:
     """Return the RiskManager opening balance without synthetic LIVE funding."""
 
-    execution_mode = str(
-        getattr(settings, "execution_mode", None)
-        or os.getenv("EXECUTION_MODE", "PAPER")
-    ).strip().upper()
+    execution_mode = (
+        str(
+            getattr(settings, "execution_mode", None)
+            or os.getenv("EXECUTION_MODE", "PAPER")
+        )
+        .strip()
+        .upper()
+    )
     if execution_mode == "LIVE":
         if startup_available_balance is None:
             raise BrokerBalanceUnavailableError(
@@ -4534,9 +4912,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         from nifty_scalper_bot.core import _real_live_mode_requested
 
         if _real_live_mode_requested():
-            raise RuntimeError(
-                "market_data_hardening_bootstrap_failed"
-            ) from _hard_exc
+            raise RuntimeError("market_data_hardening_bootstrap_failed") from _hard_exc
     fingerprint = _build_startup_fingerprint()
     LOGGER.info(
         "startup_fingerprint version=%s release=%s",
@@ -4553,9 +4929,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bool(live_enabled),
         extra={
             "event": "BOT_INSTANCE_FINGERPRINT",
-            "deployment_id": str(os.getenv("RAILWAY_DEPLOYMENT_ID", "")).strip() or "unknown",
+            "deployment_id": str(os.getenv("RAILWAY_DEPLOYMENT_ID", "")).strip()
+            or "unknown",
             "replica_id": str(os.getenv("RAILWAY_REPLICA_ID", "")).strip() or "unknown",
-            "commit_sha": str(os.getenv("RAILWAY_GIT_COMMIT_SHA", "")).strip() or fingerprint["release"],
+            "commit_sha": str(os.getenv("RAILWAY_GIT_COMMIT_SHA", "")).strip()
+            or fingerprint["release"],
             "live_execution": bool(live_enabled),
         },
     )
@@ -4580,8 +4958,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     rate_limiter = _configure_rate_limiter(config.ratelimit)
     message_bus = MessageBus()
-
-
 
     broker_client = ZerodhaKiteClient(
         api_key=config.broker.api_key,
@@ -4633,7 +5009,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         LOGGER.error(
             "BROKER_BALANCE_UNAVAILABLE_AT_STARTUP reason=%s",
             str(exc),
-            extra={"event": "BROKER_BALANCE_UNAVAILABLE_AT_STARTUP", "segment": margin_segment, "error": str(exc)},
+            extra={
+                "event": "BROKER_BALANCE_UNAVAILABLE_AT_STARTUP",
+                "segment": margin_segment,
+                "error": str(exc),
+            },
             exc_info=exc,
         )
         startup_balance_error = str(exc)
@@ -4641,7 +5021,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         LOGGER.error(
             "BROKER_BALANCE_UNAVAILABLE_AT_STARTUP reason=%s",
             str(exc),
-            extra={"event": "BROKER_BALANCE_UNAVAILABLE_AT_STARTUP", "segment": margin_segment, "error": str(exc)},
+            extra={
+                "event": "BROKER_BALANCE_UNAVAILABLE_AT_STARTUP",
+                "segment": margin_segment,
+                "error": str(exc),
+            },
             exc_info=exc,
         )
         startup_balance_error = str(exc)
@@ -4853,7 +5237,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if market_data_manager is None:
             return
         try:
-            canonical_symbol = market_data_manager._canonical_symbol(symbol)  # noqa: SLF001
+            canonical_symbol = market_data_manager._canonical_symbol(
+                symbol
+            )  # noqa: SLF001
         except Exception:
             log_throttled(
                 LOGGER,
@@ -4880,8 +5266,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             try:
                 market_data_manager._enqueue_tick_threadsafe(t)
             except Exception as exc:
-                LOGGER.error("Tick enqueue failed: %s", exc)      
-                    
+                LOGGER.error("Tick enqueue failed: %s", exc)
+
     use_websockets = not use_polling
     if use_websockets:
         LOGGER.info("Initializing WebSocket Streamer...")
@@ -5305,7 +5691,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     LOGGER.info(
                         "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=%s source=instrument_dump",
                         int(lot),
-                        extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": int(lot), "source": "instrument_dump"},
+                        extra={
+                            "event": "LOT_SIZE_RESOLVED",
+                            "underlying": "NIFTY",
+                            "lot_size": int(lot),
+                            "source": "instrument_dump",
+                        },
                     )
                 return int(lot)
             # Fallback defaults
@@ -5320,7 +5711,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=%s source=%s",
                     env_lot,
                     source,
-                    extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": env_lot, "source": source},
+                    extra={
+                        "event": "LOT_SIZE_RESOLVED",
+                        "underlying": "NIFTY",
+                        "lot_size": env_lot,
+                        "source": source,
+                    },
                 )
                 return env_lot
             if "BANKNIFTY" in sym_upper:
@@ -5330,7 +5726,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             if "NIFTY" in symbol.upper():
                 LOGGER.info(
                     "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=65 source=fallback",
-                    extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": 65, "source": "fallback"},
+                    extra={
+                        "event": "LOT_SIZE_RESOLVED",
+                        "underlying": "NIFTY",
+                        "lot_size": 65,
+                        "source": "fallback",
+                    },
                 )
                 return 65
             return 1
@@ -5430,7 +5831,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 # Pass DataHub (SSOT) as the market-data facade; bracket manager
                 # only needs subscribe/unsubscribe + quote access, which DataHub
                 # exposes and transparently delegates to MDM.
-                market_data=data_hub if 'data_hub' in locals() and data_hub else market_data_manager,
+                market_data=(
+                    data_hub
+                    if "data_hub" in locals() and data_hub
+                    else market_data_manager
+                ),
                 trade_journal=trade_journal,
             )
 
@@ -5441,10 +5846,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             )
 
             # Attach once; duplicate attachment can duplicate bracket listeners.
-            if hasattr(bracket_manager, "attach_open_position_priority_hooks") and hasattr(market_data_manager, "add_open_position_symbol") and hasattr(market_data_manager, "remove_open_position_symbol"):
+            if (
+                hasattr(bracket_manager, "attach_open_position_priority_hooks")
+                and hasattr(market_data_manager, "add_open_position_symbol")
+                and hasattr(market_data_manager, "remove_open_position_symbol")
+            ):
                 bracket_manager.attach_open_position_priority_hooks(
                     on_position_open=market_data_manager.add_open_position_symbol,
                     on_position_closed=market_data_manager.remove_open_position_symbol,
+                )
+            if hasattr(
+                bracket_manager, "attach_active_bracket_symbols_hook"
+            ) and hasattr(market_data_manager, "set_active_bracket_symbols"):
+                bracket_manager.attach_active_bracket_symbols_hook(
+                    market_data_manager.set_active_bracket_symbols
                 )
 
             if not bracket_manager_attached:
@@ -5534,7 +5949,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except Exception:  # pragma: no cover - defensive
                 LOGGER.debug("risk_state_attach_data_hub_failed", exc_info=True)
         if hasattr(data_hub, "subscribe_ticks") and risk_symbol:
-            _subscribe_ticks_force_live_compat(data_hub, risk_symbol, _risk_state_tick_listener)
+            _subscribe_ticks_force_live_compat(
+                data_hub, risk_symbol, _risk_state_tick_listener
+            )
         if hasattr(data_hub, "subscribe_orders"):
             data_hub.subscribe_orders(_risk_state_order_listener)
 
@@ -5643,7 +6060,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         f"Failed to inject DataHub into {strategy.name}: {exc}"
                     )
     futures_symbol = ""
-    for _method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
+    for _method_name in (
+        "get_active_nifty_future_symbol_cached",
+        "resolve_active_nifty_future_symbol",
+    ):
         _method = getattr(market_data_manager, _method_name, None)
         if callable(_method):
             try:
@@ -5827,7 +6247,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         interval_sec=int(reconciliation_interval),
         alert_on_mismatch=bool(reconciliation_alert),
     )
-    
 
     strategy_runner = StrategyRunner(
         market_data_manager=market_data_manager,
@@ -5844,7 +6263,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     strategy_runner.attach_persistent_state(persistent_state)
     if hasattr(order_manager, "entry_order_failed_callback"):
-        order_manager.entry_order_failed_callback = strategy_runner.notify_entry_order_failed
+        order_manager.entry_order_failed_callback = (
+            strategy_runner.notify_entry_order_failed
+        )
     market_data_manager.subscribe_bars(strategy_runner.ingest_historical_bar)
     strategy_runner.restore_trades(persistent_state.load_trades())
     settings.enable_live = bool(live_toggle_env)
@@ -5864,7 +6285,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ctx_obj = ctx_ref.get("ctx")
         if ctx_obj is not None:
             ctx_obj.shadow_mode_enabled = next_state
-        target_mode = "PAPER" if next_state else ("LIVE" if settings.enable_live else "PAPER")
+        target_mode = (
+            "PAPER" if next_state else ("LIVE" if settings.enable_live else "PAPER")
+        )
         return paper_state["enabled"]
 
     def _paper_mode_enabled() -> bool:
@@ -5882,7 +6305,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             LOGGER.warning("TELEGRAM_NOTIFIER_SKIPPED reason=dependency_unavailable")
         else:
             try:
-                notifier = TelegramEnhancedNotifierCls.from_settings(settings.notifications)
+                notifier = TelegramEnhancedNotifierCls.from_settings(
+                    settings.notifications
+                )
                 order_manager.set_notifier(notifier)
                 ctx_ref["telegram_wired"] = True
                 LOGGER.info("✅ Telegram Notifier wired to Order Manager")
@@ -6288,6 +6713,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 )
 
     ctx_ref["ctx"] = ctx
+
     # Spec §4: inject the canonical hydration callback so Runner prewarm routes
     # through the single orchestration path instead of its own reseed lifecycle.
     # The closure binds ctx here in app.py; Runner never imports app (no cycle).
@@ -6322,7 +6748,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if safe_order_manager is not None:
             try:
                 safe_order_manager.set_live_enabled(False)
-            except Exception as live_exc:  # noqa: BLE001 - live safety best effort with explicit diagnostic
+            except (
+                Exception
+            ) as live_exc:  # noqa: BLE001 - live safety best effort with explicit diagnostic
                 LOGGER.error(
                     "CANONICAL_HISTORY_ENSURER_DISABLE_LIVE_FAILED exception_type=%s exception_message=%s",
                     type(live_exc).__name__,
@@ -6740,7 +7168,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     telegram_cfg = getattr(config, "telegram", None)
     ctx.telegram_bot = None
     telegram_transport_mode = _telegram_transport_mode(settings)
-    controller = _HTTP_CONTROLLER if _telegram_requires_http_controller(settings) else None
+    controller = (
+        _HTTP_CONTROLLER if _telegram_requires_http_controller(settings) else None
+    )
     telegram_bot_instance: TelegramBot | None = None
     telegram_chat_id: int | None = None
 
@@ -6997,10 +7427,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                                     asyncio.run(awaitable)
                                 else:
                                     loop.create_task(awaitable)
-            elif settings.notifications.enabled and telegram_transport_mode == "polling":
+            elif (
+                settings.notifications.enabled and telegram_transport_mode == "polling"
+            ):
                 LOGGER.info(
                     "telegram_application_attach_skipped",
-                    extra={"event": "telegram_application_attach_skipped", "mode": "polling"},
+                    extra={
+                        "event": "telegram_application_attach_skipped",
+                        "mode": "polling",
+                    },
                 )
         else:
             LOGGER.info("Telegram disabled (no token/chat_id provided).")
@@ -7082,11 +7517,15 @@ def _is_live_execution_mode(configured_mode: str | None = None) -> bool:
         True if execution mode is LIVE *or* ENABLE_LIVE is truthy.
     """
 
-    mode = str(
-        configured_mode
-        if configured_mode is not None
-        else os.getenv("EXECUTION_MODE", "")
-    ).strip().upper()
+    mode = (
+        str(
+            configured_mode
+            if configured_mode is not None
+            else os.getenv("EXECUTION_MODE", "")
+        )
+        .strip()
+        .upper()
+    )
     if mode == "LIVE":
         return True
     flag = str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
@@ -7127,7 +7566,9 @@ def _enforce_live_single_replica_safety(*, is_live_execution: bool) -> None:
             "reason": "single_live_runner_required",
         },
     )
-    fail_fast = str(os.getenv("BOT_FAIL_FAST_ON_MULTI_REPLICA_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    fail_fast = str(
+        os.getenv("BOT_FAIL_FAST_ON_MULTI_REPLICA_LIVE", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     if fail_fast:
         raise RuntimeError("Multiple live trading replicas are unsafe")
 
@@ -7227,7 +7668,9 @@ async def _wait_for_live_spot_or_raise(
         )
         return float(price)
 
-    allow_rest_live = str(os.getenv("MARKETDATA_ALLOW_REST_SPOT_FOR_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    allow_rest_live = str(
+        os.getenv("MARKETDATA_ALLOW_REST_SPOT_FOR_LIVE", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     if live_mode and policy.block_live_if_no_ws_spot and not allow_rest_live:
         cached_probe_fn = getattr(mdm, "get_cached_ltp", None)
         rest_probe = (
@@ -7273,7 +7716,11 @@ async def _wait_for_live_spot_or_raise(
         LOGGER.info(
             "STARTUP_SPOT_PROOF_TIMEOUT symbol=%s reason=spot_ltp_unavailable",
             policy.nifty_internal_symbol,
-            extra={"event": "STARTUP_SPOT_PROOF_TIMEOUT", "symbol": policy.nifty_internal_symbol, "reason": "spot_ltp_unavailable"},
+            extra={
+                "event": "STARTUP_SPOT_PROOF_TIMEOUT",
+                "symbol": policy.nifty_internal_symbol,
+                "reason": "spot_ltp_unavailable",
+            },
         )
         raise RuntimeError("spot_ltp_unavailable:fresh_ws_spot_missing")
 
@@ -7281,7 +7728,10 @@ async def _wait_for_live_spot_or_raise(
         LOGGER.error(
             "SPOT_REST_USED_FOR_LIVE_STARTUP symbol=%s severity=high",
             policy.nifty_internal_symbol,
-            extra={"event": "SPOT_REST_USED_FOR_LIVE_STARTUP", "symbol": policy.nifty_internal_symbol},
+            extra={
+                "event": "SPOT_REST_USED_FOR_LIVE_STARTUP",
+                "symbol": policy.nifty_internal_symbol,
+            },
         )
 
     # Paper / off-hours fallback path: try cached REST/poll value first.
@@ -7418,9 +7868,11 @@ def _create_named_task(coro: Any, *, name: str) -> asyncio.Task[Any]:
 
 async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> None:
     """Refresh readiness after startup tick proof. Args: ctx/reason. Returns: none. Raises: none."""
-    configured_mode = str(
-        getattr(getattr(ctx, "settings", None), "execution_mode", None) or "LIVE"
-    ).strip().upper()
+    configured_mode = (
+        str(getattr(getattr(ctx, "settings", None), "execution_mode", None) or "LIVE")
+        .strip()
+        .upper()
+    )
     mdm = ctx.market_data_manager
     runner = ctx.strategy_runner
     spot_tick: Mapping[str, Any] | None = None
@@ -7460,7 +7912,9 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
                                 atm_strike=basket.get("atm_strike"),
                             )
                     except AttributeError as exc:
-                        _log_bot_context_attribute_missing(exc, component="live_basket_build")
+                        _log_bot_context_attribute_missing(
+                            exc, component="live_basket_build"
+                        )
                         LOGGER.warning(
                             "LIVE_BASKET_BUILD_FAILED reason=%s",
                             exc,
@@ -7533,7 +7987,13 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
             bus_running,
             runner_started,
             reason,
-            extra={"event": "DATA_PIPELINE_READY_AFTER_TICK", "spot_ready": spot_ready, "bus_running": bus_running, "runner_started": runner_started, "reason": reason},
+            extra={
+                "event": "DATA_PIPELINE_READY_AFTER_TICK",
+                "spot_ready": spot_ready,
+                "bus_running": bus_running,
+                "runner_started": runner_started,
+                "reason": reason,
+            },
         )
         return
     LOGGER.info(
@@ -7542,9 +8002,14 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
         bus_running,
         runner_started,
         reason,
-        extra={"event": "DATA_PIPELINE_STILL_NOT_READY_AFTER_TICK", "spot_ready": spot_ready, "bus_running": bus_running, "runner_started": runner_started, "reason": reason},
+        extra={
+            "event": "DATA_PIPELINE_STILL_NOT_READY_AFTER_TICK",
+            "spot_ready": spot_ready,
+            "bus_running": bus_running,
+            "runner_started": runner_started,
+            "reason": reason,
+        },
     )
-
 
 
 def _runner_is_running(runner: Any) -> bool:
@@ -7651,9 +8116,13 @@ def _wire_and_start_message_bus(ctx: BotContext) -> bool:
                 runner.on_data,
                 subscriber_id="strategy_runner.on_data.fallback",
             )
-            LOGGER.warning("MESSAGE_BUS_TICK_OWNER owner=strategy_runner_fallback reason=no_data_hub")
+            LOGGER.warning(
+                "MESSAGE_BUS_TICK_OWNER owner=strategy_runner_fallback reason=no_data_hub"
+            )
         else:
-            LOGGER.warning("MESSAGE_BUS_TICK_SUBSCRIPTION_SKIPPED reason=no_data_hub_no_runner")
+            LOGGER.warning(
+                "MESSAGE_BUS_TICK_SUBSCRIPTION_SKIPPED reason=no_data_hub_no_runner"
+            )
 
         ctx.message_bus_tick_subscribed = True
     started = bus.start()
@@ -7705,15 +8174,35 @@ async def _replay_latest_mdm_ticks_to_bus(ctx: BotContext, *, reason: str) -> in
         if not isinstance(tick, Mapping):
             continue
         try:
-            msg = Message(type=MessageType.TICK,timestamp=datetime.now(timezone.utc),data={**dict(tick),"symbol":symbol,"source":"mdm_replay","trace_id":f"replay-{symbol}-{time_module.monotonic_ns()}"},source="market_data_manager_replay")
+            msg = Message(
+                type=MessageType.TICK,
+                timestamp=datetime.now(timezone.utc),
+                data={
+                    **dict(tick),
+                    "symbol": symbol,
+                    "source": "mdm_replay",
+                    "trace_id": f"replay-{symbol}-{time_module.monotonic_ns()}",
+                },
+                source="market_data_manager_replay",
+            )
             result = bus.publish(msg)
             if inspect.isawaitable(result):
                 await result
             replayed += 1
         except Exception:
             LOGGER.exception("MDM_CACHED_TICK_REPLAY_FAILED symbol=%s", symbol)
-    LOGGER.info("MDM_CACHED_TICKS_REPLAYED count=%d reason=%s", replayed, reason, extra={"event":"MDM_CACHED_TICKS_REPLAYED","count":replayed,"reason":reason})
+    LOGGER.info(
+        "MDM_CACHED_TICKS_REPLAYED count=%d reason=%s",
+        replayed,
+        reason,
+        extra={
+            "event": "MDM_CACHED_TICKS_REPLAYED",
+            "count": replayed,
+            "reason": reason,
+        },
+    )
     return replayed
+
 
 async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> None:
     """Start strategy runner idempotently. Args: ctx/reason. Returns: none. Raises: none."""
@@ -7737,17 +8226,41 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
         getattr(runner, "ready", None),
         getattr(runner, "_runner_state", None),
         _runner_is_running(runner),
-        extra={"event":"STRATEGY_RUNNER_START_DIAG","reason":reason,"active_symbols":len(getattr(runner, "_active_symbols", set()) or []),"ready":getattr(runner, "ready", None),"runner_state":str(getattr(runner, "_runner_state", None)),"running":_runner_is_running(runner)},
+        extra={
+            "event": "STRATEGY_RUNNER_START_DIAG",
+            "reason": reason,
+            "active_symbols": len(getattr(runner, "_active_symbols", set()) or []),
+            "ready": getattr(runner, "ready", None),
+            "runner_state": str(getattr(runner, "_runner_state", None)),
+            "running": _runner_is_running(runner),
+        },
     )
     if hasattr(runner, "start"):
         result = runner.start()
         if inspect.isawaitable(result):
             await result
         if _runner_is_running(runner):
-            LOGGER.info("STRATEGY_RUNNER_STARTED reason=%s", reason, extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason})
+            LOGGER.info(
+                "STRATEGY_RUNNER_STARTED reason=%s",
+                reason,
+                extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason},
+            )
             await _recompute_and_push_runtime_readiness(ctx, reason="runner_started")
         else:
-            LOGGER.warning("STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING reason=%s active_symbols=%d runner_state=%s", reason, len(getattr(runner, "_active_symbols", set()) or []), getattr(runner, "_runner_state", None), extra={"event":"STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING","reason":reason,"active_symbols":len(getattr(runner, "_active_symbols", set()) or []),"runner_state":str(getattr(runner, "_runner_state", None))})
+            LOGGER.warning(
+                "STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING reason=%s active_symbols=%d runner_state=%s",
+                reason,
+                len(getattr(runner, "_active_symbols", set()) or []),
+                getattr(runner, "_runner_state", None),
+                extra={
+                    "event": "STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING",
+                    "reason": reason,
+                    "active_symbols": len(
+                        getattr(runner, "_active_symbols", set()) or []
+                    ),
+                    "runner_state": str(getattr(runner, "_runner_state", None)),
+                },
+            )
         return
     if hasattr(runner, "run"):
         task = asyncio.create_task(runner.run())
@@ -7760,8 +8273,6 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
         await _recompute_and_push_runtime_readiness(ctx, reason="runner_started")
         return
     LOGGER.warning("STRATEGY_RUNNER_START_SKIPPED reason=no_start_or_run_method")
-
-
 
 
 async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
@@ -7781,7 +8292,10 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
     while True:
         try:
             await asyncio.sleep(interval_seconds)
-            configured_mode = str(getattr(ctx.settings, "execution_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
+            configured_mode = str(
+                getattr(ctx.settings, "execution_mode", None)
+                or os.getenv("EXECUTION_MODE", "PAPER")
+            ).upper()
             if configured_mode != "LIVE":
                 continue
             try:
@@ -7795,14 +8309,20 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                 # interval (default 300s) to keep the loop near-idle overnight.
                 post_close = max(
                     float(interval_seconds),
-                    parse_float_env(os.getenv("POST_MARKET_REARM_INTERVAL_SECONDS"), 300.0),
+                    parse_float_env(
+                        os.getenv("POST_MARKET_REARM_INTERVAL_SECONDS"), 300.0
+                    ),
                 )
                 if not rearm_sleep_logged:
                     rearm_sleep_logged = True
                     LOGGER.info(
                         "LIVE_READINESS_REARM_SLEEPING market_state=closed sleep_s=%d",
                         int(post_close),
-                        extra={"event": "LIVE_READINESS_REARM_SLEEPING", "market_state": "closed", "sleep_s": int(post_close)},
+                        extra={
+                            "event": "LIVE_READINESS_REARM_SLEEPING",
+                            "market_state": "closed",
+                            "sleep_s": int(post_close),
+                        },
                     )
                 await asyncio.sleep(max(0.0, post_close - float(interval_seconds)))
                 continue
@@ -7831,15 +8351,29 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                             atm_strike=basket.get("atm_strike"),
                         )
                 except Exception as exc:  # noqa: BLE001
-                    LOGGER.warning("LIVE_REARM_BASKET_BUILD_FAILED error=%s", exc, exc_info=True)
+                    LOGGER.warning(
+                        "LIVE_REARM_BASKET_BUILD_FAILED error=%s", exc, exc_info=True
+                    )
             try:
-                await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
+                await _ensure_strategy_runner_started(
+                    ctx, reason="market_open_rearm_loop"
+                )
             except Exception as exc:
-                LOGGER.exception("LIVE_REARM_RUNNER_START_FAILED error_type=%s error=%s", type(exc).__name__, str(exc))
+                LOGGER.exception(
+                    "LIVE_REARM_RUNNER_START_FAILED error_type=%s error=%s",
+                    type(exc).__name__,
+                    str(exc),
+                )
             try:
-                await _recompute_and_push_runtime_readiness(ctx, reason="market_open_rearm_loop")
+                await _recompute_and_push_runtime_readiness(
+                    ctx, reason="market_open_rearm_loop"
+                )
             except Exception as exc:
-                LOGGER.exception("LIVE_REARM_READINESS_PUSH_FAILED error_type=%s error=%s", type(exc).__name__, str(exc))
+                LOGGER.exception(
+                    "LIVE_REARM_READINESS_PUSH_FAILED error_type=%s error=%s",
+                    type(exc).__name__,
+                    str(exc),
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -7858,11 +8392,19 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
 
 def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> int:
     """Compatibility projection over StrategyRunner.sync_history_from_mdm."""
-    if ctx.strategy_runner is None or not callable(getattr(ctx.strategy_runner, "sync_history_from_mdm", None)):
+    if ctx.strategy_runner is None or not callable(
+        getattr(ctx.strategy_runner, "sync_history_from_mdm", None)
+    ):
         return 0
     before = get_runner_history_count(ctx, symbol)
     resolved_role = resolve_symbol_history_role(ctx, symbol)
-    result = ctx.strategy_runner.sync_history_from_mdm(symbol, required_bars=min_bars, reason="runtime_bar_sync", role=resolved_role, request_if_short=False)
+    result = ctx.strategy_runner.sync_history_from_mdm(
+        symbol,
+        required_bars=min_bars,
+        reason="runtime_bar_sync",
+        role=resolved_role,
+        request_if_short=False,
+    )
     after = int(getattr(result, "indicator_bars", 0) or 0)
     return max(0, after - before)
 
@@ -7878,7 +8420,11 @@ def _best_fresh_option(
     for sym in candidates:
         quote_fresh = False
         try:
-            snap = ctx.market_data_manager.get_symbol_snapshot(sym) if ctx.market_data_manager is not None else None
+            snap = (
+                ctx.market_data_manager.get_symbol_snapshot(sym)
+                if ctx.market_data_manager is not None
+                else None
+            )
             ltp = float(getattr(snap, "ltp", 0.0) or 0.0)
             age = resolve_tick_age_seconds(snap)
             quote_fresh = ltp > 0 and age is not None and age <= max_age_s
@@ -7902,7 +8448,11 @@ def _best_hydrated_option(
     for sym in candidates:
         try:
             bars_count = (
-                len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or []))
+                len(
+                    list(
+                        ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or []
+                    )
+                )
                 if ctx.market_data_manager is not None
                 else 0
             )
@@ -7912,7 +8462,12 @@ def _best_hydrated_option(
             _sync_mdm_bars_to_runner(ctx, sym, min_bars=min_bars)
             try:
                 bars_count = (
-                    len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or []))
+                    len(
+                        list(
+                            ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars)
+                            or []
+                        )
+                    )
                     if ctx.market_data_manager is not None
                     else bars_count
                 )
@@ -7924,7 +8479,9 @@ def _best_hydrated_option(
     return best_symbol
 
 
-def _quote_readiness_for_symbol(ctx: Any, symbol: str | None, *, max_age_s: float = 60.0) -> Any:
+def _quote_readiness_for_symbol(
+    ctx: Any, symbol: str | None, *, max_age_s: float = 60.0
+) -> Any:
     """Return canonical quote readiness for a runtime symbol without raising."""
     snap = None
     if symbol and getattr(ctx, "market_data_manager", None) is not None:
@@ -7953,8 +8510,6 @@ def _fresh_option_quote(
     except Exception:
         return None
     return symbol if ltp > 0 and age is not None and age <= max_age_s else None
-
-
 
 
 # Readiness/hydration computation extracted to core/history_readiness.py.
@@ -8031,7 +8586,9 @@ async def ensure_symbol_runtime_history(
     global_safety = int(os.getenv("HYDRATION_GLOBAL_SAFETY_MAX", "1000") or 1000)
     # Spec §7: deep mode is explicit only. A large required_bars from a legacy
     # caller does NOT silently enable deep hydration.
-    wants_deep = bool(deep_history or (target_bars is not None and int(target_bars) > policy.role_cap))
+    wants_deep = bool(
+        deep_history or (target_bars is not None and int(target_bars) > policy.role_cap)
+    )
     normal_upper = policy.role_cap
     deep_upper = policy.deep_cap
     for bound in (capacity, global_safety):
@@ -8041,12 +8598,25 @@ async def ensure_symbol_runtime_history(
     upper = deep_upper if wants_deep else normal_upper
 
     if required_bars is not None or target_bars is not None:
-        req_requested = int(required_bars) if required_bars is not None else policy.required_bars
-        if str(policy.role) == "selected_option" and req_requested < int(policy.required_bars):
+        req_requested = (
+            int(required_bars) if required_bars is not None else policy.required_bars
+        )
+        if str(policy.role) == "selected_option" and req_requested < int(
+            policy.required_bars
+        ):
             LOGGER.info(
                 "HISTORY_REQUIRED_BARS_RAISED_TO_EXEC_MIN symbol=%s role=%s requested=%s effective=%s",
-                symbol, policy.role, req_requested, policy.required_bars,
-                extra={"event": "HISTORY_REQUIRED_BARS_RAISED_TO_EXEC_MIN", "symbol": symbol, "role": policy.role, "requested": req_requested, "effective": policy.required_bars},
+                symbol,
+                policy.role,
+                req_requested,
+                policy.required_bars,
+                extra={
+                    "event": "HISTORY_REQUIRED_BARS_RAISED_TO_EXEC_MIN",
+                    "symbol": symbol,
+                    "role": policy.role,
+                    "requested": req_requested,
+                    "effective": policy.required_bars,
+                },
             )
             req_requested = int(policy.required_bars)
         # A large required override without explicit deep mode is clamped to the
@@ -8054,8 +8624,17 @@ async def ensure_symbol_runtime_history(
         if not wants_deep and req_requested > policy.role_cap:
             LOGGER.info(
                 "HISTORY_REQUIRED_BARS_CLAMPED symbol=%s role=%s requested=%s effective=%s",
-                symbol, policy.role, req_requested, normal_upper,
-                extra={"event": "HISTORY_REQUIRED_BARS_CLAMPED", "symbol": symbol, "role": policy.role, "requested": req_requested, "effective": normal_upper},
+                symbol,
+                policy.role,
+                req_requested,
+                normal_upper,
+                extra={
+                    "event": "HISTORY_REQUIRED_BARS_CLAMPED",
+                    "symbol": symbol,
+                    "role": policy.role,
+                    "requested": req_requested,
+                    "effective": normal_upper,
+                },
             )
         req = max(1, min(req_requested, upper))
         tgt = int(target_bars) if target_bars is not None else policy.target_bars
@@ -8121,14 +8700,48 @@ async def ensure_symbol_runtime_history(
         mdm_bars = 0
     runner_bars = int(getattr(sync_result, "runner_bars", 0) or 0)
     indicator_bars = int(getattr(sync_result, "indicator_bars", 0) or 0)
-    readiness = compute_history_readiness(symbol=symbol, role=policy.role, required_bars=policy.required_bars, mdm_bars=mdm_bars, runner_bars=runner_bars, indicator_bars=indicator_bars)
+    readiness = compute_history_readiness(
+        symbol=symbol,
+        role=policy.role,
+        required_bars=policy.required_bars,
+        mdm_bars=mdm_bars,
+        runner_bars=runner_bars,
+        indicator_bars=indicator_bars,
+    )
     minimum_ready = readiness.minimum_ready and failure_reason is None
     target_ready = bool(mdm_bars >= policy.target_bars and failure_reason is None)
-    sync_success = bool(getattr(sync_result, "success", False)) if policy.sync_runner else True
+    sync_success = (
+        bool(getattr(sync_result, "success", False)) if policy.sync_runner else True
+    )
     LOGGER.info(
         "CANONICAL_HISTORY_RESULT symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s mdm_bars=%s runner_bars=%s indicator_bars=%s minimum_ready=%s target_ready=%s failure_reason=%s",
-        symbol, policy.role, policy.phase, reason, policy.required_bars, policy.target_bars, mdm_bars, runner_bars, indicator_bars, minimum_ready, target_ready, failure_reason,
-        extra={"event": "CANONICAL_HISTORY_RESULT", "symbol": symbol, "role": policy.role, "phase": policy.phase, "reason": reason, "required_bars": policy.required_bars, "target_bars": policy.target_bars, "mdm_bars": mdm_bars, "runner_bars": runner_bars, "indicator_bars": indicator_bars, "minimum_ready": minimum_ready, "target_ready": target_ready, "failure_reason": failure_reason},
+        symbol,
+        policy.role,
+        policy.phase,
+        reason,
+        policy.required_bars,
+        policy.target_bars,
+        mdm_bars,
+        runner_bars,
+        indicator_bars,
+        minimum_ready,
+        target_ready,
+        failure_reason,
+        extra={
+            "event": "CANONICAL_HISTORY_RESULT",
+            "symbol": symbol,
+            "role": policy.role,
+            "phase": policy.phase,
+            "reason": reason,
+            "required_bars": policy.required_bars,
+            "target_bars": policy.target_bars,
+            "mdm_bars": mdm_bars,
+            "runner_bars": runner_bars,
+            "indicator_bars": indicator_bars,
+            "minimum_ready": minimum_ready,
+            "target_ready": target_ready,
+            "failure_reason": failure_reason,
+        },
     )
     return RuntimeHistoryResult(
         symbol=symbol,
@@ -8149,7 +8762,11 @@ async def ensure_symbol_runtime_history(
 
 
 async def _ensure_context_history_hydrated(
-    ctx: BotContext, spot_symbol: str | None, futures_symbol: str | None, required_bars: int, reason: str
+    ctx: BotContext,
+    spot_symbol: str | None,
+    futures_symbol: str | None,
+    required_bars: int,
+    reason: str,
 ) -> dict[str, dict[str, int | bool]]:
     """Ensure spot/futures history through the canonical runtime orchestrator."""
     result: dict[str, dict[str, int | bool]] = {}
@@ -8160,13 +8777,46 @@ async def _ensure_context_history_hydrated(
         if runner is not None and hasattr(runner, "_indicator_engine"):
             before_runner = len(runner._indicator_engine.get_history(sym) or [])
         role = "futures_context" if str(sym).endswith("FUT") else "spot_context"
-        runtime = await ensure_symbol_runtime_history(ctx, sym, role=role, phase="startup", reason=f"{reason}_context", required_bars=required_bars)
+        runtime = await ensure_symbol_runtime_history(
+            ctx,
+            sym,
+            role=role,
+            phase="startup",
+            reason=f"{reason}_context",
+            required_bars=required_bars,
+        )
         fetched_rows = int(getattr(runtime.hydration, "fetched_rows", 0) or 0)
         accepted_rows = int(getattr(runtime.hydration, "accepted_rows", 0) or 0)
         LOGGER.info(
             "CONTEXT_HISTORY_HYDRATION_TRACE symbol=%s source=%s requested_bars=%d fetched_bars=%d new_ingested_bars=%d duplicate_bars=%s final_indicator_history_count=%d rejection_reason=%s",
-            sym, f"{reason}_context", runtime.required_bars, fetched_rows, max(0, runtime.indicator_bars - before_runner), None, runtime.indicator_bars, "none" if runtime.ready else (runtime.failure_reason or "insufficient_bars"),
-            extra={"event": "CONTEXT_HISTORY_HYDRATION_TRACE", "symbol": sym, "source": f"{reason}_context", "requested_bars": runtime.required_bars, "fetched_bars": fetched_rows, "accepted_rows": accepted_rows, "new_ingested_bars": max(0, runtime.indicator_bars - before_runner), "duplicate_bars": None, "final_indicator_history_count": runtime.indicator_bars, "rejection_reason": "none" if runtime.ready else (runtime.failure_reason or "insufficient_bars")},
+            sym,
+            f"{reason}_context",
+            runtime.required_bars,
+            fetched_rows,
+            max(0, runtime.indicator_bars - before_runner),
+            None,
+            runtime.indicator_bars,
+            (
+                "none"
+                if runtime.ready
+                else (runtime.failure_reason or "insufficient_bars")
+            ),
+            extra={
+                "event": "CONTEXT_HISTORY_HYDRATION_TRACE",
+                "symbol": sym,
+                "source": f"{reason}_context",
+                "requested_bars": runtime.required_bars,
+                "fetched_bars": fetched_rows,
+                "accepted_rows": accepted_rows,
+                "new_ingested_bars": max(0, runtime.indicator_bars - before_runner),
+                "duplicate_bars": None,
+                "final_indicator_history_count": runtime.indicator_bars,
+                "rejection_reason": (
+                    "none"
+                    if runtime.ready
+                    else (runtime.failure_reason or "insufficient_bars")
+                ),
+            },
         )
         result[sym] = {
             "before_mdm_bars": before_mdm,
@@ -8179,7 +8829,11 @@ async def _ensure_context_history_hydrated(
 
 
 async def _ensure_selected_options_hydrated(
-    ctx: BotContext, selected_ce: str | None, selected_pe: str | None, required_bars: int, reason: str
+    ctx: BotContext,
+    selected_ce: str | None,
+    selected_pe: str | None,
+    required_bars: int,
+    reason: str,
 ) -> dict[str, dict[str, int | bool]]:
     """Ensure selected options through the canonical runtime orchestrator."""
     hydration_result: dict[str, dict[str, int | bool]] = {}
@@ -8191,10 +8845,21 @@ async def _ensure_selected_options_hydrated(
         before_runner = 0
         if runner is not None and hasattr(runner, "_indicator_engine"):
             before_runner = len(runner._indicator_engine.get_history(sym) or [])
-        runtime = await ensure_symbol_runtime_history(ctx, sym, role="selected_option", phase="startup", reason=f"{reason}_selected_option", required_bars=required_bars)
+        runtime = await ensure_symbol_runtime_history(
+            ctx,
+            sym,
+            role="selected_option",
+            phase="startup",
+            reason=f"{reason}_selected_option",
+            required_bars=required_bars,
+        )
         LOGGER.info(
             "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM symbol=%s mdm_bars=%d runner_bars=%d required_bars=%d reason=%s",
-            sym, runtime.mdm_bars, runtime.indicator_bars, required_bars, reason,
+            sym,
+            runtime.mdm_bars,
+            runtime.indicator_bars,
+            required_bars,
+            reason,
         )
         hydration_result[sym] = {
             "before_mdm_bars": before_mdm,
@@ -8206,7 +8871,11 @@ async def _ensure_selected_options_hydrated(
         if not runtime.ready:
             LOGGER.warning(
                 "SELECTED_OPTION_HYDRATION_NOT_READY symbol=%s after_mdm_bars=%d after_runner_bars=%d required_bars=%d reason=%s",
-                sym, runtime.mdm_bars, runtime.indicator_bars, required_bars, reason,
+                sym,
+                runtime.mdm_bars,
+                runtime.indicator_bars,
+                required_bars,
+                reason,
             )
     # Spec §8: derive the cold/ready verdict from the single canonical readiness
     # function so every path (startup, dynamic, rearm, /why, diagnostics) shares
@@ -8214,19 +8883,43 @@ async def _ensure_selected_options_hydrated(
     readiness = compute_selected_option_history_readiness(ctx, selected_ce, selected_pe)
     LOGGER.info(
         "SELECTED_OPTION_HISTORY_READINESS selected_ce=%s selected_pe=%s both_ready=%s blocker=%s",
-        selected_ce, selected_pe, readiness.both_ready, readiness.blocker,
-        extra={"event": "SELECTED_OPTION_HISTORY_READINESS", "selected_ce": selected_ce, "selected_pe": selected_pe, "both_ready": readiness.both_ready, "blocker": readiness.blocker},
+        selected_ce,
+        selected_pe,
+        readiness.both_ready,
+        readiness.blocker,
+        extra={
+            "event": "SELECTED_OPTION_HISTORY_READINESS",
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "both_ready": readiness.both_ready,
+            "blocker": readiness.blocker,
+        },
     )
     return hydration_result
 
 
-async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
+async def _recompute_and_push_runtime_readiness(
+    ctx: BotContext, *, reason: str
+) -> None:
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
     ensure_bot_context_runtime_fields(ctx)
-    source_basket = getattr(ctx, "active_contract_basket", None) or getattr(ctx, "active_trading_universe", {}) or {}
-    basket = normalize_active_basket_schema(cast(dict[str, object], dict(source_basket) if isinstance(source_basket, Mapping) else {}))
+    source_basket = (
+        getattr(ctx, "active_contract_basket", None)
+        or getattr(ctx, "active_trading_universe", {})
+        or {}
+    )
+    basket = normalize_active_basket_schema(
+        cast(
+            dict[str, object],
+            dict(source_basket) if isinstance(source_basket, Mapping) else {},
+        )
+    )
     mdm = getattr(ctx, "market_data_manager", None)
-    option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if s]
+    option_symbols = [
+        str(s)
+        for s in list(basket.get("option_symbols") or basket.get("symbols") or [])
+        if s
+    ]
     selection = get_active_contract_selection(ctx)
     selected_ce = selection.selected_ce
     selected_pe = selection.selected_pe
@@ -8254,97 +8947,178 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     )
     ctx.active_trading_universe = basket
     ctx.active_contract_basket = getattr(ctx, "active_contract_basket", None) or basket
-    _sync_active_selection_from_basket(ctx, active_contract_selection_from_basket(ctx.active_contract_basket))
-    def _snapshot(sym:str|None)->Any:
-        if not sym or mdm is None: return None
-        try: return mdm.get_symbol_snapshot(sym)
-        except Exception: return None
-    def _tick_age_threshold()->float:
-        env=float(os.getenv("READINESS_TICK_MAX_AGE_SECONDS","0") or 0)
-        if env>0: return env
+    _sync_active_selection_from_basket(
+        ctx, active_contract_selection_from_basket(ctx.active_contract_basket)
+    )
+
+    def _snapshot(sym: str | None) -> Any:
+        if not sym or mdm is None:
+            return None
+        try:
+            return mdm.get_symbol_snapshot(sym)
+        except Exception:
+            return None
+
+    def _tick_age_threshold() -> float:
+        env = float(os.getenv("READINESS_TICK_MAX_AGE_SECONDS", "0") or 0)
+        if env > 0:
+            return env
         return 60.0
-    def _fresh_ltp(sym:str|None,max_age_s:float|None=None)->bool:
-        snap=_snapshot(sym)
-        if snap is None: return False
-        age_limit=max_age_s or _tick_age_threshold()
-        ltp=float(getattr(snap,'ltp',0.0) or 0.0)
-        age=resolve_tick_age_seconds(snap)
-        if ltp<=0: return False
+
+    def _fresh_ltp(sym: str | None, max_age_s: float | None = None) -> bool:
+        snap = _snapshot(sym)
+        if snap is None:
+            return False
+        age_limit = max_age_s or _tick_age_threshold()
+        ltp = float(getattr(snap, "ltp", 0.0) or 0.0)
+        age = resolve_tick_age_seconds(snap)
+        if ltp <= 0:
+            return False
         if age is not None:
-            return float(age)<=age_limit
-        last_tick_ts=getattr(mdm,'_last_tick_ts',{}) if mdm is not None else {}
-        ts=last_tick_ts.get(sym) if isinstance(last_tick_ts,dict) else None
-        dt=pd.to_datetime(ts,utc=True,errors='coerce')
-        if pd.isna(dt): return False
-        return (pd.Timestamp.utcnow()-dt).total_seconds()<=age_limit
+            return float(age) <= age_limit
+        last_tick_ts = getattr(mdm, "_last_tick_ts", {}) if mdm is not None else {}
+        ts = last_tick_ts.get(sym) if isinstance(last_tick_ts, dict) else None
+        dt = pd.to_datetime(ts, utc=True, errors="coerce")
+        if pd.isna(dt):
+            return False
+        return (pd.Timestamp.utcnow() - dt).total_seconds() <= age_limit
+
     def _snapshot_value(snap: Any, key: str, default: Any = None) -> Any:
         if isinstance(snap, Mapping):
             return snap.get(key, default)
         return getattr(snap, key, default)
-    def _selected_option_bid_ask_complete(sym:str|None)->bool:
-        snap=_snapshot(sym)
-        if snap is None: return False
+
+    def _selected_option_bid_ask_complete(sym: str | None) -> bool:
+        snap = _snapshot(sym)
+        if snap is None:
+            return False
         return bool(quote_has_tradable_bid_ask(snap))
-    def _tradable_quote(sym:str|None)->bool:
-        if not sym or mdm is None: return False
-        snap=_snapshot(sym)
-        snap_has_bid_ask = bool(quote_has_tradable_bid_ask(snap)) if snap is not None else False
-        h=getattr(mdm,'has_ws_tradable_quote',None)
+
+    def _tradable_quote(sym: str | None) -> bool:
+        if not sym or mdm is None:
+            return False
+        snap = _snapshot(sym)
+        snap_has_bid_ask = (
+            bool(quote_has_tradable_bid_ask(snap)) if snap is not None else False
+        )
+        h = getattr(mdm, "has_ws_tradable_quote", None)
         if callable(h):
             try:
-                if bool(h([sym])) and (snap_has_bid_ask or bool(_snapshot_value(snap,'tradable_quote',False))): return True
+                if bool(h([sym])) and (
+                    snap_has_bid_ask
+                    or bool(_snapshot_value(snap, "tradable_quote", False))
+                ):
+                    return True
             except TypeError:
-                if bool(h(sym)) and (snap_has_bid_ask or bool(_snapshot_value(snap,'tradable_quote',False))): return True
+                if bool(h(sym)) and (
+                    snap_has_bid_ask
+                    or bool(_snapshot_value(snap, "tradable_quote", False))
+                ):
+                    return True
             except Exception:
                 pass
-        if snap is None: return False
-        if snap_has_bid_ask: return True
-        return bool(_snapshot_value(snap,'tradable_quote',False))
-    def _live_tick_seen(sym:str|None)->bool:
-        if _fresh_ltp(sym): return True
-        if not sym or mdm is None: return False
-        limit=_tick_age_threshold()
-        for attr in ('_last_tick_ts','_last_tick_snapshot'):
-            cache=getattr(mdm,attr,{})
-            if isinstance(cache,dict) and sym in cache:
-                ts=cache.get(sym)
-                dt=pd.to_datetime(ts,utc=True,errors='coerce')
-                if not pd.isna(dt) and (pd.Timestamp.utcnow()-dt).total_seconds()<=limit:
+        if snap is None:
+            return False
+        if snap_has_bid_ask:
+            return True
+        return bool(_snapshot_value(snap, "tradable_quote", False))
+
+    def _live_tick_seen(sym: str | None) -> bool:
+        if _fresh_ltp(sym):
+            return True
+        if not sym or mdm is None:
+            return False
+        limit = _tick_age_threshold()
+        for attr in ("_last_tick_ts", "_last_tick_snapshot"):
+            cache = getattr(mdm, attr, {})
+            if isinstance(cache, dict) and sym in cache:
+                ts = cache.get(sym)
+                dt = pd.to_datetime(ts, utc=True, errors="coerce")
+                if (
+                    not pd.isna(dt)
+                    and (pd.Timestamp.utcnow() - dt).total_seconds() <= limit
+                ):
                     return True
         return False
+
     def _subscription_confirmed(sym: str | None) -> bool:
-        if not sym or mdm is None: return False
+        if not sym or mdm is None:
+            return False
         try:
-            token = getattr(mdm, "_resolve_token_for_symbol", lambda _s: None)(sym) or getattr(mdm, "_symbol_to_token", {}).get(sym)
+            token = getattr(mdm, "_resolve_token_for_symbol", lambda _s: None)(
+                sym
+            ) or getattr(mdm, "_symbol_to_token", {}).get(sym)
             confirmed = getattr(mdm, "_confirmed_subscriptions", set()) or set()
             return bool(token is not None and int(token) in confirmed)
         except Exception:
             return False
-    def _subscription_or_live_tick(sym:str|None)->bool:
-        sub=_subscription_confirmed(sym)
-        if sub: return True
+
+    def _subscription_or_live_tick(sym: str | None) -> bool:
+        sub = _subscription_confirmed(sym)
+        if sub:
+            return True
         if _live_tick_seen(sym):
-            token=getattr(mdm, "_symbol_to_token", {}).get(sym) if mdm is not None else None
-            LOGGER.info("READINESS_SUBSCRIPTION_PROOF_FROM_LIVE_TICK symbol=%s token=%s", sym, token)
+            token = (
+                getattr(mdm, "_symbol_to_token", {}).get(sym)
+                if mdm is not None
+                else None
+            )
+            LOGGER.info(
+                "READINESS_SUBSCRIPTION_PROOF_FROM_LIVE_TICK symbol=%s token=%s",
+                sym,
+                token,
+            )
             return True
         return False
+
     def _bars(sym: str | None) -> int:
-        if not sym or mdm is None: return 0
-        try: return len(mdm.get_ohlc_bars(sym) or [])
-        except Exception: return 0
+        if not sym or mdm is None:
+            return 0
+        try:
+            return len(mdm.get_ohlc_bars(sym) or [])
+        except Exception:
+            return 0
+
     def _readiness_bars(sym: str | None) -> tuple[int, int, int]:
-        mdm_bars=_bars(sym); runner_bars=0
-        runner=getattr(ctx,'strategy_runner',None)
-        if runner is not None and hasattr(runner,'_indicator_engine'):
-            try: runner_bars=len(runner._indicator_engine.get_history(sym) or []) if sym else 0
-            except Exception: runner_bars=0
+        mdm_bars = _bars(sym)
+        runner_bars = 0
+        runner = getattr(ctx, "strategy_runner", None)
+        if runner is not None and hasattr(runner, "_indicator_engine"):
+            try:
+                runner_bars = (
+                    len(runner._indicator_engine.get_history(sym) or []) if sym else 0
+                )
+            except Exception:
+                runner_bars = 0
         return min(mdm_bars, runner_bars), mdm_bars, runner_bars
-    spot_symbol=str(basket.get('spot_symbol') or 'NSE:NIFTY')
-    option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "5")) or 5)
-    option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
-    configured_context_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
-    runner_context_required_bars = int(getattr(getattr(ctx, "strategy_runner", None), "_context_required_bars", 0) or 0)
-    context_execution_min_bars = max(configured_context_min_bars, runner_context_required_bars)
+
+    spot_symbol = str(basket.get("spot_symbol") or "NSE:NIFTY")
+    option_eval_min_live_bars = int(
+        os.getenv(
+            "READINESS_OPTION_EVAL_MIN_BARS",
+            os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "5"),
+        )
+        or 5
+    )
+    option_execution_min_bars = int(
+        os.getenv(
+            "READINESS_OPTION_EXEC_MIN_BARS",
+            os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS)),
+        )
+        or _DEFAULT_OPT_MIN_BARS
+    )
+    configured_context_min_bars = int(
+        os.getenv(
+            "READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")
+        )
+        or 20
+    )
+    runner_context_required_bars = int(
+        getattr(getattr(ctx, "strategy_runner", None), "_context_required_bars", 0) or 0
+    )
+    context_execution_min_bars = max(
+        configured_context_min_bars, runner_context_required_bars
+    )
     futures_symbol = str(basket.get("futures_symbol") or "")
     _ = await _ensure_context_history_hydrated(
         ctx, spot_symbol, futures_symbol, context_execution_min_bars, reason
@@ -8354,27 +9128,44 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     )
     basket_hard_ready = True
     basket_missing: list[str] = []
-    hydrate_basket = getattr(mdm, "hydrate_active_contract_basket", None) if mdm is not None else None
+    hydrate_basket = (
+        getattr(mdm, "hydrate_active_contract_basket", None)
+        if mdm is not None
+        else None
+    )
     if callable(hydrate_basket):
         try:
             hydration_status = await _maybe_await(hydrate_basket(basket))
             if isinstance(hydration_status, Mapping):
                 basket_hard_ready = bool(hydration_status.get("hard_ready", True))
-                basket_missing = [str(item) for item in hydration_status.get("missing", []) or []]
-        except Exception as exc:  # noqa: BLE001 - readiness remains blocked by explicit diagnostic
+                basket_missing = [
+                    str(item) for item in hydration_status.get("missing", []) or []
+                ]
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - readiness remains blocked by explicit diagnostic
             basket_hard_ready = False
             basket_missing = [f"active_basket_hydration_failed:{type(exc).__name__}"]
             LOGGER.warning(
                 "ACTIVE_BASKET_HYDRATION_STATUS_FAILED reason=%s",
                 exc,
-                extra={"event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED", "error": str(exc)},
+                extra={
+                    "event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED",
+                    "error": str(exc),
+                },
             )
-    elif str(os.getenv("ALLOW_MISSING_HYDRATION_GATE", "false") or "false").strip().lower() not in {"1", "true", "yes", "on"}:
+    elif str(
+        os.getenv("ALLOW_MISSING_HYDRATION_GATE", "false") or "false"
+    ).strip().lower() not in {"1", "true", "yes", "on"}:
         basket_hard_ready = False
         basket_missing = ["hydrate_active_contract_basket_missing"]
         LOGGER.warning(
             "ACTIVE_BASKET_HYDRATION_METHOD_MISSING hard_ready=False reason=hydrator_missing",
-            extra={"event": "ACTIVE_BASKET_HYDRATION_METHOD_MISSING", "missing": list(basket_missing), "reason": "hydrator_missing"},
+            extra={
+                "event": "ACTIVE_BASKET_HYDRATION_METHOD_MISSING",
+                "missing": list(basket_missing),
+                "reason": "hydrator_missing",
+            },
         )
     statuses = _hydration_status_map(
         ctx,
@@ -8389,23 +9180,34 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     # execution. option_context strikes feed OI/IV context; if they are cold
     # they must degrade context, never block trading on the ready ATM pair.
     _execution_gating_roles = {"spot", "futures_context", "selected_ce", "selected_pe"}
-    status_blockers = list(dict.fromkeys([
-        reason
-        for status in statuses.values()
-        if getattr(status, "role", "") in _execution_gating_roles
-        for reason in status.blocker_reasons
-    ]))
-    context_only_blockers = list(dict.fromkeys([
-        reason
-        for status in statuses.values()
-        if getattr(status, "role", "") not in _execution_gating_roles
-        for reason in status.blocker_reasons
-    ]))
+    status_blockers = list(
+        dict.fromkeys(
+            [
+                reason
+                for status in statuses.values()
+                if getattr(status, "role", "") in _execution_gating_roles
+                for reason in status.blocker_reasons
+            ]
+        )
+    )
+    context_only_blockers = list(
+        dict.fromkeys(
+            [
+                reason
+                for status in statuses.values()
+                if getattr(status, "role", "") not in _execution_gating_roles
+                for reason in status.blocker_reasons
+            ]
+        )
+    )
     if context_only_blockers:
         LOGGER.info(
             "CONTEXT_SYMBOL_BLOCKERS_NON_GATING blockers=%s",
             context_only_blockers,
-            extra={"event": "CONTEXT_SYMBOL_BLOCKERS_NON_GATING", "blockers": context_only_blockers},
+            extra={
+                "event": "CONTEXT_SYMBOL_BLOCKERS_NON_GATING",
+                "blockers": context_only_blockers,
+            },
         )
     quote_quality_blockers = {
         "quote_missing",
@@ -8419,13 +9221,25 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         "quote_not_tradable",
     }
     hydration_hard_blockers = [
-        blocker for blocker in status_blockers
-        if not (blocker.endswith("_quote_missing") or blocker.endswith("_depth_missing") or blocker in quote_quality_blockers or blocker.endswith("_token_missing") or blocker == "option_token_missing")
+        blocker
+        for blocker in status_blockers
+        if not (
+            blocker.endswith("_quote_missing")
+            or blocker.endswith("_depth_missing")
+            or blocker in quote_quality_blockers
+            or blocker.endswith("_token_missing")
+            or blocker == "option_token_missing"
+        )
     ]
     if hydration_hard_blockers:
         basket_hard_ready = False
-        basket_missing = list(dict.fromkeys([*basket_missing, *hydration_hard_blockers]))
-    ctx.active_basket_hydration = {"hard_ready": bool(basket_hard_ready), "missing": list(basket_missing)}
+        basket_missing = list(
+            dict.fromkeys([*basket_missing, *hydration_hard_blockers])
+        )
+    ctx.active_basket_hydration = {
+        "hard_ready": bool(basket_hard_ready),
+        "missing": list(basket_missing),
+    }
     ce_mdm_bars = ce_status.mdm_bars if ce_status else 0
     ce_datahub_bars = ce_status.datahub_bars if ce_status else 0
     ce_runner_bars = ce_status.runner_bars if ce_status else 0
@@ -8481,61 +9295,129 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
                 },
             )
         status_blockers = [
-            blocker for blocker in status_blockers if blocker not in selected_history_blockers
+            blocker
+            for blocker in status_blockers
+            if blocker not in selected_history_blockers
         ]
         basket_missing = [
-            blocker for blocker in basket_missing if blocker not in selected_history_blockers
+            blocker
+            for blocker in basket_missing
+            if blocker not in selected_history_blockers
         ]
         if not basket_missing:
             basket_hard_ready = True
-    ce_quote_fresh = bool(ce_status and (ce_status.live_tick_fresh or ce_status.tradable_quote))
-    pe_quote_fresh = bool(pe_status and (pe_status.live_tick_fresh or pe_status.tradable_quote))
+    ce_quote_fresh = bool(
+        ce_status and (ce_status.live_tick_fresh or ce_status.tradable_quote)
+    )
+    pe_quote_fresh = bool(
+        pe_status and (pe_status.live_tick_fresh or pe_status.tradable_quote)
+    )
     ce_bid_ask_complete = bool(ce_status and ce_status.tradable_quote)
     pe_bid_ask_complete = bool(pe_status and pe_status.tradable_quote)
-    ce_exec_ready = bool(ce_status and basket_hard_ready and ce_status.ready_for_execution)
-    pe_exec_ready = bool(pe_status and basket_hard_ready and pe_status.ready_for_execution)
-    ce_eval_ready = bool(ce_status and ce_status.ready_for_evaluation and ce_bars >= option_eval_min_live_bars)
-    pe_eval_ready = bool(pe_status and pe_status.ready_for_evaluation and pe_bars >= option_eval_min_live_bars)
+    ce_exec_ready = bool(
+        ce_status and basket_hard_ready and ce_status.ready_for_execution
+    )
+    pe_exec_ready = bool(
+        pe_status and basket_hard_ready and pe_status.ready_for_execution
+    )
+    ce_eval_ready = bool(
+        ce_status
+        and ce_status.ready_for_evaluation
+        and ce_bars >= option_eval_min_live_bars
+    )
+    pe_eval_ready = bool(
+        pe_status
+        and pe_status.ready_for_evaluation
+        and pe_bars >= option_eval_min_live_bars
+    )
     spot_ready = bool(spot_status and spot_status.ready_for_evaluation)
-    futures_ready = bool(futures_status and futures_status.ready_for_evaluation) if futures_symbol else True
+    futures_ready = (
+        bool(futures_status and futures_status.ready_for_evaluation)
+        if futures_symbol
+        else True
+    )
     context_exec_ready = bool(spot_ready and futures_ready)
-    data_hard_ready=bool(basket_hard_ready and spot_ready and futures_ready and ce_eval_ready and pe_eval_ready)
-    runner_running=_runner_is_running(getattr(ctx,'strategy_runner',None))
-    evaluation_ready=bool(data_hard_ready and runner_running)
+    data_hard_ready = bool(
+        basket_hard_ready
+        and spot_ready
+        and futures_ready
+        and ce_eval_ready
+        and pe_eval_ready
+    )
+    runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
+    evaluation_ready = bool(data_hard_ready and runner_running)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
     market_open = get_market_state() == MarketState.OPEN
-    broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
+    broker_ready = bool(
+        getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)
+    )
     execution_ready_by_symbol: dict[str, bool] = {}
     if selected_ce:
         execution_ready_by_symbol[str(selected_ce)] = bool(ce_exec_ready)
     if selected_pe:
         execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)
     all_selected_options_exec_ready = bool(ce_exec_ready and pe_exec_ready)
-    live_orders_armed=bool(live_mode and market_open and evaluation_ready and context_exec_ready and broker_ready and all_selected_options_exec_ready)
-    missing=[]
-    if not selected_ce: missing.append('selected_ce_missing')
-    if not selected_pe: missing.append('selected_pe_missing')
-    if not spot_ready: missing.append('spot_history_missing')
-    if not futures_ready: missing.append('futures_history_missing')
-    if not basket_hard_ready: missing.extend(basket_missing or ['active_basket_hydration_not_ready'])
-    if not evaluation_ready: missing.append('eval_not_ready')
+    live_orders_armed = bool(
+        live_mode
+        and market_open
+        and evaluation_ready
+        and context_exec_ready
+        and broker_ready
+        and all_selected_options_exec_ready
+    )
+    missing = []
+    if not selected_ce:
+        missing.append("selected_ce_missing")
+    if not selected_pe:
+        missing.append("selected_pe_missing")
+    if not spot_ready:
+        missing.append("spot_history_missing")
+    if not futures_ready:
+        missing.append("futures_history_missing")
+    if not basket_hard_ready:
+        missing.extend(basket_missing or ["active_basket_hydration_not_ready"])
+    if not evaluation_ready:
+        missing.append("eval_not_ready")
     if not selected_history_ready:
-        if ce_runner_bars < option_eval_min_live_bars or ce_indicator_bars < option_eval_min_live_bars: missing.append('ce_eval_bars_missing')
-        if pe_runner_bars < option_eval_min_live_bars or pe_indicator_bars < option_eval_min_live_bars: missing.append('pe_eval_bars_missing')
-        if ce_bars < option_execution_min_bars: missing.append('ce_exec_bars_missing')
-        if pe_bars < option_execution_min_bars: missing.append('pe_exec_bars_missing')
-    if ce_status and not ce_status.tradable_quote: missing.append('selected_ce_quote_missing')
-    if pe_status and not pe_status.tradable_quote: missing.append('selected_pe_quote_missing')
-    if ce_status and not ce_status.depth_available: missing.append('selected_ce_depth_missing')
-    if pe_status and not pe_status.depth_available: missing.append('selected_pe_depth_missing')
-    if (ce_status and not ce_status.tradable_quote) or (pe_status and not pe_status.tradable_quote): missing.append('selected_option_bid_ask_missing')
-    if not runner_running: missing.append('runner_not_running')
+        if (
+            ce_runner_bars < option_eval_min_live_bars
+            or ce_indicator_bars < option_eval_min_live_bars
+        ):
+            missing.append("ce_eval_bars_missing")
+        if (
+            pe_runner_bars < option_eval_min_live_bars
+            or pe_indicator_bars < option_eval_min_live_bars
+        ):
+            missing.append("pe_eval_bars_missing")
+        if ce_bars < option_execution_min_bars:
+            missing.append("ce_exec_bars_missing")
+        if pe_bars < option_execution_min_bars:
+            missing.append("pe_exec_bars_missing")
+    if ce_status and not ce_status.tradable_quote:
+        missing.append("selected_ce_quote_missing")
+    if pe_status and not pe_status.tradable_quote:
+        missing.append("selected_pe_quote_missing")
+    if ce_status and not ce_status.depth_available:
+        missing.append("selected_ce_depth_missing")
+    if pe_status and not pe_status.depth_available:
+        missing.append("selected_pe_depth_missing")
+    if (ce_status and not ce_status.tradable_quote) or (
+        pe_status and not pe_status.tradable_quote
+    ):
+        missing.append("selected_option_bid_ask_missing")
+    if not runner_running:
+        missing.append("runner_not_running")
     if live_mode:
-        if not market_open: missing.append('market_closed')
-        if not ce_exec_ready and not selected_history_ready: missing.append('ce_exec_quote_or_history_not_ready')
-        if not pe_exec_ready and not selected_history_ready: missing.append('pe_exec_quote_or_history_not_ready')
-        if not context_exec_ready: missing.append('context_exec_not_ready')
-        if not broker_ready: missing.append('broker_not_ready')
+        if not market_open:
+            missing.append("market_closed")
+        if not ce_exec_ready and not selected_history_ready:
+            missing.append("ce_exec_quote_or_history_not_ready")
+        if not pe_exec_ready and not selected_history_ready:
+            missing.append("pe_exec_quote_or_history_not_ready")
+        if not context_exec_ready:
+            missing.append("context_exec_not_ready")
+        if not broker_ready:
+            missing.append("broker_not_ready")
         if bool(getattr(ctx, "position_reconciliation_failed", False)):
             missing.append("position_reconciliation_failed")
         if (
@@ -8561,7 +9443,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         },
         broker_state={
             "broker_auth_invalid": bool(getattr(ctx, "broker_auth_invalid", False)),
-            "broker_session_invalid": bool(getattr(ctx, "broker_session_invalid", False)),
+            "broker_session_invalid": bool(
+                getattr(ctx, "broker_session_invalid", False)
+            ),
             "broker_balance_unavailable": live_mode
             and hasattr(ctx, "broker_balance_valid")
             and not bool(getattr(ctx, "broker_balance_valid", False)),
@@ -8585,13 +9469,25 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         ),
     )
     live_orders_armed = bool(live_mode and normalized_decision.live_orders_armed)
-    block_reason = None if live_orders_armed else f"execution_not_armed:{normalized_decision.primary_blocker or 'unknown'}"
-    ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=evaluation_ready; ctx.live_block_reason=block_reason
+    block_reason = (
+        None
+        if live_orders_armed
+        else f"execution_not_armed:{normalized_decision.primary_blocker or 'unknown'}"
+    )
+    ctx.data_hard_ready = data_hard_ready
+    ctx.evaluation_ready = evaluation_ready
+    ctx.live_orders_armed = live_orders_armed
+    ctx.trading_ready = evaluation_ready
+    ctx.live_block_reason = block_reason
     ctx.data_ready = bool(data_hard_ready)
     ctx.strategy_evaluation_ready = bool(evaluation_ready)
     ctx.trading_signal_ready = bool(evaluation_ready)
     ctx.execution_armed = bool(live_orders_armed)
-    ctx.execution_block_reason = "market_closed" if (live_mode and not market_open and evaluation_ready) else block_reason
+    ctx.execution_block_reason = (
+        "market_closed"
+        if (live_mode and not market_open and evaluation_ready)
+        else block_reason
+    )
     ctx.market_open = bool(market_open)
     ctx.execution_ready_by_symbol = execution_ready_by_symbol
     ctx.selected_ce_exec_ready = bool(ce_exec_ready)
@@ -8622,8 +9518,48 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
             "live_orders_armed": bool(live_orders_armed),
         },
     )
-    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, ce_exec_ready, pe_exec_ready, execution_ready_by_symbol, block_reason, extra={"event":"LIVE_READINESS_COMPUTED","selected_ce":selected_ce,"selected_pe":selected_pe,"live_block_reason":block_reason,"primary_blocker":normalized_decision.primary_blocker,"secondary_blockers":normalized_decision.secondary_blockers,"market_mode":get_runtime_market_mode()})
-    if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
+    LOGGER.info(
+        "LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s",
+        selected_ce,
+        selected_pe,
+        ce_quote_fresh,
+        pe_quote_fresh,
+        getattr(_snapshot(selected_ce), "tick_age_s", None),
+        getattr(_snapshot(selected_pe), "tick_age_s", None),
+        _tradable_quote(selected_ce),
+        _tradable_quote(selected_pe),
+        bool(getattr(_snapshot(selected_ce), "depth_available", False)),
+        bool(getattr(_snapshot(selected_pe), "depth_available", False)),
+        _subscription_confirmed(selected_ce),
+        _subscription_confirmed(selected_pe),
+        _subscription_or_live_tick(selected_ce),
+        _subscription_or_live_tick(selected_pe),
+        ce_bars,
+        ce_mdm_bars,
+        ce_runner_bars,
+        pe_bars,
+        pe_mdm_bars,
+        pe_runner_bars,
+        data_hard_ready,
+        evaluation_ready,
+        live_orders_armed,
+        ce_exec_ready,
+        pe_exec_ready,
+        execution_ready_by_symbol,
+        block_reason,
+        extra={
+            "event": "LIVE_READINESS_COMPUTED",
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "live_block_reason": block_reason,
+            "primary_blocker": normalized_decision.primary_blocker,
+            "secondary_blockers": normalized_decision.secondary_blockers,
+            "market_mode": get_runtime_market_mode(),
+        },
+    )
+    if ctx.strategy_runner is not None and hasattr(
+        ctx.strategy_runner, "set_runtime_readiness"
+    ):
         try:
             setattr(
                 ctx.strategy_runner,
@@ -8635,7 +9571,19 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
             )
         except Exception:
             LOGGER.debug("RUNNER_READINESS_CALLBACK_ATTACH_FAILED", exc_info=True)
-        ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}))
+        ctx.strategy_runner.set_runtime_readiness(
+            data_hard_ready=bool(ctx.data_hard_ready),
+            evaluation_ready=bool(ctx.evaluation_ready),
+            live_orders_armed=bool(ctx.live_orders_armed),
+            reason=str(ctx.live_block_reason or reason),
+            selected_ce=selected_ce,
+            selected_pe=selected_pe,
+            atm_strike=basket.get("atm_strike"),
+            option_symbols=option_symbols,
+            execution_ready_by_symbol=dict(
+                getattr(ctx, "execution_ready_by_symbol", {}) or {}
+            ),
+        )
 
 
 def _commit_active_dynamic_basket(
@@ -8648,11 +9596,19 @@ def _commit_active_dynamic_basket(
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
     ensure_bot_context_runtime_fields(ctx)
-    requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
-    requested_selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
-    requested_selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
+    requested_futures_symbol = basket.get("futures_symbol") or basket.get(
+        "future_symbol"
+    )
+    requested_selected_ce = (
+        str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
+    )
+    requested_selected_pe = (
+        str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
+    )
     # active_symbol_tokens is a declared BotContext field (default={}) — no guard needed.
-    active_futures_symbol = canonical_nifty_future_symbol(requested_futures_symbol) or _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
+    active_futures_symbol = canonical_nifty_future_symbol(
+        requested_futures_symbol
+    ) or _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket_copy = dict(basket or {})
     basket_copy["futures_symbol"] = active_futures_symbol
     basket_copy["option_symbols"] = [
@@ -8667,7 +9623,9 @@ def _commit_active_dynamic_basket(
     # reconciliation.  This is called after every basket reselection so the
     # WebSocket always converges to exactly the active universe.
     mdm_for_reconcile = getattr(ctx, "market_data_manager", None)
-    current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
+    current_options = [
+        str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))
+    ]
     current_symbols = [str(sym) for sym in symbols if sym]
     local_basket = dict(basket or {})
     local_basket["option_symbols"] = list(current_options)
@@ -8675,13 +9633,21 @@ def _commit_active_dynamic_basket(
     if atm_strike is not None:
         local_basket["atm_strike"] = atm_strike
     picked_ce, picked_pe = pick_atm_option_symbols_from_basket(local_basket)
-    raw_selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
-    raw_selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
+    raw_selected_ce = (
+        str(basket.get("selected_ce") or basket.get("atm_ce") or "") or None
+    )
+    raw_selected_pe = (
+        str(basket.get("selected_pe") or basket.get("atm_pe") or "") or None
+    )
     for side, requested_selected, normalized_selected in (
         ("CE", requested_selected_ce, raw_selected_ce),
         ("PE", requested_selected_pe, raw_selected_pe),
     ):
-        if requested_selected and normalized_selected and requested_selected != normalized_selected:
+        if (
+            requested_selected
+            and normalized_selected
+            and requested_selected != normalized_selected
+        ):
             LOGGER.warning(
                 "BASKET_SELECTED_PAIR_REPAIRED side=%s previous_selected=%s repaired_selected=%s atm_strike=%s reason=ssot_normalize_selected_pair",
                 side,
@@ -8700,8 +9666,10 @@ def _commit_active_dynamic_basket(
     selected_ce = str(raw_selected_ce or picked_ce or "") or None
     selected_pe = str(raw_selected_pe or picked_pe or "") or None
     active_set = set(current_options) | set(current_symbols)
+
     def _nearest_for_side(side: str) -> str | None:
         from nifty_scalper_bot.core.active_basket import extract_symbol_strike
+
         candidates: list[tuple[float, str]] = []
         fallback: list[str] = []
         for sym in current_options:
@@ -8719,6 +9687,7 @@ def _commit_active_dynamic_basket(
             return sorted(fallback)[0] if fallback else None
         candidates.sort(key=lambda item: (item[0], item[1]))
         return candidates[0][1]
+
     if not (selected_ce and selected_ce.endswith("CE") and selected_ce in active_set):
         repaired_ce = _nearest_for_side("CE")
         if selected_ce and repaired_ce and selected_ce != repaired_ce:
@@ -8786,7 +9755,9 @@ def _commit_active_dynamic_basket(
         ce_symbols.append(selected_ce)
     if selected_pe and selected_pe not in pe_symbols:
         pe_symbols.append(selected_pe)
-    committed = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+    committed = cast(
+        dict[str, object], getattr(ctx, "active_trading_universe", {}) or {}
+    )
     committed.update(
         {
             "spot_symbol": basket.get("spot_symbol") or "NSE:NIFTY",
@@ -8820,14 +9791,22 @@ def _commit_active_dynamic_basket(
     # Carry token fields from the incoming basket (built by _build_canonical_active_basket
     # which now populates token_by_symbol / all_tokens / all_symbols).  These must
     # survive the update so the token-map resolution step below finds them.
-    for _token_key in ("token_by_symbol", "all_tokens", "all_symbols",
-                       "selected_ce_token", "selected_pe_token", "option_tokens"):
+    for _token_key in (
+        "token_by_symbol",
+        "all_tokens",
+        "all_symbols",
+        "selected_ce_token",
+        "selected_pe_token",
+        "option_tokens",
+    ):
         _val = basket.get(_token_key)
         if _val is not None:
             committed[_token_key] = _val
     committed = normalize_active_basket_schema(committed)
     ctx.active_trading_universe = committed
-    if not committed.get("context_only") or not getattr(ctx, "active_contract_basket", None):
+    if not committed.get("context_only") or not getattr(
+        ctx, "active_contract_basket", None
+    ):
         ctx.active_contract_basket = committed
     selection = active_contract_selection_from_basket(committed)
     _sync_active_selection_from_basket(ctx, selection)
@@ -8838,20 +9817,34 @@ def _commit_active_dynamic_basket(
     if data_hub is not None and hasattr(data_hub, "set_active_contract_basket"):
         data_hub.set_active_contract_basket(committed)
     option_universe = getattr(ctx, "option_universe", None)
-    if option_universe is not None and hasattr(option_universe, "set_active_contract_basket"):
+    if option_universe is not None and hasattr(
+        option_universe, "set_active_contract_basket"
+    ):
         option_universe.set_active_contract_basket(committed)
     strategy_manager = getattr(ctx, "strategy_manager", None)
     set_fut = getattr(strategy_manager, "set_active_futures_symbol", None)
     if callable(set_fut):
         set_fut(active_futures_symbol, source="active_dynamic_basket_commit")
     mdm = getattr(ctx, "market_data_manager", None)
-    token_map = dict(committed.get("token_by_symbol") or getattr(ctx, "active_symbol_tokens", {}) or {})
+    token_map = dict(
+        committed.get("token_by_symbol")
+        or getattr(ctx, "active_symbol_tokens", {})
+        or {}
+    )
     if not token_map:
         LOGGER.warning(
             "ACTIVE_BASKET_TOKEN_MAP_FALLBACK reason=token_by_symbol_missing_in_basket resolving_via_instrument_manager",
-            extra={"event": "ACTIVE_BASKET_TOKEN_MAP_FALLBACK", "reason": "token_by_symbol_missing_in_basket"},
+            extra={
+                "event": "ACTIVE_BASKET_TOKEN_MAP_FALLBACK",
+                "reason": "token_by_symbol_missing_in_basket",
+            },
         )
-        token_map = resolve_active_basket_tokens(ctx, [str(sym) for sym in committed.get("symbols", []) if sym], selected_ce, selected_pe)
+        token_map = resolve_active_basket_tokens(
+            ctx,
+            [str(sym) for sym in committed.get("symbols", []) if sym],
+            selected_ce,
+            selected_pe,
+        )
     LOGGER.info(
         "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
         len(token_map),
@@ -8895,7 +9888,11 @@ def _commit_active_dynamic_basket(
         selected_pe=selected_pe,
         ce_token=token_map.get(selected_ce or ""),
         pe_token=token_map.get(selected_pe or ""),
-        option_count=sum(1 for s in (committed.get("symbols", []) or []) if str(s).endswith(("CE", "PE"))),
+        option_count=sum(
+            1
+            for s in (committed.get("symbols", []) or [])
+            if str(s).endswith(("CE", "PE"))
+        ),
     )
     LOGGER.info(
         "%s selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s symbol_count=%d context_only=%s",
@@ -8922,7 +9919,11 @@ def _commit_active_dynamic_basket(
             try:
                 set_basket(committed)
             except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("ACTIVE_BASKET_SET_FAILED error=%s", exc, extra={"event": "ACTIVE_BASKET_SET_FAILED", "error": str(exc)})
+                LOGGER.warning(
+                    "ACTIVE_BASKET_SET_FAILED error=%s",
+                    exc,
+                    extra={"event": "ACTIVE_BASKET_SET_FAILED", "error": str(exc)},
+                )
         hydrate_basket = getattr(mdm, "hydrate_active_contract_basket", None)
         if callable(hydrate_basket):
             try:
@@ -8930,11 +9931,24 @@ def _commit_active_dynamic_basket(
                 if isinstance(hydration_status, Mapping):
                     ctx.active_basket_hydration = {
                         "hard_ready": bool(hydration_status.get("hard_ready", True)),
-                        "missing": [str(item) for item in hydration_status.get("missing", []) or []],
+                        "missing": [
+                            str(item)
+                            for item in hydration_status.get("missing", []) or []
+                        ],
                     }
             except Exception as exc:  # noqa: BLE001
-                ctx.active_basket_hydration = {"hard_ready": False, "missing": [f"active_basket_hydration_failed:{type(exc).__name__}"]}
-                LOGGER.warning("ACTIVE_BASKET_HYDRATION_STATUS_FAILED reason=%s", exc, extra={"event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED", "error": str(exc)})
+                ctx.active_basket_hydration = {
+                    "hard_ready": False,
+                    "missing": [f"active_basket_hydration_failed:{type(exc).__name__}"],
+                }
+                LOGGER.warning(
+                    "ACTIVE_BASKET_HYDRATION_STATUS_FAILED reason=%s",
+                    exc,
+                    extra={
+                        "event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED",
+                        "error": str(exc),
+                    },
+                )
 
     # ── Reconcile WebSocket subscriptions to match committed basket ──────────
     # After every basket commit, resolve the desired token set from the new
@@ -8988,7 +10002,13 @@ def _commit_active_dynamic_basket(
         LOGGER.info(
             "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED desired_token_count=%d",
             len(requested_tokens or set(int(tok) for tok in token_map.values() if tok)),
-            extra={"event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED", "desired_token_count": len(requested_tokens or set(int(tok) for tok in token_map.values() if tok))},
+            extra={
+                "event": "ACTIVE_BASKET_SUBSCRIPTION_RECONCILED",
+                "desired_token_count": len(
+                    requested_tokens
+                    or set(int(tok) for tok in token_map.values() if tok)
+                ),
+            },
         )
     # ────────────────────────────────────────────────────────────────────────
 
@@ -9004,13 +10024,20 @@ def _commit_active_dynamic_basket(
             LOGGER.warning(
                 "ACTIVE_BASKET_FUTURES_ROTATION_CHECK_FAILED error=%s",
                 exc,
-                extra={"event": "ACTIVE_BASKET_FUTURES_ROTATION_CHECK_FAILED", "error": str(exc)},
+                extra={
+                    "event": "ACTIVE_BASKET_FUTURES_ROTATION_CHECK_FAILED",
+                    "error": str(exc),
+                },
             )
     return selected_ce, selected_pe
 
 
 def _register_and_subscribe_live_symbol(
-    ctx: BotContext, symbol: str | None, token: int | None, reason: str, role: str = "tradable_option"
+    ctx: BotContext,
+    symbol: str | None,
+    token: int | None,
+    reason: str,
+    role: str = "tradable_option",
 ) -> bool:
     """Register and subscribe symbol in MDM/DataHub/Runner. Args: ctx/symbol/token/reason. Returns: success. Raises: none."""
     normalized = str(symbol or "").strip().upper()
@@ -9018,7 +10045,9 @@ def _register_and_subscribe_live_symbol(
         return False
     resolved_token = token
     if resolved_token is None:
-        resolved_token = (getattr(ctx, "active_symbol_tokens", {}) or {}).get(normalized)
+        resolved_token = (getattr(ctx, "active_symbol_tokens", {}) or {}).get(
+            normalized
+        )
     if resolved_token is None and getattr(ctx, "instrument_manager", None) is not None:
         try:
             resolved_token = ctx.instrument_manager.get_token(normalized)
@@ -9029,9 +10058,20 @@ def _register_and_subscribe_live_symbol(
             resolved_token = ctx.broker_client.get_instrument_token(normalized)
         except Exception:
             resolved_token = None
-    LOGGER.info("LIVE_SYMBOL_SUBSCRIBE_REQUESTED symbol=%s token=%s role=%s reason=%s", normalized, resolved_token, role, reason)
+    LOGGER.info(
+        "LIVE_SYMBOL_SUBSCRIBE_REQUESTED symbol=%s token=%s role=%s reason=%s",
+        normalized,
+        resolved_token,
+        role,
+        reason,
+    )
     if role == "tradable_option":
-        LOGGER.info("LIVE_OPTION_SUBSCRIBE_REQUESTED symbol=%s token=%s reason=%s", normalized, resolved_token, reason)
+        LOGGER.info(
+            "LIVE_OPTION_SUBSCRIBE_REQUESTED symbol=%s token=%s reason=%s",
+            normalized,
+            resolved_token,
+            reason,
+        )
     mdm = getattr(ctx, "market_data_manager", None)
     if mdm is not None and resolved_token is not None:
         if hasattr(mdm, "register_symbol"):
@@ -9047,14 +10087,30 @@ def _register_and_subscribe_live_symbol(
             normalized, runner.on_datahub_tick, token=resolved_token, force_live=True
         )
     if resolved_token:
-        LOGGER.info("LIVE_SYMBOL_SUBSCRIBE_REQUEST_SENT symbol=%s token=%s role=%s subscribed=false state=requested", normalized, resolved_token, role)
+        LOGGER.info(
+            "LIVE_SYMBOL_SUBSCRIBE_REQUEST_SENT symbol=%s token=%s role=%s subscribed=false state=requested",
+            normalized,
+            resolved_token,
+            role,
+        )
     else:
-        LOGGER.warning("LIVE_SYMBOL_SUBSCRIBE_FAILED symbol=%s role=%s subscribed=false reason=token_missing", normalized, role)
+        LOGGER.warning(
+            "LIVE_SYMBOL_SUBSCRIBE_FAILED symbol=%s role=%s subscribed=false reason=token_missing",
+            normalized,
+            role,
+        )
     if role == "tradable_option":
         if resolved_token:
-            LOGGER.info("LIVE_OPTION_SUBSCRIBE_REQUEST_SENT symbol=%s token=%s subscribed=false state=requested", normalized, resolved_token)
+            LOGGER.info(
+                "LIVE_OPTION_SUBSCRIBE_REQUEST_SENT symbol=%s token=%s subscribed=false state=requested",
+                normalized,
+                resolved_token,
+            )
         else:
-            LOGGER.warning("LIVE_OPTION_SUBSCRIBE_FAILED symbol=%s subscribed=false reason=token_missing", normalized)
+            LOGGER.warning(
+                "LIVE_OPTION_SUBSCRIBE_FAILED symbol=%s subscribed=false reason=token_missing",
+                normalized,
+            )
     return bool(resolved_token)
 
 
@@ -9069,6 +10125,7 @@ def _next_nse_open_after(now_ist: datetime) -> datetime:
     while not is_nse_trading_day(candidate.date()):
         candidate = candidate + timedelta(days=1)
     return candidate
+
 
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
@@ -9104,12 +10161,16 @@ async def _deferred_basket_hydration_retry(
             await asyncio.sleep(delay)
             continue
         await asyncio.sleep(delay_seconds)
-        if getattr(ctx, "trading_ready", False) and getattr(ctx, "live_orders_armed", False):
+        if getattr(ctx, "trading_ready", False) and getattr(
+            ctx, "live_orders_armed", False
+        ):
             return
         try:
             spot_ltp = await _wait_for_live_spot_or_raise(
                 ctx,
-                timeout=min(10.0, float(policy.startup_wait_for_ws_spot_seconds or 60.0)),
+                timeout=min(
+                    10.0, float(policy.startup_wait_for_ws_spot_seconds or 60.0)
+                ),
                 configured_mode=configured_mode,
             )
         except RuntimeError:
@@ -9147,7 +10208,9 @@ async def _deferred_basket_hydration_retry(
             await _recompute_and_push_runtime_readiness(
                 ctx, reason="deferred_basket_hydration_success"
             )
-            data_ready = bool(getattr(ctx, "data_ready", getattr(ctx, "evaluation_ready", False)))
+            data_ready = bool(
+                getattr(ctx, "data_ready", getattr(ctx, "evaluation_ready", False))
+            )
             if not data_ready:
                 LOGGER.info(
                     "DEFERRED_BASKET_RETRY_WAITING attempt=%d/%d reason=data_not_ready",
@@ -9222,11 +10285,15 @@ async def _build_and_hydrate_live_basket_from_spot(
             float(spot_ltp),
             bool(hydrate),
         )
-        return {'deferred': True, 'reason': 'already_running'}
+        return {"deferred": True, "reason": "already_running"}
 
     skip_refresh, _remaining = _should_skip_post_market_basket_refresh(ctx)
     if skip_refresh:
-        return dict(getattr(ctx, "active_trading_universe", {}) or getattr(ctx, "active_contract_basket", {}) or {"deferred": True, "reason": "post_market_quiet_mode"})
+        return dict(
+            getattr(ctx, "active_trading_universe", {})
+            or getattr(ctx, "active_contract_basket", {})
+            or {"deferred": True, "reason": "post_market_quiet_mode"}
+        )
 
     async with lock:
         start = time_module.monotonic()
@@ -9235,55 +10302,74 @@ async def _build_and_hydrate_live_basket_from_spot(
         ctx.basket_build_last_error = None
         try:
             if float(spot_ltp) <= 0:
-                raise RuntimeError('spot_ltp must be positive for live basket hydration')
+                raise RuntimeError(
+                    "spot_ltp must be positive for live basket hydration"
+                )
             LOGGER.info(
-                'LIVE_BASKET_BUILD_STARTED spot_ltp=%.2f hydrate=%s trigger=%s',
+                "LIVE_BASKET_BUILD_STARTED spot_ltp=%.2f hydrate=%s trigger=%s",
                 float(spot_ltp),
                 bool(hydrate),
-                'spot_first_tick',
+                "spot_first_tick",
             )
             if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
                 duration_ms = int((time_module.monotonic() - start) * 1000)
                 ctx.basket_build_pending_spot_ltp = float(spot_ltp)
                 LOGGER.info(
-                    'BASKET_BUILD_PENDING reason=instrument_manager_not_ready spot_ltp=%.2f',
+                    "BASKET_BUILD_PENDING reason=instrument_manager_not_ready spot_ltp=%.2f",
                     float(spot_ltp),
-                    extra={'event': 'BASKET_BUILD_PENDING', 'reason': 'instrument_manager_not_ready', 'spot_ltp': float(spot_ltp)},
+                    extra={
+                        "event": "BASKET_BUILD_PENDING",
+                        "reason": "instrument_manager_not_ready",
+                        "spot_ltp": float(spot_ltp),
+                    },
                 )
                 LOGGER.warning(
-                    'LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready duration_ms=%d recoverable=True',
+                    "LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready duration_ms=%d recoverable=True",
                     duration_ms,
                 )
-                ctx.basket_build_last_error = 'instrument_manager_not_ready'
+                ctx.basket_build_last_error = "instrument_manager_not_ready"
                 _schedule_deferred_basket_retry(
                     ctx,
-                    configured_mode='LIVE',
-                    reason='instrument_manager_not_ready',
+                    configured_mode="LIVE",
+                    reason="instrument_manager_not_ready",
                     spot_ltp=float(spot_ltp),
                 )
-                return {'deferred': True, 'reason': 'instrument_manager_not_ready', 'symbol_count': 0}
+                return {
+                    "deferred": True,
+                    "reason": "instrument_manager_not_ready",
+                    "symbol_count": 0,
+                }
             if ctx.market_data_manager is None:
-                raise RuntimeError('market_data_manager_unavailable_for_live_basket')
+                raise RuntimeError("market_data_manager_unavailable_for_live_basket")
             if ctx.broker_client is None:
-                raise RuntimeError('broker_client_unavailable_for_live_basket')
+                raise RuntimeError("broker_client_unavailable_for_live_basket")
 
             future_symbol = _resolve_active_futures_for_basket(ctx, None)
             if future_symbol:
                 # Startup-time stale-futures cleanup — kept for MDM internal
                 # cache hygiene only.  Subscription cleanup is handled by
                 # reconcile_active_subscriptions() called from basket commit.
-                purge_stale = getattr(ctx.market_data_manager, "purge_stale_nifty_futures", None)
+                purge_stale = getattr(
+                    ctx.market_data_manager, "purge_stale_nifty_futures", None
+                )
                 if callable(purge_stale):
-                    purge_stale(future_symbol, reason="startup_active_future_resolution")
+                    purge_stale(
+                        future_symbol, reason="startup_active_future_resolution"
+                    )
             else:
                 LOGGER.warning(
                     "FUTURES_CONTEXT_UNAVAILABLE reason=startup_active_future_unresolved",
-                    extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "reason": "startup_active_future_unresolved"},
+                    extra={
+                        "event": "FUTURES_CONTEXT_UNAVAILABLE",
+                        "reason": "startup_active_future_unresolved",
+                    },
                 )
 
             basket = _build_canonical_active_basket(
                 instrument_manager=ctx.instrument_manager,
-                spot_token_resolver=lambda symbol: int(ctx.broker_client.get_instrument_token(symbol)),
+                spot_token_resolver=lambda symbol: int(
+                    ctx.broker_client.get_instrument_token(symbol)
+                ),
                 spot_ltp=float(spot_ltp),
                 futures_symbol=future_symbol,
                 strike_step=int(ctx.settings.option_universe.strike_step or 50),
@@ -9297,9 +10383,7 @@ async def _build_and_hydrate_live_basket_from_spot(
                 if str(sym).endswith(("CE", "PE"))
             ]
             symbols = [
-                str(sym)
-                for sym in dict.fromkeys(basket.get("symbols") or [])
-                if sym
+                str(sym) for sym in dict.fromkeys(basket.get("symbols") or []) if sym
             ]
             committed_ce, committed_pe = _commit_active_dynamic_basket(
                 ctx,
@@ -9309,11 +10393,11 @@ async def _build_and_hydrate_live_basket_from_spot(
                 atm_strike=basket.get("atm_strike"),
             )
             LOGGER.info(
-                'LIVE_BASKET_BUILD_COMPLETE selected_ce=%s selected_pe=%s atm_strike=%s symbol_count=%d hydrated=%s duration_ms=%d',
+                "LIVE_BASKET_BUILD_COMPLETE selected_ce=%s selected_pe=%s atm_strike=%s symbol_count=%d hydrated=%s duration_ms=%d",
                 committed_ce,
                 committed_pe,
-                basket.get('atm_strike'),
-                len(list(dict.fromkeys(basket.get('symbols', [])))),
+                basket.get("atm_strike"),
+                len(list(dict.fromkeys(basket.get("symbols", [])))),
                 bool(hydrate),
                 duration_ms,
                 extra={
@@ -9321,7 +10405,7 @@ async def _build_and_hydrate_live_basket_from_spot(
                     "selected_ce": committed_ce,
                     "selected_pe": committed_pe,
                     "atm_strike": basket.get("atm_strike"),
-                    "symbol_count": len(list(dict.fromkeys(basket.get('symbols', [])))),
+                    "symbol_count": len(list(dict.fromkeys(basket.get("symbols", [])))),
                     "hydrated": bool(hydrate),
                     "duration_ms": duration_ms,
                 },
@@ -9340,15 +10424,21 @@ async def _build_and_hydrate_live_basket_from_spot(
                     "option_count": len(option_symbols),
                 },
             )
-            subscription_symbols = list(dict.fromkeys([*symbols, committed_ce, committed_pe]))
+            subscription_symbols = list(
+                dict.fromkeys([*symbols, committed_ce, committed_pe])
+            )
             token_map = dict(getattr(ctx, "active_symbol_tokens", {}) or {})
             for live_symbol in subscription_symbols:
                 if not live_symbol:
                     continue
                 role = "tradable_option"
-                if str(live_symbol) == str((basket or {}).get("spot_symbol") or "NSE:NIFTY"):
+                if str(live_symbol) == str(
+                    (basket or {}).get("spot_symbol") or "NSE:NIFTY"
+                ):
                     role = "spot_context"
-                elif str(live_symbol) == str((basket or {}).get("futures_symbol") or ""):
+                elif str(live_symbol) == str(
+                    (basket or {}).get("futures_symbol") or ""
+                ):
                     role = "futures_context"
                 _register_and_subscribe_live_symbol(
                     ctx,
@@ -9362,7 +10452,7 @@ async def _build_and_hydrate_live_basket_from_spot(
             duration_ms = int((time_module.monotonic() - start) * 1000)
             ctx.basket_build_last_error = str(exc)
             LOGGER.exception(
-                'LIVE_BASKET_BUILD_FAILED reason=%s duration_ms=%d recoverable=%s',
+                "LIVE_BASKET_BUILD_FAILED reason=%s duration_ms=%d recoverable=%s",
                 str(exc),
                 duration_ms,
                 True,
@@ -9375,14 +10465,20 @@ async def _build_and_hydrate_live_basket_from_spot(
 def _get_basket_build_lock(ctx: BotContext) -> asyncio.Lock:
     """Get/create basket-build lock. Args: ctx. Returns: lock. Raises: none."""
 
-    lock = getattr(ctx, 'basket_build_lock', None)
+    lock = getattr(ctx, "basket_build_lock", None)
     if lock is None:
         lock = asyncio.Lock()
         ctx.basket_build_lock = lock
     return lock
 
 
-def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, reason: str = "market_closed_or_spot_not_ready", spot_ltp: float | None = None) -> None:
+def _schedule_deferred_basket_retry(
+    ctx: BotContext,
+    *,
+    configured_mode: str,
+    reason: str = "market_closed_or_spot_not_ready",
+    spot_ltp: float | None = None,
+) -> None:
     """Schedule one deferred basket retry task. Args: ctx/mode. Returns: none. Raises: none."""
 
     ensure_bot_context_runtime_fields(ctx)
@@ -9390,9 +10486,18 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, re
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP"
     ctx.effective_mode = ctx.readiness_mode
-    ctx.live_block_reason = reason if reason and reason != "market_closed_or_spot_not_ready" else "fresh_ws_spot_unavailable"
+    ctx.live_block_reason = (
+        reason
+        if reason and reason != "market_closed_or_spot_not_ready"
+        else "fresh_ws_spot_unavailable"
+    )
     if bool(getattr(ctx, "deferred_basket_retry_started", False)):
-        LOGGER.info("DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s already_scheduled=%s", reason, spot_ltp, True)
+        LOGGER.info(
+            "DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s already_scheduled=%s",
+            reason,
+            spot_ltp,
+            True,
+        )
         return
 
     ctx.deferred_basket_retry_started = True
@@ -9453,7 +10558,9 @@ async def startup_sequence(ctx: BotContext) -> None:
     configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
     if configured_mode not in {"LIVE", "PAPER", "SHADOW"}:
         configured_mode = "SHADOW"
-    if configured_mode == "LIVE" and not bool(getattr(ctx.settings, "enable_live", False)):
+    if configured_mode == "LIVE" and not bool(
+        getattr(ctx.settings, "enable_live", False)
+    ):
         configured_mode = "SHADOW"
     ctx.live_orders_armed = False
     ctx.trading_ready = False
@@ -9493,7 +10600,9 @@ async def startup_sequence(ctx: BotContext) -> None:
     # token resolution is what lets the initial ``_on_connect`` subscribe
     # observe every instrument instead of just the spot token — this is the
     # fix for the "WebSocket CONNECTED successfully | tokens=1" boot banner.
-    if ctx.market_data_manager is not None and hasattr(ctx.market_data_manager, "start"):
+    if ctx.market_data_manager is not None and hasattr(
+        ctx.market_data_manager, "start"
+    ):
         try:
             ctx.market_data_manager.start(defer_ws=True)
             LOGGER.info(
@@ -9506,14 +10615,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "STARTUP_WS_SPOT_FIRST_DECISION websocket_enabled=%s mdm_present=%s has_start_websocket=%s",
                 ctx.websocket_enabled,
                 ctx.market_data_manager is not None,
-                hasattr(ctx.market_data_manager, "start_websocket")
-                if ctx.market_data_manager
-                else False,
+                (
+                    hasattr(ctx.market_data_manager, "start_websocket")
+                    if ctx.market_data_manager
+                    else False
+                ),
                 websocket_enabled=ctx.websocket_enabled,
                 mdm_present=ctx.market_data_manager is not None,
-                has_start_websocket=hasattr(ctx.market_data_manager, "start_websocket")
-                if ctx.market_data_manager
-                else False,
+                has_start_websocket=(
+                    hasattr(ctx.market_data_manager, "start_websocket")
+                    if ctx.market_data_manager
+                    else False
+                ),
             )
         except Exception as _mdm_start_exc:
             LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
@@ -9557,6 +10670,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     exc_info=True,
                 )
             if not getattr(ctx, "startup_spot_refresh_done", False):
+
                 def _startup_spot_tick_listener(tick: Mapping[str, Any]) -> None:
                     try:
                         symbol = str(tick.get("symbol") or "").upper()
@@ -9598,18 +10712,27 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.market_data_manager, "desired_token_count", None
             )
             desired_token_count = (
-                int(desired_token_count_fn()) if callable(desired_token_count_fn) else None
+                int(desired_token_count_fn())
+                if callable(desired_token_count_fn)
+                else None
             )
             register_fn = getattr(ctx.market_data_manager, "register_symbol", None)
             _safe_startup_log(
-                LOGGER, logging.INFO, "STARTUP_SPOT_REGISTER_BEGIN",
+                LOGGER,
+                logging.INFO,
+                "STARTUP_SPOT_REGISTER_BEGIN",
                 "STARTUP_SPOT_REGISTER_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_token_count,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
-                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_token_count, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
+                symbol=policy.nifty_internal_symbol,
+                token=policy.nifty_spot_token,
+                desired_token_count=desired_token_count,
+                ws_token_count=ws_status.get("tokens"),
+                websocket_enabled=ctx.websocket_enabled,
+                phase="spot_first",
             )
             if callable(register_fn):
                 try:
@@ -9620,27 +10743,41 @@ async def startup_sequence(ctx: BotContext) -> None:
                         exc_info=True,
                     )
             _safe_startup_log(
-                LOGGER, logging.INFO, "STARTUP_SPOT_REGISTER_DONE",
+                LOGGER,
+                logging.INFO,
+                "STARTUP_SPOT_REGISTER_DONE",
                 "STARTUP_SPOT_REGISTER_DONE symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_token_count,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
-                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_token_count, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
+                symbol=policy.nifty_internal_symbol,
+                token=policy.nifty_spot_token,
+                desired_token_count=desired_token_count,
+                ws_token_count=ws_status.get("tokens"),
+                websocket_enabled=ctx.websocket_enabled,
+                phase="spot_first",
             )
             subscribe_fn = getattr(
                 ctx.market_data_manager, "request_token_subscription", None
             )
             _safe_startup_log(
-                LOGGER, logging.INFO, "STARTUP_SPOT_TOKEN_REQUEST_BEGIN",
+                LOGGER,
+                logging.INFO,
+                "STARTUP_SPOT_TOKEN_REQUEST_BEGIN",
                 "STARTUP_SPOT_TOKEN_REQUEST_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_token_count,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
-                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_token_count, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
+                symbol=policy.nifty_internal_symbol,
+                token=policy.nifty_spot_token,
+                desired_token_count=desired_token_count,
+                ws_token_count=ws_status.get("tokens"),
+                websocket_enabled=ctx.websocket_enabled,
+                phase="spot_first",
             )
             if callable(subscribe_fn):
                 subscribed = bool(
@@ -9663,7 +10800,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ws_count = ws_token_count_fn()
                 ws_tokens = int(ws_count) if ws_count is not None else None
             _safe_startup_log(
-                LOGGER, logging.INFO, "STARTUP_SPOT_TOKEN_REQUEST_DONE",
+                LOGGER,
+                logging.INFO,
+                "STARTUP_SPOT_TOKEN_REQUEST_DONE",
                 "STARTUP_SPOT_TOKEN_REQUEST_DONE symbol=%s token=%d subscribed=%s desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
@@ -9671,28 +10810,48 @@ async def startup_sequence(ctx: BotContext) -> None:
                 desired_tokens,
                 ws_tokens,
                 ctx.websocket_enabled,
-                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, subscribed=subscribed, desired_token_count=desired_tokens, ws_token_count=ws_tokens, websocket_enabled=ctx.websocket_enabled, phase="spot_first",
+                symbol=policy.nifty_internal_symbol,
+                token=policy.nifty_spot_token,
+                subscribed=subscribed,
+                desired_token_count=desired_tokens,
+                ws_token_count=ws_tokens,
+                websocket_enabled=ctx.websocket_enabled,
+                phase="spot_first",
             )
             _safe_startup_log(
-                LOGGER, logging.INFO, "STARTUP_WS_START_BEGIN",
+                LOGGER,
+                logging.INFO,
+                "STARTUP_WS_START_BEGIN",
                 "STARTUP_WS_START_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_tokens,
                 ws_tokens,
                 ctx.websocket_enabled,
-                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_tokens, websocket_enabled=ctx.websocket_enabled, phase="spot_first",
+                symbol=policy.nifty_internal_symbol,
+                token=policy.nifty_spot_token,
+                desired_token_count=desired_tokens,
+                ws_token_count=ws_tokens,
+                websocket_enabled=ctx.websocket_enabled,
+                phase="spot_first",
             )
             ctx.market_data_manager.start_websocket()
             _safe_startup_log(
-                LOGGER, logging.INFO, "STARTUP_WS_START_DONE",
+                LOGGER,
+                logging.INFO,
+                "STARTUP_WS_START_DONE",
                 "STARTUP_WS_START_DONE symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_tokens,
                 ws_tokens,
                 ctx.websocket_enabled,
-                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_tokens, websocket_enabled=ctx.websocket_enabled, phase="spot_first",
+                symbol=policy.nifty_internal_symbol,
+                token=policy.nifty_spot_token,
+                desired_token_count=desired_tokens,
+                ws_token_count=ws_tokens,
+                websocket_enabled=ctx.websocket_enabled,
+                phase="spot_first",
             )
             try:
                 ws_status = ws_status_fn() if callable(ws_status_fn) else {}
@@ -9708,18 +10867,32 @@ async def startup_sequence(ctx: BotContext) -> None:
                     exc_info=True,
                 )
             _safe_startup_log(
-                LOGGER, logging.INFO, "STARTUP_WS_CONNECT_TASK_CREATED",
+                LOGGER,
+                logging.INFO,
+                "STARTUP_WS_CONNECT_TASK_CREATED",
                 "STARTUP_WS_CONNECT_TASK_CREATED symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_tokens,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
-                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
+                symbol=policy.nifty_internal_symbol,
+                token=policy.nifty_spot_token,
+                desired_token_count=desired_tokens,
+                ws_token_count=ws_status.get("tokens"),
+                websocket_enabled=ctx.websocket_enabled,
+                phase="spot_first",
             )
-            spot_wait_seconds = float(os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "8"))
-            mode = str(getattr(ctx, "effective_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
-            live_mode = mode == "LIVE" and bool(getattr(ctx.settings, "enable_live", False))
+            spot_wait_seconds = float(
+                os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "8")
+            )
+            mode = str(
+                getattr(ctx, "effective_mode", None)
+                or os.getenv("EXECUTION_MODE", "PAPER")
+            ).upper()
+            live_mode = mode == "LIVE" and bool(
+                getattr(ctx.settings, "enable_live", False)
+            )
             try:
                 spot_price = await _wait_for_ws_spot_proof(
                     ctx, timeout=spot_wait_seconds
@@ -9770,10 +10943,28 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
             except RuntimeError as exc:
-                LOGGER.error("STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE symbol=%s reason=%s", policy.nifty_internal_symbol, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE", "symbol": policy.nifty_internal_symbol, "reason": str(exc)})
+                LOGGER.error(
+                    "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE symbol=%s reason=%s",
+                    policy.nifty_internal_symbol,
+                    exc,
+                    extra={
+                        "event": "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE",
+                        "symbol": policy.nifty_internal_symbol,
+                        "reason": str(exc),
+                    },
+                )
                 raise
         except Exception as _ws_spot_first_exc:  # noqa: BLE001
-            is_live_configured = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper() == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            is_live_configured = str(
+                os.getenv("EXECUTION_MODE", "PAPER")
+            ).strip().upper() == "LIVE" or str(
+                os.getenv("ENABLE_LIVE", "false")
+            ).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
             if is_live_configured and get_market_state() == MarketState.OPEN:
                 ctx.live_orders_armed = False
                 ctx.trading_ready = False
@@ -9817,7 +11008,9 @@ async def startup_sequence(ctx: BotContext) -> None:
     try:
         get_data_dir()
     except Exception as e:
-        critical_errors_total.labels(component="startup", error_type=type(e).__name__).inc()
+        critical_errors_total.labels(
+            component="startup", error_type=type(e).__name__
+        ).inc()
         LOGGER.critical(f"❌ Startup sequence failed: {e}", exc_info=True)
         raise
 
@@ -9898,9 +11091,11 @@ async def startup_sequence(ctx: BotContext) -> None:
     # have been synced into the resolver so the same API round-trip is reused.
     if broker_ready and ctx.instrument_manager is not None:
         try:
-            inner_broker = getattr(ctx.broker_client, "_broker",
-                                   getattr(ctx.broker_client, "broker",
-                                           ctx.broker_client))
+            inner_broker = getattr(
+                ctx.broker_client,
+                "_broker",
+                getattr(ctx.broker_client, "broker", ctx.broker_client),
+            )
             ctx.instrument_manager._kite = inner_broker
             ctx.instrument_manager.load()
             _im_size = ctx.instrument_manager.size()
@@ -9914,14 +11109,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                 _im_size,
                 extra={"event": "instrument_manager_ready", "count": _im_size},
             )
-            
+
             # Initialize OptionsContractStore as single source of truth for options
             ctx.options_store = OptionsContractStore(ctx.instrument_manager)
             ctx.options_store.load()
             LOGGER.info(
                 "✅ OptionsContractStore initialized with %d contracts",
                 ctx.options_store.contract_count(),
-                extra={"event": "options_store_ready", "count": ctx.options_store.contract_count()},
+                extra={
+                    "event": "options_store_ready",
+                    "count": ctx.options_store.contract_count(),
+                },
             )
         except AssertionError as _guard_err:
             LOGGER.critical("❌ STARTUP GUARD: %s", _guard_err)
@@ -9949,7 +11147,11 @@ async def startup_sequence(ctx: BotContext) -> None:
             active_futures_symbol = _resolve_active_futures_for_basket(ctx, None)
             if active_futures_symbol:
                 try:
-                    fut_token = ctx.instrument_manager.get_token(active_futures_symbol) if ctx.instrument_manager and ctx.instrument_manager.is_loaded() else None
+                    fut_token = (
+                        ctx.instrument_manager.get_token(active_futures_symbol)
+                        if ctx.instrument_manager and ctx.instrument_manager.is_loaded()
+                        else None
+                    )
                 except Exception:
                     fut_token = None
                 if fut_token:
@@ -9957,27 +11159,45 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "ACTIVE_FUTURES_TARGET_RESOLVED symbol=%s token=%s",
                         active_futures_symbol,
                         fut_token,
-                        extra={"event": "ACTIVE_FUTURES_TARGET_RESOLVED", "symbol": active_futures_symbol, "token": int(fut_token)},
+                        extra={
+                            "event": "ACTIVE_FUTURES_TARGET_RESOLVED",
+                            "symbol": active_futures_symbol,
+                            "token": int(fut_token),
+                        },
                     )
                     targets.append(active_futures_symbol)
-                    purge_stale = getattr(ctx.market_data_manager, "purge_stale_nifty_futures", None)
+                    purge_stale = getattr(
+                        ctx.market_data_manager, "purge_stale_nifty_futures", None
+                    )
                     if callable(purge_stale):
                         # Startup MDM cache hygiene only — subscription cleanup
                         # is handled by reconcile_active_subscriptions() at basket commit.
-                        purge_stale(active_futures_symbol, reason="startup_active_future_resolution")
-                    orchestrator = getattr(getattr(ctx, "strategy_manager", None), "orchestrator", None)
+                        purge_stale(
+                            active_futures_symbol,
+                            reason="startup_active_future_resolution",
+                        )
+                    orchestrator = getattr(
+                        getattr(ctx, "strategy_manager", None), "orchestrator", None
+                    )
                     if orchestrator is not None:
                         orchestrator.futures_symbol = active_futures_symbol
                 else:
                     LOGGER.warning(
                         "FUTURES_CONTEXT_UNAVAILABLE symbol=%s reason=startup_active_future_token_missing",
                         active_futures_symbol,
-                        extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "symbol": active_futures_symbol, "reason": "startup_active_future_token_missing"},
+                        extra={
+                            "event": "FUTURES_CONTEXT_UNAVAILABLE",
+                            "symbol": active_futures_symbol,
+                            "reason": "startup_active_future_token_missing",
+                        },
                     )
             else:
                 LOGGER.warning(
                     "FUTURES_CONTEXT_UNAVAILABLE reason=startup_active_future_unresolved",
-                    extra={"event": "FUTURES_CONTEXT_UNAVAILABLE", "reason": "startup_active_future_unresolved"},
+                    extra={
+                        "event": "FUTURES_CONTEXT_UNAVAILABLE",
+                        "reason": "startup_active_future_unresolved",
+                    },
                 )
 
             if "NSE:NIFTY" not in targets:
@@ -10016,7 +11236,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                 else:
                     defer_reason = str(_basket_spot_exc)
-                    LOGGER.info("OUT_OF_HOURS_DATA_MODE option_hydration_nonfatal=true trading_ready=false")
+                    LOGGER.info(
+                        "OUT_OF_HOURS_DATA_MODE option_hydration_nonfatal=true trading_ready=false"
+                    )
                     LOGGER.info(
                         "DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s",
                         defer_reason,
@@ -10048,17 +11270,25 @@ async def startup_sequence(ctx: BotContext) -> None:
             # 0 bars for the current session) don't cause hydration_zero_bars.
             # Weekly options may have no same-day candles early in the week — a
             # multi-day window guarantees at least 50 bars from recent sessions.
-            hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
-            hydration_min_bars = max(1, int(os.getenv("HYDRATION_MIN_BARS", "100") or 100))
-            hydration_max_bars = max(hydration_min_bars, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
-            hydration_max_contracts = max(1, int(os.getenv("HYDRATION_MAX_CONTRACTS", "12") or 12))
+            hydration_lookback_days = max(
+                1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2)
+            )
+            hydration_min_bars = max(
+                1, int(os.getenv("HYDRATION_MIN_BARS", "100") or 100)
+            )
+            hydration_max_bars = max(
+                hydration_min_bars, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300)
+            )
+            hydration_max_contracts = max(
+                1, int(os.getenv("HYDRATION_MAX_CONTRACTS", "12") or 12)
+            )
             start_dt = end_dt - timedelta(days=hydration_lookback_days)
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
             hydrated_counts: dict[str, int] = {}
             runner = ctx.strategy_runner
-            
+
             # ✅ FIX: Combine Spot and final options for multi-symbol hydration
             # Validate tokens before hydration — skip symbols with no resolvable
             # token so we don't waste API quota on unresolvable contracts.
@@ -10088,14 +11318,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 "startup_nfo_token_unresolved symbol=%s err=%s",
                                 symbol,
                                 exc,
-                                extra={"event": "startup_nfo_token_unresolved", "symbol": symbol},
+                                extra={
+                                    "event": "startup_nfo_token_unresolved",
+                                    "symbol": symbol,
+                                },
                             )
                             return None
                     return None
-                if ctx.broker_client and hasattr(ctx.broker_client, "get_instrument_token"):
+                if ctx.broker_client and hasattr(
+                    ctx.broker_client, "get_instrument_token"
+                ):
                     try:
                         return int(ctx.broker_client.get_instrument_token(symbol))
-                    except Exception as exc:  # noqa: BLE001 - resolver miss is handled by caller
+                    except (
+                        Exception
+                    ) as exc:  # noqa: BLE001 - resolver miss is handled by caller
                         LOGGER.warning(
                             "startup_spot_token_unresolved symbol=%s err=%s",
                             symbol,
@@ -10117,7 +11354,8 @@ async def startup_sequence(ctx: BotContext) -> None:
             other_option_symbols = [
                 sym
                 for sym in symbols_to_hydrate_raw
-                if sym not in {"NSE:NIFTY", basket.get("futures_symbol"), *selected_symbols}
+                if sym
+                not in {"NSE:NIFTY", basket.get("futures_symbol"), *selected_symbols}
             ]
             symbols_to_hydrate_raw = list(
                 dict.fromkeys(
@@ -10140,14 +11378,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                     continue
                 active_symbol_tokens[_sym] = int(_tok)
-                LOGGER.info("ACTIVE_BASKET_TOKEN_RESOLVED symbol=%s token=%s", _sym, int(_tok))
+                LOGGER.info(
+                    "ACTIVE_BASKET_TOKEN_RESOLVED symbol=%s token=%s", _sym, int(_tok)
+                )
                 symbols_to_hydrate.append(_sym)
             atm_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "")
             atm_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "")
             if atm_ce and atm_ce not in active_symbol_tokens:
-                LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=True", atm_ce)
+                LOGGER.error(
+                    "ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=True", atm_ce
+                )
             if atm_pe and atm_pe not in active_symbol_tokens:
-                LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=True", atm_pe)
+                LOGGER.error(
+                    "ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=True", atm_pe
+                )
             LOGGER.info(
                 "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
                 len(active_symbol_tokens),
@@ -10158,12 +11402,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "HYDRATION_SYMBOLS_FINAL symbols=%s has_spot=%s has_futures=%s",
                 symbols_to_hydrate,
                 "NSE:NIFTY" in symbols_to_hydrate,
-                any(str(s).startswith("NFO:NIFTY") and str(s).endswith("FUT") for s in symbols_to_hydrate),
+                any(
+                    str(s).startswith("NFO:NIFTY") and str(s).endswith("FUT")
+                    for s in symbols_to_hydrate
+                ),
                 extra={
                     "event": "HYDRATION_SYMBOLS_FINAL",
                     "symbols": symbols_to_hydrate,
                     "has_spot": "NSE:NIFTY" in symbols_to_hydrate,
-                    "has_futures": any(str(s).startswith("NFO:NIFTY") and str(s).endswith("FUT") for s in symbols_to_hydrate),
+                    "has_futures": any(
+                        str(s).startswith("NFO:NIFTY") and str(s).endswith("FUT")
+                        for s in symbols_to_hydrate
+                    ),
                 },
             )
             LOGGER.info(
@@ -10187,7 +11437,19 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             async def _fetch_symbol(symbol: str) -> tuple[str, list[Any]]:
                 """Ensure runtime history through canonical orchestration."""
-                role = "spot_context" if symbol == "NSE:NIFTY" else "futures_context" if str(symbol).endswith("FUT") else "selected_option" if symbol in selected_symbols else "option_context"
+                role = (
+                    "spot_context"
+                    if symbol == "NSE:NIFTY"
+                    else (
+                        "futures_context"
+                        if str(symbol).endswith("FUT")
+                        else (
+                            "selected_option"
+                            if symbol in selected_symbols
+                            else "option_context"
+                        )
+                    )
+                )
                 runtime = await ensure_symbol_runtime_history(
                     ctx,
                     symbol,
@@ -10196,7 +11458,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                     reason="startup_hydration",
                     required_bars=hydration_min_bars,
                 )
-                records = list(ctx.market_data_manager.get_ohlc_bars(symbol, limit=hydration_max_bars) or [])
+                records = list(
+                    ctx.market_data_manager.get_ohlc_bars(
+                        symbol, limit=hydration_max_bars
+                    )
+                    or []
+                )
                 record_count = len(records)
                 if not runtime.minimum_ready:
                     LOGGER.info(
@@ -10204,11 +11471,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                         symbol,
                         record_count,
                         runtime.required_bars,
-                        extra={"event": "insufficient_bars_for_strategy", "symbol": symbol, "bars": record_count, "reason": runtime.failure_reason},
+                        extra={
+                            "event": "insufficient_bars_for_strategy",
+                            "symbol": symbol,
+                            "bars": record_count,
+                            "reason": runtime.failure_reason,
+                        },
                     )
                 LOGGER.info(
                     "hydration_fetch_complete",
-                    extra={"event": "hydration_fetch_complete", "symbol": symbol, "records": record_count, "minimum_ready": runtime.minimum_ready, "target_ready": runtime.target_ready},
+                    extra={
+                        "event": "hydration_fetch_complete",
+                        "symbol": symbol,
+                        "records": record_count,
+                        "minimum_ready": runtime.minimum_ready,
+                        "target_ready": runtime.target_ready,
+                    },
                 )
                 return symbol, records
 
@@ -10238,17 +11516,61 @@ async def startup_sequence(ctx: BotContext) -> None:
                 except Exception:
                     sym_token = None
                 canonical_sym = canonical(sym)
-                mdm_bars = list(ctx.market_data_manager.get_ohlc_bars(canonical_sym, limit=hydration_max_bars) or [])
+                mdm_bars = list(
+                    ctx.market_data_manager.get_ohlc_bars(
+                        canonical_sym, limit=hydration_max_bars
+                    )
+                    or []
+                )
                 count = len(mdm_bars)
                 runner_ingested = 0
                 runner_history_count = 0
                 sync_result = None
-                if getattr(ctx, "strategy_runner", None) is not None and callable(getattr(ctx.strategy_runner, "sync_history_from_mdm", None)):
-                    required_bars = int(getattr(ctx.strategy_runner, "_context_required_bars", 0) or getattr(ctx.strategy_runner, "_required_candles", 0) or 50)
-                    sync_result = ctx.strategy_runner.sync_history_from_mdm(canonical_sym, required_bars=required_bars, reason="startup_hydration", role=("spot_context" if canonical_sym == "NSE:NIFTY" else "futures_context" if str(canonical_sym).endswith("FUT") else "selected_option" if canonical_sym in selected_symbols else "option_context"), request_if_short=False)
-                    runner_history_count = int(getattr(sync_result, "indicator_bars", 0) or 0)
+                if getattr(ctx, "strategy_runner", None) is not None and callable(
+                    getattr(ctx.strategy_runner, "sync_history_from_mdm", None)
+                ):
+                    required_bars = int(
+                        getattr(ctx.strategy_runner, "_context_required_bars", 0)
+                        or getattr(ctx.strategy_runner, "_required_candles", 0)
+                        or 50
+                    )
+                    sync_result = ctx.strategy_runner.sync_history_from_mdm(
+                        canonical_sym,
+                        required_bars=required_bars,
+                        reason="startup_hydration",
+                        role=(
+                            "spot_context"
+                            if canonical_sym == "NSE:NIFTY"
+                            else (
+                                "futures_context"
+                                if str(canonical_sym).endswith("FUT")
+                                else (
+                                    "selected_option"
+                                    if canonical_sym in selected_symbols
+                                    else "option_context"
+                                )
+                            )
+                        ),
+                        request_if_short=False,
+                    )
+                    runner_history_count = int(
+                        getattr(sync_result, "indicator_bars", 0) or 0
+                    )
                     runner_ingested = max(0, runner_history_count)
-                LOGGER.info("RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", canonical_sym, count, runner_ingested,extra={"event":"RUNNER_MDM_HYDRATION_SYNC","symbol":canonical_sym,"mdm_bars":count,"runner_ingested":runner_ingested,"failure_reason":getattr(sync_result,"failure_reason",None)})
+                LOGGER.info(
+                    # "RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", canonical_sym
+                    "RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d",
+                    canonical_sym,
+                    count,
+                    runner_ingested,
+                    extra={
+                        "event": "RUNNER_MDM_HYDRATION_SYNC",
+                        "symbol": canonical_sym,
+                        "mdm_bars": count,
+                        "runner_ingested": runner_ingested,
+                        "failure_reason": getattr(sync_result, "failure_reason", None),
+                    },
+                )
                 hydrated_counts[canonical_sym] = count
                 LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
                 if getattr(ctx, "strategy_runner", None) is not None:
@@ -10262,8 +11584,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                         canonical_sym,
                         mdm_history_count,
                         runner_history_count,
-                        bool(runner_history_count >= required_bars and mdm_history_count >= required_bars),
-                        extra={"event": "RUNNER_HISTORY_CONSISTENCY", "symbol": canonical_sym, "mdm_bars": mdm_history_count, "indicator_bars": runner_history_count, "consistent": bool(runner_history_count >= required_bars and mdm_history_count >= required_bars)},
+                        bool(
+                            runner_history_count >= required_bars
+                            and mdm_history_count >= required_bars
+                        ),
+                        extra={
+                            "event": "RUNNER_HISTORY_CONSISTENCY",
+                            "symbol": canonical_sym,
+                            "mdm_bars": mdm_history_count,
+                            "indicator_bars": runner_history_count,
+                            # runner_history_count >= required_bars and mdm_history_count >= required_bars
+                            "consistent": bool(
+                                runner_history_count >= required_bars
+                                and mdm_history_count >= required_bars
+                            ),
+                        },
                     )
                     LOGGER.info(
                         "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
@@ -10284,13 +11619,36 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
                     if canonical_sym == "NSE:NIFTY":
-                        required = int(getattr(ctx.strategy_runner, "_context_required_bars", 0) or getattr(ctx.strategy_runner, "_required_candles", 0) or 50)
-                        success = runner_history_count >= required and mdm_history_count >= required
-                        reason = "hydrated" if success else "insufficient_bars_after_hydration"
+                        required = int(
+                            getattr(ctx.strategy_runner, "_context_required_bars", 0)
+                            or getattr(ctx.strategy_runner, "_required_candles", 0)
+                            or 50
+                        )
+                        success = (
+                            runner_history_count >= required
+                            and mdm_history_count >= required
+                        )
+                        reason = (
+                            "hydrated"
+                            if success
+                            else "insufficient_bars_after_hydration"
+                        )
                         LOGGER.info(
                             "SPOT_CONTEXT_HYDRATION_RESULT symbol=NSE:NIFTY mdm_bars=%d runner_bars=%d required=%d success=%s reason=%s",
-                            mdm_history_count, runner_history_count, required, success, reason,
-                            extra={"event": "SPOT_CONTEXT_HYDRATION_RESULT", "symbol": "NSE:NIFTY", "mdm_bars": mdm_history_count, "runner_bars": runner_history_count, "required": required, "success": success, "reason": reason},
+                            mdm_history_count,
+                            runner_history_count,
+                            required,
+                            success,
+                            reason,
+                            extra={
+                                "event": "SPOT_CONTEXT_HYDRATION_RESULT",
+                                "symbol": "NSE:NIFTY",
+                                "mdm_bars": mdm_history_count,
+                                "runner_bars": runner_history_count,
+                                "required": required,
+                                "success": success,
+                                "reason": reason,
+                            },
                         )
                 if ctx.market_data_manager:
                     bars_snapshot = ctx.market_data_manager.get_ohlc_bars(canonical_sym)
@@ -10331,14 +11689,26 @@ async def startup_sequence(ctx: BotContext) -> None:
                 atm=basket.get("atm_strike"),
                 max_active=int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "6")),
             )
-            readiness_symbols = list(dict.fromkeys([
-                basket.get("spot_symbol"),
-                active_futures_symbol,
-                *active_option_symbols,
-            ]))
+            readiness_symbols = list(
+                dict.fromkeys(
+                    [
+                        basket.get("spot_symbol"),
+                        active_futures_symbol,
+                        *active_option_symbols,
+                    ]
+                )
+            )
             readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
-            readiness_option_count = sum(1 for sym in readiness_symbols if str(sym).endswith(("CE", "PE")))
-            full_basket_option_count = len([sym for sym in (basket.get("option_symbols", []) or []) if str(sym).endswith(("CE", "PE"))])
+            readiness_option_count = sum(
+                1 for sym in readiness_symbols if str(sym).endswith(("CE", "PE"))
+            )
+            full_basket_option_count = len(
+                [
+                    sym
+                    for sym in (basket.get("option_symbols", []) or [])
+                    if str(sym).endswith(("CE", "PE"))
+                ]
+            )
             LOGGER.info(
                 "READINESS_SYMBOLS_SELECTED readiness_symbol_count=%d readiness_option_count=%d full_basket_option_count=%d spot=%s futures=%s symbols=%s",
                 len(readiness_symbols),
@@ -10373,18 +11743,33 @@ async def startup_sequence(ctx: BotContext) -> None:
                     except Exception:
                         runner_history_count = 0
                 if ctx.market_data_manager is not None:
-                    mdm_ohlc_count = len(ctx.market_data_manager.get_ohlc_bars(sym) or [])
+                    mdm_ohlc_count = len(
+                        ctx.market_data_manager.get_ohlc_bars(sym) or []
+                    )
                 if (
                     runner is not None
                     and runner_history_count <= 0
                     and mdm_ohlc_count > 0
                     and callable(getattr(runner, "sync_history_from_mdm", None))
                 ):
-                    sync_result = runner.sync_history_from_mdm(sym, required_bars=default_required_bars, reason="startup_readiness_sync", role=("selected_option" if str(sym).endswith(("CE", "PE")) else "spot_context"), request_if_short=False)
-                    runner_history_count = int(getattr(sync_result, "indicator_bars", 0) or 0)
+                    sync_result = runner.sync_history_from_mdm(
+                        sym,
+                        required_bars=default_required_bars,
+                        reason="startup_readiness_sync",
+                        role=(
+                            "selected_option"
+                            if str(sym).endswith(("CE", "PE"))
+                            else "spot_context"
+                        ),
+                        request_if_short=False,
+                    )
+                    runner_history_count = int(
+                        getattr(sync_result, "indicator_bars", 0) or 0
+                    )
                 min_required_bars = (
                     option_min_live_bars
-                    if str(sym).startswith("NFO:") and (str(sym).endswith("CE") or str(sym).endswith("PE"))
+                    if str(sym).startswith("NFO:")
+                    and (str(sym).endswith("CE") or str(sym).endswith("PE"))
                     else default_required_bars
                 )
                 effective_bar_count = max(runner_history_count, mdm_ohlc_count)
@@ -10423,12 +11808,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                             },
                         )
             registered_symbol_count = (
-                len(getattr(runner, "_active_symbols", set()) or []) if runner is not None else 0
+                len(getattr(runner, "_active_symbols", set()) or [])
+                if runner is not None
+                else 0
             )
             LOGGER.info(
                 "RUNNER_SYMBOLS_REGISTERED count=%d",
                 registered_symbol_count,
-                extra={"event": "RUNNER_SYMBOLS_REGISTERED", "count": registered_symbol_count},
+                extra={
+                    "event": "RUNNER_SYMBOLS_REGISTERED",
+                    "count": registered_symbol_count,
+                },
             )
             if runner is not None and hasattr(runner, "mark_ready") and ready_symbols:
                 runner.mark_ready(ready_symbols)
@@ -10459,9 +11849,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "skipped_reasons": skipped_reasons,
                     },
                 )
-            if (
-                ctx.data_hub is not None
-                and hasattr(ctx.data_hub, "flush_pending_live_subscriptions")
+            if ctx.data_hub is not None and hasattr(
+                ctx.data_hub, "flush_pending_live_subscriptions"
             ):
                 flushed = int(ctx.data_hub.flush_pending_live_subscriptions())
                 LOGGER.info(
@@ -10502,27 +11891,58 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
                 await _replay_latest_mdm_ticks_to_bus(ctx, reason="post_runner_start")
-                await _refresh_readiness_after_first_tick(ctx, reason="post_runner_start")
+                await _refresh_readiness_after_first_tick(
+                    ctx, reason="post_runner_start"
+                )
                 ctx.data_observation_ready = True
                 if configured_runtime_mode in {"PAPER", "SHADOW"}:
                     ctx.live_orders_armed = False
                     ctx.trading_ready = False
                     ctx.live_block_reason = "paper_mode_or_startup_warmup"
-                    LOGGER.info("PAPER_RUNNER_STARTED symbol_count=%d live_orders_armed=%s", len(readiness_symbols), False, extra={"event":"PAPER_RUNNER_STARTED","symbol_count":len(readiness_symbols),"live_orders_armed":False,"mode":mode})
+                    LOGGER.info(
+                        "PAPER_RUNNER_STARTED symbol_count=%d live_orders_armed=%s",
+                        len(readiness_symbols),
+                        False,
+                        extra={
+                            "event": "PAPER_RUNNER_STARTED",
+                            "symbol_count": len(readiness_symbols),
+                            "live_orders_armed": False,
+                            "mode": mode,
+                        },
+                    )
                     if not ready_symbols:
-                        LOGGER.info("PAPER_RUNNER_STARTED_OBSERVATION_ONLY reason=no_hydrated_symbols_yet", extra={"event": "PAPER_RUNNER_STARTED_OBSERVATION_ONLY", "reason": "no_hydrated_symbols_yet"})
-                
-            if (
-                ctx.market_data_manager is not None
-                and "basket" in locals()
-            ):
+                        LOGGER.info(
+                            "PAPER_RUNNER_STARTED_OBSERVATION_ONLY reason=no_hydrated_symbols_yet",
+                            extra={
+                                "event": "PAPER_RUNNER_STARTED_OBSERVATION_ONLY",
+                                "reason": "no_hydrated_symbols_yet",
+                            },
+                        )
+
+            if ctx.market_data_manager is not None and "basket" in locals():
                 ce_symbols = list(basket.get("ce_symbols") or [])
                 pe_symbols = list(basket.get("pe_symbols") or [])
                 if not ce_symbols or not pe_symbols:
-                    ce_symbols = [s for s in basket.get("option_symbols", []) if str(s).endswith("CE")]
-                    pe_symbols = [s for s in basket.get("option_symbols", []) if str(s).endswith("PE")]
-                atm_ce = basket.get("selected_ce") or basket.get("atm_ce") or (ce_symbols[len(ce_symbols) // 2] if ce_symbols else None)
-                atm_pe = basket.get("selected_pe") or basket.get("atm_pe") or (pe_symbols[len(pe_symbols) // 2] if pe_symbols else None)
+                    ce_symbols = [
+                        s
+                        for s in basket.get("option_symbols", [])
+                        if str(s).endswith("CE")
+                    ]
+                    pe_symbols = [
+                        s
+                        for s in basket.get("option_symbols", [])
+                        if str(s).endswith("PE")
+                    ]
+                atm_ce = (
+                    basket.get("selected_ce")
+                    or basket.get("atm_ce")
+                    or (ce_symbols[len(ce_symbols) // 2] if ce_symbols else None)
+                )
+                atm_pe = (
+                    basket.get("selected_pe")
+                    or basket.get("atm_pe")
+                    or (pe_symbols[len(pe_symbols) // 2] if pe_symbols else None)
+                )
                 if atm_ce and atm_pe:
                     ctx.market_data_manager.set_readiness_requirements(
                         spot_symbol=str(basket.get("spot_symbol") or "NSE:NIFTY"),
@@ -10559,7 +11979,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             # Logging INFO here floods Railway with a false alarm on every boot.
             # Demoted to DEBUG so it only appears during deep diagnostics.
             if not _data_ready(mdm):
-                LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
+                LOGGER.debug(
+                    "startup_tick_gate: waiting_for_live_ticks (expected at boot)"
+                )
 
             streamer = ctx.streamer
             tokens_to_poll = []
@@ -10615,7 +12037,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         base="NIFTY",
                         spot_price=spot_price,
                         strikes_around_atm=3,
-                        strike_step=ctx.settings.option_universe.strike_step
+                        strike_step=ctx.settings.option_universe.strike_step,
                     )
                     for t in extra_tokens:
                         if t and t not in tokens_to_poll:
@@ -10657,7 +12079,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "Market data integrity verified: tokens=%d (min=%d)",
                 len(tokens_to_poll),
                 min_tokens,
-                extra={"event": "market_data_integrity_pass", "tokens": len(tokens_to_poll)}
+                extra={
+                    "event": "market_data_integrity_pass",
+                    "tokens": len(tokens_to_poll),
+                },
             )
 
             LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
@@ -10696,14 +12121,32 @@ async def startup_sequence(ctx: BotContext) -> None:
                         token=int(tok),
                         source="startup",
                     )
-                    mdm_tracked = sym in getattr(mdm, "_tracked_symbols", set()) if mdm else False
-                    broker_ws_token_requested = int(tok) in getattr(mdm, "_requested_tokens", set()) if mdm else False
-                    runner_callback_registered = bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(sym)) if ctx.data_hub is not None else False
+                    mdm_tracked = (
+                        sym in getattr(mdm, "_tracked_symbols", set()) if mdm else False
+                    )
+                    broker_ws_token_requested = (
+                        int(tok) in getattr(mdm, "_requested_tokens", set())
+                        if mdm
+                        else False
+                    )
+                    runner_callback_registered = (
+                        bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(sym))
+                        if ctx.data_hub is not None
+                        else False
+                    )
                     reason_detail = "startup"
                     success = bool(
                         mdm_tracked
-                        and (runner_callback_registered or reason_detail in {"deferred_until_ready", "history_pending"})
-                        and (broker_ws_token_requested or not market_open_now or reason_detail in {"startup", "history_pending"})
+                        and (
+                            runner_callback_registered
+                            or reason_detail
+                            in {"deferred_until_ready", "history_pending"}
+                        )
+                        and (
+                            broker_ws_token_requested
+                            or not market_open_now
+                            or reason_detail in {"startup", "history_pending"}
+                        )
                     )
                     partial = (not success) and mdm_tracked
                     LOGGER.info(
@@ -10817,7 +12260,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
             if ctx.market_data_manager is not None:
-                last_tick_map = getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
+                last_tick_map = (
+                    getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
+                )
                 live_tick_seen_count = sum(
                     1
                     for _sym in targets
@@ -10830,13 +12275,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                     len(active_symbol_tokens),
                     len(getattr(ctx.market_data_manager, "_tracked_symbols", set())),
                     len(getattr(ctx.market_data_manager, "_subscribers", {})),
-                    sum(
-                        1
-                        for _sym in targets
-                        if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_sym))
-                    )
-                    if ctx.data_hub is not None
-                    else 0,
+                    (
+                        sum(
+                            1
+                            for _sym in targets
+                            if bool(
+                                getattr(ctx.data_hub, "_tick_subscribers", {}).get(_sym)
+                            )
+                        )
+                        if ctx.data_hub is not None
+                        else 0
+                    ),
                     _safe_ws_token_count(ctx),
                     live_tick_seen_count,
                     extra={
@@ -10853,7 +12302,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                             sum(
                                 1
                                 for _sym in targets
-                                if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_sym))
+                                if bool(
+                                    getattr(ctx.data_hub, "_tick_subscribers", {}).get(
+                                        _sym
+                                    )
+                                )
                             )
                             if ctx.data_hub is not None
                             else 0
@@ -10879,10 +12332,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                     seeded = 0
                     seeded_tokens: set[int] = set()
                     for _sym, _tok in sorted(active_symbol_tokens.items()):
-                        if _tok in tokens_to_poll and mdm.request_token_subscription(int(_tok), str(_sym)):
+                        if _tok in tokens_to_poll and mdm.request_token_subscription(
+                            int(_tok), str(_sym)
+                        ):
                             seeded += 1
                             seeded_tokens.add(int(_tok))
-                    remaining_tokens = [int(_tok) for _tok in tokens_to_poll if int(_tok) not in seeded_tokens]
+                    remaining_tokens = [
+                        int(_tok)
+                        for _tok in tokens_to_poll
+                        if int(_tok) not in seeded_tokens
+                    ]
                     if remaining_tokens:
                         seeded += mdm.request_token_subscriptions(remaining_tokens)
                     LOGGER.info(
@@ -10898,7 +12357,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
             if polling_fallback is not None and tokens_to_poll:
                 polling_fallback.subscribe(tokens_to_poll)
-                if ctx.websocket_manager is not None and ctx.market_data_manager is not None:
+                if (
+                    ctx.websocket_manager is not None
+                    and ctx.market_data_manager is not None
+                ):
+
                     async def _polling_failover_supervisor() -> None:
                         """Supervise WS health and toggle polling fallback with hysteresis."""
                         degraded_since: float | None = None
@@ -10917,14 +12380,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                         quote_stale_ms = int(fallback_stale_sec * 1000.0)
                         while True:
                             try:
-                                degraded_since, recovered_since = await _polling_failover_supervisor_iteration(
-                                    ctx,
-                                    polling_fallback,
-                                    quote_stale_ms=quote_stale_ms,
-                                    degraded_since=degraded_since,
-                                    recovered_since=recovered_since,
-                                    activate_after=activate_after,
-                                    recover_cooldown=recover_cooldown,
+                                degraded_since, recovered_since = (
+                                    await _polling_failover_supervisor_iteration(
+                                        ctx,
+                                        polling_fallback,
+                                        quote_stale_ms=quote_stale_ms,
+                                        degraded_since=degraded_since,
+                                        recovered_since=recovered_since,
+                                        activate_after=activate_after,
+                                        recover_cooldown=recover_cooldown,
+                                    )
                                 )
                             except Exception as failover_exc:  # noqa: BLE001
                                 LOGGER.error(
@@ -11005,15 +12470,25 @@ async def startup_sequence(ctx: BotContext) -> None:
                 while True:
                     try:
                         # Retry symbols deferred from previous iterations.
-                        if pending_runner_symbols and ctx.strategy_runner and ctx.market_data_manager:
+                        if (
+                            pending_runner_symbols
+                            and ctx.strategy_runner
+                            and ctx.market_data_manager
+                        ):
                             still_pending: set[str] = set()
                             for _psym in list(pending_runner_symbols):
-                                _mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(_psym) or [])
+                                _mdm_bars = len(
+                                    ctx.market_data_manager.get_ohlc_bars(_psym) or []
+                                )
                                 _runner_bars = 0
                                 try:
-                                    _runner_engine = getattr(ctx.strategy_runner, "_indicator_engine", None)
+                                    _runner_engine = getattr(
+                                        ctx.strategy_runner, "_indicator_engine", None
+                                    )
                                     if _runner_engine is not None:
-                                        _runner_bars = len(_runner_engine.get_history(_psym) or [])
+                                        _runner_bars = len(
+                                            _runner_engine.get_history(_psym) or []
+                                        )
                                 except Exception:
                                     _runner_bars = 0
                                 if _runner_bars >= _symbol_history_requirement(ctx):
@@ -11035,7 +12510,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             "mdm_bars": _mdm_bars,
                                             "token": active_symbol_tokens.get(_psym),
                                             "added_to_runner": True,
-                                            "required_bars": _symbol_history_requirement(ctx),
+                                            "required_bars": _symbol_history_requirement(
+                                                ctx
+                                            ),
                                             "history_ready": True,
                                             "source": "dynamic_universe",
                                             "reason": "history_now_ready",
@@ -11060,7 +12537,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             and hasattr(ctx.market_data_manager, "get_cached_ltp")
                             else None
                         )
-                        
+
                         # --- Objective 7: Auto ATM Resubscription via InstrumentManager ---
                         _im = ctx.instrument_manager
                         if spot and spot > 0 and _im and _im.is_loaded():
@@ -11068,13 +12545,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 base="NIFTY",
                                 spot_price=float(spot),
                                 strikes_around_atm=3,
-                                strike_step=ctx.settings.option_universe.strike_step
+                                strike_step=ctx.settings.option_universe.strike_step,
                             )
                             latest_symbols = set()
                             for t in target_tokens:
                                 s = _im.get_symbol(t)
                                 if s:
-                                    qualified = f"NFO:{s}" if not s.startswith("NFO:") else s
+                                    qualified = (
+                                        f"NFO:{s}" if not s.startswith("NFO:") else s
+                                    )
                                     if qualified.startswith("NFO:NIFTY"):
                                         latest_symbols.add(qualified)
                         else:
@@ -11146,13 +12625,29 @@ async def startup_sequence(ctx: BotContext) -> None:
                             # Ensure runtime history through the canonical orchestrator before adding to runner.
                             if ctx.broker_client and ctx.market_data_manager:
                                 try:
-                                    role = "futures_context" if str(sym).endswith("FUT") else "spot_context" if str(sym).startswith("NSE:") else "option_context"
+                                    role = (
+                                        "futures_context"
+                                        if str(sym).endswith("FUT")
+                                        else (
+                                            "spot_context"
+                                            if str(sym).startswith("NSE:")
+                                            else "option_context"
+                                        )
+                                    )
                                     runtime = await ensure_symbol_runtime_history(
                                         ctx,
                                         sym,
                                         role=role,
                                         phase="dynamic_update",
-                                        reason=("futures_context_refresh" if str(sym).endswith("FUT") else "spot_context_refresh" if str(sym).startswith("NSE:") else "dynamic_option_universe"),
+                                        reason=(
+                                            "futures_context_refresh"
+                                            if str(sym).endswith("FUT")
+                                            else (
+                                                "spot_context_refresh"
+                                                if str(sym).startswith("NSE:")
+                                                else "dynamic_option_universe"
+                                            )
+                                        ),
                                     )
                                     LOGGER.info(
                                         "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
@@ -11166,9 +12661,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             "event": "RUNNER_HISTORY_INGESTED",
                                             "symbol": sym,
                                             "token": int(tok),
-                                            "bars_ingested": int(runtime.indicator_bars),
+                                            "bars_ingested": int(
+                                                runtime.indicator_bars
+                                            ),
                                             "source": "dynamic_hydration",
-                                            "runner_history_count": int(runtime.indicator_bars),
+                                            "runner_history_count": int(
+                                                runtime.indicator_bars
+                                            ),
                                             "mdm_history_count": int(runtime.mdm_bars),
                                             "failure_reason": runtime.failure_reason,
                                         },
@@ -11193,13 +12692,25 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 source="dynamic_universe",
                             )
                             if ctx.data_hub is not None:
-                                tick_subscribers = getattr(ctx.data_hub, "_tick_subscribers", {})
-                                runner_callback_registered = bool(tick_subscribers.get(sym))
+                                tick_subscribers = getattr(
+                                    ctx.data_hub, "_tick_subscribers", {}
+                                )
+                                runner_callback_registered = bool(
+                                    tick_subscribers.get(sym)
+                                )
                             reason_detail = "dynamic_add"
                             success = bool(
                                 mdm_tracked
-                                and (runner_callback_registered or reason_detail in {"deferred_until_ready", "history_pending"})
-                                and (broker_ws_token_requested or not market_open_now or reason_detail in {"startup", "history_pending"})
+                                and (
+                                    runner_callback_registered
+                                    or reason_detail
+                                    in {"deferred_until_ready", "history_pending"}
+                                )
+                                and (
+                                    broker_ws_token_requested
+                                    or not market_open_now
+                                    or reason_detail in {"startup", "history_pending"}
+                                )
                             )
                             partial = (not success) and mdm_tracked
                             LOGGER.info(
@@ -11229,10 +12740,22 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                         for sym in drop_symbols:
                             lock_ts = ctx.execution_lock_timestamps.get(sym)
-                            lock_age_s = (datetime.now(timezone.utc) - lock_ts).total_seconds() if lock_ts is not None else None
-                            sticky_seconds = int(os.getenv("OPTION_STICKY_SECONDS", "120") or "120")
-                            if sym in ctx.execution_locked_symbols and (lock_age_s is None or lock_age_s < sticky_seconds):
-                                LOGGER.info("EXECUTION_UNIVERSE_STICKY_KEEP symbol=%s lock_age_s=%s", sym, lock_age_s)
+                            lock_age_s = (
+                                (datetime.now(timezone.utc) - lock_ts).total_seconds()
+                                if lock_ts is not None
+                                else None
+                            )
+                            sticky_seconds = int(
+                                os.getenv("OPTION_STICKY_SECONDS", "120") or "120"
+                            )
+                            if sym in ctx.execution_locked_symbols and (
+                                lock_age_s is None or lock_age_s < sticky_seconds
+                            ):
+                                LOGGER.info(
+                                    "EXECUTION_UNIVERSE_STICKY_KEEP symbol=%s lock_age_s=%s",
+                                    sym,
+                                    lock_age_s,
+                                )
                                 continue
                             ctx.execution_locked_symbols.discard(sym)
                             ctx.execution_lock_timestamps.pop(sym, None)
@@ -11251,7 +12774,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     symbol=sym,
                                 )
                             if ctx.market_data_manager is not None:
-                                removed_from_mdm = bool(ctx.market_data_manager.untrack(sym))
+                                removed_from_mdm = bool(
+                                    ctx.market_data_manager.untrack(sym)
+                                )
                             if ctx.data_hub is not None:
                                 try:
                                     ctx.data_hub.unsubscribe_ticks(sym)
@@ -11295,18 +12820,26 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         ["NSE:NIFTY", *sorted(latest_symbols)]
                                     )
                                 ]
-                                committed_ce, committed_pe = _commit_active_dynamic_basket(
-                                    ctx,
-                                    basket=cast(
-                                        Mapping[str, object],
-                                        getattr(ctx, "active_trading_universe", {}) or {},
-                                    ),
-                                    option_symbols=sorted(latest_symbols),
-                                    symbols=basket_symbols,
-                                    atm_strike=cast(
-                                        int | float | str | None,
-                                        (getattr(ctx, "active_trading_universe", {}) or {}).get("atm_strike"),
-                                    ),
+                                committed_ce, committed_pe = (
+                                    _commit_active_dynamic_basket(
+                                        ctx,
+                                        basket=cast(
+                                            Mapping[str, object],
+                                            getattr(ctx, "active_trading_universe", {})
+                                            or {},
+                                        ),
+                                        option_symbols=sorted(latest_symbols),
+                                        symbols=basket_symbols,
+                                        atm_strike=cast(
+                                            int | float | str | None,
+                                            (
+                                                getattr(
+                                                    ctx, "active_trading_universe", {}
+                                                )
+                                                or {}
+                                            ).get("atm_strike"),
+                                        ),
+                                    )
                                 )
                                 for _sym in add_symbols:
                                     _tok = active_symbol_tokens.get(_sym)
@@ -11330,21 +12863,47 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         reason="post_universe_sync",
                                     )
                                 ce_bars = (
-                                    len(ctx.market_data_manager.get_ohlc_bars(committed_ce) or [])
-                                    if committed_ce and ctx.market_data_manager is not None
+                                    len(
+                                        ctx.market_data_manager.get_ohlc_bars(
+                                            committed_ce
+                                        )
+                                        or []
+                                    )
+                                    if committed_ce
+                                    and ctx.market_data_manager is not None
                                     else 0
                                 )
                                 pe_bars = (
-                                    len(ctx.market_data_manager.get_ohlc_bars(committed_pe) or [])
-                                    if committed_pe and ctx.market_data_manager is not None
+                                    len(
+                                        ctx.market_data_manager.get_ohlc_bars(
+                                            committed_pe
+                                        )
+                                        or []
+                                    )
+                                    if committed_pe
+                                    and ctx.market_data_manager is not None
                                     else 0
                                 )
                                 LOGGER.info(
                                     "ACTIVE_DYNAMIC_BASKET_COMMITTED selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d ce_ready=%s pe_ready=%s",
                                     committed_ce,
                                     committed_pe,
-                                    (getattr(ctx, "active_trading_universe", {}) or {}).get("atm_strike"),
-                                    len([sym for sym in (getattr(ctx, "active_contract_basket", {}) or {}).get("option_symbols", []) if str(sym).endswith(("CE", "PE"))]),
+                                    (
+                                        getattr(ctx, "active_trading_universe", {})
+                                        or {}
+                                    ).get("atm_strike"),
+                                    len(
+                                        [
+                                            sym
+                                            for sym in (
+                                                getattr(
+                                                    ctx, "active_contract_basket", {}
+                                                )
+                                                or {}
+                                            ).get("option_symbols", [])
+                                            if str(sym).endswith(("CE", "PE"))
+                                        ]
+                                    ),
                                     ce_bars >= _symbol_history_requirement(ctx),
                                     pe_bars >= _symbol_history_requirement(ctx),
                                 )
@@ -11371,24 +12930,45 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 live_tick_seen_count = 0
                                 if ctx.market_data_manager is not None:
                                     mdm_tracked_count = len(
-                                        getattr(ctx.market_data_manager, "_tracked_symbols", set())
+                                        getattr(
+                                            ctx.market_data_manager,
+                                            "_tracked_symbols",
+                                            set(),
+                                        )
                                     )
                                     mdm_subscriber_count = len(
-                                        getattr(ctx.market_data_manager, "_subscribers", {})
+                                        getattr(
+                                            ctx.market_data_manager, "_subscribers", {}
+                                        )
                                     )
-                                    mdm_subscribed_token_count = _safe_ws_token_count(ctx)
-                                    last_tick_map = getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
+                                    mdm_subscribed_token_count = _safe_ws_token_count(
+                                        ctx
+                                    )
+                                    last_tick_map = (
+                                        getattr(
+                                            ctx.market_data_manager,
+                                            "_last_tick_time",
+                                            {},
+                                        )
+                                        or {}
+                                    )
                                     live_tick_seen_count = sum(
                                         1
                                         for _s in latest_symbols
-                                        if isinstance(last_tick_map.get(_s), (int, float))
+                                        if isinstance(
+                                            last_tick_map.get(_s), (int, float)
+                                        )
                                         and float(last_tick_map.get(_s, 0.0)) > 0
                                     )
                                 if ctx.data_hub is not None:
                                     datahub_callback_symbols_count = sum(
                                         1
                                         for _s in latest_symbols
-                                        if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_s))
+                                        if bool(
+                                            getattr(
+                                                ctx.data_hub, "_tick_subscribers", {}
+                                            ).get(_s)
+                                        )
                                     )
                                 LOGGER.info(
                                     "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d mdm_subscribed_token_count=%s live_tick_seen_count=%d",
@@ -11418,7 +12998,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             exc,
                             exc_info=exc,
                         )
-                    await asyncio.sleep(60) # Objective 7: 60s interval
+                    await asyncio.sleep(60)  # Objective 7: 60s interval
 
             asyncio.create_task(_option_universe_sync_loop())
             startup_trade_ready = True
@@ -11449,8 +13029,12 @@ async def startup_sequence(ctx: BotContext) -> None:
             else:
                 ensure_bot_context_runtime_fields(ctx)
                 if isinstance(e, AttributeError):
-                    _log_bot_context_attribute_missing(e, component="hydration_tracking")
-                norm_basket = normalize_active_basket_schema(dict(getattr(ctx, "active_trading_universe", {}) or {}))
+                    _log_bot_context_attribute_missing(
+                        e, component="hydration_tracking"
+                    )
+                norm_basket = normalize_active_basket_schema(
+                    dict(getattr(ctx, "active_trading_universe", {}) or {})
+                )
                 LOGGER.exception(
                     "HYDRATION_TRACKING_FAILED error_type=%s error=%s basket_keys=%s selected_ce=%s selected_pe=%s spot_symbol=%s futures_symbol=%s",
                     type(e).__name__,
@@ -11502,11 +13086,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.info("🚀 Starting Telegram Bot (Polling Mode, early)...")
                 await ctx.telegram_bot.start()
                 LOGGER.info("✅ Telegram Bot polling active — commands now live.")
-            except Exception as _tg_early_exc:  # noqa: BLE001 - never block startup on telegram
+            except (
+                Exception
+            ) as _tg_early_exc:  # noqa: BLE001 - never block startup on telegram
                 LOGGER.warning(
                     "telegram_early_start_failed err=%s",
                     _tg_early_exc,
-                    extra={"event": "telegram_early_start_failed", "err": str(_tg_early_exc)},
+                    extra={
+                        "event": "telegram_early_start_failed",
+                        "err": str(_tg_early_exc),
+                    },
                 )
         try:
             if not ctx.subsystems_started:
@@ -11515,14 +13104,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # OrderProcessor registers the SIGNAL handler; without calling
                 # start() here, MessageBus.start() sees 0 subscribers and logs
                 # "started with 0 active dispatchers" — signals never execute.
-                
 
                 _wire_and_start_message_bus(ctx)
 
                 # MDM internals are started once near startup entry with
                 # defer_ws=True; websocket bring-up is handled explicitly.
-
-
 
                 if ctx.order_manager:
                     ctx.order_manager.start_monitoring()
@@ -11550,6 +13136,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.strategy_runner:
                     if ctx.market_data_manager is not None:
                         try:
+
                             def _safe_runtime_mode(local_ctx: BotContext) -> str:
                                 mode = str(
                                     getattr(local_ctx, "configured_mode", None)
@@ -11558,7 +13145,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     or os.getenv("MODE", "")
                                     or "LIVE"
                                 ).upper()
-                                return mode if mode in {"LIVE", "PAPER", "SHADOW", "DATA_WARMUP"} else "LIVE"
+                                return (
+                                    mode
+                                    if mode
+                                    in {"LIVE", "PAPER", "SHADOW", "DATA_WARMUP"}
+                                    else "LIVE"
+                                )
 
                             configured_runtime_mode = _safe_runtime_mode(ctx)
                             await ctx.market_data_manager.wait_until_ready(timeout=30.0)
@@ -11568,7 +13160,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             hard_ready = bool(readiness_state.get("hard_ready"))
                             spot_ready = bool(readiness_state.get("spot_ready"))
-                            missing_hard = list(readiness_state.get("missing_hard") or [])
+                            missing_hard = list(
+                                readiness_state.get("missing_hard") or []
+                            )
                             indicators_ready_for_trading = hard_ready
                             if ctx.market_regime_manager is not None:
                                 ctx.market_regime_manager.indicators_ready = (
@@ -11618,24 +13212,68 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 mdm_bars: dict[str, int] = {}
                                 datahub_bars: dict[str, int] = {}
                                 fresh_quote_symbols: list[str] = []
-                                for sym in list((readiness_state.get("requirements", {}) or {}).get("options", []) or []):
+                                for sym in list(
+                                    (readiness_state.get("requirements", {}) or {}).get(
+                                        "options", []
+                                    )
+                                    or []
+                                ):
                                     try:
-                                        runner_bars[sym] = int(len(ctx.strategy_runner.get_recent_bars(sym) or [])) if hasattr(ctx.strategy_runner, "get_recent_bars") else 0
+                                        runner_bars[sym] = (
+                                            int(
+                                                len(
+                                                    ctx.strategy_runner.get_recent_bars(
+                                                        sym
+                                                    )
+                                                    or []
+                                                )
+                                            )
+                                            if hasattr(
+                                                ctx.strategy_runner, "get_recent_bars"
+                                            )
+                                            else 0
+                                        )
                                     except Exception:
                                         runner_bars[sym] = 0
                                     try:
-                                        mdm_bars[sym] = int(len(ctx.market_data_manager.get_ohlc_bars(sym, limit=20) or []))
+                                        mdm_bars[sym] = int(
+                                            len(
+                                                ctx.market_data_manager.get_ohlc_bars(
+                                                    sym, limit=20
+                                                )
+                                                or []
+                                            )
+                                        )
                                     except Exception:
                                         mdm_bars[sym] = 0
-                                    if getattr(ctx, "data_hub", None) is not None and hasattr(ctx.data_hub, "get_ohlc_bars"):
+                                    if getattr(
+                                        ctx, "data_hub", None
+                                    ) is not None and hasattr(
+                                        ctx.data_hub, "get_ohlc_bars"
+                                    ):
                                         try:
-                                            datahub_bars[sym] = int(len(ctx.data_hub.get_ohlc_bars(sym, limit=20) or []))
+                                            datahub_bars[sym] = int(
+                                                len(
+                                                    ctx.data_hub.get_ohlc_bars(
+                                                        sym, limit=20
+                                                    )
+                                                    or []
+                                                )
+                                            )
                                         except Exception:
                                             datahub_bars[sym] = 0
                                     try:
-                                        snap = ctx.market_data_manager.get_symbol_snapshot(sym)
+                                        snap = (
+                                            ctx.market_data_manager.get_symbol_snapshot(
+                                                sym
+                                            )
+                                        )
                                         age = resolve_tick_age_seconds(snap)
-                                        if float(getattr(snap, "ltp", 0.0) or 0.0) > 0 and age is not None and age <= 60.0:
+                                        if (
+                                            float(getattr(snap, "ltp", 0.0) or 0.0) > 0
+                                            and age is not None
+                                            and age <= 60.0
+                                        ):
                                             fresh_quote_symbols.append(sym)
                                     except Exception:
                                         pass
@@ -11655,20 +13293,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "fresh_quote_symbols": fresh_quote_symbols,
                                     },
                                 )
-                                if non_live_mode and _runner_is_running(ctx.strategy_runner):
+                                if non_live_mode and _runner_is_running(
+                                    ctx.strategy_runner
+                                ):
                                     ctx.data_observation_ready = True
                                     ctx.live_orders_armed = False
                                     ctx.trading_ready = False
-                                    ctx.live_block_reason = "paper_mode_or_startup_warmup"
+                                    ctx.live_block_reason = (
+                                        "paper_mode_or_startup_warmup"
+                                    )
                                     LOGGER.warning(
                                         "startup_pipeline_warmup_nonlive missing=%s",
-                                        ",".join(missing_hard) if missing_hard else "unknown",
-                                        extra={"event": "startup_pipeline_warmup_nonlive", "hard_ready": hard_ready, "spot_ready": spot_ready, "timed_out": not readiness_ready, "missing": missing_hard, "ws_connected": ws_connected},
+                                        (
+                                            ",".join(missing_hard)
+                                            if missing_hard
+                                            else "unknown"
+                                        ),
+                                        extra={
+                                            "event": "startup_pipeline_warmup_nonlive",
+                                            "hard_ready": hard_ready,
+                                            "spot_ready": spot_ready,
+                                            "timed_out": not readiness_ready,
+                                            "missing": missing_hard,
+                                            "ws_connected": ws_connected,
+                                        },
                                     )
                                 else:
                                     LOGGER.error(
                                         "startup_pipeline_incomplete missing=%s",
-                                        ",".join(missing_hard) if missing_hard else "unknown",
+                                        (
+                                            ",".join(missing_hard)
+                                            if missing_hard
+                                            else "unknown"
+                                        ),
                                         extra={
                                             "event": "startup_pipeline_incomplete",
                                             "hard_ready": hard_ready,
@@ -11679,9 +13336,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         },
                                     )
                             live_mode = configured_mode == "LIVE" or (
-                                str(os.getenv("ENABLE_LIVE", "false"))
-                                .strip()
-                                .lower()
+                                str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
                                 in {"1", "true", "yes", "on"}
                             )
                             quote_capability = _resolve_quote_capability(ctx)
@@ -11696,7 +13351,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                             ws_ltp_proof_fn = getattr(
                                 ctx.market_data_manager, "has_fresh_ws_ltp", None
                             )
-                            ws_ltp_proof = bool(ws_ltp_proof_fn()) if callable(ws_ltp_proof_fn) else False
+                            ws_ltp_proof = (
+                                bool(ws_ltp_proof_fn())
+                                if callable(ws_ltp_proof_fn)
+                                else False
+                            )
                             ws_quote_for_gate = bool(ws_quote_proof or ws_ltp_proof)
                             if (
                                 ws_quote_for_gate
@@ -11732,16 +13391,24 @@ async def startup_sequence(ctx: BotContext) -> None:
                             missing_soft: list[str] = []
                             if "futures" in set(missing_hard):
                                 missing_soft.append("futures")
-                                missing_hard = [item for item in missing_hard if item != "futures"]
+                                missing_hard = [
+                                    item for item in missing_hard if item != "futures"
+                                ]
                                 LOGGER.info(
                                     "SOFT_READINESS_MISSING missing=futures action=continue_with_spot_option_context",
-                                    extra={"event": "SOFT_READINESS_MISSING", "missing": "futures", "action": "continue_with_spot_option_context"},
+                                    extra={
+                                        "event": "SOFT_READINESS_MISSING",
+                                        "missing": "futures",
+                                        "action": "continue_with_spot_option_context",
+                                    },
                                 )
                             basket_universe = cast(
                                 Mapping[str, Any],
                                 getattr(ctx, "active_trading_universe", {}) or {},
                             )
-                            option_symbols = list(basket_universe.get("option_symbols", []) or [])
+                            option_symbols = list(
+                                basket_universe.get("option_symbols", []) or []
+                            )
                             selected_ce = cast(
                                 str | None,
                                 getattr(ctx, "selected_ce", None)
@@ -11754,47 +13421,116 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             ce_qr = _quote_readiness_for_symbol(ctx, selected_ce)
                             pe_qr = _quote_readiness_for_symbol(ctx, selected_pe)
-                            quote_ce = selected_ce if ce_qr.tradable_quote_ready else None
-                            quote_pe = selected_pe if pe_qr.tradable_quote_ready else None
-                            hydrated_ce = _count_symbol_bars(ctx, selected_ce) if selected_ce else 0
-                            hydrated_pe = _count_symbol_bars(ctx, selected_pe) if selected_pe else 0
-                            option_ticks_ready = bool(ce_qr.tradable_quote_ready and pe_qr.tradable_quote_ready)
+                            quote_ce = (
+                                selected_ce if ce_qr.tradable_quote_ready else None
+                            )
+                            quote_pe = (
+                                selected_pe if pe_qr.tradable_quote_ready else None
+                            )
+                            hydrated_ce = (
+                                _count_symbol_bars(ctx, selected_ce)
+                                if selected_ce
+                                else 0
+                            )
+                            hydrated_pe = (
+                                _count_symbol_bars(ctx, selected_pe)
+                                if selected_pe
+                                else 0
+                            )
+                            option_ticks_ready = bool(
+                                ce_qr.tradable_quote_ready
+                                and pe_qr.tradable_quote_ready
+                            )
                             futures_ready = "futures" not in set(missing_soft)
-                            atm_ce_ready = bool(selected_ce and (ce_qr.tradable_quote_ready or hydrated_ce >= 3))
-                            atm_pe_ready = bool(selected_pe and (pe_qr.tradable_quote_ready or hydrated_pe >= 3))
-                            req_atm_ce = readiness_state.get("requirements", {}).get("atm_ce")
-                            req_atm_pe = readiness_state.get("requirements", {}).get("atm_pe")
+                            atm_ce_ready = bool(
+                                selected_ce
+                                and (ce_qr.tradable_quote_ready or hydrated_ce >= 3)
+                            )
+                            atm_pe_ready = bool(
+                                selected_pe
+                                and (pe_qr.tradable_quote_ready or hydrated_pe >= 3)
+                            )
+                            req_atm_ce = readiness_state.get("requirements", {}).get(
+                                "atm_ce"
+                            )
+                            req_atm_pe = readiness_state.get("requirements", {}).get(
+                                "atm_pe"
+                            )
                             if quote_ce and req_atm_ce and quote_ce != req_atm_ce:
-                                LOGGER.info("ATM_CE_SUBSTITUTED_WITH_READY_OPTION atm_ce=%s ready_ce=%s", req_atm_ce, quote_ce)
+                                LOGGER.info(
+                                    "ATM_CE_SUBSTITUTED_WITH_READY_OPTION atm_ce=%s ready_ce=%s",
+                                    req_atm_ce,
+                                    quote_ce,
+                                )
                             if quote_pe and req_atm_pe and quote_pe != req_atm_pe:
-                                LOGGER.info("ATM_PE_SUBSTITUTED_WITH_READY_OPTION atm_pe=%s ready_pe=%s", req_atm_pe, quote_pe)
+                                LOGGER.info(
+                                    "ATM_PE_SUBSTITUTED_WITH_READY_OPTION atm_pe=%s ready_pe=%s",
+                                    req_atm_pe,
+                                    quote_pe,
+                                )
                             runner_running = _runner_is_running(ctx.strategy_runner)
                             ctx.spot_ready = bool(spot_ready)
-                            ctx.data_observation_ready = bool(spot_ready or ws_quote_proof or ws_ltp_proof)
+                            ctx.data_observation_ready = bool(
+                                spot_ready or ws_quote_proof or ws_ltp_proof
+                            )
                             enough_runner_symbols = bool(
-                                len(getattr(ctx.strategy_runner, "_active_symbols", set()) or []) > 0
+                                len(
+                                    getattr(
+                                        ctx.strategy_runner, "_active_symbols", set()
+                                    )
+                                    or []
+                                )
+                                > 0
                                 if ctx.strategy_runner is not None
                                 else False
                             )
                             ctx.evaluation_ready = bool(
                                 runner_running
-                                and (bool(hydrated_ce) or bool(hydrated_pe) or enough_runner_symbols)
+                                and (
+                                    bool(hydrated_ce)
+                                    or bool(hydrated_pe)
+                                    or enough_runner_symbols
+                                )
                             )
-                            spot_ready_for_live = bool(spot_ready or ws_quote_for_gate or ws_ltp_proof)
+                            spot_ready_for_live = bool(
+                                spot_ready or ws_quote_for_gate or ws_ltp_proof
+                            )
                             ctx.data_hard_ready = bool(
                                 spot_ready_for_live and atm_ce_ready and atm_pe_ready
                             )
-                            quote_event = "OPTION_TRADABLE_QUOTE_READY" if option_ticks_ready else "OPTION_TRADABLE_QUOTE_NOT_READY"
+                            quote_event = (
+                                "OPTION_TRADABLE_QUOTE_READY"
+                                if option_ticks_ready
+                                else "OPTION_TRADABLE_QUOTE_NOT_READY"
+                            )
                             LOGGER.info(
                                 "%s selected_ce=%s selected_pe=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_reason=%s pe_reason=%s",
-                                quote_event, selected_ce, selected_pe, ce_qr.tradable_quote_ready, pe_qr.tradable_quote_ready, ce_qr.reason, pe_qr.reason,
-                                extra={"event": quote_event, "selected_ce": selected_ce, "selected_pe": selected_pe, "ce_tradable_quote": ce_qr.tradable_quote_ready, "pe_tradable_quote": pe_qr.tradable_quote_ready, "ce_quote_readiness": ce_qr.to_dict(), "pe_quote_readiness": pe_qr.to_dict()},
+                                quote_event,
+                                selected_ce,
+                                selected_pe,
+                                ce_qr.tradable_quote_ready,
+                                pe_qr.tradable_quote_ready,
+                                ce_qr.reason,
+                                pe_qr.reason,
+                                extra={
+                                    "event": quote_event,
+                                    "selected_ce": selected_ce,
+                                    "selected_pe": selected_pe,
+                                    "ce_tradable_quote": ce_qr.tradable_quote_ready,
+                                    "pe_tradable_quote": pe_qr.tradable_quote_ready,
+                                    "ce_quote_readiness": ce_qr.to_dict(),
+                                    "pe_quote_readiness": pe_qr.to_dict(),
+                                },
                             )
                             LOGGER.info(
                                 "OPTION_HISTORY_READY selected_ce=%s selected_pe=%s",
                                 selected_ce,
                                 selected_pe,
-                                extra={"event": "OPTION_HISTORY_READY", "selected_ce": selected_ce, "selected_pe": selected_pe},
+                                extra={
+                                    "event": "OPTION_HISTORY_READY",
+                                    "selected_ce": selected_ce,
+                                    "selected_pe": selected_pe,
+                                },
                             )
                             ctx.mdm_strict_hard_ready = bool(hard_ready)
                             ctx.data_pipeline_ready = bool(ctx.data_hard_ready)
@@ -11807,9 +13543,32 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.live_orders_armed = False
                                 if ctx.strategy_runner is not None:
                                     status = ctx.strategy_runner.get_status()
-                                    if (not bool(status.get("running"))) and readiness_symbols:
-                                        await _ensure_strategy_runner_started(ctx, reason="paper_readiness_recovery")
-                                LOGGER.info("PAPER_EVALUATION_READY hard_ready=%s spot_ready=%s runner_running=%s", hard_ready, spot_ready, bool(ctx.strategy_runner.get_status().get("running")) if ctx.strategy_runner else False, extra={"event":"PAPER_EVALUATION_READY","hard_ready":bool(hard_ready),"spot_ready":bool(spot_ready),"live_orders_armed":False})
+                                    if (
+                                        not bool(status.get("running"))
+                                    ) and readiness_symbols:
+                                        await _ensure_strategy_runner_started(
+                                            ctx, reason="paper_readiness_recovery"
+                                        )
+                                LOGGER.info(
+                                    "PAPER_EVALUATION_READY hard_ready=%s spot_ready=%s runner_running=%s",
+                                    hard_ready,
+                                    spot_ready,
+                                    (
+                                        bool(
+                                            ctx.strategy_runner.get_status().get(
+                                                "running"
+                                            )
+                                        )
+                                        if ctx.strategy_runner
+                                        else False
+                                    ),
+                                    extra={
+                                        "event": "PAPER_EVALUATION_READY",
+                                        "hard_ready": bool(hard_ready),
+                                        "spot_ready": bool(spot_ready),
+                                        "live_orders_armed": False,
+                                    },
+                                )
                             if ctx.data_hard_ready:
                                 LOGGER.info(
                                     "DATA_PIPELINE_READY hard_ready=%s spot_ready=%s symbols_ready=%s",
@@ -11833,39 +13592,129 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 )
                                 or 30
                             )
-                            context_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
+                            context_min_bars = int(
+                                os.getenv(
+                                    "READINESS_CONTEXT_MIN_BARS",
+                                    os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20"),
+                                )
+                                or 20
+                            )
                             hydration_statuses = _hydration_status_map(
                                 ctx,
                                 required_option_bars=option_exec_min_bars,
                                 required_context_bars=context_min_bars,
                             )
-                            spot_hydration = _status_for_role(hydration_statuses, "spot")
-                            futures_hydration = _status_for_role(hydration_statuses, "futures_context")
-                            ce_hydration = _status_for_role(hydration_statuses, "selected_ce")
-                            pe_hydration = _status_for_role(hydration_statuses, "selected_pe")
-                            hydrated_ce = min(ce_hydration.mdm_bars, ce_hydration.runner_bars, ce_hydration.indicator_bars) if ce_hydration else 0
-                            hydrated_pe = min(pe_hydration.mdm_bars, pe_hydration.runner_bars, pe_hydration.indicator_bars) if pe_hydration else 0
-                            ce_qr_runtime = _quote_readiness_for_symbol(ctx, selected_ce)
-                            pe_qr_runtime = _quote_readiness_for_symbol(ctx, selected_pe)
-                            quote_ce = selected_ce if ce_qr_runtime.tradable_quote_ready else None
-                            quote_pe = selected_pe if pe_qr_runtime.tradable_quote_ready else None
-                            option_ticks_ready = bool(ce_qr_runtime.tradable_quote_ready and pe_qr_runtime.tradable_quote_ready)
-                            spot_ready = bool(spot_hydration and spot_hydration.ready_for_evaluation)
-                            futures_ready = bool(futures_hydration and futures_hydration.ready_for_evaluation) if (basket_universe.get("futures_symbol") or basket_universe.get("future_symbol")) else True
-                            atm_ce_ready = bool(ce_hydration and ce_hydration.ready_for_evaluation)
-                            atm_pe_ready = bool(pe_hydration and pe_hydration.ready_for_evaluation)
+                            spot_hydration = _status_for_role(
+                                hydration_statuses, "spot"
+                            )
+                            futures_hydration = _status_for_role(
+                                hydration_statuses, "futures_context"
+                            )
+                            ce_hydration = _status_for_role(
+                                hydration_statuses, "selected_ce"
+                            )
+                            pe_hydration = _status_for_role(
+                                hydration_statuses, "selected_pe"
+                            )
+                            hydrated_ce = (
+                                min(
+                                    ce_hydration.mdm_bars,
+                                    ce_hydration.runner_bars,
+                                    ce_hydration.indicator_bars,
+                                )
+                                if ce_hydration
+                                else 0
+                            )
+                            hydrated_pe = (
+                                min(
+                                    pe_hydration.mdm_bars,
+                                    pe_hydration.runner_bars,
+                                    pe_hydration.indicator_bars,
+                                )
+                                if pe_hydration
+                                else 0
+                            )
+                            ce_qr_runtime = _quote_readiness_for_symbol(
+                                ctx, selected_ce
+                            )
+                            pe_qr_runtime = _quote_readiness_for_symbol(
+                                ctx, selected_pe
+                            )
+                            quote_ce = (
+                                selected_ce
+                                if ce_qr_runtime.tradable_quote_ready
+                                else None
+                            )
+                            quote_pe = (
+                                selected_pe
+                                if pe_qr_runtime.tradable_quote_ready
+                                else None
+                            )
+                            option_ticks_ready = bool(
+                                ce_qr_runtime.tradable_quote_ready
+                                and pe_qr_runtime.tradable_quote_ready
+                            )
+                            spot_ready = bool(
+                                spot_hydration and spot_hydration.ready_for_evaluation
+                            )
+                            futures_ready = (
+                                bool(
+                                    futures_hydration
+                                    and futures_hydration.ready_for_evaluation
+                                )
+                                if (
+                                    basket_universe.get("futures_symbol")
+                                    or basket_universe.get("future_symbol")
+                                )
+                                else True
+                            )
+                            atm_ce_ready = bool(
+                                ce_hydration and ce_hydration.ready_for_evaluation
+                            )
+                            atm_pe_ready = bool(
+                                pe_hydration and pe_hydration.ready_for_evaluation
+                            )
                             ctx.spot_ready = bool(spot_ready)
-                            ctx.evaluation_ready = bool(runner_running and spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
-                            ctx.data_hard_ready = bool(spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
-                            hydration_blockers = list(dict.fromkeys([reason for status in hydration_statuses.values() for reason in status.blocker_reasons]))
+                            ctx.evaluation_ready = bool(
+                                runner_running
+                                and spot_ready
+                                and futures_ready
+                                and atm_ce_ready
+                                and atm_pe_ready
+                            )
+                            ctx.data_hard_ready = bool(
+                                spot_ready
+                                and futures_ready
+                                and atm_ce_ready
+                                and atm_pe_ready
+                            )
+                            hydration_blockers = list(
+                                dict.fromkeys(
+                                    [
+                                        reason
+                                        for status in hydration_statuses.values()
+                                        for reason in status.blocker_reasons
+                                    ]
+                                )
+                            )
                             LOGGER.info(
                                 "READINESS_BLOCKER_SUMMARY blockers=%s data_hard_ready=%s evaluation_ready=%s execution_ready=%s live_orders_armed=%s",
                                 hydration_blockers,
                                 bool(ctx.data_hard_ready),
                                 bool(ctx.evaluation_ready),
-                                bool(ce_hydration and pe_hydration and ce_hydration.ready_for_execution and pe_hydration.ready_for_execution),
+                                bool(
+                                    ce_hydration
+                                    and pe_hydration
+                                    and ce_hydration.ready_for_execution
+                                    and pe_hydration.ready_for_execution
+                                ),
                                 bool(getattr(ctx, "live_orders_armed", False)),
-                                extra={"event": "READINESS_BLOCKER_SUMMARY", "blockers": hydration_blockers, "data_hard_ready": bool(ctx.data_hard_ready), "evaluation_ready": bool(ctx.evaluation_ready)},
+                                extra={
+                                    "event": "READINESS_BLOCKER_SUMMARY",
+                                    "blockers": hydration_blockers,
+                                    "data_hard_ready": bool(ctx.data_hard_ready),
+                                    "evaluation_ready": bool(ctx.evaluation_ready),
+                                },
                             )
                             armed, blocking_reasons = compute_live_readiness(
                                 live_mode=bool(live_mode),
@@ -11892,9 +13741,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "quote_available": False,
                                     },
                                 )
-                            if live_mode and armed and bool(getattr(ctx, "live_orders_armed", False)):
+                            if (
+                                live_mode
+                                and armed
+                                and bool(getattr(ctx, "live_orders_armed", False))
+                            ):
                                 ctx.trading_ready = bool(ctx.data_hard_ready)
-                                previous_mode = str(getattr(ctx, "readiness_mode", "DATA_WARMUP"))
+                                previous_mode = str(
+                                    getattr(ctx, "readiness_mode", "DATA_WARMUP")
+                                )
                                 ctx.readiness_mode = "LIVE_READY"
                                 ctx.effective_mode = ctx.readiness_mode
                                 LOGGER.info(
@@ -11917,7 +13772,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             elif live_mode:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
-                                previous_mode = str(getattr(ctx, "readiness_mode", "DATA_WARMUP"))
+                                previous_mode = str(
+                                    getattr(ctx, "readiness_mode", "DATA_WARMUP")
+                                )
                                 ctx.readiness_mode = (
                                     "EVALUATION_READY"
                                     if bool(ctx.evaluation_ready)
@@ -11925,7 +13782,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 )
                                 ctx.effective_mode = ctx.readiness_mode
                                 try:
-                                    _market_closed_now = get_market_state() != MarketState.OPEN
+                                    _market_closed_now = (
+                                        get_market_state() != MarketState.OPEN
+                                    )
                                 except Exception:
                                     _market_closed_now = False
                                 LOGGER.info(
@@ -11933,10 +13792,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     ctx.readiness_mode,
                                     (
                                         "market_closed"
-                                        if (ctx.readiness_mode == "EVALUATION_READY" and _market_closed_now)
-                                        else "selected_option_history_or_quote_not_ready"
-                                        if ctx.readiness_mode == "EVALUATION_READY"
-                                        else "awaiting_spot_or_active_basket"
+                                        if (
+                                            ctx.readiness_mode == "EVALUATION_READY"
+                                            and _market_closed_now
+                                        )
+                                        else (
+                                            "selected_option_history_or_quote_not_ready"
+                                            if ctx.readiness_mode == "EVALUATION_READY"
+                                            else "awaiting_spot_or_active_basket"
+                                        )
                                     ),
                                 )
                                 if previous_mode != ctx.readiness_mode:
@@ -11944,13 +13808,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "STARTUP_MODE_TRANSITION from=%s to=%s reason=%s",
                                         previous_mode,
                                         ctx.readiness_mode,
-                                        "active_basket_ready"
-                                        if ctx.readiness_mode == "EVALUATION_READY"
-                                        else "warmup_guard",
+                                        (
+                                            "active_basket_ready"
+                                            if ctx.readiness_mode == "EVALUATION_READY"
+                                            else "warmup_guard"
+                                        ),
                                     )
                                 LOGGER.info(
                                     "LIVE_ORDER_ARM_BLOCKED reason=%s ce_bars=%s pe_bars=%s required=%s indicators_ready=%s quote_ready=%s",
-                                    ",".join(data_warmup_reasons) if data_warmup_reasons else "unknown",
+                                    (
+                                        ",".join(data_warmup_reasons)
+                                        if data_warmup_reasons
+                                        else "unknown"
+                                    ),
                                     hydrated_ce,
                                     hydrated_pe,
                                     option_exec_min_bars,
@@ -11969,7 +13839,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             "spot_ready": spot_ready,
                                         },
                                     )
-                                if "market_data_proof_unavailable" in data_warmup_reasons:
+                                if (
+                                    "market_data_proof_unavailable"
+                                    in data_warmup_reasons
+                                ):
                                     LOGGER.error(
                                         "LIVE_TRADING_BLOCKED reason=market_data_proof_unavailable",
                                         extra={
@@ -11988,20 +13861,48 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         },
                                     )
                             data_warmup_reason: str | None = (
-                                ",".join(data_warmup_reasons) if data_warmup_reasons else None
+                                ",".join(data_warmup_reasons)
+                                if data_warmup_reasons
+                                else None
                             )
                             ctx.live_block_reason = data_warmup_reason
-                            runtime_reason = "LIVE" if (live_mode and armed) else ctx.live_block_reason
+                            runtime_reason = (
+                                "LIVE"
+                                if (live_mode and armed)
+                                else ctx.live_block_reason
+                            )
                             if ctx.strategy_runner is not None and hasattr(
                                 ctx.strategy_runner, "set_runtime_readiness"
                             ):
-                                _basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
-                                _selected_ce = getattr(ctx, "selected_ce", None) or _basket.get("selected_ce") or _basket.get("atm_ce")
-                                _selected_pe = getattr(ctx, "selected_pe", None) or _basket.get("selected_pe") or _basket.get("atm_pe")
+                                _basket = cast(
+                                    dict[str, object],
+                                    getattr(ctx, "active_trading_universe", {}) or {},
+                                )
+                                _selected_ce = (
+                                    getattr(ctx, "selected_ce", None)
+                                    or _basket.get("selected_ce")
+                                    or _basket.get("atm_ce")
+                                )
+                                _selected_pe = (
+                                    getattr(ctx, "selected_pe", None)
+                                    or _basket.get("selected_pe")
+                                    or _basket.get("atm_pe")
+                                )
                                 _atm_strike = _basket.get("atm_strike")
-                                _option_symbols = list(_basket.get("option_symbols") or _basket.get("symbols") or [])
-                                if hasattr(ctx.strategy_runner, "set_active_option_context"):
-                                    ctx.strategy_runner.set_active_option_context(selected_ce=cast(str | None, _selected_ce), selected_pe=cast(str | None, _selected_pe), atm_strike=_atm_strike, option_symbols=_option_symbols)
+                                _option_symbols = list(
+                                    _basket.get("option_symbols")
+                                    or _basket.get("symbols")
+                                    or []
+                                )
+                                if hasattr(
+                                    ctx.strategy_runner, "set_active_option_context"
+                                ):
+                                    ctx.strategy_runner.set_active_option_context(
+                                        selected_ce=cast(str | None, _selected_ce),
+                                        selected_pe=cast(str | None, _selected_pe),
+                                        atm_strike=_atm_strike,
+                                        option_symbols=_option_symbols,
+                                    )
                                 ctx.strategy_runner.set_runtime_readiness(
                                     data_hard_ready=bool(ctx.data_hard_ready),
                                     evaluation_ready=bool(ctx.evaluation_ready),
@@ -12011,7 +13912,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     selected_pe=cast(str | None, _selected_pe),
                                     atm_strike=_atm_strike,
                                     option_symbols=_option_symbols,
-                                    execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}),
+                                    execution_ready_by_symbol=dict(
+                                        getattr(ctx, "execution_ready_by_symbol", {})
+                                        or {}
+                                    ),
                                 )
                                 LOGGER.info(
                                     "RUNTIME_READINESS_PUSHED data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s",
@@ -12023,7 +13927,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "event": "RUNTIME_READINESS_PUSHED",
                                         "data_hard_ready": bool(ctx.data_hard_ready),
                                         "evaluation_ready": bool(ctx.evaluation_ready),
-                                        "live_orders_armed": bool(ctx.live_orders_armed),
+                                        "live_orders_armed": bool(
+                                            ctx.live_orders_armed
+                                        ),
                                         "reason": runtime_reason,
                                     },
                                 )
@@ -12054,7 +13960,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             ctx.live_orders_armed = False
                             ctx.trading_ready = False
-                            ctx.live_block_reason = "startup_pipeline_incomplete:" + ",".join(missing_hard if "missing_hard" in locals() else [])
+                            ctx.live_block_reason = (
+                                "startup_pipeline_incomplete:"
+                                + ",".join(
+                                    missing_hard if "missing_hard" in locals() else []
+                                )
+                            )
                             ctx.degraded_mode = True
                             LOGGER.error(
                                 "STARTUP_PIPELINE_INCOMPLETE_CONTINUING mode=%s missing_hard=%s missing_soft=%s",
@@ -12063,8 +13974,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 (missing_soft if "missing_soft" in locals() else []),
                             )
                     if not _data_ready(ctx.market_data_manager):
-                        LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
-
+                        LOGGER.debug(
+                            "startup_tick_gate: waiting_for_live_ticks (expected at boot)"
+                        )
 
                 if ctx.telegram_bot:
                     LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
@@ -12072,7 +13984,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                     LOGGER.info("✅ Telegram Bot polling active — commands now live.")
 
                 # ✅ FIX: Mark indicators as warmed up now that hydration is complete
-                if ctx.indicator_engine and hasattr(ctx.indicator_engine, "atr_provider"):
+                if ctx.indicator_engine and hasattr(
+                    ctx.indicator_engine, "atr_provider"
+                ):
                     atr_prov = ctx.indicator_engine.atr_provider
                     if hasattr(atr_prov, "mark_warmed_up"):
                         atr_prov.mark_warmed_up()
@@ -12084,7 +13998,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.info(
                     "INDICATOR_READINESS_SYNC ready=%s",
                     indicator_ready,
-                    extra={"event": "INDICATOR_READINESS_SYNC", "ready": indicator_ready},
+                    extra={
+                        "event": "INDICATOR_READINESS_SYNC",
+                        "ready": indicator_ready,
+                    },
                 )
 
                 ctx.subsystems_started = True
@@ -12116,7 +14033,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                     logger=LOGGER,
                 )
             except Exception as reconcile_exc:
-                LOGGER.error("reconcile_with_broker failed (non-fatal): %s", reconcile_exc)
+                LOGGER.error(
+                    "reconcile_with_broker failed (non-fatal): %s", reconcile_exc
+                )
             # ────────────────────────────────────────────────────────────────
 
             async def _sync_loop():
@@ -12302,25 +14221,89 @@ async def startup_sequence(ctx: BotContext) -> None:
         runner_status = ctx.strategy_runner.get_status() if ctx.strategy_runner else {}
         runner_running = bool(runner_status.get("running"))
     except Exception:
-        runner_running = bool(getattr(ctx.strategy_runner, "_running", False)) if ctx.strategy_runner else False
-    mode = str(getattr(ctx, "effective_mode", None) or getattr(ctx.settings, "execution_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
-    paper_eval_ready = mode in {"PAPER", "SHADOW"} and bool(getattr(ctx, "data_observation_ready", False)) and runner_running
-    live_ready = mode == "LIVE" and bool(getattr(ctx, "trading_ready", False)) and bool(getattr(ctx, "live_orders_armed", False)) and runner_running
+        runner_running = (
+            bool(getattr(ctx.strategy_runner, "_running", False))
+            if ctx.strategy_runner
+            else False
+        )
+    mode = str(
+        getattr(ctx, "effective_mode", None)
+        or getattr(ctx.settings, "execution_mode", None)
+        or os.getenv("EXECUTION_MODE", "PAPER")
+    ).upper()
+    paper_eval_ready = (
+        mode in {"PAPER", "SHADOW"}
+        and bool(getattr(ctx, "data_observation_ready", False))
+        and runner_running
+    )
+    live_ready = (
+        mode == "LIVE"
+        and bool(getattr(ctx, "trading_ready", False))
+        and bool(getattr(ctx, "live_orders_armed", False))
+        and runner_running
+    )
     if paper_eval_ready:
-        LOGGER.info("STARTUP_COMPLETE_OBSERVATION_READY mode=%s runner_running=%s live_orders_armed=%s", mode, runner_running, bool(getattr(ctx, "live_orders_armed", False)), extra={"event":"STARTUP_COMPLETE_OBSERVATION_READY","mode":mode,"runner_running":runner_running,"live_orders_armed":bool(getattr(ctx, "live_orders_armed", False))})
+        LOGGER.info(
+            "STARTUP_COMPLETE_OBSERVATION_READY mode=%s runner_running=%s live_orders_armed=%s",
+            mode,
+            runner_running,
+            bool(getattr(ctx, "live_orders_armed", False)),
+            extra={
+                "event": "STARTUP_COMPLETE_OBSERVATION_READY",
+                "mode": mode,
+                "runner_running": runner_running,
+                "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False)),
+            },
+        )
     elif live_ready:
-        LOGGER.info("STARTUP_COMPLETE_LIVE_READY mode=%s runner_running=%s", mode, runner_running, extra={"event":"STARTUP_COMPLETE_LIVE_READY","mode":mode,"runner_running":runner_running})
+        LOGGER.info(
+            "STARTUP_COMPLETE_LIVE_READY mode=%s runner_running=%s",
+            mode,
+            runner_running,
+            extra={
+                "event": "STARTUP_COMPLETE_LIVE_READY",
+                "mode": mode,
+                "runner_running": runner_running,
+            },
+        )
     else:
         if mode == "LIVE":
-            LOGGER.warning("STARTUP_DEGRADED runner_running=%s data_observation_ready=%s trading_ready=%s live_orders_armed=%s", runner_running, bool(getattr(ctx, "data_observation_ready", False)), bool(getattr(ctx, "trading_ready", False)), bool(getattr(ctx, "live_orders_armed", False)), extra={"event":"STARTUP_DEGRADED","runner_running":runner_running,"data_observation_ready":bool(getattr(ctx, "data_observation_ready", False)),"trading_ready":bool(getattr(ctx, "trading_ready", False)),"live_orders_armed":bool(getattr(ctx, "live_orders_armed", False))})
+            LOGGER.warning(
+                "STARTUP_DEGRADED runner_running=%s data_observation_ready=%s trading_ready=%s live_orders_armed=%s",
+                runner_running,
+                bool(getattr(ctx, "data_observation_ready", False)),
+                bool(getattr(ctx, "trading_ready", False)),
+                bool(getattr(ctx, "live_orders_armed", False)),
+                extra={
+                    "event": "STARTUP_DEGRADED",
+                    "runner_running": runner_running,
+                    "data_observation_ready": bool(
+                        getattr(ctx, "data_observation_ready", False)
+                    ),
+                    "trading_ready": bool(getattr(ctx, "trading_ready", False)),
+                    "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False)),
+                },
+            )
         elif bool(getattr(ctx, "data_observation_ready", False)):
-            LOGGER.info("DATA_PIPELINE_OBSERVATION_READY mode=%s runner_running=%s", mode, runner_running, extra={"event":"DATA_PIPELINE_OBSERVATION_READY","mode":mode,"runner_running":runner_running})
+            LOGGER.info(
+                "DATA_PIPELINE_OBSERVATION_READY mode=%s runner_running=%s",
+                mode,
+                runner_running,
+                extra={
+                    "event": "DATA_PIPELINE_OBSERVATION_READY",
+                    "mode": mode,
+                    "runner_running": runner_running,
+                },
+            )
 
 
 async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> None:
     """Best-effort, idempotent shutdown. Must never raise during FastAPI lifespan."""
     LOGGER.info("Shutting down bot... reason=%s", reason)
-    async def _call_component(name: str, obj: Any, method_names: tuple[str, ...]) -> None:
+
+    async def _call_component(
+        name: str, obj: Any, method_names: tuple[str, ...]
+    ) -> None:
         if obj is None:
             return
         for method_name in method_names:
@@ -12329,18 +14312,33 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
                 continue
             try:
                 await _maybe_await(method())
-                LOGGER.debug("SHUTDOWN_COMPONENT_OK component=%s method=%s", name, method_name)
+                LOGGER.debug(
+                    "SHUTDOWN_COMPONENT_OK component=%s method=%s", name, method_name
+                )
                 return
             except Exception as exc:
-                LOGGER.warning("SHUTDOWN_COMPONENT_FAILED component=%s method=%s error=%r", name, method_name, exc)
+                LOGGER.warning(
+                    "SHUTDOWN_COMPONENT_FAILED component=%s method=%s error=%r",
+                    name,
+                    method_name,
+                    exc,
+                )
                 return
+
     with suppress(Exception):
         ctx.trading_ready = False
     with suppress(Exception):
         ctx.live_orders_armed = False
     with suppress(Exception):
         ctx.effective_mode = "SHUTDOWN"
-    for task_name in ("instrument_refresh_task","deferred_basket_retry_task","monitor_task","heartbeat_task","reconcile_task","maintenance_task"):
+    for task_name in (
+        "instrument_refresh_task",
+        "deferred_basket_retry_task",
+        "monitor_task",
+        "heartbeat_task",
+        "reconcile_task",
+        "maintenance_task",
+    ):
         task = getattr(ctx, task_name, None)
         if task is not None:
             try:
@@ -12356,7 +14354,9 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     order_manager = getattr(ctx, "order_manager", None)
     bracket_manager = getattr(ctx, "bracket_manager", None)
     position_manager = getattr(ctx, "position_manager", None)
-    market_data_manager = getattr(ctx, "market_data_manager", None) or getattr(ctx, "mdm", None)
+    market_data_manager = getattr(ctx, "market_data_manager", None) or getattr(
+        ctx, "mdm", None
+    )
     stream_supervisor = getattr(ctx, "stream_supervisor", None)
     streamer = getattr(ctx, "streamer", None)
     message_bus = getattr(ctx, "message_bus", None)
@@ -12365,7 +14365,9 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     instrument_db = getattr(ctx, "instrument_db", None)
     state_tracker = getattr(ctx, "state_tracker", None)
     trade_journal = getattr(ctx, "trade_journal", None)
-    telegram = getattr(ctx, "telegram_controller", None) or getattr(ctx, "telegram", None)
+    telegram = getattr(ctx, "telegram_controller", None) or getattr(
+        ctx, "telegram", None
+    )
     proc = getattr(ctx, "proc", None) or getattr(ctx, "process", None)
     if runner is not None:
         with suppress(Exception):
@@ -12376,11 +14378,19 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     except Exception as exc:
         LOGGER.warning("SHUTDOWN_CLOSE_POSITIONS_FAILED error=%r", exc)
     await _call_component("strategy_runner", runner, ("stop", "shutdown", "close"))
-    await _call_component("bracket_manager", bracket_manager, ("stop", "shutdown", "close"))
-    await _call_component("order_manager", order_manager, ("stop_monitoring", "stop", "shutdown", "close"))
-    await _call_component("stream_supervisor", stream_supervisor, ("stop", "shutdown", "close"))
+    await _call_component(
+        "bracket_manager", bracket_manager, ("stop", "shutdown", "close")
+    )
+    await _call_component(
+        "order_manager", order_manager, ("stop_monitoring", "stop", "shutdown", "close")
+    )
+    await _call_component(
+        "stream_supervisor", stream_supervisor, ("stop", "shutdown", "close")
+    )
     await _call_component("streamer", streamer, ("stop", "shutdown", "close"))
-    await _call_component("market_data_manager", market_data_manager, ("stop", "shutdown", "close"))
+    await _call_component(
+        "market_data_manager", market_data_manager, ("stop", "shutdown", "close")
+    )
     await _call_component("message_bus", message_bus, ("stop", "shutdown", "close"))
     try:
         if data_hub is not None and hasattr(data_hub, "checkpoint"):
@@ -12422,7 +14432,9 @@ def _should_reconcile_now(ctx: BotContext) -> bool:
     Disable this optimization with HEALTH_RECONCILE_SKIP_WHEN_CLOSED=false.
     """
     try:
-        if os.getenv("HEALTH_RECONCILE_SKIP_WHEN_CLOSED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        if os.getenv(
+            "HEALTH_RECONCILE_SKIP_WHEN_CLOSED", "true"
+        ).strip().lower() not in {"1", "true", "yes", "on"}:
             return True
         from nifty_scalper_bot.risk.session_gate import (
             MARKET_CLOSE,
@@ -12479,9 +14491,9 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         "broker client wrapping is incorrect. Falling back to empty list."
                     )
                     if asyncio.iscoroutine(raw):
-                        raw.close()          # suppress ResourceWarning on coroutines
+                        raw.close()  # suppress ResourceWarning on coroutines
                     elif hasattr(raw, "cancel"):
-                        raw.cancel()         # cancel Tasks / Futures
+                        raw.cancel()  # cancel Tasks / Futures
                     raw = {}
             except Exception as _pos_err:
                 LOGGER.error(
@@ -12496,7 +14508,9 @@ async def _reconcile_state(ctx: BotContext) -> None:
                     },
                     exc_info=True,
                 )
-                raise RuntimeError(f"broker_position_fetch_failed:{_pos_err}") from _pos_err
+                raise RuntimeError(
+                    f"broker_position_fetch_failed:{_pos_err}"
+                ) from _pos_err
             broker_positions: list[Mapping[str, Any]] = []
             if isinstance(raw, list):
                 broker_positions = [p for p in raw if isinstance(p, Mapping)]
@@ -12513,7 +14527,9 @@ async def _reconcile_state(ctx: BotContext) -> None:
         return cast(list[Mapping[str, Any]], _run_sync_locked(_sync_operation))
 
     # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
-    LOGGER.info("POSITION_RECONCILE_STARTED", extra={"event": "POSITION_RECONCILE_STARTED"})
+    LOGGER.info(
+        "POSITION_RECONCILE_STARTED", extra={"event": "POSITION_RECONCILE_STARTED"}
+    )
     ctx.position_reconciliation_started = True
     ctx.position_reconciliation_started_at = datetime.now(timezone.utc)
     ctx.position_reconciliation_completed = False
@@ -12557,7 +14573,10 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             ctx.unprotected_broker_positions.add(str(norm_symbol))
                         LOGGER.warning(
                             f"⚠️ ORPHAN DETECTED: {norm_symbol} (Qty: {pos.quantity}). Auto-Guarding...",
-                            extra={"event": "UNPROTECTED_POSITION_BLOCKING_ENTRIES", "symbol": norm_symbol},
+                            extra={
+                                "event": "UNPROTECTED_POSITION_BLOCKING_ENTRIES",
+                                "symbol": norm_symbol,
+                            },
                         )
 
                         avg_price = float(
@@ -12584,7 +14603,11 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             "POSITION_ADOPTED_TO_BRACKET symbol=%s quantity=%s",
                             norm_symbol,
                             pos.quantity,
-                            extra={"event": "POSITION_ADOPTED_TO_BRACKET", "symbol": norm_symbol, "quantity": pos.quantity},
+                            extra={
+                                "event": "POSITION_ADOPTED_TO_BRACKET",
+                                "symbol": norm_symbol,
+                                "quantity": pos.quantity,
+                            },
                         )
 
             # =================================================================
@@ -12622,7 +14645,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             # blocked and the position left on a wide guard SL.
                             _in_fill_window = False
                             for _bid in list(
-                                (getattr(bm, "_symbol_map", {}) or {}).get(ghost_sym) or []
+                                (getattr(bm, "_symbol_map", {}) or {}).get(ghost_sym)
+                                or []
                             ):
                                 _b = (getattr(bm, "_brackets", {}) or {}).get(_bid)
                                 if _b is None:
@@ -12655,13 +14679,19 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             LOGGER.warning(
                                 "STALE_BRACKET_RECONCILED_FLAT symbol=%s",
                                 ghost_sym,
-                                extra={"event": "STALE_BRACKET_RECONCILED_FLAT", "symbol": ghost_sym},
+                                extra={
+                                    "event": "STALE_BRACKET_RECONCILED_FLAT",
+                                    "symbol": ghost_sym,
+                                },
                             )
             ctx.position_reconciliation_failed = False
             ctx.position_reconciliation_error = None
             ctx.position_reconciliation_completed = True
             ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
-            LOGGER.info("POSITION_RECONCILE_SUCCESS", extra={"event": "POSITION_RECONCILE_SUCCESS"})
+            LOGGER.info(
+                "POSITION_RECONCILE_SUCCESS",
+                extra={"event": "POSITION_RECONCILE_SUCCESS"},
+            )
 
         except Exception as exc:
             ctx.position_reconciliation_completed = False
@@ -12824,12 +14854,17 @@ def _health_check(ctx: BotContext) -> None:
         trading_ready = bool(getattr(ctx, "trading_ready", False))
         live_orders_armed = bool(getattr(ctx, "live_orders_armed", False))
         evaluation_expected = configured_mode in {"PAPER", "SHADOW", "LIVE"}
-        live_orders_expected = configured_mode == "LIVE" and bool(ctx.settings.enable_live)
+        live_orders_expected = configured_mode == "LIVE" and bool(
+            ctx.settings.enable_live
+        )
         expected_active = bool(
             evaluation_expected
             and state == MarketState.OPEN
             and trading_ready
-            and (configured_mode in {"PAPER", "SHADOW"} or (live_orders_armed and live_orders_expected))
+            and (
+                configured_mode in {"PAPER", "SHADOW"}
+                or (live_orders_armed and live_orders_expected)
+            )
             and not ctx.shadow_mode_enabled
         )
         inactive_reason = "runner_task_not_started"
@@ -12847,7 +14882,9 @@ def _health_check(ctx: BotContext) -> None:
             inactive_reason = "live_blocked"
         elif startup_age_s < 120.0:
             inactive_reason = "startup_grace"
-        elif status.get("readiness_unmet") or not trading_ready or not live_orders_armed:
+        elif (
+            status.get("readiness_unmet") or not trading_ready or not live_orders_armed
+        ):
             inactive_reason = "readiness_unmet"
         elif status.get("startup_degraded"):
             inactive_reason = "degraded_startup"
@@ -13131,7 +15168,7 @@ class NiftyScalperApp:
             with suppress(Exception):
                 await self._ctx.telegram_application.shutdown()
             self._telegram_application_started = False
-        
+
         # ✅ FIX: Properly call telegram_bot.stop() and cancel the task
         if self._ctx.telegram_bot is not None:
             await self._ctx.telegram_bot.stop()
@@ -13140,7 +15177,7 @@ class NiftyScalperApp:
                 with suppress(asyncio.CancelledError):
                     await self._telegram_task
                 self._telegram_task = None
-                
+
         await shutdown_sequence(self._ctx)
         self._running = False
 
