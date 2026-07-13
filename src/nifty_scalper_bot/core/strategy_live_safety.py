@@ -8,8 +8,10 @@ approved signals are idempotent without depending on every strategy to stamp it.
 
 from __future__ import annotations
 
-from contextlib import suppress
 import os
+import time
+from contextlib import suppress
+from datetime import datetime, timezone
 from typing import Any
 
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
@@ -40,7 +42,11 @@ def _is_live(manager: Any) -> bool:
             return bool(checker())
     mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
     live = _env_true("ENABLE_LIVE") or _env_true("ENABLE_LIVE_TRADING")
-    paper_shadow = _env_true("PAPER_MODE") or _env_true("PAPER__ENABLED") or _env_true("SHADOW_MODE")
+    paper_shadow = (
+        _env_true("PAPER_MODE")
+        or _env_true("PAPER__ENABLED")
+        or _env_true("SHADOW_MODE")
+    )
     return mode == "LIVE" and live and not paper_shadow
 
 
@@ -65,6 +71,171 @@ def _required_bars(manager: Any) -> int:
     with suppress(Exception):
         return max(1, int(raw or policy.option_eval_min_bars))
     return max(1, int(policy.option_eval_min_bars))
+
+
+def _max_age_seconds(name: str, default: float) -> float:
+    with suppress(Exception):
+        return max(0.0, float(os.getenv(name, str(default)) or default))
+    return default
+
+
+def _coerce_epoch_seconds(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        raw = float(value)
+        if raw > 1_000_000_000_000:
+            return raw / 1000.0
+        return raw
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    text = str(value).strip()
+    if not text:
+        return None
+    with suppress(Exception):
+        return _coerce_epoch_seconds(float(text))
+    with suppress(Exception):
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return None
+
+
+def _latest_bar_epoch(manager: Any, symbol: str) -> float | None:
+    getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
+    if not callable(getter):
+        return None
+    with suppress(Exception):
+        history = list(getter(symbol) or [])
+    if not history:
+        return None
+    latest = history[-1]
+    if isinstance(latest, dict):
+        for key in ("timestamp", "timestamp_ms", "ts", "date", "time"):
+            epoch = _coerce_epoch_seconds(latest.get(key))
+            if epoch is not None:
+                return epoch
+    for key in ("timestamp", "timestamp_ms", "ts", "date", "time"):
+        epoch = _coerce_epoch_seconds(getattr(latest, key, None))
+        if epoch is not None:
+            return epoch
+    return None
+
+
+def _latest_bar_fresh_block(manager: Any, symbol: str) -> dict[str, Any] | None:
+    max_age = _max_age_seconds("STRATEGY_LATEST_BAR_MAX_AGE_SECONDS", 180.0)
+    epoch = _latest_bar_epoch(manager, symbol)
+    if epoch is None:
+        return {"reason": "live_latest_closed_bar_missing", "max_bar_age_s": max_age}
+    age = max(0.0, time.time() - epoch)
+    if age > max_age:
+        return {
+            "reason": "live_latest_closed_bar_stale",
+            "latest_bar_ts": epoch,
+            "bar_age_s": age,
+            "max_bar_age_s": max_age,
+        }
+    return None
+
+
+def _live_option_tick_block(manager: Any, symbol: str) -> dict[str, Any] | None:
+    max_age = _max_age_seconds("STRATEGY_LIVE_TICK_MAX_AGE_SECONDS", 5.0)
+    mdm = getattr(manager, "_market_data_manager", None) or getattr(
+        getattr(manager, "_data_hub", None), "_mdm", None
+    )
+    age_fn = getattr(mdm, "time_since_last_live_ws_tick", None)
+    if not callable(age_fn):
+        return None
+    with suppress(Exception):
+        age = age_fn(symbol)
+        if age is not None and float(age) <= max_age:
+            return None
+        if callable(getattr(mdm, "request_fallback_refresh", None)):
+            with suppress(Exception):
+                mdm.request_fallback_refresh(
+                    symbol, reason="strategy_live_option_tick_stale"
+                )
+        return {
+            "reason": "live_option_tick_stale",
+            "live_tick_age_s": age,
+            "max_live_tick_age_s": max_age,
+        }
+    return {
+        "reason": "live_option_tick_freshness_unknown",
+        "max_live_tick_age_s": max_age,
+    }
+
+
+def _context_fresh_block(manager: Any, symbol: str) -> dict[str, Any] | None:
+    required = getattr(manager, "_strategy_required_context", None)
+    if required is False:
+        return None
+    indicators = getattr(manager, "_strategy_live_safety_last_indicators", {})
+    if not isinstance(indicators, dict):
+        indicators = {}
+    if indicators.get("context_fresh") is False:
+        return {"reason": "live_underlying_context_stale", "context_fresh": False}
+    max_age = _max_age_seconds("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+    ages = {
+        k: indicators.get(k)
+        for k in (
+            "spot_age_seconds",
+            "spot_tick_age_s",
+            "futures_age_seconds",
+            "futures_tick_age_s",
+        )
+    }
+    present = [float(v) for v in ages.values() if isinstance(v, (int, float))]
+    if present and min(present) > max_age:
+        return {
+            "reason": "live_underlying_context_stale",
+            "context_age_seconds": min(present),
+            "max_context_age_s": max_age,
+        }
+    if (
+        indicators.get("spot_fresh") is False
+        and indicators.get("fut_fresh") is False
+        and indicators.get("futures_fresh") is False
+    ):
+        return {
+            "reason": "live_underlying_context_stale",
+            "spot_fresh": False,
+            "fut_fresh": False,
+        }
+    return None
+
+
+def _selected_contract_block(manager: Any, symbol: str) -> dict[str, Any] | None:
+    indicators = getattr(manager, "_strategy_live_safety_last_indicators", {})
+    if not isinstance(indicators, dict):
+        return None
+    selected = {
+        normalize_symbol(indicators.get("selected_ce")),
+        normalize_symbol(indicators.get("selected_pe")),
+    }
+    selected.discard("")
+    if selected and normalize_symbol(symbol) not in selected:
+        return {
+            "reason": "live_selected_contract_mismatch",
+            "selected_symbols": sorted(selected),
+        }
+    local_version = indicators.get("selected_contract_version") or indicators.get(
+        "active_basket_version"
+    )
+    owner_version = getattr(manager, "_active_basket_version", None)
+    if (
+        local_version not in (None, "")
+        and owner_version not in (None, "")
+        and str(local_version) != str(owner_version)
+    ):
+        return {
+            "reason": "live_selected_contract_version_stale",
+            "selected_contract_version": local_version,
+            "active_basket_version": owner_version,
+        }
+    return None
 
 
 def _hub_ready(manager: Any) -> bool | None:
@@ -123,6 +294,24 @@ def _record(
     )
 
 
+def _prime_indicator_snapshot(manager: Any, symbol: str) -> None:
+    engine = getattr(manager, "_indicator_engine", None)
+    getter = getattr(engine, "get_indicators", None)
+    if not callable(getter):
+        return
+    required = set()
+    union = getattr(manager, "_strategy_required_indicator_union", None)
+    if callable(union):
+        with suppress(Exception):
+            required = set(union() or set())
+    with suppress(Exception):
+        raw = getter(symbol, required)
+        if isinstance(raw, dict):
+            manager._strategy_live_safety_last_indicators = dict(raw)
+        elif hasattr(raw, "items"):
+            manager._strategy_live_safety_last_indicators = dict(raw)
+
+
 def _readiness_block(manager: Any, symbol: str) -> dict[str, Any] | None:
     if not _is_live(manager):
         return None
@@ -140,6 +329,17 @@ def _readiness_block(manager: Any, symbol: str) -> dict[str, Any] | None:
             "bars_available": available,
             "required_bars": required,
         }
+    for checker in (
+        _latest_bar_fresh_block,
+        _live_option_tick_block,
+        _context_fresh_block,
+        _selected_contract_block,
+    ):
+        block = checker(manager, symbol)
+        if block is not None:
+            block.setdefault("bars_available", available)
+            block.setdefault("required_bars", required)
+            return block
     return None
 
 
@@ -156,7 +356,9 @@ def _add_identity(signal: Signal) -> Signal:
             if candidate not in (None, ""):
                 metadata["timestamp"] = candidate
                 break
-    deterministic = str(metadata.get("deterministic_signal_id") or signal.deterministic_id)
+    deterministic = str(
+        metadata.get("deterministic_signal_id") or signal.deterministic_id
+    )
     metadata.setdefault("deterministic_signal_id", deterministic)
     metadata.setdefault("signal_id", deterministic)
     metadata.setdefault("idempotency_key", deterministic)
@@ -255,8 +457,12 @@ def _install_canonical_history_builder(strategy_module: Any) -> None:
     )
     from nifty_scalper_bot.strategies import signal_generator as signal_generator_module
 
-    strategy_module.build_strategy_history_context = canonical_build_strategy_history_context
-    signal_generator_module.build_strategy_history_context = canonical_build_strategy_history_context
+    strategy_module.build_strategy_history_context = (
+        canonical_build_strategy_history_context
+    )
+    signal_generator_module.build_strategy_history_context = (
+        canonical_build_strategy_history_context
+    )
 
 
 def apply_patches() -> None:
@@ -276,6 +482,7 @@ def apply_patches() -> None:
         trace_id: str | None = None,
     ) -> Signal | None:
         symbol_norm = normalize_symbol(symbol)
+        _prime_indicator_snapshot(self, symbol_norm)
         block = _readiness_block(self, symbol_norm)
         if block is not None:
             _record(
@@ -302,7 +509,10 @@ def apply_patches() -> None:
             _record(
                 self,
                 signal.symbol,
-                str(orderflow_block.get("reason") or "live_orderflow_selected_option_required"),
+                str(
+                    orderflow_block.get("reason")
+                    or "live_orderflow_selected_option_required"
+                ),
                 trace_id,
                 orderflow_block,
             )
