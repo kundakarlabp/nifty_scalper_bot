@@ -41,6 +41,7 @@ def build_strategy_history_context(
     runner_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build domain-aware strategy history metadata."""
+
     def _safe_get_bars(source: Any, sym: str) -> list[Any]:
         if source is None:
             return []
@@ -61,7 +62,12 @@ def build_strategy_history_context(
 
     def _bar_ts(bar: Any) -> Any:
         if isinstance(bar, Mapping):
-            return bar.get("timestamp") or bar.get("ts") or bar.get("datetime") or bar.get("time")
+            return (
+                bar.get("timestamp")
+                or bar.get("ts")
+                or bar.get("datetime")
+                or bar.get("time")
+            )
         return (
             getattr(bar, "timestamp", None)
             or getattr(bar, "ts", None)
@@ -72,7 +78,11 @@ def build_strategy_history_context(
     data_hub_bars = _safe_get_bars(data_hub, symbol)
     indicator_bars = _safe_get_bars(indicator_engine, symbol)
     bars: list[Any] = data_hub_bars or indicator_bars
-    history_source = "data_hub" if data_hub_bars else "indicator_engine" if indicator_bars else "unavailable"
+    history_source = (
+        "data_hub"
+        if data_hub_bars
+        else "indicator_engine" if indicator_bars else "unavailable"
+    )
 
     symbol_upper = str(symbol or "").upper()
     is_option = symbol_upper.endswith(("CE", "PE"))
@@ -83,14 +93,23 @@ def build_strategy_history_context(
     spot_count = raw_count if is_spot else 0
     underlying_count = raw_count if is_underlying_or_future else 0
     if runner_context:
-        option_count = max(option_count, _safe_int(runner_context.get("option_history_count"), 0))
-        spot_count = max(spot_count, _safe_int(runner_context.get("spot_history_count"), 0))
-        underlying_count = max(underlying_count, _safe_int(runner_context.get("underlying_history_count"), 0))
-    history_domain_used = "options" if is_option else "spot" if is_spot else "underlying"
+        option_count = max(
+            option_count, _safe_int(runner_context.get("option_history_count"), 0)
+        )
+        spot_count = max(
+            spot_count, _safe_int(runner_context.get("spot_history_count"), 0)
+        )
+        underlying_count = max(
+            underlying_count,
+            _safe_int(runner_context.get("underlying_history_count"), 0),
+        )
+    history_domain_used = (
+        "options" if is_option else "spot" if is_spot else "underlying"
+    )
     resolved_history_count = (
-        option_count if history_domain_used == "options"
-        else spot_count if history_domain_used == "spot"
-        else underlying_count
+        option_count
+        if history_domain_used == "options"
+        else spot_count if history_domain_used == "spot" else underlying_count
     )
     policy = HistoryReadinessPolicy.from_env()
     if history_domain_used == "options":
@@ -110,7 +129,9 @@ def build_strategy_history_context(
         "history_resolved_count": resolved_history_count,
         "oldest_bar_ts": None,
         "latest_bar_ts": None,
-        "history_quality": "warm" if resolved_history_count >= domain_min_required else "cold",
+        "history_quality": (
+            "warm" if resolved_history_count >= domain_min_required else "cold"
+        ),
         "history_required_min": domain_min_required,
         "history_ready": resolved_history_count >= domain_min_required,
         "smc_history_required_min": smc_min_required,
@@ -1313,7 +1334,9 @@ class StrategyManager:
     def _canonical_futures_symbol(symbol: Any) -> str | None:
         return canonical_nifty_future_symbol(symbol)
 
-    def set_active_futures_symbol(self, symbol: Any, *, source: str = "external") -> str | None:
+    def set_active_futures_symbol(
+        self, symbol: Any, *, source: str = "external"
+    ) -> str | None:
         """Cache latest active futures symbol from SSOT; not an independent resolver."""
         canonical = self._canonical_futures_symbol(symbol)
         if not canonical:
@@ -1325,7 +1348,12 @@ class StrategyManager:
                 previous,
                 canonical,
                 source,
-                extra={"event": "STRATEGY_MANAGER_ACTIVE_FUTURES_SYMBOL_UPDATED", "old_symbol": previous, "new_symbol": canonical, "source": source},
+                extra={
+                    "event": "STRATEGY_MANAGER_ACTIVE_FUTURES_SYMBOL_UPDATED",
+                    "old_symbol": previous,
+                    "new_symbol": canonical,
+                    "source": source,
+                },
             )
         self._futures_symbol = canonical
         return canonical
@@ -1341,7 +1369,9 @@ class StrategyManager:
                 symbol = None
             canonical = canonical_nifty_future_symbol(symbol)
             if canonical:
-                self.set_active_futures_symbol(canonical, source="data_hub.get_active_futures_symbol")
+                self.set_active_futures_symbol(
+                    canonical, source="data_hub.get_active_futures_symbol"
+                )
                 return canonical
 
         canonical = canonical_nifty_future_symbol(self._futures_symbol)
@@ -1413,14 +1443,23 @@ class StrategyManager:
             indicators["oldest_bar_ts"] = first.get("timestamp") or first.get("ts")
             indicators["latest_bar_ts"] = last.get("timestamp") or last.get("ts")
         else:
-            execution_mode = str(os.getenv("EXECUTION_MODE", "PAPER") or "PAPER").upper()
+            execution_mode = str(
+                os.getenv("EXECUTION_MODE", "PAPER") or "PAPER"
+            ).upper()
             is_live_mode = execution_mode == "LIVE"
             logger.info(
                 "STRATEGY_CONTEXT_HISTORY_MISSING symbol=%s strategy=elite live_mode=%s source=%s",
                 symbol,
                 is_live_mode,
                 "indicator_engine",
-                extra={"event": "STRATEGY_CONTEXT_HISTORY_MISSING", "symbol": symbol, "underlying": symbol, "strategy": "elite", "source": "indicator_engine", "live_mode": is_live_mode},
+                extra={
+                    "event": "STRATEGY_CONTEXT_HISTORY_MISSING",
+                    "symbol": symbol,
+                    "underlying": symbol,
+                    "strategy": "elite",
+                    "source": "indicator_engine",
+                    "live_mode": is_live_mode,
+                },
             )
 
         # 3. Augment with Futures Data (if needed)
@@ -1469,16 +1508,37 @@ class StrategyManager:
                 # DEBUG only: per-strategy entry is too noisy at INFO
                 logger.debug(
                     "strategy_eval_enter",
-                    extra={"event": "strategy_eval_start", "strategy": strategy.name, "symbol": symbol},
+                    extra={
+                        "event": "strategy_eval_start",
+                        "strategy": strategy.name,
+                        "symbol": symbol,
+                    },
                 )
 
                 # Gating: Min Bars
                 strategy_min_bars = getattr(strategy, "MIN_BARS_REQUIRED", 3)
                 if bar_count < strategy_min_bars:
-                    logger.debug(
-                        "strategy_skip_bars",
-                        extra={"event": "strategy_skip_bars", "strategy": strategy.name,
-                               "need": strategy_min_bars, "have": bar_count},
+                    event = (
+                        "STRATEGY_SKIPPED_HISTORY_COLD"
+                        if str(strategy.name).upper().startswith("SMC")
+                        else "strategy_skip_bars"
+                    )
+                    log_throttled(
+                        self._logger,
+                        key=f"{event}:{strategy.name}:{symbol}",
+                        msg=(
+                            f"{event} strategy={strategy.name} symbol={symbol} "
+                            f"history_count={bar_count} min_bars={strategy_min_bars}"
+                        ),
+                        interval_sec=60.0,
+                        level=20 if event == "STRATEGY_SKIPPED_HISTORY_COLD" else 10,
+                        extra={
+                            "event": event,
+                            "strategy": strategy.name,
+                            "need": strategy_min_bars,
+                            "have": bar_count,
+                            "symbol": symbol,
+                        },
                     )
                     skip_count += 1
                     continue
@@ -1494,8 +1554,12 @@ class StrategyManager:
                         key=f"strategy_skip_missing:{strategy.name}:{symbol}",
                         msg=f"SKIP {strategy.name}: missing indicators {missing} | {symbol}",
                         interval_sec=60.0,
-                        extra={"event": "strategy_skip_indicators", "strategy": strategy.name,
-                               "missing": missing, "symbol": symbol},
+                        extra={
+                            "event": "strategy_skip_indicators",
+                            "strategy": strategy.name,
+                            "missing": missing,
+                            "symbol": symbol,
+                        },
                     )
                     skip_count += 1
                     continue
@@ -1506,7 +1570,11 @@ class StrategyManager:
                 ):
                     logger.debug(
                         "strategy_skip_vix",
-                        extra={"event": "strategy_skip_vix", "strategy": strategy.name, "vix": vix},
+                        extra={
+                            "event": "strategy_skip_vix",
+                            "strategy": strategy.name,
+                            "vix": vix,
+                        },
                     )
                     skip_count += 1
                     continue
@@ -1518,16 +1586,24 @@ class StrategyManager:
                     if adx >= adx_trend_min and is_mean_rev:
                         logger.debug(
                             "strategy_skip_regime",
-                            extra={"event": "strategy_skip_regime", "strategy": strategy.name,
-                                   "regime": "TREND", "adx": adx},
+                            extra={
+                                "event": "strategy_skip_regime",
+                                "strategy": strategy.name,
+                                "regime": "TREND",
+                                "adx": adx,
+                            },
                         )
                         skip_count += 1
                         continue
                     if adx <= adx_range_max and is_trend:
                         logger.debug(
                             "strategy_skip_regime",
-                            extra={"event": "strategy_skip_regime", "strategy": strategy.name,
-                                   "regime": "RANGE", "adx": adx},
+                            extra={
+                                "event": "strategy_skip_regime",
+                                "strategy": strategy.name,
+                                "regime": "RANGE",
+                                "adx": adx,
+                            },
                         )
                         skip_count += 1
                         continue
@@ -1535,7 +1611,11 @@ class StrategyManager:
                 eval_count += 1
                 logger.debug(
                     "strategy_call",
-                    extra={"event": "strategy_call", "strategy": strategy.name, "symbol": symbol},
+                    extra={
+                        "event": "strategy_call",
+                        "strategy": strategy.name,
+                        "symbol": symbol,
+                    },
                 )
 
                 # ---------------------------------------------------------
@@ -1637,8 +1717,12 @@ class StrategyManager:
         combined = self._combine_signals_ensemble(all_signals)
         if combined is not None and not self._signal_arbitrator.allow(combined):
             logger.info(
-                'signal_arbitration_block',
-                extra={'event': 'signal_arbitration_block', 'symbol': combined.symbol, 'action': combined.action},
+                "signal_arbitration_block",
+                extra={
+                    "event": "signal_arbitration_block",
+                    "symbol": combined.symbol,
+                    "action": combined.action,
+                },
             )
             return None
         if combined is not None:
@@ -1993,35 +2077,33 @@ class StrategyManager:
         # ✅ 2. INDEX LTP AND VWAP DATA (NEW)
         # ═══════════════════════════════════════════════════════════
         try:
-            index_quote = data_hub.get_quote('NSE:NIFTY', allow_pull=True)
+            index_quote = data_hub.get_quote("NSE:NIFTY", allow_pull=True)
             if index_quote:
                 index_ltp = self._extract_float(
-                    index_quote, ('last_price', 'ltp', 'close')
+                    index_quote, ("last_price", "ltp", "close")
                 )
-                index_vwap = self._extract_float(
-                    index_quote, ('vwap', 'average_price')
-                )
+                index_vwap = self._extract_float(index_quote, ("vwap", "average_price"))
 
                 if index_ltp and index_ltp > 0:
-                    indicators['nifty_index_ltp'] = index_ltp
+                    indicators["nifty_index_ltp"] = index_ltp
 
                 if index_vwap and index_vwap > 0:
-                    indicators['nifty_index_vwap'] = index_vwap
+                    indicators["nifty_index_vwap"] = index_vwap
 
             cache_now = dt.datetime.now().timestamp()
-            if indicators.get('nifty_index_ltp') or indicators.get('nifty_index_vwap'):
-                self._last_index_ltp = indicators.get('nifty_index_ltp')
-                self._last_index_vwap = indicators.get('nifty_index_vwap')
+            if indicators.get("nifty_index_ltp") or indicators.get("nifty_index_vwap"):
+                self._last_index_ltp = indicators.get("nifty_index_ltp")
+                self._last_index_vwap = indicators.get("nifty_index_vwap")
                 self._last_index_update_ts = cache_now
             else:
                 cache_age = None
                 if self._last_index_update_ts is not None:
                     cache_age = cache_now - self._last_index_update_ts
                 if cache_age is not None and cache_age <= 120.0:
-                    if not indicators.get('nifty_index_ltp') and self._last_index_ltp:
-                        indicators['nifty_index_ltp'] = self._last_index_ltp
-                    if not indicators.get('nifty_index_vwap') and self._last_index_vwap:
-                        indicators['nifty_index_vwap'] = self._last_index_vwap
+                    if not indicators.get("nifty_index_ltp") and self._last_index_ltp:
+                        indicators["nifty_index_ltp"] = self._last_index_ltp
+                    if not indicators.get("nifty_index_vwap") and self._last_index_vwap:
+                        indicators["nifty_index_vwap"] = self._last_index_vwap
                     log_age = (
                         cache_now - self._index_cache_log_ts
                         if self._index_cache_log_ts is not None
@@ -2029,10 +2111,10 @@ class StrategyManager:
                     )
                     if log_age is None or log_age >= 60.0:
                         self._logger.info(
-                            'Condition met: index_cache_used',
+                            "Condition met: index_cache_used",
                             extra={
-                                'event': 'index_cache_used',
-                                'age_sec': round(cache_age, 1),
+                                "event": "index_cache_used",
+                                "age_sec": round(cache_age, 1),
                             },
                         )
                         self._index_cache_log_ts = cache_now
@@ -2040,7 +2122,7 @@ class StrategyManager:
             # ═══════════════════════════════════════════════════════
             # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
             # ═══════════════════════════════════════════════════════
-            if not indicators.get('nifty_index_vwap'):
+            if not indicators.get("nifty_index_vwap"):
                 symbols_to_try: list[str] = []
                 active_fut = self._resolve_active_futures_symbol_for_metrics()
                 if active_fut:
@@ -2049,7 +2131,11 @@ class StrategyManager:
                 if not symbols_to_try:
                     self._logger.warning(
                         "FUTURES_VWAP_FALLBACK_SKIPPED reason=active_future_unresolved",
-                        extra={"event": "FUTURES_VWAP_FALLBACK_SKIPPED", "reason": "active_future_unresolved", "configured_futures_symbol": self._futures_symbol},
+                        extra={
+                            "event": "FUTURES_VWAP_FALLBACK_SKIPPED",
+                            "reason": "active_future_unresolved",
+                            "configured_futures_symbol": self._futures_symbol,
+                        },
                     )
 
                 usable_fut_quote = None
@@ -2057,17 +2143,28 @@ class StrategyManager:
 
                 for fut_sym in symbols_to_try:
                     try:
-                        candidate_quote = data_hub.get_quote(fut_sym, allow_pull=True) or {}
+                        candidate_quote = (
+                            data_hub.get_quote(fut_sym, allow_pull=True) or {}
+                        )
                         if not candidate_quote:
                             continue
-                        if self._extract_float(candidate_quote, ("vwap", "average_price", "last_price", "ltp", "close")) is None:
+                        if (
+                            self._extract_float(
+                                candidate_quote,
+                                ("vwap", "average_price", "last_price", "ltp", "close"),
+                            )
+                            is None
+                        ):
                             continue
                         usable_fut_quote = candidate_quote
                         working_symbol = fut_sym
-                        if not getattr(self, '_vwap_source_logged', False):
+                        if not getattr(self, "_vwap_source_logged", False):
                             self._logger.info(
-                                f'✅ Futures VWAP source resolved: {fut_sym}',
-                                extra={'event': 'futures_vwap_resolved', 'symbol': fut_sym},
+                                f"✅ Futures VWAP source resolved: {fut_sym}",
+                                extra={
+                                    "event": "futures_vwap_resolved",
+                                    "symbol": fut_sym,
+                                },
                             )
                             self._vwap_source_logged = True
                         break
@@ -2079,7 +2176,10 @@ class StrategyManager:
                     self._logger.warning(
                         "FUTURES_VWAP_FALLBACK_FAILED symbols_tried=%s",
                         symbols_to_try,
-                        extra={"event": "futures_vwap_fallback_failed", "symbols_tried": symbols_to_try},
+                        extra={
+                            "event": "futures_vwap_fallback_failed",
+                            "symbols_tried": symbols_to_try,
+                        },
                     )
                     return
 

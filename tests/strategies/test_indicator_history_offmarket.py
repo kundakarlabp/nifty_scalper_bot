@@ -27,10 +27,23 @@ def test_indicator_history_missing_market_open_emits_info(monkeypatch, caplog):
 
     monkeypatch.setattr(market_hours, "is_market_open_now", lambda: True)
     engine = IndicatorEngine()
-    with caplog.at_level(logging.INFO, logger="nifty_scalper_bot.strategies.indicators"):
-        result = engine.get_history("NSE:NIFTY")
+    captured: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = captured.append  # type: ignore[method-assign]
+    logger = logging.getLogger("nifty_scalper_bot.strategies.indicators")
+    logger.addHandler(handler)
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.strategies.indicators"
+    ):
+        try:
+            result = engine.get_history("NSE:NIFTY")
+        finally:
+            logger.removeHandler(handler)
     assert result == []
-    levels = [r.levelno for r in caplog.records if "indicator_history_missing" in r.getMessage()]
+    records = list(caplog.records) + captured
+    levels = [
+        r.levelno for r in records if "indicator_history_missing" in r.getMessage()
+    ]
     assert any(level >= logging.INFO for level in levels), levels
 
 
@@ -40,7 +53,9 @@ def test_indicator_history_missing_market_closed_is_debug(monkeypatch, caplog):
 
     monkeypatch.setattr(market_hours, "is_market_open_now", lambda: False)
     engine = IndicatorEngine()
-    with caplog.at_level(logging.DEBUG, logger="nifty_scalper_bot.strategies.indicators"):
+    with caplog.at_level(
+        logging.DEBUG, logger="nifty_scalper_bot.strategies.indicators"
+    ):
         engine.get_history("NSE:NIFTY")
 
     info_records = [
