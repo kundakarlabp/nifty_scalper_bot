@@ -14641,7 +14641,30 @@ class StrategyRunner:
             min_depth_qty = int(float(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or 0))
             allow_market_entry = str(os.getenv("ALLOW_MARKET_ENTRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
             order_symbol = trade_symbol or signal.symbol or base_symbol
-            plan = TradePlan(symbol=order_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
+            _resolved_lot_size = 0
+            _requested_lots = 0
+            _instrument_token = None
+            _basket_version = None
+            _contract_expiry = None
+            _selection_timestamp = None
+            try:
+                _resolved_lot_size = int(self._order_manager._lot_size_for_symbol(order_symbol) or 0)
+                _requested_lots = int(qty // _resolved_lot_size) if _resolved_lot_size > 0 else 0
+            except Exception:
+                _resolved_lot_size = 0
+            _basket = getattr(self, "_active_contract_basket", None) or {}
+            if isinstance(_basket, Mapping):
+                _basket_version = _basket.get("basket_version") or _basket.get("version")
+                _contract_expiry = _basket.get("expiry") or _basket.get("contract_expiry")
+                _selection_timestamp = _basket.get("selected_at") or _basket.get("committed_at")
+                _token_map = dict(_basket.get("token_by_symbol") or {})
+                _instrument_token = _token_map.get(order_symbol) or _token_map.get(str(order_symbol).split(":", 1)[-1])
+                if not _instrument_token and order_symbol == str(_basket.get("selected_ce") or ""):
+                    _instrument_token = _basket.get("selected_ce_token")
+                if not _instrument_token and order_symbol == str(_basket.get("selected_pe") or ""):
+                    _instrument_token = _basket.get("selected_pe_token")
+            _client_order_id = f"{trace_id or signal.deterministic_id}:{order_symbol}:{int(time.time() * 1000)}"
+            plan = TradePlan(symbol=order_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry, trade_lifecycle_id=str(trace_id or signal.deterministic_id or _client_order_id), client_order_id=_client_order_id, basket_version=_basket_version, instrument_token=int(_instrument_token) if _instrument_token not in (None, "") else None, contract_expiry=str(_contract_expiry) if _contract_expiry else None, selection_timestamp=float(_selection_timestamp) if isinstance(_selection_timestamp, (int, float)) else None, requested_lots=_requested_lots, resolved_lot_size=_resolved_lot_size)
             self._logger.info(
                 "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s",
                 order_symbol,

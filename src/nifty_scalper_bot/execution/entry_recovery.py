@@ -304,6 +304,8 @@ def _lot_size(manager: Any, symbol: str) -> int:
                 continue
             if lot > 0:
                 return lot
+        if _manager_live_mode(manager):
+            raise
         return 65 if "NIFTY" in _symbol_key(symbol) else 1
 
 
@@ -481,8 +483,57 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
 
 
 def _is_entry_order(order: Any) -> bool:
+    intent = str(getattr(order, "intent", "") or "").strip().upper()
+    if intent and intent != "UNKNOWN":
+        return intent == "ENTRY"
     tag = str(getattr(order, "tag", "") or "").upper()
     return not any(token in tag for token in ("EXIT", "STOP", "TARGET", "SQUARE", "GUARD", "SL_", "TP_"))
+
+
+def _partial_state(order: Any) -> dict[str, Any]:
+    state = getattr(order, "entry_lifecycle_state", None)
+    if not isinstance(state, dict):
+        state = {
+            "state": "ENTRY_OPEN",
+            "requested_quantity": int(getattr(order, "quantity", 0) or 0),
+            "last_broker_filled_quantity": 0,
+            "last_broker_pending_quantity": 0,
+            "last_broker_cancelled_quantity": 0,
+            "last_accounted_fill_quantity": 0,
+            "protected_quantity": 0,
+            "broker_position_quantity": None,
+            "cancel_requested_at": None,
+            "terminal_confirmed_at": None,
+            "last_reconcile_at": None,
+        }
+        setattr(order, "entry_lifecycle_state", state)
+    return state
+
+
+def _payload_int(payload: Mapping[str, Any], *keys: str, default: int = 0) -> int:
+    for key in keys:
+        if key not in payload:
+            continue
+        try:
+            return int(float(payload.get(key) or 0))
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _broker_position_quantity(manager: Any, symbol: str, fallback: int) -> int:
+    positions = _broker_positions(manager)
+    if positions is None:
+        return int(fallback)
+    wanted = _symbol_key(symbol)
+    for position in positions:
+        if _symbol_key(position.get("tradingsymbol") or position.get("symbol")) != wanted:
+            continue
+        try:
+            return abs(int(float(position.get("quantity", position.get("net_quantity", fallback)) or 0)))
+        except (TypeError, ValueError):
+            return int(fallback)
+    return int(fallback)
 
 
 def _finalize_partial_entry(manager: Any, order: Any, payload: Mapping[str, Any]) -> None:
@@ -490,22 +541,51 @@ def _finalize_partial_entry(manager: Any, order: Any, payload: Mapping[str, Any]
     if status != "PARTIALLY_FILLED" or not _is_entry_order(order):
         return
     order_id = str(getattr(order, "order_id", "") or "")
-    if not order_id or getattr(order, "_partial_entry_finalized", False):
+    if not order_id:
         return
-    setattr(order, "_partial_entry_finalized", True)
+
+    state = _partial_state(order)
+    requested = int(state.get("requested_quantity") or getattr(order, "quantity", 0) or 0)
+    previous_accounted = int(state.get("last_accounted_fill_quantity") or 0)
+    broker_filled = _payload_int(payload, "filled_quantity", "filled", default=int(getattr(order, "filled_quantity", 0) or 0))
+    broker_pending = _payload_int(payload, "pending_quantity", "pending", default=max(requested - broker_filled, 0) if requested > 0 else 1)
+    broker_cancelled = _payload_int(payload, "cancelled_quantity", "cancelled", default=int(state.get("last_broker_cancelled_quantity") or 0))
+    now = time.time()
+    state["last_reconcile_at"] = now
+    state["last_broker_filled_quantity"] = max(int(state.get("last_broker_filled_quantity") or 0), broker_filled)
+    state["last_broker_pending_quantity"] = broker_pending
+    state["last_broker_cancelled_quantity"] = max(int(state.get("last_broker_cancelled_quantity") or 0), broker_cancelled)
+
+    if broker_filled < previous_accounted:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        setattr(manager, "_last_order_decision", {"block_reason": "entry_fill_quantity_regressed", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": broker_filled, "last_accounted_fill_quantity": previous_accounted}})
+        _log(manager, "error", "ENTRY_FILL_QUANTITY_REGRESSED order_id=%s broker_filled=%s accounted=%s", order_id, broker_filled, previous_accounted, event="ENTRY_FILL_QUANTITY_REGRESSED", order_id=order_id, filled_quantity=broker_filled)
+        return
+    fill_delta = max(broker_filled - previous_accounted, 0)
+    if broker_filled <= 0:
+        return
+    state["last_accounted_fill_quantity"] = max(previous_accounted, broker_filled)
+    state["state"] = "ENTRY_PARTIALLY_FILLED"
 
     broker = getattr(manager, "_broker", None)
-    cancel = getattr(broker, "cancel_order", None)
-    if callable(cancel):
-        try:
-            cancel(order_id)
-        except TypeError:
+    if not state.get("cancel_requested_at") and broker_pending > 0:
+        cancel = getattr(broker, "cancel_order", None)
+        if callable(cancel):
             try:
-                cancel(order_id=order_id)
-            except Exception:
-                pass
-        except Exception:
-            pass
+                cancel(order_id)
+                state["cancel_requested_at"] = now
+                state["state"] = "ENTRY_CANCEL_REQUESTED"
+            except TypeError:
+                try:
+                    cancel(order_id=order_id)
+                    state["cancel_requested_at"] = now
+                    state["state"] = "ENTRY_CANCEL_REQUESTED"
+                except Exception as exc:  # noqa: BLE001
+                    state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+                    setattr(manager, "_last_order_decision", {"block_reason": "entry_cancel_failed", "broker_attempted": True, "details": {"order_id": order_id, "error_type": type(exc).__name__, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0)}})
+            except Exception as exc:  # noqa: BLE001
+                state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+                setattr(manager, "_last_order_decision", {"block_reason": "entry_cancel_failed", "broker_attempted": True, "details": {"order_id": order_id, "error_type": type(exc).__name__, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0)}})
 
     final_payload: Mapping[str, Any] = payload
     getter = getattr(broker, "get_order_status", None)
@@ -514,25 +594,51 @@ def _finalize_partial_entry(manager: Any, order: Any, payload: Mapping[str, Any]
             refreshed = getter(order_id)
             if isinstance(refreshed, Mapping):
                 final_payload = refreshed
+                broker_filled = max(broker_filled, _payload_int(refreshed, "filled_quantity", "filled", default=broker_filled))
         except Exception:
-            pass
+            state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+
     try:
-        filled = int(final_payload.get("filled_quantity") or getattr(order, "filled_quantity", 0) or 0)
         average = float(final_payload.get("average_price") or final_payload.get("avg_price") or getattr(order, "fill_price", 0.0) or getattr(order, "average_price", 0.0) or 0.0)
     except (TypeError, ValueError):
         return
-    if filled <= 0 or average <= 0:
+    if average <= 0:
+        return
+
+    broker_position = _broker_position_quantity(manager, str(getattr(order, "symbol", "")), broker_filled)
+    state["broker_position_quantity"] = broker_position
+    desired_protection = min(broker_filled, broker_position) if broker_position > 0 else broker_filled
+    if int(state.get("protected_quantity") or 0) > desired_protection:
+        state["state"] = "ENTRY_PROTECTION_FAILED"
+        setattr(manager, "_last_order_decision", {"block_reason": "unprotected_entry_fill", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0), "broker_position_quantity": broker_position}})
         return
 
     confirmer = getattr(getattr(manager, "_bracket_manager", None), "confirm_partial_entry_fill", None)
-    if callable(confirmer):
-        confirmer(order_id, filled, average)
+    protected = False
+    if callable(confirmer) and desired_protection > int(state.get("protected_quantity") or 0):
+        confirm_result = confirmer(order_id, desired_protection, average)
+        protected = True if confirm_result is None else bool(confirm_result)
+        if protected:
+            state["protected_quantity"] = desired_protection
+            state["state"] = "ENTRY_PROTECTED" if broker_pending <= 0 else "ENTRY_PROTECTION_PENDING"
+        else:
+            state["state"] = "ENTRY_PROTECTION_FAILED"
+            setattr(manager, "_last_order_decision", {"block_reason": "unprotected_entry_fill", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": broker_filled, "protected_quantity": state.get("protected_quantity", 0), "broker_position_quantity": broker_position}})
+            _log(manager, "critical", "PARTIAL_ENTRY_PROTECTION_FAILED order_id=%s symbol=%s filled=%s", order_id, getattr(order, "symbol", ""), broker_filled, event="PARTIAL_ENTRY_PROTECTION_FAILED", order_id=order_id, filled_quantity=broker_filled)
+            return
+    elif desired_protection <= int(state.get("protected_quantity") or 0):
+        protected = True
+
     marker = getattr(manager, "_mark_order_uncertain", None)
     if callable(marker):
         marker(str(getattr(order, "client_order_id", None) or order_id))
-    setattr(manager, "_last_order_decision", {"block_reason": "partial_entry_fill_reconciled", "broker_attempted": True, "details": {"order_id": order_id, "filled_quantity": filled, "average_price": average, "remainder_cancel_requested": True}})
-    _log(manager, "critical", "ENTRY_PARTIAL_FILL_RECONCILED order_id=%s symbol=%s filled=%s average=%s", order_id, getattr(order, "symbol", ""), filled, average, event="ENTRY_PARTIAL_FILL_RECONCILED", order_id=order_id, filled_quantity=filled)
-
+    terminal_status = str(final_payload.get("status") or status).upper() in {"COMPLETE", "FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"}
+    if terminal_status:
+        state["terminal_confirmed_at"] = now
+        state["state"] = "ENTRY_TERMINAL_CONFIRMED" if protected else state.get("state")
+    decision_reason = "partial_entry_fill_reconciled" if terminal_status and protected and state.get("protected_quantity") == broker_position else "entry_fill_reconciliation_pending"
+    setattr(manager, "_last_order_decision", {"block_reason": decision_reason, "broker_attempted": True, "details": {"order_id": order_id, "requested_quantity": requested, "filled_quantity": broker_filled, "fill_delta": fill_delta, "average_price": average, "protected_quantity": state.get("protected_quantity", 0), "broker_position_quantity": broker_position, "remainder_cancel_requested": bool(state.get("cancel_requested_at")), "entry_lifecycle_state": state.get("state")}})
+    _log(manager, "critical", "ENTRY_PARTIAL_FILL_RECONCILED order_id=%s symbol=%s filled=%s protected=%s state=%s", order_id, getattr(order, "symbol", ""), broker_filled, state.get("protected_quantity", 0), state.get("state"), event="ENTRY_PARTIAL_FILL_RECONCILED", order_id=order_id, filled_quantity=broker_filled)
 
 def install_entry_recovery(order_manager_class: type[Any]) -> None:
     """Compatibility installer for legacy tests only.

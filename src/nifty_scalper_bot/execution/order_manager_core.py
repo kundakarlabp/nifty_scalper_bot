@@ -211,6 +211,12 @@ class OrderDetails:
     bracket_id: str | None = None
     signal_id: str | None = None
     signal_fingerprint: str | None = None
+    trade_lifecycle_id: str | None = None
+    linked_entry_order_id: str | None = None
+    basket_version: int | str | None = None
+    instrument_token: int | None = None
+    contract_expiry: str | None = None
+    exchange_order_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -244,6 +250,14 @@ class TradePlan:
     allow_market_entry: bool = False
     intent: OrderIntent = "ENTRY"
     intended_position_side: Literal["LONG", "SHORT"] | None = "LONG"
+    trade_lifecycle_id: str | None = None
+    client_order_id: str | None = None
+    basket_version: int | str | None = None
+    instrument_token: int | None = None
+    contract_expiry: str | None = None
+    selection_timestamp: float | None = None
+    requested_lots: int = 0
+    resolved_lot_size: int = 0
 
 @dataclass(slots=True)
 class TradePlanSubmitResult:
@@ -2232,6 +2246,12 @@ class OrderManager:
         trace_id: str | None = None,
         intent: OrderIntent | str | None = None,
         intended_position_side: Literal["LONG", "SHORT"] | None = None,
+        trade_lifecycle_id: str | None = None,
+        linked_entry_order_id: str | None = None,
+        bracket_id: str | None = None,
+        basket_version: int | str | None = None,
+        instrument_token: int | None = None,
+        contract_expiry: str | None = None,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -3689,16 +3709,100 @@ class OrderManager:
             age_ms = None
         return {"bid": bid, "ask": ask, "ltp": ltp, "spread": spread, "spread_pct": spread_pct, "bid_qty": bid_qty, "ask_qty": ask_qty, "depth_qty": bid_qty + ask_qty, "age_ms": age_ms}
 
+    def _trade_plan_rejection_details(
+        self, plan: TradePlan, reason: str, **details: Any
+    ) -> dict[str, Any]:
+        payload = {
+            "broker_attempted": False,
+            "retryable": False,
+            "trade_lifecycle_id": plan.trade_lifecycle_id,
+            "client_order_id": plan.client_order_id,
+            "signal_id": plan.signal_id,
+            "symbol": normalize_symbol(plan.symbol),
+            "requested_quantity": plan.quantity,
+            "filled_quantity": 0,
+            "protected_quantity": 0,
+            "broker_position_quantity": None,
+            "blocker_code": reason,
+        }
+        payload.update(details)
+        return payload
+
+    def _active_contract_for_trade_plan(self, plan: TradePlan) -> dict[str, Any] | None:
+        symbol = normalize_symbol(plan.symbol)
+        sources = (
+            getattr(self, "_active_contract_basket", None),
+            getattr(getattr(self, "_data_hub", None), "_active_contract_basket", None),
+            getattr(getattr(self, "_market_data", None), "_active_contract_basket", None),
+        )
+        for source in sources:
+            if not isinstance(source, Mapping):
+                continue
+            token_map = dict(source.get("token_by_symbol") or {})
+            selected = [source.get("selected_ce"), source.get("selected_pe")]
+            symbols = list(source.get("option_symbols") or source.get("symbols") or [])
+            if symbol not in {normalize_symbol(str(x)) for x in [*selected, *symbols] if x}:
+                continue
+            token = token_map.get(symbol) or token_map.get(symbol.split(":", 1)[-1])
+            if symbol == normalize_symbol(str(source.get("selected_ce") or "")):
+                token = token or source.get("selected_ce_token")
+            if symbol == normalize_symbol(str(source.get("selected_pe") or "")):
+                token = token or source.get("selected_pe_token")
+            return {
+                "symbol": symbol,
+                "instrument_token": int(token) if token not in (None, "") else None,
+                "basket_version": source.get("basket_version") or source.get("version"),
+                "contract_expiry": source.get("expiry") or source.get("contract_expiry"),
+                "selected_at": source.get("selected_at") or source.get("committed_at"),
+            }
+        return None
+
     def _validate_trade_plan(self, plan: TradePlan) -> OrderPreflightResult:
         symbol = normalize_symbol(plan.symbol)
         if not is_strategy_instrument(symbol):
             return OrderPreflightResult(False, "non_strategy_instrument", {"symbol": symbol})
         if plan.quantity <= 0:
             return OrderPreflightResult(False, "invalid_quantity", {"quantity": plan.quantity})
-        lot_size = self._lot_size_for_symbol(symbol)
-        if lot_size > 0 and plan.quantity % lot_size != 0:
+        is_entry = str(plan.intent or "").upper() == "ENTRY"
+        live_checker = getattr(self, "is_live_mode", None)
+        if callable(live_checker):
+            live_mode = bool(live_checker())
+        else:
+            live_fn = getattr(self, "_order_live_execution_enabled", None)
+            live_mode = bool(live_fn()) if callable(live_fn) else False
+        live_entry = bool(is_entry and live_mode)
+        try:
+            lot_size = int(plan.resolved_lot_size or self._lot_size_for_symbol(symbol) or 0)
+        except Exception as exc:  # noqa: BLE001
+            if live_entry:
+                return OrderPreflightResult(False, "lot_size_unresolved", OrderManager._trade_plan_rejection_details(self, plan, "lot_size_unresolved", error_type=type(exc).__name__))
+            raise
+        if live_entry:
+            if not plan.trade_lifecycle_id:
+                return OrderPreflightResult(False, "trade_lifecycle_id_missing", OrderManager._trade_plan_rejection_details(self, plan, "trade_lifecycle_id_missing"))
+            if not plan.client_order_id:
+                return OrderPreflightResult(False, "client_order_id_missing", OrderManager._trade_plan_rejection_details(self, plan, "client_order_id_missing"))
+            if not plan.signal_id:
+                return OrderPreflightResult(False, "signal_id_missing", OrderManager._trade_plan_rejection_details(self, plan, "signal_id_missing"))
+            if not plan.instrument_token:
+                return OrderPreflightResult(False, "instrument_token_mismatch", OrderManager._trade_plan_rejection_details(self, plan, "instrument_token_mismatch", required_value="present", actual_value=plan.instrument_token))
+            if lot_size <= 0:
+                return OrderPreflightResult(False, "lot_size_unresolved", OrderManager._trade_plan_rejection_details(self, plan, "lot_size_unresolved", actual_value=lot_size))
+            if plan.requested_lots <= 0:
+                return OrderPreflightResult(False, "invalid_entry_lot_quantity", OrderManager._trade_plan_rejection_details(self, plan, "invalid_entry_lot_quantity", requested_lots=plan.requested_lots))
+            expected_qty = int(plan.requested_lots) * int(lot_size)
+            if plan.quantity != expected_qty or plan.quantity % lot_size != 0:
+                return OrderPreflightResult(False, "invalid_entry_lot_quantity", OrderManager._trade_plan_rejection_details(self, plan, "invalid_entry_lot_quantity", required_value=expected_qty, actual_value=plan.quantity, lot_size=lot_size))
+            active = OrderManager._active_contract_for_trade_plan(self, plan)
+            if active is not None:
+                if plan.basket_version is not None and active.get("basket_version") is not None and str(plan.basket_version) != str(active.get("basket_version")):
+                    return OrderPreflightResult(False, "stale_contract_selection", OrderManager._trade_plan_rejection_details(self, plan, "stale_contract_selection", required_value=active.get("basket_version"), actual_value=plan.basket_version))
+                if active.get("instrument_token") is not None and int(plan.instrument_token) != int(active["instrument_token"]):
+                    return OrderPreflightResult(False, "instrument_token_mismatch", OrderManager._trade_plan_rejection_details(self, plan, "instrument_token_mismatch", required_value=active.get("instrument_token"), actual_value=plan.instrument_token))
+                if plan.contract_expiry and active.get("contract_expiry") and str(plan.contract_expiry) != str(active.get("contract_expiry")):
+                    return OrderPreflightResult(False, "contract_expiry_mismatch", OrderManager._trade_plan_rejection_details(self, plan, "contract_expiry_mismatch", required_value=active.get("contract_expiry"), actual_value=plan.contract_expiry))
+        if lot_size > 0 and plan.quantity % lot_size != 0 and is_entry:
             return OrderPreflightResult(False, "quantity_not_lot_multiple", {"quantity": plan.quantity, "lot_size": lot_size})
-        is_entry = plan.side == "BUY" and "exit" not in (plan.tag or "").lower()
         if is_entry and (plan.stop_loss is None or plan.stop_loss <= 0):
             return OrderPreflightResult(False, "missing_stop_loss", {})
         if is_entry and (plan.take_profit is None or plan.take_profit <= 0):
@@ -3914,7 +4018,7 @@ class OrderManager:
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
                 try:
-                    managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                    managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry, intent=plan.intent, intended_position_side=plan.intended_position_side, trade_lifecycle_id=plan.trade_lifecycle_id, client_order_id=plan.client_order_id, basket_version=plan.basket_version, instrument_token=plan.instrument_token, contract_expiry=plan.contract_expiry)
                 except Exception as exc:  # noqa: BLE001
                     err = self._sanitize_broker_error(exc)
                     self._last_order_api_error_type = type(exc).__name__
@@ -3964,6 +4068,11 @@ class OrderManager:
         allow_market_entry: bool = False,
         intent: OrderIntent = "ENTRY",
         intended_position_side: Literal["LONG", "SHORT"] | None = "LONG",
+        trade_lifecycle_id: str | None = None,
+        client_order_id: str | None = None,
+        basket_version: int | str | None = None,
+        instrument_token: int | None = None,
+        contract_expiry: str | None = None,
     ) -> str | None:
         result = self.place_managed_order_result(
             symbol=symbol,
@@ -3981,6 +4090,11 @@ class OrderManager:
             allow_market_entry=allow_market_entry,
             intent=intent,
             intended_position_side=intended_position_side,
+            trade_lifecycle_id=trade_lifecycle_id,
+            client_order_id=client_order_id,
+            basket_version=basket_version,
+            instrument_token=instrument_token,
+            contract_expiry=contract_expiry,
         )
         return result.order_id if result.accepted else None
 
@@ -4001,6 +4115,11 @@ class OrderManager:
         allow_market_entry: bool = False,
         intent: OrderIntent = "ENTRY",
         intended_position_side: Literal["LONG", "SHORT"] | None = "LONG",
+        trade_lifecycle_id: str | None = None,
+        client_order_id: str | None = None,
+        basket_version: int | str | None = None,
+        instrument_token: int | None = None,
+        contract_expiry: str | None = None,
     ) -> ManagedOrderResult:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
@@ -6522,7 +6641,7 @@ class OrderManager:
                 "filled_quantity": order.filled_quantity,
                 "price": order.price,
                 "fill_price": order.fill_price,
-                "timestamp": order.timestamp.isoformat(),
+                "timestamp": (order.timestamp.isoformat() if hasattr(order.timestamp, "isoformat") else float(order.timestamp)),
                 "rejection_reason": order.rejection_reason,
             }
             for order in orders
@@ -11105,13 +11224,22 @@ class OrderManager:
                 if hasattr(order.status, "value")
                 else str(order.status)
             ),
-            "timestamp": order.timestamp.isoformat(),
+            "timestamp": (order.timestamp.isoformat() if hasattr(order.timestamp, "isoformat") else float(order.timestamp)),
             "filled_quantity": order.filled_quantity,
             "fill_price": order.fill_price,
             "rejection_reason": order.rejection_reason,
             "parent_order_id": order.parent_order_id,
             "child_order_ids": list(order.child_order_ids),
             "client_order_id": order.client_order_id,
+            "intent": order.intent,
+            "trade_lifecycle_id": order.trade_lifecycle_id,
+            "linked_entry_order_id": order.linked_entry_order_id,
+            "bracket_id": order.bracket_id,
+            "basket_version": order.basket_version,
+            "instrument_token": order.instrument_token,
+            "contract_expiry": order.contract_expiry,
+            "exchange_order_id": order.exchange_order_id,
+            "signal_id": order.signal_id,
         }
 
     def _serialize_bracket_state(self, state: BracketState) -> BracketDict:
@@ -11220,9 +11348,19 @@ class OrderManager:
                 tag=payload.get("tag"),
                 client_order_id=payload.get("client_order_id"),
                 rejection_reason=payload.get("rejection_reason"),
+                intent=payload.get("intent") or "UNKNOWN",
+                trade_lifecycle_id=payload.get("trade_lifecycle_id"),
+                linked_entry_order_id=payload.get("linked_entry_order_id"),
+                bracket_id=payload.get("bracket_id"),
+                basket_version=payload.get("basket_version"),
+                instrument_token=int(payload["instrument_token"]) if payload.get("instrument_token") not in (None, "") else None,
+                contract_expiry=payload.get("contract_expiry"),
+                exchange_order_id=payload.get("exchange_order_id"),
+                signal_id=payload.get("signal_id"),
             )
         except Exception as e:
-            self._logger.error(f"Failed to restore order: {e}")
+            logger = getattr(self, "_logger", logging.getLogger(__name__))
+            logger.error(f"Failed to restore order: {e}")
             raise ValueError("Invalid order payload") from e
 
     def _bracket_from_dict(self, payload: Mapping[str, Any]) -> BracketState:
