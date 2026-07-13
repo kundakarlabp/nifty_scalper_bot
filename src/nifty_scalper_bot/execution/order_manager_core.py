@@ -26,20 +26,20 @@ Safe-edit notes:
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from contextlib import suppress
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
 import hashlib
 import json
 import logging
 import math
 import os
 import re
+import time
+from collections import deque
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from threading import Event, RLock, Thread
-import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -53,8 +53,9 @@ from typing import (
 )
 from zoneinfo import ZoneInfo
 
-from nifty_scalper_bot.config.paths import get_data_dir
 import nifty_scalper_bot.config.settings as app_settings
+from nifty_scalper_bot.config.paths import get_data_dir
+from nifty_scalper_bot.core.active_basket import active_contract_selection_from_basket
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
 from nifty_scalper_bot.data.bracket_store import BracketStore
@@ -91,15 +92,22 @@ from nifty_scalper_bot.storage.journal import AtomicKV
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.circuit_breaker import CircuitBreaker
 from nifty_scalper_bot.utils.errors import RateLimitError
-from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
+from nifty_scalper_bot.utils.log_throttle import (
+    log_on_change,
+)
+from nifty_scalper_bot.utils.log_throttle import (
+    log_throttled as log_throttled_live,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
-from nifty_scalper_bot.utils.metrics import Counter, Gauge
+from nifty_scalper_bot.utils.lot_size import (
+    resolve_lot_size as resolve_lot_size_with_source,
+)
 from nifty_scalper_bot.utils.market_hours import get_time_status
+from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.pricing import canonical_price_source
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import canonical
 from nifty_scalper_bot.utils.symbols import is_strategy_instrument, normalize_symbol
-from nifty_scalper_bot.utils.lot_size import resolve_lot_size as resolve_lot_size_with_source
 
 SOFT_BLOCK_CODES: set[str] = {
     "STALE",
@@ -121,13 +129,14 @@ RiskBlockError = execution_exceptions.RiskBlockError
 
 if TYPE_CHECKING:
     from journal.trade_journal import TradeJournal
+
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
     from nifty_scalper_bot.data.rest.client import BaseBrokerClient
     from nifty_scalper_bot.execution.bracket_manager import BracketManager
     from nifty_scalper_bot.notifications.telegram_enhanced import (
         TelegramEnhancedNotifier,
     )
-    from nifty_scalper_bot.risk.risk_manager import OrderSignal, RiskManager
+    from nifty_scalper_bot.risk.risk_manager import RiskManager
 else:  # pragma: no cover - typing only
     MarketDataManager = Any
     BaseBrokerClient = Any
@@ -211,6 +220,15 @@ class OrderDetails:
     bracket_id: str | None = None
     signal_id: str | None = None
     signal_fingerprint: str | None = None
+    trade_lifecycle_id: str | None = None
+    linked_entry_order_id: str | None = None
+    basket_version: int | str | None = None
+    instrument_token: int | None = None
+    contract_expiry: str | None = None
+    exchange_order_id: str | None = None
+    requested_lots: int = 0
+    resolved_lot_size: int = 0
+    entry_lifecycle_state: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -244,6 +262,15 @@ class TradePlan:
     allow_market_entry: bool = False
     intent: OrderIntent = "ENTRY"
     intended_position_side: Literal["LONG", "SHORT"] | None = "LONG"
+    trade_lifecycle_id: str | None = None
+    client_order_id: str | None = None
+    basket_version: int | str | None = None
+    instrument_token: int | None = None
+    contract_expiry: str | None = None
+    selection_timestamp: float | None = None
+    requested_lots: int = 0
+    resolved_lot_size: int = 0
+
 
 @dataclass(slots=True)
 class TradePlanSubmitResult:
@@ -253,6 +280,7 @@ class TradePlanSubmitResult:
     details: dict[str, Any] = field(default_factory=dict)
     broker_attempted: bool = False
 
+
 @dataclass(slots=True)
 class ManagedOrderResult:
     accepted: bool
@@ -260,6 +288,7 @@ class ManagedOrderResult:
     reason: str = "unknown"
     details: dict[str, Any] = field(default_factory=dict)
     broker_attempted: bool = False
+
 
 @dataclass(slots=True)
 class ExitIntent:
@@ -402,7 +431,8 @@ class GuardPair:
             target_order_id=str(payload.get("target_order_id") or ""),
             created_at=created_dt,
         )
-    
+
+
 def resolve_reference_price(
     symbol: str,
     *,
@@ -694,6 +724,7 @@ class OrderManager:
         OrderStatus.REJECTED,
         OrderStatus.EXPIRED,
     )
+
     @staticmethod
     def _env_truthy(name: str) -> bool:
         """Return True for common truthy environment values."""
@@ -705,6 +736,7 @@ class OrderManager:
             "on",
             "live",
         }
+
     @staticmethod
     def _execution_mode_env() -> str:
         """Return normalized execution mode from environment."""
@@ -783,7 +815,7 @@ class OrderManager:
             raise RuntimeError(
                 "LIVE mode blocked because SHADOW_MODE or PAPER mode is enabled"
             )
-        
+
         if self._execution_mode == "SIMULATION":
             try:
                 from nifty_scalper_bot.testing.simulated_broker import (
@@ -925,9 +957,15 @@ class OrderManager:
         # 🛡️ CIRCUIT BREAKER STATE (Kill Switch)
         # ---------------------------------------------------------
         self._consecutive_failures: int = 0
-        self._max_failures: int = max(1, int(os.getenv("ORDER_KILL_SWITCH_MAX_FAILURES", "5") or 5))
-        self._kill_switch_auto_reset_seconds: int = max(60, int(os.getenv("ORDER_KILL_SWITCH_AUTO_RESET_SECONDS", "900") or 900))
-        self._kill_switch_allow_auto_reset: bool = os.getenv("ORDER_KILL_SWITCH_ALLOW_AUTO_RESET", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self._max_failures: int = max(
+            1, int(os.getenv("ORDER_KILL_SWITCH_MAX_FAILURES", "5") or 5)
+        )
+        self._kill_switch_auto_reset_seconds: int = max(
+            60, int(os.getenv("ORDER_KILL_SWITCH_AUTO_RESET_SECONDS", "900") or 900)
+        )
+        self._kill_switch_allow_auto_reset: bool = os.getenv(
+            "ORDER_KILL_SWITCH_ALLOW_AUTO_RESET", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._kill_switch_engaged_at: datetime | None = None
         self._kill_switch_reason: str | None = None
         self._last_kill_switch_log_ts: float = 0.0
@@ -935,8 +973,12 @@ class OrderManager:
         self._kill_switch_last_reset: dict[str, Any] | None = None
         self._missing_counts: dict[str, int] = {}
         self._last_order_decision: dict[str, Any] = {}
-        self._margin_cache_max_age_seconds: int = max(1, int(os.getenv("MARGIN_CACHE_MAX_AGE_SECONDS", "120") or 120))
-        self._allow_entry_with_stale_margin: bool = os.getenv("ALLOW_ENTRY_WITH_STALE_MARGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self._margin_cache_max_age_seconds: int = max(
+            1, int(os.getenv("MARGIN_CACHE_MAX_AGE_SECONDS", "120") or 120)
+        )
+        self._allow_entry_with_stale_margin: bool = os.getenv(
+            "ALLOW_ENTRY_WITH_STALE_MARGIN", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._last_margin_refresh_ts: float | None = None
         self._last_margin_success_ts: float | None = None
         self._last_margin_error_type: str | None = None
@@ -961,7 +1003,6 @@ class OrderManager:
         """Check in-memory signal idempotency. Args: signal_id; Returns: bool; Raises: None."""
         with self._lock:
             return signal_id in self._seen_signal_ids
-
 
     def _prune_pending_signals(self) -> None:
         now_ts = time.time()
@@ -1039,7 +1080,13 @@ class OrderManager:
                     continue
 
                 status = str(order.get("status") or "").strip().upper()
-                if status in {"CANCELLED", "CANCELED", "REJECTED", "COMPLETE", "COMPLETED"}:
+                if status in {
+                    "CANCELLED",
+                    "CANCELED",
+                    "REJECTED",
+                    "COMPLETE",
+                    "COMPLETED",
+                }:
                     continue
 
                 candidates = {
@@ -1053,8 +1100,13 @@ class OrderManager:
                 if wanted and wanted_upper in candidates:
                     return dict(order)
                 tag_value_upper = str(order.get("tag") or "").strip().upper()
-                if wanted_upper and tag_value_upper and (
-                    wanted_upper in tag_value_upper or wanted_upper[-8:] in tag_value_upper
+                if (
+                    wanted_upper
+                    and tag_value_upper
+                    and (
+                        wanted_upper in tag_value_upper
+                        or wanted_upper[-8:] in tag_value_upper
+                    )
                 ):
                     return dict(order)
 
@@ -1256,15 +1308,33 @@ class OrderManager:
         except Exception as exc:  # noqa: BLE001
             self._logger.warning(
                 "MARGIN_PRIME_FAILED reason=%s error_type=%s",
-                reason, type(exc).__name__,
-                extra={"event": "MARGIN_PRIME_FAILED", "reason": reason, "error_type": type(exc).__name__},
+                reason,
+                type(exc).__name__,
+                extra={
+                    "event": "MARGIN_PRIME_FAILED",
+                    "reason": reason,
+                    "error_type": type(exc).__name__,
+                },
             )
             return False
-        ok = bool(available is not None and available > 0 and source in {"mdm", "margin_cache_used", "risk"})
+        ok = bool(
+            available is not None
+            and available > 0
+            and source in {"mdm", "margin_cache_used", "risk"}
+        )
         self._logger.info(
             "MARGIN_PRIMED reason=%s ok=%s source=%s available=%s",
-            reason, ok, source, available,
-            extra={"event": "MARGIN_PRIMED", "reason": reason, "ok": ok, "source": source, "available": available},
+            reason,
+            ok,
+            source,
+            available,
+            extra={
+                "event": "MARGIN_PRIMED",
+                "reason": reason,
+                "ok": ok,
+                "source": source,
+                "available": available,
+            },
         )
         self._emit_broker_health_status(force=True)
         return ok
@@ -1972,7 +2042,7 @@ class OrderManager:
                 info = self._resolver.resolve_by_symbol(symbol)
                 if info and "exchange" in info:
                     return info["exchange"]
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -1991,7 +2061,7 @@ class OrderManager:
                 info = self._resolver.resolve_by_symbol(symbol)
                 if info and "tradingsymbol" in info:
                     return info["tradingsymbol"]
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -2054,7 +2124,6 @@ class OrderManager:
             self._logger.error("Failure in _validate_live_execution_safety: %s", e)
             return False
 
-
     def _record_kill_switch_failure(self, record: dict[str, Any]) -> None:
         with self._lock:
             self._kill_switch_failure_history.append(dict(record))
@@ -2062,7 +2131,10 @@ class OrderManager:
     def get_kill_switch_failure_history(self, limit: int = 20) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit or 20), 20))
         with self._lock:
-            return [dict(item) for item in list(self._kill_switch_failure_history)[-safe_limit:]]
+            return [
+                dict(item)
+                for item in list(self._kill_switch_failure_history)[-safe_limit:]
+            ]
 
     def get_last_kill_switch_failure(self) -> dict[str, Any] | None:
         with self._lock:
@@ -2085,7 +2157,9 @@ class OrderManager:
         # failures) would halt trading for the rest of the day until a manual reset
         # or restart. Resetting only after the full cooldown avoids instantly
         # re-trying into a still-broken broker.
-        elapsed = (datetime.now(timezone.utc) - self._kill_switch_engaged_at).total_seconds()
+        elapsed = (
+            datetime.now(timezone.utc) - self._kill_switch_engaged_at
+        ).total_seconds()
         if elapsed < float(self._kill_switch_auto_reset_seconds):
             return True
         self.reset_kill_switch(reason="auto_timeout")
@@ -2097,11 +2171,18 @@ class OrderManager:
         self._kill_switch_engaged_at = None
         self._kill_switch_reason = None
         self._last_kill_switch_log_ts = 0.0
-        self._kill_switch_last_reset = {"reset_reason": reason, "reset_ts": datetime.now(timezone.utc).isoformat()}
+        self._kill_switch_last_reset = {
+            "reset_reason": reason,
+            "reset_ts": datetime.now(timezone.utc).isoformat(),
+        }
         self._logger.info(
             "ORDER_KILL_SWITCH_RESET reason=%s",
             reason,
-            extra={"event": "ORDER_KILL_SWITCH_RESET", "reason": reason, **self._kill_switch_last_reset},
+            extra={
+                "event": "ORDER_KILL_SWITCH_RESET",
+                "reason": reason,
+                **self._kill_switch_last_reset,
+            },
         )
         self._log_kill_switch_status()
 
@@ -2110,8 +2191,14 @@ class OrderManager:
         log_on_change(
             self._logger,
             key="ORDER_KILL_SWITCH_STATUS",
-            state=(status.get("active"), status.get("kill_reason"), status.get("consecutive_failures"), status.get("engaged_at")),
-            message="ORDER_KILL_SWITCH_STATUS active=%s reason=%s failures=%s engaged_at=%s auto_reset_allowed=%s" % (
+            state=(
+                status.get("active"),
+                status.get("kill_reason"),
+                status.get("consecutive_failures"),
+                status.get("engaged_at"),
+            ),
+            message="ORDER_KILL_SWITCH_STATUS active=%s reason=%s failures=%s engaged_at=%s auto_reset_allowed=%s"
+            % (
                 status.get("active"),
                 status.get("kill_reason"),
                 status.get("consecutive_failures"),
@@ -2148,7 +2235,11 @@ class OrderManager:
             "last_exception_message": last_failure.get("exception_message"),
             "symbol": last_failure.get("symbol"),
             "trace_id": last_failure.get("trace_id"),
-            "last_reset": dict(self._kill_switch_last_reset) if self._kill_switch_last_reset else None,
+            "last_reset": (
+                dict(self._kill_switch_last_reset)
+                if self._kill_switch_last_reset
+                else None
+            ),
         }
 
     def execution_health_snapshot(self) -> dict[str, Any]:
@@ -2210,7 +2301,7 @@ class OrderManager:
                 raise exc
 
         if not isinstance(response, dict):
-            raise ExecutionError("Invalid broker response payload")
+            raise OrderPlacementError("invalid_broker_response_payload")
         return response
 
     def place_order(
@@ -2232,6 +2323,13 @@ class OrderManager:
         trace_id: str | None = None,
         intent: OrderIntent | str | None = None,
         intended_position_side: Literal["LONG", "SHORT"] | None = None,
+        client_order_id: str | None = None,
+        trade_lifecycle_id: str | None = None,
+        linked_entry_order_id: str | None = None,
+        bracket_id: str | None = None,
+        basket_version: int | str | None = None,
+        instrument_token: int | None = None,
+        contract_expiry: str | None = None,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -2239,7 +2337,14 @@ class OrderManager:
         # ── PHASE 3: TRADE_ATTEMPT — first thing, always ─────────────────────
         self._logger.info(
             "TRADE_ATTEMPT symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s signal_id=%s",
-            symbol, side, quantity, price, stop_loss, take_profit, strategy_name, signal_id,
+            symbol,
+            side,
+            quantity,
+            price,
+            stop_loss,
+            take_profit,
+            strategy_name,
+            signal_id,
         )
         if trace_id:
             self._last_trace_id = trace_id
@@ -2312,18 +2417,19 @@ class OrderManager:
             """Emit unified decision logs for order placement. Args: fields. Returns: None. Raises: None."""
             if broker_mode is None:
                 try:
-                    broker_mode = str(
-                        os.getenv("EXECUTION_MODE", "SHADOW")
-                    ).strip().upper()
+                    broker_mode = (
+                        str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+                    )
                 except Exception:  # noqa: BLE001
                     broker_mode = None
             # State snapshot — the fields that most often cause *silent* blocking.
             # Captured here so every decision line shows WHY, not just THAT.
             try:
                 import time as _t
+
                 _now = _t.time()
                 _margin_ts = self._last_margin_success_ts
-                _margin_age = (round(_now - _margin_ts, 1) if _margin_ts else None)
+                _margin_age = round(_now - _margin_ts, 1) if _margin_ts else None
                 _state = {
                     "execution_mode": broker_mode,
                     "live_enabled": bool(self.is_live_mode()),
@@ -2333,7 +2439,9 @@ class OrderManager:
                     "margin_available": self._last_margin_available_balance,
                     "margin_age_s": _margin_age,
                     "margin_stale": bool(_margin_ts is None),
-                    "allow_entry_with_stale_margin": bool(self._allow_entry_with_stale_margin),
+                    "allow_entry_with_stale_margin": bool(
+                        self._allow_entry_with_stale_margin
+                    ),
                     "qty": quantity,
                 }
             except Exception:  # noqa: BLE001
@@ -2348,9 +2456,15 @@ class OrderManager:
             }
             self._logger.info(
                 "ORDER_MANAGER_DECISION allowed=%s block_reason=%s symbol=%s mode=%s live=%s shadow=%s kill=%s margin_stale=%s broker_attempted=%s",
-                allowed, block_reason, symbol, broker_mode,
-                _state.get("live_enabled"), _state.get("shadow_mode"),
-                _state.get("kill_switch_active"), _state.get("margin_stale"), broker_attempted,
+                allowed,
+                block_reason,
+                symbol,
+                broker_mode,
+                _state.get("live_enabled"),
+                _state.get("shadow_mode"),
+                _state.get("kill_switch_active"),
+                _state.get("margin_stale"),
+                broker_attempted,
                 extra={
                     "event": "ORDER_MANAGER_DECISION",
                     "symbol": symbol,
@@ -2369,6 +2483,7 @@ class OrderManager:
                     "broker_attempted": broker_attempted,
                 },
             )
+
         # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
         # ═══════════════════════════════════════════════════════════════════════
         if price is not None and price > 0:
@@ -2381,16 +2496,44 @@ class OrderManager:
             take_profit = self._round_to_tick(take_profit)
         # ---------------------------------------------------------
         # 🛡️ DETECT EXIT vs ENTRY (must be BEFORE any guard)
+        normalized_symbol = normalize_symbol(symbol)
+        normalized_side = str(side).strip().upper()
         normalized_tag = (tag or "").lower()
         is_system_exit = any(
             x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
         )
 
+        entry_blocker = getattr(self, "current_entry_blocker", None)
+        entry_block = (
+            entry_blocker()
+            if callable(entry_blocker)
+            else getattr(self, "_entry_lifecycle_blocker", None)
+        )
+        if normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"} and entry_block:
+            details = (
+                dict(entry_block)
+                if isinstance(entry_block, Mapping)
+                else {"block_reason": str(entry_block)}
+            )
+            reason = str(details.get("block_reason") or "entry_reconciliation_pending")
+            _log_order_decision(
+                allowed=False,
+                block_reason=reason,
+                details=details,
+                broker_attempted=False,
+            )
+            self.set_last_skip_reason(reason)
+            return None
+
         if not is_system_exit and self._bracket_manager is not None:
-            has_unresolved_exit = getattr(self._bracket_manager, "has_unresolved_exit", None)
+            has_unresolved_exit = getattr(
+                self._bracket_manager, "has_unresolved_exit", None
+            )
             if callable(has_unresolved_exit) and bool(has_unresolved_exit()):
                 active_bracket_id = None
-                getter = getattr(self._bracket_manager, "get_first_unresolved_exit_bracket_id", None)
+                getter = getattr(
+                    self._bracket_manager, "get_first_unresolved_exit_bracket_id", None
+                )
                 if callable(getter):
                     active_bracket_id = getter()
                 self._logger.critical(
@@ -2444,7 +2587,12 @@ class OrderManager:
                     symbol,
                     self._consecutive_failures,
                     self._kill_switch_reason,
-                    extra={"event": "ORDER_KILL_SWITCH_BLOCK", "symbol": symbol, "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason},
+                    extra={
+                        "event": "ORDER_KILL_SWITCH_BLOCK",
+                        "symbol": symbol,
+                        "consecutive_failures": self._consecutive_failures,
+                        "reason": self._kill_switch_reason,
+                    },
                 )
             self._logger.warning(
                 "ORDER_BLOCKED reason=kill_switch_active kill_reason=%s failures=%s engaged_at=%s trace_id=%s symbol=%s side=%s qty=%s last_failure_exception_type=%s last_failure_exception_message=%s",
@@ -2457,7 +2605,16 @@ class OrderManager:
                 quantity,
                 last_failure.get("exception_type"),
                 last_failure.get("exception_message"),
-                extra={"event": "ORDER_BLOCKED", "block_reason": "kill_switch_active", "trace_id": trace_id, "kill_state": kill_state, "last_failure": last_failure, "symbol": normalized_symbol, "side": normalized_side, "quantity": quantity},
+                extra={
+                    "event": "ORDER_BLOCKED",
+                    "block_reason": "kill_switch_active",
+                    "trace_id": trace_id,
+                    "kill_state": kill_state,
+                    "last_failure": last_failure,
+                    "symbol": normalized_symbol,
+                    "side": normalized_side,
+                    "quantity": quantity,
+                },
             )
             _log_order_decision(
                 allowed=False,
@@ -2470,8 +2627,13 @@ class OrderManager:
             os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
         ):
             if not self._validate_live_execution_safety():
-                self._logger.warning("ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s", symbol)
-                _log_order_decision(allowed=False, block_reason="live_execution_safety_check_failed")
+                self._logger.warning(
+                    "ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s",
+                    symbol,
+                )
+                _log_order_decision(
+                    allowed=False, block_reason="live_execution_safety_check_failed"
+                )
                 return None
 
         # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
@@ -2490,15 +2652,24 @@ class OrderManager:
                 for o in self._orders.values()
             )
             if has_open_local and has_pending_entry:
-                self._logger.warning("ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s", symbol, side)
-                _log_order_decision(allowed=False, block_reason="duplicate_entry_prevented")
+                self._logger.warning(
+                    "ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s",
+                    symbol,
+                    side,
+                )
+                _log_order_decision(
+                    allowed=False, block_reason="duplicate_entry_prevented"
+                )
                 return None
             if not self._signal_arbitrator.allow(symbol, side):
                 self._logger.critical(
                     "ORDER_BLOCKED: signal_arbitrator_blocked symbol=%s side=%s",
-                    symbol, side,
+                    symbol,
+                    side,
                 )
-                _log_order_decision(allowed=False, block_reason="signal_arbitrator_blocked")
+                _log_order_decision(
+                    allowed=False, block_reason="signal_arbitrator_blocked"
+                )
                 return None
 
         # 3. THE INVARIANT CHECK
@@ -2510,8 +2681,14 @@ class OrderManager:
                     f"\nReason: Intraday Buy Orders MUST have a Stop Loss to attach a Virtual Bracket."
                     f"\nData: Qty={quantity}, SL={stop_loss}, Tag={tag}"
                 )
-                self._logger.warning("ORDER_BLOCKED: naked_entry_no_stop_loss symbol=%s qty=%s", symbol, quantity)
-                _log_order_decision(allowed=False, block_reason="naked_entry_no_stop_loss")
+                self._logger.warning(
+                    "ORDER_BLOCKED: naked_entry_no_stop_loss symbol=%s qty=%s",
+                    symbol,
+                    quantity,
+                )
+                _log_order_decision(
+                    allowed=False, block_reason="naked_entry_no_stop_loss"
+                )
                 return None  # ❌ STOP HERE. DO NOT CALL BROKER.
 
         # =========================================================
@@ -2527,7 +2704,10 @@ class OrderManager:
         ):
             quote = self._get_latest_quote_safe(normalized_symbol) or {}
             quote_diag = self._extract_quote_diagnostics(quote)
-            if float(quote_diag.get("bid") or 0.0) <= 0 or float(quote_diag.get("ask") or 0.0) <= 0:
+            if (
+                float(quote_diag.get("bid") or 0.0) <= 0
+                or float(quote_diag.get("ask") or 0.0) <= 0
+            ):
                 self.set_last_skip_reason("selected_option_bid_ask_missing")
                 self._logger.warning(
                     "ORDER_BLOCKED: selected_option_bid_ask_missing symbol=%s bid=%s ask=%s ltp=%s",
@@ -2558,7 +2738,12 @@ class OrderManager:
                 normalized_symbol,
                 quantity,
                 exc,
-                extra={"event": "ORDER_BLOCKED", "block_reason": "invalid_lot_quantity", "symbol": normalized_symbol, "qty": quantity},
+                extra={
+                    "event": "ORDER_BLOCKED",
+                    "block_reason": "invalid_lot_quantity",
+                    "symbol": normalized_symbol,
+                    "qty": quantity,
+                },
             )
             _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
             return None
@@ -2568,7 +2753,13 @@ class OrderManager:
                 normalized_symbol,
                 quantity,
                 lot_size,
-                extra={"event": "ORDER_BLOCKED", "block_reason": "invalid_lot_quantity", "symbol": normalized_symbol, "qty": quantity, "lot_size": lot_size},
+                extra={
+                    "event": "ORDER_BLOCKED",
+                    "block_reason": "invalid_lot_quantity",
+                    "symbol": normalized_symbol,
+                    "qty": quantity,
+                    "lot_size": lot_size,
+                },
             )
             _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
             return None
@@ -2617,8 +2808,13 @@ class OrderManager:
                     f"🚫 BLOCKED: Fresh pending order exists for {normalized_symbol}. Ignored to prevent duplicate.",
                     extra={"event": "duplicate_block", "symbol": normalized_symbol},
                 )
-                self._logger.warning("ORDER_BLOCKED: fresh_pending_order_exists symbol=%s", normalized_symbol)
-                _log_order_decision(allowed=False, block_reason="fresh_pending_order_exists")
+                self._logger.warning(
+                    "ORDER_BLOCKED: fresh_pending_order_exists symbol=%s",
+                    normalized_symbol,
+                )
+                _log_order_decision(
+                    allowed=False, block_reason="fresh_pending_order_exists"
+                )
                 return None
             elif pending_orders and is_system_exit:
                 self._logger.warning(
@@ -2652,8 +2848,7 @@ class OrderManager:
                             o_sym != normalized_symbol
                             and str(getattr(o, "intent", "")).upper()
                             in {"ENTRY", "SCALE_IN", "REVERSAL"}
-                            and o.status
-                            in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
+                            and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
                         ):
                             conflict = f"pending_entry_order:{o_sym}"
                             break
@@ -2671,7 +2866,9 @@ class OrderManager:
                         conflict = "position_state_unavailable"
                 if conflict is None and self._bracket_manager is not None:
                     try:
-                        _actives = getattr(self._bracket_manager, "active_brackets", {}) or {}
+                        _actives = (
+                            getattr(self._bracket_manager, "active_brackets", {}) or {}
+                        )
                         for _b_sym in _actives:
                             if normalize_symbol(str(_b_sym)) != normalized_symbol:
                                 conflict = f"active_bracket:{_b_sym}"
@@ -2709,7 +2906,9 @@ class OrderManager:
             duplicate_pending = self._is_pending_signal(signal_id)
             if duplicate_permanent or duplicate_pending:
                 block_reason = (
-                    "duplicate_signal" if duplicate_permanent else "duplicate_signal_pending"
+                    "duplicate_signal"
+                    if duplicate_permanent
+                    else "duplicate_signal_pending"
                 )
                 self._logger.warning(
                     "🛑 DUPLICATE BLOCKED: Signal %s already traded.",
@@ -2745,15 +2944,29 @@ class OrderManager:
                     self._logger.error(
                         f"🛑 REJECTED: BUY TP ({take_profit}) is below entry ({price})"
                     )
-                    self._logger.critical("ORDER_BLOCKED: buy_tp_below_entry symbol=%s tp=%s entry=%s", normalized_symbol, take_profit, price)
-                    _log_order_decision(allowed=False, block_reason="buy_tp_below_entry")
+                    self._logger.critical(
+                        "ORDER_BLOCKED: buy_tp_below_entry symbol=%s tp=%s entry=%s",
+                        normalized_symbol,
+                        take_profit,
+                        price,
+                    )
+                    _log_order_decision(
+                        allowed=False, block_reason="buy_tp_below_entry"
+                    )
                     return None
                 if stop_loss and stop_loss >= price:
                     self._logger.error(
                         f"🛑 REJECTED: BUY SL ({stop_loss}) is above entry ({price})"
                     )
-                    self._logger.critical("ORDER_BLOCKED: buy_sl_above_entry symbol=%s sl=%s entry=%s", normalized_symbol, stop_loss, price)
-                    _log_order_decision(allowed=False, block_reason="buy_sl_above_entry")
+                    self._logger.critical(
+                        "ORDER_BLOCKED: buy_sl_above_entry symbol=%s sl=%s entry=%s",
+                        normalized_symbol,
+                        stop_loss,
+                        price,
+                    )
+                    _log_order_decision(
+                        allowed=False, block_reason="buy_sl_above_entry"
+                    )
                     return None
             elif side == "SELL":
                 # For a Short/Exit, TP must be below Entry, SL must be above Entry
@@ -2761,15 +2974,29 @@ class OrderManager:
                     self._logger.error(
                         f"🛑 REJECTED: SELL TP ({take_profit}) is above entry ({price})"
                     )
-                    self._logger.critical("ORDER_BLOCKED: sell_tp_above_entry symbol=%s tp=%s entry=%s", normalized_symbol, take_profit, price)
-                    _log_order_decision(allowed=False, block_reason="sell_tp_above_entry")
+                    self._logger.critical(
+                        "ORDER_BLOCKED: sell_tp_above_entry symbol=%s tp=%s entry=%s",
+                        normalized_symbol,
+                        take_profit,
+                        price,
+                    )
+                    _log_order_decision(
+                        allowed=False, block_reason="sell_tp_above_entry"
+                    )
                     return None
                 if stop_loss and stop_loss <= price:
                     self._logger.error(
                         f"🛑 REJECTED: SELL SL ({stop_loss}) is below entry ({price})"
                     )
-                    self._logger.critical("ORDER_BLOCKED: sell_sl_below_entry symbol=%s sl=%s entry=%s", normalized_symbol, stop_loss, price)
-                    _log_order_decision(allowed=False, block_reason="sell_sl_below_entry")
+                    self._logger.critical(
+                        "ORDER_BLOCKED: sell_sl_below_entry symbol=%s sl=%s entry=%s",
+                        normalized_symbol,
+                        stop_loss,
+                        price,
+                    )
+                    _log_order_decision(
+                        allowed=False, block_reason="sell_sl_below_entry"
+                    )
                     return None
 
         # ---------------------------------------------------------------------
@@ -2778,7 +3005,12 @@ class OrderManager:
         if variety == "regular" and not is_system_exit:
             try:
                 execution_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper()
-                enable_live = os.getenv("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
+                enable_live = os.getenv("ENABLE_LIVE", "false").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
                 is_live_mode = execution_mode == "LIVE" or enable_live
                 allowed, detail = get_time_status()
                 if is_live_mode and not allowed:
@@ -2822,7 +3054,9 @@ class OrderManager:
                     "Order blocked: Trading Switch is OFF",
                     extra={"symbol": normalized_symbol},
                 )
-                self._logger.info("ORDER_BLOCKED: trading_switch_off symbol=%s", normalized_symbol)
+                self._logger.info(
+                    "ORDER_BLOCKED: trading_switch_off symbol=%s", normalized_symbol
+                )
                 _log_order_decision(allowed=False, block_reason="trading_switch_off")
                 return None
 
@@ -2852,7 +3086,11 @@ class OrderManager:
                     f"Risk Block: {reason}",
                     extra={"symbol": normalized_symbol, "event": "risk_block"},
                 )
-                self._logger.info("ORDER_BLOCKED: risk_manager_blocked reason=%s symbol=%s", reason, normalized_symbol)
+                self._logger.info(
+                    "ORDER_BLOCKED: risk_manager_blocked reason=%s symbol=%s",
+                    reason,
+                    normalized_symbol,
+                )
                 _log_order_decision(allowed=False, block_reason="risk_manager_blocked")
                 return None
 
@@ -3018,6 +3256,7 @@ class OrderManager:
             "variety": variety,
             "client_order_id": unique_client_id,
         }
+
         def _find_existing_order_after_uncertain_submit() -> dict[str, Any] | None:
             try:
                 existing = self._find_open_order(unique_client_id)
@@ -3101,7 +3340,9 @@ class OrderManager:
                 def target():
                     try:
                         result_holder["resp"] = _broker_call(call_args)
-                    except Exception as exc:  # noqa: BLE001 - re-raised on order thread with broker text intact
+                    except (
+                        Exception
+                    ) as exc:  # noqa: BLE001 - re-raised on order thread with broker text intact
                         result_holder["resp"] = exc
 
                 # We use the 'Thread' class already imported at top of file
@@ -3117,7 +3358,9 @@ class OrderManager:
                     )
                     t.join(timeout=2.0)
                     if t.is_alive():
-                        existing_after_timeout = _find_existing_order_after_uncertain_submit()
+                        existing_after_timeout = (
+                            _find_existing_order_after_uncertain_submit()
+                        )
                         if existing_after_timeout is not None:
                             response = existing_after_timeout
                         else:
@@ -3142,7 +3385,9 @@ class OrderManager:
 
                 response = result_holder["resp"]
                 if response is None:
-                    existing_after_timeout = _find_existing_order_after_uncertain_submit()
+                    existing_after_timeout = (
+                        _find_existing_order_after_uncertain_submit()
+                    )
                     if existing_after_timeout is not None:
                         response = existing_after_timeout
 
@@ -3194,6 +3439,13 @@ class OrderManager:
                         intent=cast(OrderIntent, normalized_intent),
                         intended_position_side=intended_position_side,
                         signal_id=signal_id,
+                        client_order_id=client_order_id,
+                        trade_lifecycle_id=trade_lifecycle_id,
+                        linked_entry_order_id=linked_entry_order_id,
+                        bracket_id=bracket_id,
+                        basket_version=basket_version,
+                        instrument_token=instrument_token,
+                        contract_expiry=contract_expiry,
                     )
                     self._register_order(details)
                     # Sync PositionManager's pending-order registry so the
@@ -3276,10 +3528,9 @@ class OrderManager:
                     if fill_confirmed and self._bracket_manager:
                         bracket = self._bracket_manager.get_bracket(order_id)
                         if bracket:
-                            stop_order_id = (
-                                getattr(bracket, "stop_order_id", None)
-                                or getattr(bracket, "virtual_sl_id", None)
-                            )
+                            stop_order_id = getattr(
+                                bracket, "stop_order_id", None
+                            ) or getattr(bracket, "virtual_sl_id", None)
                             trailing_spec = getattr(bracket, "trailing_spec", None)
 
                             if stop_order_id and trailing_spec:
@@ -3347,18 +3598,35 @@ class OrderManager:
                     details={
                         "failure_class": "missing_order_id",
                         "error_message": "broker response did not include order_id",
-                        "broker_payload": response if isinstance(response, dict) else {"raw_response": repr(response)},
+                        "broker_payload": (
+                            response
+                            if isinstance(response, dict)
+                            else {"raw_response": repr(response)}
+                        ),
                         "retryable": True,
                     },
                 )
-                raise ExecutionError(f"missing_order_id: broker response did not include order_id payload={response!r}")
+                raise OrderPlacementError(
+                    f"missing_order_id: broker response did not include order_id payload={response!r}"
+                )
 
             except Exception as e:
                 msg = str(e).lower()
                 failure_class = "unexpected_exception"
                 if "rate" in msg and "limit" in msg:
                     failure_class = "transient_api_error"
-                elif any(x in msg for x in ["no ips configured", "allowed ips", "ip configured", "403", "access denied", "forbidden", "ip not whitelisted"]):
+                elif any(
+                    x in msg
+                    for x in [
+                        "no ips configured",
+                        "allowed ips",
+                        "ip configured",
+                        "403",
+                        "access denied",
+                        "forbidden",
+                        "ip not whitelisted",
+                    ]
+                ):
                     # Broker-side account/config problem (Kite static-IP allowlist).
                     # Non-retryable and NOT a trading failure — must not count toward
                     # the kill switch, otherwise a fixable config issue latches the bot.
@@ -3377,15 +3645,25 @@ class OrderManager:
                     failure_class = "invalid_symbol"
                 elif "invalid" in msg and "quant" in msg:
                     failure_class = "invalid_quantity"
-                elif any(x in msg for x in ["invalid", "bad request", "payload", "400"]):
+                elif any(
+                    x in msg for x in ["invalid", "bad request", "payload", "400"]
+                ):
                     failure_class = "broker_rejected"
 
                 if failure_class == "broker_config_error":
                     self._logger.error(
                         "ORDER_BROKER_CONFIG_ERROR non_retryable=True reason=ip_allowlist_or_access_denied "
                         "symbol=%s trace_id=%s detail=%s",
-                        normalized_symbol, trace_id, self._sanitize_broker_error(e),
-                        extra={"event": "ORDER_BROKER_CONFIG_ERROR", "non_retryable": True, "symbol": normalized_symbol, "trace_id": trace_id, "failure_class": failure_class},
+                        normalized_symbol,
+                        trace_id,
+                        self._sanitize_broker_error(e),
+                        extra={
+                            "event": "ORDER_BROKER_CONFIG_ERROR",
+                            "non_retryable": True,
+                            "symbol": normalized_symbol,
+                            "trace_id": trace_id,
+                            "failure_class": failure_class,
+                        },
                     )
 
                 countable_failures = {
@@ -3432,7 +3710,10 @@ class OrderManager:
                             },
                         }
                     )
-                if self._consecutive_failures >= self._max_failures and self._kill_switch_engaged_at is None:
+                if (
+                    self._consecutive_failures >= self._max_failures
+                    and self._kill_switch_engaged_at is None
+                ):
                     self._kill_switch_engaged_at = datetime.now(timezone.utc)
                     self._kill_switch_reason = failure_class
                     self._last_kill_switch_log_ts = time.time()
@@ -3444,22 +3725,33 @@ class OrderManager:
                         str(e),
                         trace_id,
                         normalized_symbol,
-                        extra={"event": "ORDER_KILL_SWITCH_ENGAGED", "reason": self._kill_switch_reason, "failures": self._consecutive_failures, "exception_type": type(e).__name__, "exception": str(e), "trace_id": trace_id, "symbol": normalized_symbol},
+                        extra={
+                            "event": "ORDER_KILL_SWITCH_ENGAGED",
+                            "reason": self._kill_switch_reason,
+                            "failures": self._consecutive_failures,
+                            "exception_type": type(e).__name__,
+                            "exception": str(e),
+                            "trace_id": trace_id,
+                            "symbol": normalized_symbol,
+                        },
                         exc_info=(failure_class == "unexpected_exception"),
                     )
                     self._log_kill_switch_status()
 
                 # Fail Fast logic
-                if failure_class != "missing_order_id" and (failure_class == "broker_config_error" or any(
-                    x in msg
-                    for x in [
-                        "400",
-                        "invalid",
-                        "market closed",
-                        "bad request",
-                        "insufficient funds",
-                    ]
-                )):
+                if failure_class != "missing_order_id" and (
+                    failure_class == "broker_config_error"
+                    or any(
+                        x in msg
+                        for x in [
+                            "400",
+                            "invalid",
+                            "market closed",
+                            "bad request",
+                            "insufficient funds",
+                        ]
+                    )
+                ):
                     self._logger.critical(
                         f"🛑 FATAL Payload Error: {e}",
                         extra={"event": "fatal_order_error"},
@@ -3472,7 +3764,11 @@ class OrderManager:
                         price=float(price or 0.0),
                         meta={"trade_id": trade_id, "error": str(e)},
                     )
-                    _log_order_decision(allowed=False, block_reason="fatal_order_error", broker_attempted=True)
+                    _log_order_decision(
+                        allowed=False,
+                        block_reason="fatal_order_error",
+                        broker_attempted=True,
+                    )
                     if failure_class == "broker_config_error":
                         _log_order_decision(
                             allowed=False,
@@ -3494,7 +3790,11 @@ class OrderManager:
 
         self._logger.error("❌ Order placement failed after retries.")
         self._clear_uncertain_order(unique_client_id)
-        _log_order_decision(allowed=False, block_reason="order_placement_failed_after_retries", broker_attempted=True)
+        _log_order_decision(
+            allowed=False,
+            block_reason="order_placement_failed_after_retries",
+            broker_attempted=True,
+        )
         if pending_signal_marked:
             self._clear_pending_signal(signal_id)
         return None
@@ -3558,7 +3858,10 @@ class OrderManager:
                 except Exception as exc:  # noqa: BLE001 - provider diagnostics only
                     self._logger.debug(
                         "selected_option_basket_lookup_failed",
-                        extra={"event": "selected_option_basket_lookup_failed", "error": str(exc)},
+                        extra={
+                            "event": "selected_option_basket_lookup_failed",
+                            "error": str(exc),
+                        },
                     )
             baskets.append(getattr(provider, "active_trading_universe", None))
             baskets.append(getattr(provider, "active_contract_basket", None))
@@ -3573,7 +3876,12 @@ class OrderManager:
                         normalized = normalize_symbol(str(value))
                         if normalized:
                             selected.add(normalized)
-            for attr in ("selected_ce", "selected_pe", "atm_ce_symbol", "atm_pe_symbol"):
+            for attr in (
+                "selected_ce",
+                "selected_pe",
+                "atm_ce_symbol",
+                "atm_pe_symbol",
+            ):
                 value = getattr(provider, attr, None)
                 if value:
                     normalized = normalize_symbol(str(value))
@@ -3583,7 +3891,9 @@ class OrderManager:
 
     def _is_selected_option_for_live_execution(self, symbol: str) -> bool:
         normalized = normalize_symbol(symbol)
-        return bool(normalized and normalized in self._selected_option_symbols_for_execution())
+        return bool(
+            normalized and normalized in self._selected_option_symbols_for_execution()
+        )
 
     def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
         def _safe_float(value: object, default: float = 0.0) -> float:
@@ -3650,12 +3960,18 @@ class OrderManager:
                     ts_ist = ts_raw.replace(tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
                     now = time.time()
                     if ts_key in ("received_at", "wallclock"):
-                        if abs(now - ts_ist) < abs(now - ts_utc) and abs(now - ts_ist) < 60.0:
+                        if (
+                            abs(now - ts_ist) < abs(now - ts_utc)
+                            and abs(now - ts_ist) < 60.0
+                        ):
                             parsed_ts = ts_ist
                         else:
                             parsed_ts = ts_utc
                     else:
-                        if abs(now - ts_utc) < abs(now - ts_ist) and abs(now - ts_utc) < 60.0:
+                        if (
+                            abs(now - ts_utc) < abs(now - ts_ist)
+                            and abs(now - ts_utc) < 60.0
+                        ):
                             parsed_ts = ts_utc
                         else:
                             parsed_ts = ts_ist
@@ -3669,15 +3985,23 @@ class OrderManager:
                 parsed_dt = datetime.fromisoformat(iso)
                 if parsed_dt.tzinfo is None:
                     ts_utc = parsed_dt.replace(tzinfo=timezone.utc).timestamp()
-                    ts_ist = parsed_dt.replace(tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
+                    ts_ist = parsed_dt.replace(
+                        tzinfo=ZoneInfo("Asia/Kolkata")
+                    ).timestamp()
                     now = time.time()
                     if ts_key in ("received_at", "wallclock"):
-                        if abs(now - ts_ist) < abs(now - ts_utc) and abs(now - ts_ist) < 60.0:
+                        if (
+                            abs(now - ts_ist) < abs(now - ts_utc)
+                            and abs(now - ts_ist) < 60.0
+                        ):
                             parsed_ts = ts_ist
                         else:
                             parsed_ts = ts_utc
                     else:
-                        if abs(now - ts_utc) < abs(now - ts_ist) and abs(now - ts_utc) < 60.0:
+                        if (
+                            abs(now - ts_utc) < abs(now - ts_ist)
+                            and abs(now - ts_utc) < 60.0
+                        ):
                             parsed_ts = ts_utc
                         else:
                             parsed_ts = ts_ist
@@ -3687,18 +4011,284 @@ class OrderManager:
                 age_ms = max(0.0, (time.time() - float(parsed_ts)) * 1000.0)
         except Exception:
             age_ms = None
-        return {"bid": bid, "ask": ask, "ltp": ltp, "spread": spread, "spread_pct": spread_pct, "bid_qty": bid_qty, "ask_qty": ask_qty, "depth_qty": bid_qty + ask_qty, "age_ms": age_ms}
+        return {
+            "bid": bid,
+            "ask": ask,
+            "ltp": ltp,
+            "spread": spread,
+            "spread_pct": spread_pct,
+            "bid_qty": bid_qty,
+            "ask_qty": ask_qty,
+            "depth_qty": bid_qty + ask_qty,
+            "age_ms": age_ms,
+        }
+
+    def _trade_plan_rejection_details(
+        self, plan: TradePlan, reason: str, **details: Any
+    ) -> dict[str, Any]:
+        payload = {
+            "broker_attempted": False,
+            "retryable": False,
+            "trade_lifecycle_id": plan.trade_lifecycle_id,
+            "client_order_id": plan.client_order_id,
+            "signal_id": plan.signal_id,
+            "symbol": normalize_symbol(plan.symbol),
+            "requested_quantity": plan.quantity,
+            "filled_quantity": 0,
+            "protected_quantity": 0,
+            "broker_position_quantity": None,
+            "blocker_code": reason,
+        }
+        payload.update(details)
+        return payload
+
+    def _active_contract_for_trade_plan(self, plan: TradePlan) -> dict[str, Any] | None:
+        symbol = normalize_symbol(plan.symbol)
+        sources = (
+            getattr(self, "_active_contract_basket", None),
+            getattr(getattr(self, "_data_hub", None), "_active_contract_basket", None),
+            getattr(
+                getattr(self, "_market_data", None), "_active_contract_basket", None
+            ),
+        )
+        for source in sources:
+            if source is None:
+                continue
+            selection_obj = None
+            with suppress(Exception):
+                selection_obj = active_contract_selection_from_basket(source)
+            if selection_obj is not None:
+                selected = {
+                    normalize_symbol(
+                        str(getattr(selection_obj, "selected_ce", "") or "")
+                    ),
+                    normalize_symbol(
+                        str(getattr(selection_obj, "selected_pe", "") or "")
+                    ),
+                }
+                if symbol not in selected:
+                    continue
+                token_by_symbol = getattr(selection_obj, "token_by_symbol", None) or {}
+                token = None
+                if isinstance(token_by_symbol, Mapping):
+                    token = token_by_symbol.get(symbol) or token_by_symbol.get(
+                        symbol.split(":", 1)[-1]
+                    )
+                if token is None and symbol == normalize_symbol(
+                    str(getattr(selection_obj, "selected_ce", "") or "")
+                ):
+                    token = getattr(selection_obj, "selected_ce_token", None)
+                if token is None and symbol == normalize_symbol(
+                    str(getattr(selection_obj, "selected_pe", "") or "")
+                ):
+                    token = getattr(selection_obj, "selected_pe_token", None)
+                return {
+                    "symbol": symbol,
+                    "instrument_token": int(token) if token not in (None, "") else None,
+                    "basket_version": getattr(selection_obj, "basket_version", None),
+                    "contract_expiry": getattr(selection_obj, "expiry", None),
+                    "selected_at": getattr(selection_obj, "committed_at", None),
+                }
+            if not isinstance(source, Mapping):
+                continue
+            token_map = dict(source.get("token_by_symbol") or {})
+            selected = [source.get("selected_ce"), source.get("selected_pe")]
+            symbols = list(source.get("option_symbols") or source.get("symbols") or [])
+            if symbol not in {
+                normalize_symbol(str(x)) for x in [*selected, *symbols] if x
+            }:
+                continue
+            token = token_map.get(symbol) or token_map.get(symbol.split(":", 1)[-1])
+            if symbol == normalize_symbol(str(source.get("selected_ce") or "")):
+                token = token or source.get("selected_ce_token")
+            if symbol == normalize_symbol(str(source.get("selected_pe") or "")):
+                token = token or source.get("selected_pe_token")
+            return {
+                "symbol": symbol,
+                "instrument_token": int(token) if token not in (None, "") else None,
+                "basket_version": source.get("basket_version") or source.get("version"),
+                "contract_expiry": source.get("expiry")
+                or source.get("contract_expiry"),
+                "selected_at": source.get("selected_at") or source.get("committed_at"),
+            }
+        return None
 
     def _validate_trade_plan(self, plan: TradePlan) -> OrderPreflightResult:
         symbol = normalize_symbol(plan.symbol)
         if not is_strategy_instrument(symbol):
-            return OrderPreflightResult(False, "non_strategy_instrument", {"symbol": symbol})
+            return OrderPreflightResult(
+                False, "non_strategy_instrument", {"symbol": symbol}
+            )
         if plan.quantity <= 0:
-            return OrderPreflightResult(False, "invalid_quantity", {"quantity": plan.quantity})
-        lot_size = self._lot_size_for_symbol(symbol)
-        if lot_size > 0 and plan.quantity % lot_size != 0:
-            return OrderPreflightResult(False, "quantity_not_lot_multiple", {"quantity": plan.quantity, "lot_size": lot_size})
-        is_entry = plan.side == "BUY" and "exit" not in (plan.tag or "").lower()
+            return OrderPreflightResult(
+                False, "invalid_quantity", {"quantity": plan.quantity}
+            )
+        is_entry = str(plan.intent or "").upper() == "ENTRY"
+        live_checker = getattr(self, "is_live_mode", None)
+        if callable(live_checker):
+            live_mode = bool(live_checker())
+        else:
+            live_fn = getattr(self, "_order_live_execution_enabled", None)
+            live_mode = bool(live_fn()) if callable(live_fn) else False
+        live_entry = bool(is_entry and live_mode)
+        try:
+            lot_size = int(
+                plan.resolved_lot_size or self._lot_size_for_symbol(symbol) or 0
+            )
+        except Exception as exc:  # noqa: BLE001
+            if live_entry:
+                return OrderPreflightResult(
+                    False,
+                    "lot_size_unresolved",
+                    OrderManager._trade_plan_rejection_details(
+                        self, plan, "lot_size_unresolved", error_type=type(exc).__name__
+                    ),
+                )
+            raise
+        if live_entry:
+            if not plan.trade_lifecycle_id:
+                return OrderPreflightResult(
+                    False,
+                    "trade_lifecycle_id_missing",
+                    OrderManager._trade_plan_rejection_details(
+                        self, plan, "trade_lifecycle_id_missing"
+                    ),
+                )
+            if not plan.client_order_id:
+                return OrderPreflightResult(
+                    False,
+                    "client_order_id_missing",
+                    OrderManager._trade_plan_rejection_details(
+                        self, plan, "client_order_id_missing"
+                    ),
+                )
+            if not plan.signal_id:
+                return OrderPreflightResult(
+                    False,
+                    "signal_id_missing",
+                    OrderManager._trade_plan_rejection_details(
+                        self, plan, "signal_id_missing"
+                    ),
+                )
+            if not plan.instrument_token:
+                return OrderPreflightResult(
+                    False,
+                    "instrument_token_mismatch",
+                    OrderManager._trade_plan_rejection_details(
+                        self,
+                        plan,
+                        "instrument_token_mismatch",
+                        required_value="present",
+                        actual_value=plan.instrument_token,
+                    ),
+                )
+            if lot_size <= 0:
+                return OrderPreflightResult(
+                    False,
+                    "lot_size_unresolved",
+                    OrderManager._trade_plan_rejection_details(
+                        self, plan, "lot_size_unresolved", actual_value=lot_size
+                    ),
+                )
+            if plan.requested_lots <= 0:
+                return OrderPreflightResult(
+                    False,
+                    "invalid_entry_lot_quantity",
+                    OrderManager._trade_plan_rejection_details(
+                        self,
+                        plan,
+                        "invalid_entry_lot_quantity",
+                        requested_lots=plan.requested_lots,
+                    ),
+                )
+            max_lots = int(os.getenv("MAX_LOTS_PER_TRADE", "1") or "1")
+            if max_lots <= 1 and int(plan.requested_lots) != 1:
+                return OrderPreflightResult(
+                    False,
+                    "invalid_entry_lot_quantity",
+                    OrderManager._trade_plan_rejection_details(
+                        self,
+                        plan,
+                        "invalid_entry_lot_quantity",
+                        required_value=1,
+                        actual_value=plan.requested_lots,
+                    ),
+                )
+            expected_qty = int(plan.requested_lots) * int(lot_size)
+            if plan.quantity != expected_qty or plan.quantity % lot_size != 0:
+                return OrderPreflightResult(
+                    False,
+                    "invalid_entry_lot_quantity",
+                    OrderManager._trade_plan_rejection_details(
+                        self,
+                        plan,
+                        "invalid_entry_lot_quantity",
+                        required_value=expected_qty,
+                        actual_value=plan.quantity,
+                        lot_size=lot_size,
+                    ),
+                )
+            active = OrderManager._active_contract_for_trade_plan(self, plan)
+            if active is None:
+                return OrderPreflightResult(
+                    False,
+                    "active_contract_unavailable",
+                    OrderManager._trade_plan_rejection_details(
+                        self, plan, "active_contract_unavailable"
+                    ),
+                )
+            if (
+                plan.basket_version is not None
+                and active.get("basket_version") is not None
+                and str(plan.basket_version) != str(active.get("basket_version"))
+            ):
+                return OrderPreflightResult(
+                    False,
+                    "stale_contract_selection",
+                    OrderManager._trade_plan_rejection_details(
+                        self,
+                        plan,
+                        "stale_contract_selection",
+                        required_value=active.get("basket_version"),
+                        actual_value=plan.basket_version,
+                    ),
+                )
+            if active.get("instrument_token") is not None and int(
+                plan.instrument_token
+            ) != int(active["instrument_token"]):
+                return OrderPreflightResult(
+                    False,
+                    "instrument_token_mismatch",
+                    OrderManager._trade_plan_rejection_details(
+                        self,
+                        plan,
+                        "instrument_token_mismatch",
+                        required_value=active.get("instrument_token"),
+                        actual_value=plan.instrument_token,
+                    ),
+                )
+            if (
+                plan.contract_expiry
+                and active.get("contract_expiry")
+                and str(plan.contract_expiry) != str(active.get("contract_expiry"))
+            ):
+                return OrderPreflightResult(
+                    False,
+                    "contract_expiry_mismatch",
+                    OrderManager._trade_plan_rejection_details(
+                        self,
+                        plan,
+                        "contract_expiry_mismatch",
+                        required_value=active.get("contract_expiry"),
+                        actual_value=plan.contract_expiry,
+                    ),
+                )
+        if lot_size > 0 and plan.quantity % lot_size != 0 and is_entry:
+            return OrderPreflightResult(
+                False,
+                "quantity_not_lot_multiple",
+                {"quantity": plan.quantity, "lot_size": lot_size},
+            )
         if is_entry and (plan.stop_loss is None or plan.stop_loss <= 0):
             return OrderPreflightResult(False, "missing_stop_loss", {})
         if is_entry and (plan.take_profit is None or plan.take_profit <= 0):
@@ -3708,21 +4298,38 @@ class OrderManager:
             return OrderPreflightResult(False, "quote_unavailable", {})
         qd = self._extract_quote_diagnostics(quote)
         if qd.get("age_ms") is not None and qd["age_ms"] > plan.max_quote_age_ms:
-            return OrderPreflightResult(False, "quote_stale", {"age_ms": qd["age_ms"], "limit_ms": plan.max_quote_age_ms})
-        if is_entry and qd["bid"] > 0 and qd["ask"] > 0 and qd["spread_pct"] > plan.max_spread_pct:
-            return OrderPreflightResult(False, "spread_too_wide", {"spread_pct": qd["spread_pct"], "limit_pct": plan.max_spread_pct})
+            return OrderPreflightResult(
+                False,
+                "quote_stale",
+                {"age_ms": qd["age_ms"], "limit_ms": plan.max_quote_age_ms},
+            )
+        if (
+            is_entry
+            and qd["bid"] > 0
+            and qd["ask"] > 0
+            and qd["spread_pct"] > plan.max_spread_pct
+        ):
+            return OrderPreflightResult(
+                False,
+                "spread_too_wide",
+                {"spread_pct": qd["spread_pct"], "limit_pct": plan.max_spread_pct},
+            )
         has_depth_fields = (
             int(qd.get("bid_qty", 0) or 0) > 0
             or int(qd.get("ask_qty", 0) or 0) > 0
             or int(qd.get("depth_qty", 0) or 0) > 0
         )
         if is_entry and has_depth_fields and qd["depth_qty"] < plan.min_depth_qty:
-            return OrderPreflightResult(False, "depth_insufficient", {"depth_qty": qd["depth_qty"], "limit_qty": plan.min_depth_qty})
-        return OrderPreflightResult(True, "allowed", {"quote": qd, "lot_size": lot_size})
+            return OrderPreflightResult(
+                False,
+                "depth_insufficient",
+                {"depth_qty": qd["depth_qty"], "limit_qty": plan.min_depth_qty},
+            )
+        return OrderPreflightResult(
+            True, "allowed", {"quote": qd, "lot_size": lot_size}
+        )
 
-    def _reanchor_bracket_to_price(
-        self, plan: TradePlan, price: float
-    ) -> TradePlan:
+    def _reanchor_bracket_to_price(self, plan: TradePlan, price: float) -> TradePlan:
         """Re-anchor a stale SL/TP bracket to the live protected ``price``.
 
         Strategy SL/TP are computed off the option premium at signal time.
@@ -3773,7 +4380,14 @@ class OrderManager:
         self._logger.warning(
             "BRACKET_REANCHORED symbol=%s side=%s entry=%.2f price=%.2f "
             "sl=%.2f->%.2f tp=%.2f->%.2f trace_id=%s",
-            plan.symbol, plan.side, entry, price, sl, new_sl, tp, new_tp,
+            plan.symbol,
+            plan.side,
+            entry,
+            price,
+            sl,
+            new_sl,
+            tp,
+            new_tp,
             plan.trace_id,
         )
         return replace(plan, stop_loss=new_sl, take_profit=new_tp)
@@ -3790,14 +4404,20 @@ class OrderManager:
                     return self._round_to_tick(qd["ltp"] * 1.003, tick_size)
             if plan.side == "SELL":
                 if qd["bid"] > 0:
-                    return self._round_to_tick(max(tick_size, qd["bid"] - tick_size), tick_size)
+                    return self._round_to_tick(
+                        max(tick_size, qd["bid"] - tick_size), tick_size
+                    )
                 if qd["ltp"] > 0:
-                    return self._round_to_tick(max(tick_size, qd["ltp"] * 0.997), tick_size)
+                    return self._round_to_tick(
+                        max(tick_size, qd["ltp"] * 0.997), tick_size
+                    )
         if plan.entry_price and plan.entry_price > 0:
             return self._round_to_tick(float(plan.entry_price), tick_size)
         return None
 
-    def explain_preflight(self, symbol: str, *, plan: TradePlan | None = None) -> dict[str, Any]:
+    def explain_preflight(
+        self, symbol: str, *, plan: TradePlan | None = None
+    ) -> dict[str, Any]:
         quote = self._get_latest_quote_safe(symbol)
         details = {"symbol": symbol, "quote_present": quote is not None}
         if quote:
@@ -3818,7 +4438,12 @@ class OrderManager:
         symbol = normalize_symbol(plan.symbol)
         if self.is_kill_switch_active():
             ks = self.get_kill_switch_status()
-            kill_reason = ks.get("kill_reason") or ks.get("last_reason") or ks.get("reason") or ks.get("last_exception_type")
+            kill_reason = (
+                ks.get("kill_reason")
+                or ks.get("last_reason")
+                or ks.get("reason")
+                or ks.get("last_exception_type")
+            )
             self._logger.warning(
                 "ORDER_MANAGER_KILL_SWITCH_REJECTED symbol=%s reason=%s broker_attempted=False consecutive_failures=%s kill_reason=%s trace_id=%s",
                 symbol,
@@ -3826,12 +4451,24 @@ class OrderManager:
                 ks.get("consecutive_failures"),
                 kill_reason,
                 plan.trace_id,
-                extra={"event": "ORDER_MANAGER_KILL_SWITCH_REJECTED", "symbol": symbol, "reason": "order_manager_kill_switch_active", "broker_attempted": False, "kill_switch_status": ks, "trace_id": plan.trace_id},
+                extra={
+                    "event": "ORDER_MANAGER_KILL_SWITCH_REJECTED",
+                    "symbol": symbol,
+                    "reason": "order_manager_kill_switch_active",
+                    "broker_attempted": False,
+                    "kill_switch_status": ks,
+                    "trace_id": plan.trace_id,
+                },
             )
             return TradePlanSubmitResult(
                 False,
                 reason="order_manager_kill_switch_active",
-                details={"kill_switch_status": ks, "kill_reason": kill_reason, "symbol": symbol, "trace_id": plan.trace_id},
+                details={
+                    "kill_switch_status": ks,
+                    "kill_reason": kill_reason,
+                    "symbol": symbol,
+                    "trace_id": plan.trace_id,
+                },
                 broker_attempted=False,
             )
         validation = self._validate_trade_plan(plan)
@@ -3843,7 +4480,12 @@ class OrderManager:
                 validation.details,
                 plan.trace_id,
             )
-            return TradePlanSubmitResult(False, reason=validation.reason, details=validation.details, broker_attempted=False)
+            return TradePlanSubmitResult(
+                False,
+                reason=validation.reason,
+                details=validation.details,
+                broker_attempted=False,
+            )
         price = self._protected_limit_price(plan)
         if price is None:
             self._logger.warning(
@@ -3852,7 +4494,12 @@ class OrderManager:
                 {"entry_price": plan.entry_price},
                 plan.trace_id,
             )
-            return TradePlanSubmitResult(False, reason="protected_limit_unavailable", details={"entry_price": plan.entry_price}, broker_attempted=False)
+            return TradePlanSubmitResult(
+                False,
+                reason="protected_limit_unavailable",
+                details={"entry_price": plan.entry_price},
+                broker_attempted=False,
+            )
         if (
             plan.intent in ("ENTRY", "SCALE_IN", "REVERSAL")
             and plan.entry_price is not None
@@ -3895,57 +4542,222 @@ class OrderManager:
         plan = self._reanchor_bracket_to_price(plan, price)
         if plan.side == "BUY":
             if plan.stop_loss is not None and plan.stop_loss >= price:
-                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_above_or_equal_entry"}
-                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
+                details = {
+                    "protected_price": price,
+                    "stop_loss": plan.stop_loss,
+                    "take_profit": plan.take_profit,
+                    "side": plan.side,
+                    "violation": "stop_loss_above_or_equal_entry",
+                }
+                self._logger.warning(
+                    "ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s",
+                    symbol,
+                    details,
+                    plan.trace_id,
+                )
+                return TradePlanSubmitResult(
+                    False,
+                    reason="protected_price_invalidates_bracket",
+                    details=details,
+                    broker_attempted=False,
+                )
             if plan.take_profit is not None and plan.take_profit <= price:
-                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_below_or_equal_entry"}
-                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
+                details = {
+                    "protected_price": price,
+                    "stop_loss": plan.stop_loss,
+                    "take_profit": plan.take_profit,
+                    "side": plan.side,
+                    "violation": "take_profit_below_or_equal_entry",
+                }
+                self._logger.warning(
+                    "ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s",
+                    symbol,
+                    details,
+                    plan.trace_id,
+                )
+                return TradePlanSubmitResult(
+                    False,
+                    reason="protected_price_invalidates_bracket",
+                    details=details,
+                    broker_attempted=False,
+                )
         elif plan.side == "SELL":
             if plan.stop_loss is not None and plan.stop_loss <= price:
-                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_below_or_equal_entry"}
-                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
+                details = {
+                    "protected_price": price,
+                    "stop_loss": plan.stop_loss,
+                    "take_profit": plan.take_profit,
+                    "side": plan.side,
+                    "violation": "stop_loss_below_or_equal_entry",
+                }
+                self._logger.warning(
+                    "ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s",
+                    symbol,
+                    details,
+                    plan.trace_id,
+                )
+                return TradePlanSubmitResult(
+                    False,
+                    reason="protected_price_invalidates_bracket",
+                    details=details,
+                    broker_attempted=False,
+                )
             if plan.take_profit is not None and plan.take_profit >= price:
-                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_above_or_equal_entry"}
-                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
+                details = {
+                    "protected_price": price,
+                    "stop_loss": plan.stop_loss,
+                    "take_profit": plan.take_profit,
+                    "side": plan.side,
+                    "violation": "take_profit_above_or_equal_entry",
+                }
+                self._logger.warning(
+                    "ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s",
+                    symbol,
+                    details,
+                    plan.trace_id,
+                )
+                return TradePlanSubmitResult(
+                    False,
+                    reason="protected_price_invalidates_bracket",
+                    details=details,
+                    broker_attempted=False,
+                )
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
                 try:
-                    managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                    managed = self.place_managed_order_result(
+                        symbol=symbol,
+                        side=plan.side,
+                        quantity=plan.quantity,
+                        entry_price=price,
+                        stop_loss=plan.stop_loss,
+                        take_profit=plan.take_profit,
+                        signal_id=plan.signal_id,
+                        strategy_name=plan.strategy_name,
+                        tag=plan.tag,
+                        product=plan.product,
+                        variety=plan.variety,
+                        trace_id=plan.trace_id,
+                        allow_market_entry=plan.allow_market_entry,
+                        intent=plan.intent,
+                        intended_position_side=plan.intended_position_side,
+                        trade_lifecycle_id=plan.trade_lifecycle_id,
+                        client_order_id=plan.client_order_id,
+                        basket_version=plan.basket_version,
+                        instrument_token=plan.instrument_token,
+                        contract_expiry=plan.contract_expiry,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     err = self._sanitize_broker_error(exc)
                     self._last_order_api_error_type = type(exc).__name__
                     self._last_order_api_error = err
                     self._emit_broker_health_status(force=True)
-                    return TradePlanSubmitResult(False, reason="broker_placement_exception", details={"error_type": type(exc).__name__, "error": err, "symbol": symbol, "trace_id": plan.trace_id, "protected_price": price}, broker_attempted=True)
-                return TradePlanSubmitResult(managed.accepted, order_id=managed.order_id, reason=managed.reason, details=managed.details or {"protected_price": price}, broker_attempted=managed.broker_attempted)
+                    return TradePlanSubmitResult(
+                        False,
+                        reason="broker_placement_exception",
+                        details={
+                            "error_type": type(exc).__name__,
+                            "error": err,
+                            "symbol": symbol,
+                            "trace_id": plan.trace_id,
+                            "protected_price": price,
+                        },
+                        broker_attempted=True,
+                    )
+                return TradePlanSubmitResult(
+                    managed.accepted,
+                    order_id=managed.order_id,
+                    reason=managed.reason,
+                    details=managed.details or {"protected_price": price},
+                    broker_attempted=managed.broker_attempted,
+                )
             try:
-                oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry, intent=plan.intent, intended_position_side=plan.intended_position_side)
+                oid = self.place_managed_order(
+                    symbol=symbol,
+                    side=plan.side,
+                    quantity=plan.quantity,
+                    entry_price=price,
+                    stop_loss=plan.stop_loss,
+                    take_profit=plan.take_profit,
+                    signal_id=plan.signal_id,
+                    strategy_name=plan.strategy_name,
+                    tag=plan.tag,
+                    product=plan.product,
+                    variety=plan.variety,
+                    trace_id=plan.trace_id,
+                    allow_market_entry=plan.allow_market_entry,
+                    intent=plan.intent,
+                    intended_position_side=plan.intended_position_side,
+                )
             except Exception as exc:  # noqa: BLE001
                 err = self._sanitize_broker_error(exc)
                 self._last_order_api_error_type = type(exc).__name__
                 self._last_order_api_error = err
                 self._emit_broker_health_status(force=True)
-                return TradePlanSubmitResult(False, reason="broker_placement_exception", details={"error_type": type(exc).__name__, "error": err, "symbol": symbol, "trace_id": plan.trace_id, "protected_price": price}, broker_attempted=True)
+                return TradePlanSubmitResult(
+                    False,
+                    reason="broker_placement_exception",
+                    details={
+                        "error_type": type(exc).__name__,
+                        "error": err,
+                        "symbol": symbol,
+                        "trace_id": plan.trace_id,
+                        "protected_price": price,
+                    },
+                    broker_attempted=True,
+                )
             if oid:
                 self._last_order_api_error_type = None
                 self._last_order_api_error = None
-            return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "place_order_rejected", details={"protected_price": price}, broker_attempted=bool(oid))
+            return TradePlanSubmitResult(
+                bool(oid),
+                order_id=oid,
+                reason="accepted" if oid else "place_order_rejected",
+                details={"protected_price": price},
+                broker_attempted=bool(oid),
+            )
         try:
-            oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product, intent=plan.intent, intended_position_side=plan.intended_position_side)
+            oid = self.place_order(
+                symbol=symbol,
+                side=plan.side,
+                quantity=plan.quantity,
+                order_type=OrderType.LIMIT,
+                price=price,
+                stop_loss=plan.stop_loss,
+                take_profit=plan.take_profit,
+                tag=plan.tag,
+                check_risk=True,
+                product=plan.product,
+                intent=plan.intent,
+                intended_position_side=plan.intended_position_side,
+            )
         except Exception as exc:  # noqa: BLE001
             err = self._sanitize_broker_error(exc)
             self._last_order_api_error_type = type(exc).__name__
             self._last_order_api_error = err
             self._emit_broker_health_status(force=True)
-            return TradePlanSubmitResult(False, reason="broker_placement_exception", details={"error_type": type(exc).__name__, "error": err, "symbol": symbol, "trace_id": plan.trace_id, "protected_price": price}, broker_attempted=True)
+            return TradePlanSubmitResult(
+                False,
+                reason="broker_placement_exception",
+                details={
+                    "error_type": type(exc).__name__,
+                    "error": err,
+                    "symbol": symbol,
+                    "trace_id": plan.trace_id,
+                    "protected_price": price,
+                },
+                broker_attempted=True,
+            )
         if oid:
             self._last_order_api_error_type = None
             self._last_order_api_error = None
-        return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "order_rejected", details={"protected_price": price}, broker_attempted=True)
+        return TradePlanSubmitResult(
+            bool(oid),
+            order_id=oid,
+            reason="accepted" if oid else "order_rejected",
+            details={"protected_price": price},
+            broker_attempted=True,
+        )
 
     def place_managed_order(
         self,
@@ -3964,6 +4776,11 @@ class OrderManager:
         allow_market_entry: bool = False,
         intent: OrderIntent = "ENTRY",
         intended_position_side: Literal["LONG", "SHORT"] | None = "LONG",
+        trade_lifecycle_id: str | None = None,
+        client_order_id: str | None = None,
+        basket_version: int | str | None = None,
+        instrument_token: int | None = None,
+        contract_expiry: str | None = None,
     ) -> str | None:
         result = self.place_managed_order_result(
             symbol=symbol,
@@ -3981,6 +4798,11 @@ class OrderManager:
             allow_market_entry=allow_market_entry,
             intent=intent,
             intended_position_side=intended_position_side,
+            trade_lifecycle_id=trade_lifecycle_id,
+            client_order_id=client_order_id,
+            basket_version=basket_version,
+            instrument_token=instrument_token,
+            contract_expiry=contract_expiry,
         )
         return result.order_id if result.accepted else None
 
@@ -4001,6 +4823,11 @@ class OrderManager:
         allow_market_entry: bool = False,
         intent: OrderIntent = "ENTRY",
         intended_position_side: Literal["LONG", "SHORT"] | None = "LONG",
+        trade_lifecycle_id: str | None = None,
+        client_order_id: str | None = None,
+        basket_version: int | str | None = None,
+        instrument_token: int | None = None,
+        contract_expiry: str | None = None,
     ) -> ManagedOrderResult:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
@@ -4010,19 +4837,33 @@ class OrderManager:
             _lot = self._lot_size_for_symbol(symbol)
         except Exception as exc:
             if exec_mode == "LIVE":
-                self._logger.error("LIVE_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s", symbol, exc)
+                self._logger.error(
+                    "LIVE_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s",
+                    symbol,
+                    exc,
+                )
                 return ManagedOrderResult(False, reason="lot_size_unresolved")
             fallback_lot = int(float(os.getenv("PAPER_LOT_FALLBACK", "0") or 0))
             if fallback_lot <= 0:
-                self._logger.error("PAPER_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s", symbol, exc)
+                self._logger.error(
+                    "PAPER_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s",
+                    symbol,
+                    exc,
+                )
                 return ManagedOrderResult(False, reason="lot_size_unresolved")
             _lot = fallback_lot
-            self._logger.warning("PAPER_LOT_FALLBACK_USED symbol=%s lot=%s", symbol, _lot)
+            self._logger.warning(
+                "PAPER_LOT_FALLBACK_USED symbol=%s lot=%s", symbol, _lot
+            )
         if _lot > 0 and quantity % _lot != 0:
             self._logger.error(
                 f"🛑 INVALID QTY: {quantity} is not a multiple of {_lot} (lot size for {symbol}). Order aborted."
             )
-            return ManagedOrderResult(False, reason="invalid_lot_quantity", details={"quantity": quantity, "lot_size": _lot})
+            return ManagedOrderResult(
+                False,
+                reason="invalid_lot_quantity",
+                details={"quantity": quantity, "lot_size": _lot},
+            )
 
         # 2. Execute Entry (Passes Safety Guard because SL is provided)
         entry_order_type = OrderType.LIMIT
@@ -4050,16 +4891,29 @@ class OrderManager:
             product=product,
             intent=intent,
             intended_position_side=intended_position_side,
+            client_order_id=client_order_id,
+            trade_lifecycle_id=trade_lifecycle_id,
+            basket_version=basket_version,
+            instrument_token=instrument_token,
+            contract_expiry=contract_expiry,
         )
 
         if order_id:
-            return ManagedOrderResult(True, order_id=order_id, reason="accepted", broker_attempted=True)
+            return ManagedOrderResult(
+                True, order_id=order_id, reason="accepted", broker_attempted=True
+            )
         decision = dict(getattr(self, "_last_order_decision", {}) or {})
         if not decision:
             return ManagedOrderResult(
                 False,
                 reason="place_order_rejected_without_decision",
-                details={"symbol": symbol, "side": side, "quantity": quantity, "entry_price": entry_price, "trace_id": trace_id},
+                details={
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "entry_price": entry_price,
+                    "trace_id": trace_id,
+                },
                 broker_attempted=False,
             )
         return ManagedOrderResult(
@@ -5956,7 +6810,7 @@ class OrderManager:
                 elif hasattr(self._positions, "update_from_order"):
                     try:
                         self._positions.update_from_order(order)
-                    except Exception as e:
+                    except Exception:
                         self._logger.exception("Unhandled exception", exc_info=True)
                         raise
 
@@ -5965,7 +6819,8 @@ class OrderManager:
             is_failed_entry_terminal = (
                 status_raw in {"REJECTED", "CANCELLED", "CANCELED", "FAILED", "EXPIRED"}
                 and old_status != new_status
-                and str(getattr(order, "intent", "") or "").upper() in {"ENTRY", "UNKNOWN", ""}
+                and str(getattr(order, "intent", "") or "").upper()
+                in {"ENTRY", "UNKNOWN", ""}
             )
             if is_failed_entry_terminal and callable(self.entry_order_failed_callback):
                 try:
@@ -6025,7 +6880,7 @@ class OrderManager:
             if hasattr(self, "save_orders"):
                 try:
                     self.save_orders()
-                except Exception as e:
+                except Exception:
                     self._logger.exception("Unhandled exception", exc_info=True)
                     raise
 
@@ -6346,7 +7201,7 @@ class OrderManager:
                 _price_source = self._data_hub or self._market_data
                 if _price_source is not None:
                     _exit_ltp = _price_source.get_latest_price(symbol)
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -6362,7 +7217,7 @@ class OrderManager:
             )
 
             if not exit_id:
-                self._logger.error(f"❌ Soft Exit Failed: place_order returned None")
+                self._logger.error("❌ Soft Exit Failed: place_order returned None")
                 return None
 
         except Exception as e:
@@ -6522,7 +7377,11 @@ class OrderManager:
                 "filled_quantity": order.filled_quantity,
                 "price": order.price,
                 "fill_price": order.fill_price,
-                "timestamp": order.timestamp.isoformat(),
+                "timestamp": (
+                    order.timestamp.isoformat()
+                    if hasattr(order.timestamp, "isoformat")
+                    else float(order.timestamp)
+                ),
                 "rejection_reason": order.rejection_reason,
             }
             for order in orders
@@ -6890,7 +7749,7 @@ class OrderManager:
         for oid in zombies:
             try:
                 self.cancel_order(oid)
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -7493,19 +8352,37 @@ class OrderManager:
 
     def get_broker_health_snapshot(self) -> dict[str, Any]:
         now = time.time()
-        last_margin_success_age_s = max(now - self._last_margin_success_ts, 0.0) if self._last_margin_success_ts is not None else None
-        balance_stale = last_margin_success_age_s is None or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
+        last_margin_success_age_s = (
+            max(now - self._last_margin_success_ts, 0.0)
+            if self._last_margin_success_ts is not None
+            else None
+        )
+        balance_stale = (
+            last_margin_success_age_s is None
+            or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
+        )
         # Self-heal: if the only problem is a stale margin cache (not an auth or
         # API failure), try one fresh fetch before declaring live orders blocked.
         # This fixes the false stale-block without bypassing any broker safety —
         # a genuine fetch failure leaves balance_stale True and still blocks.
-        if balance_stale and self._last_margin_error_type is None and not self._margin_circuit_open:
+        if (
+            balance_stale
+            and self._last_margin_error_type is None
+            and not self._margin_circuit_open
+        ):
             try:
                 self._resolve_available_margin_raw()
             except Exception:  # noqa: BLE001
                 pass
-            last_margin_success_age_s = max(now - self._last_margin_success_ts, 0.0) if self._last_margin_success_ts is not None else None
-            balance_stale = last_margin_success_age_s is None or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
+            last_margin_success_age_s = (
+                max(now - self._last_margin_success_ts, 0.0)
+                if self._last_margin_success_ts is not None
+                else None
+            )
+            balance_stale = (
+                last_margin_success_age_s is None
+                or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
+            )
         trading_allowed_effect = "none"
         if self._margin_circuit_open or self._last_margin_error_type:
             trading_allowed_effect = "position_sizing_degraded"
@@ -7513,13 +8390,25 @@ class OrderManager:
             trading_allowed_effect = "live_orders_blocked"
         connected_attr = getattr(self._broker, "is_connected", True)
         try:
-            broker_connected = bool(connected_attr() if callable(connected_attr) else connected_attr)
+            broker_connected = bool(
+                connected_attr() if callable(connected_attr) else connected_attr
+            )
         except Exception:
             broker_connected = False
         # Classify WHY live orders are blocked, so the caller (and logs) can tell
         # a stale cache apart from auth/config/API failures.
         order_err = (self._last_order_api_error or "").lower()
-        auth_invalid = any(t in order_err for t in ("token", "api_key", "access_token", "unauthor", "forbidden", "403"))
+        auth_invalid = any(
+            t in order_err
+            for t in (
+                "token",
+                "api_key",
+                "access_token",
+                "unauthor",
+                "forbidden",
+                "403",
+            )
+        )
         if trading_allowed_effect == "live_orders_blocked":
             if not broker_connected:
                 block_class = "broker_health_failed"
@@ -7539,7 +8428,9 @@ class OrderManager:
             "last_margin_error_type": self._last_margin_error_type,
             "last_margin_error": self._last_margin_error,
             "margin_circuit_open": self._margin_circuit_open,
-            "margin_circuit_remaining_s": max((self._margin_circuit_until_ts or 0.0) - now, 0.0),
+            "margin_circuit_remaining_s": max(
+                (self._margin_circuit_until_ts or 0.0) - now, 0.0
+            ),
             "balance_stale": balance_stale,
             "available_balance": self._last_margin_available_balance,
             "balance_source": self._last_margin_balance_source or "unknown",
@@ -7555,14 +8446,26 @@ class OrderManager:
             now = time.time()
             market_open, _reason = get_time_status()
             snapshot = self.get_broker_health_snapshot()
-            changed_effect = snapshot["trading_allowed_effect"] != self._last_broker_health_effect
-            changed_circuit = bool(snapshot["margin_circuit_open"]) != self._last_broker_health_circuit_state
+            changed_effect = (
+                snapshot["trading_allowed_effect"] != self._last_broker_health_effect
+            )
+            changed_circuit = (
+                bool(snapshot["margin_circuit_open"])
+                != self._last_broker_health_circuit_state
+            )
             interval_elapsed = now - self._last_broker_health_emit_ts >= 30.0
-            if not (force or changed_effect or changed_circuit or (market_open and interval_elapsed)):
+            if not (
+                force
+                or changed_effect
+                or changed_circuit
+                or (market_open and interval_elapsed)
+            ):
                 return
             self._last_broker_health_emit_ts = now
             self._last_broker_health_effect = str(snapshot["trading_allowed_effect"])
-            self._last_broker_health_circuit_state = bool(snapshot["margin_circuit_open"])
+            self._last_broker_health_circuit_state = bool(
+                snapshot["margin_circuit_open"]
+            )
             self._logger.info(
                 "BROKER_HEALTH_STATUS broker_connected=%s margin_api_available=%s order_api_available=%s margin_circuit_open=%s balance_stale=%s trading_allowed_effect=%s last_order_api_error_type=%s last_margin_error_type=%s",
                 snapshot.get("broker_connected"),
@@ -7594,7 +8497,9 @@ class OrderManager:
         self._margin_circuit_open = True
         self._margin_circuit_until_ts = now + 30.0
 
-    def _record_margin_refresh_success(self, available: float, source: str = "mdm") -> None:
+    def _record_margin_refresh_success(
+        self, available: float, source: str = "mdm"
+    ) -> None:
         now = time.time()
         self._last_margin_success_ts = now
         self._last_margin_refresh_ts = now
@@ -7652,7 +8557,10 @@ class OrderManager:
                 self._logger.error(
                     "Failure in _resolve_available_margin mdm refresh: %s",
                     self._sanitize_broker_error(exc),
-                    extra={"event": "order_margin_mdm_refresh_error", "error_type": type(exc).__name__},
+                    extra={
+                        "event": "order_margin_mdm_refresh_error",
+                        "error_type": type(exc).__name__,
+                    },
                     exc_info=exc,
                 )
             if refresh_failed:
@@ -7664,7 +8572,10 @@ class OrderManager:
                 self._logger.error(
                     "Failure in _resolve_available_margin mdm get: %s",
                     self._sanitize_broker_error(exc),
-                    extra={"event": "order_margin_mdm_read_error", "error_type": type(exc).__name__},
+                    extra={
+                        "event": "order_margin_mdm_read_error",
+                        "error_type": type(exc).__name__,
+                    },
                     exc_info=exc,
                 )
                 return None, "margin_read_failed"
@@ -7678,7 +8589,11 @@ class OrderManager:
                 # orders (observed: BROKER_HEALTH_LIVE_ORDERS_BLOCKED for the whole
                 # session). Sizing still independently refuses qty on balance<=0
                 # (live), so recording a zero reading as fresh cannot oversize.
-                if available is not None and math.isfinite(float(available)) and float(available) >= 0:
+                if (
+                    available is not None
+                    and math.isfinite(float(available))
+                    and float(available) >= 0
+                ):
                     self._record_margin_refresh_success(float(available), "mdm")
                     return float(available), "mdm"
         risk_manager = self._risk_manager
@@ -7690,7 +8605,9 @@ class OrderManager:
                     return balance, "risk"
         return None, "unknown"
 
-    def _resolve_available_margin(self, *, for_entry: bool = True) -> tuple[float | None, str]:
+    def _resolve_available_margin(
+        self, *, for_entry: bool = True
+    ) -> tuple[float | None, str]:
         available, source = self._resolve_available_margin_raw()
         now = time.time()
         if (
@@ -7705,14 +8622,22 @@ class OrderManager:
         if self._last_margin_success_ts is not None:
             age = now - self._last_margin_success_ts
             cached = self._last_margin_available_balance
-            if age <= float(self._margin_cache_max_age_seconds) and cached is not None and cached > 0:
+            if (
+                age <= float(self._margin_cache_max_age_seconds)
+                and cached is not None
+                and cached > 0
+            ):
                 self._last_margin_balance_source = "margin_cache_used"
                 self._emit_broker_health_status(force=True)
                 return cached, "margin_cache_used"
             if not for_entry:
                 self._emit_broker_health_status(force=True)
                 return available, "margin_unavailable_stale_exit_allowed"
-            if self._allow_entry_with_stale_margin and cached is not None and cached > 0:
+            if (
+                self._allow_entry_with_stale_margin
+                and cached is not None
+                and cached > 0
+            ):
                 self._last_margin_balance_source = "margin_cache_stale_allowed"
                 self._emit_broker_health_status(force=True)
                 return cached, "margin_cache_stale_allowed"
@@ -9966,7 +10891,7 @@ class OrderManager:
                     is False
                 ):
                     payload["instrument_token"] = int(instrument_token)
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise  # Default to not sending if settings fail
 
@@ -11105,13 +12030,29 @@ class OrderManager:
                 if hasattr(order.status, "value")
                 else str(order.status)
             ),
-            "timestamp": order.timestamp.isoformat(),
+            "timestamp": (
+                order.timestamp.isoformat()
+                if hasattr(order.timestamp, "isoformat")
+                else float(order.timestamp)
+            ),
             "filled_quantity": order.filled_quantity,
             "fill_price": order.fill_price,
             "rejection_reason": order.rejection_reason,
             "parent_order_id": order.parent_order_id,
             "child_order_ids": list(order.child_order_ids),
             "client_order_id": order.client_order_id,
+            "intent": order.intent,
+            "trade_lifecycle_id": order.trade_lifecycle_id,
+            "linked_entry_order_id": order.linked_entry_order_id,
+            "bracket_id": order.bracket_id,
+            "basket_version": order.basket_version,
+            "instrument_token": order.instrument_token,
+            "contract_expiry": order.contract_expiry,
+            "exchange_order_id": order.exchange_order_id,
+            "signal_id": order.signal_id,
+            "requested_lots": order.requested_lots,
+            "resolved_lot_size": order.resolved_lot_size,
+            "entry_lifecycle_state": order.entry_lifecycle_state,
         }
 
     def _serialize_bracket_state(self, state: BracketState) -> BracketDict:
@@ -11220,9 +12161,30 @@ class OrderManager:
                 tag=payload.get("tag"),
                 client_order_id=payload.get("client_order_id"),
                 rejection_reason=payload.get("rejection_reason"),
+                intent=payload.get("intent") or "UNKNOWN",
+                trade_lifecycle_id=payload.get("trade_lifecycle_id"),
+                linked_entry_order_id=payload.get("linked_entry_order_id"),
+                bracket_id=payload.get("bracket_id"),
+                basket_version=payload.get("basket_version"),
+                instrument_token=(
+                    int(payload["instrument_token"])
+                    if payload.get("instrument_token") not in (None, "")
+                    else None
+                ),
+                contract_expiry=payload.get("contract_expiry"),
+                exchange_order_id=payload.get("exchange_order_id"),
+                signal_id=payload.get("signal_id"),
+                requested_lots=int(payload.get("requested_lots", 0) or 0),
+                resolved_lot_size=int(payload.get("resolved_lot_size", 0) or 0),
+                entry_lifecycle_state=(
+                    payload.get("entry_lifecycle_state")
+                    if isinstance(payload.get("entry_lifecycle_state"), dict)
+                    else None
+                ),
             )
         except Exception as e:
-            self._logger.error(f"Failed to restore order: {e}")
+            logger = getattr(self, "_logger", logging.getLogger(__name__))
+            logger.error(f"Failed to restore order: {e}")
             raise ValueError("Invalid order payload") from e
 
     def _bracket_from_dict(self, payload: Mapping[str, Any]) -> BracketState:
@@ -11880,13 +12842,21 @@ class OrderManager:
         try:
             lot_size, source = resolve_lot_size_with_source(normalized_symbol, lookup)
         except Exception as exc:  # noqa: BLE001
-            compact_symbol = normalized_symbol.split(":", 1)[-1] if ":" in normalized_symbol else normalized_symbol
+            compact_symbol = (
+                normalized_symbol.split(":", 1)[-1]
+                if ":" in normalized_symbol
+                else normalized_symbol
+            )
             self._logger.warning(
                 "LOT_SIZE_RESOLUTION_FAILED symbol=%s normalized_symbol=%s underlying=%s expiry=%s strike=%s option_type=%s cache_loaded=%s cache_size=%s reason=%s",
                 symbol,
                 normalized_symbol,
                 "NIFTY" if "NIFTY" in compact_symbol else "UNKNOWN",
-                compact_symbol[5:12] if compact_symbol.startswith("NIFTY") and len(compact_symbol) >= 12 else None,
+                (
+                    compact_symbol[5:12]
+                    if compact_symbol.startswith("NIFTY") and len(compact_symbol) >= 12
+                    else None
+                ),
                 "".join(ch for ch in compact_symbol if ch.isdigit()) or None,
                 compact_symbol[-2:] if compact_symbol.endswith(("CE", "PE")) else None,
                 bool(lookup is not None),
@@ -11909,7 +12879,15 @@ class OrderManager:
             normalized_symbol,
             lot_size,
             source,
-            extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY" if "NIFTY" in normalized_symbol else normalized_symbol, "symbol": normalized_symbol, "lot_size": lot_size, "source": source},
+            extra={
+                "event": "LOT_SIZE_RESOLVED",
+                "underlying": (
+                    "NIFTY" if "NIFTY" in normalized_symbol else normalized_symbol
+                ),
+                "symbol": normalized_symbol,
+                "lot_size": lot_size,
+                "source": source,
+            },
         )
         return lot_size
 
@@ -11979,6 +12957,7 @@ class OrderManager:
             return float(cast(Any, value))
         except (TypeError, ValueError):
             return None
+
     @staticmethod
     def _timestamp_seconds(value: object) -> float:
         if isinstance(value, datetime):
@@ -11997,7 +12976,6 @@ class OrderManager:
                 except ValueError:
                     return 0.0
         return 0.0
-
 
     @staticmethod
     def _coerce_int(value: object | None) -> int | None:
@@ -12202,8 +13180,7 @@ class OrderManager:
                             if (
                                 DataHub.normalize(_if_sym)
                                 == DataHub.normalize(broker_sym)
-                                and _now_orphan - _if_ts
-                                <= self.ENTRY_INFLIGHT_TTL_SEC
+                                and _now_orphan - _if_ts <= self.ENTRY_INFLIGHT_TTL_SEC
                             ):
                                 is_active_locally = True
                                 break
@@ -12362,8 +13339,8 @@ class OrderManager:
         Fixes 'str object has no attribute value' by passing the Enum object
         directly to PositionManager, ensuring type safety.
         """
-        from datetime import datetime, timezone
         import time
+        from datetime import datetime, timezone
 
         symbol = normalize_symbol(symbol)
 
@@ -12503,7 +13480,7 @@ class OrderManager:
                                     float(ltp),
                                     tick_exchange_epoch(tick_data),
                                 )
-                        except Exception as e:
+                        except Exception:
                             self._logger.exception("Unhandled exception", exc_info=True)
                             raise
 
@@ -12564,7 +13541,7 @@ class OrderManager:
                 self._adopt_orphan_position(
                     symbol, {"qty": quantity, "price": base_price}
                 )
-            except Exception as e:
+            except Exception:
                 self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
@@ -12574,8 +13551,8 @@ class OrderManager:
             def round_tick(price: float) -> float:
                 return round(price * 20) / 20
 
-            from datetime import datetime, timezone
             import time
+            from datetime import datetime, timezone
 
             safe_symbol = symbol.replace(":", "_")
             synthetic_id = f"guard_{int(time.time())}_{safe_symbol}"
@@ -12848,8 +13825,8 @@ class OrderManager:
         """Helper to inject synthetic orders."""
         if qty == 0:
             return
-        from datetime import datetime, timezone
         import time
+        from datetime import datetime, timezone
 
         side = "BUY" if qty > 0 else "SELL"
         details = OrderDetails(

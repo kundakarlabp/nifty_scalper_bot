@@ -34,11 +34,14 @@ import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time, timedelta, timezone
 from enum import Enum
+import hashlib
 import json
 import inspect
 import logging
 import os
-from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from pathlib import Path
 import re
@@ -64,9 +67,16 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.core.active_basket import ActiveContractSelection, active_contract_selection_from_basket, extract_symbol_strike
+from nifty_scalper_bot.core.active_basket import (
+    ActiveContractSelection,
+    active_contract_selection_from_basket,
+    extract_symbol_strike,
+)
 from nifty_scalper_bot.core.event_bus import EventBus
-from nifty_scalper_bot.core.history_roles import history_role_priority, resolve_symbol_history_role
+from nifty_scalper_bot.core.history_roles import (
+    history_role_priority,
+    resolve_symbol_history_role,
+)
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
@@ -93,6 +103,7 @@ from nifty_scalper_bot.data.source import (
     ensure_ltp,
     is_symbol_valid,
 )
+
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
 from nifty_scalper_bot.execution.quote_readiness import (
@@ -100,7 +111,10 @@ from nifty_scalper_bot.execution.quote_readiness import (
     resolve_tick_age_ms,
     resolve_tick_age_seconds,
 )
-from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy, resolve_quote_bid_ask_spread
+from nifty_scalper_bot.execution.readiness import (
+    HistoryReadinessPolicy,
+    resolve_quote_bid_ask_spread,
+)
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
     OrderStateMachine,
@@ -130,7 +144,10 @@ from nifty_scalper_bot.strategies.signal_quality import (
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
-from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
+from nifty_scalper_bot.utils.log_throttle import (
+    log_on_change,
+    log_throttled as log_throttled_live,
+)
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
@@ -206,9 +223,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _ranked_candidate_for_symbol(
-    candidates: Iterable[Any], symbol: str
-) -> Any | None:
+def _ranked_candidate_for_symbol(candidates: Iterable[Any], symbol: str) -> Any | None:
     """Return the ranked candidate whose instrument exactly matches ``symbol``."""
 
     symbol_key = normalize_symbol(symbol)
@@ -216,16 +231,16 @@ def _ranked_candidate_for_symbol(
         (
             candidate
             for candidate in candidates
-            if normalize_symbol(
-                str(getattr(candidate, "symbol", "") or "")
-            )
+            if normalize_symbol(str(getattr(candidate, "symbol", "") or ""))
             == symbol_key
         ),
         None,
     )
 
 
-def _safe_positive_float(value: object, fallback: float, *, minimum: float = 0.0) -> float:
+def _safe_positive_float(
+    value: object, fallback: float, *, minimum: float = 0.0
+) -> float:
     fallback_value = max(float(fallback), float(minimum))
     parsed = parse_float_env(value, fallback_value)  # strips inline comments/whitespace
     if parsed <= 0:
@@ -238,7 +253,9 @@ def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
     return max(parsed, int(minimum))
 
 
-def safe_positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+def safe_positive_float_env(
+    name: str, default: float, *, minimum: float = 0.0
+) -> float:
     return _safe_positive_float(os.getenv(name, default), default, minimum=minimum)
 
 
@@ -289,8 +306,6 @@ _NIFTY_OPTION_SLIPPAGE_GAUGE = metrics.Gauge(
 )
 
 
-
-
 @dataclass(slots=True)
 class HistorySyncResult:
     """Runner-side synchronization result from canonical MDM bars."""
@@ -304,6 +319,7 @@ class HistorySyncResult:
     indicator_bars: int
     success: bool
     failure_reason: str | None = None
+
 
 @dataclass(slots=True)
 class TradeDecisionSnapshot:
@@ -426,6 +442,7 @@ class SignalExecutionResult:
     order_id: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass(slots=True)
 class ExecutionModeSnapshot:
     execution_mode: str
@@ -434,6 +451,7 @@ class ExecutionModeSnapshot:
     shadow_mode_enabled: bool
     order_manager_live: bool | None
     is_live_mode: bool
+
 
 @dataclass(slots=True)
 class ExecutionReadinessResult:
@@ -457,8 +475,11 @@ class StrategyRunnerConfig:
 
     # Lightweight pre-strategy same-bar throttle. Env override keeps runtime tuning explicit.
     same_bar_periodic_eval_seconds: float = field(
-        default_factory=lambda: safe_positive_float_env("RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS", 5.0, minimum=0.0)
+        default_factory=lambda: safe_positive_float_env(
+            "RUNNER_SAME_BAR_PERIODIC_EVAL_SECONDS", 5.0, minimum=0.0
+        )
     )
+
     def __post_init__(self) -> None:
         if self.min_indicator_bars < 0:
             raise ValueError("min_indicator_bars must be non-negative")
@@ -475,6 +496,7 @@ class StrategyRunnerConfig:
 
         if self.same_bar_periodic_eval_seconds < 0:
             raise ValueError("same_bar_periodic_eval_seconds must be >= 0")
+
 
 class RunnerState(Enum):
     """State machine for strategy runner lifecycle."""
@@ -534,7 +556,9 @@ class SymbolRuntimeState:
         return {
             "active": self.active,
             "last_signal_at": _format_dt(self.last_signal_at),
-            "last_trade_at": _coerce_epoch_seconds(getattr(self, "last_trade_at", None)),
+            "last_trade_at": _coerce_epoch_seconds(
+                getattr(self, "last_trade_at", None)
+            ),
             "last_order_id": getattr(self, "last_order_id", None),
             "last_trade_symbol": getattr(self, "last_trade_symbol", None),
             "trade_history": [record.to_dict() for record in self.trade_history],
@@ -560,6 +584,7 @@ def _coerce_epoch_seconds(value: float | int | str | datetime | None) -> float |
         return None
     return epoch_seconds
 
+
 def _format_dt(value: datetime | None) -> str | None:
     """Format datetime to UTC ISO format string."""
     if value is None:
@@ -582,7 +607,9 @@ def _extract_float(payload: Mapping[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _resolve_quote_bid_ask_spread(quote: Mapping[str, Any]) -> tuple[float | None, float | None, float | None, str]:
+def _resolve_quote_bid_ask_spread(
+    quote: Mapping[str, Any],
+) -> tuple[float | None, float | None, float | None, str]:
     """Resolve bid/ask/spread via the shared execution-readiness quote helper."""
     return resolve_quote_bid_ask_spread(dict(quote or {}))
 
@@ -684,7 +711,9 @@ class StrategyRunner:
         self._position_manager = position_manager
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
-        self._execution_engine = None  # Removed — signals route directly via order_manager
+        self._execution_engine = (
+            None  # Removed — signals route directly via order_manager
+        )
         self._logger = get_logger(__name__)
         self._logger.debug(
             "StrategyRunner using MessageBus id=%s", id(self._message_bus)
@@ -718,7 +747,12 @@ class StrategyRunner:
         # When broker sync prunes externally-closed positions (manual square-off /
         # auto-square-off), drop their brackets so they are not re-adopted forever.
         try:
-            if self._position_manager is not None and self._bracket_manager is not None and hasattr(self._position_manager, "set_on_symbols_flat"):
+            if (
+                self._position_manager is not None
+                and self._bracket_manager is not None
+                and hasattr(self._position_manager, "set_on_symbols_flat")
+            ):
+
                 def _on_symbols_flat(symbols: list[str]) -> None:
                     bm = self._bracket_manager
                     if bm is None:
@@ -728,6 +762,7 @@ class StrategyRunner:
                             bm.reconcile_symbol_flat(_sym)
                         except Exception:  # noqa: BLE001
                             continue
+
                 self._position_manager.set_on_symbols_flat(_on_symbols_flat)
         except Exception:  # noqa: BLE001
             pass
@@ -738,10 +773,9 @@ class StrategyRunner:
         ).strip().lower() in {"1", "true", "yes", "on"}
         # Time block logging throttle
         self._time_block_logged: Dict[str, float] = {}
-        self._allow_eval_without_new_bar = (
-            os.getenv("RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "true").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        self._allow_eval_without_new_bar = os.getenv(
+            "RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._eval_without_new_bar_seconds = max(
             1.0,
             float(os.getenv("RUNNER_EVAL_WITHOUT_NEW_BAR_SECONDS", "15")),
@@ -789,10 +823,9 @@ class StrategyRunner:
             1.0,
             float(os.getenv("RUNNER_NO_SIGNAL_LOG_THROTTLE_SECONDS", "300")),
         )
-        self._block_low_volatility = (
-            os.getenv("RUNNER_BLOCK_LOW_VOLATILITY", "false").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        self._block_low_volatility = os.getenv(
+            "RUNNER_BLOCK_LOW_VOLATILITY", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._log_throttle_state: dict[str, float] = {}
         self._first_tick_logged_symbols: set[str] = set()
         self._first_live_bar_logged_symbols: set[str] = set()
@@ -803,8 +836,16 @@ class StrategyRunner:
         self._premium_squeeze_last_signal_ts: dict[str, float] = {}
         self._signal_reject_cooldown_ts: dict[str, float] = {}
         self._execution_reject_cooldown_ts: dict[str, float] = {}
-        self._exec_reject_runtime_not_ready_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_RUNTIME_NOT_READY_SECONDS", "10") or 10))
-        self._exec_reject_invalid_lot_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_INVALID_LOT_SECONDS", "300") or 300))
+        self._exec_reject_runtime_not_ready_seconds = max(
+            1.0,
+            float(
+                os.getenv("EXEC_REJECT_COOLDOWN_RUNTIME_NOT_READY_SECONDS", "10") or 10
+            ),
+        )
+        self._exec_reject_invalid_lot_seconds = max(
+            1.0,
+            float(os.getenv("EXEC_REJECT_COOLDOWN_INVALID_LOT_SECONDS", "300") or 300),
+        )
         self._order_attempt_window: Deque[float] = deque()
         self._signal_attempt_debounce_seconds = max(
             0.5, float(os.getenv("SIGNAL_ATTEMPT_DEBOUNCE_SECONDS", "2") or 2)
@@ -818,9 +859,16 @@ class StrategyRunner:
         # RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS=30
         # SIGNAL_REJECT_COOLDOWN_SECONDS=15
         # RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE=5
-        self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "20") or 20))
-        self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "30") or 30))
-        self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "5") or 5))
+        self._underlying_signal_cooldown_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "20") or 20),
+        )
+        self._reason_signal_cooldown_seconds = max(
+            1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "30") or 30)
+        )
+        self._max_order_attempts_per_minute = max(
+            1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "5") or 5)
+        )
         self._last_execution_halted_log_ts: float = 0.0
         self._runtime_data_hard_ready = False
         self._runtime_evaluation_ready = False
@@ -845,18 +893,26 @@ class StrategyRunner:
         self._active_basket_token_by_symbol: dict[str, int] = {}
         self._active_contract_basket: Mapping[str, Any] | None = None
         self._active_selection_sync_log_key: tuple[str, str, str | None] | None = None
-        self._active_selection_drift_log_key: tuple[str | None, str | None, str | None, str | None, str | None] | None = None
+        self._active_selection_drift_log_key: (
+            tuple[str | None, str | None, str | None, str | None, str | None] | None
+        ) = None
         self._selected_option_prewarm_inflight: set[str] = set()
         self._selected_option_prewarm_last: dict[str, float] = {}
-        self._selected_option_prewarm_cooldown_s = max(1.0, parse_float_env(os.getenv("HYDRATION_RETRY_COOLDOWN_SECONDS") or os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS"), 60.0))
+        self._selected_option_prewarm_cooldown_s = max(
+            1.0,
+            parse_float_env(
+                os.getenv("HYDRATION_RETRY_COOLDOWN_SECONDS")
+                or os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS"),
+                60.0,
+            ),
+        )
         self._pending_selected_ce: str | None = None
         self._pending_selected_pe: str | None = None
         self._pending_atm_strike: int | None = None
 
-
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
-        
+
         self._logger.info(
             "StrategyRunner initialized with MessageBus: ticks=MDM-callback signals=MessageBus"
         )
@@ -949,8 +1005,12 @@ class StrategyRunner:
         self._suspended_context_symbols: set[str] = set()
         self._suspended_context_symbol_until: dict[str, float] = {}
         self._order_failure_cooldown_until: dict[str, float] = {}
-        self._order_failure_cooldown_seconds = _safe_positive_float(os.getenv("ORDER_FAILURE_COOLDOWN_SECONDS"), 120.0, minimum=1.0)
-        self._futures_context_suspension_seconds = _safe_positive_float(os.getenv("FUTURES_CONTEXT_SUSPENSION_SECONDS"), 300.0, minimum=1.0)
+        self._order_failure_cooldown_seconds = _safe_positive_float(
+            os.getenv("ORDER_FAILURE_COOLDOWN_SECONDS"), 120.0, minimum=1.0
+        )
+        self._futures_context_suspension_seconds = _safe_positive_float(
+            os.getenv("FUTURES_CONTEXT_SUSPENSION_SECONDS"), 300.0, minimum=1.0
+        )
         self._tracked_symbols: set[str] = set()
         self._live_symbols: set[str] = set()
         self._symbol_state: Dict[str, SymbolRuntimeState] = {}
@@ -969,7 +1029,9 @@ class StrategyRunner:
         self._execution_state_lock = threading.RLock()
         self._execution_state_by_symbol: dict[str, OrderStateMachine] = {}
         # Stale ORDER_PENDING past this age with no backing order is recoverable.
-        self._order_pending_timeout_seconds: float = parse_float_env(os.getenv("ORDER_PENDING_TIMEOUT_SECONDS"), 15.0)
+        self._order_pending_timeout_seconds: float = parse_float_env(
+            os.getenv("ORDER_PENDING_TIMEOUT_SECONDS"), 15.0
+        )
         self._event_bus = EventBus()
         self._entry_lock = threading.Lock()  # Atomic entry lock
         self._last_cumulative_volume: dict[str, int] = {}
@@ -1074,7 +1136,9 @@ class StrategyRunner:
         self._candle_versions: dict[str, int] = defaultdict(int)
         self._last_strategy_versions: dict[str, int] = defaultdict(int)
         self._quote_update_versions: dict[str, int] = defaultdict(int)
-        self._execution_candidate_basket_cache: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+        self._execution_candidate_basket_cache: dict[
+            tuple[str, str, int, int], dict[str, Any]
+        ] = {}
         self._execution_candidate_basket_cache_ttl_seconds: float = float(
             os.getenv("EXECUTION_CANDIDATE_BASKET_CACHE_TTL_SECONDS", "2.0") or "2.0"
         )
@@ -1119,7 +1183,9 @@ class StrategyRunner:
             "git_branch": os.getenv("GIT_BRANCH", "unknown"),
             "deployment_id": os.getenv("DEPLOYMENT_ID", "unknown"),
             "build_time": os.getenv("BUILD_TIME", "unknown"),
-            "strategy_profile_version": os.getenv("STRATEGY_PROFILE_VERSION", "unknown"),
+            "strategy_profile_version": os.getenv(
+                "STRATEGY_PROFILE_VERSION", "unknown"
+            ),
         }
 
         # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP
@@ -1140,12 +1206,22 @@ class StrategyRunner:
             logger = getattr(self, "_logger", LOGGER)
             logger.info("BRACKET_EXIT_COMPLETE symbol=%s", symbol)
 
-            for attr in ("active_trades", "_active_trades", "open_trades", "_open_trades"):
+            for attr in (
+                "active_trades",
+                "_active_trades",
+                "open_trades",
+                "_open_trades",
+            ):
                 store = getattr(self, attr, None)
                 if isinstance(store, dict):
                     store.pop(symbol, None)
 
-            for attr in ("_execution_locks", "execution_locks", "_inflight_orders", "inflight_orders"):
+            for attr in (
+                "_execution_locks",
+                "execution_locks",
+                "_inflight_orders",
+                "inflight_orders",
+            ):
                 store = getattr(self, attr, None)
                 if isinstance(store, dict):
                     store.pop(symbol, None)
@@ -1169,8 +1245,6 @@ class StrategyRunner:
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
-
-
     async def _process_token(self, token, candles, indicators):
         """Process token candles into signals. Args: token, candles, indicators. Returns: None. Raises: none."""
         del indicators
@@ -1185,17 +1259,20 @@ class StrategyRunner:
             if candles.empty:
                 return
             latest_candle = candles.iloc[-1]
-            price = float(latest_candle['close'])
+            price = float(latest_candle["close"])
             trace_id = f"{symbol}-{int(time.time() * 1000)}"
 
             signal = self._strategy_manager.generate_signal(symbol, price)
             if signal:
                 from datetime import datetime, timezone
+
                 now = datetime.now(timezone.utc)
-                prepared_signal, prepare_reason = await self._prepare_signal_for_handling(
-                    signal,
-                    price,
-                    trace_id,
+                prepared_signal, prepare_reason = (
+                    await self._prepare_signal_for_handling(
+                        signal,
+                        price,
+                        trace_id,
+                    )
                 )
                 if prepared_signal is None:
                     self._emit_runner_eval_decision(
@@ -1260,7 +1337,9 @@ class StrategyRunner:
                         "reason": "start_after_mark_ready",
                     },
                 )
-            if self._order_manager and hasattr(self._order_manager, "get_kill_switch_status"):
+            if self._order_manager and hasattr(
+                self._order_manager, "get_kill_switch_status"
+            ):
                 try:
                     ks = self._order_manager.get_kill_switch_status()
                     self._logger.info(
@@ -1284,7 +1363,9 @@ class StrategyRunner:
             # _set_symbol_hydration_state() saves symbol states from regressing,
             # but _history_ready_by_symbol is wiped here explicitly and only
             # recovered on the first tick — making the debug log misleading.
-            preserve_execution_state = self._runner_state == RunnerState.EXECUTION_ENABLED
+            preserve_execution_state = (
+                self._runner_state == RunnerState.EXECUTION_ENABLED
+            )
             if not preserve_execution_state:
                 self._vwap_state = {}
                 self._symbol_bar_count = {}
@@ -1301,15 +1382,15 @@ class StrategyRunner:
                 )
             # Always reset per-session rate limits (independent of warmup state).
 
-        # Capture the loop if called from async context (optional safety)
+            # Capture the loop if called from async context (optional safety)
             try:
                 self._main_loop = asyncio.get_running_loop()
             except RuntimeError:
                 pass
 
-        # self._market_data.start()
-        # worker = threading.Thread(target=self._strategy_worker, daemon=True)
-        # worker.start()
+            # self._market_data.start()
+            # worker = threading.Thread(target=self._strategy_worker, daemon=True)
+            # worker.start()
 
             if self._data_hub is not None:
                 reset = getattr(self._data_hub, "reset_warmup", None)
@@ -1440,7 +1521,11 @@ class StrategyRunner:
                         self._logger.info(
                             "DYNAMIC_OPTION_UNIVERSE_SKIPPED reason=market_closed symbol=%s",
                             normalized,
-                            extra={"event": "DYNAMIC_OPTION_UNIVERSE_SKIPPED", "reason": "market_closed", "symbol": normalized},
+                            extra={
+                                "event": "DYNAMIC_OPTION_UNIVERSE_SKIPPED",
+                                "reason": "market_closed",
+                                "symbol": normalized,
+                            },
                         )
                         return
                     self._frozen_universe.add(normalized)
@@ -1484,7 +1569,11 @@ class StrategyRunner:
         if cached:
             self._symbol_history[normalized] = list(cached)
             self._restored_from_cache_symbols.add(normalized)
-            self._logger.info("RUNNER_HISTORY_CACHE_RESTORED symbol=%s bars=%d", normalized, len(cached))
+            self._logger.info(
+                "RUNNER_HISTORY_CACHE_RESTORED symbol=%s bars=%d",
+                normalized,
+                len(cached),
+            )
         self._hydrate_from_mdm_cache(normalized)
 
         self._logger.info("Tracking symbol %s", normalized)
@@ -1529,14 +1618,40 @@ class StrategyRunner:
             return False
         ensurer = getattr(self, "_runtime_history_ensurer", None)
         if not callable(ensurer):
-            log_throttled(self._logger, f"canonical_history_ensurer_missing:{normalized}", f"CANONICAL_HISTORY_ENSURER_MISSING symbol={normalized} role={role}", interval_sec=60.0, level=logging.WARNING, extra={"event": "CANONICAL_HISTORY_ENSURER_MISSING", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required_bars})
+            log_throttled(
+                self._logger,
+                f"canonical_history_ensurer_missing:{normalized}",
+                f"CANONICAL_HISTORY_ENSURER_MISSING symbol={normalized} role={role}",
+                interval_sec=60.0,
+                level=logging.WARNING,
+                extra={
+                    "event": "CANONICAL_HISTORY_ENSURER_MISSING",
+                    "symbol": normalized,
+                    "role": role,
+                    "phase": phase,
+                    "reason": reason,
+                    "required_bars": required_bars,
+                },
+            )
             return False
         requested_required = max(1, int(required_bars or 1))
-        requested_target = max(requested_required, int(target_bars) if target_bars is not None else requested_required)
+        requested_target = max(
+            requested_required,
+            int(target_bars) if target_bars is not None else requested_required,
+        )
         inflight = getattr(self, "_runtime_history_ensure_inflight", None)
         roles = getattr(self, "_runtime_history_ensure_roles", None)
         if not isinstance(inflight, dict):
-            getattr(self._logger, "error", self._logger.warning)("CANONICAL_HISTORY_ENSURE_INVALID_STATE symbol=%s state_type=%s", normalized, type(inflight).__name__, extra={"event": "CANONICAL_HISTORY_ENSURE_INVALID_STATE", "symbol": normalized, "state_type": type(inflight).__name__})
+            getattr(self._logger, "error", self._logger.warning)(
+                "CANONICAL_HISTORY_ENSURE_INVALID_STATE symbol=%s state_type=%s",
+                normalized,
+                type(inflight).__name__,
+                extra={
+                    "event": "CANONICAL_HISTORY_ENSURE_INVALID_STATE",
+                    "symbol": normalized,
+                    "state_type": type(inflight).__name__,
+                },
+            )
             inflight = {}
             self._runtime_history_ensure_inflight = inflight
         if not isinstance(roles, dict):
@@ -1544,8 +1659,12 @@ class StrategyRunner:
             self._runtime_history_ensure_roles = roles
         previous_target = inflight.get(normalized)
         previous_role = roles.get(normalized)
-        target_upgraded = previous_target is not None and requested_target > previous_target
-        role_upgraded = previous_role is not None and history_role_priority(role) > history_role_priority(previous_role)
+        target_upgraded = (
+            previous_target is not None and requested_target > previous_target
+        )
+        role_upgraded = previous_role is not None and history_role_priority(
+            role
+        ) > history_role_priority(previous_role)
         if previous_target is not None and not target_upgraded and not role_upgraded:
             log_throttled(
                 self._logger,
@@ -1569,7 +1688,10 @@ class StrategyRunner:
         roles[normalized] = role
 
         def restore_after_schedule_failure() -> None:
-            if inflight.get(normalized) != requested_target or roles.get(normalized) != role:
+            if (
+                inflight.get(normalized) != requested_target
+                or roles.get(normalized) != role
+            ):
                 return
             if previous_target is None:
                 inflight.pop(normalized, None)
@@ -1583,7 +1705,11 @@ class StrategyRunner:
 
         self._hydration_attempted_symbols.add(normalized)
         self._last_hydration_reason_by_symbol[normalized] = reason
-        event = "CANONICAL_HISTORY_ENSURE_UPGRADED" if previous_target is not None else "CANONICAL_HISTORY_ENSURE_SCHEDULED"
+        event = (
+            "CANONICAL_HISTORY_ENSURE_UPGRADED"
+            if previous_target is not None
+            else "CANONICAL_HISTORY_ENSURE_SCHEDULED"
+        )
         self._logger.info(
             "%s symbol=%s role=%s phase=%s reason=%s required_bars=%s target_bars=%s previous_target_bars=%s previous_role=%s target_upgraded=%s role_upgraded=%s",
             event,
@@ -1614,14 +1740,37 @@ class StrategyRunner:
 
         async def _run() -> None:
             try:
-                result = ensurer(normalized, role=role, phase=phase, reason=reason, required_bars=requested_required, target_bars=requested_target)
+                result = ensurer(
+                    normalized,
+                    role=role,
+                    phase=phase,
+                    reason=reason,
+                    required_bars=requested_required,
+                    target_bars=requested_target,
+                )
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:  # noqa: BLE001 - orchestration boundary
-                self._logger.warning("CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED symbol=%s role=%s reason=%s error_type=%s error=%s", normalized, role, reason, type(exc).__name__, exc, extra={"event": "CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED", "symbol": normalized, "role": role, "reason": reason, "error_type": type(exc).__name__, "error": str(exc)})
+                self._logger.warning(
+                    "CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED symbol=%s role=%s reason=%s error_type=%s error=%s",
+                    normalized,
+                    role,
+                    reason,
+                    type(exc).__name__,
+                    exc,
+                    extra={
+                        "event": "CANONICAL_HISTORY_ENSURE_CALLBACK_FAILED",
+                        "symbol": normalized,
+                        "role": role,
+                        "reason": reason,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
             finally:
                 if (
-                    self._runtime_history_ensure_inflight.get(normalized) == requested_target
+                    self._runtime_history_ensure_inflight.get(normalized)
+                    == requested_target
                     and self._runtime_history_ensure_roles.get(normalized) == role
                 ):
                     self._runtime_history_ensure_inflight.pop(normalized, None)
@@ -1631,7 +1780,11 @@ class StrategyRunner:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                thread = threading.Thread(target=lambda: asyncio.run(_run()), name=f"runtime-history-ensure-{normalized}", daemon=True)
+                thread = threading.Thread(
+                    target=lambda: asyncio.run(_run()),
+                    name=f"runtime-history-ensure-{normalized}",
+                    daemon=True,
+                )
                 thread.start()
             else:
                 scheduled_coro = _run()
@@ -1642,11 +1795,24 @@ class StrategyRunner:
                     raise
         except Exception as exc:  # noqa: BLE001 - scheduling boundary
             restore_after_schedule_failure()
-            self._logger.warning("CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED symbol=%s error_type=%s error=%s", normalized, type(exc).__name__, exc, extra={"event": "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED", "symbol": normalized, "error_type": type(exc).__name__, "error": str(exc)})
+            self._logger.warning(
+                "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED symbol=%s error_type=%s error=%s",
+                normalized,
+                type(exc).__name__,
+                exc,
+                extra={
+                    "event": "CANONICAL_HISTORY_ENSURE_SCHEDULE_FAILED",
+                    "symbol": normalized,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
             return False
         return True
 
-    def _request_mdm_hydration(self, symbol: str, min_bars: int, *, reason: str = "runner_missing_bars") -> None:
+    def _request_mdm_hydration(
+        self, symbol: str, min_bars: int, *, reason: str = "runner_missing_bars"
+    ) -> None:
         """Thin compatibility alias -> canonical runtime ensurer. Args: symbol,
         min_bars, reason. Returns: None. Raises: none. Does NOT call DataHub or
         MDM request_hydration; routes through the injected canonical callback so
@@ -1668,8 +1834,12 @@ class StrategyRunner:
         """
         return resolve_symbol_history_role(
             symbol=normalize_symbol(str(symbol or "")),
-            selected_ce=normalize_symbol(str(getattr(self, "_active_selected_ce", "") or "")),
-            selected_pe=normalize_symbol(str(getattr(self, "_active_selected_pe", "") or "")),
+            selected_ce=normalize_symbol(
+                str(getattr(self, "_active_selected_ce", "") or "")
+            ),
+            selected_pe=normalize_symbol(
+                str(getattr(self, "_active_selected_pe", "") or "")
+            ),
             spot_symbol=getattr(self, "_spot_symbol", None),
             futures_symbol=getattr(self, "_active_futures_symbol", None),
         )
@@ -1708,12 +1878,24 @@ class StrategyRunner:
     ) -> None:
         """Emit concise hydration trace with no-op/rejection reason. Args: symbol/source/counts. Returns: None. Raises: None."""
         indicator_count = self._history_count_for_symbol(symbol)
-        before = int(indicator_before if indicator_before is not None else max(0, indicator_count - int(ingested_bars)))
+        before = int(
+            indicator_before
+            if indicator_before is not None
+            else max(0, indicator_count - int(ingested_bars))
+        )
         new_ingested_bars = max(0, int(indicator_count) - before)
-        duplicate_bars = max(0, int(fetched_bars) - new_ingested_bars) if int(fetched_bars) > 0 else 0
+        duplicate_bars = (
+            max(0, int(fetched_bars) - new_ingested_bars)
+            if int(fetched_bars) > 0
+            else 0
+        )
         if int(fetched_bars) <= 0:
             rejection_reason = "provider_empty"
-        elif new_ingested_bars == 0 and int(indicator_count) >= before and int(indicator_count) > 0:
+        elif (
+            new_ingested_bars == 0
+            and int(indicator_count) >= before
+            and int(indicator_count) > 0
+        ):
             rejection_reason = "duplicate_noop"
         elif int(indicator_count) == 0:
             rejection_reason = "validation_rejected"
@@ -1755,7 +1937,9 @@ class StrategyRunner:
         normalized = self._normalize_symbol(symbol)
         target = max(1, int(required_bars or 1))
         if not normalized:
-            return HistorySyncResult("", role, reason, target, 0, 0, 0, False, "symbol_empty")
+            return HistorySyncResult(
+                "", role, reason, target, 0, 0, 0, False, "symbol_empty"
+            )
         failure_reason: str | None = None
         try:
             indicator_before = self._history_count_for_symbol(normalized)
@@ -1768,11 +1952,20 @@ class StrategyRunner:
             rows = []
             failure_reason = f"mdm_history_read_failed:{type(exc).__name__}"
         mdm_bars = len(rows)
-        runner_before = len(getattr(self, "_symbol_history", {}).get(normalized, []) or [])
-        if rows and (runner_before < min(target, mdm_bars) or indicator_before < min(target, mdm_bars)):
+        runner_before = len(
+            getattr(self, "_symbol_history", {}).get(normalized, []) or []
+        )
+        if rows and (
+            runner_before < min(target, mdm_bars)
+            or indicator_before < min(target, mdm_bars)
+        ):
             try:
-                self.reseed_history_from_bars(normalized, rows, source=reason, min_bars=target)
-            except Exception as exc:  # noqa: BLE001 - sync boundary returns structured failure
+                self.reseed_history_from_bars(
+                    normalized, rows, source=reason, min_bars=target
+                )
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - sync boundary returns structured failure
                 failure_reason = f"runner_reseed_failed:{type(exc).__name__}"
                 self._logger.warning(
                     "RUNNER_HISTORY_SYNC_FAILED symbol=%s role=%s reason=%s exception_type=%s exception_message=%s",
@@ -1781,19 +1974,38 @@ class StrategyRunner:
                     reason,
                     type(exc).__name__,
                     str(exc),
-                    extra={"event": "RUNNER_HISTORY_SYNC_FAILED", "symbol": normalized, "role": role, "reason": reason, "exception_type": type(exc).__name__, "exception_message": str(exc), "failure_reason": failure_reason},
+                    extra={
+                        "event": "RUNNER_HISTORY_SYNC_FAILED",
+                        "symbol": normalized,
+                        "role": role,
+                        "reason": reason,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "failure_reason": failure_reason,
+                    },
                 )
-        runner_after = len(getattr(self, "_symbol_history", {}).get(normalized, []) or [])
+        runner_after = len(
+            getattr(self, "_symbol_history", {}).get(normalized, []) or []
+        )
         try:
             indicator_after = self._history_count_for_symbol(normalized)
         except (AttributeError, TypeError, ValueError) as exc:
             indicator_after = 0
-            failure_reason = failure_reason or f"indicator_count_failed:{type(exc).__name__}"
-        success = failure_reason is None and mdm_bars >= target and runner_after >= target and indicator_after >= target
+            failure_reason = (
+                failure_reason or f"indicator_count_failed:{type(exc).__name__}"
+            )
+        success = (
+            failure_reason is None
+            and mdm_bars >= target
+            and runner_after >= target
+            and indicator_after >= target
+        )
         # Spec §6: this canonical sync owns the hydration-state transition that
         # used to live in _hydrate_from_mdm_cache.
         try:
-            self._set_symbol_hydration_state(normalized, SymbolState.READY if success else SymbolState.HYDRATING)
+            self._set_symbol_hydration_state(
+                normalized, SymbolState.READY if success else SymbolState.HYDRATING
+            )
         except Exception:  # noqa: BLE001 - state map is best-effort diagnostic
             pass
         # This fires on every rearm-loop sync. In steady state (success, unchanged
@@ -1802,12 +2014,33 @@ class StrategyRunner:
         # (60s); failures and state changes still log immediately. Same pattern as
         # LIVE_TRADING_READINESS_SNAPSHOT / LIVE_UNIVERSE_BOOTSTRAP_STATUS.
         _sync_key = f"hist_sync:{normalized}:{role}:{success}:{reason}:{mdm_bars}:{runner_after}:{indicator_after}"
-        _sync_interval = float(os.getenv("RUNNER_HISTORY_SYNC_LOG_INTERVAL_SECONDS", "60") or "60")
+        _sync_interval = float(
+            os.getenv("RUNNER_HISTORY_SYNC_LOG_INTERVAL_SECONDS", "60") or "60"
+        )
         if (not success) or self._should_log_throttled(_sync_key, _sync_interval):
             self._logger.info(
                 "RUNNER_HISTORY_SYNC_RESULT symbol=%s role=%s reason=%s required_bars=%s mdm_after=%s runner_after=%s indicator_after=%s success=%s failure_reason=%s",
-                normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason,
-                extra={"event": "RUNNER_HISTORY_SYNC_RESULT", "symbol": normalized, "role": role, "reason": reason, "required_bars": target, "mdm_after": mdm_bars, "runner_after": runner_after, "indicator_after": indicator_after, "success": success, "failure_reason": failure_reason},
+                normalized,
+                role,
+                reason,
+                target,
+                mdm_bars,
+                runner_after,
+                indicator_after,
+                success,
+                failure_reason,
+                extra={
+                    "event": "RUNNER_HISTORY_SYNC_RESULT",
+                    "symbol": normalized,
+                    "role": role,
+                    "reason": reason,
+                    "required_bars": target,
+                    "mdm_after": mdm_bars,
+                    "runner_after": runner_after,
+                    "indicator_after": indicator_after,
+                    "success": success,
+                    "failure_reason": failure_reason,
+                },
             )
         if not success and request_if_short:
             self._schedule_runtime_history_ensure(
@@ -1818,7 +2051,17 @@ class StrategyRunner:
                 required_bars=target,
                 target_bars=target,
             )
-        return HistorySyncResult(normalized, role, reason, target, mdm_bars, runner_after, indicator_after, success, failure_reason)
+        return HistorySyncResult(
+            normalized,
+            role,
+            reason,
+            target,
+            mdm_bars,
+            runner_after,
+            indicator_after,
+            success,
+            failure_reason,
+        )
 
     def _sync_history_from_mdm_cache(
         self,
@@ -1830,8 +2073,18 @@ class StrategyRunner:
     ) -> int:
         """Compatibility wrapper around canonical Runner history sync."""
         normalized = self._normalize_symbol(symbol)
-        target = max(1, int(required_bars or self._required_bars_for_symbol(normalized) or 1)) if normalized else 1
-        role = self._symbol_role_for_runner(symbol) if hasattr(self, "_symbol_role_for_runner") else None
+        target = (
+            max(
+                1, int(required_bars or self._required_bars_for_symbol(normalized) or 1)
+            )
+            if normalized
+            else 1
+        )
+        role = (
+            self._symbol_role_for_runner(symbol)
+            if hasattr(self, "_symbol_role_for_runner")
+            else None
+        )
         if str(source or "").endswith("option_cache_sync"):
             role = "option_context_cache_sync"
         result = self.sync_history_from_mdm(
@@ -1846,7 +2099,9 @@ class StrategyRunner:
     def _active_context_symbols_for_history(self) -> list[str]:
         """Return canonical spot/futures context symbols. Args: none. Returns: symbols."""
         symbols = ["NSE:NIFTY"]
-        futures_symbol = normalize_symbol(str(getattr(self, "_active_futures_symbol", "") or ""))
+        futures_symbol = normalize_symbol(
+            str(getattr(self, "_active_futures_symbol", "") or "")
+        )
         if not futures_symbol:
             futures_symbol = next(
                 (
@@ -1861,7 +2116,9 @@ class StrategyRunner:
             symbols.append(futures_symbol)
         return symbols
 
-    def _sync_context_history_if_cold(self, *, source: str = "context_history_sync") -> None:
+    def _sync_context_history_if_cold(
+        self, *, source: str = "context_history_sync"
+    ) -> None:
         """Ensure spot/futures cached history is visible to IndicatorEngine."""
         for ctx_symbol in self._active_context_symbols_for_history():
             count = self._history_count_for_symbol(ctx_symbol)
@@ -1885,15 +2142,28 @@ class StrategyRunner:
                         cold_passes = {}
                         self._context_cold_passes = cold_passes
                     cold_passes[ctx_symbol] = cold_passes.get(ctx_symbol, 0) + 1
-                    grace = safe_positive_int_env("CONTEXT_HISTORY_COLD_GRACE_PASSES", 3, minimum=1)
+                    grace = safe_positive_int_env(
+                        "CONTEXT_HISTORY_COLD_GRACE_PASSES", 3, minimum=1
+                    )
                     if cold_passes[ctx_symbol] <= grace:
                         log_throttled(
                             self._logger,
                             f"context_history_pending:{ctx_symbol}",
                             "CONTEXT_HISTORY_HYDRATION_PENDING symbol=%s source=%s have=%d need=%d pass=%d",
-                            ctx_symbol, source, after, self._context_required_bars, cold_passes[ctx_symbol],
+                            ctx_symbol,
+                            source,
+                            after,
+                            self._context_required_bars,
+                            cold_passes[ctx_symbol],
                             interval_sec=10.0,
-                            extra={"event": "CONTEXT_HISTORY_HYDRATION_PENDING", "symbol": ctx_symbol, "source": source, "indicator_history_count": after, "required_bars": self._context_required_bars, "cold_pass": cold_passes[ctx_symbol]},
+                            extra={
+                                "event": "CONTEXT_HISTORY_HYDRATION_PENDING",
+                                "symbol": ctx_symbol,
+                                "source": source,
+                                "indicator_history_count": after,
+                                "required_bars": self._context_required_bars,
+                                "cold_pass": cold_passes[ctx_symbol],
+                            },
                         )
                     else:
                         self._logger.warning(
@@ -1901,39 +2171,64 @@ class StrategyRunner:
                             ctx_symbol,
                             source,
                             "insufficient_cached_bars",
-                            extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": ctx_symbol, "source": source, "error": "insufficient_cached_bars", "indicator_history_count": after, "required_bars": self._context_required_bars, "cold_pass": cold_passes[ctx_symbol]},
+                            extra={
+                                "event": "CONTEXT_HISTORY_HYDRATION_FAILED",
+                                "symbol": ctx_symbol,
+                                "source": source,
+                                "error": "insufficient_cached_bars",
+                                "indicator_history_count": after,
+                                "required_bars": self._context_required_bars,
+                                "cold_pass": cold_passes[ctx_symbol],
+                            },
                         )
                 else:
                     cold_passes = getattr(self, "_context_cold_passes", None)
                     if cold_passes is not None:
                         cold_passes.pop(ctx_symbol, None)
-            except Exception as exc:  # noqa: BLE001 - keep evaluation safely blocked with diagnostics
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - keep evaluation safely blocked with diagnostics
                 self._logger.warning(
                     "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
                     ctx_symbol,
                     source,
                     exc,
-                    extra={"event": "CONTEXT_HISTORY_HYDRATION_FAILED", "symbol": ctx_symbol, "source": source, "error": str(exc)},
+                    extra={
+                        "event": "CONTEXT_HISTORY_HYDRATION_FAILED",
+                        "symbol": ctx_symbol,
+                        "source": source,
+                        "error": str(exc),
+                    },
                 )
 
-    def _prewarm_active_option_history(self, *, trace_id: str | None = None, source: str = "active_basket_commit") -> None:
+    def _prewarm_active_option_history(
+        self, *, trace_id: str | None = None, source: str = "active_basket_commit"
+    ) -> None:
         """Proactively prewarm selected and active-basket option history."""
         symbols: list[str] = []
-        for raw in (getattr(self, "_active_selected_ce", None), getattr(self, "_active_selected_pe", None)):
+        for raw in (
+            getattr(self, "_active_selected_ce", None),
+            getattr(self, "_active_selected_pe", None),
+        ):
             if raw:
                 symbols.append(normalize_symbol(str(raw)))
         for raw in sorted(getattr(self, "_active_option_symbols", set()) or set()):
             normalized = normalize_symbol(str(raw))
             if normalized and normalized not in symbols:
                 symbols.append(normalized)
-        required = max(self._option_required_bars, safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
+        required = max(
+            self._option_required_bars,
+            safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1),
+        )
         for option_symbol in symbols:
             # Sync to the symbol's true readiness requirement, not just the
             # execution minimum. With a 5-bar target the cache sync fetched 5
             # bars from an MDM holding 50+, leaving dynamically added strikes
             # permanently below the 30/50-bar readiness threshold (the rearm
             # loop retried forever without ever closing the gap).
-            symbol_required = max(required, int(self._required_bars_for_symbol(option_symbol) or 0))
+            symbol_required = max(
+                required, int(self._required_bars_for_symbol(option_symbol) or 0)
+            )
             before = self._sync_history_from_mdm_cache(
                 option_symbol,
                 required_bars=symbol_required,
@@ -2017,18 +2312,22 @@ class StrategyRunner:
                 return
             bars: list[dict[str, Any]] = []
             for i, ts in enumerate(timestamps):
-                bars.append({
-                    "timestamp": ts,
-                    "open":   opens[i]   if i < len(opens)   else closes[i],
-                    "high":   highs[i]   if i < len(highs)   else closes[i],
-                    "low":    lows[i]    if i < len(lows)    else closes[i],
-                    "close":  closes[i],
-                    "volume": volumes[i] if i < len(volumes) else 0.0,
-                })
+                bars.append(
+                    {
+                        "timestamp": ts,
+                        "open": opens[i] if i < len(opens) else closes[i],
+                        "high": highs[i] if i < len(highs) else closes[i],
+                        "low": lows[i] if i < len(lows) else closes[i],
+                        "close": closes[i],
+                        "volume": volumes[i] if i < len(volumes) else 0.0,
+                    }
+                )
             self._pipeline.store.seed(symbol, bars)
         except Exception as exc:
             self._logger.warning(
-                "Failed to seed pipeline store for %s: %s", symbol, exc,
+                "Failed to seed pipeline store for %s: %s",
+                symbol,
+                exc,
                 extra={"event": "pipeline_store_seed_failed", "symbol": symbol},
             )
 
@@ -2054,15 +2353,20 @@ class StrategyRunner:
                 return
             rows = []
             for i, ts in enumerate(timestamps):
-                rows.append({
-                    "timestamp": pd.Timestamp(ts, tz="UTC") if ts.tzinfo is None
-                                 else pd.Timestamp(ts),
-                    "open":   float(opens[i])   if i < len(opens)   else float(closes[i]),
-                    "high":   float(highs[i])   if i < len(highs)   else float(closes[i]),
-                    "low":    float(lows[i])    if i < len(lows)    else float(closes[i]),
-                    "close":  float(closes[i]),
-                    "volume": float(volumes[i]) if i < len(volumes) else 0.0,
-                })
+                rows.append(
+                    {
+                        "timestamp": (
+                            pd.Timestamp(ts, tz="UTC")
+                            if ts.tzinfo is None
+                            else pd.Timestamp(ts)
+                        ),
+                        "open": float(opens[i]) if i < len(opens) else float(closes[i]),
+                        "high": float(highs[i]) if i < len(highs) else float(closes[i]),
+                        "low": float(lows[i]) if i < len(lows) else float(closes[i]),
+                        "close": float(closes[i]),
+                        "volume": float(volumes[i]) if i < len(volumes) else 0.0,
+                    }
+                )
             df = pd.DataFrame(rows)
             df = df.drop_duplicates(subset="timestamp", keep="last")
             df = df.sort_values("timestamp").reset_index(drop=True)
@@ -2070,12 +2374,17 @@ class StrategyRunner:
             engine.df = df.tail(engine.max_bars).reset_index(drop=True)
             self._logger.debug(
                 "candle_engine_seeded",
-                extra={"event": "candle_engine_seeded", "symbol": symbol,
-                       "bars": len(engine.df)},
+                extra={
+                    "event": "candle_engine_seeded",
+                    "symbol": symbol,
+                    "bars": len(engine.df),
+                },
             )
         except Exception as exc:
             self._logger.warning(
-                "Failed to seed CandleEngine for %s: %s", symbol, exc,
+                "Failed to seed CandleEngine for %s: %s",
+                symbol,
+                exc,
                 extra={"event": "candle_engine_seed_failed", "symbol": symbol},
             )
 
@@ -2124,7 +2433,11 @@ class StrategyRunner:
             if history:
                 keep = max(self._context_required_bars, self._option_required_bars)
                 self._recent_history_cache[normalized] = history[-keep:]
-                self._logger.info("RUNNER_HISTORY_CACHE_PRESERVED symbol=%s bars=%d", normalized, len(self._recent_history_cache[normalized]))
+                self._logger.info(
+                    "RUNNER_HISTORY_CACHE_PRESERVED symbol=%s bars=%d",
+                    normalized,
+                    len(self._recent_history_cache[normalized]),
+                )
             self._active_symbols.discard(normalized)
             self._tracked_symbols.discard(normalized)
             self._live_symbols.discard(normalized)
@@ -2335,7 +2648,10 @@ class StrategyRunner:
             asyncio.get_running_loop()
             self._logger.warning(
                 "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=async_required",
-                extra={"event": "CANDIDATE_SNAPSHOT_BUILD_FAILED", "reason": "async_required"},
+                extra={
+                    "event": "CANDIDATE_SNAPSHOT_BUILD_FAILED",
+                    "reason": "async_required",
+                },
             )
             return []
         except RuntimeError:
@@ -2358,18 +2674,28 @@ class StrategyRunner:
     ) -> tuple[list[dict[str, Any]], bool]:
         """Args: option context. Returns: snapshots and refresh_pending flag. Raises: none."""
         try:
-            if self._market_data is None or not hasattr(self._market_data, "get_symbol_snapshot"):
+            if self._market_data is None or not hasattr(
+                self._market_data, "get_symbol_snapshot"
+            ):
                 return [], True
             spot_snapshot = self._market_data.get_symbol_snapshot(underlying)
             spot_ltp = getattr(spot_snapshot, "ltp", None)
-            spot_canonical = str(getattr(spot_snapshot, "canonical_symbol", "") or "").upper()
+            spot_canonical = str(
+                getattr(spot_snapshot, "canonical_symbol", "") or ""
+            ).upper()
             if spot_ltp is None or float(spot_ltp) <= 0:
                 self._logger.warning(
                     "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=spot_missing underlying=%s spot_canonical=%s spot_ltp=%s",
                     underlying,
                     spot_canonical,
                     spot_ltp,
-                    extra={"event": "CANDIDATE_SNAPSHOT_BUILD_FAILED", "reason": "spot_missing", "underlying": underlying, "spot_canonical": spot_canonical, "spot_ltp": spot_ltp},
+                    extra={
+                        "event": "CANDIDATE_SNAPSHOT_BUILD_FAILED",
+                        "reason": "spot_missing",
+                        "underlying": underlying,
+                        "spot_canonical": spot_canonical,
+                        "spot_ltp": spot_ltp,
+                    },
                 )
                 return [], True
             atm = int(atm_strike or round(float(spot_ltp) / 50.0) * 50)
@@ -2378,9 +2704,13 @@ class StrategyRunner:
                 side = "CE"
             target_strikes = {
                 atm + 50 * offset
-                for offset in range(-max(1, int(window_each_side)), max(1, int(window_each_side)) + 1)
+                for offset in range(
+                    -max(1, int(window_each_side)), max(1, int(window_each_side)) + 1
+                )
             }
-            selected = self._resolve_candidate_contracts(side=side, target_strikes=target_strikes)
+            selected = self._resolve_candidate_contracts(
+                side=side, target_strikes=target_strikes
+            )
             selected = sorted(set(selected), key=lambda item: abs(item[1] - atm))
             any_refresh_pending = False
             candidates: list[dict[str, Any]] = []
@@ -2393,7 +2723,9 @@ class StrategyRunner:
                 ensure_tick_fn = getattr(self._market_data, "ensure_fresh_tick", None)
                 if callable(ensure_tick_fn):
                     self._logger.debug(
-                        "CANDIDATE_REFRESH_REQUESTED symbol=%s", sym, extra={"event": "CANDIDATE_REFRESH_REQUESTED", "symbol": sym}
+                        "CANDIDATE_REFRESH_REQUESTED symbol=%s",
+                        sym,
+                        extra={"event": "CANDIDATE_REFRESH_REQUESTED", "symbol": sym},
                     )
                     refresh_result = ensure_tick_fn(sym)
                     if inspect.isawaitable(refresh_result):
@@ -2402,7 +2734,10 @@ class StrategyRunner:
                             self._logger.debug(
                                 "CANDIDATE_REFRESH_COMPLETE symbol=%s",
                                 sym,
-                                extra={"event": "CANDIDATE_REFRESH_COMPLETE", "symbol": sym},
+                                extra={
+                                    "event": "CANDIDATE_REFRESH_COMPLETE",
+                                    "symbol": sym,
+                                },
                             )
                         except asyncio.TimeoutError:
                             symbol_refresh_pending = True
@@ -2410,14 +2745,22 @@ class StrategyRunner:
                             self._logger.warning(
                                 "CANDIDATE_REFRESH_TIMEOUT symbol=%s",
                                 sym,
-                                extra={"event": "CANDIDATE_REFRESH_TIMEOUT", "symbol": sym},
+                                extra={
+                                    "event": "CANDIDATE_REFRESH_TIMEOUT",
+                                    "symbol": sym,
+                                },
                             )
                 snap = self._market_data.get_symbol_snapshot(sym)
-                if symbol_refresh_pending and (snap.ltp is None or not snap.tradable_quote):
+                if symbol_refresh_pending and (
+                    snap.ltp is None or not snap.tradable_quote
+                ):
                     self._logger.warning(
                         "CANDIDATE_SNAPSHOT_PENDING_REFRESH symbol=%s",
                         sym,
-                        extra={"event": "CANDIDATE_SNAPSHOT_PENDING_REFRESH", "symbol": sym},
+                        extra={
+                            "event": "CANDIDATE_SNAPSHOT_PENDING_REFRESH",
+                            "symbol": sym,
+                        },
                     )
                 spread_pct = None
                 if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
@@ -2442,7 +2785,9 @@ class StrategyRunner:
                         "real_ticks_last_60s": snap.real_ticks_last_60s,
                         "latest_candle_provisional": snap.latest_candle_provisional,
                         "latest_candle_synthetic": snap.latest_candle_synthetic,
-                        "latest_candle_volume": float(getattr(snap, "latest_candle_volume", 0.0) or 0.0),
+                        "latest_candle_volume": float(
+                            getattr(snap, "latest_candle_volume", 0.0) or 0.0
+                        ),
                         "ohlc_valid": snap.ohlc_valid,
                         "atm_distance": int(abs(strike - atm) / 50),
                         "bid_missing": snap.bid_missing,
@@ -2452,8 +2797,12 @@ class StrategyRunner:
                         "refresh_pending": symbol_refresh_pending,
                         "atr_option": float(getattr(snap, "atr_option", 0.0) or 0.0),
                         "history_bars": int(getattr(snap, "history_bars", 0) or 0),
-                        "data_quality_score": float(getattr(snap, "data_quality_score", 0.0) or 0.0),
-                        "quote_quality": "bid_ask" if bool(snap.tradable_quote) else "ltp_only",
+                        "data_quality_score": float(
+                            getattr(snap, "data_quality_score", 0.0) or 0.0
+                        ),
+                        "quote_quality": (
+                            "bid_ask" if bool(snap.tradable_quote) else "ltp_only"
+                        ),
                         "ltp_only_fallback": bool(
                             snap.ltp is not None
                             and float(snap.ltp) > 0
@@ -2606,7 +2955,8 @@ class StrategyRunner:
         if _ttl > 0 and len(self._execution_candidate_basket_cache) > 8:
             _now = time.time()
             for _k in [
-                _k for _k, _v in self._execution_candidate_basket_cache.items()
+                _k
+                for _k, _v in self._execution_candidate_basket_cache.items()
                 if _now - float(_v.get("created_at", 0.0)) > _ttl
             ]:
                 self._execution_candidate_basket_cache.pop(_k, None)
@@ -2677,6 +3027,7 @@ class StrategyRunner:
             atm_strike=atm_strike,
             window_each_side=int(os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2),
         )
+
         def _snapshot_side(snap: dict[str, Any]) -> str:
             explicit = str(snap.get("option_type") or snap.get("side") or "").upper()
             if explicit in {"CE", "PE"}:
@@ -2697,7 +3048,11 @@ class StrategyRunner:
                 atm_strike=atm_strike,
                 snapshots=same_side,
                 source="async_prepared",
-                version=int(metadata.get("quote_update_version") or metadata.get("live_candle_version") or 0),
+                version=int(
+                    metadata.get("quote_update_version")
+                    or metadata.get("live_candle_version")
+                    or 0
+                ),
             )
             self._logger.info(
                 "EXECUTION_CANDIDATE_BASKET_PREPARED symbol=%s underlying=%s option_side=%s atm_strike=%s total=%s source=%s trace_id=%s",
@@ -2708,7 +3063,16 @@ class StrategyRunner:
                 len(same_side),
                 "async_prepared",
                 trace_id,
-                extra={"event": "EXECUTION_CANDIDATE_BASKET_PREPARED", "symbol": signal.symbol, "underlying": underlying, "option_side": option_side, "atm_strike": atm_strike, "total": len(same_side), "source": "async_prepared", "trace_id": trace_id},
+                extra={
+                    "event": "EXECUTION_CANDIDATE_BASKET_PREPARED",
+                    "symbol": signal.symbol,
+                    "underlying": underlying,
+                    "option_side": option_side,
+                    "atm_strike": atm_strike,
+                    "total": len(same_side),
+                    "source": "async_prepared",
+                    "trace_id": trace_id,
+                },
             )
             return same_side
         self._logger.info(
@@ -2720,7 +3084,16 @@ class StrategyRunner:
             len(same_side),
             "insufficient_snapshots",
             trace_id,
-            extra={"event": "EXECUTION_CANDIDATE_BASKET_PREPARE_INCOMPLETE", "symbol": signal.symbol, "underlying": underlying, "option_side": option_side, "atm_strike": atm_strike, "total": len(same_side), "reason": "insufficient_snapshots", "trace_id": trace_id},
+            extra={
+                "event": "EXECUTION_CANDIDATE_BASKET_PREPARE_INCOMPLETE",
+                "symbol": signal.symbol,
+                "underlying": underlying,
+                "option_side": option_side,
+                "atm_strike": atm_strike,
+                "total": len(same_side),
+                "reason": "insufficient_snapshots",
+                "trace_id": trace_id,
+            },
         )
         return same_side
 
@@ -2762,6 +3135,7 @@ class StrategyRunner:
         trace_id: str,
     ) -> tuple[bool, str | None]:
         """Schedule signal preparation from sync paths. Args: signal/price/now/trace_id. Returns: scheduled state and reason. Raises: none."""
+
         async def _job() -> None:
             prepared_signal, prepare_reason = await self._prepare_signal_for_handling(
                 signal, price, trace_id
@@ -2776,8 +3150,19 @@ class StrategyRunner:
                 )
                 self._logger.info(
                     "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                    signal.symbol, False, prepare_reason, None, trace_id,
-                    extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": signal.symbol, "accepted": False, "reason": prepare_reason, "order_id": None, "trace_id": trace_id},
+                    signal.symbol,
+                    False,
+                    prepare_reason,
+                    None,
+                    trace_id,
+                    extra={
+                        "event": "SIGNAL_EXECUTION_RESULT",
+                        "symbol": signal.symbol,
+                        "accepted": False,
+                        "reason": prepare_reason,
+                        "order_id": None,
+                        "trace_id": trace_id,
+                    },
                 )
                 return
             result = self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
@@ -2824,7 +3209,10 @@ class StrategyRunner:
                 },
             )
             return True, None
-        task = loop.create_task(_job(), name=f"signal_prepare:{signal.symbol}:{trace_id}")
+        task = loop.create_task(
+            _job(), name=f"signal_prepare:{signal.symbol}:{trace_id}"
+        )
+
         def _on_done(done_task: asyncio.Task[None]) -> None:
             """Handle async task completion. Args: done_task. Returns: None. Raises: None."""
             try:
@@ -2835,13 +3223,21 @@ class StrategyRunner:
                     signal.symbol,
                     trace_id,
                     exc,
-                    extra={"event": "SIGNAL_PREPARATION_TASK_FAILED", "symbol": signal.symbol, "trace_id": trace_id, "error": str(exc)},
+                    extra={
+                        "event": "SIGNAL_PREPARATION_TASK_FAILED",
+                        "symbol": signal.symbol,
+                        "trace_id": trace_id,
+                        "error": str(exc),
+                    },
                     exc_info=exc,
                 )
+
         task.add_done_callback(_on_done)
         return True, "signal_preparation_scheduled"
 
-    def _maybe_promote_pending_active_basket(self, *, source: str = "hydration") -> bool:
+    def _maybe_promote_pending_active_basket(
+        self, *, source: str = "hydration"
+    ) -> bool:
         """Promote pending CE/PE only after both have execution bars."""
         pending_ce = getattr(self, "_pending_selected_ce", None)
         pending_pe = getattr(self, "_pending_selected_pe", None)
@@ -2863,18 +3259,34 @@ class StrategyRunner:
         self._pending_atm_strike = None
         self._logger.info(
             "ACTIVE_BASKET_PROMOTED selected_ce=%s selected_pe=%s ce_bars=%s pe_bars=%s required=%s source=%s",
-            pending_ce, pending_pe, ce_bars, pe_bars, required, source,
-            extra={"event": "ACTIVE_BASKET_PROMOTED", "selected_ce": pending_ce, "selected_pe": pending_pe, "ce_bars": ce_bars, "pe_bars": pe_bars, "required_bars": required, "source": source},
+            pending_ce,
+            pending_pe,
+            ce_bars,
+            pe_bars,
+            required,
+            source,
+            extra={
+                "event": "ACTIVE_BASKET_PROMOTED",
+                "selected_ce": pending_ce,
+                "selected_pe": pending_pe,
+                "ce_bars": ce_bars,
+                "pe_bars": pe_bars,
+                "required_bars": required,
+                "source": source,
+            },
         )
         return True
-
 
     def _current_active_contract_selection(self) -> ActiveContractSelection:
         """Return selected-contract SSOT snapshot from active_contract_basket."""
         basket = getattr(self, "_active_contract_basket", None)
         if basket is None:
             mdm = getattr(self, "_market_data", None)
-            getter = getattr(mdm, "get_active_contract_basket", None) if mdm is not None else None
+            getter = (
+                getattr(mdm, "get_active_contract_basket", None)
+                if mdm is not None
+                else None
+            )
             if callable(getter):
                 basket = getter()
         selection = active_contract_selection_from_basket(basket)
@@ -2885,7 +3297,9 @@ class StrategyRunner:
         """Public read-only selected-contract snapshot for diagnostics/tests."""
         return self._current_active_contract_selection().to_dict()
 
-    def _sync_active_selection_from_basket(self, selection: ActiveContractSelection) -> None:
+    def _sync_active_selection_from_basket(
+        self, selection: ActiveContractSelection
+    ) -> None:
         """Synchronize legacy runner selected fields only from active basket SSOT."""
         new_ce = normalize_symbol(str(selection.selected_ce or "")) or None
         new_pe = normalize_symbol(str(selection.selected_pe or "")) or None
@@ -2893,14 +3307,36 @@ class StrategyRunner:
             return
         old_ce = getattr(self, "_active_selected_ce", None)
         old_pe = getattr(self, "_active_selected_pe", None)
-        drift = bool((old_ce and new_ce and old_ce != new_ce) or (old_pe and new_pe and old_pe != new_pe))
-        drift_key = (old_ce, old_pe, new_ce, new_pe, selection.basket_version or selection.selected_at)
-        if drift and getattr(self, "_active_selection_drift_log_key", None) != drift_key:
+        drift = bool(
+            (old_ce and new_ce and old_ce != new_ce)
+            or (old_pe and new_pe and old_pe != new_pe)
+        )
+        drift_key = (
+            old_ce,
+            old_pe,
+            new_ce,
+            new_pe,
+            selection.basket_version or selection.selected_at,
+        )
+        if (
+            drift
+            and getattr(self, "_active_selection_drift_log_key", None) != drift_key
+        ):
             self._active_selection_drift_log_key = drift_key
             self._logger.warning(
                 "ACTIVE_SELECTION_DRIFT_CORRECTED old_ce=%s old_pe=%s new_ce=%s new_pe=%s source=active_contract_basket",
-                old_ce, old_pe, new_ce, new_pe,
-                extra={"event": "ACTIVE_SELECTION_DRIFT_CORRECTED", "old_ce": old_ce, "old_pe": old_pe, "new_ce": new_ce, "new_pe": new_pe, "source": selection.source},
+                old_ce,
+                old_pe,
+                new_ce,
+                new_pe,
+                extra={
+                    "event": "ACTIVE_SELECTION_DRIFT_CORRECTED",
+                    "old_ce": old_ce,
+                    "old_pe": old_pe,
+                    "new_ce": new_ce,
+                    "new_pe": new_pe,
+                    "source": selection.source,
+                },
             )
         self._active_selected_ce = new_ce
         self._active_selected_pe = new_pe
@@ -2912,14 +3348,28 @@ class StrategyRunner:
             except (TypeError, ValueError):
                 pass
         if selection.option_symbols:
-            self._active_option_symbols = {normalize_symbol(str(sym)) for sym in selection.option_symbols if sym}
-        sync_key = (str(new_ce), str(new_pe), selection.basket_version or selection.selected_at)
+            self._active_option_symbols = {
+                normalize_symbol(str(sym)) for sym in selection.option_symbols if sym
+            }
+        sync_key = (
+            str(new_ce),
+            str(new_pe),
+            selection.basket_version or selection.selected_at,
+        )
         if getattr(self, "_active_selection_sync_log_key", None) != sync_key:
             self._active_selection_sync_log_key = sync_key
             self._logger.info(
                 "ACTIVE_SELECTION_SYNCED selected_ce=%s selected_pe=%s basket_version=%s",
-                new_ce, new_pe, selection.basket_version or selection.selected_at,
-                extra={"event": "ACTIVE_SELECTION_SYNCED", "selected_ce": new_ce, "selected_pe": new_pe, "basket_version": selection.basket_version, "selected_at": selection.selected_at},
+                new_ce,
+                new_pe,
+                selection.basket_version or selection.selected_at,
+                extra={
+                    "event": "ACTIVE_SELECTION_SYNCED",
+                    "selected_ce": new_ce,
+                    "selected_pe": new_pe,
+                    "basket_version": selection.basket_version,
+                    "selected_at": selection.selected_at,
+                },
             )
 
     def set_active_option_context(
@@ -2944,23 +3394,38 @@ class StrategyRunner:
             if not sym:
                 return False
             try:
-                return self._history_count_for_symbol(sym) >= int(self._option_required_bars)
+                return self._history_count_for_symbol(sym) >= int(
+                    self._option_required_bars
+                )
             except Exception:  # noqa: BLE001
                 return False
 
-        raw_candidate_symbols = [normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym]
-        max_active_options = max(2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "8") or 8))
+        raw_candidate_symbols = [
+            normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym
+        ]
+        max_active_options = max(
+            2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "8") or 8)
+        )
         selected_core = [sym for sym in (selected_ce_norm, selected_pe_norm) if sym]
-        candidate_symbols = set(dict.fromkeys([*selected_core, *raw_candidate_symbols]).keys())
+        candidate_symbols = set(
+            dict.fromkeys([*selected_core, *raw_candidate_symbols]).keys()
+        )
         if len(candidate_symbols) > max_active_options:
-            candidate_symbols = set(list(dict.fromkeys([*selected_core, *raw_candidate_symbols]))[:max_active_options])
+            candidate_symbols = set(
+                list(dict.fromkeys([*selected_core, *raw_candidate_symbols]))[
+                    :max_active_options
+                ]
+            )
         prev_ce = getattr(self, "_active_selected_ce", None)
         prev_pe = getattr(self, "_active_selected_pe", None)
         pair_requested = bool(selected_ce_norm and selected_pe_norm)
-        pair_ready = _exec_ready(selected_ce_norm) and _exec_ready(selected_pe_norm) if pair_requested else False
-        switching = (
-            (selected_ce_norm and selected_ce_norm != prev_ce)
-            or (selected_pe_norm and selected_pe_norm != prev_pe)
+        pair_ready = (
+            _exec_ready(selected_ce_norm) and _exec_ready(selected_pe_norm)
+            if pair_requested
+            else False
+        )
+        switching = (selected_ce_norm and selected_ce_norm != prev_ce) or (
+            selected_pe_norm and selected_pe_norm != prev_pe
         )
 
         if pair_requested and switching and not pair_ready:
@@ -2969,17 +3434,37 @@ class StrategyRunner:
             self._pending_atm_strike = atm_value
             if prev_ce and prev_pe:
                 candidate_symbols.update(s for s in (prev_ce, prev_pe) if s)
-            self._active_option_symbols = candidate_symbols or getattr(self, "_active_option_symbols", set())
-            event = "ACTIVE_BASKET_SWITCH_DEFERRED" if prev_ce and prev_pe else "ACTIVE_BASKET_INITIAL_HYDRATION_PENDING"
+            self._active_option_symbols = candidate_symbols or getattr(
+                self, "_active_option_symbols", set()
+            )
+            event = (
+                "ACTIVE_BASKET_SWITCH_DEFERRED"
+                if prev_ce and prev_pe
+                else "ACTIVE_BASKET_INITIAL_HYDRATION_PENDING"
+            )
             message = (
                 "ACTIVE_BASKET_SWITCH_DEFERRED keep_ce=%s keep_pe=%s new_ce=%s new_pe=%s new_ce_bars=%s new_pe_bars=%s required=%s"
                 if prev_ce and prev_pe
                 else "ACTIVE_BASKET_INITIAL_HYDRATION_PENDING pending_ce=%s pending_pe=%s ce_bars=%s pe_bars=%s required=%s"
             )
             args = (
-                (prev_ce, prev_pe, selected_ce_norm, selected_pe_norm, self._history_count_for_symbol(selected_ce_norm), self._history_count_for_symbol(selected_pe_norm), self._option_required_bars)
+                (
+                    prev_ce,
+                    prev_pe,
+                    selected_ce_norm,
+                    selected_pe_norm,
+                    self._history_count_for_symbol(selected_ce_norm),
+                    self._history_count_for_symbol(selected_pe_norm),
+                    self._option_required_bars,
+                )
                 if prev_ce and prev_pe
-                else (selected_ce_norm, selected_pe_norm, self._history_count_for_symbol(selected_ce_norm), self._history_count_for_symbol(selected_pe_norm), self._option_required_bars)
+                else (
+                    selected_ce_norm,
+                    selected_pe_norm,
+                    self._history_count_for_symbol(selected_ce_norm),
+                    self._history_count_for_symbol(selected_pe_norm),
+                    self._option_required_bars,
+                )
             )
             self._logger.info(
                 message,
@@ -2991,7 +3476,11 @@ class StrategyRunner:
                     "pending_ce": selected_ce_norm,
                     "pending_pe": selected_pe_norm,
                     "required_bars": self._option_required_bars,
-                    "reason": "pending_initial_hydration" if not (prev_ce and prev_pe) else "pending_basket_promotion",
+                    "reason": (
+                        "pending_initial_hydration"
+                        if not (prev_ce and prev_pe)
+                        else "pending_basket_promotion"
+                    ),
                 },
             )
             self._prewarm_active_option_history(source="active_option_context_pending")
@@ -3009,7 +3498,10 @@ class StrategyRunner:
         self._active_atm_strike = atm_value
         self._active_option_symbols = candidate_symbols
         self._eval_option_whitelist = self._compute_eval_option_whitelist(
-            candidate_symbols, atm_value, selected_ce_norm or self._active_selected_ce, selected_pe_norm or self._active_selected_pe
+            candidate_symbols,
+            atm_value,
+            selected_ce_norm or self._active_selected_ce,
+            selected_pe_norm or self._active_selected_pe,
         )
         if promoted_from_pending:
             self._pending_selected_ce = None
@@ -3017,8 +3509,15 @@ class StrategyRunner:
             self._pending_atm_strike = None
             self._logger.info(
                 "ACTIVE_BASKET_PROMOTED selected_ce=%s selected_pe=%s required=%s",
-                self._active_selected_ce, self._active_selected_pe, self._option_required_bars,
-                extra={"event": "ACTIVE_BASKET_PROMOTED", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "required_bars": self._option_required_bars},
+                self._active_selected_ce,
+                self._active_selected_pe,
+                self._option_required_bars,
+                extra={
+                    "event": "ACTIVE_BASKET_PROMOTED",
+                    "selected_ce": self._active_selected_ce,
+                    "selected_pe": self._active_selected_pe,
+                    "required_bars": self._option_required_bars,
+                },
             )
         self._logger.info(
             "RUNNER_ACTIVE_OPTION_CONTEXT selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d",
@@ -3026,7 +3525,13 @@ class StrategyRunner:
             self._active_selected_pe,
             self._active_atm_strike,
             len(self._active_option_symbols),
-            extra={"event": "RUNNER_ACTIVE_OPTION_CONTEXT", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "atm_strike": self._active_atm_strike, "option_count": len(self._active_option_symbols)},
+            extra={
+                "event": "RUNNER_ACTIVE_OPTION_CONTEXT",
+                "selected_ce": self._active_selected_ce,
+                "selected_pe": self._active_selected_pe,
+                "atm_strike": self._active_atm_strike,
+                "option_count": len(self._active_option_symbols),
+            },
         )
         self._prewarm_active_option_history(source="active_option_context")
 
@@ -3039,7 +3544,9 @@ class StrategyRunner:
             normalized = normalize_symbol(str(sym))
             if normalized.endswith(("CE", "PE")):
                 option_symbols.append(normalized)
-        all_symbols_raw = basket.get("all_symbols") or basket.get("symbols") or raw_symbols
+        all_symbols_raw = (
+            basket.get("all_symbols") or basket.get("symbols") or raw_symbols
+        )
         self._active_basket_all_symbols = {
             normalize_symbol(str(sym)) for sym in (all_symbols_raw or []) if sym
         }
@@ -3050,7 +3557,9 @@ class StrategyRunner:
             if sym and token not in (None, "")
         }
         futures_symbol = normalize_symbol(str(basket.get("futures_symbol") or ""))
-        previous_futures = normalize_symbol(str(getattr(self, "_active_futures_symbol", "") or ""))
+        previous_futures = normalize_symbol(
+            str(getattr(self, "_active_futures_symbol", "") or "")
+        )
         self._active_futures_symbol = futures_symbol or None
         if previous_futures and futures_symbol and previous_futures != futures_symbol:
             active_symbols = getattr(self, "_active_symbols", set())
@@ -3060,16 +3569,31 @@ class StrategyRunner:
             context_snapshots = getattr(self, "_latest_context_snapshots", None)
             if isinstance(context_snapshots, dict):
                 fut_ctx = context_snapshots.get("futures_context")
-                if isinstance(fut_ctx, dict) and normalize_symbol(str(fut_ctx.get("symbol") or "")) == previous_futures:
+                if (
+                    isinstance(fut_ctx, dict)
+                    and normalize_symbol(str(fut_ctx.get("symbol") or ""))
+                    == previous_futures
+                ):
                     context_snapshots.pop("futures_context", None)
             self._logger.warning(
                 "RUNNER_FUTURES_CONTEXT_ROTATED old=%s new=%s source=active_trading_universe",
                 previous_futures,
                 futures_symbol,
-                extra={"event": "RUNNER_FUTURES_CONTEXT_ROTATED", "old_symbol": previous_futures, "new_symbol": futures_symbol, "source": "active_trading_universe"},
+                extra={
+                    "event": "RUNNER_FUTURES_CONTEXT_ROTATED",
+                    "old_symbol": previous_futures,
+                    "new_symbol": futures_symbol,
+                    "source": "active_trading_universe",
+                },
             )
-        self._sync_active_selection_from_basket(active_contract_selection_from_basket(basket))
-        _context_only = not (self._active_selected_ce and self._active_selected_pe and self._active_option_symbols)
+        self._sync_active_selection_from_basket(
+            active_contract_selection_from_basket(basket)
+        )
+        _context_only = not (
+            self._active_selected_ce
+            and self._active_selected_pe
+            and self._active_option_symbols
+        )
         self._logger.info(
             "RUNNER_ACTIVE_BASKET_UPDATED selected_ce=%s selected_pe=%s futures_symbol=%s option_count=%d context_only=%s",
             self._active_selected_ce,
@@ -3077,7 +3601,14 @@ class StrategyRunner:
             self._active_futures_symbol,
             len(self._active_option_symbols),
             _context_only,
-            extra={"event": "RUNNER_ACTIVE_BASKET_UPDATED", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "futures_symbol": self._active_futures_symbol, "option_count": len(self._active_option_symbols), "context_only": _context_only},
+            extra={
+                "event": "RUNNER_ACTIVE_BASKET_UPDATED",
+                "selected_ce": self._active_selected_ce,
+                "selected_pe": self._active_selected_pe,
+                "futures_symbol": self._active_futures_symbol,
+                "option_count": len(self._active_option_symbols),
+                "context_only": _context_only,
+            },
         )
         self._sync_context_history_if_cold(source="active_basket_context_sync")
 
@@ -3114,8 +3645,16 @@ class StrategyRunner:
         self._runtime_startup_ready = bool(
             self._runtime_data_hard_ready and self._runtime_evaluation_ready
         )
-        if any(value is not None for value in (selected_ce, selected_pe, atm_strike, option_symbols)):
-            self.set_active_option_context(selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=atm_strike, option_symbols=option_symbols)
+        if any(
+            value is not None
+            for value in (selected_ce, selected_pe, atm_strike, option_symbols)
+        ):
+            self.set_active_option_context(
+                selected_ce=selected_ce,
+                selected_pe=selected_pe,
+                atm_strike=atm_strike,
+                option_symbols=option_symbols,
+            )
         log_throttled(
             self._logger,
             "runner_startup_readiness_update",
@@ -3157,7 +3696,9 @@ class StrategyRunner:
             return False
         if not bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False)):
             return False
-        ttl_seconds = float(os.getenv("RUNNER_EXECUTION_READY_TTL_SECONDS", "60") or "60")
+        ttl_seconds = float(
+            os.getenv("RUNNER_EXECUTION_READY_TTL_SECONDS", "60") or "60"
+        )
         if ttl_seconds > 0:
             last_ready_at = float(
                 self._runtime_symbol_last_ready_at.get(runtime_key, 0.0) or 0.0
@@ -3176,20 +3717,33 @@ class StrategyRunner:
         normalized = normalize_symbol(canonical_symbol or raw)
         if ":" in normalized:
             return normalized
-        option_or_fut = bool(re.match(r"^NIFTY\d{1,2}[A-Z]{3}(\d{5})(CE|PE)$", normalized) or normalized.endswith("FUT"))
+        option_or_fut = bool(
+            re.match(r"^NIFTY\d{1,2}[A-Z]{3}(\d{5})(CE|PE)$", normalized)
+            or normalized.endswith("FUT")
+        )
         if option_or_fut:
             return f"NFO:{normalized}"
         return normalized
 
-    def _ensure_symbol_execution_ready_for_order(self, symbol: str, *, trace_id: str | None = None) -> bool:
-        return self._ensure_symbol_execution_ready_result(symbol, trace_id=trace_id).allowed
+    def _ensure_symbol_execution_ready_for_order(
+        self, symbol: str, *, trace_id: str | None = None
+    ) -> bool:
+        return self._ensure_symbol_execution_ready_result(
+            symbol, trace_id=trace_id
+        ).allowed
 
-    def _ensure_symbol_execution_ready_result(self, symbol: str, *, trace_id: str | None = None) -> ExecutionReadinessResult:
+    def _ensure_symbol_execution_ready_result(
+        self, symbol: str, *, trace_id: str | None = None
+    ) -> ExecutionReadinessResult:
         normalized = normalize_symbol(symbol)
         runtime_key = self._runtime_ready_key(normalized)
         was_ready = self._is_symbol_execution_ready(runtime_key)
         if was_ready:
-            return ExecutionReadinessResult(True, "already_ready", {"symbol": normalized, "runtime_key": runtime_key})
+            return ExecutionReadinessResult(
+                True,
+                "already_ready",
+                {"symbol": normalized, "runtime_key": runtime_key},
+            )
         reason = "runtime_not_marked_ready"
         tick_age_ms = None
         bid = ask = None
@@ -3218,7 +3772,9 @@ class StrategyRunner:
             snap = None
             for candidate_symbol in candidate_keys:
                 try:
-                    candidate_snap = self._market_data.get_symbol_snapshot(candidate_symbol)
+                    candidate_snap = self._market_data.get_symbol_snapshot(
+                        candidate_symbol
+                    )
                 except Exception:
                     continue
                 if candidate_snap is None:
@@ -3268,12 +3824,16 @@ class StrategyRunner:
             else:
                 reason = "quote_missing"
         lot_size_key_used: str | None = None
-        if self._order_manager is not None and hasattr(self._order_manager, "resolve_lot_size"):
+        if self._order_manager is not None and hasattr(
+            self._order_manager, "resolve_lot_size"
+        ):
             for lot_key in candidate_keys or [symbol, normalized]:
                 if not lot_key:
                     continue
                 try:
-                    resolved_lot = int(self._order_manager.resolve_lot_size(lot_key) or 0)
+                    resolved_lot = int(
+                        self._order_manager.resolve_lot_size(lot_key) or 0
+                    )
                     if resolved_lot > 0:
                         lot_size = resolved_lot
                         lot_size_resolved = True
@@ -3285,7 +3845,9 @@ class StrategyRunner:
                 reason = "lot_size_unresolved"
         quote_source = None
         history_count = 0
-        startup_marked_ready = bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False))
+        startup_marked_ready = bool(
+            self._runtime_execution_ready_by_symbol.get(runtime_key, False)
+        )
         dynamic_revalidation_attempted = True
         dynamic_revalidation_passed = False
         history_fallback = "none"
@@ -3297,7 +3859,9 @@ class StrategyRunner:
             except (TypeError, ValueError):
                 history_count = 0
         min_history = int(os.getenv("RUNNER_MIN_REAL_TICKS_60S", "1") or "1")
-        allow_fresh_without_tick_count = _env_flag("RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT", default=True)
+        allow_fresh_without_tick_count = _env_flag(
+            "RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT", default=True
+        )
         if snap is None:
             reason = "quote_missing"
         elif ltp <= 0:
@@ -3319,14 +3883,72 @@ class StrategyRunner:
         if final_ready and runtime_key:
             self._runtime_execution_ready_by_symbol[runtime_key] = True
             self._runtime_symbol_last_ready_at[runtime_key] = time.time()
-            self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, runtime_key, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
+            self._logger.info(
+                "EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s",
+                normalized,
+                runtime_key,
+                reason,
+                tick_age_ms,
+                bid,
+                ask,
+                lot_size,
+                history_count,
+                trace_id,
+            )
         depth_available = (
-            bool(depth_available or getattr(snap, "depth_available", False) or getattr(snap, "depth", None))
+            bool(
+                depth_available
+                or getattr(snap, "depth_available", False)
+                or getattr(snap, "depth", None)
+            )
             if snap is not None
             else False
         )
-        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s spread_pct=%s tradable_quote=%s depth_available=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, spread_pct, tradable_quote, depth_available, lot_size_resolved)
-        return ExecutionReadinessResult(final_ready, reason, {"symbol": normalized, "runtime_key": runtime_key, "tick_age_ms": tick_age_ms, "bid": bid, "ask": ask, "spread_pct": spread_pct, "quote_source": quote_source, "snapshot_key_used": snapshot_key_used, "tradable_quote": tradable_quote, "depth_available": depth_available, "lot_size_resolved": lot_size_resolved})
+        self._logger.info(
+            "ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s spread_pct=%s tradable_quote=%s depth_available=%s lot_size_resolved=%s",
+            normalized,
+            runtime_key,
+            trace_id,
+            was_ready,
+            True,
+            final_ready,
+            reason,
+            startup_marked_ready,
+            dynamic_revalidation_attempted,
+            dynamic_revalidation_passed,
+            quote_source,
+            history_count,
+            history_fallback,
+            lot_size,
+            reason,
+            tick_age_ms,
+            max_quote_age_ms,
+            snapshot_key_used,
+            lot_size_key_used,
+            bid,
+            ask,
+            spread_pct,
+            tradable_quote,
+            depth_available,
+            lot_size_resolved,
+        )
+        return ExecutionReadinessResult(
+            final_ready,
+            reason,
+            {
+                "symbol": normalized,
+                "runtime_key": runtime_key,
+                "tick_age_ms": tick_age_ms,
+                "bid": bid,
+                "ask": ask,
+                "spread_pct": spread_pct,
+                "quote_source": quote_source,
+                "snapshot_key_used": snapshot_key_used,
+                "tradable_quote": tradable_quote,
+                "depth_available": depth_available,
+                "lot_size_resolved": lot_size_resolved,
+            },
+        )
 
     def _execution_reject_cooldown_result(
         self, symbol: str, reason_key: str, now_epoch: float, trace_id: str | None
@@ -3399,7 +4021,11 @@ class StrategyRunner:
         underlying = self._extract_underlying(signal.symbol) or "NIFTY"
         if underlying in {"NFO", "NSE", ""}:
             underlying = "NIFTY"
-        atm_seed = metadata.get("atm_strike") or self._extract_strike_from_symbol(signal.symbol) or self._active_atm_strike
+        atm_seed = (
+            metadata.get("atm_strike")
+            or self._extract_strike_from_symbol(signal.symbol)
+            or self._active_atm_strike
+        )
         atm_strike = int(atm_seed) if atm_seed else None
         candidate_snapshots_obj = metadata.get("candidate_snapshots")
         needs_prebuild = (
@@ -3431,11 +4057,16 @@ class StrategyRunner:
             )
             if fallback_candidate is not None:
                 metadata["candidate_snapshots"] = [fallback_candidate]
-                metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
+                metadata.setdefault(
+                    "atm_strike", int(fallback_candidate.get("atm_strike") or 0)
+                )
                 self._logger.info(
                     "CANDIDATE_FALLBACK_FROM_SIGNAL_USED symbol=%s",
                     signal.symbol,
-                    extra={"event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED", "symbol": signal.symbol},
+                    extra={
+                        "event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED",
+                        "symbol": signal.symbol,
+                    },
                 )
                 return dataclasses.replace(signal, metadata=metadata), None
             built, refresh_pending = await self.build_candidate_snapshots_async(
@@ -3451,11 +4082,16 @@ class StrategyRunner:
                 )
                 if fallback_candidate is not None:
                     metadata["candidate_snapshots"] = [fallback_candidate]
-                    metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
+                    metadata.setdefault(
+                        "atm_strike", int(fallback_candidate.get("atm_strike") or 0)
+                    )
                     self._logger.info(
                         "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING symbol=%s",
                         original_symbol,
-                        extra={"event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING", "symbol": signal.symbol},
+                        extra={
+                            "event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING",
+                            "symbol": signal.symbol,
+                        },
                     )
                     return dataclasses.replace(signal, metadata=metadata), None
             if refresh_pending:
@@ -3469,7 +4105,9 @@ class StrategyRunner:
                     fallback_candidate["candidate_selected"] = True
                     fallback_candidate["is_selected_option"] = True
                     metadata["candidate_snapshots"] = [fallback_candidate]
-                    metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
+                    metadata.setdefault(
+                        "atm_strike", int(fallback_candidate.get("atm_strike") or 0)
+                    )
                     return dataclasses.replace(signal, metadata=metadata), None
                 return None, "candidate_refresh_pending"
             if not built:
@@ -3486,7 +4124,14 @@ class StrategyRunner:
 
     def _resolve_execution_mode_snapshot(self) -> ExecutionModeSnapshot:
         def _env_truthy(name: str) -> bool:
-            return str(os.getenv(name, "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+            return str(os.getenv(name, "false")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+                "on",
+            }
+
         mode_source = getattr(self._order_manager, "is_live_mode", None)
         order_manager_live: bool | None = None
         if callable(mode_source):
@@ -3501,8 +4146,21 @@ class StrategyRunner:
             env_live_enabled = _env_truthy("ENABLE_LIVE")
         paper_enabled = _env_truthy("PAPER__ENABLED") or _env_truthy("PAPER_MODE")
         shadow_mode_enabled = _env_truthy("SHADOW_MODE")
-        is_live_mode = mode == "LIVE" and env_live_enabled and not paper_enabled and not shadow_mode_enabled and (order_manager_live is not False)
-        return ExecutionModeSnapshot(mode, env_live_enabled, paper_enabled, shadow_mode_enabled, order_manager_live, is_live_mode)
+        is_live_mode = (
+            mode == "LIVE"
+            and env_live_enabled
+            and not paper_enabled
+            and not shadow_mode_enabled
+            and (order_manager_live is not False)
+        )
+        return ExecutionModeSnapshot(
+            mode,
+            env_live_enabled,
+            paper_enabled,
+            shadow_mode_enabled,
+            order_manager_live,
+            is_live_mode,
+        )
 
     def _build_single_candidate_from_signal(
         self,
@@ -3519,35 +4177,68 @@ class StrategyRunner:
             if not callable(get_snapshot):
                 return None
             snapshot = get_snapshot(signal.symbol)
-            ltp = float(snapshot.ltp) if snapshot.ltp is not None and float(snapshot.ltp) > 0 else None
+            ltp = (
+                float(snapshot.ltp)
+                if snapshot.ltp is not None and float(snapshot.ltp) > 0
+                else None
+            )
             if ltp is None:
                 return None
-            bid = float(snapshot.bid) if snapshot.bid is not None and float(snapshot.bid) > 0 else 0.0
-            ask = float(snapshot.ask) if snapshot.ask is not None and float(snapshot.ask) > 0 else 0.0
+            bid = (
+                float(snapshot.bid)
+                if snapshot.bid is not None and float(snapshot.bid) > 0
+                else 0.0
+            )
+            ask = (
+                float(snapshot.ask)
+                if snapshot.ask is not None and float(snapshot.ask) > 0
+                else 0.0
+            )
             has_bid_ask = bid > 0 and ask > 0
             strike_match = re.search(r"(\d{5})(CE|PE)$", str(signal.symbol).upper())
-            parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
-            strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
+            parsed_strike = (
+                int(strike_match.group(1)) if strike_match is not None else 0
+            )
+            strike = int(
+                metadata.get("strike")
+                or parsed_strike
+                or metadata.get("atm_strike")
+                or 0
+            )
             atm_strike = int(metadata.get("atm_strike") or strike)
             signal_norm = normalize_symbol(signal.symbol)
-            selected_ce = normalize_symbol(str(metadata.get("selected_ce") or self._active_selected_ce or ""))
-            selected_pe = normalize_symbol(str(metadata.get("selected_pe") or self._active_selected_pe or ""))
+            selected_ce = normalize_symbol(
+                str(metadata.get("selected_ce") or self._active_selected_ce or "")
+            )
+            selected_pe = normalize_symbol(
+                str(metadata.get("selected_pe") or self._active_selected_pe or "")
+            )
             selected_set = {item for item in (selected_ce, selected_pe) if item}
             try:
-                strike_distance = abs(float(strike) - float(atm_strike)) if strike and atm_strike else None
+                strike_distance = (
+                    abs(float(strike) - float(atm_strike))
+                    if strike and atm_strike
+                    else None
+                )
             except (TypeError, ValueError):
                 strike_distance = None
-            near_threshold = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "100") or "100")
+            near_threshold = float(
+                os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "100") or "100"
+            )
             candidate_selected = bool(
                 metadata.get("candidate_selected")
                 or metadata.get("is_selected_option")
                 or signal_norm in selected_set
                 or (strike_distance is not None and strike_distance <= near_threshold)
             )
-            spread_pct = ((ask - bid) / ltp * 100.0) if has_bid_ask and ltp > 0 else None
+            spread_pct = (
+                ((ask - bid) / ltp * 100.0) if has_bid_ask and ltp > 0 else None
+            )
             tick_age_s = resolve_tick_age_seconds(snapshot) or 0.0
             real_ticks_raw = getattr(snapshot, "real_ticks_last_60s", None)
-            real_ticks_last_60s = int(real_ticks_raw) if real_ticks_raw is not None else 0
+            real_ticks_last_60s = (
+                int(real_ticks_raw) if real_ticks_raw is not None else 0
+            )
             if ltp > 0 and real_ticks_last_60s < 1:
                 real_ticks_last_60s = 1
             return {
@@ -3571,20 +4262,25 @@ class StrategyRunner:
                 "data_quality_score": float(
                     metadata.get("data_quality_score")
                     if metadata.get("data_quality_score") is not None
-                    else metadata.get("data_score", 0.0)
-                    or 0.0
+                    else metadata.get("data_score", 0.0) or 0.0
                 ),
                 "candidate_selected": candidate_selected,
                 "is_selected_option": candidate_selected,
                 "selected_ce": selected_ce,
                 "selected_pe": selected_pe,
                 "strike_distance_from_atm": strike_distance,
-                "quote_usable_for_order_plan": bool(snapshot.tradable_quote and has_bid_ask),
+                "quote_usable_for_order_plan": bool(
+                    snapshot.tradable_quote and has_bid_ask
+                ),
                 "tradable_quote": bool(snapshot.tradable_quote and has_bid_ask),
-                "effective_bars": int(metadata.get("effective_bars", metadata.get("history_bars", 0)) or 0),
+                "effective_bars": int(
+                    metadata.get("effective_bars", metadata.get("history_bars", 0)) or 0
+                ),
             }
         except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in _build_single_candidate_from_signal: %s", exc, exc_info=exc)
+            self._logger.error(
+                "Failure in _build_single_candidate_from_signal: %s", exc, exc_info=exc
+            )
             return None
 
     @staticmethod
@@ -3690,16 +4386,27 @@ class StrategyRunner:
         )
         self._record_trade_decision_snapshot(
             symbol=symbol,
-            direction=str(payload.get("direction") or payload.get("option_side") or "") or None,
+            direction=str(payload.get("direction") or payload.get("option_side") or "")
+            or None,
             final_reason=reason,
-            candidate_count=payload.get("candidate_total") if isinstance(payload.get("candidate_total"), int) else None,
-            candidate_rejects=payload.get("candidate_rejects") if isinstance(payload.get("candidate_rejects"), Mapping) else None,
+            candidate_count=(
+                payload.get("candidate_total")
+                if isinstance(payload.get("candidate_total"), int)
+                else None
+            ),
+            candidate_rejects=(
+                payload.get("candidate_rejects")
+                if isinstance(payload.get("candidate_rejects"), Mapping)
+                else None
+            ),
             selected_candidate=str(payload.get("selected_candidate") or "") or None,
             strategy_allowed=False,
             risk_allowed=None,
             order_submitted=False,
         )
-        if reason == "candidate_refresh_pending" and not bool(payload.get("event_loop_active", False)):
+        if reason == "candidate_refresh_pending" and not bool(
+            payload.get("event_loop_active", False)
+        ):
             self._logger.info(
                 "SIGNAL_DROPPED_CANDIDATE_REFRESH_PENDING symbol=%s trace_id=%s reason=%s",
                 symbol,
@@ -3709,7 +4416,9 @@ class StrategyRunner:
                     "event": "SIGNAL_DROPPED_CANDIDATE_REFRESH_PENDING",
                     "symbol": symbol,
                     "signal_id": trace_id,
-                    "reason": str(payload.get("reason") or "candidate_snapshot_refresh_pending"),
+                    "reason": str(
+                        payload.get("reason") or "candidate_snapshot_refresh_pending"
+                    ),
                 },
             )
         return SignalExecutionResult(False, reason, details=payload)
@@ -3811,15 +4520,28 @@ class StrategyRunner:
                 self._logger.info(
                     "CANDIDATE_RESOLVER_USED source=active_contract_basket count=%s",
                     len(basket_selected),
-                    extra={"event": "CANDIDATE_RESOLVER_USED", "source": "active_contract_basket", "count": len(basket_selected)},
+                    extra={
+                        "event": "CANDIDATE_RESOLVER_USED",
+                        "source": "active_contract_basket",
+                        "count": len(basket_selected),
+                    },
                 )
                 return basket_selected
         sources = [
-            ("OptionsContractStore", getattr(self, "_options_contract_store", None) or getattr(self, "_contract_store", None)),
+            (
+                "OptionsContractStore",
+                getattr(self, "_options_contract_store", None)
+                or getattr(self, "_contract_store", None),
+            ),
             ("InstrumentManager", getattr(self, "_instrument_manager", None)),
             ("ContractSelector", getattr(self, "_contract_selector", None)),
         ]
-        methods = ("get_atm_window", "get_contracts", "select_atm_contracts", "get_nearest_weekly_options")
+        methods = (
+            "get_atm_window",
+            "get_contracts",
+            "select_atm_contracts",
+            "get_nearest_weekly_options",
+        )
         for source_name, source in sources:
             if source is None:
                 continue
@@ -3870,7 +4592,11 @@ class StrategyRunner:
                         "CANDIDATE_RESOLVER_USED source=%s count=%s",
                         source_name,
                         len(selected),
-                        extra={"event": "CANDIDATE_RESOLVER_USED", "source": source_name, "count": len(selected)},
+                        extra={
+                            "event": "CANDIDATE_RESOLVER_USED",
+                            "source": source_name,
+                            "count": len(selected),
+                        },
                     )
                     return selected
         selected = []
@@ -3891,7 +4617,12 @@ class StrategyRunner:
         self._logger.info(
             "CANDIDATE_RESOLVER_FALLBACK source=tracked_symbols reason=resolver_unavailable count=%s",
             len(selected),
-            extra={"event": "CANDIDATE_RESOLVER_FALLBACK", "source": "tracked_symbols", "reason": "resolver_unavailable", "count": len(selected)},
+            extra={
+                "event": "CANDIDATE_RESOLVER_FALLBACK",
+                "source": "tracked_symbols",
+                "reason": "resolver_unavailable",
+                "count": len(selected),
+            },
         )
         if not selected:
             self._logger.warning(
@@ -4016,12 +4747,16 @@ class StrategyRunner:
                 "symbols": symbols,
                 "signal_count": getattr(self, "_signal_counter", 0),
                 "tick_count": getattr(self, "_eval_counter", 0),
-                "last_tick_age_sec": round(
-                    time.monotonic() - self._last_tick_seen_ts, 1
-                ) if getattr(self, "_last_tick_seen_ts", 0) > 0 else None,
-                "last_eval_age_sec": round(
-                    time.monotonic() - self._last_global_eval_ts, 1
-                ) if getattr(self, "_last_global_eval_ts", 0) > 0 else None,
+                "last_tick_age_sec": (
+                    round(time.monotonic() - self._last_tick_seen_ts, 1)
+                    if getattr(self, "_last_tick_seen_ts", 0) > 0
+                    else None
+                ),
+                "last_eval_age_sec": (
+                    round(time.monotonic() - self._last_global_eval_ts, 1)
+                    if getattr(self, "_last_global_eval_ts", 0) > 0
+                    else None
+                ),
             }
 
         # ── Pipeline health (non-blocking, best-effort) ──────────────────────
@@ -4033,14 +4768,13 @@ class StrategyRunner:
                 get_dropped_ticks,
                 get_dropped_candles,
             )
+
             _pl = get_pipeline()
             _pl_syms = _pl.store.symbols()
             status["pipeline"] = {
                 "dropped_ticks": get_dropped_ticks(),
                 "dropped_candles": get_dropped_candles(),
-                "candle_counts": {
-                    sym: len(_pl.store.get(sym)) for sym in _pl_syms
-                },
+                "candle_counts": {sym: len(_pl.store.get(sym)) for sym in _pl_syms},
                 "symbols_tracked": len(_pl_syms),
                 "ready_symbols": sum(
                     1 for sym in _pl_syms if _pl.candles_ready(sym, 50)
@@ -4362,7 +5096,9 @@ class StrategyRunner:
                 return 0
             normalized_rows: dict[datetime, dict[str, Any]] = {}
             for row in bars or ():
-                normalized = normalize_history_row(normalized_symbol, dict(row), source=source)
+                normalized = normalize_history_row(
+                    normalized_symbol, dict(row), source=source
+                )
                 if normalized is None:
                     continue
                 ts_value = normalized.get("timestamp")
@@ -4377,7 +5113,9 @@ class StrategyRunner:
                     "close": float(normalized["close"]),
                     "volume": int(normalized.get("volume", 0) or 0),
                 }
-            selected_rows = sorted(normalized_rows.values(), key=lambda item: item["timestamp"])
+            selected_rows = sorted(
+                normalized_rows.values(), key=lambda item: item["timestamp"]
+            )
             one_minute_bars: list[OneMinuteBar] = []
             for row in selected_rows:
                 start_ts = row["timestamp"]
@@ -4397,8 +5135,12 @@ class StrategyRunner:
                 # session (~375 bars), not days of history. Cap well above a single
                 # session for indicator warmup, but far below the old 2000 (≈5 days)
                 # that bloated RAM on the memory-tight host. Env-tunable.
-                _hist_cap = int(os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500")
-                self._symbol_history[normalized_symbol] = list(one_minute_bars[-_hist_cap:])
+                _hist_cap = int(
+                    os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500"
+                )
+                self._symbol_history[normalized_symbol] = list(
+                    one_minute_bars[-_hist_cap:]
+                )
                 if one_minute_bars:
                     self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start
                 self._active_symbols.add(normalized_symbol)
@@ -4416,7 +5158,9 @@ class StrategyRunner:
                 self._seed_pipeline_store(normalized_symbol)
                 self._seed_candle_engine_from_history(normalized_symbol)
             else:
-                self._set_symbol_hydration_state(normalized_symbol, SymbolState.DEGRADED)
+                self._set_symbol_hydration_state(
+                    normalized_symbol, SymbolState.DEGRADED
+                )
             runner_count = len(self._symbol_history.get(normalized_symbol, []))
             self._logger.info(
                 "RUNNER_HISTORY_RESEEDED symbol=%s runner_bars=%d indicator_bars=%d min_bars=%d source=%s",
@@ -4722,7 +5466,9 @@ class StrategyRunner:
                 and symbol not in self._gap_repair_inflight
             ):
                 self._gap_repair_inflight.add(symbol)
-                self._request_mdm_hydration(symbol, self._required_bars_for_symbol(symbol))
+                self._request_mdm_hydration(
+                    symbol, self._required_bars_for_symbol(symbol)
+                )
         return repaired
 
     async def _refresh_gap_history_async(self, symbol: str) -> None:
@@ -4942,9 +5688,7 @@ class StrategyRunner:
                     # Provide a list of the correct length; individual items unused.
                     effective_bars = [None] * len(ind_history)  # type: ignore[list-item]
             except Exception as e:
-                LOGGER.exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
+                LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise  # fall through to actual bars — hydration will be HYDRATING
 
         return self.update_symbol_hydration(symbol, effective_bars, indicators)
@@ -4974,18 +5718,35 @@ class StrategyRunner:
 
         if self._has_session_candle_gaps(symbol):
             gap_count = int(self._session_gap_count.get(symbol, 0))
-            if post_market_suppress_candle_gap_warnings() and get_runtime_market_mode() in {"POST_MARKET", "HOLIDAY"}:
-                if self._should_log_throttled(f"postmarket_candle_gap_suppressed:{symbol}", float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60")):
+            if (
+                post_market_suppress_candle_gap_warnings()
+                and get_runtime_market_mode() in {"POST_MARKET", "HOLIDAY"}
+            ):
+                if self._should_log_throttled(
+                    f"postmarket_candle_gap_suppressed:{symbol}",
+                    float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
+                ):
                     self._logger.info(
                         "SOFT_DATA_ISSUE_SUPPRESSED symbol=%s reason=post_market_quiet_mode gaps=%s",
-                        symbol, gap_count,
-                        extra={"event": "SOFT_DATA_ISSUE_SUPPRESSED", "symbol": symbol, "reason": "post_market_quiet_mode", "gaps": gap_count, "market_mode": get_runtime_market_mode()},
+                        symbol,
+                        gap_count,
+                        extra={
+                            "event": "SOFT_DATA_ISSUE_SUPPRESSED",
+                            "symbol": symbol,
+                            "reason": "post_market_quiet_mode",
+                            "gaps": gap_count,
+                            "market_mode": get_runtime_market_mode(),
+                        },
                     )
                 return self._set_symbol_hydration_state(symbol, SymbolState.READY)
             is_option = symbol.startswith("NFO:") and symbol.endswith(("CE", "PE"))
             now_wall = time.time()
-            candle_interval_s = float(os.getenv("RUNNER_CANDLE_GAP_INTERVAL_SECONDS", "60") or "60")
-            gap_grace_s = float(os.getenv("RUNNER_CANDLE_GAP_GRACE_SECONDS", "10") or "10")
+            candle_interval_s = float(
+                os.getenv("RUNNER_CANDLE_GAP_INTERVAL_SECONDS", "60") or "60"
+            )
+            gap_grace_s = float(
+                os.getenv("RUNNER_CANDLE_GAP_GRACE_SECONDS", "10") or "10"
+            )
             last_tick_ts = float(self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0)
             tick_age_s = round(now_wall - last_tick_ts, 2) if last_tick_ts > 0 else None
             fresh_tick = bool(tick_age_s is not None and tick_age_s < gap_grace_s)
@@ -5000,8 +5761,13 @@ class StrategyRunner:
                     last_bar_ts = float(pd.Timestamp(parsed_bar_ts).timestamp())
             except Exception:
                 last_bar_ts = 0.0
-            elapsed_since_last_bar_s = (now_wall - last_bar_ts) if last_bar_ts > 0 else 0.0
-            no_candle_close_produced = bool(last_bar_ts <= 0 or elapsed_since_last_bar_s > (candle_interval_s + gap_grace_s))
+            elapsed_since_last_bar_s = (
+                (now_wall - last_bar_ts) if last_bar_ts > 0 else 0.0
+            )
+            no_candle_close_produced = bool(
+                last_bar_ts <= 0
+                or elapsed_since_last_bar_s > (candle_interval_s + gap_grace_s)
+            )
             if fresh_tick:
                 log_throttled_live(
                     self._logger,
@@ -5010,8 +5776,17 @@ class StrategyRunner:
                     f"CANDLE_GAP_SUPPRESSED_FRESH_TICK:{symbol}",
                     float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
                     "CANDLE_GAP_SUPPRESSED_FRESH_TICK symbol=%s gaps=%s age_s=%s grace_s=%s",
-                    symbol, gap_count, tick_age_s, gap_grace_s,
-                    extra={"event": "CANDLE_GAP_SUPPRESSED_FRESH_TICK", "symbol": symbol, "gaps": gap_count, "age_s": tick_age_s, "grace_s": gap_grace_s},
+                    symbol,
+                    gap_count,
+                    tick_age_s,
+                    gap_grace_s,
+                    extra={
+                        "event": "CANDLE_GAP_SUPPRESSED_FRESH_TICK",
+                        "symbol": symbol,
+                        "gaps": gap_count,
+                        "age_s": tick_age_s,
+                        "grace_s": gap_grace_s,
+                    },
                 )
                 gap_summary = getattr(self, "_candle_gap_summary", None)
                 if gap_summary is None:
@@ -5027,9 +5802,19 @@ class StrategyRunner:
                     f"SOFT_DATA_ISSUE:{symbol}:{reason}",
                     float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
-                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
+                    extra={
+                        "event": "SOFT_DATA_ISSUE",
+                        "symbol": symbol,
+                        "reason": reason,
+                        "source": "candle_gap_detector",
+                        "age_s": tick_age_s,
+                        "details": {"gaps": gap_count},
+                        "gaps": gap_count,
+                    },
                 )
-            elif gap_count > 1 and elapsed_since_last_bar_s <= (candle_interval_s + gap_grace_s):
+            elif gap_count > 1 and elapsed_since_last_bar_s <= (
+                candle_interval_s + gap_grace_s
+            ):
                 reason = "stale_tick_for_gap_assessment"
                 log_throttled_live(
                     self._logger,
@@ -5038,7 +5823,15 @@ class StrategyRunner:
                     f"SOFT_DATA_ISSUE:{symbol}:{reason}",
                     float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
-                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
+                    extra={
+                        "event": "SOFT_DATA_ISSUE",
+                        "symbol": symbol,
+                        "reason": reason,
+                        "source": "candle_gap_detector",
+                        "age_s": tick_age_s,
+                        "details": {"gaps": gap_count},
+                        "gaps": gap_count,
+                    },
                 )
             elif gap_count > 1 and no_candle_close_produced:
                 reason = "repeated_missing_candles"
@@ -5050,7 +5843,15 @@ class StrategyRunner:
                     f"SOFT_DATA_ISSUE:{symbol}:{reason}",
                     float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
-                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
+                    extra={
+                        "event": "SOFT_DATA_ISSUE",
+                        "symbol": symbol,
+                        "reason": reason,
+                        "source": "candle_gap_detector",
+                        "age_s": tick_age_s,
+                        "details": {"gaps": gap_count},
+                        "gaps": gap_count,
+                    },
                 )
                 return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
             else:
@@ -5066,14 +5867,29 @@ class StrategyRunner:
                     f"CANDLE_GAP_SUMMARY:{symbol}",
                     float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
                     "CANDLE_GAP_SUMMARY symbol=%s suppressed=%s gaps=%s age_s=%s elapsed_since_last_bar_s=%.2f",
-                    symbol, gap_summary.get(symbol, 0), gap_count, tick_age_s, elapsed_since_last_bar_s,
-                    extra={"event": "CANDLE_GAP_SUMMARY", "symbol": symbol, "suppressed": gap_summary.get(symbol, 0), "gaps": gap_count, "age_s": tick_age_s, "elapsed_since_last_bar_s": elapsed_since_last_bar_s},
+                    symbol,
+                    gap_summary.get(symbol, 0),
+                    gap_count,
+                    tick_age_s,
+                    elapsed_since_last_bar_s,
+                    extra={
+                        "event": "CANDLE_GAP_SUMMARY",
+                        "symbol": symbol,
+                        "suppressed": gap_summary.get(symbol, 0),
+                        "gaps": gap_count,
+                        "age_s": tick_age_s,
+                        "elapsed_since_last_bar_s": elapsed_since_last_bar_s,
+                    },
                 )
 
         if valid_vwap and valid_volume:
-            self._hydration_ready_streak[symbol] = int(self._hydration_ready_streak.get(symbol, 0)) + 1
+            self._hydration_ready_streak[symbol] = (
+                int(self._hydration_ready_streak.get(symbol, 0)) + 1
+            )
         else:
-            self._hydration_ready_streak[symbol] = max(1, int(self._hydration_ready_streak.get(symbol, 0)))
+            self._hydration_ready_streak[symbol] = max(
+                1, int(self._hydration_ready_streak.get(symbol, 0))
+            )
         return self._set_symbol_hydration_state(symbol, SymbolState.READY)
 
     def _ensure_symbol_vwap_state(self, symbol: str, now: datetime) -> dict[str, Any]:
@@ -5133,7 +5949,11 @@ class StrategyRunner:
                     bar.timestamp,
                     last_ts,
                     duplicate,
-                    extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts},
+                    extra={
+                        "symbol": symbol,
+                        "bar_ts": bar.timestamp,
+                        "last_ts": last_ts,
+                    },
                 )
             return
 
@@ -5467,7 +6287,9 @@ class StrategyRunner:
             # full premium below entry. Reset to a sane ATR/percent premium stop.
             max_sl_distance = max(entry_price * 0.6, atr * 2.0)
             if sl <= 0 or (entry_price - sl) > max_sl_distance:
-                sl = entry_price - min(max(atr * 1.5, entry_price * 0.1), max_sl_distance)
+                sl = entry_price - min(
+                    max(atr * 1.5, entry_price * 0.1), max_sl_distance
+                )
                 corrected = True
             if entry_price - sl < min_sl_distance:
                 sl = entry_price - min_sl_distance
@@ -5786,9 +6608,7 @@ class StrategyRunner:
                 )
 
         except Exception as e:
-            LOGGER.exception(
-                "[CRITICAL] unhandled exception", exc_info=True
-            )
+            LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
             raise
 
         self._logger.info(
@@ -5805,9 +6625,17 @@ class StrategyRunner:
 
         return best
 
-    def _build_option_score_config(self, side: Literal["BUY", "SELL"] ) -> Mapping[str, Any]:
+    def _build_option_score_config(
+        self, side: Literal["BUY", "SELL"]
+    ) -> Mapping[str, Any]:
         """Return strike selector score configuration for the supplied side."""
-        return {"weights": dict(self._option_score_weights), "delta_target": float(self._option_delta_target), "max_iv_rank": float(self._option_max_iv_rank), "min_liquidity": float(self._option_min_liquidity), "side": side, }
+        return {
+            "weights": dict(self._option_score_weights),
+            "delta_target": float(self._option_delta_target),
+            "max_iv_rank": float(self._option_max_iv_rank),
+            "min_liquidity": float(self._option_min_liquidity),
+            "side": side,
+        }
 
     def _get_spot_tick(self) -> dict[str, Any] | None:
         """Resilient spot tick fetcher with aliases and snapshot fallback."""
@@ -5818,7 +6646,9 @@ class StrategyRunner:
                 if tick:
                     return tick
             if self._data_hub:
-                tick = getattr(self._data_hub, "get_latest_tick", lambda *_: None)(alias)
+                tick = getattr(self._data_hub, "get_latest_tick", lambda *_: None)(
+                    alias
+                )
                 if tick:
                     return tick
                 tick = getattr(self._data_hub, "get_quote", lambda *_: None)(alias)
@@ -5840,13 +6670,22 @@ class StrategyRunner:
                     return {
                         "symbol": "NSE:NIFTY",
                         "ltp": float(ltp),
-                        "received_at": snap.get("received_at") or snap.get("timestamp") or time.time(),
+                        "received_at": snap.get("received_at")
+                        or snap.get("timestamp")
+                        or time.time(),
                         "source": snap.get("source", "market_data_snapshot"),
                     }
         if self._market_data and hasattr(self._market_data, "get_cached_ltp"):
-            ltp = self._market_data.get_cached_ltp("NSE:NIFTY", max_age_seconds=300, require_ws=False)
+            ltp = self._market_data.get_cached_ltp(
+                "NSE:NIFTY", max_age_seconds=300, require_ws=False
+            )
             if ltp:
-                return {"symbol": "NSE:NIFTY", "ltp": ltp, "received_at": time.time(), "source": "market_data_cached_ltp"}
+                return {
+                    "symbol": "NSE:NIFTY",
+                    "ltp": ltp,
+                    "received_at": time.time(),
+                    "source": "market_data_cached_ltp",
+                }
         return None
 
     def _get_spot_price(self) -> float:
@@ -5897,7 +6736,9 @@ class StrategyRunner:
         )
 
         lot_size = 1
-        if self._order_manager is not None and hasattr(self._order_manager, "resolve_lot_size"):
+        if self._order_manager is not None and hasattr(
+            self._order_manager, "resolve_lot_size"
+        ):
             try:
                 lot_size = max(1, int(self._order_manager.resolve_lot_size(symbol)))
             except Exception:
@@ -6055,9 +6896,7 @@ class StrategyRunner:
                     ).set(slippage)
 
             except Exception as e:
-                LOGGER.exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
+                LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 
             self._logger.info(
@@ -6091,9 +6930,7 @@ class StrategyRunner:
                     )
 
             except Exception as e:
-                LOGGER.exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
+                LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 
             self._logger.error(
@@ -6200,9 +7037,7 @@ class StrategyRunner:
                     self._orders_in_flight.pop(underlying, None)
                     self.orders_in_flight.discard(underlying)
             except Exception as e:
-                LOGGER.exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
+                LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 
     def _get_execution_state_machine(self, symbol: str) -> OrderStateMachine:
@@ -6247,7 +7082,9 @@ class StrategyRunner:
 
         def _has_open_position() -> bool:
             try:
-                checker = getattr(pm, "has_position", None) or getattr(pm, "has_open_position", None)
+                checker = getattr(pm, "has_position", None) or getattr(
+                    pm, "has_open_position", None
+                )
                 if callable(checker):
                     return bool(checker(normalized))
             except Exception:  # noqa: BLE001
@@ -6263,16 +7100,32 @@ class StrategyRunner:
                 machine.force_idle(reason="stale_order_pending_no_active_order")
                 self._logger.error(
                     "STALE_ORDER_PENDING_RECOVERED symbol=%s state_age_s=%.1f order_id=%s trace_id=%s",
-                    normalized, age, machine.order_id, trace_id,
-                    extra={"event": "STALE_ORDER_PENDING_RECOVERED", "symbol": normalized, "state_age_seconds": age, "order_id": machine.order_id, "trace_id": trace_id},
+                    normalized,
+                    age,
+                    machine.order_id,
+                    trace_id,
+                    extra={
+                        "event": "STALE_ORDER_PENDING_RECOVERED",
+                        "symbol": normalized,
+                        "state_age_seconds": age,
+                        "order_id": machine.order_id,
+                        "trace_id": trace_id,
+                    },
                 )
         elif state == ExecutionState.POSITION_OPEN:
             if not _has_open_position():
                 machine.force_idle(reason="stale_position_open_no_position")
                 self._logger.error(
                     "STALE_POSITION_OPEN_RECOVERED symbol=%s state_age_s=%.1f trace_id=%s",
-                    normalized, age, trace_id,
-                    extra={"event": "STALE_POSITION_OPEN_RECOVERED", "symbol": normalized, "state_age_seconds": age, "trace_id": trace_id},
+                    normalized,
+                    age,
+                    trace_id,
+                    extra={
+                        "event": "STALE_POSITION_OPEN_RECOVERED",
+                        "symbol": normalized,
+                        "state_age_seconds": age,
+                        "trace_id": trace_id,
+                    },
                 )
 
     def _prepare_order_state_for_submission(
@@ -6290,32 +7143,54 @@ class StrategyRunner:
             )
             # Reconcile a wedged state against real orders/positions before it
             # blocks an otherwise-valid signal (root cause of signal_state_rejected).
-            self._reconcile_stale_execution_state(machine, normalized, trace_id=trace_id)
+            self._reconcile_stale_execution_state(
+                machine, normalized, trace_id=trace_id
+            )
             before = machine.current_state_details()
 
             if not machine.can_accept_signal():
-                return False, "signal_state_rejected", {
-                    "before": before,
-                    "after": machine.current_state_details(),
-                }
-
-            if machine.state in (ExecutionState.IDLE, ExecutionState.READY):
-                if not machine.transition(ExecutionState.SIGNAL_RECEIVED, trace_id=trace_id):
-                    return False, "signal_state_rejected", {
+                return (
+                    False,
+                    "signal_state_rejected",
+                    {
                         "before": before,
                         "after": machine.current_state_details(),
-                    }
+                    },
+                )
 
-            if not machine.transition(ExecutionState.ORDER_PENDING, reason="order_submit", trace_id=trace_id):
-                return False, "order_state_rejected", {
+            if machine.state in (ExecutionState.IDLE, ExecutionState.READY):
+                if not machine.transition(
+                    ExecutionState.SIGNAL_RECEIVED, trace_id=trace_id
+                ):
+                    return (
+                        False,
+                        "signal_state_rejected",
+                        {
+                            "before": before,
+                            "after": machine.current_state_details(),
+                        },
+                    )
+
+            if not machine.transition(
+                ExecutionState.ORDER_PENDING, reason="order_submit", trace_id=trace_id
+            ):
+                return (
+                    False,
+                    "order_state_rejected",
+                    {
+                        "before": before,
+                        "after": machine.current_state_details(),
+                    },
+                )
+
+            return (
+                True,
+                "ok",
+                {
                     "before": before,
                     "after": machine.current_state_details(),
-                }
-
-            return True, "ok", {
-                "before": before,
-                "after": machine.current_state_details(),
-            }
+                },
+            )
 
     def _reset_execution_state(self, symbol: str) -> None:
         """Reset execution state to IDLE. Args: symbol. Returns: none. Raises: none."""
@@ -6348,11 +7223,11 @@ class StrategyRunner:
             0.0,
             (now_ts - tick_timestamp.astimezone(timezone.utc).timestamp()) * 1000.0,
         )
-        
+
         # CRITICAL FIX 1: Relax stale data guard to 15 seconds.
         # Options do not tick as fast as the spot index. 3 seconds is too tight
         # and will cause perfectly valid entry signals to be dropped.
-        if tick_age_ms > 15000.0:  
+        if tick_age_ms > 15000.0:
             log_throttled(
                 self._logger,
                 "stale_reconnect_tick_drop",
@@ -6372,20 +7247,20 @@ class StrategyRunner:
             else "UNKNOWN"
         )
         self._logger.debug("RUNNER_RECEIVED_TICK %s", symbol)
-        
+
         # CRITICAL FIX 2: Throttling to prevent ThreadPool Exhaustion and 90s deadlocks
         if not hasattr(self, "_last_eval_time"):
             self._last_eval_time = {}
-        
+
         last_eval = self._last_eval_time.get(symbol, 0.0)
-        
+
         # Limit processing to 1 tick per symbol per second to unblock the event loop
         # The DataHub still records the tick price, but we skip the heavy strategy math
         if now_ts - last_eval < 1.0:
             return
-            
+
         self._last_eval_time[symbol] = now_ts
-        
+
         try:
             # Offload heavy synchronous processing (and blocking broker calls) to a thread
             # We are now safely spawning a maximum of 1 thread per symbol, per second.
@@ -6558,13 +7433,21 @@ class StrategyRunner:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
             # Reuse an upstream trace_id if the tick payload already carries one
             # (set by RunnerCallback or by an outer caller); otherwise mint here.
-            trace_id = tick.get("trace_id") or f"{normalized_symbol}-{time_module.monotonic_ns()}"
+            trace_id = (
+                tick.get("trace_id")
+                or f"{normalized_symbol}-{time_module.monotonic_ns()}"
+            )
             # Context-symbol readiness fires on every tick ingress with a constant
             # reason — pure steady-state noise on a memory-tight host. Throttle per
             # symbol (the message never changes, so nothing is lost).
-            if self._is_context_symbol(normalized_symbol) and self._should_log_throttled(
+            if self._is_context_symbol(
+                normalized_symbol
+            ) and self._should_log_throttled(
                 f"global_readiness_ctx:{normalized_symbol}",
-                float(os.getenv("RUNNER_GLOBAL_READINESS_LOG_INTERVAL_SECONDS", "60") or "60"),
+                float(
+                    os.getenv("RUNNER_GLOBAL_READINESS_LOG_INTERVAL_SECONDS", "60")
+                    or "60"
+                ),
             ):
                 self._logger.info(
                     "RUNNER_GLOBAL_READINESS_DECISION symbol=%s allowed=%s reason=%s trade_candidate=%s",
@@ -6620,19 +7503,27 @@ class StrategyRunner:
             except Exception:
                 self._last_tick[normalized_symbol] = {
                     "symbol": normalized_symbol,
-                    "ltp": tick.get("ltp") or tick.get("last_price") or tick.get("price"),
+                    "ltp": tick.get("ltp")
+                    or tick.get("last_price")
+                    or tick.get("price"),
                     "timestamp": tick.get("timestamp"),
                 }
             if not hasattr(self, "_first_tick_ingested_symbols"):
                 self._first_tick_ingested_symbols = set()
             if normalized_symbol not in self._first_tick_ingested_symbols:
                 self._first_tick_ingested_symbols.add(normalized_symbol)
-                history_count = len(self._indicator_engine.get_history(normalized_symbol) or [])
+                history_count = len(
+                    self._indicator_engine.get_history(normalized_symbol) or []
+                )
                 self._logger.info(
                     "RUNNER_TICK_INGESTED symbol=%s history_count=%d",
                     normalized_symbol,
                     history_count,
-                    extra={"event": "RUNNER_TICK_INGESTED", "symbol": normalized_symbol, "history_count": history_count},
+                    extra={
+                        "event": "RUNNER_TICK_INGESTED",
+                        "symbol": normalized_symbol,
+                        "history_count": history_count,
+                    },
                 )
             engine = self._candle_engines.setdefault(normalized_symbol, CandleEngine())
             with self._symbol_locks[normalized_symbol]:
@@ -6723,12 +7614,12 @@ class StrategyRunner:
                     tick.get("last_price") or tick.get("ltp"),
                     False,
                 )
-            
+
             # 🚨 FIX: Legacy ensure_valid_data() block completely removed.
-            # We no longer pause live tick processing to attempt blocking historical 
-            # backfills. Ticks will now flow directly into Phase 0/1/4 so the 
+            # We no longer pause live tick processing to attempt blocking historical
+            # backfills. Ticks will now flow directly into Phase 0/1/4 so the
             # OneMinuteBarBuilder can construct live candles autonomously.
-            
+
             with self._eval_gate_lock:
                 if normalized_symbol in self._eval_in_progress_symbols:
                     return
@@ -6852,22 +7743,34 @@ class StrategyRunner:
 
         for symbol, engine in self._candle_engines.items():
             if symbol not in self._active_symbols:
-                last_tick_ts = float(self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0)
-                has_recent_tick = last_tick_ts > 0 and (now_wall - last_tick_ts) <= 120.0
+                last_tick_ts = float(
+                    self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0
+                )
+                has_recent_tick = (
+                    last_tick_ts > 0 and (now_wall - last_tick_ts) <= 120.0
+                )
 
                 if has_recent_tick and symbol in self._tracked_symbols:
                     self._active_symbols.add(symbol)
                     self._logger.info(
                         "SYMBOL_REACTIVATED_FROM_LIVE_TICK symbol=%s",
                         symbol,
-                        extra={"event": "SYMBOL_REACTIVATED_FROM_LIVE_TICK", "symbol": symbol},
+                        extra={
+                            "event": "SYMBOL_REACTIVATED_FROM_LIVE_TICK",
+                            "symbol": symbol,
+                        },
                     )
                 else:
-                    if self._should_log_throttled(f"backfill_skipped_removed:{symbol}", 300.0):
+                    if self._should_log_throttled(
+                        f"backfill_skipped_removed:{symbol}", 300.0
+                    ):
                         self._logger.debug(
                             "BACKFILL_SKIPPED_REMOVED_SYMBOL symbol=%s",
                             symbol,
-                            extra={"event": "BACKFILL_SKIPPED_REMOVED_SYMBOL", "symbol": symbol},
+                            extra={
+                                "event": "BACKFILL_SKIPPED_REMOVED_SYMBOL",
+                                "symbol": symbol,
+                            },
                         )
                     continue
             if (
@@ -6875,7 +7778,9 @@ class StrategyRunner:
                 and symbol not in active_option_symbols
                 and not self._is_selected_option_symbol(symbol)
             ):
-                if self._should_log_throttled(f"ws_stale_skipped_inactive_option:{symbol}", 300.0):
+                if self._should_log_throttled(
+                    f"ws_stale_skipped_inactive_option:{symbol}", 300.0
+                ):
                     self._logger.debug(
                         "WS_STALE_SKIPPED symbol=%s reason=outside_active_option_basket",
                         symbol,
@@ -6999,9 +7904,7 @@ class StrategyRunner:
                     else:
                         loop.create_task(result)
             except Exception:
-                self._logger.exception(
-                    "STRATEGY_EVAL_STALL_READINESS_RECOMPUTE_FAILED"
-                )
+                self._logger.exception("STRATEGY_EVAL_STALL_READINESS_RECOMPUTE_FAILED")
         try:
             self.start()
         except Exception:
@@ -7059,7 +7962,9 @@ class StrategyRunner:
                         if len(rows) >= target:
                             self._set_symbol_hydration_state(symbol, SymbolState.READY)
                         else:
-                            self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+                            self._set_symbol_hydration_state(
+                                symbol, SymbolState.HYDRATING
+                            )
                             self._request_mdm_hydration(symbol, target)
                     else:
                         self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
@@ -7189,6 +8094,7 @@ class StrategyRunner:
 
     def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
         """Validate regime gate for strategy. Args: strategy, regime; Returns: bool; Raises: none."""
+
         def _canonical_regime_name(value: str) -> str:
             """Normalize regime aliases. Args: value. Returns: canonical name. Raises: none."""
             normalized_value = str(value or "").strip().upper()
@@ -7222,7 +8128,9 @@ class StrategyRunner:
         default_allowed = "TREND,NORMAL,HIGH_VOLATILITY"
         if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
             default_allowed = "TREND,NORMAL"
-        allowed_csv = os.getenv(env_name or "", default_allowed) if env_name else default_allowed
+        allowed_csv = (
+            os.getenv(env_name or "", default_allowed) if env_name else default_allowed
+        )
         allowed = {
             _canonical_regime_name(item)
             for item in allowed_csv.split(",")
@@ -7240,14 +8148,26 @@ class StrategyRunner:
             extra={"event": "REGIME_GATE_DECISION"},
         )
         return allowed_for_regime
+
     def _strategy_regime_decision(
-        self, *, strategy: str, regime: MarketRegime, symbol: str, metadata: Mapping[str, Any] | None = None
+        self,
+        *,
+        strategy: str,
+        regime: MarketRegime,
+        symbol: str,
+        metadata: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
         """Return strategy-regime compatibility decision. Args: strategy/regime/symbol/metadata; Returns: tuple[bool,str]; Raises: none."""
         del symbol
         normalized = (strategy or "").strip().lower()
         regime_name = str(regime.value or "").upper()
-        canonical = {"VOLATILE": "HIGH_VOLATILITY", "HIGHVOL": "HIGH_VOLATILITY", "HIGH_VOL": "HIGH_VOLATILITY", "TRENDING": "TREND", "RANGING": "RANGE"}.get(regime_name, regime_name)
+        canonical = {
+            "VOLATILE": "HIGH_VOLATILITY",
+            "HIGHVOL": "HIGH_VOLATILITY",
+            "HIGH_VOL": "HIGH_VOLATILITY",
+            "TRENDING": "TREND",
+            "RANGING": "RANGE",
+        }.get(regime_name, regime_name)
         meta = dict(metadata or {})
         selected = bool(
             meta.get("candidate_selected")
@@ -7258,9 +8178,11 @@ class StrategyRunner:
             spread_pct = float(
                 meta.get("candidate_spread_pct")
                 if meta.get("candidate_spread_pct") is not None
-                else meta.get("spread_pct")
-                if meta.get("spread_pct") is not None
-                else 999.0
+                else (
+                    meta.get("spread_pct")
+                    if meta.get("spread_pct") is not None
+                    else 999.0
+                )
             )
         except (TypeError, ValueError):
             spread_pct = 999.0
@@ -7268,16 +8190,16 @@ class StrategyRunner:
             rr = float(
                 meta.get("candidate_rr")
                 if meta.get("candidate_rr") is not None
-                else meta.get("rr")
-                if meta.get("rr") is not None
-                else 0.0
+                else meta.get("rr") if meta.get("rr") is not None else 0.0
             )
         except (TypeError, ValueError):
             rr = 0.0
         if self._strategy_allowed_for_regime(strategy, regime):
             return True, "regime_in_allowed_list"
         if normalized in {"vwap_pro", "vwappro"} and canonical == "HIGH_VOLATILITY":
-            max_spread = float(os.getenv("VWAP_HIGH_VOL_MAX_SPREAD_PCT", "0.75") or "0.75")
+            max_spread = float(
+                os.getenv("VWAP_HIGH_VOL_MAX_SPREAD_PCT", "0.75") or "0.75"
+            )
             min_rr = float(os.getenv("VWAP_HIGH_VOL_MIN_RR", "1.6") or "1.6")
             if selected and spread_pct <= max_spread and rr >= min_rr:
                 return True, "vwap_high_vol_execution_quality_soft_allow"
@@ -7313,7 +8235,9 @@ class StrategyRunner:
         )
         try:
             reserved_extra_keys = set(logging.makeLogRecord({}).__dict__)
-            universe_ready, universe_reason = self._emit_live_universe_bootstrap_status(symbol=symbol)
+            universe_ready, universe_reason = self._emit_live_universe_bootstrap_status(
+                symbol=symbol
+            )
             payload = {
                 "level": "WARNING",
                 "symbol": symbol,
@@ -7355,10 +8279,25 @@ class StrategyRunner:
         """
         try:
             reason_str = str(reason or "")
-            throttle_reasons = {"evaluation_no_signal", "same_bar_market_update_eval", "same_bar_price_move_eval"}
-            if allowed and not str(stage).startswith("phase10") and reason_str in throttle_reasons and all(x not in reason_str for x in ("error","execution","risk")):
+            throttle_reasons = {
+                "evaluation_no_signal",
+                "same_bar_market_update_eval",
+                "same_bar_price_move_eval",
+            }
+            if (
+                allowed
+                and not str(stage).startswith("phase10")
+                and reason_str in throttle_reasons
+                and all(x not in reason_str for x in ("error", "execution", "risk"))
+            ):
                 key = f"runner_eval_decision:{symbol}:{stage}:{reason_str}"
-                if not self._should_log_throttled(key, float(os.getenv("RUNNER_EVAL_NO_SIGNAL_LOG_INTERVAL_SECONDS", "5") or "5")):
+                if not self._should_log_throttled(
+                    key,
+                    float(
+                        os.getenv("RUNNER_EVAL_NO_SIGNAL_LOG_INTERVAL_SECONDS", "5")
+                        or "5"
+                    ),
+                ):
                     return
             if (
                 symbol == "NSE:NIFTY"
@@ -7369,10 +8308,16 @@ class StrategyRunner:
                 )
             ):
                 return
-            if reason == "insufficient_indicator_bar_count" and str(symbol).upper().endswith(("CE", "PE")):
+            if reason == "insufficient_indicator_bar_count" and str(
+                symbol
+            ).upper().endswith(("CE", "PE")):
                 selected_set = {
-                    normalize_symbol(str(getattr(self, "_active_selected_ce", "") or "")),
-                    normalize_symbol(str(getattr(self, "_active_selected_pe", "") or "")),
+                    normalize_symbol(
+                        str(getattr(self, "_active_selected_ce", "") or "")
+                    ),
+                    normalize_symbol(
+                        str(getattr(self, "_active_selected_pe", "") or "")
+                    ),
                 }
                 selected_set.discard("")
                 normalized_symbol = normalize_symbol(symbol)
@@ -7381,7 +8326,11 @@ class StrategyRunner:
                 try:
                     sym_strike = self._extract_strike_from_symbol(normalized_symbol)
                     atm = float(getattr(self, "_active_atm_strike", 0) or 0)
-                    near_atm = sym_strike is not None and atm > 0 and abs(float(sym_strike) - atm) <= 100.0
+                    near_atm = (
+                        sym_strike is not None
+                        and atm > 0
+                        and abs(float(sym_strike) - atm) <= 100.0
+                    )
                 except Exception:
                     near_atm = False
                 warmup_only = not (selected_option or near_atm)
@@ -7393,9 +8342,13 @@ class StrategyRunner:
                 context.setdefault("near_atm", near_atm)
                 context.setdefault("warmup_only", warmup_only)
             state_obj = self._symbol_state.get(symbol)
-            state_active = bool(getattr(state_obj, "active", False)) if state_obj else False
+            state_active = (
+                bool(getattr(state_obj, "active", False)) if state_obj else False
+            )
             sym_state = self._symbol_states.get(symbol)
-            sym_state_val = getattr(sym_state, "value", str(sym_state)) if sym_state else None
+            sym_state_val = (
+                getattr(sym_state, "value", str(sym_state)) if sym_state else None
+            )
             try:
                 candle_count = len(self._indicator_engine.get_history(symbol) or [])
             except Exception:  # pragma: no cover - defensive
@@ -7429,9 +8382,16 @@ class StrategyRunner:
                 mdm_bars = len(self._market_data.get_ohlc_bars(symbol) or [])
             except Exception:
                 mdm_bars = None
-            quote_update_version = int(self._quote_update_versions.get(symbol, 0)) if hasattr(self, "_quote_update_versions") else 0
+            quote_update_version = (
+                int(self._quote_update_versions.get(symbol, 0))
+                if hasattr(self, "_quote_update_versions")
+                else 0
+            )
             if quote_update_version <= 0:
-                for source in (getattr(self, "_data_hub", None), getattr(self, "_market_data", None)):
+                for source in (
+                    getattr(self, "_data_hub", None),
+                    getattr(self, "_market_data", None),
+                ):
                     fn = getattr(source, "quote_update_version", None)
                     if callable(fn):
                         try:
@@ -7446,9 +8406,13 @@ class StrategyRunner:
                 "symbol": symbol,
                 "trace_id": trace_id,
                 "allowed": allowed,
-                "diagnostic_eval_allowed": bool(context.pop("diagnostic_eval_allowed", True)),
+                "diagnostic_eval_allowed": bool(
+                    context.pop("diagnostic_eval_allowed", True)
+                ),
                 "trading_allowed": bool(context.pop("trading_allowed", allowed)),
-                "order_forwarding_allowed": bool(context.pop("order_forwarding_allowed", allowed)),
+                "order_forwarding_allowed": bool(
+                    context.pop("order_forwarding_allowed", allowed)
+                ),
                 "stage": stage,
                 "reason": reason,
                 "active_symbol": symbol in self._active_symbols,
@@ -7471,23 +8435,51 @@ class StrategyRunner:
                 "runner_bars": candle_count,
                 "mdm_bars": mdm_bars,
                 "hydration_attempted": symbol in self._hydration_attempted_symbols,
-                "last_hydration_reason": self._last_hydration_reason_by_symbol.get(symbol),
-                "market_session_state": "open" if is_market_hours_cached() else "closed",
+                "last_hydration_reason": self._last_hydration_reason_by_symbol.get(
+                    symbol
+                ),
+                "market_session_state": (
+                    "open" if is_market_hours_cached() else "closed"
+                ),
                 "selected_symbol": symbol,
                 "option_history_count": candle_count,
-                "history_domain_used": context.get("history_domain_used") if isinstance(context, dict) else None,
+                "history_domain_used": (
+                    context.get("history_domain_used")
+                    if isinstance(context, dict)
+                    else None
+                ),
             }
             if context:
                 payload.update(context)
-            payload["diagnostic_eval_allowed"] = bool(payload.get("diagnostic_eval_allowed", True))
+            payload["diagnostic_eval_allowed"] = bool(
+                payload.get("diagnostic_eval_allowed", True)
+            )
             payload["trading_allowed"] = bool(payload.get("trading_allowed", allowed))
-            payload["order_forwarding_allowed"] = bool(payload.get("order_forwarding_allowed", payload["trading_allowed"]))
-            verbose_eval = str(os.getenv("LOG_VERBOSE_RUNNER_EVAL", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            payload["order_forwarding_allowed"] = bool(
+                payload.get("order_forwarding_allowed", payload["trading_allowed"])
+            )
+            verbose_eval = str(
+                os.getenv("LOG_VERBOSE_RUNNER_EVAL", "false")
+            ).strip().lower() in {"1", "true", "yes", "on"}
             # CPU/log volume: routine eval decisions are DEBUG. INFO is reserved
             # for actionable transitions (signal forwarded / blocked entry path).
-            _info_reasons = {"signal_forwarded", "evaluation_entered_first", "order_path_entered"}
-            verbose_all = str(os.getenv("RUNNER_EVAL_LOG_INFO", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
-            log_level = logging.INFO if (verbose_all or reason_str in _info_reasons or stage == "signal_forward") else logging.DEBUG
+            _info_reasons = {
+                "signal_forwarded",
+                "evaluation_entered_first",
+                "order_path_entered",
+            }
+            verbose_all = str(
+                os.getenv("RUNNER_EVAL_LOG_INFO", "false") or "false"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            log_level = (
+                logging.INFO
+                if (
+                    verbose_all
+                    or reason_str in _info_reasons
+                    or stage == "signal_forward"
+                )
+                else logging.DEBUG
+            )
             log_throttled_live(
                 self._logger,
                 log_level,
@@ -7510,52 +8502,112 @@ class StrategyRunner:
                 payload.get("data_phase"),
                 extra=payload,
             )
-            self._emit_live_trading_readiness_snapshot(symbol=symbol, strategy_signal_present=allowed, order_path_entered=False)
+            self._emit_live_trading_readiness_snapshot(
+                symbol=symbol, strategy_signal_present=allowed, order_path_entered=False
+            )
         except Exception as exc:  # noqa: BLE001
             # Observability must never raise; log and continue.
             try:
                 self._logger.error(
-                    "runner_eval_decision_emit_failed: %s", exc,
-                    extra={"event": "runner_eval_decision_emit_error", "symbol": symbol},
+                    "runner_eval_decision_emit_failed: %s",
+                    exc,
+                    extra={
+                        "event": "runner_eval_decision_emit_error",
+                        "symbol": symbol,
+                    },
                 )
             except Exception:  # pragma: no cover - defensive
                 pass
 
-    def _emit_live_trading_readiness_snapshot(self, *, symbol: str, strategy_signal_present: bool, order_path_entered: bool, order_manager_block_reason: str | None = None) -> None:
+    def _emit_live_trading_readiness_snapshot(
+        self,
+        *,
+        symbol: str,
+        strategy_signal_present: bool,
+        order_path_entered: bool,
+        order_manager_block_reason: str | None = None,
+    ) -> None:
         try:
-            universe_ready, universe_reason = self._emit_live_universe_bootstrap_status(symbol=symbol)
-            ce_symbol = self._selected_option_symbol_for_side("CE", {}) or getattr(self, "_active_selected_ce", None)
-            pe_symbol = self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
-            ce_history = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
-            pe_history = len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
+            universe_ready, universe_reason = self._emit_live_universe_bootstrap_status(
+                symbol=symbol
+            )
+            ce_symbol = self._selected_option_symbol_for_side("CE", {}) or getattr(
+                self, "_active_selected_ce", None
+            )
+            pe_symbol = self._selected_option_symbol_for_side("PE", {}) or getattr(
+                self, "_active_selected_pe", None
+            )
+            ce_history = (
+                len(self._indicator_engine.get_history(ce_symbol) or [])
+                if ce_symbol
+                else 0
+            )
+            pe_history = (
+                len(self._indicator_engine.get_history(pe_symbol) or [])
+                if pe_symbol
+                else 0
+            )
+
             def _mdm_count(sym):
                 try:
                     return len(self._market_data.get_ohlc_bars(sym) or []) if sym else 0
                 except Exception:
                     return 0
+
             def _runner_count(sym):
                 try:
                     return int(self.runner_history_count(sym)) if sym else 0
                 except Exception:
                     return 0
+
             ce_mdm_history = _mdm_count(ce_symbol)
             pe_mdm_history = _mdm_count(pe_symbol)
             ce_runner_history = _runner_count(ce_symbol)
             pe_runner_history = _runner_count(pe_symbol)
-            required_execution_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
-            primary_blocker = str(universe_reason or self._runtime_readiness_reason or "")
+            required_execution_bars = int(
+                os.getenv(
+                    "READINESS_OPTION_EXEC_MIN_BARS",
+                    os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS)),
+                )
+                or _DEFAULT_OPT_MIN_BARS
+            )
+            primary_blocker = str(
+                universe_reason or self._runtime_readiness_reason or ""
+            )
             if not bool(self._runtime_live_orders_armed) and not primary_blocker:
                 primary_blocker = "startup_pipeline_incomplete"
             _last_tick_map = getattr(self._market_data, "_last_tick_time", {}) or {}
-            ce_tick_age = int(max(0.0, (time.time() - float(_last_tick_map.get(ce_symbol, 0.0) or 0.0)) * 1000.0)) if ce_symbol and _last_tick_map.get(ce_symbol) else None
-            pe_tick_age = int(max(0.0, (time.time() - float(_last_tick_map.get(pe_symbol, 0.0) or 0.0)) * 1000.0)) if pe_symbol and _last_tick_map.get(pe_symbol) else None
+            ce_tick_age = (
+                int(
+                    max(
+                        0.0,
+                        (time.time() - float(_last_tick_map.get(ce_symbol, 0.0) or 0.0))
+                        * 1000.0,
+                    )
+                )
+                if ce_symbol and _last_tick_map.get(ce_symbol)
+                else None
+            )
+            pe_tick_age = (
+                int(
+                    max(
+                        0.0,
+                        (time.time() - float(_last_tick_map.get(pe_symbol, 0.0) or 0.0))
+                        * 1000.0,
+                    )
+                )
+                if pe_symbol and _last_tick_map.get(pe_symbol)
+                else None
+            )
             payload = {
                 "event": "LIVE_TRADING_READINESS_SNAPSHOT",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "symbol": symbol,
                 "underlying": "NIFTY",
                 "data_phase": self._data_phase.get(symbol),
-                "market_session_state": "open" if is_market_hours_cached() else "closed",
+                "market_session_state": (
+                    "open" if is_market_hours_cached() else "closed"
+                ),
                 "trading_allowed": bool(self._runtime_evaluation_ready),
                 "diagnostic_allowed": True,
                 "live_orders_armed": bool(self._runtime_live_orders_armed),
@@ -7572,24 +8624,73 @@ class StrategyRunner:
                 "selected_pe_runner_bars": pe_runner_history,
                 "selected_pe_indicator_bars": pe_history,
                 "required_execution_bars": required_execution_bars,
-                "broker_authenticated": not bool(getattr(getattr(self, "_market_data", None), "broker_auth_invalid", False)),
+                "broker_authenticated": not bool(
+                    getattr(
+                        getattr(self, "_market_data", None),
+                        "broker_auth_invalid",
+                        False,
+                    )
+                ),
                 "reconciled": getattr(self, "_position_reconciliation_completed", None),
-                "event_loop_lag_ms": round(float(getattr(self._market_data, "_event_loop_lag_seconds", 0.0) or 0.0) * 1000.0, 3),
+                "event_loop_lag_ms": round(
+                    float(
+                        getattr(self._market_data, "_event_loop_lag_seconds", 0.0)
+                        or 0.0
+                    )
+                    * 1000.0,
+                    3,
+                ),
                 "build_sha": _resolve_build_sha(),
-                "ce_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(ce_symbol, False)) if ce_symbol else False,
-                "pe_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(pe_symbol, False)) if pe_symbol else False,
-                "ce_quote_ready": bool(self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0)) if ce_symbol else False,
-                "pe_quote_ready": bool(self._is_option_symbol_tick_fresh(pe_symbol, max_age_s=60.0)) if pe_symbol else False,
+                "ce_exec_ready": (
+                    bool(self._runtime_execution_ready_by_symbol.get(ce_symbol, False))
+                    if ce_symbol
+                    else False
+                ),
+                "pe_exec_ready": (
+                    bool(self._runtime_execution_ready_by_symbol.get(pe_symbol, False))
+                    if pe_symbol
+                    else False
+                ),
+                "ce_quote_ready": (
+                    bool(self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0))
+                    if ce_symbol
+                    else False
+                ),
+                "pe_quote_ready": (
+                    bool(self._is_option_symbol_tick_fresh(pe_symbol, max_age_s=60.0))
+                    if pe_symbol
+                    else False
+                ),
                 "ce_history_ready": ce_history > 0,
                 "pe_history_ready": pe_history > 0,
-                "ce_depth_tradable": bool(self._is_symbol_execution_ready(ce_symbol)) if ce_symbol else False,
-                "pe_depth_tradable": bool(self._is_symbol_execution_ready(pe_symbol)) if pe_symbol else False,
-                "ce_spread_ok": bool(self._is_symbol_execution_ready(ce_symbol)) if ce_symbol else False,
-                "pe_spread_ok": bool(self._is_symbol_execution_ready(pe_symbol)) if pe_symbol else False,
+                "ce_depth_tradable": (
+                    bool(self._is_symbol_execution_ready(ce_symbol))
+                    if ce_symbol
+                    else False
+                ),
+                "pe_depth_tradable": (
+                    bool(self._is_symbol_execution_ready(pe_symbol))
+                    if pe_symbol
+                    else False
+                ),
+                "ce_spread_ok": (
+                    bool(self._is_symbol_execution_ready(ce_symbol))
+                    if ce_symbol
+                    else False
+                ),
+                "pe_spread_ok": (
+                    bool(self._is_symbol_execution_ready(pe_symbol))
+                    if pe_symbol
+                    else False
+                ),
                 "ce_tick_age_ms": ce_tick_age,
                 "pe_tick_age_ms": pe_tick_age,
-                "ce_last_quote_ts": _last_tick_map.get(ce_symbol) if ce_symbol else None,
-                "pe_last_quote_ts": _last_tick_map.get(pe_symbol) if pe_symbol else None,
+                "ce_last_quote_ts": (
+                    _last_tick_map.get(ce_symbol) if ce_symbol else None
+                ),
+                "pe_last_quote_ts": (
+                    _last_tick_map.get(pe_symbol) if pe_symbol else None
+                ),
                 "ce_history_count": ce_history,
                 "pe_history_count": pe_history,
                 "selected_candidate_count": 0,
@@ -7614,8 +8715,11 @@ class StrategyRunner:
                 self._logger,
                 key=f"LIVE_TRADING_READINESS_SNAPSHOT:{symbol}",
                 state=_snap_state,
-                message="LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s" % (symbol, bool(self._runtime_live_orders_armed), _snap_reason),
-                reminder_seconds=float(os.getenv("RUNNER_READINESS_SNAP_REMINDER_SECONDS", "600") or "600"),
+                message="LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s"
+                % (symbol, bool(self._runtime_live_orders_armed), _snap_reason),
+                reminder_seconds=float(
+                    os.getenv("RUNNER_READINESS_SNAP_REMINDER_SECONDS", "600") or "600"
+                ),
                 level=logging.INFO,
                 extra=payload,
             )
@@ -7634,14 +8738,33 @@ class StrategyRunner:
             )
             return
 
-
-    def _emit_live_universe_bootstrap_status(self, *, symbol: str) -> tuple[bool, str | None]:
+    def _emit_live_universe_bootstrap_status(
+        self, *, symbol: str
+    ) -> tuple[bool, str | None]:
         selection = self._current_active_contract_selection()
-        ce_symbol = selection.selected_ce or self._selected_option_symbol_for_side("CE", {}) or getattr(self, "_active_selected_ce", None)
-        pe_symbol = selection.selected_pe or self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
-        fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
+        ce_symbol = (
+            selection.selected_ce
+            or self._selected_option_symbol_for_side("CE", {})
+            or getattr(self, "_active_selected_ce", None)
+        )
+        pe_symbol = (
+            selection.selected_pe
+            or self._selected_option_symbol_for_side("PE", {})
+            or getattr(self, "_active_selected_pe", None)
+        )
+        fut_symbol = next(
+            (
+                sym
+                for sym in self._active_symbols
+                if self._symbol_role_for_runner(sym) == "futures_context"
+                and not self._is_context_symbol_suspended(sym)
+            ),
+            "",
+        )
         mdm = getattr(self, "_market_data", None)
-        token_by_symbol = getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+        token_by_symbol = (
+            getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+        )
         ce_token = token_by_symbol.get(ce_symbol) if ce_symbol else None
         pe_token = token_by_symbol.get(pe_symbol) if pe_symbol else None
         fut_token = token_by_symbol.get(fut_symbol) if fut_symbol else None
@@ -7651,26 +8774,72 @@ class StrategyRunner:
         ws = getattr(mdm, "_ws", None) if mdm is not None else None
         subscribed_tokens.update(set(getattr(ws, "_tokens", set()) or set()))
         confirmed_tokens = set(getattr(mdm, "_confirmed_subscriptions", set()) or set())
-        ce_quote_payload = self._get_cached_quote_for_live_entry(ce_symbol) if ce_symbol else {}
-        pe_quote_payload = self._get_cached_quote_for_live_entry(pe_symbol) if pe_symbol else {}
+        ce_quote_payload = (
+            self._get_cached_quote_for_live_entry(ce_symbol) if ce_symbol else {}
+        )
+        pe_quote_payload = (
+            self._get_cached_quote_for_live_entry(pe_symbol) if pe_symbol else {}
+        )
         max_boot_spread = float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5")
-        def _selected_quote_tradable(sym: str | None, quote: Mapping[str, Any]) -> tuple[bool, bool, float | None, float | None, float | None, str]:
-            if not sym or not quote or not self._is_option_symbol_tick_fresh(sym, max_age_s=60.0):
-                return False, bool(quote.get("depth_available") or quote.get("depth")) if isinstance(quote, Mapping) else False, None, None, None, "missing"
+
+        def _selected_quote_tradable(
+            sym: str | None, quote: Mapping[str, Any]
+        ) -> tuple[bool, bool, float | None, float | None, float | None, str]:
+            if (
+                not sym
+                or not quote
+                or not self._is_option_symbol_tick_fresh(sym, max_age_s=60.0)
+            ):
+                return (
+                    False,
+                    (
+                        bool(quote.get("depth_available") or quote.get("depth"))
+                        if isinstance(quote, Mapping)
+                        else False
+                    ),
+                    None,
+                    None,
+                    None,
+                    "missing",
+                )
             bid_v, ask_v, spread_v, source_v = resolve_quote_bid_ask_spread(dict(quote))
-            ltp_v = _extract_float(quote, "ltp", "last_price", "last_traded_price") or 0.0
+            ltp_v = (
+                _extract_float(quote, "ltp", "last_price", "last_traded_price") or 0.0
+            )
             depth_v = bool(quote.get("depth_available") or quote.get("depth"))
-            ok_v = bool(ltp_v > 0 and bid_v is not None and ask_v is not None and bid_v > 0 and ask_v > bid_v and spread_v is not None and spread_v <= max_boot_spread)
+            ok_v = bool(
+                ltp_v > 0
+                and bid_v is not None
+                and ask_v is not None
+                and bid_v > 0
+                and ask_v > bid_v
+                and spread_v is not None
+                and spread_v <= max_boot_spread
+            )
             return ok_v, depth_v, bid_v, ask_v, spread_v, source_v
-        ce_quote, ce_depth, ce_bid, ce_ask, ce_spread_pct, ce_quote_source = _selected_quote_tradable(ce_symbol, ce_quote_payload)
-        pe_quote, pe_depth, pe_bid, pe_ask, pe_spread_pct, pe_quote_source = _selected_quote_tradable(pe_symbol, pe_quote_payload)
-        fut_quote = bool(fut_symbol and self._is_option_symbol_tick_fresh(fut_symbol, max_age_s=60.0)) if fut_symbol else False
+
+        ce_quote, ce_depth, ce_bid, ce_ask, ce_spread_pct, ce_quote_source = (
+            _selected_quote_tradable(ce_symbol, ce_quote_payload)
+        )
+        pe_quote, pe_depth, pe_bid, pe_ask, pe_spread_pct, pe_quote_source = (
+            _selected_quote_tradable(pe_symbol, pe_quote_payload)
+        )
+        fut_quote = (
+            bool(
+                fut_symbol
+                and self._is_option_symbol_tick_fresh(fut_symbol, max_age_s=60.0)
+            )
+            if fut_symbol
+            else False
+        )
+
         def _sub_state(sym: str | None, token: Any, fresh_tick: bool) -> bool:
             token_int = None
             try:
                 token_int = int(token) if token is not None else None
             except (TypeError, ValueError):
                 token_int = None
+
             def _int_set(values: set[Any]) -> set[int]:
                 normalized: set[int] = set()
                 for value in values:
@@ -7681,49 +8850,114 @@ class StrategyRunner:
                     if value_int > 0:
                         normalized.add(value_int)
                 return normalized
-            desired = bool(token_int is not None and token_int in _int_set(desired_tokens))
-            subscribed = bool(token_int is not None and token_int in _int_set(subscribed_tokens))
-            confirmed = bool(token_int is not None and token_int in _int_set(confirmed_tokens))
+
+            desired = bool(
+                token_int is not None and token_int in _int_set(desired_tokens)
+            )
+            subscribed = bool(
+                token_int is not None and token_int in _int_set(subscribed_tokens)
+            )
+            confirmed = bool(
+                token_int is not None and token_int in _int_set(confirmed_tokens)
+            )
             active_symbol = bool(sym and sym in active_subs)
-            selected_pair = (getattr(self, "_active_selected_ce", None), getattr(self, "_active_selected_pe", None))
-            state_key = (sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, selected_pair, get_runtime_market_mode())
+            selected_pair = (
+                getattr(self, "_active_selected_ce", None),
+                getattr(self, "_active_selected_pe", None),
+            )
+            state_key = (
+                sym,
+                token_int,
+                desired,
+                subscribed or active_symbol or confirmed,
+                fresh_tick,
+                selected_pair,
+                get_runtime_market_mode(),
+            )
             self._last_selected_subscription_state_key = state_key
             log_on_change(
                 self._logger,
                 key=f"SELECTED_OPTION_SUBSCRIPTION_STATE:{sym}",
                 state=state_key,
-                message="SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s" % (sym, token_int, desired, subscribed or active_symbol or confirmed, fresh_tick, None),
-                reminder_seconds=float(os.getenv("RUNNER_BOOTSTRAP_LOG_REMINDER_SECONDS", "600") or "600"),
+                message="SELECTED_OPTION_SUBSCRIPTION_STATE symbol=%s token=%s desired=%s subscribed=%s fresh_tick=%s tick_age_s=%s"
+                % (
+                    sym,
+                    token_int,
+                    desired,
+                    subscribed or active_symbol or confirmed,
+                    fresh_tick,
+                    None,
+                ),
+                reminder_seconds=float(
+                    os.getenv("RUNNER_BOOTSTRAP_LOG_REMINDER_SECONDS", "600") or "600"
+                ),
                 level=logging.INFO,
-                extra={"event": "SELECTED_OPTION_SUBSCRIPTION_STATE", "symbol": sym, "token": token_int, "desired": desired, "subscribed": subscribed or active_symbol or confirmed, "fresh_tick": fresh_tick, "tick_age_s": None, "selected_ce": selected_pair[0], "selected_pe": selected_pair[1], "market_mode": get_runtime_market_mode()},
+                extra={
+                    "event": "SELECTED_OPTION_SUBSCRIPTION_STATE",
+                    "symbol": sym,
+                    "token": token_int,
+                    "desired": desired,
+                    "subscribed": subscribed or active_symbol or confirmed,
+                    "fresh_tick": fresh_tick,
+                    "tick_age_s": None,
+                    "selected_ce": selected_pair[0],
+                    "selected_pe": selected_pair[1],
+                    "market_mode": get_runtime_market_mode(),
+                },
             )
-            return bool(active_symbol or desired or subscribed or confirmed or fresh_tick)
+            return bool(
+                active_symbol or desired or subscribed or confirmed or fresh_tick
+            )
+
         ce_sub = _sub_state(ce_symbol, ce_token, ce_quote)
         pe_sub = _sub_state(pe_symbol, pe_token, pe_quote)
         try:
             fut_token_int = int(fut_token) if fut_token is not None else None
         except (TypeError, ValueError):
             fut_token_int = None
-        fut_sub = bool(fut_symbol and (fut_symbol in active_subs or (fut_token_int is not None and fut_token_int in desired_tokens)))
+        fut_sub = bool(
+            fut_symbol
+            and (
+                fut_symbol in active_subs
+                or (fut_token_int is not None and fut_token_int in desired_tokens)
+            )
+        )
         if _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False):
-            ce_depth = bool(ce_symbol and self._selected_option_has_real_depth(ce_symbol))
-            pe_depth = bool(pe_symbol and self._selected_option_has_real_depth(pe_symbol))
-        ce_hist = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
-        pe_hist = len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
+            ce_depth = bool(
+                ce_symbol and self._selected_option_has_real_depth(ce_symbol)
+            )
+            pe_depth = bool(
+                pe_symbol and self._selected_option_has_real_depth(pe_symbol)
+            )
+        ce_hist = (
+            len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
+        )
+        pe_hist = (
+            len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
+        )
         min_bars = int(self._required_bars_for_symbol(ce_symbol or pe_symbol or symbol))
         reason = None
         if not (ce_sub and pe_sub):
             reason = "selected_option_subscription_pending"
         elif not (ce_quote and pe_quote):
             reason = "selected_option_quote_missing"
-        elif _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False) and not (ce_depth and pe_depth):
+        elif _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False) and not (
+            ce_depth and pe_depth
+        ):
             reason = "selected_option_depth_missing"
         elif ce_hist < min_bars or pe_hist < min_bars:
             reason = "selected_option_history_cold"
         normalized_boot_symbol = normalize_symbol(str(symbol or ""))
-        selected_boot_symbols = {normalize_symbol(str(item)) for item in (ce_symbol, pe_symbol) if item}
-        if reason == "selected_option_depth_missing" and normalized_boot_symbol not in selected_boot_symbols:
-            if normalized_boot_symbol.startswith("NFO:") and normalized_boot_symbol.endswith(("CE", "PE")):
+        selected_boot_symbols = {
+            normalize_symbol(str(item)) for item in (ce_symbol, pe_symbol) if item
+        }
+        if (
+            reason == "selected_option_depth_missing"
+            and normalized_boot_symbol not in selected_boot_symbols
+        ):
+            if normalized_boot_symbol.startswith(
+                "NFO:"
+            ) and normalized_boot_symbol.endswith(("CE", "PE")):
                 reason = "option_context_depth_missing"
             else:
                 reason = "context_symbol_not_tradable"
@@ -7732,51 +8966,68 @@ class StrategyRunner:
             symbol_role = self._symbol_role_for_runner(normalized_boot_symbol)
         except Exception:
             symbol_role = "unknown"
-        _boot_state = (ready, reason, ce_symbol, pe_symbol, ce_sub, pe_sub, ce_quote, pe_quote, ce_depth, pe_depth, ce_hist, pe_hist)
+        _boot_state = (
+            ready,
+            reason,
+            ce_symbol,
+            pe_symbol,
+            ce_sub,
+            pe_sub,
+            ce_quote,
+            pe_quote,
+            ce_depth,
+            pe_depth,
+            ce_hist,
+            pe_hist,
+        )
         log_on_change(
             self._logger,
             key=f"LIVE_UNIVERSE_BOOTSTRAP_STATUS:{symbol}",
             state=_boot_state,
-            message="LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s" % (symbol, ready, reason),
-            reminder_seconds=float(os.getenv("RUNNER_BOOTSTRAP_LOG_REMINDER_SECONDS", "600") or "600"),
+            message="LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s"
+            % (symbol, ready, reason),
+            reminder_seconds=float(
+                os.getenv("RUNNER_BOOTSTRAP_LOG_REMINDER_SECONDS", "600") or "600"
+            ),
             level=logging.INFO,
             extra={
-                    "event": "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
-                    "symbol": symbol,
-                    "evaluated_symbol": normalized_boot_symbol,
-                    "selected_ce": ce_symbol,
-                    "selected_pe": pe_symbol,
-                    "selected_pair": [ce_symbol, pe_symbol],
-                    "symbol_role": symbol_role,
-                    "active_future": fut_symbol or None,
-                    "ce_token": ce_token,
-                    "pe_token": pe_token,
-                    "fut_token": fut_token,
-                    "ce_subscribed": ce_sub,
-                    "pe_subscribed": pe_sub,
-                    "fut_subscribed": fut_sub,
-                    "ce_quote_fresh": ce_quote,
-                    "pe_quote_fresh": pe_quote,
-                    "fut_quote_fresh": fut_quote,
-                    "ce_depth_available": ce_depth,
-                    "pe_depth_available": pe_depth,
-                    "ce_bid": ce_bid,
-                    "ce_ask": ce_ask,
-                    "ce_spread_pct": ce_spread_pct,
-                    "ce_quote_source": ce_quote_source,
-                    "pe_bid": pe_bid,
-                    "pe_ask": pe_ask,
-                    "pe_spread_pct": pe_spread_pct,
-                    "pe_quote_source": pe_quote_source,
-                    "require_full_depth_for_execution": _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False),
-                    "ce_history_count": ce_hist,
-                    "pe_history_count": pe_hist,
-                    "ready": ready,
-                    "reason": reason,
-                },
-            )
+                "event": "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
+                "symbol": symbol,
+                "evaluated_symbol": normalized_boot_symbol,
+                "selected_ce": ce_symbol,
+                "selected_pe": pe_symbol,
+                "selected_pair": [ce_symbol, pe_symbol],
+                "symbol_role": symbol_role,
+                "active_future": fut_symbol or None,
+                "ce_token": ce_token,
+                "pe_token": pe_token,
+                "fut_token": fut_token,
+                "ce_subscribed": ce_sub,
+                "pe_subscribed": pe_sub,
+                "fut_subscribed": fut_sub,
+                "ce_quote_fresh": ce_quote,
+                "pe_quote_fresh": pe_quote,
+                "fut_quote_fresh": fut_quote,
+                "ce_depth_available": ce_depth,
+                "pe_depth_available": pe_depth,
+                "ce_bid": ce_bid,
+                "ce_ask": ce_ask,
+                "ce_spread_pct": ce_spread_pct,
+                "ce_quote_source": ce_quote_source,
+                "pe_bid": pe_bid,
+                "pe_ask": pe_ask,
+                "pe_spread_pct": pe_spread_pct,
+                "pe_quote_source": pe_quote_source,
+                "require_full_depth_for_execution": _env_bool(
+                    "REQUIRE_FULL_DEPTH_FOR_EXECUTION", False
+                ),
+                "ce_history_count": ce_hist,
+                "pe_history_count": pe_hist,
+                "ready": ready,
+                "reason": reason,
+            },
+        )
         return ready, reason
-
 
     def _selected_option_has_real_depth(self, symbol: str | None) -> bool:
         """Return true only when selected option has real bid/ask/depth proof."""
@@ -7788,14 +9039,18 @@ class StrategyRunner:
         if runtime_key:
             candidates.append(runtime_key)
         seen: set[str] = set()
-        candidates = [item for item in candidates if item and not (item in seen or seen.add(item))]
+        candidates = [
+            item for item in candidates if item and not (item in seen or seen.add(item))
+        ]
         proof = getattr(mdm, "has_ws_tradable_quote", None)
         if callable(proof):
             try:
                 proof_ok = bool(proof(candidates))
             except TypeError:
                 proof_ok = any(bool(proof(item)) for item in candidates)
-            except Exception as exc:  # noqa: BLE001 - depth proof lookup is diagnostic; fall back to cached quote
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - depth proof lookup is diagnostic; fall back to cached quote
                 proof_ok = False
                 log_throttled(
                     self._logger,
@@ -7805,9 +9060,15 @@ class StrategyRunner:
                     type(exc).__name__,
                     interval_sec=60.0,
                     level=logging.WARNING,
-                    extra={"event": "SELECTED_OPTION_DEPTH_PROOF_FAILED", "symbol": symbol, "error_type": type(exc).__name__},
+                    extra={
+                        "event": "SELECTED_OPTION_DEPTH_PROOF_FAILED",
+                        "symbol": symbol,
+                        "error_type": type(exc).__name__,
+                    },
                 )
-            if proof_ok and any(self._quote_fresh_for_symbol(item, None) for item in candidates):
+            if proof_ok and any(
+                self._quote_fresh_for_symbol(item, None) for item in candidates
+            ):
                 return True
         # _tick_has_quote_update verifies only bid/ask/depth presence; freshness is checked separately below.
         for item in candidates:
@@ -7818,19 +9079,30 @@ class StrategyRunner:
                 continue
             bid = _extract_float(quote, "bid", "best_bid", "buy_price")
             ask = _extract_float(quote, "ask", "best_ask", "sell_price")
-            if bid is not None and ask is not None and bid > 0 and ask > bid and self._quote_fresh_for_symbol(item, quote):
+            if (
+                bid is not None
+                and ask is not None
+                and bid > 0
+                and ask > bid
+                and self._quote_fresh_for_symbol(item, quote)
+            ):
                 return True
         return False
 
-
-    def _quote_fresh_for_symbol(self, symbol: str, quote: Mapping[str, Any] | None = None) -> bool:
+    def _quote_fresh_for_symbol(
+        self, symbol: str, quote: Mapping[str, Any] | None = None
+    ) -> bool:
         """Return whether an existing quote/tick for symbol is fresh enough for live gates."""
         limit = float(os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0)
         if quote is not None:
             age_ms = resolve_tick_age_ms(quote)
             if age_ms is not None:
                 return age_ms <= limit * 1000.0
-            ts_raw = quote.get("timestamp") or quote.get("received_at") or quote.get("exchange_timestamp")
+            ts_raw = (
+                quote.get("timestamp")
+                or quote.get("received_at")
+                or quote.get("exchange_timestamp")
+            )
             if ts_raw is not None:
                 try:
                     ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
@@ -7838,7 +9110,10 @@ class StrategyRunner:
                         return (pd.Timestamp.utcnow() - ts).total_seconds() <= limit
                 except (TypeError, ValueError):
                     return False
-        for source in (getattr(self, "_market_data", None), getattr(self, "_data_hub", None)):
+        for source in (
+            getattr(self, "_market_data", None),
+            getattr(self, "_data_hub", None),
+        ):
             fn = getattr(source, "time_since_last_tick", None)
             if callable(fn):
                 try:
@@ -7855,14 +9130,27 @@ class StrategyRunner:
         if runtime_key:
             candidates.append(runtime_key)
         seen: set[str] = set()
-        return [item for item in candidates if item and not (item in seen or seen.add(item))]
+        return [
+            item for item in candidates if item and not (item in seen or seen.add(item))
+        ]
 
-    def _lookup_context_quote(self, symbol: str) -> tuple[Mapping[str, Any] | None, float | None]:
+    def _lookup_context_quote(
+        self, symbol: str
+    ) -> tuple[Mapping[str, Any] | None, float | None]:
         for candidate in self._quote_candidates_for_symbol(symbol):
-            for source in (self, getattr(self, "_market_data", None), getattr(self, "_data_hub", None)):
+            for source in (
+                self,
+                getattr(self, "_market_data", None),
+                getattr(self, "_data_hub", None),
+            ):
                 if source is None:
                     continue
-                for method_name in ("get_quote", "get_symbol_snapshot", "get_latest_tick", "get_cached_quote"):
+                for method_name in (
+                    "get_quote",
+                    "get_symbol_snapshot",
+                    "get_latest_tick",
+                    "get_cached_quote",
+                ):
                     method = getattr(source, method_name, None)
                     if not callable(method):
                         continue
@@ -7877,19 +9165,33 @@ class StrategyRunner:
                             continue
                     if raw is None:
                         continue
-                    quote = dict(raw) if isinstance(raw, Mapping) else {
-                        "ltp": getattr(raw, "ltp", None) or getattr(raw, "last_price", None) or getattr(raw, "price", None),
-                        "tick_age_s": getattr(raw, "tick_age_s", None),
-                    }
+                    quote = (
+                        dict(raw)
+                        if isinstance(raw, Mapping)
+                        else {
+                            "ltp": getattr(raw, "ltp", None)
+                            or getattr(raw, "last_price", None)
+                            or getattr(raw, "price", None),
+                            "tick_age_s": getattr(raw, "tick_age_s", None),
+                        }
+                    )
                     price = _extract_float(quote, "ltp", "last_price", "price", "close")
-                    if price is not None and price > 0 and self._quote_fresh_for_symbol(candidate, quote):
+                    if (
+                        price is not None
+                        and price > 0
+                        and self._quote_fresh_for_symbol(candidate, quote)
+                    ):
                         return quote, price
         return None, None
 
     def _underlying_context_from_strategy_manager(self) -> dict[str, Any]:
         """Return spot-first fresh direction context cached by StrategyManager."""
         manager = getattr(self, "_strategy_manager", None)
-        snapshots = getattr(manager, "_latest_context_snapshots", {}) if manager is not None else {}
+        snapshots = (
+            getattr(manager, "_latest_context_snapshots", {})
+            if manager is not None
+            else {}
+        )
         if not isinstance(snapshots, Mapping):
             return {}
         now = time.time()
@@ -7907,11 +9209,19 @@ class StrategyRunner:
                 return {}, False, "", max_age + 1.0
             payload = dict(ctx)
             try:
-                ts = float(payload.get("timestamp") or payload.get("context_timestamp_epoch") or 0.0)
+                ts = float(
+                    payload.get("timestamp")
+                    or payload.get("context_timestamp_epoch")
+                    or 0.0
+                )
             except (TypeError, ValueError):
                 ts = 0.0
             age = max(0.0, now - ts) if ts > 0 else max_age + 1.0
-            bias = str(payload.get("underlying_direction_bias") or payload.get("direction_bias") or "").upper()
+            bias = str(
+                payload.get("underlying_direction_bias")
+                or payload.get("direction_bias")
+                or ""
+            ).upper()
             return payload, bool(ts > 0 and age <= max_age), bias, age
 
         spot_ctx, spot_fresh, spot_bias, spot_age = _ctx_state("spot_context")
@@ -7931,34 +9241,52 @@ class StrategyRunner:
             return output
         output["direction_bias"] = selected_bias
         output["underlying_direction_bias"] = selected_bias
-        output["underlying_direction_confidence"] = selected_ctx.get("underlying_direction_confidence")
+        output["underlying_direction_confidence"] = selected_ctx.get(
+            "underlying_direction_confidence"
+        )
         output["context_age_seconds"] = selected_age
         output["context_fresh"] = True
-        output["direction_context_source"] = selected_ctx.get("role") or selected_ctx.get("context_kind")
-        output["direction_context_reasons"] = selected_ctx.get("direction_context_reasons")
+        output["direction_context_source"] = selected_ctx.get(
+            "role"
+        ) or selected_ctx.get("context_kind")
+        output["direction_context_reasons"] = selected_ctx.get(
+            "direction_context_reasons"
+        )
         return output
 
-    def _refresh_underlying_context_snapshots(self, *, trace_id: str | None = None) -> None:
+    def _refresh_underlying_context_snapshots(
+        self, *, trace_id: str | None = None
+    ) -> None:
         """Update StrategyManager context snapshots before selected option evaluation."""
         manager = getattr(self, "_strategy_manager", None)
         if manager is None or not hasattr(manager, "generate_signal"):
             return
         raw_symbols = ["NSE:NIFTY"]
-        active_future_resolver = getattr(self, "_resolve_active_futures_symbol_for_metrics", None)
+        active_future_resolver = getattr(
+            self, "_resolve_active_futures_symbol_for_metrics", None
+        )
         if not callable(active_future_resolver):
-            active_future_resolver = getattr(manager, "_resolve_active_futures_symbol_for_metrics", None)
+            active_future_resolver = getattr(
+                manager, "_resolve_active_futures_symbol_for_metrics", None
+            )
         if callable(active_future_resolver):
             active_future = active_future_resolver()
         else:
             active_future = getattr(self, "_active_futures_symbol", None)
         if active_future:
             raw_symbols.append(str(active_future))
-        raw_symbols.extend(str(sym) for sym in sorted(getattr(self, "_active_symbols", set()) or set()))
+        raw_symbols.extend(
+            str(sym) for sym in sorted(getattr(self, "_active_symbols", set()) or set())
+        )
         context_symbols: list[str] = []
         seen: set[str] = set()
         for raw_symbol in raw_symbols:
             normalized = normalize_symbol(raw_symbol)
-            if not normalized or normalized in seen or not self._is_context_symbol(normalized):
+            if (
+                not normalized
+                or normalized in seen
+                or not self._is_context_symbol(normalized)
+            ):
                 continue
             if self._is_context_symbol_suspended(normalized):
                 continue
@@ -7972,7 +9300,9 @@ class StrategyRunner:
                 manager.generate_signal(ctx_symbol, float(price), trace_id=trace_id)
             except TypeError:
                 manager.generate_signal(ctx_symbol, float(price))
-            except Exception as exc:  # noqa: BLE001 - context refresh failure is logged, not hidden
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - context refresh failure is logged, not hidden
                 log_throttled(
                     self._logger,
                     f"context_snapshot_refresh_failed:{ctx_symbol}",
@@ -8000,7 +9330,12 @@ class StrategyRunner:
             if not basket:
                 return set()
             if isinstance(basket, Mapping):
-                values = (basket.get("selected_ce"), basket.get("selected_pe"), basket.get("selected_ce_symbol"), basket.get("selected_pe_symbol"))
+                values = (
+                    basket.get("selected_ce"),
+                    basket.get("selected_pe"),
+                    basket.get("selected_ce_symbol"),
+                    basket.get("selected_pe_symbol"),
+                )
             else:
                 values = (
                     getattr(basket, "selected_ce", None),
@@ -8030,25 +9365,48 @@ class StrategyRunner:
         return bool(selected and normalized in selected)
 
     def _request_selected_option_history_prewarm(
-        self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None, selected: bool | None = None
+        self,
+        symbol: str,
+        *,
+        bars_before: int,
+        required_bars: int,
+        trace_id: str | None = None,
+        selected: bool | None = None,
     ) -> None:
         now = time.monotonic()
         if selected is None:
             selected = self._is_selected_option_symbol(symbol)
-        request_event = "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_REQUESTED"
-        result_event = "SELECTED_OPTION_HISTORY_PREWARM_RESULT" if selected else "OPTION_CONTEXT_HISTORY_PREWARM_RESULT"
+        request_event = (
+            "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED"
+            if selected
+            else "OPTION_CONTEXT_HISTORY_PREWARM_REQUESTED"
+        )
+        result_event = (
+            "SELECTED_OPTION_HISTORY_PREWARM_RESULT"
+            if selected
+            else "OPTION_CONTEXT_HISTORY_PREWARM_RESULT"
+        )
         if not selected and bars_before >= required_bars:
             return
         data_hub = getattr(self, "_data_hub", None)
         mdm = getattr(data_hub, "_mdm", None)
         inflight = getattr(mdm, "_history_inflight", {}) if mdm is not None else {}
-        inflight_entry = inflight.get((symbol, "minute")) if isinstance(inflight, Mapping) else None
-        if not selected and inflight_entry and int(inflight_entry[0] or 0) >= required_bars:
+        inflight_entry = (
+            inflight.get((symbol, "minute")) if isinstance(inflight, Mapping) else None
+        )
+        if (
+            not selected
+            and inflight_entry
+            and int(inflight_entry[0] or 0) >= required_bars
+        ):
             return
         if not selected and get_runtime_market_mode() != "OPEN":
             return
         last = float(self._selected_option_prewarm_last.get(symbol, 0.0) or 0.0)
-        if (now - last) < self._selected_option_prewarm_cooldown_s or symbol in self._selected_option_prewarm_inflight:
+        if (
+            (now - last) < self._selected_option_prewarm_cooldown_s
+            or symbol in self._selected_option_prewarm_inflight
+        ):
             return
         self._selected_option_prewarm_last[symbol] = now
         self._selected_option_prewarm_inflight.add(symbol)
@@ -8058,7 +9416,13 @@ class StrategyRunner:
             symbol,
             bars_before,
             required_bars,
-            extra={"event": request_event, "symbol": symbol, "bars_before": bars_before, "required_bars": required_bars, "trace_id": trace_id},
+            extra={
+                "event": request_event,
+                "symbol": symbol,
+                "bars_before": bars_before,
+                "required_bars": required_bars,
+                "trace_id": trace_id,
+            },
         )
         ensurer = getattr(self, "_runtime_history_ensurer", None)
         if not callable(ensurer):
@@ -8071,7 +9435,13 @@ class StrategyRunner:
                 symbol,
                 "selected_option" if selected else "option_context",
                 required_bars,
-                extra={"event": "CANONICAL_HISTORY_ENSURER_MISSING", "symbol": symbol, "role": "selected_option" if selected else "option_context", "required_bars": required_bars, "trace_id": trace_id},
+                extra={
+                    "event": "CANONICAL_HISTORY_ENSURER_MISSING",
+                    "symbol": symbol,
+                    "role": "selected_option" if selected else "option_context",
+                    "required_bars": required_bars,
+                    "trace_id": trace_id,
+                },
             )
             return
         policy = HistoryReadinessPolicy.from_env()
@@ -8081,7 +9451,11 @@ class StrategyRunner:
             """Canonical path: delegate to the injected runtime orchestrator."""
             success = False
             bars_after = bars_before
-            reason = "selected_option_history_cold" if selected else "option_context_history_cold"
+            reason = (
+                "selected_option_history_cold"
+                if selected
+                else "option_context_history_cold"
+            )
             source = "canonical_runtime_history_ensurer"
             role = "selected_option" if selected else "option_context"
             try:
@@ -8096,9 +9470,22 @@ class StrategyRunner:
                 if inspect.isawaitable(result):
                     result = await result
                 bars_after = self._history_count_for_symbol(symbol)
-                success = bool(getattr(result, "minimum_ready", None) if result is not None else False) or bars_after >= required_bars
-                hydration = getattr(result, "hydration", None) if result is not None else None
-                fetched_rows = int(getattr(hydration, "fetched_rows", 0) or 0) if hydration is not None else 0
+                success = (
+                    bool(
+                        getattr(result, "minimum_ready", None)
+                        if result is not None
+                        else False
+                    )
+                    or bars_after >= required_bars
+                )
+                hydration = (
+                    getattr(result, "hydration", None) if result is not None else None
+                )
+                fetched_rows = (
+                    int(getattr(hydration, "fetched_rows", 0) or 0)
+                    if hydration is not None
+                    else 0
+                )
                 self._emit_history_hydration_trace(
                     symbol,
                     source=source,
@@ -8113,13 +9500,39 @@ class StrategyRunner:
             finally:
                 self._selected_option_prewarm_inflight.discard(symbol)
                 success = bool(success and bars_after >= required_bars)
-                if not success and bars_after < required_bars and reason in {"scheduled", "selected_option_history_cold", "option_context_history_cold"}:
+                if (
+                    not success
+                    and bars_after < required_bars
+                    and reason
+                    in {
+                        "scheduled",
+                        "selected_option_history_cold",
+                        "option_context_history_cold",
+                    }
+                ):
                     reason = "insufficient_bars"
-                self._maybe_promote_pending_active_basket(source="selected_option_history_prewarm")
+                self._maybe_promote_pending_active_basket(
+                    source="selected_option_history_prewarm"
+                )
                 self._logger.info(
                     "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
-                    result_event, symbol, bars_before, bars_after, required_bars, success,
-                    extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": reason, "source": source, "trace_id": trace_id},
+                    result_event,
+                    symbol,
+                    bars_before,
+                    bars_after,
+                    required_bars,
+                    success,
+                    extra={
+                        "event": result_event,
+                        "symbol": symbol,
+                        "bars_before": bars_before,
+                        "bars_after": bars_after,
+                        "required_bars": required_bars,
+                        "success": success,
+                        "reason": reason,
+                        "source": source,
+                        "trace_id": trace_id,
+                    },
                 )
 
         _prewarm_coro = _do_prewarm_canonical
@@ -8127,13 +9540,32 @@ class StrategyRunner:
             loop = asyncio.get_running_loop()
             loop.create_task(_prewarm_coro())
         except RuntimeError:
-            threading.Thread(target=lambda: asyncio.run(_prewarm_coro()), name=f"selected-option-prewarm-{symbol}", daemon=True).start()
+            threading.Thread(
+                target=lambda: asyncio.run(_prewarm_coro()),
+                name=f"selected-option-prewarm-{symbol}",
+                daemon=True,
+            ).start()
         except Exception as exc:
             self._selected_option_prewarm_inflight.discard(symbol)
             self._logger.info(
                 "%s symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
-                result_event, symbol, bars_before, bars_before, required_bars, False,
-                extra={"event": result_event, "symbol": symbol, "bars_before": bars_before, "bars_after": bars_before, "required_bars": required_bars, "success": False, "reason": type(exc).__name__, "source": "prewarm_scheduler_exception", "trace_id": trace_id},
+                result_event,
+                symbol,
+                bars_before,
+                bars_before,
+                required_bars,
+                False,
+                extra={
+                    "event": result_event,
+                    "symbol": symbol,
+                    "bars_before": bars_before,
+                    "bars_after": bars_before,
+                    "required_bars": required_bars,
+                    "success": False,
+                    "reason": type(exc).__name__,
+                    "source": "prewarm_scheduler_exception",
+                    "trace_id": trace_id,
+                },
             )
 
     def set_runtime_history_ensurer(self, ensurer: Callable[..., Any] | None) -> None:
@@ -8185,22 +9617,39 @@ class StrategyRunner:
         volume_now = float(tick.get("volume") or 0.0)
         tick_ts = float(tick.get("timestamp_epoch") or tick.get("ts") or 0.0)
         if not _env_bool("RUNNER_ENABLE_INTRABAR_STRATEGY_EVAL", True):
-            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_env_disabled"
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
+                "intrabar_eval_env_disabled"
+            )
             return None
         if self._data_phase.get(symbol) != "LIVE":
-            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_non_live_phase"
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
+                "intrabar_eval_non_live_phase"
+            )
             return None
         required = self._required_bars_for_symbol(symbol)
         if candle_count < required:
-            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_insufficient_bars"
-            self._last_same_bar_eval_block_detail_by_symbol[symbol] = {"candle_count": candle_count, "required": required}
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
+                "intrabar_eval_insufficient_bars"
+            )
+            self._last_same_bar_eval_block_detail_by_symbol[symbol] = {
+                "candle_count": candle_count,
+                "required": required,
+            }
             return None
         normalized = normalize_symbol(symbol)
-        selected_ce = normalize_symbol(str(getattr(self, "_active_selected_ce", "") or ""))
-        selected_pe = normalize_symbol(str(getattr(self, "_active_selected_pe", "") or ""))
+        selected_ce = normalize_symbol(
+            str(getattr(self, "_active_selected_ce", "") or "")
+        )
+        selected_pe = normalize_symbol(
+            str(getattr(self, "_active_selected_pe", "") or "")
+        )
         selected_set = {s for s in (selected_ce, selected_pe) if s}
         is_selected_option = normalized in selected_set
-        is_context = normalized in {"NSE:NIFTY", "NIFTY", "NFO:NIFTY26MAYFUT"} or normalized.endswith("FUT")
+        is_context = normalized in {
+            "NSE:NIFTY",
+            "NIFTY",
+            "NFO:NIFTY26MAYFUT",
+        } or normalized.endswith("FUT")
         near_selected = False
         try:
             symbol_strike = self._extract_strike_from_symbol(normalized)
@@ -8209,30 +9658,48 @@ class StrategyRunner:
                 if normalized.endswith("CE")
                 else selected_pe if normalized.endswith("PE") else ""
             )
-            selected_strike = self._extract_strike_from_symbol(same_side_selected) if same_side_selected else None
+            selected_strike = (
+                self._extract_strike_from_symbol(same_side_selected)
+                if same_side_selected
+                else None
+            )
             if symbol_strike is not None and selected_strike is not None:
-                near_selected_threshold = float(os.getenv("RUNNER_INTRABAR_NEAR_SELECTED_POINTS", "100") or "100")
-                near_selected = abs(float(symbol_strike) - float(selected_strike)) <= near_selected_threshold
+                near_selected_threshold = float(
+                    os.getenv("RUNNER_INTRABAR_NEAR_SELECTED_POINTS", "100") or "100"
+                )
+                near_selected = (
+                    abs(float(symbol_strike) - float(selected_strike))
+                    <= near_selected_threshold
+                )
         except Exception:
             near_selected = False
         if not is_selected_option and not near_selected and not is_context:
-            interval = float(os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60") or "60")
+            interval = float(
+                os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60") or "60"
+            )
         else:
-            interval = float(os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10") or "10")
+            interval = float(
+                os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10") or "10"
+            )
         last_eval_ts = float(self._last_same_bar_eval_ts_by_symbol.get(symbol, 0.0))
         if now_ts - last_eval_ts >= interval:
             self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
             self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
             return "same_bar_periodic_eval"
         if not is_selected_option and not near_selected and not is_context:
-            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_non_selected_waiting"
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
+                "intrabar_eval_non_selected_waiting"
+            )
             return None
         if is_selected_option or near_selected:
             last_price = float(self._last_eval_price_by_symbol.get(symbol, 0.0) or 0.0)
             detail: dict[str, Any] = {}
             if last_price > 0 and price > 0:
                 move_pct = abs(price - last_price) / last_price * 100.0
-                min_move_pct = float(os.getenv("RUNNER_INTRABAR_EVAL_MIN_PRICE_MOVE_PCT", "0.12") or "0.12")
+                min_move_pct = float(
+                    os.getenv("RUNNER_INTRABAR_EVAL_MIN_PRICE_MOVE_PCT", "0.12")
+                    or "0.12"
+                )
                 detail["price_move_pct"] = round(move_pct, 4)
                 if move_pct >= min_move_pct:
                     self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
@@ -8242,28 +9709,52 @@ class StrategyRunner:
             spread_now = (ask - bid) if ask > bid > 0 else 0.0
             last_spread = float(last_quote.get("spread_now") or 0.0)
             spread_delta = abs(spread_now - last_spread)
-            spread_trigger = spread_delta >= float(os.getenv("RUNNER_INTRABAR_SPREAD_DELTA_MIN", "0.25") or "0.25")
+            spread_trigger = spread_delta >= float(
+                os.getenv("RUNNER_INTRABAR_SPREAD_DELTA_MIN", "0.25") or "0.25"
+            )
             ts_changed = tick_ts > float(last_quote.get("tick_ts") or 0.0)
-            volume_delta = max(0.0, volume_now - float(last_quote.get("volume_now") or 0.0))
-            volume_trigger = volume_delta >= float(os.getenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "100") or "100")
+            volume_delta = max(
+                0.0, volume_now - float(last_quote.get("volume_now") or 0.0)
+            )
+            volume_trigger = volume_delta >= float(
+                os.getenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "100") or "100"
+            )
             current_score = float(tick.get("candidate_score") or 0.0)
             prev_score = float(last_quote.get("candidate_score") or 0.0)
-            score_trigger = current_score > prev_score + float(os.getenv("RUNNER_INTRABAR_CANDIDATE_SCORE_DELTA_MIN", "0.15") or "0.15")
-            detail.update({"volume_delta": round(volume_delta, 2), "spread_now": round(spread_now, 4), "spread_delta": round(spread_delta, 4), "bid_ask_fresh": bool(ts_changed), "tick_ts": tick_ts, "volume_now": volume_now, "candidate_score": current_score})
+            score_trigger = current_score > prev_score + float(
+                os.getenv("RUNNER_INTRABAR_CANDIDATE_SCORE_DELTA_MIN", "0.15") or "0.15"
+            )
+            detail.update(
+                {
+                    "volume_delta": round(volume_delta, 2),
+                    "spread_now": round(spread_now, 4),
+                    "spread_delta": round(spread_delta, 4),
+                    "bid_ask_fresh": bool(ts_changed),
+                    "tick_ts": tick_ts,
+                    "volume_now": volume_now,
+                    "candidate_score": current_score,
+                }
+            )
             if spread_trigger or ts_changed or volume_trigger or score_trigger:
                 self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
                 self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
                 return "same_bar_market_update_eval"
-            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_conditions_not_met"
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
+                "intrabar_eval_conditions_not_met"
+            )
             self._last_same_bar_eval_block_detail_by_symbol[symbol] = detail
             return None
-        self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_interval_not_elapsed"
+        self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
+            "intrabar_eval_interval_not_elapsed"
+        )
         return None
 
     def _is_tradable_symbol(self, symbol: str) -> bool:
         """Return True when symbol is a tradable NIFTY option. Args: symbol. Returns: bool. Raises: none."""
         value = str(symbol or "").upper()
-        return value.startswith("NFO:NIFTY") and (value.endswith("CE") or value.endswith("PE"))
+        return value.startswith("NFO:NIFTY") and (
+            value.endswith("CE") or value.endswith("PE")
+        )
 
     def _is_tradable_option_symbol(self, symbol: str) -> bool:
         """Compatibility alias for option-tradability checks."""
@@ -8272,6 +9763,7 @@ class StrategyRunner:
     @staticmethod
     def _tick_has_quote_update(tick: Mapping[str, Any]) -> bool:
         """Return True when tick carries depth or valid top-of-book quote."""
+
         def _safe_float(value: Any) -> float:
             try:
                 return float(value)
@@ -8314,9 +9806,13 @@ class StrategyRunner:
                     payload = dict(raw)
                 else:
                     payload = {
-                        "ltp": getattr(raw, "ltp", None) or getattr(raw, "last_price", None) or getattr(raw, "price", None),
-                        "bid": getattr(raw, "bid", None) or getattr(raw, "best_bid", None),
-                        "ask": getattr(raw, "ask", None) or getattr(raw, "best_ask", None),
+                        "ltp": getattr(raw, "ltp", None)
+                        or getattr(raw, "last_price", None)
+                        or getattr(raw, "price", None),
+                        "bid": getattr(raw, "bid", None)
+                        or getattr(raw, "best_bid", None),
+                        "ask": getattr(raw, "ask", None)
+                        or getattr(raw, "best_ask", None),
                         "tick_age_s": getattr(raw, "tick_age_s", None),
                         "ts_ns": getattr(raw, "ts_ns", None),
                     }
@@ -8325,20 +9821,38 @@ class StrategyRunner:
                     return payload
         return None
 
-    def _current_eval_bar_key(self, symbol: str, tick: Mapping[str, Any] | None = None) -> Any:
+    def _current_eval_bar_key(
+        self, symbol: str, tick: Mapping[str, Any] | None = None
+    ) -> Any:
         """Return the current evaluation bar identity for same-bar throttling."""
         symbol_norm = normalize_symbol(symbol)
-        version = int((getattr(self, "_candle_versions", {}) or {}).get(symbol_norm, 0) or 0)
+        version = int(
+            (getattr(self, "_candle_versions", {}) or {}).get(symbol_norm, 0) or 0
+        )
         if version > 0:
             return ("version", version)
         if tick:
-            for key in ("bar_key", "candle_key", "bar_ts", "candle_ts", "timestamp", "ts"):
+            for key in (
+                "bar_key",
+                "candle_key",
+                "bar_ts",
+                "candle_ts",
+                "timestamp",
+                "ts",
+            ):
                 value = tick.get(key)
                 if value not in (None, ""):
                     return (key, str(value))
         last_bar = (getattr(self, "_last_bar_ts", {}) or {}).get(symbol_norm)
         if last_bar is not None:
-            return ("last_bar_ts", last_bar.isoformat() if hasattr(last_bar, "isoformat") else str(last_bar))
+            return (
+                "last_bar_ts",
+                (
+                    last_bar.isoformat()
+                    if hasattr(last_bar, "isoformat")
+                    else str(last_bar)
+                ),
+            )
         return ("symbol", symbol_norm)
 
     def _quote_update_version_for_eval(self, symbol: str) -> int | None:
@@ -8350,7 +9864,10 @@ class StrategyRunner:
                 return int(value)
         except (TypeError, ValueError):
             pass
-        for source in (getattr(self, "_data_hub", None), getattr(self, "_market_data", None)):
+        for source in (
+            getattr(self, "_data_hub", None),
+            getattr(self, "_market_data", None),
+        ):
             fn = getattr(source, "quote_update_version", None)
             if not callable(fn):
                 continue
@@ -8375,10 +9892,23 @@ class StrategyRunner:
         cfg = getattr(self, "_config", StrategyRunnerConfig())
         symbol_norm = normalize_symbol(symbol)
         now_mono = time.monotonic()
-        current_bar_key = bar_key if bar_key is not None else self._current_eval_bar_key(symbol_norm, tick)
-        last_bar_key = (getattr(self, "_last_eval_bar_key_by_symbol", {}) or {}).get(symbol_norm)
-        last_eval_at = float((getattr(self, "_last_periodic_eval_at_by_symbol", {}) or {}).get(symbol_norm, 0.0) or 0.0)
-        interval = max(float(getattr(cfg, "same_bar_periodic_eval_seconds", 5.0) or 5.0), 3.0)
+        current_bar_key = (
+            bar_key
+            if bar_key is not None
+            else self._current_eval_bar_key(symbol_norm, tick)
+        )
+        last_bar_key = (getattr(self, "_last_eval_bar_key_by_symbol", {}) or {}).get(
+            symbol_norm
+        )
+        last_eval_at = float(
+            (getattr(self, "_last_periodic_eval_at_by_symbol", {}) or {}).get(
+                symbol_norm, 0.0
+            )
+            or 0.0
+        )
+        interval = max(
+            float(getattr(cfg, "same_bar_periodic_eval_seconds", 5.0) or 5.0), 3.0
+        )
         env_min_ms = parse_float_env(os.getenv("RUNNER_EVAL_MIN_INTERVAL_MS"), 0.0)
         if env_min_ms > 0:
             interval = max(interval, env_min_ms / 1000.0)
@@ -8388,11 +9918,18 @@ class StrategyRunner:
             "same_bar_elapsed_s": round(elapsed, 3) if elapsed is not None else None,
             "same_bar_interval_s": interval,
             "pregate_reason": "ok",
-            "eval_throttle_elapsed_s": round(elapsed, 3) if elapsed is not None else None,
+            "eval_throttle_elapsed_s": (
+                round(elapsed, 3) if elapsed is not None else None
+            ),
             "quote_update_version": self._quote_update_version_for_eval(symbol_norm),
             "data_phase": (getattr(self, "_data_phase", {}) or {}).get(symbol_norm),
         }
-        if last_bar_key == current_bar_key and last_eval_at > 0 and elapsed is not None and elapsed < interval:
+        if (
+            last_bar_key == current_bar_key
+            and last_eval_at > 0
+            and elapsed is not None
+            and elapsed < interval
+        ):
             details["pregate_reason"] = "same_bar_periodic_eval_throttled"
             self._bump_cpu_metric("skipped_by_eval_throttle")
             return True, "same_bar_periodic_eval_throttled", details
@@ -8407,7 +9944,11 @@ class StrategyRunner:
         # to MAX_LIVE_OPTION_SYMBOLS. Far context strikes still stream data
         # (OI/IV context) but do not pay full strategy-evaluation cost.
         whitelist = getattr(self, "_eval_option_whitelist", None)
-        if whitelist and symbol_norm.endswith(("CE", "PE")) and symbol_norm not in whitelist:
+        if (
+            whitelist
+            and symbol_norm.endswith(("CE", "PE"))
+            and symbol_norm not in whitelist
+        ):
             details["pregate_reason"] = "eval_capped_far_strike"
             self._bump_cpu_metric("skipped_by_option_cap")
             return True, "eval_capped_far_strike", details
@@ -8454,7 +9995,9 @@ class StrategyRunner:
         open, and DIAGNOSTIC_FULL_UNIVERSE is not set — i.e. there is no
         reason to grow the option universe. Raises: none.
         """
-        if str(os.getenv("DIAGNOSTIC_FULL_UNIVERSE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}:
+        if str(
+            os.getenv("DIAGNOSTIC_FULL_UNIVERSE", "false") or "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}:
             return False
         try:
             if get_market_state() == MarketState.OPEN:
@@ -8501,11 +10044,21 @@ class StrategyRunner:
                 metrics.get("skipped_by_eval_throttle", 0),
                 metrics.get("skipped_by_option_cap", 0),
                 len(whitelist),
-                extra={"event": "CPU_OPTIMIZATION_SUMMARY", **{k: int(v) for k, v in metrics.items()}, "active_option_symbols_count": len(whitelist)},
+                extra={
+                    "event": "CPU_OPTIMIZATION_SUMMARY",
+                    **{k: int(v) for k, v in metrics.items()},
+                    "active_option_symbols_count": len(whitelist),
+                },
             )
             metrics.clear()
 
-    def _mark_symbol_eval_allowed(self, symbol: str, *, bar_key: Any | None = None, tick: Mapping[str, Any] | None = None) -> None:
+    def _mark_symbol_eval_allowed(
+        self,
+        symbol: str,
+        *,
+        bar_key: Any | None = None,
+        tick: Mapping[str, Any] | None = None,
+    ) -> None:
         """Record a permitted strategy evaluation for future same-bar throttling."""
         symbol_norm = normalize_symbol(symbol)
         if not hasattr(self, "_last_periodic_eval_at_by_symbol"):
@@ -8513,15 +10066,23 @@ class StrategyRunner:
         if not hasattr(self, "_last_eval_bar_key_by_symbol"):
             self._last_eval_bar_key_by_symbol = {}
         self._last_periodic_eval_at_by_symbol[symbol_norm] = time.monotonic()
-        self._last_eval_bar_key_by_symbol[symbol_norm] = bar_key if bar_key is not None else self._current_eval_bar_key(symbol_norm, tick)
+        self._last_eval_bar_key_by_symbol[symbol_norm] = (
+            bar_key
+            if bar_key is not None
+            else self._current_eval_bar_key(symbol_norm, tick)
+        )
 
-    def _log_eval_pregate_skip(self, symbol: str, reason: str, details: Mapping[str, Any]) -> None:
+    def _log_eval_pregate_skip(
+        self, symbol: str, reason: str, details: Mapping[str, Any]
+    ) -> None:
         """Emit throttled structured same-bar pregate skip diagnostics."""
         if not hasattr(self, "_last_pregate_log_at_by_symbol_reason"):
             self._last_pregate_log_at_by_symbol_reason = {}
         key = (normalize_symbol(symbol), reason)
         now_mono = time.monotonic()
-        interval = float(os.getenv("RUNNER_EVAL_PREGATE_SKIP_LOG_SECONDS", "30") or "30")
+        interval = float(
+            os.getenv("RUNNER_EVAL_PREGATE_SKIP_LOG_SECONDS", "30") or "30"
+        )
         last = float(self._last_pregate_log_at_by_symbol_reason.get(key, 0.0) or 0.0)
         if last and now_mono - last < interval:
             return
@@ -8556,7 +10117,9 @@ class StrategyRunner:
                 pass
             except Exception:
                 return {}
-        tick = getattr(self, "_last_tick", {}).get(symbol_norm) or getattr(self, "_last_tick", {}).get(symbol)
+        tick = getattr(self, "_last_tick", {}).get(symbol_norm) or getattr(
+            self, "_last_tick", {}
+        ).get(symbol)
         if isinstance(tick, dict):
             return dict(tick)
         mdm = getattr(self, "_market_data", None)
@@ -8571,11 +10134,15 @@ class StrategyRunner:
                     return {}
         return {}
 
-    def _is_option_symbol_tick_fresh(self, symbol: str, *, max_age_s: float | None = None) -> bool:
+    def _is_option_symbol_tick_fresh(
+        self, symbol: str, *, max_age_s: float | None = None
+    ) -> bool:
         """Freshness guard for selected option soft-pass and live execution readiness."""
         if not self._is_tradable_symbol(symbol):
             return False
-        limit = float(max_age_s or os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0)
+        limit = float(
+            max_age_s or os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0
+        )
         quote = self._get_cached_quote_for_live_entry(symbol)
         if isinstance(quote, Mapping):
             age_ms = resolve_tick_age_ms(quote)
@@ -8597,7 +10164,9 @@ class StrategyRunner:
     def _is_context_symbol(self, symbol: str) -> bool:
         """Return True when symbol is a context-only spot/futures instrument. Args: symbol. Returns: bool. Raises: none."""
         value = str(symbol or "").upper()
-        return value == "NSE:NIFTY" or (value.startswith("NFO:NIFTY") and value.endswith("FUT"))
+        return value == "NSE:NIFTY" or (
+            value.startswith("NFO:NIFTY") and value.endswith("FUT")
+        )
 
     def _is_context_symbol_suspended(self, symbol: str) -> bool:
         until = self._suspended_context_symbol_until.get(symbol)
@@ -8606,7 +10175,14 @@ class StrategyRunner:
         if time.monotonic() >= until:
             self._suspended_context_symbol_until.pop(symbol, None)
             self._suspended_context_symbols.discard(symbol)
-            self._logger.info("CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED symbol=%s", symbol, extra={"event": "CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED", "symbol": symbol})
+            self._logger.info(
+                "CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED symbol=%s",
+                symbol,
+                extra={
+                    "event": "CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED",
+                    "symbol": symbol,
+                },
+            )
             return False
         return True
 
@@ -8618,7 +10194,9 @@ class StrategyRunner:
             return "PE"
         return None
 
-    def _order_manager_kill_switch_status_for_entry(self) -> tuple[bool, dict[str, Any]]:
+    def _order_manager_kill_switch_status_for_entry(
+        self,
+    ) -> tuple[bool, dict[str, Any]]:
         om = getattr(self, "_order_manager", None)
         if om is None:
             return False, {}
@@ -8630,10 +10208,16 @@ class StrategyRunner:
             status["active"] = active
             return active, status
         except Exception as exc:
-            return True, {"active": True, "kill_reason": "kill_switch_status_check_failed", "last_exception_type": type(exc).__name__, "last_exception_message": str(exc)}
+            return True, {
+                "active": True,
+                "kill_reason": "kill_switch_status_check_failed",
+                "last_exception_type": type(exc).__name__,
+                "last_exception_message": str(exc),
+            }
 
-
-    def _resolve_order_manager_health_for_entry(self) -> tuple[bool, str, dict[str, Any]]:
+    def _resolve_order_manager_health_for_entry(
+        self,
+    ) -> tuple[bool, str, dict[str, Any]]:
         """Resolve broker/order-manager health for live entry without blocking on unknown health APIs."""
         om = getattr(self, "_order_manager", None)
         details: dict[str, Any] = {
@@ -8669,7 +10253,10 @@ class StrategyRunner:
         else:
             details["order_manager_live_mode_unknown"] = True
         details["order_manager_live_mode"] = live_mode
-        if live_mode_check_failed and str(os.getenv("EXECUTION_MODE", "")).strip().upper() == "LIVE":
+        if (
+            live_mode_check_failed
+            and str(os.getenv("EXECUTION_MODE", "")).strip().upper() == "LIVE"
+        ):
             details["broker_health_block_reason"] = "order_manager_not_live"
             return False, "order_manager_not_live", details
         if live_mode is False:
@@ -8722,17 +10309,29 @@ class StrategyRunner:
         effect = health.get("trading_allowed_effect") or health.get("effect")
         details["broker_health_effect"] = effect
         details["broker_health_ready"] = health.get("ready")
-        details["broker_order_api_ready"] = health.get("order_api_ready", health.get("order_api_available"))
+        details["broker_order_api_ready"] = health.get(
+            "order_api_ready", health.get("order_api_available")
+        )
         details["broker_connected"] = health.get("broker_connected")
-        details["last_broker_error"] = health.get("last_broker_error") or health.get("last_margin_error")
-        details["last_order_error"] = health.get("last_order_error") or health.get("last_order_api_error")
-        details["last_order_error_type"] = health.get("last_order_error_type") or health.get("last_order_api_error_type")
+        details["last_broker_error"] = health.get("last_broker_error") or health.get(
+            "last_margin_error"
+        )
+        details["last_order_error"] = health.get("last_order_error") or health.get(
+            "last_order_api_error"
+        )
+        details["last_order_error_type"] = health.get(
+            "last_order_error_type"
+        ) or health.get("last_order_api_error_type")
         if effect == "live_orders_blocked":
             block_class = health.get("block_class") or "broker_health_unknown"
-            details["broker_health_block_reason"] = "trading_allowed_effect_live_orders_blocked"
+            details["broker_health_block_reason"] = (
+                "trading_allowed_effect_live_orders_blocked"
+            )
             details["broker_health_block_class"] = block_class
             details["balance_stale"] = health.get("balance_stale")
-            details["last_margin_success_age_s"] = health.get("last_margin_success_age_s")
+            details["last_margin_success_age_s"] = health.get(
+                "last_margin_success_age_s"
+            )
             details["margin_api_available"] = health.get("margin_api_available")
             details["order_api_available"] = health.get("order_api_available")
             details["available_balance"] = health.get("available_balance")
@@ -8747,7 +10346,11 @@ class StrategyRunner:
                 health.get("last_margin_success_age_s"),
                 details.get("last_broker_error"),
                 details.get("last_order_error"),
-                extra={"event": "BROKER_HEALTH_LIVE_ORDERS_BLOCKED", "block_class": block_class, "health": health},
+                extra={
+                    "event": "BROKER_HEALTH_LIVE_ORDERS_BLOCKED",
+                    "block_class": block_class,
+                    "health": health,
+                },
             )
             return False, "broker_health_live_orders_blocked", details
         for key, reason in (
@@ -8763,7 +10366,14 @@ class StrategyRunner:
         details["broker_ready_assumed"] = False
         return True, "broker_health_ready", details
 
-    def _strategy_decision_is_current(self, decision: Any, *, symbol: str, trace_id: str | None, max_age_s: float = 3.0) -> bool:
+    def _strategy_decision_is_current(
+        self,
+        decision: Any,
+        *,
+        symbol: str,
+        trace_id: str | None,
+        max_age_s: float = 3.0,
+    ) -> bool:
         if decision is None:
             return False
         if str(getattr(decision, "symbol", "")).upper() != str(symbol).upper():
@@ -8780,7 +10390,9 @@ class StrategyRunner:
                 return False
         return True
 
-    def _update_symbol_execution_phase(self, symbol: str, new_phase: str, reason: str) -> None:
+    def _update_symbol_execution_phase(
+        self, symbol: str, new_phase: str, reason: str
+    ) -> None:
         old_phase = self._symbol_execution_phase.get(symbol)
         if old_phase == new_phase:
             return
@@ -8810,8 +10422,12 @@ class StrategyRunner:
     ) -> tuple[bool, str, dict[str, Any]]:
         """Return executable-candidate eligibility for selected or near-ATM active-basket options."""
         symbol_norm = normalize_symbol(symbol)
-        selected_ce = normalize_symbol(str(getattr(self, "_active_selected_ce", "") or ""))
-        selected_pe = normalize_symbol(str(getattr(self, "_active_selected_pe", "") or ""))
+        selected_ce = normalize_symbol(
+            str(getattr(self, "_active_selected_ce", "") or "")
+        )
+        selected_pe = normalize_symbol(
+            str(getattr(self, "_active_selected_pe", "") or "")
+        )
         selected_set = {item for item in (selected_ce, selected_pe) if item}
         is_selected_option = symbol_norm in selected_set
         active_option_symbols = {
@@ -8825,22 +10441,32 @@ class StrategyRunner:
             if item
         }
         token_symbols = set(getattr(self, "_active_basket_token_by_symbol", {}) or {})
-        in_active_basket = symbol_norm in active_option_symbols or symbol_norm in all_symbols or symbol_norm in token_symbols
+        in_active_basket = (
+            symbol_norm in active_option_symbols
+            or symbol_norm in all_symbols
+            or symbol_norm in token_symbols
+        )
         candidate_strike = self._extract_strike_from_symbol(symbol_norm)
         active_atm = getattr(self, "_active_atm_strike", None)
         try:
-            atm_strike = int(float(active_atm)) if active_atm not in (None, "") else None
+            atm_strike = (
+                int(float(active_atm)) if active_atm not in (None, "") else None
+            )
         except (TypeError, ValueError):
             atm_strike = None
         max_allowed_distance = safe_positive_float_env(
             "LIVE_ENTRY_MAX_NEAR_ATM_DISTANCE",
-            safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 100.0, minimum=0.0),
+            safe_positive_float_env(
+                "STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 100.0, minimum=0.0
+            ),
             minimum=0.0,
         )
         strike_distance = None
         if candidate_strike is not None and atm_strike is not None:
             strike_distance = abs(float(candidate_strike) - float(atm_strike))
-        near_atm = strike_distance is not None and strike_distance <= max_allowed_distance
+        near_atm = (
+            strike_distance is not None and strike_distance <= max_allowed_distance
+        )
         contract_side = self._contract_side_from_symbol(symbol_norm)
         bias = str(direction_bias or "").upper()
         details: dict[str, Any] = {
@@ -8863,7 +10489,11 @@ class StrategyRunner:
             "direction_bias": bias,
             "strike_step": 50,
         }
-        if bias in {"CE", "PE"} and contract_side in {"CE", "PE"} and bias != contract_side:
+        if (
+            bias in {"CE", "PE"}
+            and contract_side in {"CE", "PE"}
+            and bias != contract_side
+        ):
             return False, "context_direction_conflict", details
         if is_selected_option:
             details["eligibility_source"] = "selected_option"
@@ -8883,7 +10513,9 @@ class StrategyRunner:
         details["eligibility_source"] = "outside_near_atm_window"
         return False, "candidate_not_selected_or_near_atm", details
 
-    def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
+    def _symbol_live_entry_ready(
+        self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None
+    ) -> tuple[bool, str, dict[str, Any]]:
         def _resolve_live_entry_atm_reference(context: Mapping[str, Any]) -> int | None:
             active = getattr(self, "_active_atm_strike", None)
             if active:
@@ -8891,7 +10523,14 @@ class StrategyRunner:
                     return int(active)
                 except (TypeError, ValueError):
                     pass
-            for key in ("atm_strike", "active_atm_strike", "spot_price", "underlying_ltp", "futures_ltp", "last_price"):
+            for key in (
+                "atm_strike",
+                "active_atm_strike",
+                "spot_price",
+                "underlying_ltp",
+                "futures_ltp",
+                "last_price",
+            ):
                 value = context.get(key)
                 try:
                     px = float(value)
@@ -8921,9 +10560,27 @@ class StrategyRunner:
             )
             if pending or not snapshots:
                 return False
-            selected_ce = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("CE")), None)
-            selected_pe = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("PE")), None)
-            option_symbols = [normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if s.get("symbol")]
+            selected_ce = next(
+                (
+                    normalize_symbol(str(s.get("symbol") or ""))
+                    for s in snapshots
+                    if str(s.get("symbol") or "").upper().endswith("CE")
+                ),
+                None,
+            )
+            selected_pe = next(
+                (
+                    normalize_symbol(str(s.get("symbol") or ""))
+                    for s in snapshots
+                    if str(s.get("symbol") or "").upper().endswith("PE")
+                ),
+                None,
+            )
+            option_symbols = [
+                normalize_symbol(str(s.get("symbol") or ""))
+                for s in snapshots
+                if s.get("symbol")
+            ]
             token_updates: dict[str, int] = {}
             for snap in snapshots:
                 snap_symbol = normalize_symbol(str(snap.get("symbol") or ""))
@@ -8941,16 +10598,26 @@ class StrategyRunner:
                 option_symbols=option_symbols,
             )
             if token_updates:
-                existing_tokens = getattr(self, "_active_basket_token_by_symbol", {}) or {}
+                existing_tokens = (
+                    getattr(self, "_active_basket_token_by_symbol", {}) or {}
+                )
                 if isinstance(existing_tokens, Mapping):
-                    merged_tokens = {normalize_symbol(str(k)): int(v) for k, v in dict(existing_tokens).items() if k and v not in (None, "")}
+                    merged_tokens = {
+                        normalize_symbol(str(k)): int(v)
+                        for k, v in dict(existing_tokens).items()
+                        if k and v not in (None, "")
+                    }
                     merged_tokens.update(token_updates)
                     self._active_basket_token_by_symbol = merged_tokens
             return bool(option_symbols)
 
         symbol_norm = normalize_symbol(symbol)
         runtime_indicators = getattr(self, "_runtime_indicators", {}) or {}
-        ctx = runtime_indicators.get(symbol, {}) or runtime_indicators.get(symbol_norm, {}) or {}
+        ctx = (
+            runtime_indicators.get(symbol, {})
+            or runtime_indicators.get(symbol_norm, {})
+            or {}
+        )
         mode_snapshot = self._resolve_execution_mode_snapshot()
         ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
         quote = self._get_cached_quote_for_live_entry(symbol_norm)
@@ -8986,7 +10653,9 @@ class StrategyRunner:
         selected_pe_norm = normalize_symbol(str(self._active_selected_pe or ""))
         is_selected_symbol = symbol_norm in {selected_ce_norm, selected_pe_norm}
         candidate_bid_ask_ready = bool(tradable_quote)
-        signal_metadata = dict(getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+        signal_metadata = (
+            dict(getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+        )
         details: dict[str, Any] = {
             "symbol": symbol,
             "trace_id": trace_id,
@@ -8995,9 +10664,15 @@ class StrategyRunner:
             "enable_live_trading": bool(mode_snapshot.env_live_enabled),
             "paper_mode": bool(mode_snapshot.paper_enabled),
             "shadow_mode": bool(mode_snapshot.shadow_mode_enabled),
-            "broker_ready": bool(broker_health_details.get("broker_ready", True) and not ks_active),
-            "broker_health_available": bool(broker_health_details.get("broker_health_available", False)),
-            "broker_ready_assumed": bool(broker_health_details.get("broker_ready_assumed", True)),
+            "broker_ready": bool(
+                broker_health_details.get("broker_ready", True) and not ks_active
+            ),
+            "broker_health_available": bool(
+                broker_health_details.get("broker_health_available", False)
+            ),
+            "broker_ready_assumed": bool(
+                broker_health_details.get("broker_ready_assumed", True)
+            ),
             "risk_ready": bool(not risk_kill_switch),
             "data_hard_ready": bool(self._runtime_data_hard_ready),
             "kill_switch": bool(ks_active or risk_kill_switch),
@@ -9007,7 +10682,9 @@ class StrategyRunner:
             "selected_symbol": symbol_norm if is_selected_symbol else None,
             "is_selected_symbol": is_selected_symbol,
             "candidate_bid_ask_ready": candidate_bid_ask_ready,
-            "selected_option_bid_ask_ready": bool(is_selected_symbol and tradable_quote),
+            "selected_option_bid_ask_ready": bool(
+                is_selected_symbol and tradable_quote
+            ),
             "combined_signal_present": signal is not None,
             "approval_path": signal_metadata.get("approval_path"),
             "final_ready": False,
@@ -9016,12 +10693,20 @@ class StrategyRunner:
             "runtime_evaluation_ready": bool(self._runtime_evaluation_ready),
             "order_manager_live": mode_snapshot.order_manager_live,
             "order_manager_present": broker_health_details.get("order_manager_present"),
-            "order_manager_live_mode": broker_health_details.get("order_manager_live_mode"),
-            "order_manager_live_mode_unknown": broker_health_details.get("order_manager_live_mode_unknown"),
-            "order_manager_kill_switch_active": broker_health_details.get("order_manager_kill_switch_active"),
+            "order_manager_live_mode": broker_health_details.get(
+                "order_manager_live_mode"
+            ),
+            "order_manager_live_mode_unknown": broker_health_details.get(
+                "order_manager_live_mode_unknown"
+            ),
+            "order_manager_kill_switch_active": broker_health_details.get(
+                "order_manager_kill_switch_active"
+            ),
             "is_live_mode": mode_snapshot.is_live_mode,
             "broker_health_effect": broker_health_details.get("broker_health_effect"),
-            "broker_health_block_reason": broker_health_details.get("broker_health_block_reason"),
+            "broker_health_block_reason": broker_health_details.get(
+                "broker_health_block_reason"
+            ),
             "last_broker_error": broker_health_details.get("last_broker_error"),
             "last_order_error": broker_health_details.get("last_order_error"),
             "candidate_quote_ready": bool(tradable_quote),
@@ -9045,7 +10730,14 @@ class StrategyRunner:
                 bool(final_ready),
                 reason,
                 trace_id,
-                extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": bool(final_ready), "reason": reason, "trace_id": trace_id, **details},
+                extra={
+                    "event": "SYMBOL_LIVE_ENTRY_READY_CHECK",
+                    "symbol": symbol,
+                    "final_ready": bool(final_ready),
+                    "reason": reason,
+                    "trace_id": trace_id,
+                    **details,
+                },
             )
             return final_ready, reason, details
 
@@ -9058,7 +10750,9 @@ class StrategyRunner:
                 "eval_not_ready",
                 "not_live_mode",
             )
-            if (not mode_snapshot.is_live_mode) or any(item in hard_runtime_reason for item in runtime_hard_blockers):
+            if (not mode_snapshot.is_live_mode) or any(
+                item in hard_runtime_reason for item in runtime_hard_blockers
+            ):
                 return _finish(False, "execution_not_armed")
             details["global_live_orders_armed"] = False
             details["candidate_specific_readiness_override"] = True
@@ -9067,11 +10761,17 @@ class StrategyRunner:
         if ks_active:
             return _finish(False, "order_manager_kill_switch_active")
         contract_side = self._contract_side_from_symbol(symbol)
-        direction_bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
+        direction_bias = str(
+            ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or ""
+        ).upper()
         details["contract_side"] = contract_side
         details["direction_bias"] = direction_bias
         details["underlying_direction_bias"] = ctx.get("underlying_direction_bias")
-        if direction_bias in {"CE", "PE"} and contract_side in {"CE", "PE"} and direction_bias != contract_side:
+        if (
+            direction_bias in {"CE", "PE"}
+            and contract_side in {"CE", "PE"}
+            and direction_bias != contract_side
+        ):
             # A stale directional bias must not hard-block an entry when the
             # OrderFlow signal already cleared its own (microstructure-aware) gate.
             # OrderFlow sets trigger_conditions_met=True only after confirming the
@@ -9081,10 +10781,21 @@ class StrategyRunner:
                 meta.get("trigger_conditions_met")
                 or meta.get("bias_invalidated_by_microstructure")
             )
-            frozen_bias = str(meta.get("frozen_direction_bias") or meta.get("frozen_underlying_direction_bias") or "").upper()
-            signal_age_s = _extract_float(meta, "signal_age_seconds", "frozen_context_age_seconds")
-            max_signal_age_s = safe_positive_float_env("SIGNAL_MAX_EXECUTION_AGE_SECONDS", 5.0, minimum=0.1)
-            frozen_context_fresh = bool(frozen_bias == contract_side and (signal_age_s is None or signal_age_s <= max_signal_age_s))
+            frozen_bias = str(
+                meta.get("frozen_direction_bias")
+                or meta.get("frozen_underlying_direction_bias")
+                or ""
+            ).upper()
+            signal_age_s = _extract_float(
+                meta, "signal_age_seconds", "frozen_context_age_seconds"
+            )
+            max_signal_age_s = safe_positive_float_env(
+                "SIGNAL_MAX_EXECUTION_AGE_SECONDS", 5.0, minimum=0.1
+            )
+            frozen_context_fresh = bool(
+                frozen_bias == contract_side
+                and (signal_age_s is None or signal_age_s <= max_signal_age_s)
+            )
             if frozen_context_fresh:
                 details["frozen_direction_bias"] = frozen_bias
                 details["context_direction_conflict_overridden"] = True
@@ -9093,13 +10804,21 @@ class StrategyRunner:
                     direction_bias,
                     frozen_bias,
                     symbol_norm,
-                    extra={"event": "FROZEN_DIRECTION_CONTEXT_USED", "symbol": symbol_norm, "current_bias": direction_bias, "frozen_bias": frozen_bias},
+                    extra={
+                        "event": "FROZEN_DIRECTION_CONTEXT_USED",
+                        "symbol": symbol_norm,
+                        "current_bias": direction_bias,
+                        "frozen_bias": frozen_bias,
+                    },
                 )
             elif not orderflow_confirmed:
                 return _finish(False, "context_direction_conflict")
             else:
                 details["context_direction_conflict_overridden"] = True
-        required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
+        required_bars = max(
+            self._required_bars_for_symbol(symbol),
+            safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1),
+        )
         history_count = len(self._indicator_engine.get_history(symbol) or [])
         details["history_count"] = history_count
         details["required_bars"] = required_bars
@@ -9110,14 +10829,18 @@ class StrategyRunner:
         details["quote_fresh"] = quote_fresh
         if not quote_fresh:
             return _finish(False, "option_tick_stale")
-        max_context_age = safe_positive_float_env("MAX_CONTEXT_AGE_SECONDS", 5.0, minimum=0.1)
+        max_context_age = safe_positive_float_env(
+            "MAX_CONTEXT_AGE_SECONDS", 5.0, minimum=0.1
+        )
         ctx_age = _extract_float(ctx, "context_age_seconds")
         details["context_age_seconds"] = ctx_age
         if ctx_age is not None and ctx_age > max_context_age:
             return _finish(False, "context_stale")
-        eligible, eligibility_reason, eligibility_details = self._live_entry_candidate_eligibility(
-            symbol_norm,
-            direction_bias=direction_bias,
+        eligible, eligibility_reason, eligibility_details = (
+            self._live_entry_candidate_eligibility(
+                symbol_norm,
+                direction_bias=direction_bias,
+            )
         )
         details.update(eligibility_details)
         # Issue D: freeze direction context at signal generation. If eligibility
@@ -9135,7 +10858,13 @@ class StrategyRunner:
             ).upper()
             contract_side = self._contract_side_from_symbol(symbol_norm)
             context_fresh = ctx_age is None or ctx_age <= max_context_age
-            if frozen_bias and contract_side and frozen_bias == contract_side and context_fresh and quote_fresh:
+            if (
+                frozen_bias
+                and contract_side
+                and frozen_bias == contract_side
+                and context_fresh
+                and quote_fresh
+            ):
                 eligible = True
                 eligibility_reason = "frozen_direction_context_honored"
                 details["frozen_direction_bias"] = frozen_bias
@@ -9153,14 +10882,30 @@ class StrategyRunner:
                         "contract_side": contract_side,
                     },
                 )
-        if not eligible and eligibility_reason in {"candidate_not_selected_or_near_atm", "candidate_distance_unknown", "candidate_not_in_active_basket"}:
-            metadata = (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+        if not eligible and eligibility_reason in {
+            "candidate_not_selected_or_near_atm",
+            "candidate_distance_unknown",
+            "candidate_not_in_active_basket",
+        }:
+            metadata = (
+                (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+            )
             trigger_evidence = bool(
                 metadata.get("trigger_conditions_met")
                 or metadata.get("trigger_eligible")
-                or (str(metadata.get("strategy") or getattr(signal, "reason", "")).upper() == "ORDERFLOW" and float(metadata.get("strategy_score") or 0.0) >= 5.0)
+                or (
+                    str(
+                        metadata.get("strategy") or getattr(signal, "reason", "")
+                    ).upper()
+                    == "ORDERFLOW"
+                    and float(metadata.get("strategy_score") or 0.0) >= 5.0
+                )
             )
-            if trigger_evidence and quote_fresh and (ctx_age is None or ctx_age <= max_context_age):
+            if (
+                trigger_evidence
+                and quote_fresh
+                and (ctx_age is None or ctx_age <= max_context_age)
+            ):
                 atm_reference = _resolve_live_entry_atm_reference(ctx)
                 refreshed = _refresh_selected_candidates_for_symbol(
                     symbol_norm,
@@ -9169,9 +10914,11 @@ class StrategyRunner:
                 details["candidate_refresh_attempted"] = True
                 details["candidate_refresh_succeeded"] = refreshed
                 if refreshed:
-                    eligible, eligibility_reason, eligibility_details = self._live_entry_candidate_eligibility(
-                        symbol_norm,
-                        direction_bias=direction_bias,
+                    eligible, eligibility_reason, eligibility_details = (
+                        self._live_entry_candidate_eligibility(
+                            symbol_norm,
+                            direction_bias=direction_bias,
+                        )
                     )
                     details.update(eligibility_details)
         if not eligible:
@@ -9185,7 +10932,11 @@ class StrategyRunner:
                     details.get("max_allowed_distance"),
                     details.get("in_active_basket"),
                     details.get("is_selected_option"),
-                    extra={"event": "LIVE_ENTRY_CANDIDATE_REJECTED", "reason": eligibility_reason, **details},
+                    extra={
+                        "event": "LIVE_ENTRY_CANDIDATE_REJECTED",
+                        "reason": eligibility_reason,
+                        **details,
+                    },
                 )
             else:
                 self._logger.info(
@@ -9193,13 +10944,24 @@ class StrategyRunner:
                     symbol,
                     False,
                     eligibility_reason,
-                    extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": eligibility_reason, **details},
+                    extra={
+                        "event": "CANDIDATE_GATE_CHECK",
+                        "final_ready": False,
+                        "block_reason": eligibility_reason,
+                        **details,
+                    },
                 )
             return _finish(False, eligibility_reason)
 
         token_map_raw = getattr(self, "_active_basket_token_by_symbol", {}) or {}
-        token_map = {normalize_symbol(str(k)): v for k, v in dict(token_map_raw).items()} if isinstance(token_map_raw, Mapping) else {}
-        candidate_token = token_map.get(symbol_norm) or token_map.get(symbol_norm.split(":", 1)[-1])
+        token_map = (
+            {normalize_symbol(str(k)): v for k, v in dict(token_map_raw).items()}
+            if isinstance(token_map_raw, Mapping)
+            else {}
+        )
+        candidate_token = token_map.get(symbol_norm) or token_map.get(
+            symbol_norm.split(":", 1)[-1]
+        )
         try:
             candidate_token_valid = int(candidate_token or 0) > 0
         except (TypeError, ValueError):
@@ -9250,12 +11012,16 @@ class StrategyRunner:
         details["ask"] = ask
         details["bid_ask_source"] = bid_ask_source
         details["candidate_bid_ask_ready"] = bool(tradable_quote)
-        details["selected_option_bid_ask_ready"] = bool(is_selected_symbol and tradable_quote)
+        details["selected_option_bid_ask_ready"] = bool(
+            is_selected_symbol and tradable_quote
+        )
         if not tradable_quote:
             return _finish(False, "quote_not_tradable")
         if _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False) and not depth_available:
             return _finish(False, "quote_depth_unavailable")
-        max_spread_pct = safe_positive_float_env("LIVE_MAX_SPREAD_PCT", 0.75, minimum=0.01)
+        max_spread_pct = safe_positive_float_env(
+            "LIVE_MAX_SPREAD_PCT", 0.75, minimum=0.01
+        )
         require_spread = _env_bool("LIVE_REQUIRE_SPREAD_PCT", True)
         if require_spread and spread_pct is None:
             # bid/ask were resolved but spread couldn't be derived — report precise reason
@@ -9266,15 +11032,30 @@ class StrategyRunner:
             return _finish(False, "spread_unknown")
         if spread_pct is not None and spread_pct > max_spread_pct:
             return _finish(False, "spread_too_wide")
-        broker_health_allowed, broker_health_reason, broker_health_details = self._resolve_order_manager_health_for_entry()
+        broker_health_allowed, broker_health_reason, broker_health_details = (
+            self._resolve_order_manager_health_for_entry()
+        )
         details.update(broker_health_details)
         details["broker_ready"] = bool(broker_health_details.get("broker_ready", False))
-        details["broker_ready_assumed"] = bool(broker_health_details.get("broker_ready_assumed", False))
+        details["broker_ready_assumed"] = bool(
+            broker_health_details.get("broker_ready_assumed", False)
+        )
         if not broker_health_allowed:
             return _finish(False, broker_health_reason)
         details["broker_health_reason"] = broker_health_reason
         details["final_ready"] = True
-        self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, True, "ok", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": True, "block_reason": "ok", **details})
+        self._logger.info(
+            "CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s",
+            symbol,
+            True,
+            "ok",
+            extra={
+                "event": "CANDIDATE_GATE_CHECK",
+                "final_ready": True,
+                "block_reason": "ok",
+                **details,
+            },
+        )
         return _finish(True, "symbol_live_ready")
 
     def _classify_no_trade_decision(
@@ -9293,45 +11074,71 @@ class StrategyRunner:
         if option_count < option_required:
             return "data_history_cold", "insufficient_indicator_bar_count"
         if signal is None:
-            latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
+            latest_decision_getter = getattr(
+                self._strategy_manager, "get_last_no_signal_decision", None
+            )
             if callable(latest_decision_getter):
                 decision = latest_decision_getter(symbol)
-                if self._strategy_decision_is_current(decision, symbol=symbol, trace_id=trace_id):
-                    return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
-        conflict = bool(indicators_ctx.get("direction_conflict") or indicators_ctx.get("underlying_direction_conflict"))
+                if self._strategy_decision_is_current(
+                    decision, symbol=symbol, trace_id=trace_id
+                ):
+                    return str(
+                        getattr(decision, "category", "strategy_no_trigger")
+                    ), str(getattr(decision, "reason", "strategy_no_trigger"))
+        conflict = bool(
+            indicators_ctx.get("direction_conflict")
+            or indicators_ctx.get("underlying_direction_conflict")
+        )
         if conflict:
             self._logger.info(
                 "UNDERLYING_DIRECTION_CONFLICT symbol=%s resolved_bias=%s candidate_side=%s spot_direction_bias=%s futures_direction_bias=%s confidence=%s conflict_source=%s",
                 symbol,
-                indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias"),
+                indicators_ctx.get("underlying_direction_bias")
+                or indicators_ctx.get("direction_bias"),
                 self._contract_side_from_symbol(symbol),
                 indicators_ctx.get("spot_direction_bias"),
                 indicators_ctx.get("futures_direction_bias"),
                 indicators_ctx.get("underlying_direction_confidence"),
-                "underlying_direction_conflict" if indicators_ctx.get("underlying_direction_conflict") else "direction_conflict",
+                (
+                    "underlying_direction_conflict"
+                    if indicators_ctx.get("underlying_direction_conflict")
+                    else "direction_conflict"
+                ),
                 extra={"event": "UNDERLYING_DIRECTION_CONFLICT", "symbol": symbol},
             )
             return "context_direction_conflict", "underlying_direction_conflict"
-        direction_bias = indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias")
+        direction_bias = indicators_ctx.get(
+            "underlying_direction_bias"
+        ) or indicators_ctx.get("direction_bias")
         if not direction_bias:
-            reason_detail, direction_reason_flags = self._direction_context_missing_reason(indicators_ctx)
+            reason_detail, direction_reason_flags = (
+                self._direction_context_missing_reason(indicators_ctx)
+            )
             self._logger.info(
                 "CONTEXT_DIRECTION_UNAVAILABLE symbol=%s reason_detail=%s diagnostics=%s",
                 symbol,
                 reason_detail,
                 direction_reason_flags,
-                extra={"event": "CONTEXT_DIRECTION_UNAVAILABLE", "symbol": symbol, **direction_reason_flags},
+                extra={
+                    "event": "CONTEXT_DIRECTION_UNAVAILABLE",
+                    "symbol": symbol,
+                    **direction_reason_flags,
+                },
             )
             return "context_direction_unavailable", "direction_context_not_ready"
         if signal is None:
             return "strategy_no_trigger", "evaluation_no_signal"
         if not self._runtime_live_orders_armed:
-            return "execution_readiness_false", str(self._runtime_readiness_reason or "runtime_live_orders_not_armed")
+            return "execution_readiness_false", str(
+                self._runtime_readiness_reason or "runtime_live_orders_not_armed"
+            )
         return "strategy_no_trigger", "no_order_condition"
 
-
-    def _direction_context_missing_reason(self, indicators_ctx: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    def _direction_context_missing_reason(
+        self, indicators_ctx: Mapping[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
         """Return precise diagnostics for missing direction context without changing decisions."""
+
         def _safe_int(value: Any, default: int = 0) -> int:
             try:
                 return int(value)
@@ -9349,22 +11156,62 @@ class StrategyRunner:
             indicators_ctx.get("futures_bars")
             or indicators_ctx.get("futures_context_bar_count")
         )
-        spot_fresh = not bool(indicators_ctx.get("spot_stale") or indicators_ctx.get("stale_context") or indicators_ctx.get("context_stale"))
-        fut_fresh = not bool(indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale"))
-        spot_vwap = indicators_ctx.get("spot_vwap", indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")))
+        spot_fresh = not bool(
+            indicators_ctx.get("spot_stale")
+            or indicators_ctx.get("stale_context")
+            or indicators_ctx.get("context_stale")
+        )
+        fut_fresh = not bool(
+            indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
+        )
+        spot_vwap = indicators_ctx.get(
+            "spot_vwap",
+            indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")),
+        )
         futures_vwap = indicators_ctx.get("futures_vwap")
-        futures_vwap_slope = indicators_ctx.get("futures_vwap_slope", indicators_ctx.get("vwap_slope", indicators_ctx.get("underlying_vwap_slope")))
-        futures_volume_ratio = indicators_ctx.get("futures_volume_ratio", indicators_ctx.get("volume_ratio", indicators_ctx.get("underlying_volume_ratio")))
-        regime_available = bool(indicators_ctx.get("regime_snapshot") or indicators_ctx.get("regime") or indicators_ctx.get("market_regime"))
+        futures_vwap_slope = indicators_ctx.get(
+            "futures_vwap_slope",
+            indicators_ctx.get(
+                "vwap_slope", indicators_ctx.get("underlying_vwap_slope")
+            ),
+        )
+        futures_volume_ratio = indicators_ctx.get(
+            "futures_volume_ratio",
+            indicators_ctx.get(
+                "volume_ratio", indicators_ctx.get("underlying_volume_ratio")
+            ),
+        )
+        regime_available = bool(
+            indicators_ctx.get("regime_snapshot")
+            or indicators_ctx.get("regime")
+            or indicators_ctx.get("market_regime")
+        )
         required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
 
-        if not bool(spot_snapshot or indicators_ctx.get("spot_ltp") or indicators_ctx.get("spot_price")):
+        if not bool(
+            spot_snapshot
+            or indicators_ctx.get("spot_ltp")
+            or indicators_ctx.get("spot_price")
+        ):
             reason = "missing_spot_snapshot"
-        elif not bool(futures_snapshot or indicators_ctx.get("futures_ltp") or indicators_ctx.get("futures_price")):
+        elif not bool(
+            futures_snapshot
+            or indicators_ctx.get("futures_ltp")
+            or indicators_ctx.get("futures_price")
+        ):
             reason = "missing_futures_snapshot"
-        elif not spot_fresh or not fut_fresh or bool(indicators_ctx.get("stale_context") or indicators_ctx.get("context_stale")):
+        elif (
+            not spot_fresh
+            or not fut_fresh
+            or bool(
+                indicators_ctx.get("stale_context")
+                or indicators_ctx.get("context_stale")
+            )
+        ):
             reason = "stale_context"
-        elif bool(indicators_ctx.get("insufficient_context_bars")) or (required_bars > 0 and spot_bars < required_bars):
+        elif bool(indicators_ctx.get("insufficient_context_bars")) or (
+            required_bars > 0 and spot_bars < required_bars
+        ):
             reason = "insufficient_context_bars"
         elif spot_vwap is None and futures_vwap is None:
             reason = "missing_vwap"
@@ -9421,8 +11268,12 @@ class StrategyRunner:
             # Logs on every loop; throttle when the symbol+category+reason is
             # unchanged (logs immediately when the reason changes, so diagnostic
             # signal is kept while steady-state repeats are suppressed).
-            _ntd_interval = float(os.getenv("RUNNER_NO_TRADE_LOG_INTERVAL_SECONDS", "60") or "60")
-            if self._should_log_throttled(f"no_trade:{symbol}:{category}:{reason}", _ntd_interval):
+            _ntd_interval = float(
+                os.getenv("RUNNER_NO_TRADE_LOG_INTERVAL_SECONDS", "60") or "60"
+            )
+            if self._should_log_throttled(
+                f"no_trade:{symbol}:{category}:{reason}", _ntd_interval
+            ):
                 self._logger.info(
                     "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
                     symbol,
@@ -9438,12 +11289,22 @@ class StrategyRunner:
                         "data_phase": self._data_phase.get(symbol),
                         "option_history_count": int(option_history_count or 0),
                         "option_history_required": int(option_history_required or 0),
-                        "context_fresh": bool(ctx.get("spot_fresh") or ctx.get("futures_fresh")),
-                        "context_direction_valid": bool((ctx.get("direction_bias") or ctx.get("underlying_direction_bias"))),
-                        "direction_bias": ctx.get("underlying_direction_bias") or ctx.get("direction_bias"),
+                        "context_fresh": bool(
+                            ctx.get("spot_fresh") or ctx.get("futures_fresh")
+                        ),
+                        "context_direction_valid": bool(
+                            (
+                                ctx.get("direction_bias")
+                                or ctx.get("underlying_direction_bias")
+                            )
+                        ),
+                        "direction_bias": ctx.get("underlying_direction_bias")
+                        or ctx.get("direction_bias"),
                         "strategy_vote_count": 0,
                         "no_vote_reason_counts": {},
-                        "execution_readiness_allowed": bool(self._runtime_live_orders_armed),
+                        "execution_readiness_allowed": bool(
+                            self._runtime_live_orders_armed
+                        ),
                         "execution_readiness_reason": self._runtime_readiness_reason,
                         "broker_health_effect": None,
                         "margin_status": None,
@@ -9452,7 +11313,7 @@ class StrategyRunner:
                         "git_branch": self._build_info.get("git_branch"),
                         "deployment_id": self._build_info.get("deployment_id"),
                     },
-            )
+                )
         except Exception:
             return
 
@@ -9478,7 +11339,11 @@ class StrategyRunner:
 
     def _required_bars_for_symbol(self, symbol: str) -> int:
         """Return readiness bars by role. Args: symbol. Returns: int. Raises: none."""
-        return self._context_required_bars if self._is_context_symbol(symbol) else self._option_required_bars
+        return (
+            self._context_required_bars
+            if self._is_context_symbol(symbol)
+            else self._option_required_bars
+        )
 
     def _sync_indicator_history_if_needed(self, symbol: str) -> None:
         """Ensure indicator engine has runner bars for symbol. Args: symbol. Returns: none. Raises: none."""
@@ -9533,21 +11398,27 @@ class StrategyRunner:
                 )
                 self._emit_runner_eval_decision(
                     symbol=symbol,
-                    stage='phase9',
-                    reason='symbol_not_active',
+                    stage="phase9",
+                    reason="symbol_not_active",
                     allowed=False,
                     trace_id=trace_id,
                 )
                 return False
             required_bars = self._required_bars_for_symbol(symbol)
             if self._is_tradable_symbol(symbol):
-                option_execution_min_bars = safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1)
+                option_execution_min_bars = safe_positive_int_env(
+                    "OPTION_EXECUTION_MIN_BARS", 5, minimum=1
+                )
                 required_bars = max(required_bars, option_execution_min_bars)
                 # Context (spot/futures) sync must run independently of the option's
                 # own bar count — option eval depends on warm context. The call is
                 # self-guarding and no longer emits duplicate_noop traces when warm.
-                self._sync_context_history_if_cold(source="pre_option_eval_context_sync")
-                _indicator_count_pre = len(self._indicator_engine.get_history(symbol) or [])
+                self._sync_context_history_if_cold(
+                    source="pre_option_eval_context_sync"
+                )
+                _indicator_count_pre = len(
+                    self._indicator_engine.get_history(symbol) or []
+                )
                 if _indicator_count_pre < required_bars:
                     # Only sync option history when we still need bars; avoids
                     # duplicate_noop trace spam during normal warm operation.
@@ -9567,13 +11438,27 @@ class StrategyRunner:
                         role = self._symbol_role_for_runner(symbol)
                         self._logger.info(
                             "CONTEXT_EVAL_ALLOWED_WITH_PARTIAL_BARS symbol=%s role=%s indicator_history_count=%s required=%s",
-                            symbol, role, history_count, required_bars,
-                            extra={"event": "CONTEXT_EVAL_ALLOWED_WITH_PARTIAL_BARS", "symbol": symbol, "role": role, "indicator_history_count": history_count, "required_bars": required_bars},
+                            symbol,
+                            role,
+                            history_count,
+                            required_bars,
+                            extra={
+                                "event": "CONTEXT_EVAL_ALLOWED_WITH_PARTIAL_BARS",
+                                "symbol": symbol,
+                                "role": role,
+                                "indicator_history_count": history_count,
+                                "required_bars": required_bars,
+                            },
                         )
                         return True
                     elif self._is_tradable_symbol(symbol):
                         if self._should_log_throttled(f"opt_cold:{symbol}", 120.0):
-                            self._logger.warning("OPTION_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, required_bars)
+                            self._logger.warning(
+                                "OPTION_HISTORY_COLD symbol=%s bars=%d required=%d",
+                                symbol,
+                                history_count,
+                                required_bars,
+                            )
                         # The prewarm is a historical-data backfill, not a live-tick
                         # consumer, so a fresh tick is not required for it to work.
                         # For the SELECTED tradable option, requiring tick freshness
@@ -9583,7 +11468,9 @@ class StrategyRunner:
                         # cooldown/inflight guards prevent spam); keep the freshness
                         # gate for non-selected context symbols to limit scope.
                         is_selected_opt = self._is_selected_option_symbol(symbol)
-                        if is_selected_opt or self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
+                        if is_selected_opt or self._is_option_symbol_tick_fresh(
+                            symbol, max_age_s=60.0
+                        ):
                             self._request_selected_option_history_prewarm(
                                 symbol,
                                 bars_before=int(history_count),
@@ -9591,12 +11478,40 @@ class StrategyRunner:
                                 trace_id=trace_id,
                                 selected=is_selected_opt,
                             )
-                        spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
-                        fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY" and not self._is_context_symbol_suspended(sym)), "")
-                        fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
-                        if (spot_bars < self._context_required_bars or fut_bars < self._context_required_bars) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
-                            self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._context_required_bars)
-                    strict_for_all = _env_bool("OPTION_STRICT_HISTORY_FOR_ALL_STRATEGIES", False)
+                        spot_bars = len(
+                            self._indicator_engine.get_history("NSE:NIFTY") or []
+                        )
+                        fut_symbol = next(
+                            (
+                                sym
+                                for sym in self._active_symbols
+                                if self._is_context_symbol(sym)
+                                and sym != "NSE:NIFTY"
+                                and not self._is_context_symbol_suspended(sym)
+                            ),
+                            "",
+                        )
+                        fut_bars = (
+                            len(self._indicator_engine.get_history(fut_symbol) or [])
+                            if fut_symbol
+                            else 0
+                        )
+                        if (
+                            spot_bars < self._context_required_bars
+                            or fut_bars < self._context_required_bars
+                        ) and self._should_log_throttled(
+                            f"opt_ctx_cold:{symbol}", 120.0
+                        ):
+                            self._logger.warning(
+                                "OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d",
+                                symbol,
+                                spot_bars,
+                                fut_bars,
+                                self._context_required_bars,
+                            )
+                    strict_for_all = _env_bool(
+                        "OPTION_STRICT_HISTORY_FOR_ALL_STRATEGIES", False
+                    )
                     tick_is_fresh = self._is_option_symbol_tick_fresh(symbol)
                     selected_symbols = {
                         normalize_symbol(sym)
@@ -9604,41 +11519,113 @@ class StrategyRunner:
                         if sym
                     }
                     is_selected_option = normalize_symbol(symbol) in selected_symbols
-                    option_eval_min_live_bars = safe_positive_int_env("OPTION_EVAL_MIN_LIVE_BARS", 1, minimum=1)
+                    option_eval_min_live_bars = safe_positive_int_env(
+                        "OPTION_EVAL_MIN_LIVE_BARS", 1, minimum=1
+                    )
                     spot_symbol = "NSE:NIFTY"
-                    fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
-                    if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
-                        self._logger.warning("CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol)
-                    if not fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
-                        rotate_result = getattr(self._market_data, "maybe_rotate_nifty_futures_context_result", None)
-                        rotated = rotate_result(None, reason="context_futures_missing", trace_id=trace_id, selected_option_symbols=[self._active_selected_ce, self._active_selected_pe]) if callable(rotate_result) else self._market_data.maybe_rotate_nifty_futures_context(None, reason="context_futures_missing", trace_id=trace_id)
+                    fut_symbol = next(
+                        (
+                            sym
+                            for sym in self._active_symbols
+                            if self._symbol_role_for_runner(sym) == "futures_context"
+                            and not self._is_context_symbol_suspended(sym)
+                        ),
+                        "",
+                    )
+                    if not fut_symbol and self._should_log_throttled(
+                        "fut_unresolved", 120.0
+                    ):
+                        self._logger.warning(
+                            "CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol
+                        )
+                    if not fut_symbol and hasattr(
+                        self._market_data, "maybe_rotate_nifty_futures_context"
+                    ):
+                        rotate_result = getattr(
+                            self._market_data,
+                            "maybe_rotate_nifty_futures_context_result",
+                            None,
+                        )
+                        rotated = (
+                            rotate_result(
+                                None,
+                                reason="context_futures_missing",
+                                trace_id=trace_id,
+                                selected_option_symbols=[
+                                    self._active_selected_ce,
+                                    self._active_selected_pe,
+                                ],
+                            )
+                            if callable(rotate_result)
+                            else self._market_data.maybe_rotate_nifty_futures_context(
+                                None,
+                                reason="context_futures_missing",
+                                trace_id=trace_id,
+                            )
+                        )
                         if getattr(rotated, "symbol", rotated):
                             fut_symbol = str(getattr(rotated, "symbol", rotated))
                             self._active_symbols.add(fut_symbol)
-                    if fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
+                    if fut_symbol and hasattr(
+                        self._market_data, "maybe_rotate_nifty_futures_context"
+                    ):
                         old_fut_symbol = fut_symbol
-                        rotate_result = getattr(self._market_data, "maybe_rotate_nifty_futures_context_result", None)
-                        rotated = rotate_result(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id, selected_option_symbols=[self._active_selected_ce, self._active_selected_pe]) if callable(rotate_result) else self._market_data.maybe_rotate_nifty_futures_context(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id)
+                        rotate_result = getattr(
+                            self._market_data,
+                            "maybe_rotate_nifty_futures_context_result",
+                            None,
+                        )
+                        rotated = (
+                            rotate_result(
+                                fut_symbol,
+                                reason="context_futures_unresolved",
+                                trace_id=trace_id,
+                                selected_option_symbols=[
+                                    self._active_selected_ce,
+                                    self._active_selected_pe,
+                                ],
+                            )
+                            if callable(rotate_result)
+                            else self._market_data.maybe_rotate_nifty_futures_context(
+                                fut_symbol,
+                                reason="context_futures_unresolved",
+                                trace_id=trace_id,
+                            )
+                        )
                         if bool(getattr(rotated, "unresolved", False)):
                             stale_symbol = old_fut_symbol
                             if stale_symbol:
                                 self._active_symbols.discard(stale_symbol)
                                 self._suspended_context_symbols.add(stale_symbol)
-                                cooldown_seconds = self._futures_context_suspension_seconds
-                                self._suspended_context_symbol_until[stale_symbol] = time.monotonic() + cooldown_seconds
+                                cooldown_seconds = (
+                                    self._futures_context_suspension_seconds
+                                )
+                                self._suspended_context_symbol_until[stale_symbol] = (
+                                    time.monotonic() + cooldown_seconds
+                                )
                                 self._logger.warning(
                                     "CONTEXT_FUTURES_SYMBOL_SUSPENDED symbol=%s reason=%s trace_id=%s cooldown_seconds=%s",
                                     stale_symbol,
                                     "active_future_resolution_failed",
                                     trace_id,
                                     cooldown_seconds,
-                                    extra={"event": "CONTEXT_FUTURES_SYMBOL_SUSPENDED", "symbol": stale_symbol, "reason": "active_future_resolution_failed", "trace_id": trace_id, "cooldown_seconds": cooldown_seconds},
+                                    extra={
+                                        "event": "CONTEXT_FUTURES_SYMBOL_SUSPENDED",
+                                        "symbol": stale_symbol,
+                                        "reason": "active_future_resolution_failed",
+                                        "trace_id": trace_id,
+                                        "cooldown_seconds": cooldown_seconds,
+                                    },
                                 )
                             self._logger.warning(
                                 "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED old_symbol=%s reason=%s",
                                 stale_symbol,
                                 "context_futures_unresolved",
-                                extra={"event": "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED", "old_symbol": fut_symbol, "trace_id": trace_id},
+                                extra={
+                                    "event": "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED",
+                                    "old_symbol": fut_symbol,
+                                    "trace_id": trace_id,
+                                },
                             )
                             fut_symbol = ""
                         rotated_symbol = getattr(rotated, "symbol", rotated)
@@ -9650,16 +11637,60 @@ class StrategyRunner:
                                 "RUNNER_FUTURES_CONTEXT_ROTATED old_symbol=%s new_symbol=%s",
                                 old_fut_symbol,
                                 fut_symbol,
-                                extra={"event": "RUNNER_FUTURES_CONTEXT_ROTATED", "old_symbol": old_fut_symbol, "new_symbol": fut_symbol, "trace_id": trace_id, "reason": "context_futures_unresolved", "stage": "phase9"},
+                                extra={
+                                    "event": "RUNNER_FUTURES_CONTEXT_ROTATED",
+                                    "old_symbol": old_fut_symbol,
+                                    "new_symbol": fut_symbol,
+                                    "trace_id": trace_id,
+                                    "reason": "context_futures_unresolved",
+                                    "stage": "phase9",
+                                },
                             )
-                    spot_bars = len(self._indicator_engine.get_history(spot_symbol) or [])
-                    fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
+                    spot_bars = len(
+                        self._indicator_engine.get_history(spot_symbol) or []
+                    )
+                    fut_bars = (
+                        len(self._indicator_engine.get_history(fut_symbol) or [])
+                        if fut_symbol
+                        else 0
+                    )
                     opt_bars = history_count
-                    self._logger.info("CONTEXT_HISTORY_STATUS domain=spot symbol=%s bars=%d required=%d quality=%s", spot_symbol, spot_bars, self._context_required_bars, "warm" if spot_bars >= self._context_required_bars else "cold")
-                    self._logger.info("CONTEXT_HISTORY_STATUS domain=futures symbol=%s bars=%d required=%d quality=%s", fut_symbol or "missing", fut_bars, self._context_required_bars, "missing" if not fut_symbol else ("warm" if fut_bars >= self._context_required_bars else "cold"))
-                    self._logger.info("CONTEXT_HISTORY_STATUS domain=options symbol=%s bars=%d required=%d quality=%s", symbol, opt_bars, required_bars, "warm" if opt_bars >= required_bars else "cold")
-                    context_ready = spot_bars >= self._context_required_bars and fut_bars >= self._context_required_bars
-                    require_warm_context_live = _env_bool("LIVE_REQUIRE_WARM_UNDERLYING_CONTEXT", False)
+                    self._logger.info(
+                        "CONTEXT_HISTORY_STATUS domain=spot symbol=%s bars=%d required=%d quality=%s",
+                        spot_symbol,
+                        spot_bars,
+                        self._context_required_bars,
+                        "warm" if spot_bars >= self._context_required_bars else "cold",
+                    )
+                    self._logger.info(
+                        "CONTEXT_HISTORY_STATUS domain=futures symbol=%s bars=%d required=%d quality=%s",
+                        fut_symbol or "missing",
+                        fut_bars,
+                        self._context_required_bars,
+                        (
+                            "missing"
+                            if not fut_symbol
+                            else (
+                                "warm"
+                                if fut_bars >= self._context_required_bars
+                                else "cold"
+                            )
+                        ),
+                    )
+                    self._logger.info(
+                        "CONTEXT_HISTORY_STATUS domain=options symbol=%s bars=%d required=%d quality=%s",
+                        symbol,
+                        opt_bars,
+                        required_bars,
+                        "warm" if opt_bars >= required_bars else "cold",
+                    )
+                    context_ready = (
+                        spot_bars >= self._context_required_bars
+                        and fut_bars >= self._context_required_bars
+                    )
+                    require_warm_context_live = _env_bool(
+                        "LIVE_REQUIRE_WARM_UNDERLYING_CONTEXT", False
+                    )
                     soft_pass = (
                         self._is_tradable_symbol(symbol)
                         and not strict_for_all
@@ -9669,40 +11700,81 @@ class StrategyRunner:
                         and (context_ready or not require_warm_context_live)
                     )
                     if soft_pass and not context_ready:
-                        self._logger.warning("LIVE_CONTEXT_COLD_CONTINUE domain=futures penalty=quality_threshold_plus_1")
+                        self._logger.warning(
+                            "LIVE_CONTEXT_COLD_CONTINUE domain=futures penalty=quality_threshold_plus_1"
+                        )
                         runtime_indicators = getattr(self, "_runtime_indicators", None)
                         if runtime_indicators is None:
                             self._runtime_indicators = {}
                             runtime_indicators = self._runtime_indicators
                         runtime_indicators.setdefault(symbol, {})
-                        runtime_indicators[symbol]["underlying_context_quality"] = "cold"
-                        runtime_indicators[symbol]["futures_context_quality"] = "cold" if fut_symbol else "missing"
-                        runtime_indicators[symbol]["context_confidence_multiplier"] = 0.75
-                        runtime_indicators[symbol]["context_cold_reasons"] = ["spot_context_cold" if spot_bars < self._context_required_bars else "", "futures_context_cold" if fut_bars < self._context_required_bars else ""]
+                        runtime_indicators[symbol][
+                            "underlying_context_quality"
+                        ] = "cold"
+                        runtime_indicators[symbol]["futures_context_quality"] = (
+                            "cold" if fut_symbol else "missing"
+                        )
+                        runtime_indicators[symbol][
+                            "context_confidence_multiplier"
+                        ] = 0.75
+                        runtime_indicators[symbol]["context_cold_reasons"] = [
+                            (
+                                "spot_context_cold"
+                                if spot_bars < self._context_required_bars
+                                else ""
+                            ),
+                            (
+                                "futures_context_cold"
+                                if fut_bars < self._context_required_bars
+                                else ""
+                            ),
+                        ]
                     if soft_pass:
                         self._logger.info(
                             "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS symbol=%s bars=%d required=%d",
                             symbol,
                             history_count,
                             required_bars,
-                            extra={"event": "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS", "symbol": symbol, "bars": history_count, "required": required_bars},
+                            extra={
+                                "event": "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS",
+                                "symbol": symbol,
+                                "bars": history_count,
+                                "required": required_bars,
+                            },
                         )
                         self._emit_runner_eval_decision(
                             symbol=symbol,
-                            stage='phase9',
-                            reason='cold_history_soft_pass',
+                            stage="phase9",
+                            reason="cold_history_soft_pass",
                             allowed=True,
                             trace_id=trace_id,
                         )
                         return True
-                    if self._should_log_throttled(f"eval_block_cold_history:{symbol}", 120.0):
+                    if self._should_log_throttled(
+                        f"eval_block_cold_history:{symbol}", 120.0
+                    ):
                         self._logger.warning(
                             "EVALUATION_BLOCKED_COLD_HISTORY symbol=%s bars=%d required=%d",
-                            symbol, history_count, required_bars,
-                            extra={"event": "EVALUATION_BLOCKED_COLD_HISTORY", "symbol": symbol, "bars": history_count, "required": required_bars},
+                            symbol,
+                            history_count,
+                            required_bars,
+                            extra={
+                                "event": "EVALUATION_BLOCKED_COLD_HISTORY",
+                                "symbol": symbol,
+                                "bars": history_count,
+                                "required": required_bars,
+                            },
                         )
-                    category = "data_history_cold" if history_count < required_bars else "data_history_integrity_failed"
-                    reason = 'insufficient_indicator_bar_count' if history_count < required_bars else 'indicator_history_integrity_failed'
+                    category = (
+                        "data_history_cold"
+                        if history_count < required_bars
+                        else "data_history_integrity_failed"
+                    )
+                    reason = (
+                        "insufficient_indicator_bar_count"
+                        if history_count < required_bars
+                        else "indicator_history_integrity_failed"
+                    )
                     self._emit_no_trade_decision(
                         symbol=symbol,
                         trace_id=trace_id,
@@ -9711,10 +11783,14 @@ class StrategyRunner:
                         option_history_count=history_count,
                         option_history_required=required_bars,
                     )
-                reason = 'insufficient_indicator_bar_count' if history_count < required_bars else 'indicator_history_integrity_failed'
+                reason = (
+                    "insufficient_indicator_bar_count"
+                    if history_count < required_bars
+                    else "indicator_history_integrity_failed"
+                )
                 self._emit_runner_eval_decision(
                     symbol=symbol,
-                    stage='phase9',
+                    stage="phase9",
                     reason=reason,
                     allowed=False,
                     trace_id=trace_id,
@@ -9723,14 +11799,14 @@ class StrategyRunner:
             return True
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
-                'Failure in StrategyRunner._strategy_evaluation_allowed: %s',
+                "Failure in StrategyRunner._strategy_evaluation_allowed: %s",
                 exc,
                 exc_info=exc,
             )
             self._emit_runner_eval_decision(
                 symbol=symbol,
-                stage='phase9',
-                reason='strategy_eval_gate_exception',
+                stage="phase9",
+                reason="strategy_eval_gate_exception",
                 allowed=False,
                 trace_id=trace_id,
             )
@@ -9970,11 +12046,16 @@ class StrategyRunner:
         )
         phase = "entry"
         try:
-            is_live_mode = (
-                str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
-                or str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
+            is_live_mode = str(
+                os.getenv("EXECUTION_MODE", "SHADOW")
+            ).strip().upper() == "LIVE" or str(
+                os.getenv("ENABLE_LIVE", "false")
+            ).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
             # =================================================================
             # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
             # =================================================================
@@ -10061,7 +12142,9 @@ class StrategyRunner:
             # =================================================================
 
             now = datetime.now(timezone.utc)
-            trace_id = str(tick.get("trace_id") or f"{symbol}-{time_module.monotonic_ns()}")
+            trace_id = str(
+                tick.get("trace_id") or f"{symbol}-{time_module.monotonic_ns()}"
+            )
 
             # Helper: Extract timestamp for freshness check
             def _extract_timestamp(t, fallback):
@@ -10111,8 +12194,10 @@ class StrategyRunner:
             price = _extract_float(tick, "ltp", "last_price", "close", "price")
             has_explicit_delta = "volume_delta" in tick
             has_explicit_volume = "volume" in tick
-            raw_volume_delta = _extract_int(tick, "volume_delta") if has_explicit_delta else (
-                _extract_int(tick, "volume") if has_explicit_volume else 0
+            raw_volume_delta = (
+                _extract_int(tick, "volume_delta")
+                if has_explicit_delta
+                else (_extract_int(tick, "volume") if has_explicit_volume else 0)
             )
             raw_volume_cumulative = _extract_int(
                 tick, "volume_cumulative", "volume_traded", "volume_traded_today"
@@ -10154,7 +12239,10 @@ class StrategyRunner:
             elif has_explicit_delta:
                 volume = max(int(raw_volume_delta), 0)
             elif has_explicit_volume:
-                if raw_volume_cumulative > 0 and raw_volume_delta == raw_volume_cumulative:
+                if (
+                    raw_volume_cumulative > 0
+                    and raw_volume_delta == raw_volume_cumulative
+                ):
                     volume = 0
                     log_throttled(
                         self._logger,
@@ -10196,7 +12284,10 @@ class StrategyRunner:
                         level=logging.INFO,
                     )
             if self._is_tradable_symbol(symbol):
-                max_runner_delta = int(os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000") or "1000000")
+                max_runner_delta = int(
+                    os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000")
+                    or "1000000"
+                )
                 if volume > max_runner_delta:
                     log_throttled(
                         self._logger,
@@ -10292,7 +12383,9 @@ class StrategyRunner:
                 return
             has_quote_update = self._tick_has_quote_update(tick)
             if has_quote_update:
-                self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
+                self._quote_update_versions[symbol] = (
+                    int(self._quote_update_versions.get(symbol, 0)) + 1
+                )
 
             # Bracket tick forwarding already happened at function entry.
             # Keep a single forward per tick so protective handlers do not churn
@@ -10485,12 +12578,17 @@ class StrategyRunner:
                     runner_history_count = len(
                         self._indicator_engine.get_history(symbol) or []
                     )
-                    should_info_live_bar = symbol not in self._first_live_bar_logged_symbols
+                    should_info_live_bar = (
+                        symbol not in self._first_live_bar_logged_symbols
+                    )
                     if should_info_live_bar:
                         self._first_live_bar_logged_symbols.add(symbol)
-                    should_info_live_bar = should_info_live_bar or self._should_log_throttled(
-                        f"runner_live_bar_ingested:{symbol}",
-                        self._bar_log_throttle_seconds,
+                    should_info_live_bar = (
+                        should_info_live_bar
+                        or self._should_log_throttled(
+                            f"runner_live_bar_ingested:{symbol}",
+                            self._bar_log_throttle_seconds,
+                        )
                     )
                     if should_info_live_bar:
                         self._logger.debug(
@@ -10514,13 +12612,18 @@ class StrategyRunner:
                                 "close": completed_bar.close,
                                 "volume": completed_bar.volume,
                                 "runner_history_count": runner_history_count,
-                                "candle_version": int(self._candle_versions.get(symbol, 0)),
+                                "candle_version": int(
+                                    self._candle_versions.get(symbol, 0)
+                                ),
                             },
                         )
                 candle_count = len(self._indicator_engine.get_history(symbol) or [])
-                should_log_bar_state = completed_bar is not None or self._should_log_throttled(
-                    f"runner_bar_state:{symbol}:c0:{candle_count == 0}",
-                    self._bar_log_throttle_seconds,
+                should_log_bar_state = (
+                    completed_bar is not None
+                    or self._should_log_throttled(
+                        f"runner_bar_state:{symbol}:c0:{candle_count == 0}",
+                        self._bar_log_throttle_seconds,
+                    )
                 )
                 if should_log_bar_state:
                     self._logger.debug(
@@ -10559,9 +12662,7 @@ class StrategyRunner:
                 except ValueError:
                     pass  # ✅ FIX: Ignore expected "No open position" errors
                 except Exception as e:
-                    LOGGER.error(
-                        f"Failed to update position price for {symbol}: {e}"
-                    )
+                    LOGGER.error(f"Failed to update position price for {symbol}: {e}")
 
             # =================================================================
             # PHASE 6: Global readiness gate
@@ -10648,7 +12749,6 @@ class StrategyRunner:
                     )
 
                 min_bars_needed = self._required_candles or 20
-                
 
                 # BUG W2 FIX: Emit a one-shot INFO log the first time each symbol
                 # passes the warmup gate so Railway logs clearly show the moment
@@ -10689,7 +12789,7 @@ class StrategyRunner:
                             },
                         )
 
-                # Strategy evaluation is now purely event-driven. 
+                # Strategy evaluation is now purely event-driven.
                 # ExecutionEngine handles any timing constraints.
 
                 spot_tick = self._get_spot_tick()
@@ -10752,7 +12852,10 @@ class StrategyRunner:
                 generated_signal = None
 
                 # 8A. FORCED SIGNAL (Testing only)
-                if self._force_signal_enabled and not self._disable_early_forced_signals:
+                if (
+                    self._force_signal_enabled
+                    and not self._disable_early_forced_signals
+                ):
                     generated_signal = Signal(
                         action="BUY",
                         symbol=symbol,
@@ -10766,8 +12869,14 @@ class StrategyRunner:
                     self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
                 # 8B. PREMIUM MOMENTUM SQUEEZE (disabled in runner by default)
-                premium_squeeze_enabled = str(os.getenv("RUNNER_ENABLE_PREMIUM_SQUEEZE", "false")).strip().lower() in {"1", "true", "yes", "on"}
-                if generated_signal is None and premium_squeeze_enabled and self._indicator_engine.has_min_bars(symbol, 20):
+                premium_squeeze_enabled = str(
+                    os.getenv("RUNNER_ENABLE_PREMIUM_SQUEEZE", "false")
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if (
+                    generated_signal is None
+                    and premium_squeeze_enabled
+                    and self._indicator_engine.has_min_bars(symbol, 20)
+                ):
                     phase = "phase8_premium_squeeze"
                     try:
                         generated_signal = self._maybe_generate_premium_squeeze_signal(
@@ -10792,9 +12901,12 @@ class StrategyRunner:
                         generated_signal = None
 
                 # 8C. VWAP CROSSOVER (Requires VWAP > 0)
-                runner_vwap_crossover_enabled = str(os.getenv("RUNNER_ENABLE_LEGACY_VWAP_CROSSOVER", "false")).strip().lower() in {"1", "true", "yes", "on"}
+                runner_vwap_crossover_enabled = str(
+                    os.getenv("RUNNER_ENABLE_LEGACY_VWAP_CROSSOVER", "false")
+                ).strip().lower() in {"1", "true", "yes", "on"}
                 if (
-                    runner_vwap_crossover_enabled and self._vwap_crossover_enabled
+                    runner_vwap_crossover_enabled
+                    and self._vwap_crossover_enabled
                     and generated_signal is None
                     and state.vwap
                     and state.vwap > 0
@@ -10935,11 +13047,17 @@ class StrategyRunner:
                         price=price,
                     )
                 else:
-                    same_bar_block_reason = self._last_same_bar_eval_block_reason_by_symbol.get(symbol)
-                    same_bar_block_detail = self._last_same_bar_eval_block_detail_by_symbol.get(symbol, {})
+                    same_bar_block_reason = (
+                        self._last_same_bar_eval_block_reason_by_symbol.get(symbol)
+                    )
+                    same_bar_block_detail = (
+                        self._last_same_bar_eval_block_detail_by_symbol.get(symbol, {})
+                    )
                     if self._should_log_throttled(
                         f"strategy_eval_skipped_same_bar:{symbol}",
-                        float(os.getenv("RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30") or "30"),
+                        float(
+                            os.getenv("RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30") or "30"
+                        ),
                     ):
                         self._emit_runner_eval_decision(
                             symbol=symbol,
@@ -10954,8 +13072,12 @@ class StrategyRunner:
                             same_bar_block_detail=same_bar_block_detail,
                             active_selected_ce=self._active_selected_ce,
                             active_selected_pe=self._active_selected_pe,
-                            intrabar_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10"),
-                            intrabar_non_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"),
+                            intrabar_selected_seconds=os.getenv(
+                                "RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10"
+                            ),
+                            intrabar_non_selected_seconds=os.getenv(
+                                "RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"
+                            ),
                         )
                     return
             elif first_hydrated_eval:
@@ -10989,7 +13111,9 @@ class StrategyRunner:
                 self._emit_runner_eval_decision(
                     symbol=symbol,
                     stage="phase9",
-                    reason=str(self._runtime_readiness_reason or "runtime_data_not_ready"),
+                    reason=str(
+                        self._runtime_readiness_reason or "runtime_data_not_ready"
+                    ),
                     allowed=False,
                     trace_id=trace_id,
                 )
@@ -11141,10 +13265,19 @@ class StrategyRunner:
                                     )
                                 if self._should_log_throttled(
                                     f"strategy_eval_skipped_same_bar:{symbol}",
-                                    float(os.getenv("RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30") or "30"),
+                                    float(
+                                        os.getenv(
+                                            "RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30"
+                                        )
+                                        or "30"
+                                    ),
                                 ):
-                                    same_bar_block_reason = self._last_same_bar_eval_block_reason_by_symbol.get(symbol)
-                                    same_bar_block_detail = self._last_same_bar_eval_block_detail_by_symbol.get(symbol, {})
+                                    same_bar_block_reason = self._last_same_bar_eval_block_reason_by_symbol.get(
+                                        symbol
+                                    )
+                                    same_bar_block_detail = self._last_same_bar_eval_block_detail_by_symbol.get(
+                                        symbol, {}
+                                    )
                                     self._emit_runner_eval_decision(
                                         symbol=symbol,
                                         stage="phase9",
@@ -11156,8 +13289,14 @@ class StrategyRunner:
                                         same_bar_block_detail=same_bar_block_detail,
                                         active_selected_ce=self._active_selected_ce,
                                         active_selected_pe=self._active_selected_pe,
-                                        intrabar_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10"),
-                                        intrabar_non_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"),
+                                        intrabar_selected_seconds=os.getenv(
+                                            "RUNNER_INTRABAR_EVAL_SELECTED_SECONDS",
+                                            "10",
+                                        ),
+                                        intrabar_non_selected_seconds=os.getenv(
+                                            "RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS",
+                                            "60",
+                                        ),
                                     )
                                 return
                         if last_bar_ts:
@@ -11209,15 +13348,26 @@ class StrategyRunner:
                         return
                     if self._is_tradable_symbol(symbol):
                         selected_only_bias = str(
-                            (getattr(self, "_runtime_indicators", {}) or {}).get(symbol, {}).get("underlying_direction_bias")
-                            or (getattr(self, "_runtime_indicators", {}) or {}).get(symbol, {}).get("direction_bias")
+                            (getattr(self, "_runtime_indicators", {}) or {})
+                            .get(symbol, {})
+                            .get("underlying_direction_bias")
+                            or (getattr(self, "_runtime_indicators", {}) or {})
+                            .get(symbol, {})
+                            .get("direction_bias")
                             or ""
                         ).upper()
-                        selected_only_ok, selected_only_reason, selected_only_details = self._live_entry_candidate_eligibility(
+                        (
+                            selected_only_ok,
+                            selected_only_reason,
+                            selected_only_details,
+                        ) = self._live_entry_candidate_eligibility(
                             symbol,
                             direction_bias=selected_only_bias,
                         )
-                        if _env_flag("LIVE_ENTRY_SELECTED_ONLY", False) and not selected_only_ok:
+                        if (
+                            _env_flag("LIVE_ENTRY_SELECTED_ONLY", False)
+                            and not selected_only_ok
+                        ):
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
                                 stage="phase9",
@@ -11231,7 +13381,13 @@ class StrategyRunner:
                                 symbol,
                                 selected_only_reason,
                                 trace_id,
-                                extra={"event": "RUNNER_EVAL_SKIPPED_NON_EXECUTABLE_CANDIDATE", "symbol": symbol, "reason": selected_only_reason, "trace_id": trace_id, **selected_only_details},
+                                extra={
+                                    "event": "RUNNER_EVAL_SKIPPED_NON_EXECUTABLE_CANDIDATE",
+                                    "symbol": symbol,
+                                    "reason": selected_only_reason,
+                                    "trace_id": trace_id,
+                                    **selected_only_details,
+                                },
                             )
                             return
                         self._refresh_underlying_context_snapshots(trace_id=trace_id)
@@ -11241,7 +13397,10 @@ class StrategyRunner:
                         "Strategy evaluation triggered",
                         interval_sec=self._eval_log_throttle_seconds,
                         level=logging.DEBUG,
-                        extra={"event": "strategy_evaluation_triggered", "symbol": symbol},
+                        extra={
+                            "event": "strategy_evaluation_triggered",
+                            "symbol": symbol,
+                        },
                     )
                     # ✅ DIAGNOSTIC LOG: Confirm evaluation is happening
                     log_throttled(
@@ -11282,9 +13441,16 @@ class StrategyRunner:
                     ):
                         _mdm_age = time.time() - float(mdm_last_tick)
                         upper_symbol = symbol.upper()
-                        if upper_symbol in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}:
+                        if upper_symbol in {
+                            "NSE:NIFTY",
+                            "NIFTY",
+                            "NSE:NIFTY 50",
+                            "NIFTY 50",
+                        }:
                             fallback_ltp = None
-                            if self._market_data is not None and hasattr(self._market_data, "get_ltp"):
+                            if self._market_data is not None and hasattr(
+                                self._market_data, "get_ltp"
+                            ):
                                 try:
                                     fallback_ltp = self._market_data.get_ltp(symbol)
                                 except Exception:
@@ -11300,7 +13466,11 @@ class StrategyRunner:
                                 self._logger.info(
                                     "MDM_REST_FALLBACK_USED symbol=%s reason=stale_ws_tick",
                                     symbol,
-                                    extra={"event": "MDM_REST_FALLBACK_USED", "symbol": symbol, "reason": "stale_ws_tick"},
+                                    extra={
+                                        "event": "MDM_REST_FALLBACK_USED",
+                                        "symbol": symbol,
+                                        "reason": "stale_ws_tick",
+                                    },
                                 )
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
@@ -11339,8 +13509,15 @@ class StrategyRunner:
                     except Exception:
                         _pregate_market_open = True
                     if not _pregate_market_open:
-                        if _pregate_symbol_role in {"spot_context", "futures_context"} and not _env_bool("ALLOW_OFFMARKET_CONTEXT_DIAGNOSTICS", False):
-                            if self._should_log_throttled(f"pregate_market_closed:{symbol}:context", 60.0):
+                        if _pregate_symbol_role in {
+                            "spot_context",
+                            "futures_context",
+                        } and not _env_bool(
+                            "ALLOW_OFFMARKET_CONTEXT_DIAGNOSTICS", False
+                        ):
+                            if self._should_log_throttled(
+                                f"pregate_market_closed:{symbol}:context", 60.0
+                            ):
                                 self._emit_runner_eval_decision(
                                     symbol=symbol,
                                     stage="phase9_pregate",
@@ -11351,7 +13528,9 @@ class StrategyRunner:
                                 )
                             return
                         if _pregate_symbol_role == "tradable_option":
-                            if self._should_log_throttled(f"pregate_market_closed:{symbol}", 60.0):
+                            if self._should_log_throttled(
+                                f"pregate_market_closed:{symbol}", 60.0
+                            ):
                                 self._emit_runner_eval_decision(
                                     symbol=symbol,
                                     stage="phase9_pregate",
@@ -11360,12 +13539,16 @@ class StrategyRunner:
                                     trace_id=trace_id,
                                 )
                             # Periodic summary: count suppressed per-symbol market_closed skips.
-                            _mc_counts = getattr(self, "_market_closed_skip_counts", None)
+                            _mc_counts = getattr(
+                                self, "_market_closed_skip_counts", None
+                            )
                             if _mc_counts is None:
                                 self._market_closed_skip_counts: dict[str, int] = {}
                                 _mc_counts = self._market_closed_skip_counts
                             _mc_counts[symbol] = _mc_counts.get(symbol, 0) + 1
-                            if self._should_log_throttled("market_closed_skip_summary", 60.0):
+                            if self._should_log_throttled(
+                                "market_closed_skip_summary", 60.0
+                            ):
                                 total = sum(_mc_counts.values())
                                 self._logger.info(
                                     "RUNNER_EVAL_SKIP_SUMMARY reason=market_closed symbols=%d suppressed=%d",
@@ -11380,13 +13563,20 @@ class StrategyRunner:
                                 )
                                 _mc_counts.clear()
                             return
-                    _same_bar_pregate_skip, _same_bar_pregate_reason, _same_bar_pregate_details = self._should_skip_symbol_eval(
+                    (
+                        _same_bar_pregate_skip,
+                        _same_bar_pregate_reason,
+                        _same_bar_pregate_details,
+                    ) = self._should_skip_symbol_eval(
                         symbol,
                         tick,
-                        bar_key=pending_eval_bar_ts or self._current_eval_bar_key(symbol, tick),
+                        bar_key=pending_eval_bar_ts
+                        or self._current_eval_bar_key(symbol, tick),
                     )
                     if _same_bar_pregate_skip:
-                        self._log_eval_pregate_skip(symbol, _same_bar_pregate_reason, _same_bar_pregate_details)
+                        self._log_eval_pregate_skip(
+                            symbol, _same_bar_pregate_reason, _same_bar_pregate_details
+                        )
                         self._emit_runner_eval_decision(
                             symbol=symbol,
                             stage="phase9_pregate",
@@ -11401,7 +13591,9 @@ class StrategyRunner:
                     # evaluator. These gates only skip evaluation — they do NOT affect
                     # subscriptions, hydration, DataHub updates, or the active basket.
                     _is_option_pregate = _pregate_symbol_role == "tradable_option"
-                    if _is_option_pregate and _env_bool("SKIP_LOW_PREMIUM_OPTION_EVAL", True):
+                    if _is_option_pregate and _env_bool(
+                        "SKIP_LOW_PREMIUM_OPTION_EVAL", True
+                    ):
                         # Guard: price may be None, non-numeric, or <=0 — never raise from pregate.
                         _pregate_ltp: float | None = None
                         try:
@@ -11409,78 +13601,157 @@ class StrategyRunner:
                         except (TypeError, ValueError):
                             _pregate_ltp = None
                         if _pregate_ltp is None or _pregate_ltp <= 0:
-                            if self._should_log_throttled(f"pregate_missing_price:{symbol}", 60.0):
+                            if self._should_log_throttled(
+                                f"pregate_missing_price:{symbol}", 60.0
+                            ):
                                 self._logger.info(
                                     "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_premium_missing_or_invalid ltp=%s",
-                                    symbol, price,
-                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
-                                           "reason": "option_premium_missing_or_invalid", "ltp": price},
+                                    symbol,
+                                    price,
+                                    extra={
+                                        "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+                                        "symbol": symbol,
+                                        "reason": "option_premium_missing_or_invalid",
+                                        "ltp": price,
+                                    },
                                 )
                             return
-                        _min_premium = float(os.getenv("MIN_OPTION_PREMIUM", "20") or "20")
+                        _min_premium = float(
+                            os.getenv("MIN_OPTION_PREMIUM", "20") or "20"
+                        )
                         if _pregate_ltp < _min_premium:
-                            if self._should_log_throttled(f"pregate_low_premium:{symbol}", 60.0):
+                            if self._should_log_throttled(
+                                f"pregate_low_premium:{symbol}", 60.0
+                            ):
                                 self._logger.info(
                                     "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_premium_below_min ltp=%s min_premium=%s",
-                                    symbol, _pregate_ltp, _min_premium,
-                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
-                                           "reason": "option_premium_below_min", "ltp": _pregate_ltp, "min_premium": _min_premium},
+                                    symbol,
+                                    _pregate_ltp,
+                                    _min_premium,
+                                    extra={
+                                        "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+                                        "symbol": symbol,
+                                        "reason": "option_premium_below_min",
+                                        "ltp": _pregate_ltp,
+                                        "min_premium": _min_premium,
+                                    },
                                 )
                             return
-                    if _is_option_pregate and _env_bool("REQUIRE_BID_ASK_FOR_OPTION_EVAL", True):
+                    if _is_option_pregate and _env_bool(
+                        "REQUIRE_BID_ASK_FOR_OPTION_EVAL", True
+                    ):
                         # Use the canonical execution-readiness quote resolver for consistency with
                         # live readiness checks — same source, same bid/ask/spread extraction.
                         _pregate_quote = self._get_cached_quote_for_live_entry(symbol)
-                        _pg_bid, _pg_ask, _, _ = _resolve_quote_bid_ask_spread(_pregate_quote) if _pregate_quote else (None, None, None, "missing")
-                        if _pg_bid is None or _pg_ask is None or _pg_bid <= 0 or _pg_ask <= 0:
-                            if self._should_log_throttled(f"pregate_no_bid_ask:{symbol}", 60.0):
+                        _pg_bid, _pg_ask, _, _ = (
+                            _resolve_quote_bid_ask_spread(_pregate_quote)
+                            if _pregate_quote
+                            else (None, None, None, "missing")
+                        )
+                        if (
+                            _pg_bid is None
+                            or _pg_ask is None
+                            or _pg_bid <= 0
+                            or _pg_ask <= 0
+                        ):
+                            if self._should_log_throttled(
+                                f"pregate_no_bid_ask:{symbol}", 60.0
+                            ):
                                 self._logger.info(
                                     "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_bid_ask_missing_or_invalid bid=%s ask=%s",
-                                    symbol, _pg_bid, _pg_ask,
-                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
-                                           "reason": "option_bid_ask_missing_or_invalid", "bid": _pg_bid, "ask": _pg_ask},
+                                    symbol,
+                                    _pg_bid,
+                                    _pg_ask,
+                                    extra={
+                                        "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+                                        "symbol": symbol,
+                                        "reason": "option_bid_ask_missing_or_invalid",
+                                        "bid": _pg_bid,
+                                        "ask": _pg_ask,
+                                    },
                                 )
                             return
                         if _pg_ask < _pg_bid:
-                            if self._should_log_throttled(f"pregate_inverted_spread:{symbol}", 60.0):
+                            if self._should_log_throttled(
+                                f"pregate_inverted_spread:{symbol}", 60.0
+                            ):
                                 self._logger.info(
                                     "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_bid_ask_missing_or_invalid bid=%s ask=%s",
-                                    symbol, _pg_bid, _pg_ask,
-                                    extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
-                                           "reason": "option_bid_ask_missing_or_invalid", "bid": _pg_bid, "ask": _pg_ask},
+                                    symbol,
+                                    _pg_bid,
+                                    _pg_ask,
+                                    extra={
+                                        "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+                                        "symbol": symbol,
+                                        "reason": "option_bid_ask_missing_or_invalid",
+                                        "bid": _pg_bid,
+                                        "ask": _pg_ask,
+                                    },
                                 )
                             return
                         if _env_bool("SKIP_WIDE_SPREAD_OPTION_EVAL", True):
                             _pg_spread = _pg_ask - _pg_bid
                             _pg_mid = (_pg_bid + _pg_ask) / 2.0
-                            _max_spread_pct = float(os.getenv("MAX_OPTION_SPREAD_PCT_FOR_EVAL", "1.5") or "1.5")
-                            if _pg_mid > 0 and (_pg_spread / _pg_mid) * 100.0 > _max_spread_pct:
-                                if self._should_log_throttled(f"pregate_wide_spread:{symbol}", 60.0):
+                            _max_spread_pct = float(
+                                os.getenv("MAX_OPTION_SPREAD_PCT_FOR_EVAL", "1.5")
+                                or "1.5"
+                            )
+                            if (
+                                _pg_mid > 0
+                                and (_pg_spread / _pg_mid) * 100.0 > _max_spread_pct
+                            ):
+                                if self._should_log_throttled(
+                                    f"pregate_wide_spread:{symbol}", 60.0
+                                ):
                                     self._logger.info(
                                         "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_spread_too_wide spread_pct=%.2f max_pct=%s",
-                                        symbol, (_pg_spread / _pg_mid) * 100.0, _max_spread_pct,
-                                        extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
-                                               "reason": "option_spread_too_wide",
-                                               "spread_pct": round((_pg_spread / _pg_mid) * 100.0, 2),
-                                               "max_spread_pct": _max_spread_pct},
+                                        symbol,
+                                        (_pg_spread / _pg_mid) * 100.0,
+                                        _max_spread_pct,
+                                        extra={
+                                            "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+                                            "symbol": symbol,
+                                            "reason": "option_spread_too_wide",
+                                            "spread_pct": round(
+                                                (_pg_spread / _pg_mid) * 100.0, 2
+                                            ),
+                                            "max_spread_pct": _max_spread_pct,
+                                        },
                                     )
                                 return
-                            _max_spread_abs = os.getenv("MAX_OPTION_SPREAD_ABS_FOR_EVAL")
+                            _max_spread_abs = os.getenv(
+                                "MAX_OPTION_SPREAD_ABS_FOR_EVAL"
+                            )
                             if _max_spread_abs:
                                 _max_spread_abs_f = float(_max_spread_abs)
-                                if _max_spread_abs_f > 0 and _pg_spread > _max_spread_abs_f:
-                                    if self._should_log_throttled(f"pregate_wide_spread_abs:{symbol}", 60.0):
+                                if (
+                                    _max_spread_abs_f > 0
+                                    and _pg_spread > _max_spread_abs_f
+                                ):
+                                    if self._should_log_throttled(
+                                        f"pregate_wide_spread_abs:{symbol}", 60.0
+                                    ):
                                         self._logger.info(
                                             "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=option_spread_abs_too_wide spread=%s max=%s",
-                                            symbol, _pg_spread, _max_spread_abs_f,
-                                            extra={"event": "RUNNER_EVAL_PREGATE_SKIPPED", "symbol": symbol,
-                                                   "reason": "option_spread_abs_too_wide",
-                                                   "spread": _pg_spread, "max_spread_abs": _max_spread_abs_f},
+                                            symbol,
+                                            _pg_spread,
+                                            _max_spread_abs_f,
+                                            extra={
+                                                "event": "RUNNER_EVAL_PREGATE_SKIPPED",
+                                                "symbol": symbol,
+                                                "reason": "option_spread_abs_too_wide",
+                                                "spread": _pg_spread,
+                                                "max_spread_abs": _max_spread_abs_f,
+                                            },
                                         )
                                     return
                     self._mark_symbol_eval_allowed(
                         symbol,
-                        bar_key=_same_bar_pregate_details.get("bar_key") if isinstance(_same_bar_pregate_details, Mapping) else None,
+                        bar_key=(
+                            _same_bar_pregate_details.get("bar_key")
+                            if isinstance(_same_bar_pregate_details, Mapping)
+                            else None
+                        ),
                         tick=tick,
                     )
                     # ── END PRE-GATES ──────────────────────────────────────────────
@@ -11505,12 +13776,22 @@ class StrategyRunner:
                     try:
                         indicators_ctx = self._indicator_engine.get_indicators(symbol)
                         selection = self._current_active_contract_selection()
-                        selected_ce = selection.selected_ce or getattr(self, "_active_selected_ce", None)
-                        selected_pe = selection.selected_pe or getattr(self, "_active_selected_pe", None)
-                        atm_strike = selection.atm_strike or getattr(self, "_active_atm_strike", None)
+                        selected_ce = selection.selected_ce or getattr(
+                            self, "_active_selected_ce", None
+                        )
+                        selected_pe = selection.selected_pe or getattr(
+                            self, "_active_selected_pe", None
+                        )
+                        atm_strike = selection.atm_strike or getattr(
+                            self, "_active_atm_strike", None
+                        )
                         symbol_strike = self._extract_strike_from_symbol(symbol)
                         normalized_symbol = normalize_symbol(symbol)
-                        selected_set = {normalize_symbol(item) for item in [selected_ce, selected_pe] if item}
+                        selected_set = {
+                            normalize_symbol(item)
+                            for item in [selected_ce, selected_pe]
+                            if item
+                        }
                         runtime_ctx: dict[str, Any] = {
                             "selected_ce": selected_ce,
                             "selected_pe": selected_pe,
@@ -11538,19 +13819,44 @@ class StrategyRunner:
                         )
                         if str(existing_bias or "").upper() in {"CE", "PE"}:
                             runtime_ctx["direction_bias"] = str(existing_bias).upper()
-                            runtime_ctx["underlying_direction_bias"] = str(existing_bias).upper()
+                            runtime_ctx["underlying_direction_bias"] = str(
+                                existing_bias
+                            ).upper()
                         if symbol_strike is not None and atm_strike is not None:
-                            runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
+                            runtime_ctx["strike_distance_from_atm"] = abs(
+                                float(symbol_strike) - float(atm_strike)
+                            )
                         runtime_ctx["active_selected_ce"] = selected_ce
                         runtime_ctx["active_selected_pe"] = selected_pe
-                        runtime_ctx["active_option_count"] = len(getattr(self, "_active_option_symbols", []) or [])
+                        runtime_ctx["active_option_count"] = len(
+                            getattr(self, "_active_option_symbols", []) or []
+                        )
                         if runtime_ctx.get("strike_distance_from_atm") is None:
-                            same_side_selected = selected_ce if option_side == "CE" else selected_pe if option_side == "PE" else None
-                            selected_strike = self._extract_strike_from_symbol(same_side_selected) if same_side_selected else None
-                            if symbol_strike is not None and selected_strike is not None:
-                                runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(selected_strike))
-                        quote_payload = self.get_quote(symbol) if hasattr(self, "get_quote") else {}
-                        quote_map = dict(quote_payload) if isinstance(quote_payload, Mapping) else {}
+                            same_side_selected = (
+                                selected_ce
+                                if option_side == "CE"
+                                else selected_pe if option_side == "PE" else None
+                            )
+                            selected_strike = (
+                                self._extract_strike_from_symbol(same_side_selected)
+                                if same_side_selected
+                                else None
+                            )
+                            if (
+                                symbol_strike is not None
+                                and selected_strike is not None
+                            ):
+                                runtime_ctx["strike_distance_from_atm"] = abs(
+                                    float(symbol_strike) - float(selected_strike)
+                                )
+                        quote_payload = (
+                            self.get_quote(symbol) if hasattr(self, "get_quote") else {}
+                        )
+                        quote_map = (
+                            dict(quote_payload)
+                            if isinstance(quote_payload, Mapping)
+                            else {}
+                        )
                         last_tick_store = getattr(self, "_last_tick", None)
                         if isinstance(last_tick_store, Mapping):
                             tick_map = dict(
@@ -11561,50 +13867,102 @@ class StrategyRunner:
                         else:
                             tick_map = {}
                         depth_payload = quote_map.get("depth") or tick_map.get("depth")
-                        bid = quote_map.get("bid") or quote_map.get("best_bid") or tick_map.get("bid") or tick_map.get("best_bid")
-                        ask = quote_map.get("ask") or quote_map.get("best_ask") or tick_map.get("ask") or tick_map.get("best_ask")
+                        bid = (
+                            quote_map.get("bid")
+                            or quote_map.get("best_bid")
+                            or tick_map.get("bid")
+                            or tick_map.get("best_bid")
+                        )
+                        ask = (
+                            quote_map.get("ask")
+                            or quote_map.get("best_ask")
+                            or tick_map.get("ask")
+                            or tick_map.get("best_ask")
+                        )
                         bid_f = _extract_float({"value": bid}, "value")
                         ask_f = _extract_float({"value": ask}, "value")
-                        bid_qty = quote_map.get("bid_qty") or tick_map.get("bid_qty") or quote_map.get("buy_qty") or tick_map.get("buy_qty")
-                        ask_qty = quote_map.get("ask_qty") or tick_map.get("ask_qty") or quote_map.get("sell_qty") or tick_map.get("sell_qty")
+                        bid_qty = (
+                            quote_map.get("bid_qty")
+                            or tick_map.get("bid_qty")
+                            or quote_map.get("buy_qty")
+                            or tick_map.get("buy_qty")
+                        )
+                        ask_qty = (
+                            quote_map.get("ask_qty")
+                            or tick_map.get("ask_qty")
+                            or quote_map.get("sell_qty")
+                            or tick_map.get("sell_qty")
+                        )
                         spread = quote_map.get("spread")
                         mid = quote_map.get("mid")
-                        if spread in (None, "") and bid_f is not None and ask_f is not None:
+                        if (
+                            spread in (None, "")
+                            and bid_f is not None
+                            and ask_f is not None
+                        ):
                             spread = ask_f - bid_f
-                        if mid in (None, "") and bid_f is not None and ask_f is not None:
+                        if (
+                            mid in (None, "")
+                            and bid_f is not None
+                            and ask_f is not None
+                        ):
                             mid = (ask_f + bid_f) / 2.0
                         spread_pct = quote_map.get("spread_pct")
-                        if spread_pct in (None, "") and spread not in (None, "") and mid not in (None, "", 0):
+                        if (
+                            spread_pct in (None, "")
+                            and spread not in (None, "")
+                            and mid not in (None, "", 0)
+                        ):
                             spread_f = _extract_float({"value": spread}, "value")
                             mid_f = _extract_float({"value": mid}, "value")
                             if spread_f is not None and mid_f not in (None, 0.0):
                                 spread_pct = (spread_f / mid_f) * 100.0
                         tradable_quote = bool(quote_map.get("tradable_quote"))
-                        if not tradable_quote and bid_f is not None and ask_f is not None:
+                        if (
+                            not tradable_quote
+                            and bid_f is not None
+                            and ask_f is not None
+                        ):
                             tradable_quote = ask_f > bid_f
-                        runtime_ctx.update({
-                            "bid": bid,
-                            "ask": ask,
-                            "best_bid": bid,
-                            "best_ask": ask,
-                            "bid_qty": bid_qty,
-                            "ask_qty": ask_qty,
-                            "buy_qty": quote_map.get("buy_qty") or tick_map.get("buy_qty") or bid_qty,
-                            "sell_qty": quote_map.get("sell_qty") or tick_map.get("sell_qty") or ask_qty,
-                            "depth": depth_payload,
-                            "depth_available": bool(quote_map.get("depth_available") or depth_payload),
-                            "tradable_quote": tradable_quote,
-                            "spread": spread,
-                            "mid": mid,
-                            "spread_pct": spread_pct,
-                            "bid_ask_source": quote_map.get("bid_ask_source") or tick_map.get("bid_ask_source") or "runner_context",
-                            "tick_direction": quote_map.get("tick_direction") or tick_map.get("tick_direction"),
-                            "data_age_seconds": quote_map.get("data_age_seconds") or tick_map.get("data_age_seconds"),
-                            "quote_age_s": quote_map.get("quote_age_s") or quote_map.get("data_age_seconds") or tick_map.get("data_age_seconds"),
-                        })
+                        runtime_ctx.update(
+                            {
+                                "bid": bid,
+                                "ask": ask,
+                                "best_bid": bid,
+                                "best_ask": ask,
+                                "bid_qty": bid_qty,
+                                "ask_qty": ask_qty,
+                                "buy_qty": quote_map.get("buy_qty")
+                                or tick_map.get("buy_qty")
+                                or bid_qty,
+                                "sell_qty": quote_map.get("sell_qty")
+                                or tick_map.get("sell_qty")
+                                or ask_qty,
+                                "depth": depth_payload,
+                                "depth_available": bool(
+                                    quote_map.get("depth_available") or depth_payload
+                                ),
+                                "tradable_quote": tradable_quote,
+                                "spread": spread,
+                                "mid": mid,
+                                "spread_pct": spread_pct,
+                                "bid_ask_source": quote_map.get("bid_ask_source")
+                                or tick_map.get("bid_ask_source")
+                                or "runner_context",
+                                "tick_direction": quote_map.get("tick_direction")
+                                or tick_map.get("tick_direction"),
+                                "data_age_seconds": quote_map.get("data_age_seconds")
+                                or tick_map.get("data_age_seconds"),
+                                "quote_age_s": quote_map.get("quote_age_s")
+                                or quote_map.get("data_age_seconds")
+                                or tick_map.get("data_age_seconds"),
+                            }
+                        )
                         indicators_ctx.update(runtime_ctx)
                         if hasattr(self._indicator_engine, "set_runtime_context"):
-                            self._indicator_engine.set_runtime_context(symbol, runtime_ctx)
+                            self._indicator_engine.set_runtime_context(
+                                symbol, runtime_ctx
+                            )
                         elif self._should_log_throttled(
                             "indicator_ctx_missing_setter", 60.0
                         ):
@@ -11613,9 +13971,10 @@ class StrategyRunner:
                                 symbol,
                                 type(self._indicator_engine).__name__,
                             )
-                        require_depth_for_signal = (
-                            os.getenv("EXECUTION_MODE", "PAPER").strip().upper() == "LIVE"
-                            and _env_bool("REQUIRE_MARKET_DEPTH_FOR_SIGNAL", False)
+                        require_depth_for_signal = os.getenv(
+                            "EXECUTION_MODE", "PAPER"
+                        ).strip().upper() == "LIVE" and _env_bool(
+                            "REQUIRE_MARKET_DEPTH_FOR_SIGNAL", False
                         )
                         market_depth_ok = self.validate_market_depth()
                         if not market_depth_ok and require_depth_for_signal:
@@ -11634,7 +13993,10 @@ class StrategyRunner:
                                 "MARKET_DEPTH_SOFT_FAIL_SIGNAL_CONTINUES",
                                 interval_sec=60.0,
                                 level=logging.INFO,
-                                extra={"event": "MARKET_DEPTH_SOFT_FAIL_SIGNAL_CONTINUES", "symbol": symbol},
+                                extra={
+                                    "event": "MARKET_DEPTH_SOFT_FAIL_SIGNAL_CONTINUES",
+                                    "symbol": symbol,
+                                },
                             )
 
                         symbol_role = self._symbol_role_for_runner(symbol)
@@ -11646,7 +14008,9 @@ class StrategyRunner:
                         if (
                             symbol_role in {"spot_context", "futures_context"}
                             and not market_open
-                            and not _env_bool("ALLOW_OFFMARKET_CONTEXT_DIAGNOSTICS", False)
+                            and not _env_bool(
+                                "ALLOW_OFFMARKET_CONTEXT_DIAGNOSTICS", False
+                            )
                         ):
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
@@ -11678,8 +14042,12 @@ class StrategyRunner:
                                 trace_id=trace_id,
                             )
                             return
-                        direction_bias = str((indicators_ctx.get("direction_bias") or "")).upper()
-                        underlying_bias = str((indicators_ctx.get("underlying_direction_bias") or "")).upper()
+                        direction_bias = str(
+                            (indicators_ctx.get("direction_bias") or "")
+                        ).upper()
+                        underlying_bias = str(
+                            (indicators_ctx.get("underlying_direction_bias") or "")
+                        ).upper()
                         resolved_bias = underlying_bias or direction_bias
                         resolved_confidence = float(
                             indicators_ctx.get("direction_confidence")
@@ -11693,75 +14061,161 @@ class StrategyRunner:
                         runtime_indicators[symbol] = {
                             **(runtime_indicators.get(symbol, {}) or {}),
                             "direction_bias": indicators_ctx.get("direction_bias"),
-                            "underlying_direction_bias": indicators_ctx.get("underlying_direction_bias"),
-                            "context_age_seconds": indicators_ctx.get("context_age_seconds"),
-                            "underlying_direction_confidence": indicators_ctx.get("underlying_direction_confidence"),
+                            "underlying_direction_bias": indicators_ctx.get(
+                                "underlying_direction_bias"
+                            ),
+                            "context_age_seconds": indicators_ctx.get(
+                                "context_age_seconds"
+                            ),
+                            "underlying_direction_confidence": indicators_ctx.get(
+                                "underlying_direction_confidence"
+                            ),
                         }
                         self._last_direction_context = runtime_indicators[symbol]
                         spot_fresh = bool(indicators_ctx.get("spot_fresh"))
-                        fut_fresh = bool(indicators_ctx.get("futures_fresh") or indicators_ctx.get("fut_fresh"))
-                        context_fresh = bool(indicators_ctx.get("context_fresh") or spot_fresh or fut_fresh)
-                        live_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE"
-                        if live_mode and (resolved_bias not in {"CE", "PE"} or not context_fresh):
-                            refreshed_context = self._underlying_context_from_strategy_manager()
+                        fut_fresh = bool(
+                            indicators_ctx.get("futures_fresh")
+                            or indicators_ctx.get("fut_fresh")
+                        )
+                        context_fresh = bool(
+                            indicators_ctx.get("context_fresh")
+                            or spot_fresh
+                            or fut_fresh
+                        )
+                        live_mode = (
+                            str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW")
+                            .strip()
+                            .upper()
+                            == "LIVE"
+                        )
+                        if live_mode and (
+                            resolved_bias not in {"CE", "PE"} or not context_fresh
+                        ):
+                            refreshed_context = (
+                                self._underlying_context_from_strategy_manager()
+                            )
                             if refreshed_context:
                                 runtime_ctx.update(refreshed_context)
                                 indicators_ctx.update(refreshed_context)
-                                direction_bias = str((indicators_ctx.get("direction_bias") or "")).upper()
-                                underlying_bias = str((indicators_ctx.get("underlying_direction_bias") or "")).upper()
+                                direction_bias = str(
+                                    (indicators_ctx.get("direction_bias") or "")
+                                ).upper()
+                                underlying_bias = str(
+                                    (
+                                        indicators_ctx.get("underlying_direction_bias")
+                                        or ""
+                                    )
+                                ).upper()
                                 resolved_bias = underlying_bias or direction_bias
                                 resolved_confidence = float(
                                     indicators_ctx.get("direction_confidence")
-                                    or indicators_ctx.get("underlying_direction_confidence")
+                                    or indicators_ctx.get(
+                                        "underlying_direction_confidence"
+                                    )
                                     or 0.0
                                 )
                                 spot_fresh = bool(indicators_ctx.get("spot_fresh"))
-                                fut_fresh = bool(indicators_ctx.get("futures_fresh") or indicators_ctx.get("fut_fresh"))
-                                context_fresh = bool(indicators_ctx.get("context_fresh") or spot_fresh or fut_fresh)
+                                fut_fresh = bool(
+                                    indicators_ctx.get("futures_fresh")
+                                    or indicators_ctx.get("fut_fresh")
+                                )
+                                context_fresh = bool(
+                                    indicators_ctx.get("context_fresh")
+                                    or spot_fresh
+                                    or fut_fresh
+                                )
                             if resolved_bias in {"CE", "PE"} and context_fresh:
                                 runtime_indicators[symbol] = {
                                     **(runtime_indicators.get(symbol, {}) or {}),
-                                    "direction_bias": indicators_ctx.get("direction_bias"),
-                                    "underlying_direction_bias": indicators_ctx.get("underlying_direction_bias"),
-                                    "context_age_seconds": indicators_ctx.get("context_age_seconds"),
-                                    "underlying_direction_confidence": indicators_ctx.get("underlying_direction_confidence"),
+                                    "direction_bias": indicators_ctx.get(
+                                        "direction_bias"
+                                    ),
+                                    "underlying_direction_bias": indicators_ctx.get(
+                                        "underlying_direction_bias"
+                                    ),
+                                    "context_age_seconds": indicators_ctx.get(
+                                        "context_age_seconds"
+                                    ),
+                                    "underlying_direction_confidence": indicators_ctx.get(
+                                        "underlying_direction_confidence"
+                                    ),
                                 }
-                                self._last_direction_context = runtime_indicators[symbol]
+                                self._last_direction_context = runtime_indicators[
+                                    symbol
+                                ]
                             else:
                                 log_throttled(
-                                self._logger,
-                                f"direction_context_missing_live:{symbol}",
-                                "TRIGGER_EVAL_SKIPPED symbol=%s reason=direction_context_missing_live spot_fresh=%s fut_fresh=%s",
-                                symbol,
-                                spot_fresh,
-                                fut_fresh,
-                                interval_sec=30.0,
-                                level=logging.WARNING,
-                                extra={"event": "trigger_eval_skipped", "reason": "direction_context_missing_live", "symbol": symbol, "spot_fresh": spot_fresh, "fut_fresh": fut_fresh},
+                                    self._logger,
+                                    f"direction_context_missing_live:{symbol}",
+                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=direction_context_missing_live spot_fresh=%s fut_fresh=%s",
+                                    symbol,
+                                    spot_fresh,
+                                    fut_fresh,
+                                    interval_sec=30.0,
+                                    level=logging.WARNING,
+                                    extra={
+                                        "event": "trigger_eval_skipped",
+                                        "reason": "direction_context_missing_live",
+                                        "symbol": symbol,
+                                        "spot_fresh": spot_fresh,
+                                        "fut_fresh": fut_fresh,
+                                    },
                                 )
-                                self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="direction_context_missing_live", allowed=False, trace_id=trace_id)
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="direction_context_missing_live",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
                                 return
-                        if getattr(self, "_orchestrator", None) is not None and hasattr(self._orchestrator, "reconcile_direction_bias"):
+                        if getattr(self, "_orchestrator", None) is not None and hasattr(
+                            self._orchestrator, "reconcile_direction_bias"
+                        ):
                             self._orchestrator.reconcile_direction_bias(
                                 resolved_bias=resolved_bias or None,
                                 confidence=resolved_confidence,
                                 symbol=symbol,
-                                position_manager=getattr(self, "_position_manager", None),
+                                position_manager=getattr(
+                                    self, "_position_manager", None
+                                ),
                             )
-                        suppress_opposite = str(os.getenv("SUPPRESS_OPPOSITE_SIDE_TRIGGERS", "true")).lower() in {"1", "true", "yes", "on"}
-                        suppress_conf = float(os.getenv("OPPOSITE_SIDE_SUPPRESSION_CONFIDENCE", "0.85"))
-                        if suppress_opposite and resolved_bias in {"CE", "PE"} and resolved_confidence >= suppress_conf:
+                        suppress_opposite = str(
+                            os.getenv("SUPPRESS_OPPOSITE_SIDE_TRIGGERS", "true")
+                        ).lower() in {"1", "true", "yes", "on"}
+                        suppress_conf = float(
+                            os.getenv("OPPOSITE_SIDE_SUPPRESSION_CONFIDENCE", "0.85")
+                        )
+                        if (
+                            suppress_opposite
+                            and resolved_bias in {"CE", "PE"}
+                            and resolved_confidence >= suppress_conf
+                        ):
                             upper_sym = symbol.upper()
-                            opposite = (resolved_bias == "PE" and upper_sym.endswith("CE")) or (resolved_bias == "CE" and upper_sym.endswith("PE"))
+                            opposite = (
+                                resolved_bias == "PE" and upper_sym.endswith("CE")
+                            ) or (resolved_bias == "CE" and upper_sym.endswith("PE"))
                             if opposite:
                                 self._logger.warning(
                                     "TRIGGER_EVAL_SKIPPED symbol=%s reason=opposite_side_trigger_suppressed underlying_bias=%s confidence=%.2f",
                                     symbol,
                                     resolved_bias,
                                     resolved_confidence,
-                                    extra={"event": "trigger_eval_skipped", "reason": "opposite_side_trigger_suppressed", "symbol": symbol, "underlying_bias": resolved_bias, "confidence": resolved_confidence},
+                                    extra={
+                                        "event": "trigger_eval_skipped",
+                                        "reason": "opposite_side_trigger_suppressed",
+                                        "symbol": symbol,
+                                        "underlying_bias": resolved_bias,
+                                        "confidence": resolved_confidence,
+                                    },
                                 )
-                                self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="opposite_side_trigger_suppressed", allowed=False, trace_id=trace_id)
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="opposite_side_trigger_suppressed",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
                                 return
                         signal = self._strategy_manager.generate_signal(
                             symbol,
@@ -11770,7 +14224,9 @@ class StrategyRunner:
                         )
                         self._symbol_has_completed_strategy_eval.add(symbol)
                         if same_bar_eval_allowed and pending_same_bar_eval_ts > 0.0:
-                            self._last_same_bar_eval_ts_by_symbol[symbol] = pending_same_bar_eval_ts
+                            self._last_same_bar_eval_ts_by_symbol[symbol] = (
+                                pending_same_bar_eval_ts
+                            )
                         self._last_eval_price_by_symbol[symbol] = float(price)
                         if pending_eval_bar_ts is not None:
                             with self._lock:
@@ -11779,7 +14235,9 @@ class StrategyRunner:
                                     state_after._last_eval_bar_ts = pending_eval_bar_ts
                         if signal is None:
                             option_required = self._required_bars_for_symbol(symbol)
-                            option_count = len(self._indicator_engine.get_history(symbol) or [])
+                            option_count = len(
+                                self._indicator_engine.get_history(symbol) or []
+                            )
                             category, reason = self._classify_no_trade_decision(
                                 symbol=symbol,
                                 signal=None,
@@ -11823,8 +14281,8 @@ class StrategyRunner:
                                 "symbol": symbol,
                                 "price": price,
                                 "has_signal": signal is not None,
-                                "signal_action": signal.action if signal else None
-                            }
+                                "signal_action": signal.action if signal else None,
+                            },
                         )
                         self._last_strategy_versions[symbol] = current_version
                     except Exception as exc:
@@ -11835,18 +14293,29 @@ class StrategyRunner:
                             type(exc).__name__,
                             str(exc),
                             trace_id,
-                            extra={"event": "SIGNAL_EVALUATION_FAILURE", "symbol": symbol, "phase": "phase9", "error_type": type(exc).__name__, "error": str(exc), "trace_id": trace_id},
+                            extra={
+                                "event": "SIGNAL_EVALUATION_FAILURE",
+                                "symbol": symbol,
+                                "phase": "phase9",
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "trace_id": trace_id,
+                            },
                         )
                         signal = None
                     self._strategy_window_symbols.add(symbol)
                     if signal is not None:
                         self._signal_counter += 1
                         self._strategy_window_signals += 1
-                        
+
                         # --- Objective 8: Prometheus metrics ---
                         signals_generated_total.labels(
                             symbol=symbol,
-                            strategy=str(signal.metadata.get("strategy") if signal.metadata else "unknown")
+                            strategy=str(
+                                signal.metadata.get("strategy")
+                                if signal.metadata
+                                else "unknown"
+                            ),
                         ).inc()
 
                         self._logger.info(
@@ -11933,10 +14402,30 @@ class StrategyRunner:
                 phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
                 signal_phase = self._data_phase.get(symbol)
-                live_ready, live_ready_reason, live_ready_details = self._symbol_live_entry_ready(symbol, signal=signal, trace_id=trace_id)
+                live_ready, live_ready_reason, live_ready_details = (
+                    self._symbol_live_entry_ready(
+                        symbol, signal=signal, trace_id=trace_id
+                    )
+                )
                 if not live_ready:
-                    self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, False, live_ready_reason, trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": False, "reason": live_ready_reason, "trace_id": trace_id, **live_ready_details})
-                    self._update_symbol_execution_phase(symbol, "BLOCKED", live_ready_reason)
+                    self._logger.info(
+                        "SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s",
+                        symbol,
+                        False,
+                        live_ready_reason,
+                        trace_id,
+                        extra={
+                            "event": "SYMBOL_LIVE_ENTRY_READY_CHECK",
+                            "symbol": symbol,
+                            "final_ready": False,
+                            "reason": live_ready_reason,
+                            "trace_id": trace_id,
+                            **live_ready_details,
+                        },
+                    )
+                    self._update_symbol_execution_phase(
+                        symbol, "BLOCKED", live_ready_reason
+                    )
                     signal_metadata = dict(signal.metadata or {})
                     signal_metadata["shadow_only"] = True
                     signal_metadata["blocked_reason"] = live_ready_reason
@@ -11971,18 +14460,26 @@ class StrategyRunner:
                         },
                     )
                     return
-                self._update_symbol_execution_phase(symbol, "LIVE_READY", "symbol_live_ready")
+                self._update_symbol_execution_phase(
+                    symbol, "LIVE_READY", "symbol_live_ready"
+                )
                 if signal_phase == "HYDRATION":
                     self._logger.info(
                         "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY symbol=%s trace_id=%s",
                         symbol,
                         trace_id,
-                        extra={"event": "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY", "symbol": symbol, "trace_id": trace_id},
+                        extra={
+                            "event": "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY",
+                            "symbol": symbol,
+                            "trace_id": trace_id,
+                        },
                     )
                 current_regime = self._compute_regime_snapshot(symbol)
                 signal_metadata = dict(signal.metadata or {})
                 signal_metadata["runtime_regime"] = current_regime.value
-                signal_metadata["runtime_regime_inputs"] = self._last_regime_inputs_by_symbol.get(symbol, {})
+                signal_metadata["runtime_regime_inputs"] = (
+                    self._last_regime_inputs_by_symbol.get(symbol, {})
+                )
                 signal = dataclasses.replace(signal, metadata=signal_metadata)
                 signal_strategy = str((signal.metadata or {}).get("strategy") or "")
                 coarse_regime = self.detect_market_regime(symbol)
@@ -12003,8 +14500,21 @@ class StrategyRunner:
                     if self._block_low_volatility:
                         self._logger.info(
                             "SIGNAL_EXECUTION_DECISION symbol=%s stage=phase10 decision=low_volatility_rejected trace_id=%s strategy=%s action=%s confidence=%.2f",
-                            symbol, trace_id, signal_strategy or "unknown", signal.action, float(signal.confidence or 0.0),
-                            extra={"event": "SIGNAL_EXECUTION_DECISION", "symbol": symbol, "stage": "phase10", "decision": "low_volatility_rejected", "trace_id": trace_id, "strategy": signal_strategy or "unknown", "action": signal.action, "confidence": float(signal.confidence or 0.0)},
+                            symbol,
+                            trace_id,
+                            signal_strategy or "unknown",
+                            signal.action,
+                            float(signal.confidence or 0.0),
+                            extra={
+                                "event": "SIGNAL_EXECUTION_DECISION",
+                                "symbol": symbol,
+                                "stage": "phase10",
+                                "decision": "low_volatility_rejected",
+                                "trace_id": trace_id,
+                                "strategy": signal_strategy or "unknown",
+                                "action": signal.action,
+                                "confidence": float(signal.confidence or 0.0),
+                            },
                         )
                         return
                 if (
@@ -12039,7 +14549,9 @@ class StrategyRunner:
                                         "event": "RUNNER_SIGNAL_COOLDOWN",
                                         "symbol": symbol,
                                         "elapsed_s": round(elapsed_s, 3),
-                                        "required_s": float(self._config.signal_cooldown_seconds),
+                                        "required_s": float(
+                                            self._config.signal_cooldown_seconds
+                                        ),
                                         "allowed": False,
                                     },
                                 )
@@ -12053,22 +14565,60 @@ class StrategyRunner:
 
                 self._logger.debug(
                     "SIGNAL_EXECUTING symbol=%s action=%s reason=%s price=%.2f",
-                    symbol, signal.action, signal.reason, price,
-                    extra={"event": "signal_executing", "symbol": symbol,
-                           "action": signal.action},
+                    symbol,
+                    signal.action,
+                    signal.reason,
+                    price,
+                    extra={
+                        "event": "signal_executing",
+                        "symbol": symbol,
+                        "action": signal.action,
+                    },
                 )
-                ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
+                ks_active, ks_status = (
+                    self._order_manager_kill_switch_status_for_entry()
+                )
                 if ks_active:
                     self._logger.warning(
                         "RUNNER_KILL_SWITCH_PRECHECK_BLOCK symbol=%s trace_id=%s",
                         symbol,
                         trace_id,
-                        extra={"event": "RUNNER_KILL_SWITCH_PRECHECK_BLOCK", "symbol": symbol, "trace_id": trace_id, "reason": "order_manager_kill_switch_active", "kill_switch_status": ks_status, "broker_attempted": False, "consecutive_failures": ks_status.get("consecutive_failures"), "kill_reason": ks_status.get("kill_reason"), "last_exception_type": (ks_status.get("last_failure") or {}).get("exception_type"), "last_exception_message": (ks_status.get("last_failure") or {}).get("exception_message"), "recent_failures": ks_status.get("recent_failures")},
+                        extra={
+                            "event": "RUNNER_KILL_SWITCH_PRECHECK_BLOCK",
+                            "symbol": symbol,
+                            "trace_id": trace_id,
+                            "reason": "order_manager_kill_switch_active",
+                            "kill_switch_status": ks_status,
+                            "broker_attempted": False,
+                            "consecutive_failures": ks_status.get(
+                                "consecutive_failures"
+                            ),
+                            "kill_reason": ks_status.get("kill_reason"),
+                            "last_exception_type": (
+                                ks_status.get("last_failure") or {}
+                            ).get("exception_type"),
+                            "last_exception_message": (
+                                ks_status.get("last_failure") or {}
+                            ).get("exception_message"),
+                            "recent_failures": ks_status.get("recent_failures"),
+                        },
                     )
                     self._logger.info(
                         "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                        symbol, False, "order_manager_kill_switch_active", None, trace_id,
-                        extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": False, "reason": "order_manager_kill_switch_active", "order_id": None, "trace_id": trace_id, "broker_attempted": False},
+                        symbol,
+                        False,
+                        "order_manager_kill_switch_active",
+                        None,
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_EXECUTION_RESULT",
+                            "symbol": symbol,
+                            "accepted": False,
+                            "reason": "order_manager_kill_switch_active",
+                            "order_id": None,
+                            "trace_id": trace_id,
+                            "broker_attempted": False,
+                        },
                     )
                     return
                 self._logger.info(
@@ -12090,9 +14640,8 @@ class StrategyRunner:
                 # (materializing plans + order requests just to be rejected by
                 # the native gate wastes the event loop and floods logs —
                 # 2026-07-10 RCA: ORDER_PATH_ENTERED live_orders_armed=False).
-                if (
-                    getattr(self, "_live_mode", False)
-                    and not getattr(self, "_runtime_live_orders_armed", True)
+                if getattr(self, "_live_mode", False) and not getattr(
+                    self, "_runtime_live_orders_armed", True
                 ):
                     if self._should_log_throttled(
                         f"signal_prep_unarmed:{symbol}", 30.0
@@ -12128,8 +14677,19 @@ class StrategyRunner:
                     )
                     self._logger.info(
                         "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                        symbol, False, prepare_reason, None, trace_id,
-                        extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": False, "reason": prepare_reason, "order_id": None, "trace_id": trace_id},
+                        symbol,
+                        False,
+                        prepare_reason,
+                        None,
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_EXECUTION_RESULT",
+                            "symbol": symbol,
+                            "accepted": False,
+                            "reason": prepare_reason,
+                            "order_id": None,
+                            "trace_id": trace_id,
+                        },
                     )
                 return
         except Exception as exc:
@@ -12345,24 +14905,44 @@ class StrategyRunner:
                 for option_symbol in getattr(self, "_active_option_symbols", set())
                 if option_symbol
             }
-            normalized_selected_ce = normalize_symbol(selected_ce) if selected_ce else ""
-            normalized_selected_pe = normalize_symbol(selected_pe) if selected_pe else ""
+            normalized_selected_ce = (
+                normalize_symbol(selected_ce) if selected_ce else ""
+            )
+            normalized_selected_pe = (
+                normalize_symbol(selected_pe) if selected_pe else ""
+            )
             normalized_symbol = normalize_symbol(symbol)
-            if not (normalized_selected_ce or normalized_selected_pe) and active_option_symbols and atm_strike:
+            if (
+                not (normalized_selected_ce or normalized_selected_pe)
+                and active_option_symbols
+                and atm_strike
+            ):
                 selected_candidates = [
-                    item for item in active_option_symbols if self._extract_strike_from_symbol(item)
+                    item
+                    for item in active_option_symbols
+                    if self._extract_strike_from_symbol(item)
                 ]
-                ce_candidates = [item for item in selected_candidates if item.endswith("CE")]
-                pe_candidates = [item for item in selected_candidates if item.endswith("PE")]
+                ce_candidates = [
+                    item for item in selected_candidates if item.endswith("CE")
+                ]
+                pe_candidates = [
+                    item for item in selected_candidates if item.endswith("PE")
+                ]
                 if ce_candidates:
                     normalized_selected_ce = min(
                         ce_candidates,
-                        key=lambda item: abs(float(self._extract_strike_from_symbol(item) or 0) - float(atm_strike)),
+                        key=lambda item: abs(
+                            float(self._extract_strike_from_symbol(item) or 0)
+                            - float(atm_strike)
+                        ),
                     )
                 if pe_candidates:
                     normalized_selected_pe = min(
                         pe_candidates,
-                        key=lambda item: abs(float(self._extract_strike_from_symbol(item) or 0) - float(atm_strike)),
+                        key=lambda item: abs(
+                            float(self._extract_strike_from_symbol(item) or 0)
+                            - float(atm_strike)
+                        ),
                     )
             strike_value = self._extract_strike_from_symbol(symbol)
             inds = self._indicator_engine.get_indicators(symbol)
@@ -12373,7 +14953,11 @@ class StrategyRunner:
                 except (TypeError, ValueError):
                     atm_strike = atm_strike
             if (atm_strike in (None, 0)) and not selected_ce and not selected_pe:
-                self._logger.info("PREMIUM_SQUEEZE_SKIPPED reason=missing_active_option_context symbol=%s trace_id=%s", symbol, trace_id)
+                self._logger.info(
+                    "PREMIUM_SQUEEZE_SKIPPED reason=missing_active_option_context symbol=%s trace_id=%s",
+                    symbol,
+                    trace_id,
+                )
                 return None
             strike = float(strike_value or 0.0)
             atm_strike_float = float(atm_strike or 0.0)
@@ -12388,17 +14972,19 @@ class StrategyRunner:
             )
             in_active_universe = normalized_symbol in active_option_symbols
             if not (selected or near_atm or in_active_universe):
-                if self._should_log_throttled(f"premium_outside_window:{normalized_symbol}", 60.0):
+                if self._should_log_throttled(
+                    f"premium_outside_window:{normalized_symbol}", 60.0
+                ):
                     self._logger.info(
-                    "PREMIUM_SQUEEZE_SKIPPED reason=outside_selected_strike_window symbol=%s selected_ce=%s selected_pe=%s atm_strike=%s strike=%s max_distance=%s trace_id=%s",
-                    symbol,
-                    normalized_selected_ce,
-                    normalized_selected_pe,
-                    atm_strike_float,
-                    strike,
-                    max_strike_distance,
-                    trace_id,
-                )
+                        "PREMIUM_SQUEEZE_SKIPPED reason=outside_selected_strike_window symbol=%s selected_ce=%s selected_pe=%s atm_strike=%s strike=%s max_distance=%s trace_id=%s",
+                        symbol,
+                        normalized_selected_ce,
+                        normalized_selected_pe,
+                        atm_strike_float,
+                        strike,
+                        max_strike_distance,
+                        trace_id,
+                    )
                 return None
         sl_pct = self._vwap_sl_pct
         tp_pct = self._vwap_tp_pct
@@ -12474,12 +15060,21 @@ class StrategyRunner:
         option_score = max(0.0, min(10.0, option_score))
         data_score = max(0.0, min(10.0, data_score))
         rr_score = max(0.0, min(10.0, rr_score))
-        premium_rr = (float(calculated_tp) - float(price)) / max(float(price) - float(calculated_sl), 1e-9)
+        premium_rr = (float(calculated_tp) - float(price)) / max(
+            float(price) - float(calculated_sl), 1e-9
+        )
         confidence = max(
             0.55,
             min(
                 0.85,
-                (direction_score + strategy_score + option_score + data_score + rr_score) / 50.0,
+                (
+                    direction_score
+                    + strategy_score
+                    + option_score
+                    + data_score
+                    + rr_score
+                )
+                / 50.0,
             ),
         )
         return Signal(
@@ -12498,7 +15093,11 @@ class StrategyRunner:
                 "feature": "premium_momentum_squeeze",
                 "strategy_name": "premium_momentum_squeeze",
                 "is_selected_option": bool(selected),
-                "strike_distance_from_atm": abs(strike - atm_strike_float) if strike > 0 and atm_strike_float > 0 else None,
+                "strike_distance_from_atm": (
+                    abs(strike - atm_strike_float)
+                    if strike > 0 and atm_strike_float > 0
+                    else None
+                ),
                 "premium_stop_distance": max(float(price) - float(calculated_sl), 0.0),
                 "premium_target_rr": premium_rr,
                 "direction_score": direction_score,
@@ -12521,7 +15120,12 @@ class StrategyRunner:
     ) -> Signal:
         """Build final long-option SL/TP from metadata, then normalize geometry."""
         metadata = dict(signal.metadata or {})
-        entry_price = float(execution_price or metadata.get("entry_price") or metadata.get("price") or 0.0)
+        entry_price = float(
+            execution_price
+            or metadata.get("entry_price")
+            or metadata.get("price")
+            or 0.0
+        )
         if entry_price <= 0:
             return signal
 
@@ -12535,16 +15139,29 @@ class StrategyRunner:
         take_profit = _to_float(signal.take_profit)
         rr = _to_float(metadata.get("premium_target_rr")) or 2.0
         stop_distance = _to_float(metadata.get("premium_stop_distance"))
-        explicit_stop = _to_float(metadata.get("setup_invalidation_premium")) or _to_float(metadata.get("premium_stop_price"))
+        explicit_stop = _to_float(
+            metadata.get("setup_invalidation_premium")
+        ) or _to_float(metadata.get("premium_stop_price"))
         plan_source = "existing_signal_levels"
-        if stop_loss is None or stop_loss <= 0 or take_profit is None or take_profit <= 0:
+        if (
+            stop_loss is None
+            or stop_loss <= 0
+            or take_profit is None
+            or take_profit <= 0
+        ):
             if metadata.get("premium_stop_pct") is not None:
-                signal = self._apply_premium_targets(signal, premium=entry_price, entry_side=entry_side)
+                signal = self._apply_premium_targets(
+                    signal, premium=entry_price, entry_side=entry_side
+                )
                 stop_loss = _to_float(signal.stop_loss)
                 take_profit = _to_float(signal.take_profit)
                 plan_source = "premium_stop_pct"
             else:
-                distance = stop_distance if stop_distance is not None and stop_distance > 0 else max(atr * 1.2, entry_price * 0.02, 1.0)
+                distance = (
+                    stop_distance
+                    if stop_distance is not None and stop_distance > 0
+                    else max(atr * 1.2, entry_price * 0.02, 1.0)
+                )
                 # An explicit stop is only valid if it sits BELOW entry and within a
                 # sane premium range. Strategies sometimes derive the stop from the
                 # UNDERLYING (index ~24000) while the trade is on the option PREMIUM
@@ -12558,16 +15175,23 @@ class StrategyRunner:
                     and explicit_stop > 0
                     and str(entry_side).upper() == "BUY"
                     and explicit_stop < entry_price
-                    and (entry_price - explicit_stop) <= entry_price  # SL not absurdly far (>100% premium)
+                    and (entry_price - explicit_stop)
+                    <= entry_price  # SL not absurdly far (>100% premium)
                 )
                 if explicit_ok:
                     stop_loss = explicit_stop
                     plan_source = "explicit_premium_stop"
                 else:
-                    if explicit_stop is not None and explicit_stop > 0 and str(entry_side).upper() == "BUY":
+                    if (
+                        explicit_stop is not None
+                        and explicit_stop > 0
+                        and str(entry_side).upper() == "BUY"
+                    ):
                         LOGGER.info(
                             "EXPLICIT_STOP_REJECTED_OUT_OF_PREMIUM_RANGE symbol=%s entry=%.2f explicit_stop=%.2f -> using premium_stop_distance",
-                            getattr(signal, "symbol", "?"), entry_price, float(explicit_stop),
+                            getattr(signal, "symbol", "?"),
+                            entry_price,
+                            float(explicit_stop),
                         )
                     stop_loss = entry_price - distance
                     plan_source = "premium_stop_distance"
@@ -12577,16 +15201,30 @@ class StrategyRunner:
                 signal,
                 stop_loss=float(stop_loss) if stop_loss is not None else None,
                 take_profit=float(take_profit) if take_profit is not None else None,
-                metadata={**metadata, "entry_price": entry_price, "option_trade_plan_source": plan_source},
+                metadata={
+                    **metadata,
+                    "entry_price": entry_price,
+                    "option_trade_plan_source": plan_source,
+                },
             )
-        signal = self._validate_long_option_geometry(signal=signal, entry_price=entry_price, entry_side=entry_side, atr=atr)
-        signal = self._anchor_sl_tp_to_execution(signal=signal, signal_price=entry_price, execution_price=entry_price, entry_side=entry_side, atr=atr)
+        signal = self._validate_long_option_geometry(
+            signal=signal, entry_price=entry_price, entry_side=entry_side, atr=atr
+        )
+        signal = self._anchor_sl_tp_to_execution(
+            signal=signal,
+            signal_price=entry_price,
+            execution_price=entry_price,
+            entry_side=entry_side,
+            atr=atr,
+        )
         final_md = dict(signal.metadata or {})
         final_md["entry_price"] = entry_price
         final_md["stop_loss"] = signal.stop_loss
         final_md["take_profit"] = signal.take_profit
         final_md["materialized_trade_plan"] = True
-        final_md["option_trade_plan_source"] = final_md.get("option_trade_plan_source", plan_source)
+        final_md["option_trade_plan_source"] = final_md.get(
+            "option_trade_plan_source", plan_source
+        )
         self._logger.info(
             "OPTION_TRADE_PLAN_MATERIALIZED symbol=%s entry=%.2f sl=%s tp=%s source=%s",
             signal.symbol,
@@ -12627,7 +15265,9 @@ class StrategyRunner:
                     "trace_id": trace_id,
                 },
             )
-            return SignalExecutionResult(False, "outside_market_hours", details={"trace_id": trace_id})
+            return SignalExecutionResult(
+                False, "outside_market_hours", details={"trace_id": trace_id}
+            )
         mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
         is_live_mode = mode == "LIVE" or (
             str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
@@ -12690,13 +15330,21 @@ class StrategyRunner:
                 )
 
             elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
-                self._transition_execution_state(base_symbol, ExecutionState.EXIT_PENDING)
+                self._transition_execution_state(
+                    base_symbol, ExecutionState.EXIT_PENDING
+                )
                 self._handle_exit_signal(
                     signal, base_symbol, trade_symbol, trade_price, timestamp
                 )
-                return SignalExecutionResult(True, "exit_submitted", details={"trace_id": trace_id})
+                return SignalExecutionResult(
+                    True, "exit_submitted", details={"trace_id": trace_id}
+                )
 
-            return SignalExecutionResult(False, "unsupported_action", details={"trace_id": trace_id, "action": action})
+            return SignalExecutionResult(
+                False,
+                "unsupported_action",
+                details={"trace_id": trace_id, "action": action},
+            )
 
         except Exception as exc:
             self._logger.error(f"🔴 HANDLER CRASHED: {exc}", exc_info=True)
@@ -12709,10 +15357,10 @@ class StrategyRunner:
                         ),
                     )
                 except Exception as e:
-                    LOGGER.exception(
-                        "[CRITICAL] unhandled exception", exc_info=True
+                    LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
+                    self._logger.error(
+                        "Failure in _handle_signal: %s", e, exc_info=True
                     )
-                    self._logger.error("Failure in _handle_signal: %s", e, exc_info=True)
             return SignalExecutionResult(
                 False,
                 "exception",
@@ -12899,7 +15547,7 @@ class StrategyRunner:
                 extra={
                     "event": "RUNNER_SIGNAL_DECISION",
                     "symbol": base_symbol,
-                "underlying_symbol": base_symbol,
+                    "underlying_symbol": base_symbol,
                     "action": action,
                     "proceed_to_order": False,
                     "reason": "strike_selector_none",
@@ -13095,12 +15743,16 @@ class StrategyRunner:
         spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else 999.0
         tick_age_ms = resolve_tick_age_ms(
             {
-                "tick_age_ms": metadata.get("candidate_tick_age_ms")
-                if metadata.get("candidate_tick_age_ms") is not None
-                else metadata.get("tick_age_ms"),
-                "tick_age_s": metadata.get("candidate_tick_age_s")
-                if metadata.get("candidate_tick_age_s") is not None
-                else metadata.get("tick_age_s"),
+                "tick_age_ms": (
+                    metadata.get("candidate_tick_age_ms")
+                    if metadata.get("candidate_tick_age_ms") is not None
+                    else metadata.get("tick_age_ms")
+                ),
+                "tick_age_s": (
+                    metadata.get("candidate_tick_age_s")
+                    if metadata.get("candidate_tick_age_s") is not None
+                    else metadata.get("tick_age_s")
+                ),
                 "quote_age_ms": metadata.get("quote_age_ms"),
                 "quote_age_s": metadata.get("quote_age_s"),
                 "last_tick_age_ms": metadata.get("last_tick_age_ms"),
@@ -13162,16 +15814,27 @@ class StrategyRunner:
         is_live_depth_required = bool(mode_snapshot.is_live_mode) and not _env_flag(
             "RUNNER_ALLOW_LIVE_DEPTH_FALLBACK", default=False
         )
-        strict_depth = is_live_depth_required or _env_flag("STRICT_OPTION_DEPTH_FOR_PAPER", default=False)
-        max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
-        invalid_spread = spread_pct_raw is None or spread_pct < 0 or spread_pct > max_spread_pct
+        strict_depth = is_live_depth_required or _env_flag(
+            "STRICT_OPTION_DEPTH_FOR_PAPER", default=False
+        )
+        max_spread_pct = float(
+            os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0"))
+            or "10.0"
+        )
+        invalid_spread = (
+            spread_pct_raw is None or spread_pct < 0 or spread_pct > max_spread_pct
+        )
         # A fresh quote with valid bid/ask and acceptable spread is executable even
         # when the full broker depth array is absent. depth_available=False alone
         # must NOT reject unless REQUIRE_FULL_DEPTH_FOR_EXECUTION is explicitly set.
         # The real tradability checks (tradable_quote, bid/ask > 0, ask > bid, spread)
         # are preserved.
-        require_full_depth = _env_flag("REQUIRE_FULL_DEPTH_FOR_EXECUTION", default=False)
-        bid_ask_invalid = not tradable_quote or bid <= 0 or ask <= 0 or ask <= bid or invalid_spread
+        require_full_depth = _env_flag(
+            "REQUIRE_FULL_DEPTH_FOR_EXECUTION", default=False
+        )
+        bid_ask_invalid = (
+            not tradable_quote or bid <= 0 or ask <= 0 or ask <= bid or invalid_spread
+        )
         depth_blocks = require_full_depth and not depth_available
         if strict_depth and (bid_ask_invalid or depth_blocks):
             reject_reason = (
@@ -13206,7 +15869,10 @@ class StrategyRunner:
             return SignalExecutionResult(
                 False,
                 reject_reason,
-                details={"selected_symbol": selected_symbol, "ranking_fields": ranking_fields},
+                details={
+                    "selected_symbol": selected_symbol,
+                    "ranking_fields": ranking_fields,
+                },
             )
 
         self._logger.info(
@@ -13220,8 +15886,12 @@ class StrategyRunner:
             elapsed = now_epoch - float(prev.get("ts", 0.0))
             if elapsed < self._signal_attempt_debounce_seconds:
                 prev_rank_score = float(prev.get("rank_score", 0.0) or 0.0)
-                if (rank_score - prev_rank_score) < self._signal_attempt_debounce_min_improvement:
-                    remaining = max(0.0, self._signal_attempt_debounce_seconds - elapsed)
+                if (
+                    rank_score - prev_rank_score
+                ) < self._signal_attempt_debounce_min_improvement:
+                    remaining = max(
+                        0.0, self._signal_attempt_debounce_seconds - elapsed
+                    )
                     log_throttled_live(
                         self._logger,
                         logging.INFO,
@@ -13234,11 +15904,16 @@ class StrategyRunner:
                         False,
                         elapsed,
                         self._signal_attempt_debounce_seconds,
-                        extra={"event": "SIGNAL_ATTEMPT_DEBOUNCE_BLOCKED", "symbol": selected_symbol, "direction": option_side, "allowed": False, "age_s": elapsed, "required_s": self._signal_attempt_debounce_seconds},
+                        extra={
+                            "event": "SIGNAL_ATTEMPT_DEBOUNCE_BLOCKED",
+                            "symbol": selected_symbol,
+                            "direction": option_side,
+                            "allowed": False,
+                            "age_s": elapsed,
+                            "required_s": self._signal_attempt_debounce_seconds,
+                        },
                     )
-                    return SignalExecutionResult(
-                        False, "signal_attempt_debounce"
-                    )
+                    return SignalExecutionResult(False, "signal_attempt_debounce")
         self._signal_attempt_debounce_state[key] = {
             "ts": now_epoch,
             "symbol": selected_symbol,
@@ -13323,7 +15998,10 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "non_option_symbol")
             reason_key = str(signal.reason or "unknown")
-            initial_option_side = infer_option_side(trade_symbol or base_symbol or signal.symbol, getattr(signal, "metadata", {}) or {})
+            initial_option_side = infer_option_side(
+                trade_symbol or base_symbol or signal.symbol,
+                getattr(signal, "metadata", {}) or {},
+            )
             underlying_reason_key = self._reason_order_cooldown_key(
                 underlying=underlying,
                 option_side=initial_option_side,
@@ -13331,10 +16009,19 @@ class StrategyRunner:
             )
             reject_cooldown_key = f"{base_symbol}:{reason_key}:score_below_threshold"
             reject_last_ts = self._signal_reject_cooldown_ts.get(reject_cooldown_key)
-            if reject_last_ts is not None and (now_epoch - float(reject_last_ts)) < float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15"):
+            if reject_last_ts is not None and (
+                now_epoch - float(reject_last_ts)
+            ) < float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15"):
                 reject_age = now_epoch - float(reject_last_ts)
-                required_seconds = float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15")
-                self._logger.info("SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s", base_symbol, "score_below_threshold", trace_id)
+                required_seconds = float(
+                    os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15"
+                )
+                self._logger.info(
+                    "SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s",
+                    base_symbol,
+                    "score_below_threshold",
+                    trace_id,
+                )
                 self._logger.info(
                     "SCORE_REJECT_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
                     base_symbol,
@@ -13348,25 +16035,51 @@ class StrategyRunner:
                     reason_key,
                     float(reject_last_ts),
                     now_epoch,
-                    extra={"event": "SCORE_REJECT_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": reject_cooldown_key, "age_seconds": reject_age, "required_seconds": required_seconds, "remaining_seconds": max(0.0, required_seconds - reject_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": float(reject_last_ts), "now_epoch": now_epoch},
+                    extra={
+                        "event": "SCORE_REJECT_COOLDOWN_BLOCKED",
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                        "cooldown_key": reject_cooldown_key,
+                        "age_seconds": reject_age,
+                        "required_seconds": required_seconds,
+                        "remaining_seconds": max(0.0, required_seconds - reject_age),
+                        "reason_key": reason_key,
+                        "underlying": underlying,
+                        "strategy": reason_key,
+                        "last_ts": float(reject_last_ts),
+                        "now_epoch": now_epoch,
+                    },
                 )
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "score_below_threshold_reject_cooldown")
+                return SignalExecutionResult(
+                    False, "score_below_threshold_reject_cooldown"
+                )
             if reason_key == "premium_momentum_squeeze":
                 upper_symbol = (trade_symbol or base_symbol).upper()
-                if ("CE" not in upper_symbol and "PE" not in upper_symbol) or "FUT" in upper_symbol:
+                if (
+                    "CE" not in upper_symbol and "PE" not in upper_symbol
+                ) or "FUT" in upper_symbol:
                     log_throttled(
                         self._logger,
                         f"premium_squeeze_skipped_{upper_symbol}",
                         "PREMIUM_SQUEEZE_SKIPPED",
                         interval_sec=self._cooldown_log_throttle_seconds,
                         level=logging.DEBUG,
-                        extra={"event": "PREMIUM_SQUEEZE_SKIPPED", "symbol": trade_symbol or base_symbol, "reason": "non_option_instrument"},
+                        extra={
+                            "event": "PREMIUM_SQUEEZE_SKIPPED",
+                            "symbol": trade_symbol or base_symbol,
+                            "reason": "non_option_instrument",
+                        },
                     )
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "non_option_instrument")
-                last_premium_ts = float(self._premium_squeeze_last_signal_ts.get(underlying, 0.0))
-                if now_epoch - last_premium_ts < self._underlying_signal_cooldown_seconds:
+                last_premium_ts = float(
+                    self._premium_squeeze_last_signal_ts.get(underlying, 0.0)
+                )
+                if (
+                    now_epoch - last_premium_ts
+                    < self._underlying_signal_cooldown_seconds
+                ):
                     premium_age = now_epoch - last_premium_ts
                     log_throttled(
                         self._logger,
@@ -13374,7 +16087,11 @@ class StrategyRunner:
                         "PREMIUM_SQUEEZE_SUPPRESSED",
                         interval_sec=self._cooldown_log_throttle_seconds,
                         level=logging.INFO,
-                        extra={"event": "PREMIUM_SQUEEZE_SUPPRESSED", "underlying": underlying, "reason": "cooldown"},
+                        extra={
+                            "event": "PREMIUM_SQUEEZE_SUPPRESSED",
+                            "underlying": underlying,
+                            "reason": "cooldown",
+                        },
                     )
                     self._logger.info(
                         "PREMIUM_SQUEEZE_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
@@ -13383,52 +16100,248 @@ class StrategyRunner:
                         underlying,
                         premium_age,
                         self._underlying_signal_cooldown_seconds,
-                        max(0.0, self._underlying_signal_cooldown_seconds - premium_age),
+                        max(
+                            0.0, self._underlying_signal_cooldown_seconds - premium_age
+                        ),
                         reason_key,
                         underlying,
                         reason_key,
                         last_premium_ts,
                         now_epoch,
-                        extra={"event": "PREMIUM_SQUEEZE_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": underlying, "age_seconds": premium_age, "required_seconds": self._underlying_signal_cooldown_seconds, "remaining_seconds": max(0.0, self._underlying_signal_cooldown_seconds - premium_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": last_premium_ts, "now_epoch": now_epoch},
+                        extra={
+                            "event": "PREMIUM_SQUEEZE_COOLDOWN_BLOCKED",
+                            "symbol": base_symbol,
+                            "trace_id": trace_id,
+                            "cooldown_key": underlying,
+                            "age_seconds": premium_age,
+                            "required_seconds": self._underlying_signal_cooldown_seconds,
+                            "remaining_seconds": max(
+                                0.0,
+                                self._underlying_signal_cooldown_seconds - premium_age,
+                            ),
+                            "reason_key": reason_key,
+                            "underlying": underlying,
+                            "strategy": reason_key,
+                            "last_ts": last_premium_ts,
+                            "now_epoch": now_epoch,
+                        },
                     )
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "premium_squeeze_cooldown")
             underlying_last_ts = self._underlying_last_signal_ts.get(underlying)
             reason_last_ts = self._reason_last_signal_ts.get(underlying_reason_key)
-            underlying_age = None if underlying_last_ts is None else now_epoch - float(underlying_last_ts)
-            reason_age = None if reason_last_ts is None else now_epoch - float(reason_last_ts)
-            self._logger.info("STRATEGY_REASON_ORDER_COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying_reason_key, f"{reason_age:.2f}" if reason_age is not None else None, self._reason_signal_cooldown_seconds, True if reason_age is None else reason_age >= self._reason_signal_cooldown_seconds, "first_trade_for_key" if reason_age is None else "cooldown_elapsed", trace_id)
-            self._logger.info("UNDERLYING_ORDER_COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying, f"{underlying_age:.2f}" if underlying_age is not None else None, self._underlying_signal_cooldown_seconds, True if underlying_age is None else underlying_age >= self._underlying_signal_cooldown_seconds, "first_trade_for_key" if underlying_age is None else "cooldown_elapsed", trace_id)
-            if underlying_age is not None and underlying_age < self._underlying_signal_cooldown_seconds:
-                self._logger.info("COOLDOWN_REJECTED reason=underlying_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying, underlying_last_ts, now_epoch, underlying_age, self._underlying_signal_cooldown_seconds)
+            underlying_age = (
+                None
+                if underlying_last_ts is None
+                else now_epoch - float(underlying_last_ts)
+            )
+            reason_age = (
+                None if reason_last_ts is None else now_epoch - float(reason_last_ts)
+            )
+            self._logger.info(
+                "STRATEGY_REASON_ORDER_COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s",
+                base_symbol,
+                underlying_reason_key,
+                f"{reason_age:.2f}" if reason_age is not None else None,
+                self._reason_signal_cooldown_seconds,
+                (
+                    True
+                    if reason_age is None
+                    else reason_age >= self._reason_signal_cooldown_seconds
+                ),
+                "first_trade_for_key" if reason_age is None else "cooldown_elapsed",
+                trace_id,
+            )
+            self._logger.info(
+                "UNDERLYING_ORDER_COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s",
+                base_symbol,
+                underlying,
+                f"{underlying_age:.2f}" if underlying_age is not None else None,
+                self._underlying_signal_cooldown_seconds,
+                (
+                    True
+                    if underlying_age is None
+                    else underlying_age >= self._underlying_signal_cooldown_seconds
+                ),
+                "first_trade_for_key" if underlying_age is None else "cooldown_elapsed",
+                trace_id,
+            )
+            if (
+                underlying_age is not None
+                and underlying_age < self._underlying_signal_cooldown_seconds
+            ):
+                self._logger.info(
+                    "COOLDOWN_REJECTED reason=underlying_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f",
+                    base_symbol,
+                    underlying,
+                    reason_key,
+                    underlying,
+                    underlying_last_ts,
+                    now_epoch,
+                    underlying_age,
+                    self._underlying_signal_cooldown_seconds,
+                )
                 self._logger.info(
                     "UNDERLYING_ORDER_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
-                    base_symbol, trace_id, underlying, underlying_age, self._underlying_signal_cooldown_seconds, max(0.0, self._underlying_signal_cooldown_seconds - underlying_age), reason_key, underlying, reason_key, float(underlying_last_ts), now_epoch,
-                    extra={"event": "UNDERLYING_ORDER_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": underlying, "age_seconds": underlying_age, "required_seconds": self._underlying_signal_cooldown_seconds, "remaining_seconds": max(0.0, self._underlying_signal_cooldown_seconds - underlying_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": float(underlying_last_ts), "now_epoch": now_epoch},
+                    base_symbol,
+                    trace_id,
+                    underlying,
+                    underlying_age,
+                    self._underlying_signal_cooldown_seconds,
+                    max(0.0, self._underlying_signal_cooldown_seconds - underlying_age),
+                    reason_key,
+                    underlying,
+                    reason_key,
+                    float(underlying_last_ts),
+                    now_epoch,
+                    extra={
+                        "event": "UNDERLYING_ORDER_COOLDOWN_BLOCKED",
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                        "cooldown_key": underlying,
+                        "age_seconds": underlying_age,
+                        "required_seconds": self._underlying_signal_cooldown_seconds,
+                        "remaining_seconds": max(
+                            0.0,
+                            self._underlying_signal_cooldown_seconds - underlying_age,
+                        ),
+                        "reason_key": reason_key,
+                        "underlying": underlying,
+                        "strategy": reason_key,
+                        "last_ts": float(underlying_last_ts),
+                        "now_epoch": now_epoch,
+                    },
                 )
-                log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
+                log_throttled(
+                    self._logger,
+                    f"runner_underlying_cd_{underlying}",
+                    "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED",
+                    interval_sec=self._cooldown_log_throttle_seconds,
+                    level=logging.INFO,
+                    extra={
+                        "event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED",
+                        "symbol": base_symbol,
+                        "reason": "underlying_cooldown",
+                    },
+                )
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "underlying_cooldown")
-            if reason_age is not None and reason_age < self._reason_signal_cooldown_seconds:
-                self._logger.info("COOLDOWN_REJECTED reason=reason_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying_reason_key, reason_last_ts, now_epoch, reason_age, self._reason_signal_cooldown_seconds)
+            if (
+                reason_age is not None
+                and reason_age < self._reason_signal_cooldown_seconds
+            ):
+                self._logger.info(
+                    "COOLDOWN_REJECTED reason=reason_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f",
+                    base_symbol,
+                    underlying,
+                    reason_key,
+                    underlying_reason_key,
+                    reason_last_ts,
+                    now_epoch,
+                    reason_age,
+                    self._reason_signal_cooldown_seconds,
+                )
                 self._logger.info(
                     "STRATEGY_REASON_ORDER_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
-                    base_symbol, trace_id, underlying_reason_key, reason_age, self._reason_signal_cooldown_seconds, max(0.0, self._reason_signal_cooldown_seconds - reason_age), reason_key, underlying, reason_key, float(reason_last_ts), now_epoch,
-                    extra={"event": "STRATEGY_REASON_ORDER_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": underlying_reason_key, "age_seconds": reason_age, "required_seconds": self._reason_signal_cooldown_seconds, "remaining_seconds": max(0.0, self._reason_signal_cooldown_seconds - reason_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": float(reason_last_ts), "now_epoch": now_epoch},
+                    base_symbol,
+                    trace_id,
+                    underlying_reason_key,
+                    reason_age,
+                    self._reason_signal_cooldown_seconds,
+                    max(0.0, self._reason_signal_cooldown_seconds - reason_age),
+                    reason_key,
+                    underlying,
+                    reason_key,
+                    float(reason_last_ts),
+                    now_epoch,
+                    extra={
+                        "event": "STRATEGY_REASON_ORDER_COOLDOWN_BLOCKED",
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                        "cooldown_key": underlying_reason_key,
+                        "age_seconds": reason_age,
+                        "required_seconds": self._reason_signal_cooldown_seconds,
+                        "remaining_seconds": max(
+                            0.0, self._reason_signal_cooldown_seconds - reason_age
+                        ),
+                        "reason_key": reason_key,
+                        "underlying": underlying,
+                        "strategy": reason_key,
+                        "last_ts": float(reason_last_ts),
+                        "now_epoch": now_epoch,
+                    },
                 )
-                log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
+                log_throttled(
+                    self._logger,
+                    f"runner_reason_cd_{reason_key}",
+                    "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED",
+                    interval_sec=self._cooldown_log_throttle_seconds,
+                    level=logging.INFO,
+                    extra={
+                        "event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED",
+                        "symbol": base_symbol,
+                        "reason": "reason_cooldown",
+                    },
+                )
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "reason_cooldown")
-            while self._order_attempt_window and (now_epoch - self._order_attempt_window[0]) > 60.0:
+            while (
+                self._order_attempt_window
+                and (now_epoch - self._order_attempt_window[0]) > 60.0
+            ):
                 self._order_attempt_window.popleft()
             if len(self._order_attempt_window) >= self._max_order_attempts_per_minute:
-                oldest_attempt_age_s = None if not self._order_attempt_window else now_epoch - self._order_attempt_window[0]
+                oldest_attempt_age_s = (
+                    None
+                    if not self._order_attempt_window
+                    else now_epoch - self._order_attempt_window[0]
+                )
                 self._logger.info(
                     "ORDER_ATTEMPT_RATE_LIMIT_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f remaining_seconds=%s reason_key=%s underlying=%s strategy=%s last_ts=%s now_epoch=%.3f attempts_last_60s=%s max_order_attempts_per_minute=%s oldest_attempt_age_s=%s",
-                    base_symbol, trace_id, "order_attempt_window", oldest_attempt_age_s, 60.0, None, reason_key, underlying, reason_key, None, now_epoch, len(self._order_attempt_window), self._max_order_attempts_per_minute, oldest_attempt_age_s,
-                    extra={"event": "ORDER_ATTEMPT_RATE_LIMIT_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": "order_attempt_window", "age_seconds": oldest_attempt_age_s, "required_seconds": 60.0, "remaining_seconds": None, "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": None, "now_epoch": now_epoch, "attempts_last_60s": len(self._order_attempt_window), "max_order_attempts_per_minute": self._max_order_attempts_per_minute, "oldest_attempt_age_s": oldest_attempt_age_s},
+                    base_symbol,
+                    trace_id,
+                    "order_attempt_window",
+                    oldest_attempt_age_s,
+                    60.0,
+                    None,
+                    reason_key,
+                    underlying,
+                    reason_key,
+                    None,
+                    now_epoch,
+                    len(self._order_attempt_window),
+                    self._max_order_attempts_per_minute,
+                    oldest_attempt_age_s,
+                    extra={
+                        "event": "ORDER_ATTEMPT_RATE_LIMIT_BLOCKED",
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                        "cooldown_key": "order_attempt_window",
+                        "age_seconds": oldest_attempt_age_s,
+                        "required_seconds": 60.0,
+                        "remaining_seconds": None,
+                        "reason_key": reason_key,
+                        "underlying": underlying,
+                        "strategy": reason_key,
+                        "last_ts": None,
+                        "now_epoch": now_epoch,
+                        "attempts_last_60s": len(self._order_attempt_window),
+                        "max_order_attempts_per_minute": self._max_order_attempts_per_minute,
+                        "oldest_attempt_age_s": oldest_attempt_age_s,
+                    },
                 )
-                log_throttled(self._logger, "runner_order_attempt_rate", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=300.0, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "max_order_attempts_per_minute"})
+                log_throttled(
+                    self._logger,
+                    "runner_order_attempt_rate",
+                    "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED",
+                    interval_sec=300.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED",
+                        "symbol": base_symbol,
+                        "reason": "max_order_attempts_per_minute",
+                    },
+                )
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
             metadata = dict(signal.metadata or {})
@@ -13442,21 +16355,39 @@ class StrategyRunner:
             candidate_ready_before = None
             candidate_ready_after = None
             selected_candidate_trace = None
-            def _trace(stop_reason: str, executor_called: bool = False, risk_allowed: bool = False) -> None:
+
+            def _trace(
+                stop_reason: str,
+                executor_called: bool = False,
+                risk_allowed: bool = False,
+            ) -> None:
                 self._logger.info(
                     "TRADING_PATH_TRACE symbol=%s strategy_name=%s live_orders_armed=%s selected_or_near_atm=%s history_bars_effective=%s signal_generated=%s consensus_side=%s quality_final=%s quality_threshold=%s quality_allowed=%s candidate_selected=%s candidate_snapshots_present=%s selected_candidate=%s candidate_ready_before=%s candidate_ready_after=%s risk_allowed=%s executor_called=%s stop_reason=%s",
                     signal.symbol,
-                    metadata.get("strategy_name") or metadata.get("strategy") or signal.reason,
+                    metadata.get("strategy_name")
+                    or metadata.get("strategy")
+                    or signal.reason,
                     bool(self._runtime_live_orders_armed),
-                    bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")),
+                    bool(
+                        metadata.get("candidate_selected")
+                        or metadata.get("is_selected_option")
+                    ),
                     metadata.get("history_bars_effective"),
                     True,
                     infer_option_side(signal.symbol, metadata),
                     getattr(quality, "final_score", None),
-                    (quality.components.get("threshold") if quality is not None else None),
+                    (
+                        quality.components.get("threshold")
+                        if quality is not None
+                        else None
+                    ),
                     (quality.allowed if quality is not None else None),
-                    bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")),
-                    isinstance(metadata.get("candidate_snapshots"), list) and bool(metadata.get("candidate_snapshots")),
+                    bool(
+                        metadata.get("candidate_selected")
+                        or metadata.get("is_selected_option")
+                    ),
+                    isinstance(metadata.get("candidate_snapshots"), list)
+                    and bool(metadata.get("candidate_snapshots")),
                     selected_candidate_trace,
                     candidate_ready_before,
                     candidate_ready_after,
@@ -13464,7 +16395,14 @@ class StrategyRunner:
                     executor_called,
                     stop_reason,
                 )
-            self._logger.info("ORDER_PATH_ENTERED symbol=%s reason=%s live_orders_armed=%s trace_id=%s", base_symbol, reason_key, bool(self._runtime_live_orders_armed), trace_id)
+
+            self._logger.info(
+                "ORDER_PATH_ENTERED symbol=%s reason=%s live_orders_armed=%s trace_id=%s",
+                base_symbol,
+                reason_key,
+                bool(self._runtime_live_orders_armed),
+                trace_id,
+            )
             option_side = infer_option_side(signal.symbol, metadata)
             if is_live_mode and option_side == "UNKNOWN":
                 self._reset_execution_state(base_symbol)
@@ -13481,7 +16419,10 @@ class StrategyRunner:
                         symbol=base_symbol,
                         trace_id=trace_id,
                         reason=expiry_reason,
-                        details={"option_side": option_side, "stage": "expiry_day_entry_cutoff"},
+                        details={
+                            "option_side": option_side,
+                            "stage": "expiry_day_entry_cutoff",
+                        },
                     )
             selected_symbol = normalize_symbol(
                 trade_symbol or base_symbol or signal.symbol
@@ -13524,13 +16465,17 @@ class StrategyRunner:
             )
             if is_live_mode and is_directional_option:
                 if len(existing_snapshots) <= 1:
-                    basket_snapshots, basket_pending, _basket_source = self._build_candidate_snapshots_sync_safe(
-                        symbol=signal.symbol,
-                        underlying=underlying,
-                        direction_bias=cast(Literal["CE", "PE"], option_side),
-                        atm_strike=int(atm_seed) if atm_seed else None,
-                        existing_snapshots=existing_snapshots,
-                        window_each_side=int(os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2),
+                    basket_snapshots, basket_pending, _basket_source = (
+                        self._build_candidate_snapshots_sync_safe(
+                            symbol=signal.symbol,
+                            underlying=underlying,
+                            direction_bias=cast(Literal["CE", "PE"], option_side),
+                            atm_strike=int(atm_seed) if atm_seed else None,
+                            existing_snapshots=existing_snapshots,
+                            window_each_side=int(
+                                os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2
+                            ),
+                        )
                     )
                     if basket_snapshots and not basket_pending:
                         metadata["candidate_snapshots"] = basket_snapshots
@@ -13540,7 +16485,11 @@ class StrategyRunner:
                         self._logger.info(
                             "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=basket_unavailable symbol=%s",
                             signal.symbol,
-                            extra={"event": "EXECUTION_CANDIDATE_BASKET_FALLBACK", "reason": "basket_unavailable", "symbol": signal.symbol},
+                            extra={
+                                "event": "EXECUTION_CANDIDATE_BASKET_FALLBACK",
+                                "reason": "basket_unavailable",
+                                "symbol": signal.symbol,
+                            },
                         )
             if is_live_mode and is_directional_option:
                 if not isinstance(candidate_snapshots_obj, list):
@@ -13551,7 +16500,9 @@ class StrategyRunner:
                         reason="candidate_refresh_pending",
                     )
                 if basket_pending and len(candidate_snapshots_obj) <= 1:
-                    event_loop_active = _basket_source == "event_loop_active_refresh_pending"
+                    event_loop_active = (
+                        _basket_source == "event_loop_active_refresh_pending"
+                    )
                     pending_reason = (
                         "event_loop_active_refresh_pending"
                         if event_loop_active
@@ -13561,7 +16512,11 @@ class StrategyRunner:
                         underlying=underlying,
                         option_side=cast(Literal["CE", "PE"], option_side),
                         atm_strike=int(atm_seed) if atm_seed else None,
-                        version=int(metadata.get("quote_update_version") or metadata.get("live_candle_version") or 0),
+                        version=int(
+                            metadata.get("quote_update_version")
+                            or metadata.get("live_candle_version")
+                            or 0
+                        ),
                     )
                     cache_key_fallback_zero = self._execution_candidate_cache_key(
                         underlying=underlying,
@@ -13569,19 +16524,30 @@ class StrategyRunner:
                         atm_strike=int(atm_seed) if atm_seed else None,
                         version=0,
                     )
-                    cache_entry_versioned = self._execution_candidate_basket_cache.get(cache_key_versioned)
-                    cache_entry_fallback = self._execution_candidate_basket_cache.get(cache_key_fallback_zero)
+                    cache_entry_versioned = self._execution_candidate_basket_cache.get(
+                        cache_key_versioned
+                    )
+                    cache_entry_fallback = self._execution_candidate_basket_cache.get(
+                        cache_key_fallback_zero
+                    )
                     cache_age_s = None
                     cache_total = 0
                     cache_hit = False
                     for cache_entry in (cache_entry_versioned, cache_entry_fallback):
                         if not cache_entry:
                             continue
-                        age_s = max(0.0, time.time() - float(cache_entry.get("created_at") or 0.0))
-                        if age_s > max(0.0, self._execution_candidate_basket_cache_ttl_seconds):
+                        age_s = max(
+                            0.0,
+                            time.time() - float(cache_entry.get("created_at") or 0.0),
+                        )
+                        if age_s > max(
+                            0.0, self._execution_candidate_basket_cache_ttl_seconds
+                        ):
                             continue
                         cache_snaps = cache_entry.get("snapshots")
-                        cache_total = len(cache_snaps) if isinstance(cache_snaps, list) else 0
+                        cache_total = (
+                            len(cache_snaps) if isinstance(cache_snaps, list) else 0
+                        )
                         cache_age_s = age_s
                         cache_hit = True
                         break
@@ -13593,7 +16559,11 @@ class StrategyRunner:
                         "candidate_total": len(candidate_snapshots_obj),
                         "basket_source": _basket_source,
                         "event_loop_active": event_loop_active,
-                        "existing_snapshot_symbols": [normalize_symbol(str(s.get("symbol") or "")) for s in existing_snapshots if isinstance(s, dict)],
+                        "existing_snapshot_symbols": [
+                            normalize_symbol(str(s.get("symbol") or ""))
+                            for s in existing_snapshots
+                            if isinstance(s, dict)
+                        ],
                         "cache_key_versioned": str(cache_key_versioned),
                         "cache_key_fallback_zero": str(cache_key_fallback_zero),
                         "cache_hit": cache_hit,
@@ -13602,17 +16572,36 @@ class StrategyRunner:
                         "atm_seed": atm_seed,
                         "active_atm_strike": self._active_atm_strike,
                         "live_orders_armed": bool(self._runtime_live_orders_armed),
-                        "selected_ce": self._selected_option_symbol_for_side("CE", metadata),
-                        "selected_pe": self._selected_option_symbol_for_side("PE", metadata),
-                        "preparation_attempted": bool(metadata.get("candidate_preparation_attempted")),
-                        "preparation_source": metadata.get("candidate_preparation_source"),
-                        "preparation_total": int(metadata.get("candidate_preparation_total") or 0),
+                        "selected_ce": self._selected_option_symbol_for_side(
+                            "CE", metadata
+                        ),
+                        "selected_pe": self._selected_option_symbol_for_side(
+                            "PE", metadata
+                        ),
+                        "preparation_attempted": bool(
+                            metadata.get("candidate_preparation_attempted")
+                        ),
+                        "preparation_source": metadata.get(
+                            "candidate_preparation_source"
+                        ),
+                        "preparation_total": int(
+                            metadata.get("candidate_preparation_total") or 0
+                        ),
                         "reason": pending_reason,
                     }
                     self._logger.info(
                         "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS symbol=%s trace_id=%s underlying=%s option_side=%s candidate_total=%s basket_source=%s reason=%s",
-                        base_symbol, trace_id, underlying, option_side, len(candidate_snapshots_obj), _basket_source, pending_reason,
-                        extra={"event": "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS", **details},
+                        base_symbol,
+                        trace_id,
+                        underlying,
+                        option_side,
+                        len(candidate_snapshots_obj),
+                        _basket_source,
+                        pending_reason,
+                        extra={
+                            "event": "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS",
+                            **details,
+                        },
                     )
                     self._logger.info(
                         "SIGNAL_DEFERRED_CANDIDATE_REFRESH_PENDING symbol=%s trace_id=%s strategy=%s direction=%s age_ms=%s retry_allowed=%s",
@@ -13629,9 +16618,17 @@ class StrategyRunner:
                             "strategy": reason_key,
                             "direction": option_side,
                             "candidate_refresh_started_at": None,
-                            "candidate_refresh_age_ms": int(max(0.0, (cache_age_s or 0.0) * 1000.0)),
+                            "candidate_refresh_age_ms": int(
+                                max(0.0, (cache_age_s or 0.0) * 1000.0)
+                            ),
                             "retry_allowed": bool(event_loop_active),
-                            "retry_deadline_ms": int(max(1000.0, self._execution_candidate_basket_cache_ttl_seconds * 1000.0)),
+                            "retry_deadline_ms": int(
+                                max(
+                                    1000.0,
+                                    self._execution_candidate_basket_cache_ttl_seconds
+                                    * 1000.0,
+                                )
+                            ),
                         },
                     )
                     self._reset_execution_state(base_symbol)
@@ -13645,15 +16642,23 @@ class StrategyRunner:
                 signal_symbol = normalize_symbol(signal.symbol)
                 selected_ce = self._selected_option_symbol_for_side("CE", metadata)
                 selected_pe = self._selected_option_symbol_for_side("PE", metadata)
-                strike_distance = float(metadata.get("strike_distance_from_atm") or 999.0)
+                strike_distance = float(
+                    metadata.get("strike_distance_from_atm") or 999.0
+                )
                 selected_or_near = (
                     signal_symbol in {selected_ce, selected_pe}
                     or bool(metadata.get("is_selected_option"))
-                    or strike_distance <= float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100)
+                    or strike_distance
+                    <= float(
+                        os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100
+                    )
                 )
                 quote_fresh = self._is_option_symbol_tick_fresh(
                     signal.symbol,
-                    max_age_s=float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0,
+                    max_age_s=float(
+                        os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000"
+                    )
+                    / 1000.0,
                 )
                 sl_ok = signal.stop_loss is not None and signal.take_profit is not None
                 if selected_or_near and quote_fresh and sl_ok:
@@ -13685,18 +16690,28 @@ class StrategyRunner:
                         reason="missing_atm_strike",
                     )
                 valid_snapshots = [
-                    snap
-                    for snap in candidate_snapshots_obj
-                    if isinstance(snap, dict)
+                    snap for snap in candidate_snapshots_obj if isinstance(snap, dict)
                 ]
-                if is_live_mode and is_directional_option and valid_snapshots and len(valid_snapshots) <= 1:
-                    basket_source = str(metadata.get("candidate_basket_source") or "existing")
+                if (
+                    is_live_mode
+                    and is_directional_option
+                    and valid_snapshots
+                    and len(valid_snapshots) <= 1
+                ):
+                    basket_source = str(
+                        metadata.get("candidate_basket_source") or "existing"
+                    )
                     self._logger.info(
                         "EXECUTION_SINGLE_CANDIDATE_SCREEN symbol=%s total=%s source=%s",
                         signal.symbol,
                         len(valid_snapshots),
                         basket_source,
-                        extra={"event": "EXECUTION_SINGLE_CANDIDATE_SCREEN", "symbol": signal.symbol, "total": len(valid_snapshots), "source": basket_source},
+                        extra={
+                            "event": "EXECUTION_SINGLE_CANDIDATE_SCREEN",
+                            "symbol": signal.symbol,
+                            "total": len(valid_snapshots),
+                            "source": basket_source,
+                        },
                     )
                     lone = valid_snapshots[0]
                     lone_symbol = normalize_symbol(str(lone.get("symbol") or ""))
@@ -13715,43 +16730,102 @@ class StrategyRunner:
                         strike_distance = abs(strike - atm)
                     else:
                         strike_distance = float(distance_raw or 999.0)
-                    is_selected = bool(lone.get("is_selected_option")) or lone_symbol == selected_symbol
+                    is_selected = (
+                        bool(lone.get("is_selected_option"))
+                        or lone_symbol == selected_symbol
+                    )
                     tick_age_ms = resolve_tick_age_ms(lone)
                     tick_age_s = None if tick_age_ms is None else tick_age_ms / 1000.0
                     max_quote_age_s = (
                         float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
                         / 1000.0
                     )
-                    is_fresh = bool(tick_age_s is not None and tick_age_s <= max_quote_age_s)
+                    is_fresh = bool(
+                        tick_age_s is not None and tick_age_s <= max_quote_age_s
+                    )
                     ltp = float(lone.get("ltp") or 0.0)
                     bid = float(lone.get("bid") or 0.0)
                     ask = float(lone.get("ask") or 0.0)
                     bid_ask_ok = bid > 0 and ask > bid
-                    allow_ltp_only = _env_flag("ALLOW_LTP_ONLY_CANDIDATE", default=False)
-                    tradable = bool(lone.get("tradable_quote")) or bid_ask_ok or (allow_ltp_only and bool(lone.get("ltp_only_fallback")) and ltp > 0)
-                    min_option_premium = float(self._trade_candidate_selector.min_option_premium)
-                    max_option_premium = float(self._trade_candidate_selector.max_option_premium)
+                    allow_ltp_only = _env_flag(
+                        "ALLOW_LTP_ONLY_CANDIDATE", default=False
+                    )
+                    tradable = (
+                        bool(lone.get("tradable_quote"))
+                        or bid_ask_ok
+                        or (
+                            allow_ltp_only
+                            and bool(lone.get("ltp_only_fallback"))
+                            and ltp > 0
+                        )
+                    )
+                    min_option_premium = float(
+                        self._trade_candidate_selector.min_option_premium
+                    )
+                    max_option_premium = float(
+                        self._trade_candidate_selector.max_option_premium
+                    )
                     premium_dynamic_override = False
                     dynamic_spread_pct = None
                     if ltp < min_option_premium:
                         dynamic_mid = (bid + ask) / 2.0 if bid_ask_ok else 0.0
-                        dynamic_spread_pct = ((ask - bid) / dynamic_mid * 100.0) if dynamic_mid > 0 else None
+                        dynamic_spread_pct = (
+                            ((ask - bid) / dynamic_mid * 100.0)
+                            if dynamic_mid > 0
+                            else None
+                        )
                         dynamic_near_atm = bool(
                             is_selected
                             or strike_distance
-                            <= (50.0 * max(1, int(getattr(self._trade_candidate_selector, "option_strike_window_each_side", 2) or 2)))
+                            <= (
+                                50.0
+                                * max(
+                                    1,
+                                    int(
+                                        getattr(
+                                            self._trade_candidate_selector,
+                                            "option_strike_window_each_side",
+                                            2,
+                                        )
+                                        or 2
+                                    ),
+                                )
+                            )
                         )
                         premium_dynamic_override = bool(
                             _env_flag("MIN_OPTION_PREMIUM_DYNAMIC", default=True)
-                            and ltp >= float(os.getenv("MIN_OPTION_PREMIUM_DYNAMIC_FLOOR", "25") or "25")
+                            and ltp
+                            >= float(
+                                os.getenv("MIN_OPTION_PREMIUM_DYNAMIC_FLOOR", "25")
+                                or "25"
+                            )
                             and bid_ask_ok
                             and is_fresh
                             and dynamic_near_atm
                             and dynamic_spread_pct is not None
-                            and dynamic_spread_pct <= float(os.getenv("MIN_OPTION_PREMIUM_DYNAMIC_MAX_SPREAD_PCT", "0.75") or "0.75")
+                            and dynamic_spread_pct
+                            <= float(
+                                os.getenv(
+                                    "MIN_OPTION_PREMIUM_DYNAMIC_MAX_SPREAD_PCT", "0.75"
+                                )
+                                or "0.75"
+                            )
                         )
-                    premium_ok = bool((min_option_premium <= ltp <= max_option_premium) or premium_dynamic_override)
-                    if not (is_selected and is_fresh and tradable and premium_ok and strike_distance <= float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100)):
+                    premium_ok = bool(
+                        (min_option_premium <= ltp <= max_option_premium)
+                        or premium_dynamic_override
+                    )
+                    if not (
+                        is_selected
+                        and is_fresh
+                        and tradable
+                        and premium_ok
+                        and strike_distance
+                        <= float(
+                            os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100")
+                            or 100
+                        )
+                    ):
                         basket_details = {
                             "symbol": signal.symbol,
                             "trace_id": trace_id,
@@ -13763,7 +16837,10 @@ class StrategyRunner:
                             "tradable": tradable,
                             "premium_ok": premium_ok,
                             "strike_distance": strike_distance,
-                            "max_distance": float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100),
+                            "max_distance": float(
+                                os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100")
+                                or 100
+                            ),
                             "ltp": ltp,
                             "bid": bid,
                             "ask": ask,
@@ -13777,8 +16854,14 @@ class StrategyRunner:
                         }
                         self._logger.info(
                             "EXECUTION_CANDIDATE_BASKET_INADEQUATE symbol=%s trace_id=%s lone_symbol=%s reason=%s",
-                            signal.symbol, trace_id, lone_symbol, "candidate_screen_failed",
-                            extra={"event": "EXECUTION_CANDIDATE_BASKET_INADEQUATE", **basket_details},
+                            signal.symbol,
+                            trace_id,
+                            lone_symbol,
+                            "candidate_screen_failed",
+                            extra={
+                                "event": "EXECUTION_CANDIDATE_BASKET_INADEQUATE",
+                                **basket_details,
+                            },
                         )
                         self._reset_execution_state(base_symbol)
                         return self._reject_signal_execution(
@@ -13788,21 +16871,30 @@ class StrategyRunner:
                             details=basket_details,
                         )
                 try:
-                    ranked_candidates = self._trade_candidate_selector.select_ranked_candidates(
-                        direction_bias=option_side,
-                        atm_strike=atm_strike,
-                        snapshots=valid_snapshots,
+                    ranked_candidates = (
+                        self._trade_candidate_selector.select_ranked_candidates(
+                            direction_bias=option_side,
+                            atm_strike=atm_strike,
+                            snapshots=valid_snapshots,
+                        )
                     )
                     candidate = None
                     for ranked in ranked_candidates:
                         ranked_symbol = normalize_symbol(ranked.symbol)
                         selected_candidate_trace = ranked_symbol
-                        candidate_ready_before = self._is_symbol_execution_ready(ranked_symbol)
+                        candidate_ready_before = self._is_symbol_execution_ready(
+                            ranked_symbol
+                        )
                         if candidate_ready_before:
                             candidate_ready_after = True
                             candidate = ranked
                             break
-                        if is_live_mode and self._ensure_symbol_execution_ready_for_order(ranked_symbol, trace_id=trace_id):
+                        if (
+                            is_live_mode
+                            and self._ensure_symbol_execution_ready_for_order(
+                                ranked_symbol, trace_id=trace_id
+                            )
+                        ):
                             candidate_ready_after = True
                             candidate = ranked
                             break
@@ -13820,69 +16912,145 @@ class StrategyRunner:
                     )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
-                        symbol=base_symbol, trace_id=trace_id, reason="candidate_selection_exception", details={
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="candidate_selection_exception",
+                        details={
                             "error_type": type(exc).__name__,
                             "error": str(exc),
                             "candidate_total": len(valid_snapshots),
                             "direction": option_side,
                             "atm": atm_strike,
                             "trace_id": trace_id,
-                        }
+                        },
                     )
                 if candidate is None:
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
-                        symbol=base_symbol, trace_id=trace_id, reason="no_execution_ready_candidate", details={
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="no_execution_ready_candidate",
+                        details={
                             "candidate_total": len(valid_snapshots),
                             "candidate_ranked": len(ranked_candidates),
-                            "candidate_rejects": getattr(self._trade_candidate_selector, "_last_rejects", {}),
+                            "candidate_rejects": getattr(
+                                self._trade_candidate_selector, "_last_rejects", {}
+                            ),
                             "direction": option_side,
                             "atm": atm_strike,
                             "min_option_premium": self._trade_candidate_selector.min_option_premium,
                             "max_option_premium": self._trade_candidate_selector.max_option_premium,
-                        }
+                        },
                     )
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
                 original_trade_price = float(trade_price or 0.0)
                 replacement_blocked_reason: str | None = None
                 if selected_symbol != original_symbol:
-                    allow_replace = _env_flag("ALLOW_CANDIDATE_REPLACEMENT", default=False)
-                    strict_replace = _env_flag("STRICT_CANDIDATE_REPLACEMENT", default=True)
-                    max_strike_dist = float(os.getenv("MAX_REPLACEMENT_STRIKE_DISTANCE", os.getenv("CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50")) or "50")
-                    max_premium_pct = float(os.getenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35")) or "35")
-                    replacement_blocked_reason = "config_disabled" if not allow_replace else None
+                    allow_replace = _env_flag(
+                        "ALLOW_CANDIDATE_REPLACEMENT", default=False
+                    )
+                    strict_replace = _env_flag(
+                        "STRICT_CANDIDATE_REPLACEMENT", default=True
+                    )
+                    max_strike_dist = float(
+                        os.getenv(
+                            "MAX_REPLACEMENT_STRIKE_DISTANCE",
+                            os.getenv(
+                                "CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50"
+                            ),
+                        )
+                        or "50"
+                    )
+                    max_premium_pct = float(
+                        os.getenv(
+                            "MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT",
+                            os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35"),
+                        )
+                        or "35"
+                    )
+                    replacement_blocked_reason = (
+                        "config_disabled" if not allow_replace else None
+                    )
 
                     orig_side = self._contract_side_from_symbol(original_symbol)
                     new_side = self._contract_side_from_symbol(selected_symbol)
-                    if replacement_blocked_reason is None and orig_side in {"CE", "PE"} and new_side in {"CE", "PE"} and orig_side != new_side:
+                    if (
+                        replacement_blocked_reason is None
+                        and orig_side in {"CE", "PE"}
+                        and new_side in {"CE", "PE"}
+                        and orig_side != new_side
+                    ):
                         replacement_blocked_reason = "side_mismatch"
+
                     def _expiry_key(sym: str) -> str | None:
-                        match = re.search(r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$", normalize_symbol(sym))
+                        match = re.search(
+                            r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$",
+                            normalize_symbol(sym),
+                        )
                         return match.group(1) if match else None
+
                     orig_expiry = _expiry_key(original_symbol)
                     new_expiry = _expiry_key(selected_symbol)
-                    if replacement_blocked_reason is None and strict_replace and orig_expiry and new_expiry and orig_expiry != new_expiry:
+                    if (
+                        replacement_blocked_reason is None
+                        and strict_replace
+                        and orig_expiry
+                        and new_expiry
+                        and orig_expiry != new_expiry
+                    ):
                         replacement_blocked_reason = "expiry_mismatch"
                     orig_strike = self._extract_strike_from_symbol(original_symbol)
                     new_strike = self._extract_strike_from_symbol(selected_symbol)
-                    if replacement_blocked_reason is None and orig_strike is not None and new_strike is not None and abs(float(new_strike) - float(orig_strike)) > max_strike_dist:
+                    if (
+                        replacement_blocked_reason is None
+                        and orig_strike is not None
+                        and new_strike is not None
+                        and abs(float(new_strike) - float(orig_strike))
+                        > max_strike_dist
+                    ):
                         replacement_blocked_reason = "strike_jump"
                     new_premium = float(getattr(candidate, "entry_price", 0.0) or 0.0)
                     if (
                         replacement_blocked_reason is None
                         and original_trade_price > 0.0
                         and new_premium > 0.0
-                        and abs(new_premium - original_trade_price) / original_trade_price * 100.0 > max_premium_pct
+                        and abs(new_premium - original_trade_price)
+                        / original_trade_price
+                        * 100.0
+                        > max_premium_pct
                     ):
                         replacement_blocked_reason = "premium_jump"
-                    active_symbols = {normalize_symbol(str(item)) for item in (getattr(self, "_active_option_symbols", set()) or set())}
-                    active_symbols.update(normalize_symbol(str(item)) for item in (getattr(self, "_active_basket_all_symbols", set()) or set()))
-                    active_symbols.update(normalize_symbol(str(item)) for item in (getattr(self, "_active_basket_token_by_symbol", {}) or {}).keys())
-                    if replacement_blocked_reason is None and active_symbols and selected_symbol not in active_symbols:
+                    active_symbols = {
+                        normalize_symbol(str(item))
+                        for item in (
+                            getattr(self, "_active_option_symbols", set()) or set()
+                        )
+                    }
+                    active_symbols.update(
+                        normalize_symbol(str(item))
+                        for item in (
+                            getattr(self, "_active_basket_all_symbols", set()) or set()
+                        )
+                    )
+                    active_symbols.update(
+                        normalize_symbol(str(item))
+                        for item in (
+                            getattr(self, "_active_basket_token_by_symbol", {}) or {}
+                        ).keys()
+                    )
+                    if (
+                        replacement_blocked_reason is None
+                        and active_symbols
+                        and selected_symbol not in active_symbols
+                    ):
                         replacement_blocked_reason = "not_in_active_basket"
                     if replacement_blocked_reason is None:
-                        replacement_readiness = self._ensure_symbol_execution_ready_result(selected_symbol, trace_id=trace_id)
+                        replacement_readiness = (
+                            self._ensure_symbol_execution_ready_result(
+                                selected_symbol, trace_id=trace_id
+                            )
+                        )
                         if not replacement_readiness.allowed:
                             replacement_blocked_reason = "quote_not_tradable"
 
@@ -13935,11 +17103,22 @@ class StrategyRunner:
                         take_profit=candidate.target or signal.take_profit,
                         metadata=metadata,
                     )
-                metadata["option_score"] = max(float(metadata.get("option_score", 0.0) or 0.0), float(candidate.score or 0.0))
-                metadata["data_score"] = max(float(metadata.get("data_score", 0.0) or 0.0), float(candidate.data_quality_score or 0.0))
-                metadata["rr_score"] = max(float(metadata.get("rr_score", 0.0) or 0.0), min(10.0, float(candidate.rr or 0.0) * 5.0))
+                metadata["option_score"] = max(
+                    float(metadata.get("option_score", 0.0) or 0.0),
+                    float(candidate.score or 0.0),
+                )
+                metadata["data_score"] = max(
+                    float(metadata.get("data_score", 0.0) or 0.0),
+                    float(candidate.data_quality_score or 0.0),
+                )
+                metadata["rr_score"] = max(
+                    float(metadata.get("rr_score", 0.0) or 0.0),
+                    min(10.0, float(candidate.rr or 0.0) * 5.0),
+                )
                 if str(candidate.side or "").upper() == option_side:
-                    metadata["direction_score"] = max(float(metadata.get("direction_score", 0.0) or 0.0), 7.5)
+                    metadata["direction_score"] = max(
+                        float(metadata.get("direction_score", 0.0) or 0.0), 7.5
+                    )
                 metadata["strategy_score"] = max(
                     float(metadata.get("strategy_score", 0.0) or 0.0),
                     float(metadata.get("raw_setup_score", 0.0) or 0.0),
@@ -13955,7 +17134,9 @@ class StrategyRunner:
                 metadata["candidate_rr"] = candidate.rr
                 metadata["candidate_data_quality_score"] = candidate.data_quality_score
                 metadata["candidate_spread_pct"] = candidate.spread_pct
-                metadata["candidate_tick_age_s"] = getattr(candidate, "tick_age_s", None)
+                metadata["candidate_tick_age_s"] = getattr(
+                    candidate, "tick_age_s", None
+                )
                 selected_snapshot = next(
                     (
                         snap
@@ -13999,10 +17180,14 @@ class StrategyRunner:
                             "selected_symbol": candidate.symbol,
                             "original_trade_price": original_trade_price,
                             "selected_trade_price": selected_trade_price,
-                            "candidate_entry_price": getattr(candidate, "entry_price", None),
+                            "candidate_entry_price": getattr(
+                                candidate, "entry_price", None
+                            ),
                             "selected_snapshot_ask": selected_snapshot.get("ask"),
                             "selected_snapshot_ltp": selected_snapshot.get("ltp"),
-                            "candidate_stop_loss": getattr(candidate, "stop_loss", None),
+                            "candidate_stop_loss": getattr(
+                                candidate, "stop_loss", None
+                            ),
                             "candidate_target": getattr(candidate, "target", None),
                             "candidate_rr": getattr(candidate, "rr", None),
                             "candidate_score": getattr(candidate, "score", None),
@@ -14013,37 +17198,47 @@ class StrategyRunner:
                 snapshot_ask = selected_snapshot.get("ask")
 
                 try:
-                    snapshot_bid_f = float(snapshot_bid) if snapshot_bid is not None else 0.0
+                    snapshot_bid_f = (
+                        float(snapshot_bid) if snapshot_bid is not None else 0.0
+                    )
                 except (TypeError, ValueError):
                     snapshot_bid_f = 0.0
 
                 try:
-                    snapshot_ask_f = float(snapshot_ask) if snapshot_ask is not None else 0.0
+                    snapshot_ask_f = (
+                        float(snapshot_ask) if snapshot_ask is not None else 0.0
+                    )
                 except (TypeError, ValueError):
                     snapshot_ask_f = 0.0
 
                 snapshot_bid_ask_valid = bool(
-                    snapshot_bid_f > 0
-                    and snapshot_ask_f > snapshot_bid_f
+                    snapshot_bid_f > 0 and snapshot_ask_f > snapshot_bid_f
                 )
 
                 snapshot_tradable_quote = bool(
-                    selected_snapshot.get("tradable_quote")
-                    or snapshot_bid_ask_valid
+                    selected_snapshot.get("tradable_quote") or snapshot_bid_ask_valid
                 )
 
                 mdm_tradable_quote = False
                 mdm_bid_ask_valid = False
                 if self._market_data is not None:
                     try:
-                        latest_snapshot = self._market_data.get_symbol_snapshot(candidate.symbol)
+                        latest_snapshot = self._market_data.get_symbol_snapshot(
+                            candidate.symbol
+                        )
                         latest_bid = float(latest_snapshot.bid or 0.0)
                         latest_ask = float(latest_snapshot.ask or 0.0)
-                        mdm_bid_ask_valid = bool(latest_bid > 0 and latest_ask > latest_bid)
-                        mdm_tradable_quote = bool(latest_snapshot.tradable_quote and mdm_bid_ask_valid)
+                        mdm_bid_ask_valid = bool(
+                            latest_bid > 0 and latest_ask > latest_bid
+                        )
+                        mdm_tradable_quote = bool(
+                            latest_snapshot.tradable_quote and mdm_bid_ask_valid
+                        )
                         metadata["latest_quote_bid"] = latest_bid
                         metadata["latest_quote_ask"] = latest_ask
-                        metadata["latest_quote_tradable"] = bool(latest_snapshot.tradable_quote)
+                        metadata["latest_quote_tradable"] = bool(
+                            latest_snapshot.tradable_quote
+                        )
                     except Exception as quote_exc:  # noqa: BLE001
                         self._logger.warning(
                             "QUOTE_REVALIDATION_FAILED symbol=%s err=%s trace_id=%s",
@@ -14058,9 +17253,13 @@ class StrategyRunner:
                             },
                         )
 
-                allow_ltp_live_plan = _env_flag("ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False)
+                allow_ltp_live_plan = _env_flag(
+                    "ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False
+                )
 
-                metadata["tradable_quote"] = bool(snapshot_tradable_quote or mdm_tradable_quote)
+                metadata["tradable_quote"] = bool(
+                    snapshot_tradable_quote or mdm_tradable_quote
+                )
                 trade_price = selected_trade_price
                 metadata["entry_price"] = trade_price
                 metadata["signal_price"] = trade_price
@@ -14104,6 +17303,7 @@ class StrategyRunner:
                     "option_side": option_side,
                     "reason": reason_key,
                 }
+
                 def _reject_after_dedup(
                     *,
                     reason: str,
@@ -14111,7 +17311,9 @@ class StrategyRunner:
                 ) -> SignalExecutionResult:
                     if dedup_reserved:
                         self._mark_directional_dedup_failed(
-                            underlying=underlying, option_side=option_side, reason=reason_key
+                            underlying=underlying,
+                            option_side=option_side,
+                            reason=reason_key,
                         )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
@@ -14120,25 +17322,44 @@ class StrategyRunner:
                         reason=reason,
                         details=details,
                     )
+
                 if is_live_mode:
                     readiness = self._ensure_symbol_execution_ready_result(
                         trade_symbol or base_symbol, trace_id=trace_id
                     )
                     if not readiness.allowed:
-                        selected_candidate = candidate.symbol if candidate is not None else metadata.get("candidate_symbol")
+                        selected_candidate = (
+                            candidate.symbol
+                            if candidate is not None
+                            else metadata.get("candidate_symbol")
+                        )
                         readiness_details = dict(readiness.details or {})
                         readiness_details["readiness_reason"] = readiness.reason
                         readiness_details["trace_id"] = trace_id
                         self._logger.info(
                             "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s reason=%s details=%s",
-                            base_symbol, trace_id, selected_candidate, readiness.reason, readiness_details,
-                            extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "readiness_reason": readiness.reason, "readiness_details": readiness_details},
+                            base_symbol,
+                            trace_id,
+                            selected_candidate,
+                            readiness.reason,
+                            readiness_details,
+                            extra={
+                                "event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS",
+                                "symbol": base_symbol,
+                                "trace_id": trace_id,
+                                "selected_candidate": selected_candidate,
+                                "readiness_reason": readiness.reason,
+                                "readiness_details": readiness_details,
+                            },
                         )
                         self._execution_reject_cooldown_ts[
                             f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:runtime_symbol_execution_not_ready"
                         ] = now_epoch
                         _trace("runtime_symbol_execution_not_ready")
-                        return _reject_after_dedup(reason="runtime_symbol_execution_not_ready", details=readiness_details)
+                        return _reject_after_dedup(
+                            reason="runtime_symbol_execution_not_ready",
+                            details=readiness_details,
+                        )
             requires_final_score = bool(metadata.get("preliminary_only")) or bool(
                 metadata.get("requires_runner_final_score")
             )
@@ -14192,9 +17413,13 @@ class StrategyRunner:
                 if "candidate_spread_pct" not in metadata and candidate is not None:
                     metadata["candidate_spread_pct"] = candidate.spread_pct
                 if "quote_usable_for_order_plan" not in metadata:
-                    metadata["quote_usable_for_order_plan"] = bool(metadata.get("tradable_quote"))
+                    metadata["quote_usable_for_order_plan"] = bool(
+                        metadata.get("tradable_quote")
+                    )
                 signal = dataclasses.replace(signal, metadata=dict(metadata))
-                metadata["entry_price"] = float(trade_price or metadata.get("entry_price") or 0.0)
+                metadata["entry_price"] = float(
+                    trade_price or metadata.get("entry_price") or 0.0
+                )
                 metadata["stop_loss"] = signal.stop_loss
                 metadata["take_profit"] = signal.take_profit
             except Exception as materialize_exc:
@@ -14213,11 +17438,40 @@ class StrategyRunner:
                 )
                 self._logger.error(
                     "TRADE_PLAN_MATERIALIZATION_DIAGNOSTICS symbol=%s trace_id=%s action=%s quantity=%s trade_price=%s error_type=%s error=%s",
-                    base_symbol, trace_id, signal.action, signal.quantity, trade_price, type(materialize_exc).__name__, materialize_exc,
-                    extra={"event": "TRADE_PLAN_MATERIALIZATION_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "action": signal.action, "quantity": signal.quantity, "trade_price": trade_price, "entry_price": metadata.get("entry_price"), "stop_loss": signal.stop_loss, "take_profit": signal.take_profit, "candidate_symbol": candidate_symbol, "candidate_entry_price": metadata.get("candidate_entry_price"), "candidate_stop_loss": metadata.get("candidate_stop_loss"), "candidate_target": metadata.get("candidate_target"), "candidate_rr": metadata.get("candidate_rr"), "lot_size": metadata.get("lot_size"), "tick_size": metadata.get("tick_size"), "metadata_keys": sorted(list(metadata.keys())), "error_type": type(materialize_exc).__name__, "error": str(materialize_exc)},
+                    base_symbol,
+                    trace_id,
+                    signal.action,
+                    signal.quantity,
+                    trade_price,
+                    type(materialize_exc).__name__,
+                    materialize_exc,
+                    extra={
+                        "event": "TRADE_PLAN_MATERIALIZATION_DIAGNOSTICS",
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                        "action": signal.action,
+                        "quantity": signal.quantity,
+                        "trade_price": trade_price,
+                        "entry_price": metadata.get("entry_price"),
+                        "stop_loss": signal.stop_loss,
+                        "take_profit": signal.take_profit,
+                        "candidate_symbol": candidate_symbol,
+                        "candidate_entry_price": metadata.get("candidate_entry_price"),
+                        "candidate_stop_loss": metadata.get("candidate_stop_loss"),
+                        "candidate_target": metadata.get("candidate_target"),
+                        "candidate_rr": metadata.get("candidate_rr"),
+                        "lot_size": metadata.get("lot_size"),
+                        "tick_size": metadata.get("tick_size"),
+                        "metadata_keys": sorted(list(metadata.keys())),
+                        "error_type": type(materialize_exc).__name__,
+                        "error": str(materialize_exc),
+                    },
                 )
                 _trace("trade_plan_materialization_failed")
-                return _reject_after_dedup(reason="trade_plan_materialization_failed", details={"error": str(materialize_exc)})
+                return _reject_after_dedup(
+                    reason="trade_plan_materialization_failed",
+                    details={"error": str(materialize_exc)},
+                )
             if metadata.get("rr_score") is None:
                 rr_score = quality_hint
                 try:
@@ -14340,7 +17594,11 @@ class StrategyRunner:
                         final_score_block_reason = "quote_not_usable_for_order_plan"
                     else:
                         final_score_block_reason = "final_score_precheck_failed_unknown"
-                    strategy_name = metadata.get("strategy_name") or metadata.get("strategy") or signal.reason
+                    strategy_name = (
+                        metadata.get("strategy_name")
+                        or metadata.get("strategy")
+                        or signal.reason
+                    )
                     self._logger.info(
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s missing_components=%s has_candidate=%s has_quote_usable=%s candidate_symbol=%s selected_snapshot_symbol=%s latest_bid=%s latest_ask=%s latest_quote_tradable=%s",
                         base_symbol,
@@ -14370,10 +17628,14 @@ class StrategyRunner:
                             "has_candidate": has_candidate,
                             "has_quote_usable": has_quote_usable,
                             "candidate_symbol": metadata.get("candidate_symbol"),
-                            "selected_snapshot_symbol": metadata.get("selected_snapshot_symbol"),
+                            "selected_snapshot_symbol": metadata.get(
+                                "selected_snapshot_symbol"
+                            ),
                             "latest_bid": metadata.get("latest_quote_bid"),
                             "latest_ask": metadata.get("latest_quote_ask"),
-                            "latest_quote_tradable": metadata.get("latest_quote_tradable"),
+                            "latest_quote_tradable": metadata.get(
+                                "latest_quote_tradable"
+                            ),
                         },
                     )
                     _trace(final_score_block_reason)
@@ -14396,7 +17658,10 @@ class StrategyRunner:
                         "trace_id": trace_id,
                     },
                 )
-                return _reject_after_dedup(reason="missing_signal_score_components", details={"missing": missing_components})
+                return _reject_after_dedup(
+                    reason="missing_signal_score_components",
+                    details={"missing": missing_components},
+                )
             resolved_strategy_name = (
                 metadata.get("strategy_name")
                 or metadata.get("strategy")
@@ -14447,11 +17712,29 @@ class StrategyRunner:
                         "final_score_below_live_threshold",
                         quality.final_score,
                         live_threshold,
-                        float(quality.components.get("direction_score", quality.direction_score) or 0.0),
-                        float(quality.components.get("strategy_score", quality.strategy_score) or 0.0),
-                        float(quality.components.get("option_score", quality.option_score) or 0.0),
-                        float(quality.components.get("data_score", quality.data_score) or 0.0),
-                        float(quality.components.get("rr_score", quality.rr_score) or 0.0),
+                        float(
+                            quality.components.get(
+                                "direction_score", quality.direction_score
+                            )
+                            or 0.0
+                        ),
+                        float(
+                            quality.components.get(
+                                "strategy_score", quality.strategy_score
+                            )
+                            or 0.0
+                        ),
+                        float(
+                            quality.components.get("option_score", quality.option_score)
+                            or 0.0
+                        ),
+                        float(
+                            quality.components.get("data_score", quality.data_score)
+                            or 0.0
+                        ),
+                        float(
+                            quality.components.get("rr_score", quality.rr_score) or 0.0
+                        ),
                         quality.reasons,
                         trace_id,
                         extra={
@@ -14463,18 +17746,32 @@ class StrategyRunner:
                             "allowed": False,
                             "blocked_at": "runner_final_score",
                             "blocked_reason": "final_score_below_live_threshold",
-                            "direction_score": quality.components.get("direction_score", quality.direction_score),
-                            "strategy_score": quality.components.get("strategy_score", quality.strategy_score),
-                            "option_score": quality.components.get("option_score", quality.option_score),
-                            "data_score": quality.components.get("data_score", quality.data_score),
-                            "rr_score": quality.components.get("rr_score", quality.rr_score),
+                            "direction_score": quality.components.get(
+                                "direction_score", quality.direction_score
+                            ),
+                            "strategy_score": quality.components.get(
+                                "strategy_score", quality.strategy_score
+                            ),
+                            "option_score": quality.components.get(
+                                "option_score", quality.option_score
+                            ),
+                            "data_score": quality.components.get(
+                                "data_score", quality.data_score
+                            ),
+                            "rr_score": quality.components.get(
+                                "rr_score", quality.rr_score
+                            ),
                             "reasons": quality.reasons,
                         },
                     )
                     _trace("final_score_below_live_threshold")
-                    return _reject_after_dedup(reason="final_score_below_live_threshold")
+                    return _reject_after_dedup(
+                        reason="final_score_below_live_threshold"
+                    )
             if not quality.allowed:
-                delta = quality.final_score - float(quality.components.get("threshold", 0.0) or 0.0)
+                delta = quality.final_score - float(
+                    quality.components.get("threshold", 0.0) or 0.0
+                )
                 self._logger.info(
                     "SIGNAL_SCORE_REJECTED symbol=%s strategy_name=%s final=%.2f threshold=%.2f delta=%.2f components=%s",
                     base_symbol,
@@ -14485,7 +17782,10 @@ class StrategyRunner:
                     quality.components,
                 )
                 self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
-                return _reject_after_dedup(reason="score_below_threshold", details={"score": quality.final_score})
+                return _reject_after_dedup(
+                    reason="score_below_threshold",
+                    details={"score": quality.final_score},
+                )
             signal = dataclasses.replace(
                 signal,
                 confidence=final_confidence,
@@ -14514,7 +17814,11 @@ class StrategyRunner:
             try:
                 qty_lots = max(int(signal.quantity or 1), 1)
                 if hasattr(self._order_manager, "resolve_lot_size"):
-                    lot_size = int(self._order_manager.resolve_lot_size(trade_symbol or base_symbol))
+                    lot_size = int(
+                        self._order_manager.resolve_lot_size(
+                            trade_symbol or base_symbol
+                        )
+                    )
                 final_qty = qty_lots * lot_size
                 self._logger.info(
                     "ORDER_QTY_NORMALIZED symbol=%s input_qty_lots=%s lot_size=%s final_qty=%s trace_id=%s",
@@ -14523,25 +17827,44 @@ class StrategyRunner:
                     lot_size,
                     final_qty,
                     trace_id,
-                    extra={"event": "ORDER_QTY_NORMALIZED", "symbol": trade_symbol or base_symbol, "input_qty_lots": qty_lots, "lot_size": lot_size, "final_qty": final_qty},
+                    extra={
+                        "event": "ORDER_QTY_NORMALIZED",
+                        "symbol": trade_symbol or base_symbol,
+                        "input_qty_lots": qty_lots,
+                        "lot_size": lot_size,
+                        "final_qty": final_qty,
+                    },
                 )
             except Exception as lot_exc:
-                self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s error=%s", trade_symbol or base_symbol, lot_exc)
+                self._logger.warning(
+                    "ORDER_BLOCKED: invalid_lot_quantity symbol=%s error=%s",
+                    trade_symbol or base_symbol,
+                    lot_exc,
+                )
                 self._mark_directional_dedup_failed(
                     underlying=underlying, option_side=option_side, reason=reason_key
                 )
-                self._execution_reject_cooldown_ts[f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:invalid_lot_quantity"] = now_epoch
+                self._execution_reject_cooldown_ts[
+                    f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:invalid_lot_quantity"
+                ] = now_epoch
                 self._reset_execution_state(base_symbol)
                 return self._reject_signal_execution(
                     symbol=base_symbol, trace_id=trace_id, reason="invalid_lot_quantity"
                 )
             qty = final_qty
             if qty <= 0 or (lot_size > 0 and qty % lot_size != 0):
-                self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s", trade_symbol or base_symbol, qty, lot_size)
+                self._logger.warning(
+                    "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s",
+                    trade_symbol or base_symbol,
+                    qty,
+                    lot_size,
+                )
                 self._mark_directional_dedup_failed(
                     underlying=underlying, option_side=option_side, reason=reason_key
                 )
-                self._execution_reject_cooldown_ts[f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:invalid_lot_quantity"] = now_epoch
+                self._execution_reject_cooldown_ts[
+                    f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:invalid_lot_quantity"
+                ] = now_epoch
                 self._reset_execution_state(base_symbol)
                 return self._reject_signal_execution(
                     symbol=base_symbol, trace_id=trace_id, reason="invalid_lot_quantity"
@@ -14549,7 +17872,9 @@ class StrategyRunner:
 
             # Resolve price: prefer signal metadata, fall back to live tick
             price: float | None = None
-            raw_price = signal.metadata.get("signal_price") or signal.metadata.get("price")
+            raw_price = signal.metadata.get("signal_price") or signal.metadata.get(
+                "price"
+            )
             if raw_price:
                 try:
                     price = float(raw_price)
@@ -14568,18 +17893,38 @@ class StrategyRunner:
                 or "runner"
             )
             failure_cd_prefix = f"{base_symbol}|{signal.action}|{strategy_name}|"
-            failure_cd_until = max((float(v) for k, v in self._order_failure_cooldown_until.items() if str(k).startswith(failure_cd_prefix)), default=0.0)
+            failure_cd_until = max(
+                (
+                    float(v)
+                    for k, v in self._order_failure_cooldown_until.items()
+                    if str(k).startswith(failure_cd_prefix)
+                ),
+                default=0.0,
+            )
             if now_epoch < failure_cd_until:
                 self._logger.warning(
                     "ORDER_FAILURE_COOLDOWN_ACTIVE symbol=%s side=%s strategy=%s cooldown_remaining_s=%.1f trace_id=%s",
-                    base_symbol, signal.action, strategy_name, failure_cd_until - now_epoch, trace_id,
-                    extra={"event": "ORDER_FAILURE_COOLDOWN_ACTIVE", "symbol": base_symbol, "side": signal.action, "strategy": strategy_name, "cooldown_until": failure_cd_until, "trace_id": trace_id},
+                    base_symbol,
+                    signal.action,
+                    strategy_name,
+                    failure_cd_until - now_epoch,
+                    trace_id,
+                    extra={
+                        "event": "ORDER_FAILURE_COOLDOWN_ACTIVE",
+                        "symbol": base_symbol,
+                        "side": signal.action,
+                        "strategy": strategy_name,
+                        "cooldown_until": failure_cd_until,
+                        "trace_id": trace_id,
+                    },
                 )
                 return _reject_after_dedup(reason="order_failure_cooldown_active")
 
             execution_symbol = normalize_symbol(trade_symbol or base_symbol)
-            state_ok, state_reason, state_details = self._prepare_order_state_for_submission(
-                execution_symbol, trace_id=trace_id
+            state_ok, state_reason, state_details = (
+                self._prepare_order_state_for_submission(
+                    execution_symbol, trace_id=trace_id
+                )
             )
             if not state_ok:
                 self._logger.warning(
@@ -14636,12 +17981,128 @@ class StrategyRunner:
                 },
             )
 
-            max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
-            max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
-            min_depth_qty = int(float(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or 0))
-            allow_market_entry = str(os.getenv("ALLOW_MARKET_ENTRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            max_quote_age_ms = int(
+                os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000"
+            )
+            max_spread_pct = float(
+                os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0"))
+                or "10.0"
+            )
+            min_depth_qty = int(
+                float(
+                    os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0"))
+                    or 0
+                )
+            )
+            allow_market_entry = str(
+                os.getenv("ALLOW_MARKET_ENTRY", "false")
+            ).strip().lower() in {"1", "true", "yes", "on"}
             order_symbol = trade_symbol or signal.symbol or base_symbol
-            plan = TradePlan(symbol=order_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
+            _resolved_lot_size = 0
+            _requested_lots = 0
+            _instrument_token = None
+            _basket_version = None
+            _contract_expiry = None
+            _selection_timestamp = None
+            try:
+                _resolved_lot_size = int(
+                    self._order_manager._lot_size_for_symbol(order_symbol) or 0
+                )
+                _requested_lots = (
+                    1
+                    if _resolved_lot_size > 0 and int(qty) == _resolved_lot_size
+                    else 0
+                )
+            except Exception:
+                _resolved_lot_size = 0
+            _basket = getattr(self, "_active_contract_basket", None) or {}
+            _selection = None
+            with suppress(Exception):
+                _selection = active_contract_selection_from_basket(_basket)
+            if _selection is not None:
+                _basket_version = getattr(_selection, "basket_version", None)
+                _contract_expiry = getattr(_selection, "expiry", None)
+                _selection_timestamp = getattr(_selection, "committed_at", None)
+                _token_map = getattr(_selection, "token_by_symbol", None) or {}
+                if isinstance(_token_map, Mapping):
+                    _instrument_token = _token_map.get(order_symbol) or _token_map.get(
+                        str(order_symbol).split(":", 1)[-1]
+                    )
+            elif isinstance(_basket, Mapping):
+                _basket_version = _basket.get("basket_version") or _basket.get(
+                    "version"
+                )
+                _contract_expiry = _basket.get("expiry") or _basket.get(
+                    "contract_expiry"
+                )
+                _selection_timestamp = _basket.get("selected_at") or _basket.get(
+                    "committed_at"
+                )
+                _token_map = dict(_basket.get("token_by_symbol") or {})
+                _instrument_token = _token_map.get(order_symbol) or _token_map.get(
+                    str(order_symbol).split(":", 1)[-1]
+                )
+                if not _instrument_token and order_symbol == str(
+                    _basket.get("selected_ce") or ""
+                ):
+                    _instrument_token = _basket.get("selected_ce_token")
+                if not _instrument_token and order_symbol == str(
+                    _basket.get("selected_pe") or ""
+                ):
+                    _instrument_token = _basket.get("selected_pe_token")
+            _identity_parts = (
+                str(signal.deterministic_id or ""),
+                str(strategy_name or "runner"),
+                str(_basket_version or ""),
+                str(_instrument_token or ""),
+                str(signal.action or ""),
+                str(_requested_lots),
+                str(
+                    getattr(self, "_session_date", "")
+                    or datetime.now(timezone.utc).date()
+                ),
+            )
+            _identity_seed = "|".join(_identity_parts)
+            _identity_digest = hashlib.sha256(
+                _identity_seed.encode("utf-8")
+            ).hexdigest()[:20]
+            _client_order_id = f"nfo:{_identity_digest}"
+            _trade_lifecycle_id = f"tl:{_identity_digest}"
+            _broker_tag = f"r{_identity_digest[:12]}"
+            plan = TradePlan(
+                symbol=order_symbol,
+                side=signal.action,
+                quantity=qty,
+                entry_price=price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                strategy_name=strategy_name,
+                signal_id=signal.deterministic_id,
+                trace_id=trace_id,
+                tag=_broker_tag,
+                product="MIS",
+                variety="regular",
+                max_quote_age_ms=max_quote_age_ms,
+                max_spread_pct=max_spread_pct,
+                min_depth_qty=min_depth_qty,
+                allow_market_entry=allow_market_entry,
+                trade_lifecycle_id=_trade_lifecycle_id,
+                client_order_id=_client_order_id,
+                basket_version=_basket_version,
+                instrument_token=(
+                    int(_instrument_token)
+                    if _instrument_token not in (None, "")
+                    else None
+                ),
+                contract_expiry=str(_contract_expiry) if _contract_expiry else None,
+                selection_timestamp=(
+                    float(_selection_timestamp)
+                    if isinstance(_selection_timestamp, (int, float))
+                    else None
+                ),
+                requested_lots=_requested_lots,
+                resolved_lot_size=_resolved_lot_size,
+            )
             self._logger.info(
                 "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s",
                 order_symbol,
@@ -14652,36 +18113,82 @@ class StrategyRunner:
                 mode_snapshot.paper_enabled,
                 mode_snapshot.shadow_mode_enabled,
             )
-            submit_result_fn = getattr(self._order_manager, "submit_trade_plan_result", None)
+            submit_result_fn = getattr(
+                self._order_manager, "submit_trade_plan_result", None
+            )
             order_id = None
             submit_reason = "order_rejected"
             submit_details = {"trace_id": trace_id}
             broker_attempted = True
             if callable(submit_result_fn):
                 submit_result = submit_result_fn(plan)
-                broker_attempted = bool(getattr(submit_result, "broker_attempted", False))
+                broker_attempted = bool(
+                    getattr(submit_result, "broker_attempted", False)
+                )
                 if submit_result.accepted and submit_result.order_id:
                     order_id = submit_result.order_id
                 else:
                     reason_base = str(submit_result.reason or "order_rejected")
-                    submit_reason = reason_base if reason_base.startswith("order_manager_") else f"order_manager_{reason_base}"
-                    submit_details = {**dict(getattr(submit_result, "details", {}) or {}), "trace_id": trace_id}
-                    if submit_result.reason == "kill_switch_active" and hasattr(self._order_manager, "get_kill_switch_status"):
-                        submit_details["kill_switch_status"] = self._order_manager.get_kill_switch_status()
+                    submit_reason = (
+                        reason_base
+                        if reason_base.startswith("order_manager_")
+                        else f"order_manager_{reason_base}"
+                    )
+                    submit_details = {
+                        **dict(getattr(submit_result, "details", {}) or {}),
+                        "trace_id": trace_id,
+                    }
+                    if submit_result.reason == "kill_switch_active" and hasattr(
+                        self._order_manager, "get_kill_switch_status"
+                    ):
+                        submit_details["kill_switch_status"] = (
+                            self._order_manager.get_kill_switch_status()
+                        )
                     self._logger.warning(
                         "RUNNER_ORDER_MANAGER_REJECTED symbol=%s order_symbol=%s reason=%s runner_reason=%s broker_attempted=%s trace_id=%s",
-                        base_symbol, order_symbol, submit_result.reason, submit_reason, submit_result.broker_attempted, trace_id,
-                        extra={"event": "RUNNER_ORDER_MANAGER_REJECTED", "symbol": base_symbol, "order_symbol": order_symbol, "reason": submit_result.reason, "runner_reason": submit_reason, "broker_attempted": submit_result.broker_attempted, "details": submit_details, "trace_id": trace_id},
+                        base_symbol,
+                        order_symbol,
+                        submit_result.reason,
+                        submit_reason,
+                        submit_result.broker_attempted,
+                        trace_id,
+                        extra={
+                            "event": "RUNNER_ORDER_MANAGER_REJECTED",
+                            "symbol": base_symbol,
+                            "order_symbol": order_symbol,
+                            "reason": submit_result.reason,
+                            "runner_reason": submit_reason,
+                            "broker_attempted": submit_result.broker_attempted,
+                            "details": submit_details,
+                            "trace_id": trace_id,
+                        },
                     )
                     if submit_result.reason == "broker_placement_exception":
-                        error_type = str((submit_details or {}).get("error_type") or "unknown")
+                        error_type = str(
+                            (submit_details or {}).get("error_type") or "unknown"
+                        )
                         cd_key = f"{base_symbol}|{signal.action}|{strategy_name}|{error_type}"
                         cd_seconds = self._order_failure_cooldown_seconds
-                        self._order_failure_cooldown_until[cd_key] = now_epoch + cd_seconds
+                        self._order_failure_cooldown_until[cd_key] = (
+                            now_epoch + cd_seconds
+                        )
                         self._logger.warning(
                             "ORDER_FAILURE_COOLDOWN_MARKED symbol=%s side=%s strategy=%s error_type=%s cooldown_seconds=%s trace_id=%s",
-                            base_symbol, signal.action, strategy_name, error_type, cd_seconds, trace_id,
-                            extra={"event": "ORDER_FAILURE_COOLDOWN_MARKED", "symbol": base_symbol, "side": signal.action, "strategy": strategy_name, "error_type": error_type, "cooldown_seconds": cd_seconds, "trace_id": trace_id},
+                            base_symbol,
+                            signal.action,
+                            strategy_name,
+                            error_type,
+                            cd_seconds,
+                            trace_id,
+                            extra={
+                                "event": "ORDER_FAILURE_COOLDOWN_MARKED",
+                                "symbol": base_symbol,
+                                "side": signal.action,
+                                "strategy": strategy_name,
+                                "error_type": error_type,
+                                "cooldown_seconds": cd_seconds,
+                                "trace_id": trace_id,
+                            },
                         )
             else:
                 order_id = self._order_manager.submit_trade_plan(plan)
@@ -14698,18 +18205,30 @@ class StrategyRunner:
                 # reconciliation can tell a real pending order from a wedged one.
                 try:
                     with self._execution_state_lock:
-                        _machine = self._execution_state_by_symbol.get(normalize_symbol(trade_symbol or base_symbol))
-                        if _machine is not None and _machine.state == ExecutionState.ORDER_PENDING:
+                        _machine = self._execution_state_by_symbol.get(
+                            normalize_symbol(trade_symbol or base_symbol)
+                        )
+                        if (
+                            _machine is not None
+                            and _machine.state == ExecutionState.ORDER_PENDING
+                        ):
                             _machine.set_order_id(str(order_id))
                 except Exception:  # noqa: BLE001 - observability only
                     pass
                 self._logger.info(
                     "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s trace_id=%s",
-                    order_id, base_symbol, signal.action, qty, trace_id,
+                    order_id,
+                    base_symbol,
+                    signal.action,
+                    qty,
+                    trace_id,
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._mark_directional_dedup_submitted(
-                    underlying=underlying, option_side=option_side, reason=reason_key, order_id=order_id
+                    underlying=underlying,
+                    option_side=option_side,
+                    reason=reason_key,
+                    order_id=order_id,
                 )
                 self._reason_last_signal_ts[underlying_reason_key] = now_epoch
                 self._logger.info(
@@ -14717,7 +18236,13 @@ class StrategyRunner:
                     base_symbol,
                     option_side,
                     order_id,
-                    extra={"event": "DUPLICATE_DIRECTION_COOLDOWN_MARKED", "symbol": base_symbol, "direction": option_side, "reason": "order_submitted", "order_id": order_id},
+                    extra={
+                        "event": "DUPLICATE_DIRECTION_COOLDOWN_MARKED",
+                        "symbol": base_symbol,
+                        "direction": option_side,
+                        "reason": "order_submitted",
+                        "order_id": order_id,
+                    },
                 )
                 if reason_key == "premium_momentum_squeeze":
                     self._premium_squeeze_last_signal_ts[underlying] = now_epoch
@@ -14733,7 +18258,15 @@ class StrategyRunner:
                 try:
                     self._record_trade(
                         base_symbol,
-                        TradeRecord(timestamp, signal.action, qty, price or 0.0, "submitted", signal.reason, order_id),
+                        TradeRecord(
+                            timestamp,
+                            signal.action,
+                            qty,
+                            price or 0.0,
+                            "submitted",
+                            signal.reason,
+                            order_id,
+                        ),
                     )
                 except Exception as rec_exc:
                     self._logger.error("record_trade failed: %s", rec_exc)
@@ -14741,14 +18274,23 @@ class StrategyRunner:
                     symbol=base_symbol,
                     direction=option_side,
                     final_reason="order_submitted",
-                    candidate_count=len(valid_snapshots) if "valid_snapshots" in locals() else None,
-                    candidate_rejects=getattr(self._trade_candidate_selector, "_last_rejects", {}),
+                    candidate_count=(
+                        len(valid_snapshots) if "valid_snapshots" in locals() else None
+                    ),
+                    candidate_rejects=getattr(
+                        self._trade_candidate_selector, "_last_rejects", {}
+                    ),
                     selected_candidate=base_symbol,
                     strategy_allowed=True,
                     risk_allowed=True,
                     order_submitted=True,
                 )
-                return SignalExecutionResult(True, "order_submitted", order_id=order_id, details={"trace_id": trace_id})
+                return SignalExecutionResult(
+                    True,
+                    "order_submitted",
+                    order_id=order_id,
+                    details={"trace_id": trace_id},
+                )
             else:
                 deterministic_rejections = {
                     "order_manager_place_order_rejected",
@@ -14777,7 +18319,9 @@ class StrategyRunner:
                 submit_reason_lc = str(submit_reason or "").lower()
                 if not broker_attempted or submit_reason in deterministic_rejections:
                     self._mark_directional_dedup_failed(
-                        underlying=underlying, option_side=option_side, reason=reason_key
+                        underlying=underlying,
+                        option_side=option_side,
+                        reason=reason_key,
                     )
                 elif any(marker in submit_reason_lc for marker in uncertain_markers):
                     self._mark_directional_dedup_uncertain(
@@ -14785,7 +18329,10 @@ class StrategyRunner:
                         option_side=option_side,
                         reason=reason_key,
                         trace_id=trace_id,
-                        details={"submit_reason": submit_reason, **dict(submit_details or {})},
+                        details={
+                            "submit_reason": submit_reason,
+                            **dict(submit_details or {}),
+                        },
                     )
                 else:
                     self._mark_directional_dedup_uncertain(
@@ -14793,27 +18340,47 @@ class StrategyRunner:
                         option_side=option_side,
                         reason=reason_key,
                         trace_id=trace_id,
-                        details={"submit_reason": submit_reason, **dict(submit_details or {})},
+                        details={
+                            "submit_reason": submit_reason,
+                            **dict(submit_details or {}),
+                        },
                     )
                 self._logger.info(
                     "DUPLICATE_DIRECTION_COOLDOWN_NOT_MARKED symbol=%s reason=no_order_submitted",
                     base_symbol,
-                    extra={"event": "DUPLICATE_DIRECTION_COOLDOWN_NOT_MARKED", "symbol": base_symbol, "reason": "no_order_submitted"},
+                    extra={
+                        "event": "DUPLICATE_DIRECTION_COOLDOWN_NOT_MARKED",
+                        "symbol": base_symbol,
+                        "reason": "no_order_submitted",
+                    },
                 )
-                log_throttled(self._logger, f"runner_order_rejected_{base_symbol}", "ORDER_REJECTED by order_manager", interval_sec=300.0, level=logging.WARNING, extra={"event": "ORDER_REJECTED", "symbol": base_symbol})
+                log_throttled(
+                    self._logger,
+                    f"runner_order_rejected_{base_symbol}",
+                    "ORDER_REJECTED by order_manager",
+                    interval_sec=300.0,
+                    level=logging.WARNING,
+                    extra={"event": "ORDER_REJECTED", "symbol": base_symbol},
+                )
                 self._reset_execution_state(base_symbol)
                 self._record_trade_decision_snapshot(
                     symbol=base_symbol,
                     direction=option_side,
                     final_reason=submit_reason,
-                    candidate_count=len(valid_snapshots) if "valid_snapshots" in locals() else None,
-                    candidate_rejects=getattr(self._trade_candidate_selector, "_last_rejects", {}),
+                    candidate_count=(
+                        len(valid_snapshots) if "valid_snapshots" in locals() else None
+                    ),
+                    candidate_rejects=getattr(
+                        self._trade_candidate_selector, "_last_rejects", {}
+                    ),
                     selected_candidate=base_symbol,
                     strategy_allowed=True,
                     risk_allowed=False,
                     order_submitted=False,
                 )
-                return SignalExecutionResult(False, submit_reason, details=submit_details)
+                return SignalExecutionResult(
+                    False, submit_reason, details=submit_details
+                )
 
         except Exception as exc:
             if dedup_reserved and dedup_key_context:
@@ -14824,15 +18391,30 @@ class StrategyRunner:
                     dedup_key_context.get("underlying"),
                     dedup_key_context.get("option_side"),
                     dedup_key_context.get("reason"),
-                    extra={"event": "DIRECTIONAL_DEDUP_ROLLED_BACK", "rollback_reason": "entry_exception", "trace_id": trace_id, **dedup_key_context},
+                    extra={
+                        "event": "DIRECTIONAL_DEDUP_ROLLED_BACK",
+                        "rollback_reason": "entry_exception",
+                        "trace_id": trace_id,
+                        **dedup_key_context,
+                    },
                 )
             self._logger.error("🔴 ENTRY LOGIC CRASH: %s", exc, exc_info=True)
             self._reset_execution_state(base_symbol)
-            return SignalExecutionResult(False, "entry_exception", details={"trace_id": trace_id, "error": str(exc)})
+            return SignalExecutionResult(
+                False,
+                "entry_exception",
+                details={"trace_id": trace_id, "error": str(exc)},
+            )
 
-    def notify_entry_order_failed(self, *, order_id: str, symbol: str | None = None, reason: str = "unknown") -> None:
+    def notify_entry_order_failed(
+        self, *, order_id: str, symbol: str | None = None, reason: str = "unknown"
+    ) -> None:
         context = self._submitted_entry_order_context.get(str(order_id), {})
-        underlying = str(context.get("underlying") or self._extract_underlying(symbol or "") or "NIFTY")
+        underlying = str(
+            context.get("underlying")
+            or self._extract_underlying(symbol or "")
+            or "NIFTY"
+        )
         underlying_reason_key = str(context.get("underlying_reason_key") or "")
         has_position = False
         if self._position_manager is not None and symbol:
@@ -14842,16 +18424,27 @@ class StrategyRunner:
                 has_position = False
         if not has_position:
             orchestrator = getattr(self, "_orchestrator", None)
-            if orchestrator is not None and hasattr(orchestrator, "clear_direction_lock"):
+            if orchestrator is not None and hasattr(
+                orchestrator, "clear_direction_lock"
+            ):
                 try:
-                    orchestrator.clear_direction_lock(reason="entry_order_failed", symbol=symbol or str(context.get("symbol") or ""))
+                    orchestrator.clear_direction_lock(
+                        reason="entry_order_failed",
+                        symbol=symbol or str(context.get("symbol") or ""),
+                    )
                 except Exception:
                     pass
             self._underlying_last_signal_ts.pop(underlying, None)
             if underlying_reason_key:
                 self._reason_last_signal_ts.pop(underlying_reason_key, None)
         self._submitted_entry_order_context.pop(str(order_id), None)
-        self._logger.info("ENTRY_ORDER_FAILED_RECONCILED order_id=%s symbol=%s reason=%s has_position=%s", order_id, symbol or context.get("symbol"), reason, has_position)
+        self._logger.info(
+            "ENTRY_ORDER_FAILED_RECONCILED order_id=%s symbol=%s reason=%s has_position=%s",
+            order_id,
+            symbol or context.get("symbol"),
+            reason,
+            has_position,
+        )
 
     def _get_atr_with_fallback(
         self, symbol: str, metadata: dict, current_price: float
@@ -14886,7 +18479,14 @@ class StrategyRunner:
                 fallback_atr,
                 len(bars),
                 int(self._required_candles),
-                extra={"event": "ATR_FALLBACK_USED", "symbol": symbol, "atr": fallback_atr, "bars": len(bars), "required": int(self._required_candles), "reason": "insufficient_bars"},
+                extra={
+                    "event": "ATR_FALLBACK_USED",
+                    "symbol": symbol,
+                    "atr": fallback_atr,
+                    "bars": len(bars),
+                    "required": int(self._required_candles),
+                    "reason": "insufficient_bars",
+                },
             )
             return fallback_atr
 
@@ -14926,9 +18526,7 @@ class StrategyRunner:
                     if atr_val > 0:
                         source = "indicator_engine"
             except Exception as e:
-                LOGGER.exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
+                LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 
         # 4. Try base underlying (e.g., NIFTY instead of NIFTY2620325200CE)
@@ -14951,7 +18549,12 @@ class StrategyRunner:
                 "ATR_FALLBACK_USED symbol=%s atr=%.4f reason=atr_unavailable",
                 symbol,
                 fallback_atr,
-                extra={"event": "ATR_FALLBACK_USED", "symbol": symbol, "atr": fallback_atr, "reason": "atr_unavailable"},
+                extra={
+                    "event": "ATR_FALLBACK_USED",
+                    "symbol": symbol,
+                    "atr": fallback_atr,
+                    "reason": "atr_unavailable",
+                },
             )
             return fallback_atr
 
@@ -15001,6 +18604,7 @@ class StrategyRunner:
         if compact.startswith("NIFTY"):
             return "NIFTY"
         import re
+
         match = re.match(r"^([A-Z]+)", compact)
         if match:
             prefix = match.group(1)
@@ -15059,7 +18663,8 @@ class StrategyRunner:
             else:
                 self._logger.critical(
                     "ORDER_BLOCKED: unknown exit action=%s for %s",
-                    signal.action, base_symbol,
+                    signal.action,
+                    base_symbol,
                 )
                 return
 
@@ -15088,7 +18693,10 @@ class StrategyRunner:
 
             self._logger.info(
                 "EXIT_TRIGGERED symbol=%s side=%s qty=%s reason=%s",
-                base_symbol, exit_side, qty, signal.reason,
+                base_symbol,
+                exit_side,
+                qty,
+                signal.reason,
             )
 
             order_id = self._order_manager.place_reduce_only_exit(exit_intent)
@@ -15096,20 +18704,33 @@ class StrategyRunner:
             if order_id:
                 self._logger.info(
                     "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s (EXIT)",
-                    order_id, base_symbol, exit_side, qty,
+                    order_id,
+                    base_symbol,
+                    exit_side,
+                    qty,
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._reason_last_signal_ts[
                     self._reason_order_cooldown_key(
                         underlying=underlying,
-                        option_side=infer_option_side(base_symbol, getattr(signal, "metadata", {}) or {}),
+                        option_side=infer_option_side(
+                            base_symbol, getattr(signal, "metadata", {}) or {}
+                        ),
                         reason_key=reason_key,
                     )
                 ] = now_epoch
                 try:
                     self._record_trade(
                         base_symbol,
-                        TradeRecord(timestamp, signal.action, qty, trade_price, "submitted", signal.reason, order_id),
+                        TradeRecord(
+                            timestamp,
+                            signal.action,
+                            qty,
+                            trade_price,
+                            "submitted",
+                            signal.reason,
+                            order_id,
+                        ),
                     )
                 except Exception as rec_exc:
                     self._logger.error("record_trade failed: %s", rec_exc)

@@ -43,7 +43,6 @@ def resolve_lot_size(symbol: str, lookup: Callable[[str], int] | None = None) ->
                     return lot, "env_fallback"
             except ValueError:
                 pass
-        return 65, "fallback_default"
     fallback_settings = app_settings.get_settings()
     fallback_lot = int(getattr(fallback_settings, 'contract_lot_size', 0) or 0)
     if fallback_lot > 0:

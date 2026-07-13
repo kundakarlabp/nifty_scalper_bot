@@ -1,19 +1,29 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import nifty_scalper_bot.execution  # noqa: F401 - applies runtime safety patches
 from nifty_scalper_bot.execution import order_manager_core as core
-
 
 GOOD_SYMBOL = "NFO:NIFTY2670724250PE"
 BAD_SYMBOL = "NFO:NIFTY2670724300PE"
 
 
 class _Manager:
-    def __init__(self, quote: dict[str, Any]) -> None:
+    def __init__(
+        self, quote: dict[str, Any], *, active_basket: Any | None = None
+    ) -> None:
         self.quote = dict(quote)
+        self._active_contract_basket = (
+            active_basket
+            if active_basket is not None
+            else {
+                "selected_pe": "NIFTY2670724250PE",
+                "basket_version": "7",
+                "expiry": "2026-07-30",
+                "token_by_symbol": {GOOD_SYMBOL: 12345, "NIFTY2670724250PE": 12345},
+            }
+        )
 
     def _lot_size_for_symbol(self, _symbol: str) -> int:
         return 65
@@ -46,6 +56,14 @@ def _plan(symbol: str = GOOD_SYMBOL) -> core.TradePlan:
         stop_loss=83.0,
         take_profit=96.0,
         trace_id="trace-identity",
+        signal_id="sig-identity",
+        trade_lifecycle_id="life-identity",
+        client_order_id="client-identity",
+        basket_version="7",
+        instrument_token=12345,
+        contract_expiry="2026-07-30",
+        requested_lots=1,
+        resolved_lot_size=65,
     )
 
 
@@ -75,3 +93,155 @@ def test_live_trade_plan_allows_matching_quote_identity() -> None:
     result = core.OrderManager._validate_trade_plan(manager, _plan())
 
     assert result.allowed is True
+
+
+def test_live_trade_plan_requires_lifecycle_identity_before_broker_attempt(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    m = _Manager({"tradingsymbol": "NIFTY2670724250PE"})
+    m.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    plan = core.TradePlan(
+        symbol=GOOD_SYMBOL,
+        side="BUY",
+        quantity=65,
+        entry_price=88.25,
+        stop_loss=83.0,
+        take_profit=96.0,
+        signal_id="sig-1",
+        basket_version="7",
+        instrument_token=12345,
+        contract_expiry="2026-07-30",
+        requested_lots=1,
+        resolved_lot_size=65,
+    )
+
+    result = core.OrderManager._validate_trade_plan(m, plan)
+
+    assert result.allowed is False
+    assert result.reason == "trade_lifecycle_id_missing"
+    assert result.details["broker_attempted"] is False
+    assert result.details["retryable"] is False
+
+
+def test_live_trade_plan_rejects_invalid_requested_lot_quantity(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    m = _Manager({"tradingsymbol": "NIFTY2670724250PE"})
+    m.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    plan = core.TradePlan(
+        symbol=GOOD_SYMBOL,
+        side="BUY",
+        quantity=40,
+        entry_price=88.25,
+        stop_loss=83.0,
+        take_profit=96.0,
+        signal_id="sig-1",
+        trade_lifecycle_id="life-1",
+        client_order_id="client-1",
+        basket_version="7",
+        instrument_token=12345,
+        contract_expiry="2026-07-30",
+        requested_lots=1,
+        resolved_lot_size=65,
+    )
+
+    result = core.OrderManager._validate_trade_plan(m, plan)
+
+    assert result.allowed is False
+    assert result.reason == "invalid_entry_lot_quantity"
+    assert result.details["required_value"] == 65
+    assert result.details["actual_value"] == 40
+
+
+def test_order_details_persists_lifecycle_contract_identity() -> None:
+    order = core.OrderDetails(
+        order_id="OID1",
+        symbol=GOOD_SYMBOL,
+        side="BUY",
+        quantity=65,
+        order_type=core.OrderType.LIMIT,
+        status=core.OrderStatus.SUBMITTED,
+        client_order_id="client-1",
+        intent="ENTRY",
+        trade_lifecycle_id="life-1",
+        linked_entry_order_id="entry-1",
+        bracket_id="bracket-1",
+        basket_version="7",
+        instrument_token=123,
+        contract_expiry="2026-07-30",
+        exchange_order_id="ex-1",
+        signal_id="sig-1",
+    )
+
+    payload = core.OrderManager._serialize(
+        m := object.__new__(core.OrderManager), order
+    )
+    restored = core.OrderManager._order_from_dict(m, payload)
+
+    assert restored.trade_lifecycle_id == "life-1"
+    assert restored.client_order_id == "client-1"
+    assert restored.bracket_id == "bracket-1"
+    assert restored.instrument_token == 123
+    assert restored.contract_expiry == "2026-07-30"
+
+
+def test_live_trade_plan_requires_active_basket_before_broker_attempt(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = _Manager({"tradingsymbol": "NIFTY2670724250PE"}, active_basket=None)
+    manager._active_contract_basket = None
+    manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+
+    result = core.OrderManager._validate_trade_plan(manager, _plan())
+
+    assert result.allowed is False
+    assert result.reason == "active_contract_unavailable"
+    assert result.details["broker_attempted"] is False
+
+
+def test_live_trade_plan_rejects_more_than_one_lot_when_runtime_max_is_one(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("MAX_LOTS_PER_TRADE", "1")
+    manager = _Manager({"tradingsymbol": "NIFTY2670724250PE"})
+    manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    plan = _plan()
+    plan.requested_lots = 2
+    plan.quantity = 130
+
+    result = core.OrderManager._validate_trade_plan(manager, plan)
+
+    assert result.allowed is False
+    assert result.reason == "invalid_entry_lot_quantity"
+    assert result.details["required_value"] == 1
+    assert result.details["actual_value"] == 2
+
+
+def test_order_details_persists_exact_lot_lifecycle_state() -> None:
+    order = core.OrderDetails(
+        order_id="OID2",
+        symbol=GOOD_SYMBOL,
+        side="BUY",
+        quantity=65,
+        order_type=core.OrderType.LIMIT,
+        status=core.OrderStatus.SUBMITTED,
+        requested_lots=1,
+        resolved_lot_size=65,
+        entry_lifecycle_state={"state": "ENTRY_OPEN", "requested_lots": 1},
+    )
+
+    payload = core.OrderManager._serialize(
+        m := object.__new__(core.OrderManager), order
+    )
+    restored = core.OrderManager._order_from_dict(m, payload)
+
+    assert restored.requested_lots == 1
+    assert restored.resolved_lot_size == 65
+    assert restored.entry_lifecycle_state == {
+        "state": "ENTRY_OPEN",
+        "requested_lots": 1,
+    }
