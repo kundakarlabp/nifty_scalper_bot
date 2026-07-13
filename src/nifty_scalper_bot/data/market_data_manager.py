@@ -349,6 +349,7 @@ class MarketDataManager:
         self._last_async_drop_log = time.monotonic()
         self._ws_connected = False
         self._last_ws_tick_mono: float = 0.0
+        self._last_valid_live_tick_mono: dict[str, float] = {}
         self._event_loop_lag_seconds: float = 0.0
         self._hydration_status: dict[str, str] = {}
         self._hydration_log_ts: dict[str, float] = {}
@@ -405,6 +406,7 @@ class MarketDataManager:
         self._last_open_position_priority_log: dict[str, float] = {}
         self._position_manager: Any | None = None
         self._open_position_symbols: set[str] = set()
+        self._active_bracket_symbols: set[str] = set()
         self._priority_context_cached_at = 0.0
         self._priority_context_ttl_s = self._parse_float_env(
             "MDM_PRIORITY_CONTEXT_TTL_SECONDS", default=0.25, minimum=0.01
@@ -424,6 +426,8 @@ class MarketDataManager:
         self._tick_drain_budget_s = self._parse_float_env("MDM_TICK_DRAIN_BUDGET_SECONDS", default=0.008, minimum=0.001)
         self._tick_drain_callbacks_scheduled = 0
         self._tick_drain_callbacks_completed = 0
+        self._tick_drain_callbacks_cancelled = 0
+        self._last_drain_duration_ms = 0.0
         self._tick_pending_max_seen = 0
         self._tick_coalesced_total = 0
         self._tick_submitted_total = 0
@@ -1793,6 +1797,7 @@ class MarketDataManager:
                 # Remove stale symbol mappings if they are not in desired
                 mapped_sym = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
                 if mapped_sym:
+                    self._cleanup_noncritical_live_symbol(str(mapped_sym))
                     token_for_sym = (
                         self._token_by_symbol.get(str(mapped_sym))
                         or self._symbol_to_token.get(str(mapped_sym))
@@ -1828,6 +1833,47 @@ class MarketDataManager:
             extra={"event": "SUBSCRIPTION_RECONCILED", **result},
         )
         return result
+
+    def _required_live_symbols(self) -> set[str]:
+        """Return symbols that are currently critical for live WS health."""
+        required: set[str] = set()
+
+        def add(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    required.add(self._canonical_symbol(text))
+                return
+            if isinstance(value, Mapping):
+                return
+            if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+                for item in value:
+                    add(item)
+
+        basket = getattr(self, "_active_contract_basket", None)
+        add(self._basket_value(basket, "spot_symbol", None) or "NSE:NIFTY")
+        add(self._basket_value(basket, "futures_symbol", None))
+        add(self._basket_value(basket, "active_futures_symbol", None))
+        add(self._basket_value(basket, "selected_ce", None))
+        add(self._basket_value(basket, "selected_pe", None))
+        add(self._basket_value(basket, "option_symbols", None))
+        add(getattr(self, "_open_position_symbols", set()))
+        add(getattr(self, "_active_bracket_symbols", set()))
+        return {sym for sym in required if sym}
+
+    def _cleanup_noncritical_live_symbol(self, symbol: str) -> None:
+        """Drop no-longer-required live/watchdog state while preserving history."""
+        canonical = self._canonical_symbol(symbol)
+        if canonical in self._required_live_symbols():
+            return
+        self._active_subscribed_symbols.discard(canonical)
+        self._tracked_symbols.discard(canonical)
+        self._suspended_context_symbols.discard(canonical)
+        self._suspended_context_symbol_until.pop(canonical, None)
+        self._symbols_with_tick.discard(canonical)
+        self._last_valid_live_tick_mono.pop(canonical, None)
 
 
     def _resolve_symbol_for_token(self, token: int) -> str | None:
@@ -2562,6 +2608,19 @@ class MarketDataManager:
         if not wallclock:
             return None
         return max(time.time() - float(wallclock), 0.0)
+
+    def time_since_last_any_tick(self, symbol: str) -> float | None:
+        """Return seconds since any accepted tick/quote, including REST fallback."""
+        return self.time_since_last_tick(symbol)
+
+    def time_since_last_live_ws_tick(self, symbol: str) -> float | None:
+        """Return seconds since the last accepted real WebSocket tick."""
+        normalized_symbol = self._canonical_symbol(symbol)
+        with self._lock:
+            mono = self._last_valid_live_tick_mono.get(normalized_symbol)
+        if mono is None:
+            return None
+        return max(time.monotonic() - float(mono), 0.0)
 
     async def _rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
@@ -5006,6 +5065,13 @@ class MarketDataManager:
         }
         self._invalidate_priority_context_cache()
 
+    def set_active_bracket_symbols(self, symbols: Iterable[str]) -> None:
+        """Set active bracket symbols for live-feed protection."""
+        self._active_bracket_symbols = {
+            self._canonical_symbol(str(symbol)) for symbol in symbols if str(symbol or "").strip()
+        }
+        self._invalidate_priority_context_cache()
+
     def add_open_position_symbol(self, symbol: str) -> None:
         """Add one open-position symbol for priority protection. Args: symbol. Returns: None."""
         normalized = self._canonical_symbol(str(symbol)) if str(symbol or "").strip() else ""
@@ -5380,6 +5446,17 @@ class MarketDataManager:
         self._tick_queue_priority_drops[bucket] += 1
 
     def _schedule_tick_drain_locked(self, loop: asyncio.AbstractEventLoop) -> None:
+        task = getattr(self, "_tick_drain_task", None)
+        pending = self._pending_count_locked()
+        if (
+            pending > 0
+            and self._tick_active_drains == 0
+            and self._tick_drain_scheduled
+            and (task is None or task.done())
+            and self._tick_drain_callbacks_scheduled == self._tick_drain_callbacks_completed
+            and not self._tick_drain_stopping
+        ):
+            self._tick_drain_scheduled = False
         if self._tick_drain_scheduled or self._tick_drain_stopping:
             return
         self._tick_drain_scheduled = True
@@ -5480,6 +5557,7 @@ class MarketDataManager:
                     self._pending_far_ticks[key] = raw
 
     async def _drain_latest_ticks(self) -> None:
+        drain_started = time.monotonic()
         with self._pending_tick_lock:
             self._tick_active_drains += 1
             self._tick_max_active_drains = max(self._tick_max_active_drains, self._tick_active_drains)
@@ -5504,9 +5582,12 @@ class MarketDataManager:
                         break
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
+            with self._pending_tick_lock:
+                self._tick_drain_callbacks_cancelled += 1
             raise
         finally:
             with self._pending_tick_lock:
+                self._last_drain_duration_ms = max(0.0, (time.monotonic() - drain_started) * 1000.0)
                 self._tick_active_drains = max(0, self._tick_active_drains - 1)
                 has_more = self._pending_count_locked() > 0
                 self._tick_drain_scheduled = False
@@ -5564,6 +5645,12 @@ class MarketDataManager:
                 "dropped_by_priority": dict(self._tick_dropped_by_priority),
                 "drain_callbacks_scheduled": self._tick_drain_callbacks_scheduled,
                 "drain_callbacks_completed": self._tick_drain_callbacks_completed,
+                "drain_task_done": self._tick_drain_task.done() if self._tick_drain_task is not None else None,
+                "drain_task_cancelled": self._tick_drain_task.cancelled() if self._tick_drain_task is not None else None,
+                "callbacks_scheduled": self._tick_drain_callbacks_scheduled,
+                "callbacks_completed": self._tick_drain_callbacks_completed,
+                "callbacks_cancelled": self._tick_drain_callbacks_cancelled,
+                "last_drain_duration_ms": self._last_drain_duration_ms,
                 "active_drains": self._tick_active_drains,
                 "max_active_drains": self._tick_max_active_drains,
                 "drain_scheduled": self._tick_drain_scheduled,
@@ -5649,6 +5736,7 @@ class MarketDataManager:
                 self._last_tick_time[canonical] = now
                 self._last_tick_wallclock[canonical] = now
                 self._last_tick_source[canonical] = "ws"
+                self._last_valid_live_tick_mono[canonical] = time.monotonic()
                 self._symbols_with_tick.add(canonical)
                 self._ticks_received_per_symbol[canonical] += 1
 
@@ -5659,6 +5747,7 @@ class MarketDataManager:
                     self._last_tick_time["NSE:NIFTY"] = now
                     self._last_tick_wallclock["NSE:NIFTY"] = now
                     self._last_tick_source["NSE:NIFTY"] = "ws"
+                    self._last_valid_live_tick_mono["NSE:NIFTY"] = time.monotonic()
                     self._symbols_with_tick.add("NSE:NIFTY")
                     if not getattr(self, "_spot_ws_first_tick_seen_logged", False):
                         self._spot_ws_first_tick_seen_logged = True
@@ -6749,7 +6838,11 @@ class MarketDataManager:
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
         if source == "ws":
-            self._last_ws_tick_mono = time.monotonic()
+            now_mono = time.monotonic()
+            self._last_ws_tick_mono = now_mono
+            canonical_symbol = self._canonical_symbol(symbol)
+            with self._lock:
+                self._last_valid_live_tick_mono[canonical_symbol] = now_mono
         self._store_tick(symbol, tick)
         if source == "ws":
             try:
@@ -7263,15 +7356,16 @@ class MarketDataManager:
 
         now = time.time()
         with self._lock:
+            required = self._required_live_symbols()
             candidate_symbols = sorted(
                 sym
-                for sym in self._active_subscribed_symbols
+                for sym in required
                 if sym in self._symbols_with_tick
             )
             stale_symbols = [
                 sym
                 for sym in candidate_symbols
-                if (now - self._last_tick_time.get(sym, now))
+                if (self.time_since_last_live_ws_tick(sym) or 0.0)
                 > self._zombie_tick_threshold_sec
             ]
         if not candidate_symbols:
@@ -7279,6 +7373,9 @@ class MarketDataManager:
             return
 
         stale_ratio = len(stale_symbols) / max(len(candidate_symbols), 1)
+        heartbeat_age = (
+            None if self._last_hb_mono is None else max(0.0, time.monotonic() - self._last_hb_mono)
+        )
         self._logger.info(
             "Condition met: mdm_zombie_summary",
             extra={
@@ -7287,9 +7384,49 @@ class MarketDataManager:
                 "stale_symbols": len(stale_symbols),
                 "stale_ratio": round(stale_ratio, 3),
                 "threshold_seconds": self._zombie_tick_threshold_sec,
+                "required_symbols": len(required),
+                "heartbeat_age_s": heartbeat_age,
             },
         )
-        if stale_ratio < 0.70:
+        spot_stale = "NSE:NIFTY" in stale_symbols
+        fut_stale = any(self._is_context_symbol(sym) and sym != "NSE:NIFTY" for sym in stale_symbols)
+        heartbeat_stale = heartbeat_age is not None and heartbeat_age > self._zombie_tick_threshold_sec
+        multiple_required_stale = len(stale_symbols) > 1
+        transport_failure = heartbeat_stale or (spot_stale and fut_stale) or multiple_required_stale
+        if stale_symbols and not transport_failure:
+            for sym in stale_symbols:
+                age = self.time_since_last_live_ws_tick(sym)
+                self.request_fallback_refresh(sym, reason="ws_symbol_stale_recovery")
+                self._logger.warning(
+                    "WS_SYMBOL_STALE_RECOVERY symbol=%s required=%s stale_age_s=%s heartbeat_age_s=%s reason=single_symbol_stale",
+                    sym,
+                    sym in required,
+                    age,
+                    heartbeat_age,
+                    extra={
+                        "event": "WS_SYMBOL_STALE_RECOVERY",
+                        "symbol": sym,
+                        "required": sym in required,
+                        "stale_age_s": age,
+                        "heartbeat_age_s": heartbeat_age,
+                        "reason": "single_symbol_stale",
+                    },
+                )
+            self._logger.warning(
+                "WS_GLOBAL_RESTART_SUPPRESSED stale_symbols=%d heartbeat_age_s=%s reason=no_transport_failure",
+                len(stale_symbols),
+                heartbeat_age,
+                extra={
+                    "event": "WS_GLOBAL_RESTART_SUPPRESSED",
+                    "stale_symbols": stale_symbols,
+                    "heartbeat_age_s": heartbeat_age,
+                    "reason": "no_transport_failure",
+                },
+            )
+            self._zombie_stale_logged = False
+            return
+
+        if stale_ratio < 0.70 and not transport_failure:
             self._zombie_stale_logged = False
             # Recovery observed — reset exponential backoff counter
             # so the next genuine stall restarts at the base cooldown.
@@ -7310,6 +7447,17 @@ class MarketDataManager:
             )
             self._zombie_stale_logged = True
 
+        self._logger.critical(
+            "WS_GLOBAL_RESTART_TRIGGERED stale_symbols=%d heartbeat_age_s=%s reason=transport_failure",
+            len(stale_symbols),
+            heartbeat_age,
+            extra={
+                "event": "WS_GLOBAL_RESTART_TRIGGERED",
+                "symbols": stale_symbols,
+                "heartbeat_age_s": heartbeat_age,
+                "reason": "transport_failure",
+            },
+        )
         self._trigger_zombie_ws_restart()
 
     def _trigger_zombie_ws_restart(self) -> None:
@@ -9062,8 +9210,12 @@ class MarketDataManager:
         s = str(symbol or "").upper()
         return s.startswith("NFO:NIFTY") and (s.endswith("CE") or s.endswith("PE"))
 
-    def _tick_age_seconds(self, symbol: str, now: datetime) -> float | None:
+    def _tick_age_seconds(self, symbol: str, now: datetime | None = None) -> float | None:
         """Return tick age in seconds. Args: symbol, now; Returns: age or none; Raises: none."""
+        live_age = self.time_since_last_live_ws_tick(symbol)
+        if live_age is not None:
+            return live_age
+        now = now or datetime.now(timezone.utc)
         ts = self._last_tick_time.get(symbol)
         if ts is None:
             return None
@@ -9118,11 +9270,9 @@ class MarketDataManager:
 
     def _is_ws_fresh_enough(self, symbol: str, now: datetime) -> bool:
         """Return whether websocket tick freshness is sufficient. Args: symbol, now. Returns: bool. Raises: none."""
-        ts = self._last_tick_time.get(self._canonical_symbol(symbol))
-        if ts is None:
+        age = self.time_since_last_live_ws_tick(symbol)
+        if age is None:
             return False
-        tick_dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-        age = (now - tick_dt).total_seconds()
         threshold = (
             self._polling_policy.context_stale_seconds
             if self._is_context_symbol(symbol)

@@ -1475,10 +1475,22 @@ class StrategyManager:
                 # Gating: Min Bars
                 strategy_min_bars = getattr(strategy, "MIN_BARS_REQUIRED", 3)
                 if bar_count < strategy_min_bars:
-                    logger.debug(
-                        "strategy_skip_bars",
-                        extra={"event": "strategy_skip_bars", "strategy": strategy.name,
-                               "need": strategy_min_bars, "have": bar_count},
+                    event = (
+                        "STRATEGY_SKIPPED_HISTORY_COLD"
+                        if str(strategy.name).upper().startswith("SMC")
+                        else "strategy_skip_bars"
+                    )
+                    log_throttled(
+                        self._logger,
+                        key=f"{event}:{strategy.name}:{symbol}",
+                        msg=(
+                            f"{event} strategy={strategy.name} symbol={symbol} "
+                            f"history_count={bar_count} min_bars={strategy_min_bars}"
+                        ),
+                        interval_sec=60.0,
+                        level=20 if event == "STRATEGY_SKIPPED_HISTORY_COLD" else 10,
+                        extra={"event": event, "strategy": strategy.name,
+                               "need": strategy_min_bars, "have": bar_count, "symbol": symbol},
                     )
                     skip_count += 1
                     continue

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -39,11 +40,13 @@ async def test_threadsafe_tick_ingress_coalesces_and_loop_runs(monkeypatch):
 
     def submit():
         for i in range(50_000):
-            mdm._enqueue_tick_threadsafe({
-                "instrument_token": 1,
-                "last_price": i,
-                "timestamp": i,
-            })
+            mdm._enqueue_tick_threadsafe(
+                {
+                    "instrument_token": 1,
+                    "last_price": i,
+                    "timestamp": i,
+                }
+            )
 
     thread = threading.Thread(target=submit)
     thread.start()
@@ -77,11 +80,13 @@ async def test_selected_ticks_span_multiple_budget_batches_without_loss(monkeypa
     loop = asyncio.get_running_loop()
     mdm.set_event_loop(loop)
     for i in range(10):
-        mdm._enqueue_tick_threadsafe({
-            "instrument_token": 1,
-            "last_price": i,
-            "timestamp": i,
-        })
+        mdm._enqueue_tick_threadsafe(
+            {
+                "instrument_token": 1,
+                "last_price": i,
+                "timestamp": i,
+            }
+        )
     await mdm.drain_pending_ticks(timeout=2.0)
     assert processed == list(range(10))
     stats = mdm.get_tick_pressure_stats()
@@ -131,16 +136,18 @@ def _wire_symbols(mdm):
         mdm._token_to_symbol[token] = symbol
         mdm._symbol_to_token[symbol] = token
         mdm._token_by_symbol[symbol] = token
-    mdm.set_active_contract_basket({
-        "all_tokens": list(mapping),
-        "token_by_symbol": {symbol: token for token, symbol in mapping.items()},
-        "spot_symbol": "NSE:NIFTY",
-        "spot_token": 3,
-        "futures_symbol": "NFO:NIFTY26JUNFUT",
-        "selected_ce": "NFO:NIFTY26JUN24000CE",
-        "selected_pe": "NFO:NIFTY26JUN24000PE",
-        "option_symbols": ["NFO:NIFTY26JUN24000CE", "NFO:NIFTY26JUN24000PE"],
-    })
+    mdm.set_active_contract_basket(
+        {
+            "all_tokens": list(mapping),
+            "token_by_symbol": {symbol: token for token, symbol in mapping.items()},
+            "spot_symbol": "NSE:NIFTY",
+            "spot_token": 3,
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "selected_ce": "NFO:NIFTY26JUN24000CE",
+            "selected_pe": "NFO:NIFTY26JUN24000PE",
+            "option_symbols": ["NFO:NIFTY26JUN24000CE", "NFO:NIFTY26JUN24000PE"],
+        }
+    )
     return mapping
 
 
@@ -235,4 +242,168 @@ async def test_open_position_stop_loss_crossing_tick_is_not_silently_lost(monkey
     stats = mdm.get_tick_pressure_stats()
     assert stats["unexplained_loss"] == 0
     assert stats["max_active_drains"] == 1
+    await _stop_mdm(mdm)
+
+
+def test_old_basket_symbol_removed_from_watchdog_critical_set():
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    old = "NFO:NIFTY26JUN25000CE"
+    mdm._active_subscribed_symbols.add(old)
+    mdm._tracked_symbols.add(old)
+    mdm._symbols_with_tick.add(old)
+    mdm._last_valid_live_tick_mono[old] = 1.0
+
+    mdm.reconcile_active_subscriptions({1, 2, 3, 4})
+
+    assert old not in mdm._required_live_symbols()
+    assert old not in mdm._active_subscribed_symbols
+    assert old not in mdm._tracked_symbols
+    assert old not in mdm._symbols_with_tick
+
+
+def test_open_position_symbol_remains_required_after_basket_drift():
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    old = "NFO:NIFTY26JUN25000CE"
+    mdm.set_open_position_symbols([old])
+    mdm._active_subscribed_symbols.add(old)
+    mdm._tracked_symbols.add(old)
+    mdm._symbols_with_tick.add(old)
+
+    mdm.reconcile_active_subscriptions({1, 2, 3, 4})
+
+    assert old in mdm._required_live_symbols()
+    assert old in mdm._active_subscribed_symbols
+    assert old in mdm._tracked_symbols
+
+
+def test_one_stale_noncritical_option_does_not_restart_full_ws(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    stale = "NFO:NIFTY26JUN24000CE"
+    now = time.monotonic()
+    mdm._symbols_with_tick.update(mdm._required_live_symbols())
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)),
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("global restart should be suppressed"),
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert rest_requests == [(stale, "ws_symbol_stale_recovery")]
+
+
+def test_spot_and_futures_both_stale_may_trigger_full_restart(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    mdm._symbols_with_tick.update(required)
+    for sym in required:
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 120.0
+    mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    restarted = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert restarted == [True]
+
+
+def test_rest_fallback_does_not_mark_ws_tick_freshness():
+    mdm = MarketDataManager(kite=None)
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._ingest_normalized_tick(
+        {"symbol": symbol, "ltp": 10.0, "timestamp": time.time(), "source": "rest"}
+    )
+
+    assert mdm.time_since_last_any_tick(symbol) is not None
+    assert mdm.time_since_last_live_ws_tick(symbol) is None
+
+
+def test_valid_ws_tick_updates_canonical_live_timestamp():
+    mdm = MarketDataManager(kite=None)
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._ingest_normalized_tick(
+        {"symbol": symbol, "ltp": 10.0, "timestamp": time.time(), "source": "ws"}
+    )
+
+    assert mdm.time_since_last_live_ws_tick(symbol) is not None
+    assert mdm.time_since_last_live_ws_tick(symbol) < 1.0
+
+
+def test_time_since_last_live_ws_tick_returns_none_without_ws_tick():
+    mdm = MarketDataManager(kite=None)
+    assert mdm.time_since_last_live_ws_tick("NFO:NIFTY26JUN24000CE") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_scheduled_drain_with_done_task_is_repaired_once(monkeypatch):
+    mdm = _make_mdm()
+    loop = asyncio.get_running_loop()
+    mdm.set_event_loop(loop)
+    done_task = loop.create_task(asyncio.sleep(0))
+    await done_task
+    mdm._tick_drain_task = done_task
+    mdm._tick_drain_scheduled = True
+    mdm._pending_far_ticks["NFO:NIFTY26JUN24000CE"] = {
+        "symbol": "NFO:NIFTY26JUN24000CE",
+        "last_price": 1,
+        "timestamp": 1,
+    }
+    mdm._schedule_tick_drain_locked(loop)
+    mdm._schedule_tick_drain_locked(loop)
+    await asyncio.sleep(0)
+
+    assert mdm.get_tick_pressure_stats()["callbacks_scheduled"] == 1
+    await _stop_mdm(mdm)
+
+
+@pytest.mark.asyncio
+async def test_transient_scheduled_active_zero_with_live_task_not_rescheduled():
+    mdm = _make_mdm()
+    loop = asyncio.get_running_loop()
+    mdm.set_event_loop(loop)
+    live_task = loop.create_task(asyncio.sleep(0.05))
+    mdm._tick_drain_task = live_task
+    mdm._tick_drain_scheduled = True
+    mdm._pending_far_ticks["NFO:NIFTY26JUN24000CE"] = {
+        "symbol": "NFO:NIFTY26JUN24000CE",
+        "last_price": 1,
+        "timestamp": 1,
+    }
+    mdm._schedule_tick_drain_locked(loop)
+
+    assert mdm.get_tick_pressure_stats()["callbacks_scheduled"] == 0
+    live_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await live_task
     await _stop_mdm(mdm)
