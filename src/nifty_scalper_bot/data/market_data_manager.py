@@ -69,10 +69,16 @@ from nifty_scalper_bot.streaming.websocket_manager import (
     ConnectionState,
     WebSocketManager,
 )
-from nifty_scalper_bot.execution.readiness import evaluate_quote_readiness, resolve_quote_bid_ask_spread
+from nifty_scalper_bot.execution.readiness import (
+    evaluate_quote_readiness,
+    resolve_quote_bid_ask_spread,
+)
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.async_helpers import safe_task
-from nifty_scalper_bot.utils.log_throttle import log_on_change, log_throttled as log_throttled_live
+from nifty_scalper_bot.utils.log_throttle import (
+    log_on_change,
+    log_throttled as log_throttled_live,
+)
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
@@ -148,10 +154,6 @@ class ResolvedInstrument:
     tradingsymbol: str
 
 
-
-
-
-
 @dataclass(frozen=True, slots=True)
 class HydrationResult:
     """Structured result for canonical historical hydration requests."""
@@ -184,6 +186,7 @@ class HydrationResult:
         """Compatibility alias for callers/tests that predate broker_fetch_started."""
         return self.broker_fetch_started
 
+
 @dataclass(frozen=True)
 class PollingPolicy:
     """Polling policy values. Args: settings. Returns: policy. Raises: none."""
@@ -200,11 +203,17 @@ class PollingPolicy:
         if settings is None:
             return cls()
         return cls(
-            context_stale_seconds=float(getattr(settings, "poll_context_stale_seconds", 30.0)),
-            option_stale_seconds=float(getattr(settings, "poll_option_stale_seconds", 60.0)),
+            context_stale_seconds=float(
+                getattr(settings, "poll_context_stale_seconds", 30.0)
+            ),
+            option_stale_seconds=float(
+                getattr(settings, "poll_option_stale_seconds", 60.0)
+            ),
             interval_seconds=float(getattr(settings, "poll_interval_seconds", 1.0)),
             max_symbols=int(getattr(settings, "poll_max_symbols", 12)),
-            error_log_throttle_seconds=float(getattr(settings, "poll_error_log_throttle_seconds", 30.0)),
+            error_log_throttle_seconds=float(
+                getattr(settings, "poll_error_log_throttle_seconds", 30.0)
+            ),
         )
 
 
@@ -216,11 +225,16 @@ class FuturesContextRotationResult:
     unresolved: bool
     reason: str
     source: str
+
+
 def canonical_symbol(symbol: str) -> str:
     """Canonicalize symbols (including NIFTY spot aliases) to EXCHANGE:SYMBOL."""
     normalized = enforce_canonical(normalize_symbol(str(symbol or "")))
     alias = normalized.replace(" ", "")
-    if alias in {"NSE:NIFTY50", "NIFTY50"} or normalized in {"NSE:NIFTY 50", "NIFTY 50"}:
+    if alias in {"NSE:NIFTY50", "NIFTY50"} or normalized in {
+        "NSE:NIFTY 50",
+        "NIFTY 50",
+    }:
         return "NSE:NIFTY"
     return normalized
 
@@ -349,6 +363,13 @@ class MarketDataManager:
         self._last_async_drop_log = time.monotonic()
         self._ws_connected = False
         self._last_ws_tick_mono: float = 0.0
+        self._last_valid_live_tick_mono: dict[str, float] = {}
+        self._required_symbol_since_mono: dict[str, float] = {}
+        self._required_symbol_missing_grace_sec = self._parse_float_env(
+            "MDM_REQUIRED_SYMBOL_MISSING_GRACE_SECONDS", default=15.0, minimum=0.0
+        )
+        self._subscription_divergence_since_mono: float | None = None
+        self._last_symbol_level_recovery_mono: float | None = None
         self._event_loop_lag_seconds: float = 0.0
         self._hydration_status: dict[str, str] = {}
         self._hydration_log_ts: dict[str, float] = {}
@@ -380,7 +401,9 @@ class MarketDataManager:
         self._quote_direct_miss_count: dict[str, int] = {}
         self._quote_direct_miss_until: dict[str, float] = {}
         self._quote_direct_miss_reason: dict[str, str] = {}
-        self._quote_direct_miss_cooldown_seconds = float(os.getenv("MDM_QUOTE_SYMBOL_MISS_COOLDOWN_SECONDS", "45") or "45")
+        self._quote_direct_miss_cooldown_seconds = float(
+            os.getenv("MDM_QUOTE_SYMBOL_MISS_COOLDOWN_SECONDS", "45") or "45"
+        )
         self._spot_ready_logged = False
         self._spot_refresh_last_attempt_mono: float = 0.0
         # Bounded queue: drops oldest when full so a stall in the async
@@ -405,6 +428,7 @@ class MarketDataManager:
         self._last_open_position_priority_log: dict[str, float] = {}
         self._position_manager: Any | None = None
         self._open_position_symbols: set[str] = set()
+        self._active_bracket_symbols: set[str] = set()
         self._priority_context_cached_at = 0.0
         self._priority_context_ttl_s = self._parse_float_env(
             "MDM_PRIORITY_CONTEXT_TTL_SECONDS", default=0.25, minimum=0.01
@@ -418,12 +442,19 @@ class MarketDataManager:
         self._pending_tick_queues: dict[str, Deque[dict[str, Any]]] = defaultdict(deque)
         self._pending_far_ticks: dict[str, dict[str, Any]] = {}
         self._tick_drain_scheduled = False
+        self._tick_drain_start_pending = False
         self._tick_drain_task: asyncio.Task[None] | None = None
         self._tick_drain_stopping = False
-        self._tick_drain_batch_size = self._parse_int_env("MDM_TICK_DRAIN_BATCH", default=100, minimum=10)
-        self._tick_drain_budget_s = self._parse_float_env("MDM_TICK_DRAIN_BUDGET_SECONDS", default=0.008, minimum=0.001)
+        self._tick_drain_batch_size = self._parse_int_env(
+            "MDM_TICK_DRAIN_BATCH", default=100, minimum=10
+        )
+        self._tick_drain_budget_s = self._parse_float_env(
+            "MDM_TICK_DRAIN_BUDGET_SECONDS", default=0.008, minimum=0.001
+        )
         self._tick_drain_callbacks_scheduled = 0
         self._tick_drain_callbacks_completed = 0
+        self._tick_drain_callbacks_cancelled = 0
+        self._last_drain_duration_ms = 0.0
         self._tick_pending_max_seen = 0
         self._tick_coalesced_total = 0
         self._tick_submitted_total = 0
@@ -476,7 +507,9 @@ class MarketDataManager:
         self._poll_error_last_log: dict[str, float] = {}
         self._canonical_history_lock = asyncio.Lock()
         self._canonical_history_inflight_lock = asyncio.Lock()
-        self._canonical_history_inflight: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]] = {}
+        self._canonical_history_inflight: dict[
+            tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]
+        ] = {}
         self._last_history_request_ts = 0.0
         self._canonical_history_min_interval_sec = float(
             getattr(settings, "history_min_interval_sec", 1.2)
@@ -639,7 +672,9 @@ class MarketDataManager:
         # for the callback slot here — process_ticks is the single
         # ingress for WS ticks.
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
-        self._m_subs = Counter("mdm_subscriptions_total", "Market data subscriptions registered")
+        self._m_subs = Counter(
+            "mdm_subscriptions_total", "Market data subscriptions registered"
+        )
         self._last_balance_log_time = 0.0
         self._started = False
         if self._ws is not None and hasattr(self._ws, "on_tick"):
@@ -675,10 +710,9 @@ class MarketDataManager:
                     exchange_instruments = self._broker.instruments(exchange)
                     break
                 except Exception as exc:  # noqa: BLE001
-                    delay = min(8.0, 2.0 ** attempt)
+                    delay = min(8.0, 2.0**attempt)
                     self._logger.warning(
-                        "instrument load %s attempt %d failed: %s — "
-                        "retry in %.1fs",
+                        "instrument load %s attempt %d failed: %s — " "retry in %.1fs",
                         exchange,
                         attempt + 1,
                         exc,
@@ -738,19 +772,27 @@ class MarketDataManager:
         mismatches: list[str] = []
         for symbol, token in token_by_symbol.items():
             if symbol_to_token.get(symbol) != token:
-                mismatches.append(f"symbol missing/mismatch in _symbol_to_token {symbol}:{token}->{symbol_to_token.get(symbol)}")
+                mismatches.append(
+                    f"symbol missing/mismatch in _symbol_to_token {symbol}:{token}->{symbol_to_token.get(symbol)}"
+                )
         for token, symbol in symbol_by_token.items():
             if token_to_symbol.get(token) != symbol:
-                mismatches.append(f"token missing/mismatch in _token_to_symbol {token}:{symbol}->{token_to_symbol.get(token)}")
+                mismatches.append(
+                    f"token missing/mismatch in _token_to_symbol {token}:{symbol}->{token_to_symbol.get(token)}"
+                )
             reverse = token_by_symbol.get(symbol)
             if reverse != token:
                 mismatches.append(f"reverse mismatch {symbol}:{token}->{reverse}")
         for symbol, token in symbol_to_token.items():
             if token_by_symbol.get(symbol) != token:
-                mismatches.append(f"compat symbol mismatch {symbol}:{token}->{token_by_symbol.get(symbol)}")
+                mismatches.append(
+                    f"compat symbol mismatch {symbol}:{token}->{token_by_symbol.get(symbol)}"
+                )
         for token, symbol in token_to_symbol.items():
             if symbol_by_token.get(token) != symbol:
-                mismatches.append(f"compat token mismatch {token}:{symbol}->{symbol_by_token.get(token)}")
+                mismatches.append(
+                    f"compat token mismatch {token}:{symbol}->{symbol_by_token.get(token)}"
+                )
         if mismatches:
             raise RuntimeError(
                 f"Token/symbol mapping mismatch detected ({len(mismatches)}): {mismatches[:5]}"
@@ -788,9 +830,7 @@ class MarketDataManager:
                 self._emit_tick(symbol, normalized, source=source)
             self._process_poll_quote(symbol, normalized)
         except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "ingest_rest_quote failed for %s: %s", symbol, exc
-            )
+            self._logger.debug("ingest_rest_quote failed for %s: %s", symbol, exc)
 
     def _process_poll_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
         """Aggregate poll quotes into minute candles. Args: symbol, quote. Returns: None. Raises: Exception."""
@@ -835,7 +875,9 @@ class MarketDataManager:
                 cumulative_value = None
             if cumulative_value is not None and cumulative_value >= 0:
                 prev = self._last_cumulative_volume_by_symbol.get(symbol)
-                delta = 0.0 if prev is None else max(0.0, cumulative_value - float(prev))
+                delta = (
+                    0.0 if prev is None else max(0.0, cumulative_value - float(prev))
+                )
                 self._last_cumulative_volume_by_symbol[symbol] = cumulative_value
                 state["volume"] = float(state.get("volume") or 0.0) + delta
                 state["volume_source"] = "cumulative_delta"
@@ -920,40 +962,62 @@ class MarketDataManager:
             self._ohlc[self._bar_symbol_key(symbol)].append(dict(payload))
             if isinstance(ts, datetime):
                 self._last_historical_ts[symbol] = ts.timestamp()
-            self.update_hydration_status(symbol, self._ohlc[self._bar_symbol_key(symbol)])
+            self.update_hydration_status(
+                symbol, self._ohlc[self._bar_symbol_key(symbol)]
+            )
         except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in ingest_historical_bar: %s", exc, exc_info=exc)
+            self._logger.error(
+                "Failure in ingest_historical_bar: %s", exc, exc_info=exc
+            )
 
     def ingest_historical_ohlc(
         self, symbol: str, bars: Sequence[Mapping[str, Any]]
     ) -> int:
         """Ingest sorted UTC historical OHLC bars and return newly accepted rows."""
         accepted = 0
-        normalized_symbol = self._canonical_symbol(symbol) if hasattr(self, "_canonical_symbol") else str(symbol)
+        normalized_symbol = (
+            self._canonical_symbol(symbol)
+            if hasattr(self, "_canonical_symbol")
+            else str(symbol)
+        )
         try:
             normalized_rows: dict[datetime, dict[str, Any]] = {}
             for row in bars or ():
-                normalized = self.normalize_history_row(normalized_symbol, row, source="historical")
+                normalized = self.normalize_history_row(
+                    normalized_symbol, row, source="historical"
+                )
                 if normalized is None:
                     continue
                 ts = normalized.get("timestamp")
                 if not isinstance(ts, datetime):
                     continue
-                normalized["timestamp"] = ts.astimezone(timezone.utc).replace(microsecond=0)
+                normalized["timestamp"] = ts.astimezone(timezone.utc).replace(
+                    microsecond=0
+                )
                 normalized["symbol"] = normalized_symbol
                 normalized_rows[normalized["timestamp"]] = normalized
             sorted_rows = [normalized_rows[ts] for ts in sorted(normalized_rows)]
-            key = self._bar_symbol_key(normalized_symbol) if hasattr(self, "_bar_symbol_key") else normalized_symbol
+            key = (
+                self._bar_symbol_key(normalized_symbol)
+                if hasattr(self, "_bar_symbol_key")
+                else normalized_symbol
+            )
             existing = list(getattr(self, "_ohlc", {}).get(key, []) or [])
             existing_ts: set[datetime] = set()
             for existing_row in existing:
-                ts = existing_row.get("timestamp") if isinstance(existing_row, Mapping) else None
+                ts = (
+                    existing_row.get("timestamp")
+                    if isinstance(existing_row, Mapping)
+                    else None
+                )
                 if isinstance(ts, str):
                     try:
                         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                     except ValueError:
                         continue
-                    existing_ts.add(parsed.astimezone(timezone.utc).replace(microsecond=0))
+                    existing_ts.add(
+                        parsed.astimezone(timezone.utc).replace(microsecond=0)
+                    )
                 elif isinstance(ts, datetime):
                     existing_ts.add(ts.astimezone(timezone.utc).replace(microsecond=0))
             for row in sorted_rows:
@@ -963,16 +1027,31 @@ class MarketDataManager:
                 self.ingest_historical_bar(row)
                 existing_ts.add(ts)
                 accepted += 1
-            final_count = len(self.get_ohlc_bars(normalized_symbol)) if hasattr(self, "get_ohlc_bars") else accepted
+            final_count = (
+                len(self.get_ohlc_bars(normalized_symbol))
+                if hasattr(self, "get_ohlc_bars")
+                else accepted
+            )
             self._logger.info(
                 "HYDRATION_INGEST_RESULT symbol=%s returned_rows=%s accepted_rows=%s final_mdm_bars=%s first_ts=%s last_ts=%s",
-                normalized_symbol, len(bars or ()), accepted, final_count,
+                normalized_symbol,
+                len(bars or ()),
+                accepted,
+                final_count,
                 sorted_rows[0]["timestamp"].isoformat() if sorted_rows else None,
                 sorted_rows[-1]["timestamp"].isoformat() if sorted_rows else None,
-                extra={"event": "HYDRATION_INGEST_RESULT", "symbol": normalized_symbol, "returned_rows": len(bars or ()), "accepted_rows": accepted, "final_mdm_bars": final_count},
+                extra={
+                    "event": "HYDRATION_INGEST_RESULT",
+                    "symbol": normalized_symbol,
+                    "returned_rows": len(bars or ()),
+                    "accepted_rows": accepted,
+                    "final_mdm_bars": final_count,
+                },
             )
         except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in ingest_historical_ohlc: %s", exc, exc_info=exc)
+            self._logger.error(
+                "Failure in ingest_historical_ohlc: %s", exc, exc_info=exc
+            )
         return accepted
 
     def subscribe_bars(self, callback: Callable[[dict[str, Any]], None]) -> None:
@@ -988,7 +1067,10 @@ class MarketDataManager:
         bars and rejects out-of-order ones). Errors never break publishing.
         """
         try:
-            from nifty_scalper_bot.data.pipeline import Candle, get_pipeline  # noqa: PLC0415
+            from nifty_scalper_bot.data.pipeline import (
+                Candle,
+                get_pipeline,
+            )  # noqa: PLC0415
 
             get_pipeline().store.push(
                 Candle(
@@ -1001,14 +1083,20 @@ class MarketDataManager:
                     volume=float(bar.get("volume") or 0.0),
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - pipeline sync must not break bar publish
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - pipeline sync must not break bar publish
             log_throttled(
                 self._logger,
                 f"pipeline_bar_sync_failed:{bar.get('symbol')}",
-                "PIPELINE_BAR_SYNC_FAILED symbol=%s error=%s" % (bar.get("symbol"), exc),
+                "PIPELINE_BAR_SYNC_FAILED symbol=%s error=%s"
+                % (bar.get("symbol"), exc),
                 interval_sec=60,
                 level=logging.WARNING,
-                extra={"event": "PIPELINE_BAR_SYNC_FAILED", "symbol": str(bar.get("symbol") or "")},
+                extra={
+                    "event": "PIPELINE_BAR_SYNC_FAILED",
+                    "symbol": str(bar.get("symbol") or ""),
+                },
             )
 
     def _publish_closed_bar(self, bar: dict[str, Any]) -> None:
@@ -1096,7 +1184,9 @@ class MarketDataManager:
         option_contracts = []
         try:
             if self._resolver and hasattr(self._resolver, "option_contracts"):
-                option_contracts = self._resolver.option_contracts(normalized_underlying)
+                option_contracts = self._resolver.option_contracts(
+                    normalized_underlying
+                )
             if not option_contracts:
                 basket = getattr(self, "_active_contract_basket", None)
                 token_map = self._basket_token_map(basket)
@@ -1106,7 +1196,8 @@ class MarketDataManager:
                         "symbol": sym,
                         "tradingsymbol": str(sym).split(":", 1)[-1],
                         "exchange": "NFO",
-                        "instrument_token": token_map.get(sym) or token_map.get(str(sym).split(":", 1)[-1]),
+                        "instrument_token": token_map.get(sym)
+                        or token_map.get(str(sym).split(":", 1)[-1]),
                         "instrument_type": "CE" if str(sym).endswith("CE") else "PE",
                         "expiry": self._basket_value(basket, "option_expiry", expiry),
                     }
@@ -1132,7 +1223,10 @@ class MarketDataManager:
             except (TypeError, ValueError):
                 continue
             option_type = str(
-                contract.get("option_type") or contract.get("instrument_type") or contract.get("type") or ""
+                contract.get("option_type")
+                or contract.get("instrument_type")
+                or contract.get("type")
+                or ""
             ).upper()
             if option_type not in {"CE", "PE"}:
                 continue
@@ -1284,7 +1378,12 @@ class MarketDataManager:
                     self._ws_connect_task_started,
                     len(self._desired_tokens),
                     post_status.get("tokens"),
-                    extra={"event": "MDM_WS_START_PENDING_CONNECTION", "connect_task_alive": self._ws_connect_task_started, "desired_token_count": len(self._desired_tokens), "ws_token_count": post_status.get("tokens")},
+                    extra={
+                        "event": "MDM_WS_START_PENDING_CONNECTION",
+                        "connect_task_alive": self._ws_connect_task_started,
+                        "desired_token_count": len(self._desired_tokens),
+                        "ws_token_count": post_status.get("tokens"),
+                    },
                 )
             if not self._ws_connect_task_started and not self._ws_connected:
                 self._ws_start_requested = False
@@ -1292,7 +1391,11 @@ class MarketDataManager:
                     "MDM_WS_START_NO_CONNECT_TASK desired_token_count=%s ws_token_count=%s",
                     len(self._desired_tokens),
                     post_status.get("tokens"),
-                    extra={"event": "MDM_WS_START_NO_CONNECT_TASK", "desired_token_count": len(self._desired_tokens), "ws_token_count": post_status.get("tokens")},
+                    extra={
+                        "event": "MDM_WS_START_NO_CONNECT_TASK",
+                        "desired_token_count": len(self._desired_tokens),
+                        "ws_token_count": post_status.get("tokens"),
+                    },
                 )
         except Exception:
             self._ws_start_requested = False
@@ -1562,7 +1665,9 @@ class MarketDataManager:
                 if hasattr(broker, "get_available_balance"):
                     try:
                         live_balance = broker.get_available_balance(segment=segment)  # type: ignore[call-arg]
-                        numeric_live = float(live_balance) if live_balance is not None else None
+                        numeric_live = (
+                            float(live_balance) if live_balance is not None else None
+                        )
                         if numeric_live is not None and not math.isfinite(numeric_live):
                             numeric_live = None
                         if numeric_live is not None:
@@ -1677,12 +1782,15 @@ class MarketDataManager:
                         or resolved.get("exchange_symbol")
                         or f"{resolved.get('exchange', exchange)}:{resolved.get('tradingsymbol', tradingsymbol)}"
                     )
-                    token = int(
-                        resolved.get("instrument_token")
-                        or resolved.get("token")
-                        or token
-                        or 0
-                    ) or None
+                    token = (
+                        int(
+                            resolved.get("instrument_token")
+                            or resolved.get("token")
+                            or token
+                            or 0
+                        )
+                        or None
+                    )
                     exchange = str(resolved.get("exchange") or exchange)
                     tradingsymbol = str(resolved.get("tradingsymbol") or tradingsymbol)
             except Exception as exc:  # noqa: BLE001
@@ -1737,7 +1845,9 @@ class MarketDataManager:
             self._pending_subscriptions.update(self._desired_tokens)
             return
 
-    def reconcile_active_subscriptions(self, desired_tokens: set[int]) -> dict[str, int]:
+    def reconcile_active_subscriptions(
+        self, desired_tokens: set[int]
+    ) -> dict[str, int]:
         """Reconcile WebSocket subscriptions to exactly the desired token set.
 
         Replaces the futures-specific purge model with a generic set-difference
@@ -1791,12 +1901,14 @@ class MarketDataManager:
                 self._dispatched_subscriptions.discard(token)
                 self._confirmed_subscriptions.discard(token)
                 # Remove stale symbol mappings if they are not in desired
-                mapped_sym = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
+                mapped_sym = self._symbol_by_token.get(
+                    token
+                ) or self._token_to_symbol.get(token)
                 if mapped_sym:
-                    token_for_sym = (
-                        self._token_by_symbol.get(str(mapped_sym))
-                        or self._symbol_to_token.get(str(mapped_sym))
-                    )
+                    self._cleanup_noncritical_live_symbol(str(mapped_sym))
+                    token_for_sym = self._token_by_symbol.get(
+                        str(mapped_sym)
+                    ) or self._symbol_to_token.get(str(mapped_sym))
                     # Only remove mapping if this token is the canonical one
                     if token_for_sym == token:
                         self._symbol_by_token.pop(token, None)
@@ -1808,7 +1920,9 @@ class MarketDataManager:
                 ws.set_tokens(sorted(desired))
                 self._dispatched_subscriptions.update(desired)
         except Exception as exc:  # noqa: BLE001
-            self._logger.warning("reconcile_active_subscriptions ws.set_tokens failed: %s", exc)
+            self._logger.warning(
+                "reconcile_active_subscriptions ws.set_tokens failed: %s", exc
+            )
 
         after = len(desired)
         result = {
@@ -1829,15 +1943,71 @@ class MarketDataManager:
         )
         return result
 
+    def _required_live_symbols(self) -> set[str]:
+        """Return symbols that are currently critical for live WS health."""
+        required: set[str] = set()
+
+        def add(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    required.add(self._canonical_symbol(text))
+                return
+            if isinstance(value, Mapping):
+                return
+            if isinstance(value, Iterable) and not isinstance(
+                value, (bytes, bytearray)
+            ):
+                for item in value:
+                    add(item)
+
+        basket = getattr(self, "_active_contract_basket", None)
+        add(self._basket_value(basket, "spot_symbol", None) or "NSE:NIFTY")
+        add(self._basket_value(basket, "futures_symbol", None))
+        add(self._basket_value(basket, "active_futures_symbol", None))
+        add(self._basket_value(basket, "selected_ce", None))
+        add(self._basket_value(basket, "selected_pe", None))
+        add(self._basket_value(basket, "option_symbols", None))
+        add(getattr(self, "_open_position_symbols", set()))
+        add(getattr(self, "_active_bracket_symbols", set()))
+        current = {sym for sym in required if sym}
+        now = time.monotonic()
+        for sym in current:
+            self._required_symbol_since_mono.setdefault(sym, now)
+        for sym in list(self._required_symbol_since_mono):
+            if sym not in current:
+                self._required_symbol_since_mono.pop(sym, None)
+        return current
+
+    def _cleanup_noncritical_live_symbol(self, symbol: str) -> None:
+        """Drop no-longer-required live/watchdog state while preserving history."""
+        canonical = self._canonical_symbol(symbol)
+        if canonical in self._required_live_symbols():
+            return
+        self._active_subscribed_symbols.discard(canonical)
+        self._tracked_symbols.discard(canonical)
+        self._suspended_context_symbols.discard(canonical)
+        self._suspended_context_symbol_until.pop(canonical, None)
+        self._symbols_with_tick.discard(canonical)
+        self._last_valid_live_tick_mono.pop(canonical, None)
+        self._required_symbol_since_mono.pop(canonical, None)
 
     def _resolve_symbol_for_token(self, token: int) -> str | None:
         """Best-effort reverse token lookup for subscription safety."""
         token_int = int(token)
-        mapped = self._symbol_by_token.get(token_int) or self._token_to_symbol.get(token_int)
+        mapped = self._symbol_by_token.get(token_int) or self._token_to_symbol.get(
+            token_int
+        )
         if mapped:
             return self._canonical_symbol(str(mapped))
         resolver = getattr(self, "_resolver", None)
-        for method_name in ("get_symbol", "resolve_token_to_symbol", "symbol_for_token"):
+        for method_name in (
+            "get_symbol",
+            "resolve_token_to_symbol",
+            "symbol_for_token",
+        ):
             method = getattr(resolver, method_name, None)
             if callable(method):
                 try:
@@ -1858,14 +2028,17 @@ class MarketDataManager:
                     exchange = row.get("exchange") or "NFO"
                     if symbol:
                         raw = str(symbol).upper()
-                        return self._canonical_symbol(raw if ":" in raw else f"{exchange}:{raw}")
+                        return self._canonical_symbol(
+                            raw if ":" in raw else f"{exchange}:{raw}"
+                        )
         return None
 
-    def _is_stale_nifty_future_subscription(self, symbol: str | None, active_future: str | None) -> bool:
+    def _is_stale_nifty_future_subscription(
+        self, symbol: str | None, active_future: str | None
+    ) -> bool:
         canonical = canonical_nifty_future_symbol(symbol)
         active = canonical_nifty_future_symbol(active_future)
         return bool(canonical and active and canonical != active)
-
 
     def _basket_value(self, basket: Any, key: str, default: Any = None) -> Any:
         if isinstance(basket, Mapping):
@@ -1884,7 +2057,10 @@ class MarketDataManager:
             except Exception:
                 normalized = enforce_canonical(normalize_symbol(text))
                 alias = normalized.replace(" ", "")
-                if alias in {"NSE:NIFTY50", "NIFTY50"} or normalized in {"NSE:NIFTY 50", "NIFTY 50"}:
+                if alias in {"NSE:NIFTY50", "NIFTY50"} or normalized in {
+                    "NSE:NIFTY 50",
+                    "NIFTY 50",
+                }:
                     return "NSE:NIFTY"
                 return normalized
 
@@ -1901,10 +2077,19 @@ class MarketDataManager:
                     continue
                 text = str(sym or "").strip()
                 canonical = self._safe_canonical_for_basket(text)
-                for key in {text, text.upper(), canonical, canonical.split(":", 1)[-1] if ":" in canonical else canonical}:
+                for key in {
+                    text,
+                    text.upper(),
+                    canonical,
+                    canonical.split(":", 1)[-1] if ":" in canonical else canonical,
+                }:
                     if key:
                         token_map[key] = token
-        symbols = list(self._basket_value(basket, "all_symbols", None) or self._basket_value(basket, "symbols", []) or [])
+        symbols = list(
+            self._basket_value(basket, "all_symbols", None)
+            or self._basket_value(basket, "symbols", [])
+            or []
+        )
         tokens = list(self._basket_value(basket, "all_tokens", []) or [])
         for sym, tok in zip(symbols, tokens, strict=False):
             try:
@@ -1913,7 +2098,12 @@ class MarketDataManager:
                 continue
             text = str(sym or "").strip()
             canonical = self._safe_canonical_for_basket(text)
-            for key in {text, text.upper(), canonical, canonical.split(":", 1)[-1] if ":" in canonical else canonical}:
+            for key in {
+                text,
+                text.upper(),
+                canonical,
+                canonical.split(":", 1)[-1] if ":" in canonical else canonical,
+            }:
                 if key:
                     token_map.setdefault(key, token)
         return token_map
@@ -1932,9 +2122,13 @@ class MarketDataManager:
         bypasses. Raises: none.
         """
         max_options = parse_int_env(
-            os.getenv("MAX_ACTIVE_OPTION_SYMBOLS") or os.getenv("MAX_LIVE_OPTION_SYMBOLS"), 8
+            os.getenv("MAX_ACTIVE_OPTION_SYMBOLS")
+            or os.getenv("MAX_LIVE_OPTION_SYMBOLS"),
+            8,
         )
-        diagnostic = str(os.getenv("DIAGNOSTIC_FULL_UNIVERSE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+        diagnostic = str(
+            os.getenv("DIAGNOSTIC_FULL_UNIVERSE", "false") or "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if diagnostic or max_options <= 0:
             return tokens
         symbol_by_token: dict[int, str] = {}
@@ -1953,7 +2147,9 @@ class MarketDataManager:
             return tokens
         priority: list[int] = []
         for sel in (selected_ce, selected_pe):
-            tok = token_map.get(sel) or token_map.get(sel.split(":", 1)[-1] if ":" in sel else sel)
+            tok = token_map.get(sel) or token_map.get(
+                sel.split(":", 1)[-1] if ":" in sel else sel
+            )
             if tok:
                 try:
                     priority.append(int(tok))
@@ -1969,22 +2165,34 @@ class MarketDataManager:
         clamped = [t for t in tokens if (not _is_option(t)) or t in kept_set]
         self._logger.warning(
             "MDM_OPTION_TOKENS_CLAMPED full_option_count=%d capped_option_count=%d max_options=%d",
-            len(option_tokens), len(kept), max_options,
-            extra={"event": "MDM_OPTION_TOKENS_CLAMPED", "full_option_count": len(option_tokens), "capped_option_count": len(kept), "max_options": max_options},
+            len(option_tokens),
+            len(kept),
+            max_options,
+            extra={
+                "event": "MDM_OPTION_TOKENS_CLAMPED",
+                "full_option_count": len(option_tokens),
+                "capped_option_count": len(kept),
+                "max_options": max_options,
+            },
         )
         return clamped
 
     def set_active_contract_basket(self, basket: Any) -> None:
         """Commit active basket tokens/subscriptions without clearing on incomplete payloads."""
-        tokens = [int(tok) for tok in (self._basket_value(basket, "all_tokens", []) or []) if tok]
+        tokens = [
+            int(tok)
+            for tok in (self._basket_value(basket, "all_tokens", []) or [])
+            if tok
+        ]
         if not tokens:
             # all_tokens absent — reconstruct from token_by_symbol if available.
             token_map_raw = self._basket_value(basket, "token_by_symbol", {}) or {}
             if isinstance(token_map_raw, Mapping):
-                tokens = list(dict.fromkeys(
-                    int(t) for t in token_map_raw.values()
-                    if t and int(t) > 0
-                ))
+                tokens = list(
+                    dict.fromkeys(
+                        int(t) for t in token_map_raw.values() if t and int(t) > 0
+                    )
+                )
         if not tokens:
             selected_ce = str(self._basket_value(basket, "selected_ce", "") or "")
             selected_pe = str(self._basket_value(basket, "selected_pe", "") or "")
@@ -2010,12 +2218,16 @@ class MarketDataManager:
         selected_ce_token = (
             self._basket_value(basket, "selected_ce_token", None)
             or token_map.get(selected_ce)
-            or token_map.get(selected_ce.split(":", 1)[-1] if ":" in selected_ce else selected_ce)
+            or token_map.get(
+                selected_ce.split(":", 1)[-1] if ":" in selected_ce else selected_ce
+            )
         )
         selected_pe_token = (
             self._basket_value(basket, "selected_pe_token", None)
             or token_map.get(selected_pe)
-            or token_map.get(selected_pe.split(":", 1)[-1] if ":" in selected_pe else selected_pe)
+            or token_map.get(
+                selected_pe.split(":", 1)[-1] if ":" in selected_pe else selected_pe
+            )
         )
         self._logger.info(
             "MDM_ACTIVE_BASKET_ACCEPTED token_count=%d selected_ce=%s selected_ce_token=%s selected_pe=%s selected_pe_token=%s",
@@ -2039,14 +2251,20 @@ class MarketDataManager:
             for sym, tok in token_map.items():
                 canonical = self._safe_canonical_for_basket(sym)
                 if canonical:
-                    self._set_symbol_token_mapping(canonical, int(tok), source="active_contract_basket")
-        self._replace_desired_tokens_from_basket(tokens, reason="active_contract_basket")
+                    self._set_symbol_token_mapping(
+                        canonical, int(tok), source="active_contract_basket"
+                    )
+        self._replace_desired_tokens_from_basket(
+            tokens, reason="active_contract_basket"
+        )
 
     def _persistent_context_tokens(self) -> set[int]:
         """Return tokens that should persist outside active option rotations."""
         return set()
 
-    def _replace_desired_tokens_from_basket(self, tokens: Iterable[int], *, reason: str) -> None:
+    def _replace_desired_tokens_from_basket(
+        self, tokens: Iterable[int], *, reason: str
+    ) -> None:
         new_tokens = {int(t) for t in tokens if t and int(t) > 0}
         new_tokens |= self._persistent_context_tokens()
         with self._lock:
@@ -2066,7 +2284,13 @@ class MarketDataManager:
             len(added),
             len(removed),
             len(new_tokens),
-            extra={"event": "MDM_DESIRED_TOKENS_REPLACED", "added_count": len(added), "removed_count": len(removed), "total_count": len(new_tokens), "reason": reason},
+            extra={
+                "event": "MDM_DESIRED_TOKENS_REPLACED",
+                "added_count": len(added),
+                "removed_count": len(removed),
+                "total_count": len(new_tokens),
+                "reason": reason,
+            },
         )
 
     def _selected_option_history_required_bars(self) -> int:
@@ -2075,6 +2299,7 @@ class MarketDataManager:
                 return int(os.getenv(name, str(default)) or default)
             except (TypeError, ValueError):
                 return default
+
         return max(
             int(getattr(self, "_min_required_bars", 0) or 0),
             _env_int("MIN_INDICATOR_BARS", 20),
@@ -2085,41 +2310,115 @@ class MarketDataManager:
     def get_active_contract_basket(self) -> Any | None:
         return self._active_contract_basket
 
-    def hydrate_active_contract_basket(self, basket: Any | None = None) -> dict[str, Any]:
+    def hydrate_active_contract_basket(
+        self, basket: Any | None = None
+    ) -> dict[str, Any]:
         """Validate quote/OHLC hydration for the active basket with explicit blockers."""
         basket = basket if basket is not None else self._active_contract_basket
         token_map = self._basket_token_map(basket)
-        selected = {str(self._basket_value(basket, "selected_ce", "") or ""), str(self._basket_value(basket, "selected_pe", "") or "")}
-        symbols = list(self._basket_value(basket, "all_symbols", None) or self._basket_value(basket, "symbols", None) or [])
+        selected = {
+            str(self._basket_value(basket, "selected_ce", "") or ""),
+            str(self._basket_value(basket, "selected_pe", "") or ""),
+        }
+        symbols = list(
+            self._basket_value(basket, "all_symbols", None)
+            or self._basket_value(basket, "symbols", None)
+            or []
+        )
         if not symbols:
-            symbols = [self._basket_value(basket, "spot_symbol", "NSE:NIFTY"), *list(self._basket_value(basket, "option_symbols", []) or [])]
+            symbols = [
+                self._basket_value(basket, "spot_symbol", "NSE:NIFTY"),
+                *list(self._basket_value(basket, "option_symbols", []) or []),
+            ]
         min_bars = self._selected_option_history_required_bars()
-        report: dict[str, Any] = {"hard_ready": True, "missing": [], "symbols": {}, "hydration_min_bars_required": min_bars, "retry_scheduled": False}
+        report: dict[str, Any] = {
+            "hard_ready": True,
+            "missing": [],
+            "symbols": {},
+            "hydration_min_bars_required": min_bars,
+            "retry_scheduled": False,
+        }
         for raw_sym in symbols:
             sym = str(raw_sym or "")
             if not sym:
                 continue
             canonical = self._safe_canonical_for_basket(sym)
-            is_option = canonical.startswith("NFO:NIFTY") and (canonical.endswith("CE") or canonical.endswith("PE"))
+            is_option = canonical.startswith("NFO:NIFTY") and (
+                canonical.endswith("CE") or canonical.endswith("PE")
+            )
             is_future = canonical.startswith("NFO:NIFTY") and canonical.endswith("FUT")
-            role = "tradable_option" if is_option else "futures_context" if is_future else "spot_context"
-            if is_future and raw_sym != self._basket_value(basket, "futures_symbol", None):
-                self._logger.warning("MDM_BASKET_ROLE_INCONSISTENCY symbol=%s role=%s", canonical, role, extra={"event": "MDM_BASKET_ROLE_INCONSISTENCY", "symbol": canonical, "role": role})
-            token = token_map.get(sym) or token_map.get(sym.upper()) or token_map.get(canonical) or token_map.get(canonical.split(":", 1)[-1] if ":" in canonical else canonical)
-            entry = {"role": role, "token": token, "ltp_ready": False, "depth_available": False, "bid_ask_available": False, "tradable_quote_ready": False, "quote_ready": False, "quote_ready_alias": "ltp_ready_compat_only", "quote_ready_reason": "quote_missing", "ohlc_ready": False, "bars_count": 0, "oi_ready": False, "ohlc_provisional": False}
+            role = (
+                "tradable_option"
+                if is_option
+                else "futures_context" if is_future else "spot_context"
+            )
+            if is_future and raw_sym != self._basket_value(
+                basket, "futures_symbol", None
+            ):
+                self._logger.warning(
+                    "MDM_BASKET_ROLE_INCONSISTENCY symbol=%s role=%s",
+                    canonical,
+                    role,
+                    extra={
+                        "event": "MDM_BASKET_ROLE_INCONSISTENCY",
+                        "symbol": canonical,
+                        "role": role,
+                    },
+                )
+            token = (
+                token_map.get(sym)
+                or token_map.get(sym.upper())
+                or token_map.get(canonical)
+                or token_map.get(
+                    canonical.split(":", 1)[-1] if ":" in canonical else canonical
+                )
+            )
+            entry = {
+                "role": role,
+                "token": token,
+                "ltp_ready": False,
+                "depth_available": False,
+                "bid_ask_available": False,
+                "tradable_quote_ready": False,
+                "quote_ready": False,
+                "quote_ready_alias": "ltp_ready_compat_only",
+                "quote_ready_reason": "quote_missing",
+                "ohlc_ready": False,
+                "bars_count": 0,
+                "oi_ready": False,
+                "ohlc_provisional": False,
+            }
             if is_option and token is None:
                 report["missing"].append(f"{sym}:token_missing")
                 report["hard_ready"] = False
-            quote = self.get_latest_tick(sym) or self.get_latest_tick(canonical) or self.get_quote(sym) or self.get_quote(canonical)
-            if isinstance(quote, dict) and quote.get("tick_age_s") is None and quote.get("age_s") is None and not quote.get("timestamp_ms") and not quote.get("last_tick_ts_ms"):
+            quote = (
+                self.get_latest_tick(sym)
+                or self.get_latest_tick(canonical)
+                or self.get_quote(sym)
+                or self.get_quote(canonical)
+            )
+            if (
+                isinstance(quote, dict)
+                and quote.get("tick_age_s") is None
+                and quote.get("age_s") is None
+                and not quote.get("timestamp_ms")
+                and not quote.get("last_tick_ts_ms")
+            ):
                 # The tick/quote dict may carry bid/ask but no age field, which makes
                 # evaluate_quote_readiness report quote_age_unknown and wrongly block a
                 # selected option. MDM already tracks the last quote timestamp, so
                 # surface it (read-only copy) to let freshness be evaluated.
-                _ts_ms = self._last_quote_ts_ms.get(canonical) or self._last_quote_ts_ms.get(sym)
+                _ts_ms = self._last_quote_ts_ms.get(
+                    canonical
+                ) or self._last_quote_ts_ms.get(sym)
                 if _ts_ms:
                     quote = {**quote, "timestamp_ms": float(_ts_ms)}
-            qr = evaluate_quote_readiness(canonical, quote, max_spread_pct=float(os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10), max_age_s=self._option_stale_seconds)
+            qr = evaluate_quote_readiness(
+                canonical,
+                quote,
+                max_spread_pct=float(os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10),
+                max_age_s=self._option_stale_seconds,
+            )
             entry["ltp_ready"] = qr.ltp_ready
             entry["depth_available"] = qr.depth_available
             entry["bid_ask_available"] = qr.bid_ask_available
@@ -2137,7 +2436,12 @@ class MarketDataManager:
             if is_option and sym in selected and len(bars) < min_bars:
                 hydrate = getattr(self, "hydrate_symbol_history", None)
                 if callable(hydrate):
-                    result = hydrate(sym, interval="minute", max_bars=min_bars, reason="active_basket_hydration")
+                    result = hydrate(
+                        sym,
+                        interval="minute",
+                        max_bars=min_bars,
+                        reason="active_basket_hydration",
+                    )
                     if inspect.isawaitable(result):
                         entry["reseed_deferred"] = True
                         entry["last_error"] = "reseed_deferred"
@@ -2147,7 +2451,11 @@ class MarketDataManager:
                             try:
                                 loop = asyncio.get_running_loop()
                                 task = loop.create_task(result)
-                                task.add_done_callback(lambda _task, _sym=sym: self._active_basket_reseed_inflight.discard(_sym))
+                                task.add_done_callback(
+                                    lambda _task, _sym=sym: self._active_basket_reseed_inflight.discard(
+                                        _sym
+                                    )
+                                )
                             except RuntimeError:
                                 self._active_basket_reseed_inflight.discard(sym)
                     elif isinstance(result, list) and result:
@@ -2157,7 +2465,11 @@ class MarketDataManager:
                     entry["ohlc_ready"] = False
                     report["missing"].append(f"{sym}:ohlc_insufficient")
                     report["hard_ready"] = False
-                elif 0 < entry["bars_count"] < int(getattr(self, "_min_required_bars", 20) or 20):
+                elif (
+                    0
+                    < entry["bars_count"]
+                    < int(getattr(self, "_min_required_bars", 20) or 20)
+                ):
                     entry["ohlc_provisional"] = True
             elif entry["bars_count"] > 0:
                 entry["ohlc_ready"] = True
@@ -2180,15 +2492,24 @@ class MarketDataManager:
         normalized_symbol: str | None = None
         if symbol:
             normalized_symbol = self._canonical_symbol(symbol)
-            if self._is_stale_nifty_future_subscription(normalized_symbol, active_future):
+            if self._is_stale_nifty_future_subscription(
+                normalized_symbol, active_future
+            ):
                 self._logger.warning(
                     "STALE_FUTURE_TOKEN_SUBSCRIPTION_REJECTED symbol=%s token=%s active=%s",
                     normalized_symbol,
                     token_int,
                     active_future,
-                    extra={"event": "STALE_FUTURE_TOKEN_SUBSCRIPTION_REJECTED", "symbol": normalized_symbol, "token": token_int, "active_symbol": active_future},
+                    extra={
+                        "event": "STALE_FUTURE_TOKEN_SUBSCRIPTION_REJECTED",
+                        "symbol": normalized_symbol,
+                        "token": token_int,
+                        "active_symbol": active_future,
+                    },
                 )
-                self.purge_stale_nifty_futures(active_future, reason="stale_future_subscription_rejected")
+                self.purge_stale_nifty_futures(
+                    active_future, reason="stale_future_subscription_rejected"
+                )
                 return False
             self.register_symbol(normalized_symbol, token_int)
             if normalized_symbol.endswith(("CE", "PE")):
@@ -2199,13 +2520,19 @@ class MarketDataManager:
                 )
 
         if active_future:
-            self.purge_stale_nifty_futures(active_future, reason="request_token_subscription_pre")
+            self.purge_stale_nifty_futures(
+                active_future, reason="request_token_subscription_pre"
+            )
         with self._lock:
             self._desired_tokens.add(token_int)
             if normalized_symbol:
-                self._set_symbol_token_mapping(normalized_symbol, token_int, source="request_token_subscription")
+                self._set_symbol_token_mapping(
+                    normalized_symbol, token_int, source="request_token_subscription"
+                )
         if active_future:
-            self.purge_stale_nifty_futures(active_future, reason="request_token_subscription_post")
+            self.purge_stale_nifty_futures(
+                active_future, reason="request_token_subscription_post"
+            )
         self._reconcile_ws_subscriptions()
         if normalized_symbol and normalized_symbol.endswith(("CE", "PE")):
             with self._lock:
@@ -2232,7 +2559,9 @@ class MarketDataManager:
             return 0
         active_future = self.get_active_nifty_future_symbol_cached()
         if active_future:
-            self.purge_stale_nifty_futures(active_future, reason="request_token_subscriptions_pre")
+            self.purge_stale_nifty_futures(
+                active_future, reason="request_token_subscriptions_pre"
+            )
         accepted: set[int] = set()
         for token_int in sorted(normalized):
             symbol = self._resolve_symbol_for_token(token_int)
@@ -2242,14 +2571,22 @@ class MarketDataManager:
                     symbol,
                     token_int,
                     active_future,
-                    extra={"event": "STALE_FUTURE_TOKEN_SUBSCRIPTION_REJECTED", "symbol": symbol, "token": token_int, "active_symbol": active_future},
+                    extra={
+                        "event": "STALE_FUTURE_TOKEN_SUBSCRIPTION_REJECTED",
+                        "symbol": symbol,
+                        "token": token_int,
+                        "active_symbol": active_future,
+                    },
                 )
                 continue
             if active_future and symbol is None:
                 self._logger.warning(
                     "UNKNOWN_TOKEN_IN_DESIRED_SUBSCRIPTIONS token=%s",
                     token_int,
-                    extra={"event": "UNKNOWN_TOKEN_IN_DESIRED_SUBSCRIPTIONS", "token": token_int},
+                    extra={
+                        "event": "UNKNOWN_TOKEN_IN_DESIRED_SUBSCRIPTIONS",
+                        "token": token_int,
+                    },
                 )
             accepted.add(token_int)
         if not accepted:
@@ -2259,7 +2596,9 @@ class MarketDataManager:
             self._desired_tokens.update(accepted)
             added_count = len(self._desired_tokens) - before
         if active_future:
-            self.purge_stale_nifty_futures(active_future, reason="request_token_subscriptions_post")
+            self.purge_stale_nifty_futures(
+                active_future, reason="request_token_subscriptions_post"
+            )
         self._reconcile_ws_subscriptions()
         return added_count
 
@@ -2353,7 +2692,9 @@ class MarketDataManager:
         """Record symbol removal intent. Args: symbol. Returns: changed flag. Raises: none."""
 
         normalized = self._canonical_symbol(symbol)
-        token = self._symbol_to_token.get(normalized) or self._token_by_symbol.get(normalized)
+        token = self._symbol_to_token.get(normalized) or self._token_by_symbol.get(
+            normalized
+        )
         if token is None:
             return False
         return self.request_token_unsubscription(token, symbol=normalized)
@@ -2505,7 +2846,9 @@ class MarketDataManager:
         else:
             if str(symbol).strip().isdigit():
                 with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
+                    resolved_symbol = self._symbol_by_token.get(
+                        int(str(symbol).strip())
+                    )
                 if not resolved_symbol:
                     return None
             else:
@@ -2563,13 +2906,28 @@ class MarketDataManager:
             return None
         return max(time.time() - float(wallclock), 0.0)
 
+    def time_since_last_any_tick(self, symbol: str) -> float | None:
+        """Return seconds since any accepted tick/quote, including REST fallback."""
+        return self.time_since_last_tick(symbol)
+
+    def time_since_last_live_ws_tick(self, symbol: str) -> float | None:
+        """Return seconds since the last accepted real WebSocket tick."""
+        normalized_symbol = self._canonical_symbol(symbol)
+        with self._lock:
+            mono = self._last_valid_live_tick_mono.get(normalized_symbol)
+        if mono is None:
+            return None
+        return max(time.monotonic() - float(mono), 0.0)
+
     async def _rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
         resolved = self._resolve_instrument(symbol)
         canonical = resolved.canonical_symbol
         broker_symbol = resolved.broker_symbol
-        broker = self._broker or getattr(self, "_kite", None) or getattr(
-            self, "_client", None
+        broker = (
+            self._broker
+            or getattr(self, "_kite", None)
+            or getattr(self, "_client", None)
         )
         if broker is None:
             self._logger.debug(
@@ -2583,7 +2941,9 @@ class MarketDataManager:
             elif hasattr(broker, "ltp"):
                 quote_payload = broker.ltp([broker_symbol])
             elif hasattr(broker, "get_ltp"):
-                quote_payload = {broker_symbol: {"last_price": broker.get_ltp(broker_symbol)}}
+                quote_payload = {
+                    broker_symbol: {"last_price": broker.get_ltp(broker_symbol)}
+                }
             elif hasattr(broker, "get_quote"):
                 quote_payload = {broker_symbol: broker.get_quote(broker_symbol)}
             else:
@@ -2601,27 +2961,42 @@ class MarketDataManager:
                     or quote_payload.get(f"NSE:{canonical.split(':')[-1]}")
                 )
             if not isinstance(quote, Mapping):
-                self._logger.info("MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=invalid_quote_payload", canonical)
+                self._logger.info(
+                    "MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=invalid_quote_payload",
+                    canonical,
+                )
                 return None
             ltp = _coerce_positive_float(quote.get("ltp") or quote.get("last_price"))
             if ltp is None:
-                self._logger.info("MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=invalid_ltp", canonical)
+                self._logger.info(
+                    "MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=invalid_ltp",
+                    canonical,
+                )
                 return None
             tick = {
                 "symbol": canonical,
                 "ltp": float(ltp),
                 "last_price": float(ltp),
-                "bid": _coerce_positive_float(quote.get("bid") or quote.get("buy_price")),
-                "ask": _coerce_positive_float(quote.get("ask") or quote.get("sell_price")),
+                "bid": _coerce_positive_float(
+                    quote.get("bid") or quote.get("buy_price")
+                ),
+                "ask": _coerce_positive_float(
+                    quote.get("ask") or quote.get("sell_price")
+                ),
                 "received_at": time.time(),
                 "timestamp": time.time(),
-                "source": "rest_quote" if canonical.endswith(("CE", "PE")) else "rest_ltp",
+                "source": (
+                    "rest_quote" if canonical.endswith(("CE", "PE")) else "rest_ltp"
+                ),
             }
             with self._lock:
                 previous = self._latest_ticks.get(canonical)
             normalized = self._normalize_tick(canonical, tick, previous)
             if normalized is None:
-                self._logger.info("MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=normalization_failed", canonical)
+                self._logger.info(
+                    "MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=normalization_failed",
+                    canonical,
+                )
                 return None
             self._emit_tick(canonical, normalized, source="rest")
             if canonical.endswith(("CE", "PE")):
@@ -2687,8 +3062,9 @@ class MarketDataManager:
             await asyncio.sleep(0.1)
         raise RuntimeError("Live tick unavailable")
 
-
-    def suspend_context_symbol(self, symbol: str, *, reason: str, ttl_s: float = 300.0) -> None:
+    def suspend_context_symbol(
+        self, symbol: str, *, reason: str, ttl_s: float = 300.0
+    ) -> None:
         canonical = self._canonical_symbol(symbol)
         ttl = max(1.0, float(ttl_s or 300.0))
         self._suspended_context_symbols.add(canonical)
@@ -2698,7 +3074,12 @@ class MarketDataManager:
             canonical,
             reason,
             ttl,
-            extra={"event": "CONTEXT_SYMBOL_SUSPENDED", "symbol": canonical, "reason": reason, "ttl_s": ttl},
+            extra={
+                "event": "CONTEXT_SYMBOL_SUSPENDED",
+                "symbol": canonical,
+                "reason": reason,
+                "ttl_s": ttl,
+            },
         )
 
     def is_context_symbol_suspended(self, symbol: str) -> bool:
@@ -2736,12 +3117,19 @@ class MarketDataManager:
         if self._is_nifty_future_symbol_expired(canonical_symbol):
             active = self.get_active_nifty_future_symbol_cached()
             if active and self._canonical_symbol(active) != canonical_symbol:
-                self.rotate_active_nifty_future_context(canonical_symbol, active, reason="get_cached_ltp_expired_future")
+                self.rotate_active_nifty_future_context(
+                    canonical_symbol, active, reason="get_cached_ltp_expired_future"
+                )
             self._logger.warning(
                 "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=get_cached_ltp",
                 canonical_symbol,
                 active,
-                extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "get_cached_ltp"},
+                extra={
+                    "event": "EXPIRED_FUTURE_SUPPRESSED",
+                    "symbol": canonical_symbol,
+                    "active_symbol": active,
+                    "stage": "get_cached_ltp",
+                },
             )
             return None
         if self.is_context_symbol_suspended(canonical_symbol):
@@ -2812,7 +3200,8 @@ class MarketDataManager:
                             self._logger,
                             key=f"STALE_DATA:{canonical_symbol}",
                             state=("STALE", round(float(stale_seconds), 0)),
-                            message="STALE_DATA symbol=%s age=%.2fs threshold=%.2fs — falling back to broker REST" % (canonical_symbol, tick_age, stale_seconds),
+                            message="STALE_DATA symbol=%s age=%.2fs threshold=%.2fs — falling back to broker REST"
+                            % (canonical_symbol, tick_age, stale_seconds),
                             reminder_seconds=log_interval,
                             level=logging.WARNING,
                             extra={
@@ -2894,7 +3283,12 @@ class MarketDataManager:
                                 "MDM_REST_FALLBACK_USED symbol=%s reason=stale_ws_tick price=%.2f",
                                 canonical_symbol,
                                 p,
-                                extra={"event": "MDM_REST_FALLBACK_USED", "symbol": canonical_symbol, "reason": "stale_ws_tick", "price": p},
+                                extra={
+                                    "event": "MDM_REST_FALLBACK_USED",
+                                    "symbol": canonical_symbol,
+                                    "reason": "stale_ws_tick",
+                                    "price": p,
+                                },
                             )
                             # Repair symbol-level cache so the next call to
                             # get_ltp does not hit the stale guard again.
@@ -2907,16 +3301,22 @@ class MarketDataManager:
                                         > t_before_rest
                                     )
                                 if not live_tick_arrived:
-                                    prepared = self._prepare_rest_tick(quote, source="rest")
+                                    prepared = self._prepare_rest_tick(
+                                        quote, source="rest"
+                                    )
                                     with self._lock:
                                         prev = self._latest_ticks.get(canonical_symbol)
                                     normalized_repair = self._normalize_tick(
                                         canonical_symbol, prepared, prev
                                     )
                                     if normalized_repair is not None:
-                                        self._store_tick(canonical_symbol, normalized_repair)
+                                        self._store_tick(
+                                            canonical_symbol, normalized_repair
+                                        )
                                         try:
-                                            self.update_authoritative_ticks([normalized_repair])
+                                            self.update_authoritative_ticks(
+                                                [normalized_repair]
+                                            )
                                         except Exception:
                                             pass
                                     else:
@@ -2930,10 +3330,18 @@ class MarketDataManager:
                                                 "timestamp": _now_ts,
                                                 "source": "rest",
                                             }
-                                            self._last_tick_time[canonical_symbol] = _now_ts
-                                            self._last_tick_wallclock[canonical_symbol] = _now_ts
-                                            self._last_quote_ts_ms[canonical_symbol] = _now_ms_v
-                                            self._last_tick_source[canonical_symbol] = "rest"
+                                            self._last_tick_time[canonical_symbol] = (
+                                                _now_ts
+                                            )
+                                            self._last_tick_wallclock[
+                                                canonical_symbol
+                                            ] = _now_ts
+                                            self._last_quote_ts_ms[canonical_symbol] = (
+                                                _now_ms_v
+                                            )
+                                            self._last_tick_source[canonical_symbol] = (
+                                                "rest"
+                                            )
                                         try:
                                             self.update_authoritative_ticks(
                                                 [
@@ -3197,7 +3605,11 @@ class MarketDataManager:
         if self._is_nifty_future_symbol_expired(canonical_symbol):
             active = self.get_active_nifty_future_symbol_cached()
             already_suspended = self.is_context_symbol_suspended(canonical_symbol)
-            if active and self._canonical_symbol(active) != canonical_symbol and not already_suspended:
+            if (
+                active
+                and self._canonical_symbol(active) != canonical_symbol
+                and not already_suspended
+            ):
                 self.rotate_active_nifty_future_context(
                     canonical_symbol,
                     active,
@@ -3212,7 +3624,13 @@ class MarketDataManager:
                 already_suspended,
                 interval_sec=60.0,
                 level=logging.WARNING,
-                extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote", "already_suspended": already_suspended},
+                extra={
+                    "event": "EXPIRED_FUTURE_SUPPRESSED",
+                    "symbol": canonical_symbol,
+                    "active_symbol": active,
+                    "stage": "pull_quote",
+                    "already_suspended": already_suspended,
+                },
             )
             self.purge_stale_nifty_futures(active, reason="pull_quote_expired_future")
             return {}
@@ -3228,7 +3646,9 @@ class MarketDataManager:
         if not candidates:
             candidates = [canonical_symbol]
         quote: dict[str, Any] | None = None
-        cooldown_until = float(self._quote_direct_miss_until.get(canonical_symbol, 0.0) or 0.0)
+        cooldown_until = float(
+            self._quote_direct_miss_until.get(canonical_symbol, 0.0) or 0.0
+        )
         now_mono = time.monotonic()
         if cooldown_until > now_mono:
             remaining = max(0.0, cooldown_until - now_mono)
@@ -3263,9 +3683,14 @@ class MarketDataManager:
                 error_text = str(exc)
                 is_recoverable_miss = "Quote data missing" in error_text
                 if is_recoverable_miss:
-                    miss_count = int(self._quote_direct_miss_count.get(canonical_symbol, 0) or 0) + 1
+                    miss_count = (
+                        int(self._quote_direct_miss_count.get(canonical_symbol, 0) or 0)
+                        + 1
+                    )
                     self._quote_direct_miss_count[canonical_symbol] = miss_count
-                    self._quote_direct_miss_reason[canonical_symbol] = "quote_data_missing"
+                    self._quote_direct_miss_reason[canonical_symbol] = (
+                        "quote_data_missing"
+                    )
                     self._quote_direct_miss_until[canonical_symbol] = (
                         time.monotonic() + self._quote_direct_miss_cooldown_seconds
                     )
@@ -3285,18 +3710,18 @@ class MarketDataManager:
                     )
                 if not is_recoverable_miss:
                     self._logger.error(
-                    "Failure in pull_quote direct get_quote: %s",
-                    exc,
-                    extra={
-                        "event": (
-                            "mdm_pull_quote_direct_miss"
-                            if is_recoverable_miss
-                            else "mdm_pull_quote_direct_error"
-                        ),
-                        "symbol": canonical_symbol,
-                        "error": error_text,
-                    },
-                    exc_info=exc,
+                        "Failure in pull_quote direct get_quote: %s",
+                        exc,
+                        extra={
+                            "event": (
+                                "mdm_pull_quote_direct_miss"
+                                if is_recoverable_miss
+                                else "mdm_pull_quote_direct_error"
+                            ),
+                            "symbol": canonical_symbol,
+                            "error": error_text,
+                        },
+                        exc_info=exc,
                     )
                 raw_quote = None
             else:
@@ -3320,7 +3745,9 @@ class MarketDataManager:
                         "reason": "no_quote_from_broker_or_cache",
                     },
                 )
-            miss_count = int(self._quote_direct_miss_count.get(canonical_symbol, 0) or 0)
+            miss_count = int(
+                self._quote_direct_miss_count.get(canonical_symbol, 0) or 0
+            )
             if miss_count > 0:
                 return {
                     "symbol": canonical_symbol,
@@ -4214,12 +4641,20 @@ class MarketDataManager:
         """Return live/raw tick readiness for a symbol; OHLC bars do not count."""
         normalized = normalize_symbol(str(symbol or ""))
         with self._lock:
-            return len(self._raw_tick_history.get(normalized, ())) >= self._min_required_bars
+            return (
+                len(self._raw_tick_history.get(normalized, ()))
+                >= self._min_required_bars
+            )
 
     def is_ohlc_ready(self, symbol: str, required_bars: int | None = None) -> bool:
         """Return canonical OHLC readiness for a symbol; raw ticks do not count."""
         normalized = normalize_symbol(str(symbol or ""))
-        needed = max(1, int(required_bars if required_bars is not None else self._min_required_bars))
+        needed = max(
+            1,
+            int(
+                required_bars if required_bars is not None else self._min_required_bars
+            ),
+        )
         with self._lock:
             return len(self._ohlc.get(self._bar_symbol_key(normalized), ())) >= needed
 
@@ -4264,8 +4699,14 @@ class MarketDataManager:
             spot_symbol = str(requirements.get("spot") or "NSE:NIFTY")
             spot_age_ms = self.symbol_data_age_ms_or_none(spot_symbol)
             threshold_ms = 120000
-            spot_fresh = spot_age_ms is not None and 0 <= int(spot_age_ms) <= threshold_ms
-            if readiness_state["spot_ready"] and spot_fresh and not self._spot_ready_logged:
+            spot_fresh = (
+                spot_age_ms is not None and 0 <= int(spot_age_ms) <= threshold_ms
+            )
+            if (
+                readiness_state["spot_ready"]
+                and spot_fresh
+                and not self._spot_ready_logged
+            ):
                 spot_source = str(self._last_tick_source.get(spot_symbol, "unknown"))
                 source = "ws" if spot_source == "ws" else "rest_ltp"
                 token = self._token_by_symbol.get(spot_symbol)
@@ -4443,13 +4884,29 @@ class MarketDataManager:
 
         strict_atm_ce_ready = bool(atm_ce and bars.get(atm_ce, 0) >= min_bars)
         strict_atm_pe_ready = bool(atm_pe and bars.get(atm_pe, 0) >= min_bars)
-        selected_ce = atm_ce if strict_atm_ce_ready else next(
-            (sym for sym in options if sym.endswith("CE") and bars.get(sym, 0) >= min_bars),
-            "",
+        selected_ce = (
+            atm_ce
+            if strict_atm_ce_ready
+            else next(
+                (
+                    sym
+                    for sym in options
+                    if sym.endswith("CE") and bars.get(sym, 0) >= min_bars
+                ),
+                "",
+            )
         )
-        selected_pe = atm_pe if strict_atm_pe_ready else next(
-            (sym for sym in options if sym.endswith("PE") and bars.get(sym, 0) >= min_bars),
-            "",
+        selected_pe = (
+            atm_pe
+            if strict_atm_pe_ready
+            else next(
+                (
+                    sym
+                    for sym in options
+                    if sym.endswith("PE") and bars.get(sym, 0) >= min_bars
+                ),
+                "",
+            )
         )
         ce_ready = bool(selected_ce)
         pe_ready = bool(selected_pe)
@@ -4467,9 +4924,11 @@ class MarketDataManager:
         if spot:
             spot_bar_ready = bars.get(spot, 0) >= min_bars
             try:
-                spot_ready = bool(self._is_symbol_fresh(spot, self._tick_stale_threshold_ms))
+                spot_ready = bool(
+                    self._is_symbol_fresh(spot, self._tick_stale_threshold_ms)
+                )
             except Exception as exc:
-                self._logger.error('Failure in _readiness_state: %s', exc, exc_info=exc)
+                self._logger.error("Failure in _readiness_state: %s", exc, exc_info=exc)
                 spot_ready = False
             if not spot_ready and spot_bar_ready:
                 spot_ready = True
@@ -4516,9 +4975,7 @@ class MarketDataManager:
             "last_checked_at": self._quote_api_last_checked_at,
         }
 
-    def has_ws_tradable_quote(
-        self, symbols: Sequence[str] | None = None
-    ) -> bool:
+    def has_ws_tradable_quote(self, symbols: Sequence[str] | None = None) -> bool:
         """Return whether websocket/depth tradable quote proof exists."""
         with self._lock:
             candidate_symbols = (
@@ -4531,15 +4988,21 @@ class MarketDataManager:
                 if not isinstance(tick, Mapping):
                     continue
                 source = str(
-                    tick.get("source")
-                    or self._last_tick_source.get(symbol)
-                    or ""
+                    tick.get("source") or self._last_tick_source.get(symbol) or ""
                 ).lower()
                 bid_ask_source = str(tick.get("bid_ask_source") or "").lower()
-                qr = evaluate_quote_readiness(symbol, tick, max_spread_pct=float(os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10), max_age_s=self._option_stale_seconds)
+                qr = evaluate_quote_readiness(
+                    symbol,
+                    tick,
+                    max_spread_pct=float(
+                        os.getenv("OPTION_MAX_SPREAD_PCT", "10") or 10
+                    ),
+                    max_age_s=self._option_stale_seconds,
+                )
                 if qr.tradable_quote_ready and (
                     source in {"ws", "ws_full", "full"}
-                    or bid_ask_source in {"market_depth", "ws_full", "top_level", "best_bid_ask"}
+                    or bid_ask_source
+                    in {"market_depth", "ws_full", "top_level", "best_bid_ask"}
                 ):
                     return True
         return False
@@ -4564,9 +5027,7 @@ class MarketDataManager:
                 if not isinstance(tick, Mapping):
                     continue
                 source = str(
-                    tick.get("source")
-                    or self._last_tick_source.get(symbol)
-                    or ""
+                    tick.get("source") or self._last_tick_source.get(symbol) or ""
                 ).lower()
                 if source not in allowed_sources:
                     continue
@@ -4580,8 +5041,14 @@ class MarketDataManager:
                 tick_ts = tick.get("exchange_timestamp") or tick.get("timestamp")
                 age_seconds: float | None = None
                 if isinstance(tick_ts, datetime):
-                    ts = tick_ts if tick_ts.tzinfo is not None else tick_ts.replace(tzinfo=timezone.utc)
-                    age_seconds = max((datetime.now(timezone.utc) - ts).total_seconds(), 0.0)
+                    ts = (
+                        tick_ts
+                        if tick_ts.tzinfo is not None
+                        else tick_ts.replace(tzinfo=timezone.utc)
+                    )
+                    age_seconds = max(
+                        (datetime.now(timezone.utc) - ts).total_seconds(), 0.0
+                    )
                 elif tick_ts is not None:
                     try:
                         age_seconds = max(now - float(tick_ts), 0.0)
@@ -4653,7 +5120,9 @@ class MarketDataManager:
         option_symbols = self._active_option_symbols()
         if not option_symbols:
             return False
-        return all(self._is_symbol_fresh(symbol, threshold) for symbol in option_symbols)
+        return all(
+            self._is_symbol_fresh(symbol, threshold) for symbol in option_symbols
+        )
 
     def trading_feed_health(self, max_age_ms: int | None = None) -> dict[str, Any]:
         """Return trading-critical feed health where spot is advisory only."""
@@ -4673,9 +5142,11 @@ class MarketDataManager:
             "spot_symbol": spot_symbol,
             "spot_age_ms": self.symbol_data_age_ms(spot_symbol),
             "futures_symbol": futures_symbol,
-            "futures_age_ms": self.symbol_data_age_ms(futures_symbol)
-            if futures_symbol
-            else 1_000_000_000,
+            "futures_age_ms": (
+                self.symbol_data_age_ms(futures_symbol)
+                if futures_symbol
+                else 1_000_000_000
+            ),
             "option_symbols": option_symbols,
             "threshold_ms": threshold,
         }
@@ -4985,7 +5456,6 @@ class MarketDataManager:
         else:
             loop.call_soon_threadsafe(_start)
 
-
     def _invalidate_priority_context_cache(self) -> None:
         """Clear cached priority context sets. Args: none. Returns: None."""
         self._priority_context_cached_at = 0.0
@@ -5002,20 +5472,35 @@ class MarketDataManager:
     def set_open_position_symbols(self, symbols: Iterable[str]) -> None:
         """Set open-position symbols for tests/adapters. Args: symbols. Returns: None."""
         self._open_position_symbols = {
-            self._canonical_symbol(str(symbol)) for symbol in symbols if str(symbol or "").strip()
+            self._canonical_symbol(str(symbol))
+            for symbol in symbols
+            if str(symbol or "").strip()
+        }
+        self._invalidate_priority_context_cache()
+
+    def set_active_bracket_symbols(self, symbols: Iterable[str]) -> None:
+        """Set active bracket symbols for live-feed protection."""
+        self._active_bracket_symbols = {
+            self._canonical_symbol(str(symbol))
+            for symbol in symbols
+            if str(symbol or "").strip()
         }
         self._invalidate_priority_context_cache()
 
     def add_open_position_symbol(self, symbol: str) -> None:
         """Add one open-position symbol for priority protection. Args: symbol. Returns: None."""
-        normalized = self._canonical_symbol(str(symbol)) if str(symbol or "").strip() else ""
+        normalized = (
+            self._canonical_symbol(str(symbol)) if str(symbol or "").strip() else ""
+        )
         if normalized:
             self._open_position_symbols.add(normalized)
             self._invalidate_priority_context_cache()
 
     def remove_open_position_symbol(self, symbol: str) -> None:
         """Remove one open-position symbol from priority protection. Args: symbol. Returns: None."""
-        normalized = self._canonical_symbol(str(symbol)) if str(symbol or "").strip() else ""
+        normalized = (
+            self._canonical_symbol(str(symbol)) if str(symbol or "").strip() else ""
+        )
         if normalized:
             self._open_position_symbols.discard(normalized)
             self._invalidate_priority_context_cache()
@@ -5024,7 +5509,11 @@ class MarketDataManager:
         """Return canonical symbols with open positions without changing execution state."""
         symbols = set(getattr(self, "_open_position_symbols", set()) or set())
         manager = getattr(self, "_position_manager", None)
-        getter = getattr(manager, "get_open_positions", None) if manager is not None else None
+        getter = (
+            getattr(manager, "get_open_positions", None)
+            if manager is not None
+            else None
+        )
         if callable(getter):
             try:
                 for pos in getter() or []:
@@ -5033,7 +5522,9 @@ class MarketDataManager:
                         raw_symbol = pos.get("symbol")
                     if raw_symbol:
                         symbols.add(self._canonical_symbol(str(raw_symbol)))
-            except Exception as exc:  # noqa: BLE001 - diagnostics only; never block ticks
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - diagnostics only; never block ticks
                 log_throttled(
                     self._logger,
                     "mdm_open_position_priority_lookup_failed",
@@ -5051,7 +5542,12 @@ class MarketDataManager:
             raw = self._basket_value(basket, key, None) if basket is not None else None
             if raw:
                 symbols.add(self._canonical_symbol(str(raw)))
-        for attr in ("_selected_ce_symbol", "_selected_pe_symbol", "selected_ce_symbol", "selected_pe_symbol"):
+        for attr in (
+            "_selected_ce_symbol",
+            "_selected_pe_symbol",
+            "selected_ce_symbol",
+            "selected_pe_symbol",
+        ):
             raw = getattr(self, attr, None)
             if raw:
                 symbols.add(self._canonical_symbol(str(raw)))
@@ -5078,10 +5574,18 @@ class MarketDataManager:
         """Return NIFTY spot and committed active-future context symbols protected from coalescing."""
         basket = getattr(self, "_active_contract_basket", None)
         symbols = {"NSE:NIFTY"}
-        spot = self._basket_value(basket, "spot_symbol", None) if basket is not None else None
+        spot = (
+            self._basket_value(basket, "spot_symbol", None)
+            if basket is not None
+            else None
+        )
         if spot:
             symbols.add(self._canonical_symbol(str(spot)))
-        future = self._basket_value(basket, "futures_symbol", None) if basket is not None else None
+        future = (
+            self._basket_value(basket, "futures_symbol", None)
+            if basket is not None
+            else None
+        )
         if not future:
             future = self.get_active_nifty_future_symbol_cached()
         future_canonical = canonical_nifty_future_symbol(future) if future else None
@@ -5102,16 +5606,22 @@ class MarketDataManager:
                 token = 0
             if token > 0:
                 with self._lock:
-                    mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
+                    mapped = self._symbol_by_token.get(
+                        token
+                    ) or self._token_to_symbol.get(token)
                 if mapped:
                     return self._canonical_symbol(str(mapped))
         return "UNKNOWN"
 
-    def _get_priority_context_sets(self) -> tuple[set[str], set[str], set[str], set[str]]:
+    def _get_priority_context_sets(
+        self,
+    ) -> tuple[set[str], set[str], set[str], set[str]]:
         """Return cached open/selected/near-ATM/spot-future symbol sets for hot tick path."""
         now = time.monotonic()
         cached_at = float(getattr(self, "_priority_context_cached_at", 0.0) or 0.0)
-        if cached_at > 0.0 and (now - cached_at) <= float(getattr(self, "_priority_context_ttl_s", 0.25) or 0.25):
+        if cached_at > 0.0 and (now - cached_at) <= float(
+            getattr(self, "_priority_context_ttl_s", 0.25) or 0.25
+        ):
             return (
                 set(getattr(self, "_cached_open_position_symbols", set()) or set()),
                 set(getattr(self, "_cached_selected_option_symbols", set()) or set()),
@@ -5127,12 +5637,21 @@ class MarketDataManager:
         self._cached_near_atm_symbols = set(near_atm_symbols)
         self._cached_spot_future_symbols = set(spot_future_symbols)
         self._priority_context_cached_at = now
-        return set(open_symbols), set(selected_symbols), set(near_atm_symbols), set(spot_future_symbols)
+        return (
+            set(open_symbols),
+            set(selected_symbols),
+            set(near_atm_symbols),
+            set(spot_future_symbols),
+        )
 
     def _tick_priority(self, symbol: str) -> tuple[int, str]:
         """Return lower-is-higher priority for tick fan-out."""
-        canonical = self._canonical_symbol(symbol) if symbol and symbol != "UNKNOWN" else symbol
-        open_symbols, selected_symbols, near_atm_symbols, spot_future_symbols = self._get_priority_context_sets()
+        canonical = (
+            self._canonical_symbol(symbol) if symbol and symbol != "UNKNOWN" else symbol
+        )
+        open_symbols, selected_symbols, near_atm_symbols, spot_future_symbols = (
+            self._get_priority_context_sets()
+        )
         if canonical in open_symbols:
             return 0, "open_position"
         if canonical in selected_symbols:
@@ -5146,21 +5665,33 @@ class MarketDataManager:
     def _emit_priority_summaries_if_due(self) -> None:
         """Emit throttled bus/tick priority and backpressure summaries."""
         now = time.monotonic()
-        if now - float(getattr(self, "_last_bus_priority_summary_ts", 0.0) or 0.0) < 30.0:
+        if (
+            now - float(getattr(self, "_last_bus_priority_summary_ts", 0.0) or 0.0)
+            < 30.0
+        ):
             return
         self._last_bus_priority_summary_ts = now
         priority_counts = dict(getattr(self, "_bus_priority_counts", {}) or {})
         queue_drops = dict(getattr(self, "_tick_queue_priority_drops", {}) or {})
-        queue_coalesced = dict(getattr(self, "_tick_queue_priority_coalesced", {}) or {})
+        queue_coalesced = dict(
+            getattr(self, "_tick_queue_priority_coalesced", {}) or {}
+        )
         bp_drops = dict(getattr(self, "_bus_backpressure_drops_by_priority", {}) or {})
-        bp_coalesced = dict(getattr(self, "_bus_backpressure_coalesced_by_priority", {}) or {})
+        bp_coalesced = dict(
+            getattr(self, "_bus_backpressure_coalesced_by_priority", {}) or {}
+        )
         if priority_counts:
             self._logger.info(
                 "MDM_BUS_PRIORITY_SUMMARY published=%s queue_drops=%s queue_coalesced=%s",
                 priority_counts,
                 queue_drops,
                 queue_coalesced,
-                extra={"event": "MDM_BUS_PRIORITY_SUMMARY", "published": priority_counts, "queue_drops": queue_drops, "queue_coalesced": queue_coalesced},
+                extra={
+                    "event": "MDM_BUS_PRIORITY_SUMMARY",
+                    "published": priority_counts,
+                    "queue_drops": queue_drops,
+                    "queue_coalesced": queue_coalesced,
+                },
             )
             self._bus_priority_counts.clear()
         if bp_drops or bp_coalesced:
@@ -5169,7 +5700,11 @@ class MarketDataManager:
                 bp_drops,
                 bp_coalesced,
                 len(getattr(self, "_bus_latest_coalesced_ticks", {}) or {}),
-                extra={"event": "MDM_BUS_BACKPRESSURE_SUMMARY", "dropped_by_priority": bp_drops, "coalesced_by_priority": bp_coalesced},
+                extra={
+                    "event": "MDM_BUS_BACKPRESSURE_SUMMARY",
+                    "dropped_by_priority": bp_drops,
+                    "coalesced_by_priority": bp_coalesced,
+                },
             )
             self._bus_backpressure_drops_by_priority.clear()
             self._bus_backpressure_coalesced_by_priority.clear()
@@ -5189,7 +5724,6 @@ class MarketDataManager:
             extra={"event": "OPEN_POSITION_TICK_PRIORITY_ACTIVE", "symbol": symbol},
         )
 
-
     @staticmethod
     def _mark_queue_item_done(queue: asyncio.Queue) -> None:
         """Balance unfinished task count when queue surgery permanently removes an item."""
@@ -5200,7 +5734,9 @@ class MarketDataManager:
             # by join() callers. Never let accounting diagnostics block tick intake.
             pass
 
-    def _put_priority_tick_nowait(self, queue: asyncio.Queue, tick_payload: dict[str, Any]) -> bool:
+    def _put_priority_tick_nowait(
+        self, queue: asyncio.Queue, tick_payload: dict[str, Any]
+    ) -> bool:
         """Insert tick, evicting/coalescing lower-value work when full.
 
         This queue is consumed with task_done() in _consume_ticks(). Queue
@@ -5226,8 +5762,12 @@ class MarketDataManager:
                 while True:
                     existing = queue.get_nowait()
                     self._mark_queue_item_done(queue)
-                    existing_symbol = self._resolve_tick_symbol_for_priority(existing if isinstance(existing, Mapping) else {})
-                    existing_priority, existing_bucket = self._tick_priority(existing_symbol)
+                    existing_symbol = self._resolve_tick_symbol_for_priority(
+                        existing if isinstance(existing, Mapping) else {}
+                    )
+                    existing_priority, existing_bucket = self._tick_priority(
+                        existing_symbol
+                    )
                     if not removed and existing_priority > priority:
                         removed = True
                         removed_reason = "drop_lower_priority"
@@ -5288,7 +5828,6 @@ class MarketDataManager:
                 self._tick_queue_priority_drops[bucket] += 1
                 return False
 
-
     async def push_tick(self, raw_tick: dict[str, Any]) -> None:
         """Queue one raw websocket tick through the supported bounded ingress path."""
         payload = dict(raw_tick)
@@ -5345,8 +5884,9 @@ class MarketDataManager:
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
 
-
-    def _resolve_tick_key_and_priority(self, tick: dict[str, Any]) -> tuple[str | None, int, str, str]:
+    def _resolve_tick_key_and_priority(
+        self, tick: dict[str, Any]
+    ) -> tuple[str | None, int, str, str]:
         """Resolve tick routing metadata before taking the pending-drain lock."""
         if not isinstance(tick, dict):
             return None, 99, "malformed", "not_mapping"
@@ -5360,7 +5900,9 @@ class MarketDataManager:
             except (TypeError, ValueError):
                 return None, 99, "malformed", "bad_token"
             with self._lock:
-                mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
+                mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(
+                    token
+                )
             if not mapped:
                 return None, 99, "unmapped", "unmapped_token"
             canonical_symbol = self._canonical_symbol(str(mapped))
@@ -5371,7 +5913,9 @@ class MarketDataManager:
         return canonical_symbol, priority, bucket, "ok"
 
     def _pending_count_locked(self) -> int:
-        return sum(len(q) for q in self._pending_tick_queues.values()) + len(self._pending_far_ticks)
+        return sum(len(q) for q in self._pending_tick_queues.values()) + len(
+            self._pending_far_ticks
+        )
 
     def _record_tick_drop(self, bucket: str, reason: str) -> None:
         self._tick_dropped_total += 1
@@ -5380,12 +5924,25 @@ class MarketDataManager:
         self._tick_queue_priority_drops[bucket] += 1
 
     def _schedule_tick_drain_locked(self, loop: asyncio.AbstractEventLoop) -> None:
+        task = getattr(self, "_tick_drain_task", None)
+        pending = self._pending_count_locked()
+        if (
+            pending > 0
+            and self._tick_active_drains == 0
+            and self._tick_drain_scheduled
+            and (task is None or task.done())
+            and not self._tick_drain_start_pending
+            and not self._tick_drain_stopping
+        ):
+            self._tick_drain_scheduled = False
         if self._tick_drain_scheduled or self._tick_drain_stopping:
             return
         self._tick_drain_scheduled = True
+        self._tick_drain_start_pending = True
         self._tick_drain_callbacks_scheduled += 1
 
         def _start() -> None:
+            self._tick_drain_start_pending = False
             task = getattr(self, "_tick_drain_task", None)
             if task is not None and not task.done():
                 return
@@ -5395,9 +5952,12 @@ class MarketDataManager:
             loop.call_soon_threadsafe(_start)
         except Exception as exc:  # pragma: no cover - loop closed race
             self._tick_drain_scheduled = False
+            self._tick_drain_start_pending = False
             self._logger.warning("MDM_TICK_DRAIN_SCHEDULE_FAILED error=%r", exc)
 
-    def _enqueue_latest_tick_for_drain(self, tick: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+    def _enqueue_latest_tick_for_drain(
+        self, tick: dict[str, Any], loop: asyncio.AbstractEventLoop
+    ) -> None:
         key, priority, bucket, reason = self._resolve_tick_key_and_priority(tick)
         with self._pending_tick_lock:
             self._tick_submitted_total += 1
@@ -5464,11 +6024,12 @@ class MarketDataManager:
                 break
             return batch
 
-
     def _requeue_unprocessed_ticks(self, ticks: list[dict[str, Any]]) -> None:
         if not ticks:
             return
-        resolved = [(raw, *self._resolve_tick_key_and_priority(raw)) for raw in reversed(ticks)]
+        resolved = [
+            (raw, *self._resolve_tick_key_and_priority(raw)) for raw in reversed(ticks)
+        ]
         with self._pending_tick_lock:
             for raw, key, priority, bucket, reason in resolved:
                 if key is None:
@@ -5480,9 +6041,12 @@ class MarketDataManager:
                     self._pending_far_ticks[key] = raw
 
     async def _drain_latest_ticks(self) -> None:
+        drain_started = time.monotonic()
         with self._pending_tick_lock:
             self._tick_active_drains += 1
-            self._tick_max_active_drains = max(self._tick_max_active_drains, self._tick_active_drains)
+            self._tick_max_active_drains = max(
+                self._tick_max_active_drains, self._tick_active_drains
+            )
         try:
             while True:
                 start = time.monotonic()
@@ -5494,25 +6058,40 @@ class MarketDataManager:
                         self._process_queued_tick(raw)
                         self._tick_processed_total += 1
                     except asyncio.CancelledError:
-                        self._requeue_unprocessed_ticks([raw, *batch[index + 1:]])
+                        self._requeue_unprocessed_ticks([raw, *batch[index + 1 :]])
                         raise
                     except Exception as exc:
-                        self._record_tick_drop(str(raw.get("_mdm_priority_bucket") or "unknown"), "process_error")
-                        self._logger.error("MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True)
+                        self._record_tick_drop(
+                            str(raw.get("_mdm_priority_bucket") or "unknown"),
+                            "process_error",
+                        )
+                        self._logger.error(
+                            "MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True
+                        )
                     if time.monotonic() - start >= self._tick_drain_budget_s:
-                        self._requeue_unprocessed_ticks(batch[index + 1:])
+                        self._requeue_unprocessed_ticks(batch[index + 1 :])
                         break
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
+            with self._pending_tick_lock:
+                self._tick_drain_callbacks_cancelled += 1
             raise
         finally:
             with self._pending_tick_lock:
+                self._last_drain_duration_ms = max(
+                    0.0, (time.monotonic() - drain_started) * 1000.0
+                )
                 self._tick_active_drains = max(0, self._tick_active_drains - 1)
                 has_more = self._pending_count_locked() > 0
                 self._tick_drain_scheduled = False
                 self._tick_drain_callbacks_completed += 1
                 loop = self._main_loop
-                if has_more and not self._tick_drain_stopping and loop is not None and loop.is_running():
+                if (
+                    has_more
+                    and not self._tick_drain_stopping
+                    and loop is not None
+                    and loop.is_running()
+                ):
                     self._schedule_tick_drain_locked(loop)
 
     async def drain_pending_ticks(self, *, timeout: float = 5.0) -> None:
@@ -5556,7 +6135,11 @@ class MarketDataManager:
                 "processed_total": self._tick_processed_total,
                 "coalesced_total": self._tick_coalesced_total,
                 "dropped_total": self._tick_dropped_total,
-                "unexplained_loss": self._tick_submitted_total - self._tick_processed_total - self._tick_coalesced_total - self._tick_dropped_total - pending,
+                "unexplained_loss": self._tick_submitted_total
+                - self._tick_processed_total
+                - self._tick_coalesced_total
+                - self._tick_dropped_total
+                - pending,
                 "pending_ticks": pending,
                 "pending_max_seen": self._tick_pending_max_seen,
                 "coalesced_by_priority": dict(self._tick_coalesced_by_priority),
@@ -5564,6 +6147,20 @@ class MarketDataManager:
                 "dropped_by_priority": dict(self._tick_dropped_by_priority),
                 "drain_callbacks_scheduled": self._tick_drain_callbacks_scheduled,
                 "drain_callbacks_completed": self._tick_drain_callbacks_completed,
+                "drain_task_done": (
+                    self._tick_drain_task.done()
+                    if self._tick_drain_task is not None
+                    else None
+                ),
+                "drain_task_cancelled": (
+                    self._tick_drain_task.cancelled()
+                    if self._tick_drain_task is not None
+                    else None
+                ),
+                "callbacks_scheduled": self._tick_drain_callbacks_scheduled,
+                "callbacks_completed": self._tick_drain_callbacks_completed,
+                "callbacks_cancelled": self._tick_drain_callbacks_cancelled,
+                "last_drain_duration_ms": self._last_drain_duration_ms,
                 "active_drains": self._tick_active_drains,
                 "max_active_drains": self._tick_max_active_drains,
                 "drain_scheduled": self._tick_drain_scheduled,
@@ -5609,10 +6206,14 @@ class MarketDataManager:
         """Legacy tick-bus hook routed to queue ingestion."""
         self._enqueue_tick_threadsafe(tick)
 
-    def _is_nifty_spot_tick(self, symbol: str | None = None, token: int | None = None) -> bool:
+    def _is_nifty_spot_tick(
+        self, symbol: str | None = None, token: int | None = None
+    ) -> bool:
         """Return whether tick belongs to NIFTY spot aliases/token."""
         s = (symbol or "").upper().replace(" ", "")
-        return (token is not None and self._symbol_by_token.get(int(token)) == "NSE:NIFTY") or s in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}
+        return (
+            token is not None and self._symbol_by_token.get(int(token)) == "NSE:NIFTY"
+        ) or s in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}
 
     def _record_ws_arrival_fast(
         self,
@@ -5642,7 +6243,9 @@ class MarketDataManager:
             with self._lock:
                 if token is not None:
                     token_int = int(token)
-                    self._set_symbol_token_mapping(canonical, token_int, source="ws_arrival")
+                    self._set_symbol_token_mapping(
+                        canonical, token_int, source="ws_arrival"
+                    )
 
                 self._latest_ticks[canonical] = payload
                 self._tick_cache[canonical] = payload
@@ -5675,7 +6278,9 @@ class MarketDataManager:
                             },
                         )
         except Exception as e:
-            self._logger.error("Failure in MarketDataManager._record_ws_arrival_fast: %s", e)
+            self._logger.error(
+                "Failure in MarketDataManager._record_ws_arrival_fast: %s", e
+            )
 
     def process_ticks(self, ticks: list[dict[str, Any]]) -> None:
         """Batch-enqueue WS ticks from KiteTicker callback.
@@ -5715,10 +6320,14 @@ class MarketDataManager:
                         raw_tick=tick,
                     )
                     now = time.monotonic()
-                    last_logged = float(self._ws_raw_tick_log_at.get(symbol_resolved, 0.0))
+                    last_logged = float(
+                        self._ws_raw_tick_log_at.get(symbol_resolved, 0.0)
+                    )
                     if last_logged <= 0.0 or (now - last_logged) >= 60.0:
                         self._ws_raw_tick_log_at[symbol_resolved] = now
-                        verbose_ticks = str(os.getenv("LOG_VERBOSE_TICKS", "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+                        verbose_ticks = str(
+                            os.getenv("LOG_VERBOSE_TICKS", "false")
+                        ).strip().lower() in {"1", "true", "yes", "y", "on"}
                         self._logger.log(
                             logging.INFO if verbose_ticks else logging.DEBUG,
                             "WS_RAW_TICK_RECEIVED token=%s symbol_resolved=%s ltp=%s",
@@ -5771,7 +6380,6 @@ class MarketDataManager:
         freshest = max(candidates)
         return int(max(0.0, (now - freshest) * 1000.0))
 
-
     def _resolve_symbol_key_safe(self, symbol: str | int) -> str | None:
         """Resolve symbol/token aliases to canonical symbol. Args: symbol. Returns: canonical or None. Raises: none."""
 
@@ -5799,7 +6407,9 @@ class MarketDataManager:
             return 1_000_000_000
         now = time.time()
         with self._lock:
-            wallclock = float(self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0)
+            wallclock = float(
+                self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0
+            )
             arrival = float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0)
         freshest = max(wallclock, arrival)
         if freshest <= 0.0:
@@ -5812,7 +6422,12 @@ class MarketDataManager:
         resolved_symbol = self._resolve_symbol_key_safe(symbol)
         now = time.time()
         candidates: list[str] = []
-        if str(symbol).strip().upper() in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}:
+        if str(symbol).strip().upper() in {
+            "NIFTY",
+            "NSE:NIFTY",
+            "NIFTY50",
+            "NSE:NIFTY50",
+        }:
             candidates.append("NSE:NIFTY")
             with self._lock:
                 token = self._token_by_symbol.get("NSE:NIFTY")
@@ -5839,7 +6454,12 @@ class MarketDataManager:
 
         resolved_symbol = self._resolve_symbol_key_safe(symbol)
 
-        if str(symbol).strip().upper() in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}:
+        if str(symbol).strip().upper() in {
+            "NIFTY",
+            "NSE:NIFTY",
+            "NIFTY50",
+            "NSE:NIFTY50",
+        }:
             candidates = ["NSE:NIFTY"]
             with self._lock:
                 token = self._token_by_symbol.get("NSE:NIFTY")
@@ -5866,7 +6486,6 @@ class MarketDataManager:
             if float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0) > 0.0:
                 return True
         return False
-
 
     # ------------------------------------------------------------------
     # Internal plumbing
@@ -5976,7 +6595,11 @@ class MarketDataManager:
         if price <= 0:
             return None
 
-        ts_raw = raw.get("exchange_timestamp") or raw.get("timestamp") or raw.get("received_at")
+        ts_raw = (
+            raw.get("exchange_timestamp")
+            or raw.get("timestamp")
+            or raw.get("received_at")
+        )
         ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
         if pd.isna(ts) or ts.year < 2020:
             ts = pd.Timestamp.utcnow()
@@ -5992,27 +6615,89 @@ class MarketDataManager:
             "last_price": price,
             "timestamp": ts.isoformat(),
             "timestamp_ms": float(pd.Timestamp(ts).timestamp() * 1000.0),
-            "source": "ws_full" if bool(quote_fields.get("depth_available")) else (raw.get("source") or "ws"),
+            "source": (
+                "ws_full"
+                if bool(quote_fields.get("depth_available"))
+                else (raw.get("source") or "ws")
+            ),
             "received_at": float(raw.get("received_at") or time.time()),
         }
 
     def _extract_depth_quote_fields(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         """Extract quote/depth fields. Args: raw. Returns: normalized quote fields. Raises: none."""
-        depth = raw.get("depth") if isinstance(raw, Mapping) and isinstance(raw.get("depth"), Mapping) else {}
+        depth = (
+            raw.get("depth")
+            if isinstance(raw, Mapping) and isinstance(raw.get("depth"), Mapping)
+            else {}
+        )
         buy_levels = depth.get("buy") if isinstance(depth, Mapping) else []
         sell_levels = depth.get("sell") if isinstance(depth, Mapping) else []
         buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
-        sell_top = sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
-        bid = _coerce_float(raw.get("bid") or raw.get("best_bid") or raw.get("buy_price") or raw.get("best_bid_price") or (buy_top or {}).get("price"))
-        ask = _coerce_float(raw.get("ask") or raw.get("best_ask") or raw.get("sell_price") or raw.get("best_ask_price") or (sell_top or {}).get("price"))
-        bid_qty = _coerce_int(raw.get("bid_qty") or raw.get("buy_quantity") or (buy_top or {}).get("quantity"))
-        ask_qty = _coerce_int(raw.get("ask_qty") or raw.get("sell_quantity") or (sell_top or {}).get("quantity"))
-        depth_available = bool((isinstance(buy_levels, list) and buy_levels) or (isinstance(sell_levels, list) and sell_levels))
-        spread = (ask - bid) if (bid is not None and ask is not None and ask > bid) else None
-        mid = ((bid + ask) / 2.0) if (bid is not None and ask is not None and bid > 0 and ask > 0) else None
-        return {"bid": bid, "ask": ask, "best_bid": bid, "best_ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "mid": mid, "spread": spread, "depth": depth, "depth_available": depth_available, "tradable_quote": bool(bid is not None and ask is not None and bid > 0 and ask > bid), "bid_missing": not bool(bid and bid > 0), "ask_missing": not bool(ask and ask > 0), "bid_ask_source": "ws_full" if depth_available else ("quote" if bid is not None or ask is not None else "missing")}
+        sell_top = (
+            sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+        )
+        bid = _coerce_float(
+            raw.get("bid")
+            or raw.get("best_bid")
+            or raw.get("buy_price")
+            or raw.get("best_bid_price")
+            or (buy_top or {}).get("price")
+        )
+        ask = _coerce_float(
+            raw.get("ask")
+            or raw.get("best_ask")
+            or raw.get("sell_price")
+            or raw.get("best_ask_price")
+            or (sell_top or {}).get("price")
+        )
+        bid_qty = _coerce_int(
+            raw.get("bid_qty")
+            or raw.get("buy_quantity")
+            or (buy_top or {}).get("quantity")
+        )
+        ask_qty = _coerce_int(
+            raw.get("ask_qty")
+            or raw.get("sell_quantity")
+            or (sell_top or {}).get("quantity")
+        )
+        depth_available = bool(
+            (isinstance(buy_levels, list) and buy_levels)
+            or (isinstance(sell_levels, list) and sell_levels)
+        )
+        spread = (
+            (ask - bid) if (bid is not None and ask is not None and ask > bid) else None
+        )
+        mid = (
+            ((bid + ask) / 2.0)
+            if (bid is not None and ask is not None and bid > 0 and ask > 0)
+            else None
+        )
+        return {
+            "bid": bid,
+            "ask": ask,
+            "best_bid": bid,
+            "best_ask": ask,
+            "bid_qty": bid_qty,
+            "ask_qty": ask_qty,
+            "mid": mid,
+            "spread": spread,
+            "depth": depth,
+            "depth_available": depth_available,
+            "tradable_quote": bool(
+                bid is not None and ask is not None and bid > 0 and ask > bid
+            ),
+            "bid_missing": not bool(bid and bid > 0),
+            "ask_missing": not bool(ask and ask > 0),
+            "bid_ask_source": (
+                "ws_full"
+                if depth_available
+                else ("quote" if bid is not None or ask is not None else "missing")
+            ),
+        }
 
-    def _normalise_tick_volume_delta(self, symbol: str, raw: dict[str, Any]) -> dict[str, Any]:
+    def _normalise_tick_volume_delta(
+        self, symbol: str, raw: dict[str, Any]
+    ) -> dict[str, Any]:
         """Convert cumulative broker volume into per-tick delta volume. Args: symbol/raw. Returns: normalized payload. Raises: none."""
         payload = dict(raw)
         cumulative_raw = (
@@ -6029,7 +6714,11 @@ class MarketDataManager:
         key = self._canonical_symbol(symbol)
         previous = self._last_cumulative_volume_by_symbol.get(key)
         if previous is None:
-            ltq_raw = payload.get("last_traded_quantity") or payload.get("last_quantity") or payload.get("ltq")
+            ltq_raw = (
+                payload.get("last_traded_quantity")
+                or payload.get("last_quantity")
+                or payload.get("ltq")
+            )
             try:
                 delta = max(float(ltq_raw), 0.0) if ltq_raw is not None else 0.0
             except (TypeError, ValueError):
@@ -6044,16 +6733,23 @@ class MarketDataManager:
         if previous is not None and cumulative < previous:
             payload["volume_delta_reset"] = True
         if is_option_symbol:
-            max_delta = float(os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000") or "1000000")
+            max_delta = float(
+                os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000")
+                or "1000000"
+            )
             if delta > max_delta:
                 volume_delta_untrusted = True
                 stats = self._volume_delta_clamp_stats.setdefault(
                     key, {"interval_count": 0.0, "interval_max_delta": 0.0}
                 )
                 stats["interval_count"] = float(stats.get("interval_count", 0.0)) + 1.0
-                stats["interval_max_delta"] = max(float(stats.get("interval_max_delta", 0.0)), float(delta))
+                stats["interval_max_delta"] = max(
+                    float(stats.get("interval_max_delta", 0.0)), float(delta)
+                )
                 now_mono = time.monotonic()
-                last_summary = float(self._last_volume_delta_clamp_summary_ts.get(key, 0.0) or 0.0)
+                last_summary = float(
+                    self._last_volume_delta_clamp_summary_ts.get(key, 0.0) or 0.0
+                )
                 if now_mono - last_summary >= 60.0:
                     self._last_volume_delta_clamp_summary_ts[key] = now_mono
                     self._logger.warning(
@@ -6087,7 +6783,9 @@ class MarketDataManager:
         volume_delta_normalized = False
         enqueued_mono = raw.get("_enqueued_monotonic")
         if isinstance(enqueued_mono, (int, float)):
-            self._event_loop_lag_seconds = max(0.0, time.monotonic() - float(enqueued_mono))
+            self._event_loop_lag_seconds = max(
+                0.0, time.monotonic() - float(enqueued_mono)
+            )
         if not raw.get("symbol"):
             token = raw.get("instrument_token")
             if token is None:
@@ -6107,7 +6805,9 @@ class MarketDataManager:
                 )
                 return
             raw = {**raw, "symbol": symbol_from_map}
-            raw = self._normalise_tick_volume_delta(symbol_from_map or raw.get("symbol", ""), raw)
+            raw = self._normalise_tick_volume_delta(
+                symbol_from_map or raw.get("symbol", ""), raw
+            )
             volume_delta_normalized = True
 
         symbol = str(raw.get("symbol") or "")
@@ -6140,7 +6840,9 @@ class MarketDataManager:
             if not pd.isna(last_ts) and tick_ts == last_ts:
                 last_snapshot = self._last_tick_snapshot.get(symbol, {})
                 same_price = float(last_snapshot.get("ltp", -1)) == float(tick.ltp)
-                same_volume = last_snapshot.get("volume") == raw.get("volume_traded_today")
+                same_volume = last_snapshot.get("volume") == raw.get(
+                    "volume_traded_today"
+                )
 
                 if same_price and same_volume:
                     self._logger.debug(
@@ -6229,17 +6931,27 @@ class MarketDataManager:
             _cur_tradable = bool(normalized_live.get("tradable_quote"))
             _cur_depth = bool(normalized_live.get("depth_available"))
             _is_first = not _prev
-            _tradable_transition = _cur_tradable and not _prev.get("tradable_quote", False)
+            _tradable_transition = _cur_tradable and not _prev.get(
+                "tradable_quote", False
+            )
             _depth_transition = _cur_depth and not _prev.get("depth_available", False)
-            _proof_state[symbol] = {"tradable_quote": _cur_tradable, "depth_available": _cur_depth}
+            _proof_state[symbol] = {
+                "tradable_quote": _cur_tradable,
+                "depth_available": _cur_depth,
+            }
             _should_emit_proof = _is_first or _tradable_transition or _depth_transition
-            if not _should_emit_proof and str(os.getenv("LOG_QUOTE_PROOF_DEBUG", "false")).lower() in {"1", "true", "yes"}:
-                _proof_interval = float(os.getenv("LOG_QUOTE_PROOF_EVERY_SECONDS", "60") or "60")
+            if not _should_emit_proof and str(
+                os.getenv("LOG_QUOTE_PROOF_DEBUG", "false")
+            ).lower() in {"1", "true", "yes"}:
+                _proof_interval = float(
+                    os.getenv("LOG_QUOTE_PROOF_EVERY_SECONDS", "60") or "60"
+                )
                 _proof_throttle = getattr(self, "_ws_proof_throttle", None)
                 if _proof_throttle is None:
                     self._ws_proof_throttle: dict[str, float] = {}
                     _proof_throttle = self._ws_proof_throttle
                 import time as _t
+
                 _now_mono = _t.monotonic()
                 _last_proof = float(_proof_throttle.get(symbol, 0.0))
                 if _now_mono - _last_proof >= _proof_interval:
@@ -6266,17 +6978,38 @@ class MarketDataManager:
         if candle:
             bar = {
                 "symbol": symbol,
-                "timestamp": candle["timestamp"] if isinstance(candle, dict) else candle.timestamp,
-                "open": float(candle["open"] if isinstance(candle, dict) else candle.open),
-                "high": float(candle["high"] if isinstance(candle, dict) else candle.high),
+                "timestamp": (
+                    candle["timestamp"]
+                    if isinstance(candle, dict)
+                    else candle.timestamp
+                ),
+                "open": float(
+                    candle["open"] if isinstance(candle, dict) else candle.open
+                ),
+                "high": float(
+                    candle["high"] if isinstance(candle, dict) else candle.high
+                ),
                 "low": float(candle["low"] if isinstance(candle, dict) else candle.low),
-                "close": float(candle["close"] if isinstance(candle, dict) else candle.close),
-                "volume": int(float((candle.get("volume", 0) if isinstance(candle, dict) else getattr(candle, "volume", 0)) or 0)),
+                "close": float(
+                    candle["close"] if isinstance(candle, dict) else candle.close
+                ),
+                "volume": int(
+                    float(
+                        (
+                            candle.get("volume", 0)
+                            if isinstance(candle, dict)
+                            else getattr(candle, "volume", 0)
+                        )
+                        or 0
+                    )
+                ),
                 "source": "ws_candle",
             }
             self._ohlc[symbol].append(bar)
             self._publish_closed_bar(bar)
-            verbose_candles = str(os.getenv("LOG_VERBOSE_CANDLES", "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+            verbose_candles = str(
+                os.getenv("LOG_VERBOSE_CANDLES", "false")
+            ).strip().lower() in {"1", "true", "yes", "y", "on"}
             self._logger.log(
                 logging.INFO if verbose_candles else logging.DEBUG,
                 "LIVE_CANDLE_CLOSED symbol=%s source=ws_candle close=%s",
@@ -6299,7 +7032,9 @@ class MarketDataManager:
             self._engines[symbol] = CandleEngine()
         return self._engines[symbol]
 
-    def _set_symbol_token_mapping(self, symbol: str, token: int, *, source: str) -> None:
+    def _set_symbol_token_mapping(
+        self, symbol: str, token: int, *, source: str
+    ) -> None:
         normalized = self._canonical_symbol(symbol)
         token_int = int(token)
         old_token = self._token_by_symbol.get(normalized)
@@ -6315,13 +7050,19 @@ class MarketDataManager:
         self._symbol_to_token[normalized] = token_int
         self._token_to_symbol[token_int] = normalized
 
-    def _remove_symbol_token_mapping(self, *, symbol: str | None = None, token: int | None = None, reason: str) -> None:
+    def _remove_symbol_token_mapping(
+        self, *, symbol: str | None = None, token: int | None = None, reason: str
+    ) -> None:
         normalized = self._canonical_symbol(symbol) if symbol else None
         token_int = int(token) if token is not None else None
         if normalized is not None and token_int is None:
-            token_int = self._token_by_symbol.get(normalized) or self._symbol_to_token.get(normalized)
+            token_int = self._token_by_symbol.get(
+                normalized
+            ) or self._symbol_to_token.get(normalized)
         if token_int is not None and normalized is None:
-            normalized = self._symbol_by_token.get(token_int) or self._token_to_symbol.get(token_int)
+            normalized = self._symbol_by_token.get(
+                token_int
+            ) or self._token_to_symbol.get(token_int)
         if normalized is not None:
             self._token_by_symbol.pop(normalized, None)
             self._symbol_to_token.pop(normalized, None)
@@ -6329,20 +7070,35 @@ class MarketDataManager:
             self._symbol_by_token.pop(token_int, None)
             self._token_to_symbol.pop(token_int, None)
 
-    def seed_symbol_tokens(self, token_by_symbol: Mapping[str, int], *, source: str = "instrument_manager") -> None:
+    def seed_symbol_tokens(
+        self, token_by_symbol: Mapping[str, int], *, source: str = "instrument_manager"
+    ) -> None:
         if not token_by_symbol:
-            self._logger.warning("MDM_SYMBOL_TOKENS_SEED_SKIPPED source=%s reason=empty_mapping", source)
+            self._logger.warning(
+                "MDM_SYMBOL_TOKENS_SEED_SKIPPED source=%s reason=empty_mapping", source
+            )
             return
         count = 0
         with self._lock:
             for sym, tok in token_by_symbol.items():
                 try:
                     if int(tok) > 0:
-                        self._set_symbol_token_mapping(str(sym), int(tok), source=source)
+                        self._set_symbol_token_mapping(
+                            str(sym), int(tok), source=source
+                        )
                         count += 1
                 except (TypeError, ValueError, RuntimeError):
                     continue
-        self._logger.info("MDM_SYMBOL_TOKENS_SEEDED source=%s count=%d", source, count, extra={"event": "MDM_SYMBOL_TOKENS_SEEDED", "source": source, "count": count})
+        self._logger.info(
+            "MDM_SYMBOL_TOKENS_SEEDED source=%s count=%d",
+            source,
+            count,
+            extra={
+                "event": "MDM_SYMBOL_TOKENS_SEEDED",
+                "source": source,
+                "count": count,
+            },
+        )
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
@@ -6361,7 +7117,9 @@ class MarketDataManager:
         with self._lock:
             if self._token_by_symbol.get(normalized_symbol) == token_int:
                 return
-            self._set_symbol_token_mapping(normalized_symbol, token_int, source="register_symbol")
+            self._set_symbol_token_mapping(
+                normalized_symbol, token_int, source="register_symbol"
+            )
         try:
             if self._resolver is not None and hasattr(self._resolver, "register"):
                 self._resolver.register(normalized_symbol, token_int)
@@ -6458,8 +7216,9 @@ class MarketDataManager:
                 },
             )
 
-
-    async def _publish_tick_message_with_priority(self, bus: Any, msg: Message, *, symbol: str, priority: int, bucket: str) -> None:
+    async def _publish_tick_message_with_priority(
+        self, bus: Any, msg: Message, *, symbol: str, priority: int, bucket: str
+    ) -> None:
         """Publish tick message while protecting high-priority symbols from queue pressure."""
         queues = getattr(bus, "queues", None)
         queue = queues.get(MessageType.TICK) if isinstance(queues, Mapping) else None
@@ -6491,15 +7250,23 @@ class MarketDataManager:
             while True:
                 existing = queue.get_nowait()
                 self._mark_queue_item_done(queue)
-                existing_symbol = str((getattr(existing, "data", {}) or {}).get("symbol") or "UNKNOWN")
-                existing_priority, existing_bucket = self._tick_priority(existing_symbol)
+                existing_symbol = str(
+                    (getattr(existing, "data", {}) or {}).get("symbol") or "UNKNOWN"
+                )
+                existing_priority, existing_bucket = self._tick_priority(
+                    existing_symbol
+                )
                 if not removed and existing_priority > priority:
                     removed = True
                     removed_reason = "drop_lower_priority"
                     removed_bucket = existing_bucket
                     removed_symbol = existing_symbol
                     continue
-                if not removed and existing_symbol == symbol and existing_priority >= priority:
+                if (
+                    not removed
+                    and existing_symbol == symbol
+                    and existing_priority >= priority
+                ):
                     removed = True
                     removed_reason = "coalesce_same_symbol"
                     removed_bucket = existing_bucket
@@ -6515,14 +7282,18 @@ class MarketDataManager:
                 break
         if removed:
             if removed_reason == "coalesce_same_symbol":
-                self._bus_backpressure_coalesced_by_priority[removed_bucket or bucket] += 1
+                self._bus_backpressure_coalesced_by_priority[
+                    removed_bucket or bucket
+                ] += 1
             else:
                 self._bus_backpressure_drops_by_priority[removed_bucket or bucket] += 1
         elif priority == 0:
             try:
                 removed = queue.get_nowait()
                 self._mark_queue_item_done(queue)
-                removed_symbol = str((getattr(removed, "data", {}) or {}).get("symbol") or "UNKNOWN")
+                removed_symbol = str(
+                    (getattr(removed, "data", {}) or {}).get("symbol") or "UNKNOWN"
+                )
                 self._bus_backpressure_drops_by_priority["open_position"] += 1
                 self._logger.critical(
                     "MDM_OPEN_POSITION_TICK_FORCED_DROP dropped_symbol=%s incoming_symbol=%s",
@@ -6550,7 +7321,6 @@ class MarketDataManager:
             self._bus_backpressure_coalesced_by_priority[bucket] += 1
             self._bus_backpressure_drops_by_priority[bucket] += 1
         self._emit_priority_summaries_if_due()
-
 
     def _publish_tick_to_bus_safe(self, tick: dict[str, Any]) -> None:
         """Publish a normalized tick to MessageBus without ever crashing MDM."""
@@ -6628,8 +7398,7 @@ class MarketDataManager:
                     log_throttled(
                         self._logger,
                         "mdm_bus_publish_failed",
-                        "MDM_BUS_PUBLISH_FAILED symbol=%s error=%r"
-                        % (_bp_sym, exc),
+                        "MDM_BUS_PUBLISH_FAILED symbol=%s error=%r" % (_bp_sym, exc),
                         interval_sec=10.0,
                         level=logging.ERROR,
                     )
@@ -6637,7 +7406,8 @@ class MarketDataManager:
                     log_throttled(
                         self._logger,
                         f"mdm_bus_backpressure:{_bp_sym}",
-                        "MDM_BUS_BACKPRESSURE symbol=%s dropped_ticks=1 coalesced_ticks=1 latest_cache_updated=True" % _bp_sym,
+                        "MDM_BUS_BACKPRESSURE symbol=%s dropped_ticks=1 coalesced_ticks=1 latest_cache_updated=True"
+                        % _bp_sym,
                         interval_sec=30.0,
                         level=logging.WARNING,
                     )
@@ -6685,7 +7455,6 @@ class MarketDataManager:
             except Exception:
                 return False
         return bool(getattr(bus, "_running", False))
-
 
     def _dispatch_awaitable_callback_result(
         self,
@@ -6748,10 +7517,13 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
-        if source == "ws":
-            self._last_ws_tick_mono = time.monotonic()
         self._store_tick(symbol, tick)
         if source == "ws":
+            now_mono = time.monotonic()
+            self._last_ws_tick_mono = now_mono
+            canonical_symbol = self._canonical_symbol(symbol)
+            with self._lock:
+                self._last_valid_live_tick_mono[canonical_symbol] = now_mono
             try:
                 token_value = tick.get("instrument_token") or tick.get("token")
                 token_int = int(token_value) if token_value is not None else None
@@ -6763,7 +7535,12 @@ class MarketDataManager:
                         "MDM_TICK_CACHE_UPDATED symbol=%s token=%s source=ws",
                         symbol,
                         token_int,
-                        extra={"event": "MDM_TICK_CACHE_UPDATED", "symbol": symbol, "token": token_int, "source": "ws"},
+                        extra={
+                            "event": "MDM_TICK_CACHE_UPDATED",
+                            "symbol": symbol,
+                            "token": token_int,
+                            "source": "ws",
+                        },
                     )
                     self._logger.debug(
                         "WS_TICK_STORED symbol=%s token=%s ltp=%s source=ws age_ms=0",
@@ -6785,12 +7562,18 @@ class MarketDataManager:
                 pass
         callbacks: list[TickCallback]
         tick_payload = to_json_safe(dict(tick))
-        ts_payload = pd.to_datetime(tick_payload.get("timestamp"), utc=True, errors="coerce")
+        ts_payload = pd.to_datetime(
+            tick_payload.get("timestamp"), utc=True, errors="coerce"
+        )
         if pd.isna(ts_payload) or ts_payload.year < 2020:
             ts_payload = pd.Timestamp.utcnow()
         tick_payload["timestamp"] = ts_payload.isoformat()
-        tick_payload["timestamp_ms"] = float(pd.Timestamp(ts_payload).timestamp() * 1000.0)
-        tick_payload["received_at"] = float(tick_payload.get("received_at") or time.time())
+        tick_payload["timestamp_ms"] = float(
+            pd.Timestamp(ts_payload).timestamp() * 1000.0
+        )
+        tick_payload["received_at"] = float(
+            tick_payload.get("received_at") or time.time()
+        )
         with self._lock:
             self._last_tick_source[symbol] = source
             callbacks = list(self._subscribers.get(symbol, ()))
@@ -6893,7 +7676,11 @@ class MarketDataManager:
                     self._spot_ws_first_tick_seen = True
                 tick_age = 0.0
                 try:
-                    tick_age = max(time.time() - float(self._last_tick_time.get(symbol, 0.0) or 0.0), 0.0)
+                    tick_age = max(
+                        time.time()
+                        - float(self._last_tick_time.get(symbol, 0.0) or 0.0),
+                        0.0,
+                    )
                 except Exception:
                     tick_age = 0.0
                 log_throttled(
@@ -6902,7 +7689,11 @@ class MarketDataManager:
                     "MDM_WS_TICK_RECEIVED symbol=NSE:NIFTY",
                     interval_sec=60.0,
                     level=logging.DEBUG,
-                    extra={"event": "MDM_WS_TICK_RECEIVED", "symbol": "NSE:NIFTY", "age": round(tick_age, 3)},
+                    extra={
+                        "event": "MDM_WS_TICK_RECEIVED",
+                        "symbol": "NSE:NIFTY",
+                        "age": round(tick_age, 3),
+                    },
                 )
         except Exception:  # pragma: no cover - defensive
             pass
@@ -6921,9 +7712,7 @@ class MarketDataManager:
                         1e-6,
                     )
                     rates = {
-                        sym: (
-                            count - self._last_tick_rate_snapshot.get(sym, 0)
-                        )
+                        sym: (count - self._last_tick_rate_snapshot.get(sym, 0))
                         / rate_interval
                         for sym, count in self._ticks_received_per_symbol.items()
                         if sym in self._active_subscribed_symbols
@@ -6960,16 +7749,15 @@ class MarketDataManager:
                     if (time.time() - float(self._last_tick_time.get(sym, 0.0) or 0.0))
                     >= self._option_stale_seconds
                 ]
-                stale_symbols = sum(
-                    1
-                    for sym in stale_symbols_list
-                )
+                stale_symbols = sum(1 for sym in stale_symbols_list)
             log_throttled_live(
                 self._logger,
                 logging.INFO,
                 "MARKET_DATA_HEALTH_SUMMARY",
                 f"MARKET_DATA_HEALTH_SUMMARY:{self._is_ws_connected()}:{subscribed}:{live_symbols}:{stale_symbols}",
-                float(os.getenv("LOG_THROTTLE_MARKET_DATA_HEALTH_SECONDS", "300") or "300"),
+                float(
+                    os.getenv("LOG_THROTTLE_MARKET_DATA_HEALTH_SECONDS", "300") or "300"
+                ),
                 "MARKET_DATA_HEALTH_SUMMARY ws_connected=%s subscribed=%d live_symbols=%d stale_symbols=%d poll_fallbacks=%d bus_running=%s",
                 self._is_ws_connected(),
                 subscribed,
@@ -6977,43 +7765,93 @@ class MarketDataManager:
                 stale_symbols,
                 int(getattr(self, "_poll_fallback_count", 0)),
                 bool(getattr(getattr(self, "bus", None), "running", False)),
-                extra={"event": "MARKET_DATA_HEALTH_SUMMARY", "ws_connected": self._is_ws_connected(), "subscribed": subscribed, "live_symbols": live_symbols, "stale_symbols": stale_symbols},
+                extra={
+                    "event": "MARKET_DATA_HEALTH_SUMMARY",
+                    "ws_connected": self._is_ws_connected(),
+                    "subscribed": subscribed,
+                    "live_symbols": live_symbols,
+                    "stale_symbols": stale_symbols,
+                },
             )
             now_epoch = time.time()
-            last_detail_emit = float(getattr(self, "_last_stale_detail_emit_epoch", 0.0) or 0.0)
+            last_detail_emit = float(
+                getattr(self, "_last_stale_detail_emit_epoch", 0.0) or 0.0
+            )
             if (now_epoch - last_detail_emit) >= 30.0:
-                fresh_symbols = sorted([sym for sym in self._active_subscribed_symbols if sym not in stale_symbols_list])
+                fresh_symbols = sorted(
+                    [
+                        sym
+                        for sym in self._active_subscribed_symbols
+                        if sym not in stale_symbols_list
+                    ]
+                )
                 stale_age_map = {
-                    sym: int(max(0.0, (now_epoch - float(self._last_tick_time.get(sym, 0.0) or 0.0)) * 1000.0))
+                    sym: int(
+                        max(
+                            0.0,
+                            (
+                                now_epoch
+                                - float(self._last_tick_time.get(sym, 0.0) or 0.0)
+                            )
+                            * 1000.0,
+                        )
+                    )
                     for sym in stale_symbols_list
                 }
                 active_basket = getattr(self, "_active_contract_basket", None)
-                selected_ce_symbol = str(
-                    self._basket_value(active_basket, "selected_ce", None)
-                    or self._basket_value(active_basket, "atm_ce", None)
-                    or getattr(self, "_selected_ce_symbol", None)
-                    or getattr(self, "selected_ce_symbol", None)
-                    or ""
-                ) or None
-                selected_pe_symbol = str(
-                    self._basket_value(active_basket, "selected_pe", None)
-                    or self._basket_value(active_basket, "atm_pe", None)
-                    or getattr(self, "_selected_pe_symbol", None)
-                    or getattr(self, "selected_pe_symbol", None)
-                    or ""
-                ) or None
-                selected_ce_stale = bool(selected_ce_symbol and selected_ce_symbol in stale_symbols_list)
-                selected_pe_stale = bool(selected_pe_symbol and selected_pe_symbol in stale_symbols_list)
-                selected_ce_age_ms = stale_age_map.get(selected_ce_symbol) if selected_ce_symbol else None
-                selected_pe_age_ms = stale_age_map.get(selected_pe_symbol) if selected_pe_symbol else None
-                live_orders_armed = bool(getattr(self, "_live_orders_armed", getattr(self, "live_orders_armed", True)))
+                selected_ce_symbol = (
+                    str(
+                        self._basket_value(active_basket, "selected_ce", None)
+                        or self._basket_value(active_basket, "atm_ce", None)
+                        or getattr(self, "_selected_ce_symbol", None)
+                        or getattr(self, "selected_ce_symbol", None)
+                        or ""
+                    )
+                    or None
+                )
+                selected_pe_symbol = (
+                    str(
+                        self._basket_value(active_basket, "selected_pe", None)
+                        or self._basket_value(active_basket, "atm_pe", None)
+                        or getattr(self, "_selected_pe_symbol", None)
+                        or getattr(self, "selected_pe_symbol", None)
+                        or ""
+                    )
+                    or None
+                )
+                selected_ce_stale = bool(
+                    selected_ce_symbol and selected_ce_symbol in stale_symbols_list
+                )
+                selected_pe_stale = bool(
+                    selected_pe_symbol and selected_pe_symbol in stale_symbols_list
+                )
+                selected_ce_age_ms = (
+                    stale_age_map.get(selected_ce_symbol)
+                    if selected_ce_symbol
+                    else None
+                )
+                selected_pe_age_ms = (
+                    stale_age_map.get(selected_pe_symbol)
+                    if selected_pe_symbol
+                    else None
+                )
+                live_orders_armed = bool(
+                    getattr(
+                        self,
+                        "_live_orders_armed",
+                        getattr(self, "live_orders_armed", True),
+                    )
+                )
                 impact_on_trading = "diagnostic_only"
                 if (selected_ce_stale or selected_pe_stale) and not live_orders_armed:
                     impact_on_trading = "live_orders_disarmed"
                 elif selected_ce_stale or selected_pe_stale:
                     impact_on_trading = "none"
                 market_mode = get_runtime_market_mode()
-                postmarket_quiet = post_market_quiet_mode_enabled() and market_mode in {"POST_MARKET", "HOLIDAY"}
+                postmarket_quiet = post_market_quiet_mode_enabled() and market_mode in {
+                    "POST_MARKET",
+                    "HOLIDAY",
+                }
                 if postmarket_quiet:
                     summary_interval = post_market_market_data_summary_seconds()
                     if (now_epoch - last_detail_emit) >= summary_interval:
@@ -7038,9 +7876,22 @@ class MarketDataManager:
                     log_on_change(
                         self._logger,
                         key="MARKET_DATA_STALE_SYMBOLS_DETAIL",
-                        state=(tuple(sorted(stale_symbols_list)), self._is_ws_connected(), selected_ce_stale, selected_pe_stale),
-                        message="MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s" % (len(stale_symbols_list), len(fresh_symbols), self._is_ws_connected()),
-                        reminder_seconds=float(os.getenv("LOG_THROTTLE_MARKET_DATA_HEALTH_SECONDS", "300") or "300"),
+                        state=(
+                            tuple(sorted(stale_symbols_list)),
+                            self._is_ws_connected(),
+                            selected_ce_stale,
+                            selected_pe_stale,
+                        ),
+                        message="MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s"
+                        % (
+                            len(stale_symbols_list),
+                            len(fresh_symbols),
+                            self._is_ws_connected(),
+                        ),
+                        reminder_seconds=float(
+                            os.getenv("LOG_THROTTLE_MARKET_DATA_HEALTH_SECONDS", "300")
+                            or "300"
+                        ),
                         level=logging.INFO,
                         extra={
                             "event": "MARKET_DATA_STALE_SYMBOLS_DETAIL",
@@ -7073,7 +7924,9 @@ class MarketDataManager:
                         # Default-argument capture prevents closure bug where
                         # all lambdas in the for-loop share the last `callback`.
                         loop.call_soon_threadsafe(
-                            lambda _cb=callback, _tp=tick_payload: safe_task(_cb(dict(_tp)))
+                            lambda _cb=callback, _tp=tick_payload: safe_task(
+                                _cb(dict(_tp))
+                            )
                         )
                     else:
                         with self._lock:
@@ -7257,39 +8110,150 @@ class MarketDataManager:
             self._zombie_stale_logged = False
             return
         self._monitor_spot_ws_health()
-        if not self._is_ws_healthy():
-            self._zombie_stale_logged = False
-            return
+        ws_healthy = self._is_ws_healthy()
 
-        now = time.time()
         with self._lock:
-            candidate_symbols = sorted(
-                sym
-                for sym in self._active_subscribed_symbols
-                if sym in self._symbols_with_tick
-            )
-            stale_symbols = [
-                sym
+            required = self._required_live_symbols()
+            candidate_symbols = sorted(required)
+            since_by_symbol = {
+                sym: self._required_symbol_since_mono.get(sym)
                 for sym in candidate_symbols
-                if (now - self._last_tick_time.get(sym, now))
-                > self._zombie_tick_threshold_sec
-            ]
+            }
         if not candidate_symbols:
             self._zombie_stale_logged = False
             return
 
-        stale_ratio = len(stale_symbols) / max(len(candidate_symbols), 1)
+        now_mono = time.monotonic()
+        stale_symbols: list[str] = []
+        missing_symbols: list[str] = []
+        fresh_symbols: list[str] = []
+        for sym in candidate_symbols:
+            age = self.time_since_last_live_ws_tick(sym)
+            if age is None:
+                required_since = since_by_symbol.get(sym) or now_mono
+                if now_mono - required_since >= self._required_symbol_missing_grace_sec:
+                    missing_symbols.append(sym)
+                continue
+            if age > self._zombie_tick_threshold_sec:
+                stale_symbols.append(sym)
+            else:
+                fresh_symbols.append(sym)
+        stale_or_missing_symbols = stale_symbols + missing_symbols
+        stale_ratio = len(stale_or_missing_symbols) / max(len(candidate_symbols), 1)
+        heartbeat_age = (
+            None
+            if self._last_hb_mono is None
+            else max(0.0, time.monotonic() - self._last_hb_mono)
+        )
         self._logger.info(
             "Condition met: mdm_zombie_summary",
             extra={
                 "event": "mdm_zombie_summary",
                 "active_symbols": len(candidate_symbols),
                 "stale_symbols": len(stale_symbols),
+                "missing_symbols": len(missing_symbols),
+                "fresh_symbols": len(fresh_symbols),
                 "stale_ratio": round(stale_ratio, 3),
                 "threshold_seconds": self._zombie_tick_threshold_sec,
+                "required_symbols": len(required),
+                "heartbeat_age_s": heartbeat_age,
             },
         )
-        if stale_ratio < 0.70:
+        spot_stale = "NSE:NIFTY" in stale_or_missing_symbols
+        fut_stale = any(
+            self._is_context_symbol(sym) and sym != "NSE:NIFTY"
+            for sym in stale_or_missing_symbols
+        )
+        heartbeat_stale = (
+            heartbeat_age is not None
+            and heartbeat_age > self._zombie_tick_threshold_sec
+        )
+        desired_tokens = set(getattr(self, "_desired_tokens", set()) or set())
+        confirmed_tokens = set(
+            getattr(self, "_confirmed_subscriptions", set()) or set()
+        )
+        subscription_divergence = bool(
+            desired_tokens and confirmed_tokens and (desired_tokens - confirmed_tokens)
+        )
+        if subscription_divergence:
+            self._subscription_divergence_since_mono = (
+                self._subscription_divergence_since_mono or now_mono
+            )
+        else:
+            self._subscription_divergence_since_mono = None
+        divergence_age = (
+            0.0
+            if self._subscription_divergence_since_mono is None
+            else now_mono - self._subscription_divergence_since_mono
+        )
+        recovery_after_divergence = (
+            self._last_symbol_level_recovery_mono is not None
+            and self._subscription_divergence_since_mono is not None
+            and self._last_symbol_level_recovery_mono
+            >= self._subscription_divergence_since_mono
+        )
+        subscription_transport_failure = (
+            subscription_divergence
+            and divergence_age >= self._required_symbol_missing_grace_sec
+            and recovery_after_divergence
+        )
+        transport_failure = (
+            heartbeat_stale
+            or (spot_stale and fut_stale)
+            or stale_ratio >= 0.70
+            or subscription_transport_failure
+        )
+        if stale_or_missing_symbols and not transport_failure:
+            for sym in stale_or_missing_symbols:
+                age = self.time_since_last_live_ws_tick(sym)
+                self.request_fallback_refresh(sym, reason="ws_symbol_stale_recovery")
+                self._last_symbol_level_recovery_mono = now_mono
+                self._logger.warning(
+                    "WS_SYMBOL_STALE_RECOVERY symbol=%s required=%s stale_age_s=%s heartbeat_age_s=%s reason=%s",
+                    sym,
+                    sym in required,
+                    age,
+                    heartbeat_age,
+                    (
+                        "missing_first_ws_tick"
+                        if sym in missing_symbols
+                        else "stale_ws_tick"
+                    ),
+                    extra={
+                        "event": "WS_SYMBOL_STALE_RECOVERY",
+                        "symbol": sym,
+                        "required": sym in required,
+                        "stale_age_s": age,
+                        "heartbeat_age_s": heartbeat_age,
+                        "ws_healthy": ws_healthy,
+                        "subscription_divergence": subscription_divergence,
+                        "subscription_divergence_age_s": divergence_age,
+                        "reason": (
+                            "missing_first_ws_tick"
+                            if sym in missing_symbols
+                            else "stale_ws_tick"
+                        ),
+                    },
+                )
+            self._logger.warning(
+                "WS_GLOBAL_RESTART_SUPPRESSED stale_symbols=%d heartbeat_age_s=%s reason=no_transport_failure",
+                len(stale_symbols),
+                heartbeat_age,
+                extra={
+                    "event": "WS_GLOBAL_RESTART_SUPPRESSED",
+                    "stale_symbols": stale_symbols,
+                    "missing_symbols": missing_symbols,
+                    "heartbeat_age_s": heartbeat_age,
+                    "ws_healthy": ws_healthy,
+                    "subscription_divergence": subscription_divergence,
+                    "subscription_divergence_age_s": divergence_age,
+                    "reason": "no_transport_failure",
+                },
+            )
+            self._zombie_stale_logged = False
+            return
+
+        if stale_ratio < 0.70 and not transport_failure:
             self._zombie_stale_logged = False
             # Recovery observed — reset exponential backoff counter
             # so the next genuine stall restarts at the base cooldown.
@@ -7297,19 +8261,34 @@ class MarketDataManager:
                 self._zombie_restart_consecutive = 0
             return
 
-        if not self._zombie_stale_logged and stale_symbols:
+        if not self._zombie_stale_logged and stale_or_missing_symbols:
             self._logger.critical(
                 "CRITICAL zombie_tick_detected symbols=%s threshold=%.2fs",
-                stale_symbols[:8],
+                stale_or_missing_symbols[:8],
                 self._zombie_tick_threshold_sec,
                 extra={
                     "event": "mdm_zombie_tick_detected",
-                    "symbols": stale_symbols,
+                    "symbols": stale_or_missing_symbols,
                     "stale_ratio": stale_ratio,
                 },
             )
             self._zombie_stale_logged = True
 
+        self._logger.critical(
+            "WS_GLOBAL_RESTART_TRIGGERED stale_symbols=%d heartbeat_age_s=%s reason=transport_failure",
+            len(stale_or_missing_symbols),
+            heartbeat_age,
+            extra={
+                "event": "WS_GLOBAL_RESTART_TRIGGERED",
+                "symbols": stale_symbols,
+                "missing_symbols": missing_symbols,
+                "heartbeat_age_s": heartbeat_age,
+                "ws_healthy": ws_healthy,
+                "subscription_divergence": subscription_divergence,
+                "subscription_divergence_age_s": divergence_age,
+                "reason": "transport_failure",
+            },
+        )
         self._trigger_zombie_ws_restart()
 
     def _trigger_zombie_ws_restart(self) -> None:
@@ -7349,9 +8328,10 @@ class MarketDataManager:
                 self._zombie_restart_failures = 0
                 self._zombie_restart_consecutive += 1
                 self._zombie_restart_attempts.append(now)
-                while self._zombie_restart_attempts and (
-                    now - self._zombie_restart_attempts[0]
-                ) > 120.0:
+                while (
+                    self._zombie_restart_attempts
+                    and (now - self._zombie_restart_attempts[0]) > 120.0
+                ):
                     self._zombie_restart_attempts.popleft()
                 self._logger.warning(
                     "Condition met: mdm_zombie_ws_restart",
@@ -7562,7 +8542,9 @@ class MarketDataManager:
             if self._active_subscribed_symbols or self._tracked_symbols:
                 ordered = self._poll_candidates(now_dt)
             else:
-                ordered = [sym for sym in ordered if self._should_poll_symbol(sym, now_dt)]
+                ordered = [
+                    sym for sym in ordered if self._should_poll_symbol(sym, now_dt)
+                ]
             limit = self._rest_poll_max_symbols
             if limit > 0 and len(ordered) > limit:
                 self._logger.debug(
@@ -7585,7 +8567,11 @@ class MarketDataManager:
                     self._logger.warning(
                         "EXPIRED_FUTURE_SUPPRESSED symbol=%s stage=symbols_for_poll",
                         sym,
-                        extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": sym, "stage": "symbols_for_poll"},
+                        extra={
+                            "event": "EXPIRED_FUTURE_SUPPRESSED",
+                            "symbol": sym,
+                            "stage": "symbols_for_poll",
+                        },
                     )
                     continue
                 filtered.append(sym)
@@ -7598,6 +8584,7 @@ class MarketDataManager:
                 exc_info=exc,
             )
             return []
+
     def ensure_tracking(
         self, symbol: str, *, seed: bool = True, subscribe: bool = True
     ) -> bool:
@@ -7631,12 +8618,19 @@ class MarketDataManager:
         if self._is_nifty_future_symbol_expired(sym):
             active = self.get_active_nifty_future_symbol_cached()
             if active and self._canonical_symbol(active) != sym:
-                self.rotate_active_nifty_future_context(sym, active, reason="ensure_tracking_expired_future")
+                self.rotate_active_nifty_future_context(
+                    sym, active, reason="ensure_tracking_expired_future"
+                )
             self._logger.warning(
                 "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=ensure_tracking",
                 sym,
                 active,
-                extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": sym, "active_symbol": active, "stage": "ensure_tracking"},
+                extra={
+                    "event": "EXPIRED_FUTURE_SUPPRESSED",
+                    "symbol": sym,
+                    "active_symbol": active,
+                    "stage": "ensure_tracking",
+                },
             )
             return False
         try:
@@ -7850,7 +8844,9 @@ class MarketDataManager:
             naked_symbol = symbol.split(":", 1)[-1]
             if symbol in payload and isinstance(payload.get(symbol), Mapping):
                 quote_payload = cast(Mapping[str, Any], payload[symbol])
-            elif naked_symbol in payload and isinstance(payload.get(naked_symbol), Mapping):
+            elif naked_symbol in payload and isinstance(
+                payload.get(naked_symbol), Mapping
+            ):
                 quote_payload = cast(Mapping[str, Any], payload[naked_symbol])
 
             token = (
@@ -7864,11 +8860,19 @@ class MarketDataManager:
                 or quote_payload.get("ltp")
                 or quote_payload.get("LastTradedPrice")
             )
-            depth = quote_payload.get("depth") if isinstance(quote_payload.get("depth"), Mapping) else {}
+            depth = (
+                quote_payload.get("depth")
+                if isinstance(quote_payload.get("depth"), Mapping)
+                else {}
+            )
             buy_levels = depth.get("buy") if isinstance(depth, Mapping) else []
             sell_levels = depth.get("sell") if isinstance(depth, Mapping) else []
-            buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
-            sell_top = sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+            buy_top = (
+                buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
+            )
+            sell_top = (
+                sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+            )
             bid = _coerce_positive_float(
                 quote_payload.get("bid")
                 or quote_payload.get("best_bid")
@@ -8003,11 +9007,15 @@ class MarketDataManager:
         self._last_quote_ts_ms[canonical_symbol] = now_ms
         return quote
 
-    def resolve_active_nifty_future_symbol(self, now: datetime | None = None) -> str | None:
+    def resolve_active_nifty_future_symbol(
+        self, now: datetime | None = None
+    ) -> str | None:
         """Return active future from committed basket only; InstrumentManager owns selection."""
         return self.get_active_nifty_future_symbol_cached(now=now)
 
-    def get_active_nifty_future_symbol_cached(self, *, now: datetime | None = None, ttl_seconds: float = 30.0) -> str | None:
+    def get_active_nifty_future_symbol_cached(
+        self, *, now: datetime | None = None, ttl_seconds: float = 30.0
+    ) -> str | None:
         basket = getattr(self, "_active_contract_basket", None)
         symbol = self._basket_value(basket, "futures_symbol", None)
         canonical = canonical_nifty_future_symbol(symbol)
@@ -8027,11 +9035,17 @@ class MarketDataManager:
         )
         return None
 
-    def _set_active_nifty_future_cache(self, symbol: str, *, ttl_seconds: float = 30.0) -> str:
+    def _set_active_nifty_future_cache(
+        self, symbol: str, *, ttl_seconds: float = 30.0
+    ) -> str:
         return self._canonical_symbol(symbol)
 
-    def _resolve_active_nifty_future_from_instruments(self, instruments: Iterable[Mapping[str, Any]], now: datetime | None = None) -> str | None:
-        raise RuntimeError("MDM does not resolve active futures from instruments; use InstrumentManager basket")
+    def _resolve_active_nifty_future_from_instruments(
+        self, instruments: Iterable[Mapping[str, Any]], now: datetime | None = None
+    ) -> str | None:
+        raise RuntimeError(
+            "MDM does not resolve active futures from instruments; use InstrumentManager basket"
+        )
 
     def maybe_rotate_nifty_futures_context(
         self,
@@ -8062,24 +9076,52 @@ class MarketDataManager:
         if not active:
             self._logger.warning(
                 "FUTURES_CONTEXT_STALE_OR_UNRESOLVED current_symbol=%s reason=%s",
-                current_symbol, reason,
-                extra={"event": "FUTURES_CONTEXT_STALE_OR_UNRESOLVED", "current_symbol": current_symbol, "reason": reason, "trace_id": trace_id, "source": "unresolved"},
+                current_symbol,
+                reason,
+                extra={
+                    "event": "FUTURES_CONTEXT_STALE_OR_UNRESOLVED",
+                    "current_symbol": current_symbol,
+                    "reason": reason,
+                    "trace_id": trace_id,
+                    "source": "unresolved",
+                },
             )
-            return FuturesContextRotationResult(None, current_symbol, False, True, reason, "unresolved")
-        if current_symbol and self._canonical_symbol(current_symbol) == self._canonical_symbol(active):
+            return FuturesContextRotationResult(
+                None, current_symbol, False, True, reason, "unresolved"
+            )
+        if current_symbol and self._canonical_symbol(
+            current_symbol
+        ) == self._canonical_symbol(active):
             self.purge_stale_nifty_futures(active, reason=reason)
-            return FuturesContextRotationResult(current_symbol, current_symbol, False, False, reason, source)
+            return FuturesContextRotationResult(
+                current_symbol, current_symbol, False, False, reason, source
+            )
         old_symbol = current_symbol
-        self.rotate_active_nifty_future_context(old_symbol, active, reason=reason, trace_id=trace_id)
+        self.rotate_active_nifty_future_context(
+            old_symbol, active, reason=reason, trace_id=trace_id
+        )
         self.purge_stale_nifty_futures(active, reason=reason)
         self._logger.warning(
             "FUTURES_CONTEXT_SYMBOL_ROTATED old_symbol=%s new_symbol=%s reason=%s",
-            old_symbol, active, reason,
-            extra={"event": "FUTURES_CONTEXT_SYMBOL_ROTATED", "old_symbol": old_symbol, "new_symbol": active, "reason": reason, "trace_id": trace_id, "source": source},
+            old_symbol,
+            active,
+            reason,
+            extra={
+                "event": "FUTURES_CONTEXT_SYMBOL_ROTATED",
+                "old_symbol": old_symbol,
+                "new_symbol": active,
+                "reason": reason,
+                "trace_id": trace_id,
+                "source": source,
+            },
         )
-        return FuturesContextRotationResult(active, old_symbol, True, False, reason, source)
+        return FuturesContextRotationResult(
+            active, old_symbol, True, False, reason, source
+        )
 
-    def _is_nifty_future_symbol_expired(self, symbol: str, *, now: datetime | None = None) -> bool:
+    def _is_nifty_future_symbol_expired(
+        self, symbol: str, *, now: datetime | None = None
+    ) -> bool:
         canonical = canonical_nifty_future_symbol(symbol)
         if not canonical:
             return False
@@ -8088,11 +9130,16 @@ class MarketDataManager:
             return canonical_nifty_future_symbol(active) != canonical
         return is_nifty_future_expired(canonical, now=now)
 
-    def purge_stale_nifty_futures(self, active_symbol: str | None = None, *, reason: str = "active_future_rotation") -> list[int]:
+    def purge_stale_nifty_futures(
+        self,
+        active_symbol: str | None = None,
+        *,
+        reason: str = "active_future_rotation",
+    ) -> list[int]:
         """Purge stale NIFTY futures symbols/tokens from runtime subscription state."""
-        active = canonical_nifty_future_symbol(active_symbol) or canonical_nifty_future_symbol(
-            self.get_active_nifty_future_symbol_cached()
-        )
+        active = canonical_nifty_future_symbol(
+            active_symbol
+        ) or canonical_nifty_future_symbol(self.get_active_nifty_future_symbol_cached())
         if not active:
             return []
 
@@ -8113,7 +9160,9 @@ class MarketDataManager:
                 stale_tokens.add(token_int)
 
         with self._lock:
-            for symbol in list(self._tracked_symbols) + list(self._active_subscribed_symbols):
+            for symbol in list(self._tracked_symbols) + list(
+                self._active_subscribed_symbols
+            ):
                 _mark_symbol(symbol)
             for mapping_name in ("_token_by_symbol", "_symbol_to_token"):
                 mapping = getattr(self, mapping_name, {})
@@ -8131,7 +9180,14 @@ class MarketDataManager:
                         if canonical and canonical != active:
                             stale_symbols.add(canonical)
                             _mark_token(token)
-            for cache_name in ("_latest_ticks", "_tick_cache", "_last_tick_snapshot", "_history", "_poll_bar_state", "_last_poll_bucket"):
+            for cache_name in (
+                "_latest_ticks",
+                "_tick_cache",
+                "_last_tick_snapshot",
+                "_history",
+                "_poll_bar_state",
+                "_last_poll_bucket",
+            ):
                 cache = getattr(self, cache_name, {})
                 if isinstance(cache, dict):
                     for symbol in list(cache.keys()):
@@ -8149,7 +9205,9 @@ class MarketDataManager:
             self._readiness_requirements = reqs
 
             for symbol in list(stale_symbols):
-                token = self._token_by_symbol.get(symbol) or self._symbol_to_token.get(symbol)
+                token = self._token_by_symbol.get(symbol) or self._symbol_to_token.get(
+                    symbol
+                )
                 if token is not None:
                     _mark_token(token)
                 self._tracked_symbols.discard(symbol)
@@ -8182,10 +9240,14 @@ class MarketDataManager:
                 if mapped_token is not None:
                     _mark_token(mapped_token)
                 self._suspended_context_symbols.add(symbol)
-                self._suspended_context_symbol_until[symbol] = time.monotonic() + (48.0 * 3600.0)
+                self._suspended_context_symbol_until[symbol] = time.monotonic() + (
+                    48.0 * 3600.0
+                )
 
             for token in list(stale_tokens):
-                mapped_symbol = self._symbol_by_token.get(token) or self._token_to_symbol.get(token)
+                mapped_symbol = self._symbol_by_token.get(
+                    token
+                ) or self._token_to_symbol.get(token)
                 canonical = canonical_nifty_future_symbol(mapped_symbol)
                 if canonical == active:
                     stale_tokens.discard(token)
@@ -8230,7 +9292,9 @@ class MarketDataManager:
                 },
             )
         purged_tokens = sorted(stale_tokens)
-        if purged_tokens or any(token not in self._desired_tokens for token in ws_tokens):
+        if purged_tokens or any(
+            token not in self._desired_tokens for token in ws_tokens
+        ):
             self._reconcile_ws_subscriptions()
         # Log counts + small sample only — never log full token lists (noisy, useless)
         self._logger.info(
@@ -8257,7 +9321,11 @@ class MarketDataManager:
         if callable(purge_hub):
             purge_hub(symbols=sorted(stale_symbols), tokens=purged_tokens)
         if stale_symbols or purged_tokens:
-            purge_key = (active, tuple(sorted(purged_tokens)), tuple(sorted(stale_symbols)))
+            purge_key = (
+                active,
+                tuple(sorted(purged_tokens)),
+                tuple(sorted(stale_symbols)),
+            )
             repeated = getattr(self, "_last_futures_purge_key", None) == purge_key
             self._last_futures_purge_key = purge_key
             self._logger.log(
@@ -8295,7 +9363,9 @@ class MarketDataManager:
             raise RuntimeError("rotate_active_nifty_future_context requires new_symbol")
         old_token_to_unsubscribe: int | None = None
         with self._lock:
-            already_suspended_old = bool(old_canonical and old_canonical in self._suspended_context_symbols)
+            already_suspended_old = bool(
+                old_canonical and old_canonical in self._suspended_context_symbols
+            )
             if old_canonical and old_canonical != new_canonical:
                 old_token = self._token_by_symbol.get(old_canonical)
                 self._tracked_symbols.discard(old_canonical)
@@ -8318,7 +9388,9 @@ class MarketDataManager:
                 self._quote_direct_miss_until.pop(old_canonical, None)
                 self._quote_direct_miss_reason.pop(old_canonical, None)
                 self._suspended_context_symbols.add(old_canonical)
-                self._suspended_context_symbol_until[old_canonical] = time.monotonic() + (48.0 * 3600.0)
+                self._suspended_context_symbol_until[old_canonical] = (
+                    time.monotonic() + (48.0 * 3600.0)
+                )
                 if old_token is not None:
                     old_token_int = int(old_token)
                     old_token_to_unsubscribe = old_token_int
@@ -8344,7 +9416,16 @@ class MarketDataManager:
                 try:
                     ws.unsubscribe_tokens([old_token_to_unsubscribe])
                 except (RuntimeError, ValueError, TypeError):
-                    self._logger.warning("FUTURES_CONTEXT_WS_UNSUBSCRIBE_FAILED symbol=%s token=%s", old_canonical, old_token_to_unsubscribe, extra={"event": "FUTURES_CONTEXT_WS_UNSUBSCRIBE_FAILED", "symbol": old_canonical, "token": old_token_to_unsubscribe})
+                    self._logger.warning(
+                        "FUTURES_CONTEXT_WS_UNSUBSCRIBE_FAILED symbol=%s token=%s",
+                        old_canonical,
+                        old_token_to_unsubscribe,
+                        extra={
+                            "event": "FUTURES_CONTEXT_WS_UNSUBSCRIBE_FAILED",
+                            "symbol": old_canonical,
+                            "token": old_token_to_unsubscribe,
+                        },
+                    )
         self.request_symbol_subscription(new_canonical)
         self._set_active_nifty_future_cache(new_canonical)
         reqs = dict(self._readiness_requirements)
@@ -8358,13 +9439,24 @@ class MarketDataManager:
                 old_canonical or None,
                 new_canonical,
                 reason,
-                extra={"event": "FUTURES_CONTEXT_ROTATED", "old_symbol": old_canonical or None, "new_symbol": new_canonical, "reason": reason, "trace_id": trace_id},
+                extra={
+                    "event": "FUTURES_CONTEXT_ROTATED",
+                    "old_symbol": old_canonical or None,
+                    "new_symbol": new_canonical,
+                    "reason": reason,
+                    "trace_id": trace_id,
+                },
             )
         self._logger.info(
             "ACTIVE_FUTURE_READY symbol=%s reason=%s",
             new_canonical,
             reason,
-            extra={"event": "ACTIVE_FUTURE_READY", "symbol": new_canonical, "reason": reason, "trace_id": trace_id},
+            extra={
+                "event": "ACTIVE_FUTURE_READY",
+                "symbol": new_canonical,
+                "reason": reason,
+                "trace_id": trace_id,
+            },
         )
 
     def get_symbol_snapshot(self, symbol: str) -> MarketSnapshot:
@@ -8372,7 +9464,9 @@ class MarketDataManager:
         canonical = self._canonical_symbol(symbol)
         tick = self.get_latest_tick(canonical) or {}
         ltp = _coerce_float(tick.get("ltp") or tick.get("last_price"))
-        bid, ask, _spread_pct, resolved_bid_ask_source = resolve_quote_bid_ask_spread(tick)
+        bid, ask, _spread_pct, resolved_bid_ask_source = resolve_quote_bid_ask_spread(
+            tick
+        )
         mid = None
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             mid = (float(bid) + float(ask)) / 2.0
@@ -8395,7 +9489,11 @@ class MarketDataManager:
             bars = list(self._ohlc.get(self._bar_symbol_key(canonical), ()))
         if ltp is None:
             latest_bar = bars[-1] if bars else {}
-            candle_close = _coerce_float(latest_bar.get("close")) if isinstance(latest_bar, Mapping) else None
+            candle_close = (
+                _coerce_float(latest_bar.get("close"))
+                if isinstance(latest_bar, Mapping)
+                else None
+            )
             if candle_close is not None and candle_close > 0:
                 ltp = candle_close
                 source = "ws_candle_fallback"
@@ -8411,16 +9509,32 @@ class MarketDataManager:
                     },
                 )
         latest = bars[-1] if bars else {}
-        latest_candle_provisional = bool(latest.get("provisional")) if isinstance(latest, Mapping) else False
-        latest_candle_synthetic = bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False
+        latest_candle_provisional = (
+            bool(latest.get("provisional")) if isinstance(latest, Mapping) else False
+        )
+        latest_candle_synthetic = (
+            bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False
+        )
         ohlc_valid = bool(bars)
-        depth_available = isinstance(tick.get("depth"), Mapping) and bool(tick.get("depth"))
+        depth_available = isinstance(tick.get("depth"), Mapping) and bool(
+            tick.get("depth")
+        )
         bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
         ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
         bid_ask_source = str(
-            tick.get("bid_ask_source") or resolved_bid_ask_source or ("market_depth" if depth_available else "missing")
+            tick.get("bid_ask_source")
+            or resolved_bid_ask_source
+            or ("market_depth" if depth_available else "missing")
         ).lower()
-        source_ok = bid_ask_source in {"market_depth", "quote", "rest_quote", "ws_full", "depth", "top_level", "best_bid_ask"}
+        source_ok = bid_ask_source in {
+            "market_depth",
+            "quote",
+            "rest_quote",
+            "ws_full",
+            "depth",
+            "top_level",
+            "best_bid_ask",
+        }
         quote_source = str(tick.get("source") or "").lower()
         rest_quote_source = quote_source in {"rest", "rest_quote", "quote"}
         tradable_quote = (
@@ -8682,7 +9796,9 @@ class MarketDataManager:
             normalized_key = self._canonical_symbol(key)
         return self._broker_quote(broker, normalized_key)
 
-    def _broker_quote(self, broker: Any, broker_symbol: str | int) -> dict[str, Any] | None:
+    def _broker_quote(
+        self, broker: Any, broker_symbol: str | int
+    ) -> dict[str, Any] | None:
         """Fetch quote via broker.quote/get_quote variants. Args: broker + symbol. Returns: quote dict or None. Raises: none."""
         try:
             aliases: list[str] = []
@@ -8719,7 +9835,10 @@ class MarketDataManager:
                             if isinstance(payload, Mapping):
                                 self._mark_quote_api_status(available=True)
                                 return dict(payload)
-                        if any(key in raw_quote for key in ("ltp", "last_price", "bid", "ask")):
+                        if any(
+                            key in raw_quote
+                            for key in ("ltp", "last_price", "bid", "ask")
+                        ):
                             self._mark_quote_api_status(available=True)
                             return dict(raw_quote)
                         for payload in raw_quote.values():
@@ -8893,7 +10012,9 @@ class MarketDataManager:
                     resolved_symbol = self._symbol_by_token.get(int(symbol))
             elif str(symbol).strip().isdigit():
                 with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
+                    resolved_symbol = self._symbol_by_token.get(
+                        int(str(symbol).strip())
+                    )
             else:
                 resolved_symbol = self._canonical_symbol(str(symbol))
             if not resolved_symbol:
@@ -9011,7 +10132,11 @@ class MarketDataManager:
                 if self._is_context_symbol(symbol)
                 else self._polling_policy.option_stale_seconds
             )
-            if ws_age is not None and ws_age <= stale_threshold and self._last_tick_source.get(symbol) == "ws":
+            if (
+                ws_age is not None
+                and ws_age <= stale_threshold
+                and self._last_tick_source.get(symbol) == "ws"
+            ):
                 self._logger.debug(
                     "poll_tick_skipped_fresh_ws symbol=%s ws_age=%.3f threshold=%.3f",
                     symbol,
@@ -9025,7 +10150,9 @@ class MarketDataManager:
                     },
                 )
                 return
-            self._poll_fallback_count = int(getattr(self, "_poll_fallback_count", 0)) + 1
+            self._poll_fallback_count = (
+                int(getattr(self, "_poll_fallback_count", 0)) + 1
+            )
             self._ingest_normalized_tick(normalized_live)
             self._process_poll_quote(symbol, normalized)
             self._logger.info(
@@ -9062,8 +10189,14 @@ class MarketDataManager:
         s = str(symbol or "").upper()
         return s.startswith("NFO:NIFTY") and (s.endswith("CE") or s.endswith("PE"))
 
-    def _tick_age_seconds(self, symbol: str, now: datetime) -> float | None:
+    def _tick_age_seconds(
+        self, symbol: str, now: datetime | None = None
+    ) -> float | None:
         """Return tick age in seconds. Args: symbol, now; Returns: age or none; Raises: none."""
+        live_age = self.time_since_last_live_ws_tick(symbol)
+        if live_age is not None:
+            return live_age
+        now = now or datetime.now(timezone.utc)
         ts = self._last_tick_time.get(symbol)
         if ts is None:
             return None
@@ -9118,11 +10251,9 @@ class MarketDataManager:
 
     def _is_ws_fresh_enough(self, symbol: str, now: datetime) -> bool:
         """Return whether websocket tick freshness is sufficient. Args: symbol, now. Returns: bool. Raises: none."""
-        ts = self._last_tick_time.get(self._canonical_symbol(symbol))
-        if ts is None:
+        age = self.time_since_last_live_ws_tick(symbol)
+        if age is None:
             return False
-        tick_dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-        age = (now - tick_dt).total_seconds()
         threshold = (
             self._polling_policy.context_stale_seconds
             if self._is_context_symbol(symbol)
@@ -9139,7 +10270,10 @@ class MarketDataManager:
         if isinstance(grace_until, datetime) and now < grace_until:
             return False
         spot_age = self._tick_age_seconds("NSE:NIFTY", now)
-        if spot_age is not None and spot_age < self._polling_policy.context_stale_seconds:
+        if (
+            spot_age is not None
+            and spot_age < self._polling_policy.context_stale_seconds
+        ):
             return False
         recent_live_symbols = 0
         for sym in list(getattr(self, "_last_tick_time", {}).keys()):
@@ -9163,7 +10297,11 @@ class MarketDataManager:
         symbol = str(symbol_raw) if symbol_raw else ""
         if not symbol and token is not None:
             with self._lock:
-                symbol = str(self._symbol_by_token.get(token) or self._token_to_symbol.get(token) or "")
+                symbol = str(
+                    self._symbol_by_token.get(token)
+                    or self._token_to_symbol.get(token)
+                    or ""
+                )
         if not symbol:
             return None
         ltp_raw = raw.get("ltp") or raw.get("last_price") or raw.get("price")
@@ -9171,7 +10309,13 @@ class MarketDataManager:
             ltp = float(ltp_raw)
             if ltp <= 0:
                 return None
-            ts = pd.to_datetime(raw.get("timestamp") or raw.get("exchange_timestamp") or datetime.now(timezone.utc), utc=True, errors="coerce")
+            ts = pd.to_datetime(
+                raw.get("timestamp")
+                or raw.get("exchange_timestamp")
+                or datetime.now(timezone.utc),
+                utc=True,
+                errors="coerce",
+            )
             if pd.isna(ts):
                 ts = pd.Timestamp.utcnow()
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
@@ -9187,9 +10331,15 @@ class MarketDataManager:
                 or raw.get("sell_price")
                 or raw.get("best_ask_price")
             )
-            depth_obj = raw.get("depth") if isinstance(raw.get("depth"), Mapping) else None
-            buy_levels = depth_obj.get("buy") if isinstance(depth_obj, Mapping) else None
-            sell_levels = depth_obj.get("sell") if isinstance(depth_obj, Mapping) else None
+            depth_obj = (
+                raw.get("depth") if isinstance(raw.get("depth"), Mapping) else None
+            )
+            buy_levels = (
+                depth_obj.get("buy") if isinstance(depth_obj, Mapping) else None
+            )
+            sell_levels = (
+                depth_obj.get("sell") if isinstance(depth_obj, Mapping) else None
+            )
             bid_ask_source = "missing"
             if bid is not None and ask is not None:
                 bid_ask_source = "ws_full"
@@ -9270,7 +10420,9 @@ class MarketDataManager:
         if now - self._last_spot_resubscribe_attempt < 120.0:
             return
         self._last_spot_resubscribe_attempt = now
-        token = int(self._symbol_to_token.get(symbol) or self._token_by_symbol.get(symbol) or 0)
+        token = int(
+            self._symbol_to_token.get(symbol) or self._token_by_symbol.get(symbol) or 0
+        )
         if token <= 0:
             log_throttled(
                 self._logger,
@@ -9290,7 +10442,11 @@ class MarketDataManager:
             "WS_RESUBSCRIBE_REQUESTED symbol=%s reason=%s",
             symbol,
             reason,
-            extra={"event": "WS_RESUBSCRIBE_REQUESTED", "symbol": symbol, "reason": reason},
+            extra={
+                "event": "WS_RESUBSCRIBE_REQUESTED",
+                "symbol": symbol,
+                "reason": reason,
+            },
         )
         self.request_token_subscription(token, symbol=symbol)
 
@@ -9310,7 +10466,16 @@ class MarketDataManager:
                 self.ws_status_snapshot().get("tokens"),
                 interval_sec=60.0,
                 level=logging.WARNING,
-                extra={"event": "MDM_WS_FIRST_TICK_MISSING", "symbol": symbol, "reason": "no_tick_received", "connected": self.ws_status_snapshot().get("connected"), "connect_task_alive": self.ws_status_snapshot().get("connect_task_alive"), "ws_tokens": self.ws_status_snapshot().get("tokens")},
+                extra={
+                    "event": "MDM_WS_FIRST_TICK_MISSING",
+                    "symbol": symbol,
+                    "reason": "no_tick_received",
+                    "connected": self.ws_status_snapshot().get("connected"),
+                    "connect_task_alive": self.ws_status_snapshot().get(
+                        "connect_task_alive"
+                    ),
+                    "ws_tokens": self.ws_status_snapshot().get("tokens"),
+                },
             )
             self._request_spot_resubscribe_if_due(symbol, reason="first_tick_missing")
             return
@@ -9323,7 +10488,12 @@ class MarketDataManager:
             symbol,
             age_ms / 1000.0,
             threshold_ms / 1000.0,
-            extra={"event": "SPOT_WS_HEALTH_CHECK", "symbol": symbol, "age_s": round(age_ms / 1000.0, 3), "threshold_s": round(threshold_ms / 1000.0, 3)},
+            extra={
+                "event": "SPOT_WS_HEALTH_CHECK",
+                "symbol": symbol,
+                "age_s": round(age_ms / 1000.0, 3),
+                "threshold_s": round(threshold_ms / 1000.0, 3),
+            },
         )
         if age_ms <= threshold_ms:
             return
@@ -9334,10 +10504,13 @@ class MarketDataManager:
                 "MDM_WS_TICK_STALE symbol=%s age=%.2fs",
                 symbol,
                 age_ms / 1000.0,
-                extra={"event": "MDM_WS_TICK_STALE", "symbol": symbol, "age_s": round(age_ms / 1000.0, 3)},
+                extra={
+                    "event": "MDM_WS_TICK_STALE",
+                    "symbol": symbol,
+                    "age_s": round(age_ms / 1000.0, 3),
+                },
             )
         self._request_spot_resubscribe_if_due(symbol, reason="stale_index_tick")
-
 
     def _has_recent_rest_ticks(self) -> bool:
         cutoff = time.time() - max(self._rest_poll_interval * 2.0, 5.0)
@@ -9456,7 +10629,11 @@ class MarketDataManager:
             # everything else → NSE.  Previously the call had no exchange argument
             # which defaulted to NSE, so all NFO instruments silently returned None.
             _suffix = clean_symbol.upper()
-            _exchange = "NFO" if any(_suffix.endswith(s) for s in ("FUT", "CE", "PE")) else "NSE"
+            _exchange = (
+                "NFO"
+                if any(_suffix.endswith(s) for s in ("FUT", "CE", "PE"))
+                else "NSE"
+            )
             # Zerodha's instrument dump lists index spot instruments under
             # their full names ("NIFTY 50", "NIFTY BANK"), not the short
             # aliases used across the bot ("NIFTY") — root cause of the
@@ -9474,7 +10651,7 @@ class MarketDataManager:
             for ins in instruments:
                 if ins["tradingsymbol"] in _aliases:
                     t = int(ins["instrument_token"])
-                    self.register_symbol(symbol, t) # Cache it
+                    self.register_symbol(symbol, t)  # Cache it
                     return t
         except Exception as e:
             self._logger.error(f"Failed live token resolution for {symbol}: {e}")
@@ -9644,9 +10821,7 @@ class MarketDataManager:
         if not isinstance(depth, Mapping):
             return None
         entries = depth.get(side)
-        if not isinstance(entries, Iterable) or isinstance(
-            entries, (str, bytes, dict)
-        ):
+        if not isinstance(entries, Iterable) or isinstance(entries, (str, bytes, dict)):
             return None
         for entry in entries:
             if not isinstance(entry, Mapping):
@@ -9680,7 +10855,11 @@ class MarketDataManager:
     def _parse_wallclock(value: Any) -> float | None:
         """Parse timestamp-like values into epoch seconds."""
         if isinstance(value, datetime):
-            dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            dt = (
+                value
+                if value.tzinfo is not None
+                else value.replace(tzinfo=timezone.utc)
+            )
             return float(dt.timestamp())
         if isinstance(value, (int, float)):
             val = float(value)
@@ -9760,9 +10939,10 @@ class MarketDataManager:
         self._last_signature[symbol] = (signature, current)
         return False
 
-
     @staticmethod
-    def normalize_history_row(symbol: str, row: Any, source: str = "historical") -> dict[str, Any] | None:
+    def normalize_history_row(
+        symbol: str, row: Any, source: str = "historical"
+    ) -> dict[str, Any] | None:
         """Normalize broker/DataHub OHLC row. Args: symbol/row/source. Returns: canonical bar or None. Raises: None."""
         return normalize_history_row(symbol, row, source=source)
 
@@ -9776,12 +10956,17 @@ class MarketDataManager:
         self._raw_tick_history = value
 
     @property
-    def _history_inflight(self) -> dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]]:
+    def _history_inflight(
+        self,
+    ) -> dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]]:
         """Deprecated compatibility alias for the canonical history coordinator."""
         return self._canonical_history_inflight
 
     @_history_inflight.setter
-    def _history_inflight(self, value: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]]) -> None:
+    def _history_inflight(
+        self,
+        value: dict[tuple[str, str], tuple[int, asyncio.Task[list[dict[str, Any]]]]],
+    ) -> None:
         self._canonical_history_inflight = value
 
     # -------------------------------------------------------------------------
@@ -9909,12 +11094,16 @@ class MarketDataManager:
         if not hasattr(self, "_canonical_history_inflight_lock"):
             self._canonical_history_inflight_lock = asyncio.Lock()
 
-        async def _run_hydration(requested_bars: int, request_cached_before: int) -> HydrationResult:
+        async def _run_hydration(
+            requested_bars: int, request_cached_before: int
+        ) -> HydrationResult:
             fetched_rows = 0
             accepted_rows = 0
             failure_reason: str | None = None
             try:
-                rows = await self.fetch_history(normalized, normalized_interval, lookback_days)
+                rows = await self.fetch_history(
+                    normalized, normalized_interval, lookback_days
+                )
                 fetched_rows = len(rows or [])
                 rows = list(rows or [])[-requested_bars:]
                 accepted_rows = int(self.ingest_historical_ohlc(normalized, rows) or 0)
@@ -9929,7 +11118,15 @@ class MarketDataManager:
                     reason,
                     type(exc).__name__,
                     str(exc),
-                    extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    extra={
+                        "event": "CANONICAL_HISTORY_FETCH_RESULT",
+                        "symbol": normalized,
+                        "role": role,
+                        "phase": phase,
+                        "reason": reason,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
                 )
             after = _cached_count()
             result = _result(
@@ -9957,7 +11154,22 @@ class MarketDataManager:
                 result.minimum_ready,
                 result.target_ready,
                 failure_reason,
-                extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": requested_bars, "cached_before": request_cached_before, "fetched_rows": fetched_rows, "accepted_rows": accepted_rows, "cached_after": after, "minimum_ready": result.minimum_ready, "target_ready": result.target_ready, "failure_reason": failure_reason},
+                extra={
+                    "event": "CANONICAL_HISTORY_FETCH_RESULT",
+                    "symbol": normalized,
+                    "role": role,
+                    "phase": phase,
+                    "reason": reason,
+                    "required_bars": required,
+                    "target_bars": requested_bars,
+                    "cached_before": request_cached_before,
+                    "fetched_rows": fetched_rows,
+                    "accepted_rows": accepted_rows,
+                    "cached_after": after,
+                    "minimum_ready": result.minimum_ready,
+                    "target_ready": result.target_ready,
+                    "failure_reason": failure_reason,
+                },
             )
             return result
 
@@ -9970,9 +11182,27 @@ class MarketDataManager:
             cached_now = _cached_count()
             if not force and cached_now >= target:
                 # Returned without this request ever starting a broker task.
-                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_any, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
+                return _result(
+                    cached_before=cached_before,
+                    cached_after=cached_now,
+                    broker_fetch_started=False,
+                    joined_inflight=joined_any,
+                    broker_fetch_observed=joined_observed_fetch,
+                    fetched_rows=joined_fetched_rows,
+                    accepted_rows=joined_accepted_rows,
+                    failure_reason=joined_failure,
+                )
             if not force and minimum_only and cached_now >= required:
-                return _result(cached_before=cached_before, cached_after=cached_now, broker_fetch_started=False, joined_inflight=joined_any, broker_fetch_observed=joined_observed_fetch, fetched_rows=joined_fetched_rows, accepted_rows=joined_accepted_rows, failure_reason=joined_failure)
+                return _result(
+                    cached_before=cached_before,
+                    cached_after=cached_now,
+                    broker_fetch_started=False,
+                    joined_inflight=joined_any,
+                    broker_fetch_observed=joined_observed_fetch,
+                    fetched_rows=joined_fetched_rows,
+                    accepted_rows=joined_accepted_rows,
+                    failure_reason=joined_failure,
+                )
             async with self._canonical_history_inflight_lock:
                 current = self._canonical_history_inflight.get(key)
                 if current is not None and current[1].done():
@@ -9989,7 +11219,16 @@ class MarketDataManager:
                         required,
                         target,
                         inflight_bars,
-                        extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "inflight_bars": inflight_bars},
+                        extra={
+                            "event": "CANONICAL_HISTORY_FETCH_RESULT",
+                            "symbol": normalized,
+                            "role": role,
+                            "phase": phase,
+                            "reason": reason,
+                            "required_bars": required,
+                            "target_bars": target,
+                            "inflight_bars": inflight_bars,
+                        },
                     )
                 else:
                     self._logger.info(
@@ -10001,7 +11240,16 @@ class MarketDataManager:
                         required,
                         target,
                         cached_now,
-                        extra={"event": "CANONICAL_HISTORY_FETCH_RESULT", "symbol": normalized, "role": role, "phase": phase, "reason": reason, "required_bars": required, "target_bars": target, "cached_before": cached_now},
+                        extra={
+                            "event": "CANONICAL_HISTORY_FETCH_RESULT",
+                            "symbol": normalized,
+                            "role": role,
+                            "phase": phase,
+                            "reason": reason,
+                            "required_bars": required,
+                            "target_bars": target,
+                            "cached_before": cached_now,
+                        },
                     )
                     task = asyncio.create_task(_run_hydration(target, cached_now))
                     self._canonical_history_inflight[key] = (target, task)
@@ -10009,7 +11257,11 @@ class MarketDataManager:
             try:
                 joined = await inflight_task
                 joined_any = True
-                joined_observed_fetch = joined_observed_fetch or joined.broker_fetch_observed or joined.broker_fetch_started
+                joined_observed_fetch = (
+                    joined_observed_fetch
+                    or joined.broker_fetch_observed
+                    or joined.broker_fetch_started
+                )
                 joined_fetched_rows += int(joined.fetched_rows or 0)
                 joined_accepted_rows += int(joined.accepted_rows or 0)
                 joined_failure = joined.failure_reason
@@ -10075,12 +11327,15 @@ class MarketDataManager:
         default_target = int(os.getenv("MDM_COMPAT_HISTORY_TARGET", "60") or 60)
         default_required = int(os.getenv("MDM_COMPAT_REQUIRED_BARS", "30") or 30)
         target = (
-            int(target_bars) if target_bars is not None
-            else int(max_bars) if max_bars is not None
-            else default_target
+            int(target_bars)
+            if target_bars is not None
+            else int(max_bars) if max_bars is not None else default_target
         )
         target = max(1, target)
-        required = min(int(required_bars) if required_bars is not None else default_required, target)
+        required = min(
+            int(required_bars) if required_bars is not None else default_required,
+            target,
+        )
         result = await self.ensure_history(
             symbol,
             interval=interval,
@@ -10098,7 +11353,11 @@ class MarketDataManager:
         self, symbol: str, interval: str, days: int = 3
     ) -> list[dict]:
         """Fetch historical data with token, tradingsymbol, wider-window, and spot fallbacks."""
-        symbol = self._canonical_symbol(symbol.strip().upper()) if hasattr(self, "_canonical_symbol") else symbol.strip().upper()
+        symbol = (
+            self._canonical_symbol(symbol.strip().upper())
+            if hasattr(self, "_canonical_symbol")
+            else symbol.strip().upper()
+        )
         exchange = symbol.split(":", 1)[0] if ":" in symbol else ""
         tradingsymbol = symbol.split(":", 1)[1] if ":" in symbol else symbol
         token = getattr(self, "_token_by_symbol", {}).get(symbol)
@@ -10123,10 +11382,21 @@ class MarketDataManager:
                 except (TypeError, ValueError) as exc:
                     self._logger.warning(
                         "HYDRATION_FETCH_RESOLVE_FAILED symbol=%s exception_type=%s exception_message=%s",
-                        symbol, type(exc).__name__, str(exc),
-                        extra={"event": "HYDRATION_FETCH_RESOLVE_FAILED", "symbol": symbol, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                        symbol,
+                        type(exc).__name__,
+                        str(exc),
+                        extra={
+                            "event": "HYDRATION_FETCH_RESOLVE_FAILED",
+                            "symbol": symbol,
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                        },
                     )
-            if not token and self._broker and hasattr(self._broker, "get_instrument_token"):
+            if (
+                not token
+                and self._broker
+                and hasattr(self._broker, "get_instrument_token")
+            ):
                 try:
                     resolved = self._broker.get_instrument_token(symbol)
                     if resolved:
@@ -10134,8 +11404,15 @@ class MarketDataManager:
                 except (TypeError, ValueError) as exc:
                     self._logger.warning(
                         "HYDRATION_FETCH_RESOLVE_FAILED symbol=%s exception_type=%s exception_message=%s",
-                        symbol, type(exc).__name__, str(exc),
-                        extra={"event": "HYDRATION_FETCH_RESOLVE_FAILED", "symbol": symbol, "exception_type": type(exc).__name__, "exception_message": str(exc)},
+                        symbol,
+                        type(exc).__name__,
+                        str(exc),
+                        extra={
+                            "event": "HYDRATION_FETCH_RESOLVE_FAILED",
+                            "symbol": symbol,
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                        },
                     )
 
         try:
@@ -10164,12 +11441,35 @@ class MarketDataManager:
             return []
 
         if not self._broker:
-            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=broker_unavailable", symbol, token_int, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token_int, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "broker_unavailable"})
+            self._logger.error(
+                "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=broker_unavailable",
+                symbol,
+                token_int,
+                interval,
+                extra={
+                    "event": "HYDRATION_FETCH_RESULT",
+                    "symbol": symbol,
+                    "instrument_token": token_int,
+                    "interval": interval,
+                    "returned_rows": 0,
+                    "accepted_rows": 0,
+                    "failure_category": "broker_unavailable",
+                },
+            )
             return []
 
-        candidates = ["historical_data", "get_historical_data", "history", "get_history"]
+        candidates = [
+            "historical_data",
+            "get_historical_data",
+            "history",
+            "get_history",
+        ]
         fetcher = None
-        for owner in (self._broker, getattr(self._broker, "kite", None), getattr(self._broker, "client", None)):
+        for owner in (
+            self._broker,
+            getattr(self._broker, "kite", None),
+            getattr(self._broker, "client", None),
+        ):
             if owner is None:
                 continue
             for method in candidates:
@@ -10180,7 +11480,21 @@ class MarketDataManager:
             if fetcher:
                 break
         if not callable(fetcher):
-            self._logger.error("HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=history_capability_missing", symbol, token_int, interval, extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token_int, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "failure_category": "history_capability_missing"})
+            self._logger.error(
+                "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s interval=%s returned_rows=0 accepted_rows=0 failure_category=history_capability_missing",
+                symbol,
+                token_int,
+                interval,
+                extra={
+                    "event": "HYDRATION_FETCH_RESULT",
+                    "symbol": symbol,
+                    "instrument_token": token_int,
+                    "interval": interval,
+                    "returned_rows": 0,
+                    "accepted_rows": 0,
+                    "failure_category": "history_capability_missing",
+                },
+            )
             return []
 
         now = datetime.now(timezone.utc)
@@ -10197,15 +11511,44 @@ class MarketDataManager:
             from_date = to_date - timedelta(days=max(1, int(lookback_days)))
             self._logger.info(
                 "HYDRATION_FETCH_ATTEMPT symbol=%s instrument_token=%s tradingsymbol=%s exchange=%s from_dt=%s to_dt=%s timezone=%s interval=%s required_bars=%s attempt=%s",
-                symbol, instrument_key, tradingsymbol, exchange, from_date.isoformat(), to_date.isoformat(), "UTC", interval, None, attempt_name,
-                extra={"event": "HYDRATION_FETCH_ATTEMPT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "interval": interval, "attempt": attempt_name},
+                symbol,
+                instrument_key,
+                tradingsymbol,
+                exchange,
+                from_date.isoformat(),
+                to_date.isoformat(),
+                "UTC",
+                interval,
+                None,
+                attempt_name,
+                extra={
+                    "event": "HYDRATION_FETCH_ATTEMPT",
+                    "symbol": symbol,
+                    "instrument_token": instrument_key,
+                    "tradingsymbol": tradingsymbol,
+                    "exchange": exchange,
+                    "from_dt": from_date.isoformat(),
+                    "to_dt": to_date.isoformat(),
+                    "timezone": "UTC",
+                    "interval": interval,
+                    "attempt": attempt_name,
+                },
             )
             try:
-                lock = getattr(self, "_canonical_history_lock", None) or getattr(self, "_history_lock", None)
+                lock = getattr(self, "_canonical_history_lock", None) or getattr(
+                    self, "_history_lock", None
+                )
                 if lock is None:
                     lock = asyncio.Lock()
                     self._canonical_history_lock = lock
-                min_interval = float(getattr(self, "_canonical_history_min_interval_sec", getattr(self, "_history_min_interval_sec", 0.0)) or 0.0)
+                min_interval = float(
+                    getattr(
+                        self,
+                        "_canonical_history_min_interval_sec",
+                        getattr(self, "_history_min_interval_sec", 0.0),
+                    )
+                    or 0.0
+                )
                 async with lock:
                     now_mono = time.monotonic()
                     wait = min_interval - (now_mono - self._last_history_request_ts)
@@ -10213,47 +11556,158 @@ class MarketDataManager:
                         await asyncio.sleep(wait)
                     self._last_history_request_ts = time.monotonic()
                     try:
-                        raw_rows = await asyncio.to_thread(fetcher, instrument_key, from_date, to_date, interval)
-                    except Exception as exc:  # noqa: BLE001 - broker boundary with retry diagnostics
-                        if "Rate limit exceeded" in str(exc) or "zerodha.historical" in str(exc):
+                        raw_rows = await asyncio.to_thread(
+                            fetcher, instrument_key, from_date, to_date, interval
+                        )
+                    except (
+                        Exception
+                    ) as exc:  # noqa: BLE001 - broker boundary with retry diagnostics
+                        if "Rate limit exceeded" in str(
+                            exc
+                        ) or "zerodha.historical" in str(exc):
                             await asyncio.sleep(2.5)
                             self._last_history_request_ts = time.monotonic()
-                            raw_rows = await asyncio.to_thread(fetcher, instrument_key, from_date, to_date, interval)
+                            raw_rows = await asyncio.to_thread(
+                                fetcher, instrument_key, from_date, to_date, interval
+                            )
                         else:
                             raise
                 rows = list(raw_rows or [])
-                normalized = [bar for bar in (self.normalize_history_row(symbol, row, source="historical") for row in rows) if bar is not None]
+                normalized = [
+                    bar
+                    for bar in (
+                        self.normalize_history_row(symbol, row, source="historical")
+                        for row in rows
+                    )
+                    if bar is not None
+                ]
                 normalized.sort(key=lambda item: item["timestamp"])
-                deduped = list({row["timestamp"].astimezone(timezone.utc).replace(microsecond=0): row for row in normalized}.values())
+                deduped = list(
+                    {
+                        row["timestamp"]
+                        .astimezone(timezone.utc)
+                        .replace(microsecond=0): row
+                        for row in normalized
+                    }.values()
+                )
                 deduped.sort(key=lambda item: item["timestamp"])
                 self._logger.info(
                     "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=%s accepted_rows=%s first_ts=%s last_ts=%s exception_type=%s exception_message=%s",
-                    symbol, token_int, tradingsymbol, exchange, interval, attempt_name, len(rows), len(deduped),
+                    symbol,
+                    token_int,
+                    tradingsymbol,
+                    exchange,
+                    interval,
+                    attempt_name,
+                    len(rows),
+                    len(deduped),
                     deduped[0]["timestamp"].isoformat() if deduped else None,
-                    deduped[-1]["timestamp"].isoformat() if deduped else None, None, None,
-                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "returned_rows": len(rows), "accepted_rows": len(deduped), "failure_category": None},
+                    deduped[-1]["timestamp"].isoformat() if deduped else None,
+                    None,
+                    None,
+                    extra={
+                        "event": "HYDRATION_FETCH_RESULT",
+                        "symbol": symbol,
+                        "instrument_token": instrument_key,
+                        "tradingsymbol": tradingsymbol,
+                        "exchange": exchange,
+                        "interval": interval,
+                        "attempt": attempt_name,
+                        "from_dt": from_date.isoformat(),
+                        "to_dt": to_date.isoformat(),
+                        "timezone": "UTC",
+                        "returned_rows": len(rows),
+                        "accepted_rows": len(deduped),
+                        "failure_category": None,
+                    },
                 )
                 if deduped:
                     return deduped
             except BrokerAuthenticationError:
                 self._logger.error(
                     "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=0 accepted_rows=0 failure_category=history_authentication_failed",
-                    symbol, instrument_key, tradingsymbol, exchange, interval, attempt_name,
-                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "returned_rows": 0, "accepted_rows": 0, "exception_type": "BrokerAuthenticationError", "failure_category": "history_authentication_failed"},
+                    symbol,
+                    instrument_key,
+                    tradingsymbol,
+                    exchange,
+                    interval,
+                    attempt_name,
+                    extra={
+                        "event": "HYDRATION_FETCH_RESULT",
+                        "symbol": symbol,
+                        "instrument_token": instrument_key,
+                        "tradingsymbol": tradingsymbol,
+                        "exchange": exchange,
+                        "interval": interval,
+                        "attempt": attempt_name,
+                        "from_dt": from_date.isoformat(),
+                        "to_dt": to_date.isoformat(),
+                        "timezone": "UTC",
+                        "returned_rows": 0,
+                        "accepted_rows": 0,
+                        "exception_type": "BrokerAuthenticationError",
+                        "failure_category": "history_authentication_failed",
+                    },
                 )
                 raise
-            except Exception as exc:  # noqa: BLE001 - broker boundary with structured failure
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - broker boundary with structured failure
                 last_error = str(exc)
-                failure_category = "broker_input_error" if isinstance(exc, (BrokerError, ValueError, TypeError)) else "history_http_failure"
+                failure_category = (
+                    "broker_input_error"
+                    if isinstance(exc, (BrokerError, ValueError, TypeError))
+                    else "history_http_failure"
+                )
                 self._logger.warning(
                     "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=0 accepted_rows=0 exception_type=%s exception_message=%s failure_category=%s",
-                    symbol, instrument_key, tradingsymbol, exchange, interval, attempt_name, type(exc).__name__, str(exc), failure_category,
-                    extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": instrument_key, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "attempt": attempt_name, "from_dt": from_date.isoformat(), "to_dt": to_date.isoformat(), "timezone": "UTC", "returned_rows": 0, "accepted_rows": 0, "exception_type": type(exc).__name__, "exception_message": str(exc), "failure_category": failure_category},
+                    symbol,
+                    instrument_key,
+                    tradingsymbol,
+                    exchange,
+                    interval,
+                    attempt_name,
+                    type(exc).__name__,
+                    str(exc),
+                    failure_category,
+                    extra={
+                        "event": "HYDRATION_FETCH_RESULT",
+                        "symbol": symbol,
+                        "instrument_token": instrument_key,
+                        "tradingsymbol": tradingsymbol,
+                        "exchange": exchange,
+                        "interval": interval,
+                        "attempt": attempt_name,
+                        "from_dt": from_date.isoformat(),
+                        "to_dt": to_date.isoformat(),
+                        "timezone": "UTC",
+                        "returned_rows": 0,
+                        "accepted_rows": 0,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "failure_category": failure_category,
+                    },
                 )
         self._logger.error(
             "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s returned_rows=0 accepted_rows=0 exception_message=%s",
-            symbol, token_int, tradingsymbol, exchange, interval, last_error,
-            extra={"event": "HYDRATION_FETCH_RESULT", "symbol": symbol, "instrument_token": token_int, "tradingsymbol": tradingsymbol, "exchange": exchange, "interval": interval, "returned_rows": 0, "accepted_rows": 0, "exception_message": last_error, "failure_category": "history_empty_or_failed"},
+            symbol,
+            token_int,
+            tradingsymbol,
+            exchange,
+            interval,
+            last_error,
+            extra={
+                "event": "HYDRATION_FETCH_RESULT",
+                "symbol": symbol,
+                "instrument_token": token_int,
+                "tradingsymbol": tradingsymbol,
+                "exchange": exchange,
+                "interval": interval,
+                "returned_rows": 0,
+                "accepted_rows": 0,
+                "exception_message": last_error,
+                "failure_category": "history_empty_or_failed",
+            },
         )
         return []
 

@@ -29,12 +29,12 @@ _MARKET_CLOSE = time(hour=15, minute=30)
 LOGGER = get_logger(__name__)
 
 _FEATURE_CAPABILITIES: dict[str, bool] = {
-    'vwap': True,
-    'bollinger': True,
-    'orb_levels': True,
-    'cpr_levels': False,
-    'structure_flags': False,
-    'order_book_depth': True,
+    "vwap": True,
+    "bollinger": True,
+    "orb_levels": True,
+    "cpr_levels": False,
+    "structure_flags": False,
+    "order_book_depth": True,
 }
 
 
@@ -216,18 +216,37 @@ class IndicatorEngine:
         self._lock = threading.RLock()
         self._logger = get_logger(__name__)
 
-    def set_runtime_context(self, symbol: str, context: Mapping[str, Any], *, merge: bool = True) -> None:
+    def set_runtime_context(
+        self, symbol: str, context: Mapping[str, Any], *, merge: bool = True
+    ) -> None:
         """Store runtime context. Args: symbol, context. Returns: None. Raises: Exception."""
         try:
             if not symbol:
                 return
             allowed_context_keys = {
-                "contract_side", "underlying", "spot_symbol", "spot_price",
-                "futures_symbol", "futures_price", "quote_age_s", "spread_pct",
-                "bid", "ask", "best_bid", "best_ask",
-                "bid_qty", "ask_qty", "buy_qty", "sell_qty",
-                "depth", "depth_available", "tradable_quote",
-                "spread", "mid", "bid_ask_source", "tick_direction",
+                "contract_side",
+                "underlying",
+                "spot_symbol",
+                "spot_price",
+                "futures_symbol",
+                "futures_price",
+                "quote_age_s",
+                "spread_pct",
+                "bid",
+                "ask",
+                "best_bid",
+                "best_ask",
+                "bid_qty",
+                "ask_qty",
+                "buy_qty",
+                "sell_qty",
+                "depth",
+                "depth_available",
+                "tradable_quote",
+                "spread",
+                "mid",
+                "bid_ask_source",
+                "tick_direction",
                 "data_age_seconds",
                 "selected_ce",
                 "selected_pe",
@@ -238,7 +257,9 @@ class IndicatorEngine:
                 "option_role",
             }
             with self._lock:
-                symbol_context = self._runtime_context.setdefault(symbol, {}) if merge else {}
+                symbol_context = (
+                    self._runtime_context.setdefault(symbol, {}) if merge else {}
+                )
                 for key, value in dict(context).items():
                     if key in allowed_context_keys:
                         symbol_context[key] = value
@@ -252,7 +273,9 @@ class IndicatorEngine:
         """Backward-compatible alias for runtime context setter. Args: symbol, indicators. Returns: None. Raises: Exception."""
         self.set_runtime_context(symbol, indicators)
 
-    def get_runtime_context(self, symbol: str, default: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def get_runtime_context(
+        self, symbol: str, default: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Fetch runtime context. Args: symbol. Returns: context copy. Raises: Exception."""
         try:
             with self._lock:
@@ -270,7 +293,9 @@ class IndicatorEngine:
                 else:
                     self._runtime_context.pop(symbol, None)
         except Exception as e:
-            self._logger.error("Failure in IndicatorEngine.clear_runtime_context: %s", e)
+            self._logger.error(
+                "Failure in IndicatorEngine.clear_runtime_context: %s", e
+            )
             raise
 
     def update_price(
@@ -307,7 +332,9 @@ class IndicatorEngine:
                 close_price = float(bar["close"])
                 volume = int(bar.get("volume", 0) or 0)
             else:
-                ts_value = getattr(bar, "timestamp", None) or getattr(bar, "start", None)
+                ts_value = getattr(bar, "timestamp", None) or getattr(
+                    bar, "start", None
+                )
                 open_price = float(getattr(bar, "open"))
                 high_price = float(getattr(bar, "high"))
                 low_price = float(getattr(bar, "low"))
@@ -347,14 +374,15 @@ class IndicatorEngine:
             )
             raise
 
-
     def ingest_historical_bar(self, symbol: str, bar: Mapping[str, Any]) -> int:
         """Args: symbol/bar mapping. Returns: new history count. Raises: Exception."""
         try:
             self.ingest_bar(symbol, bar)
             return self.history_count(symbol)
         except Exception as e:
-            self._logger.error("Failure in IndicatorEngine.ingest_historical_bar: %s", e)
+            self._logger.error(
+                "Failure in IndicatorEngine.ingest_historical_bar: %s", e
+            )
             raise
 
     def replace_history(
@@ -407,7 +435,9 @@ class IndicatorEngine:
                     "volume": volume,
                 }
 
-            selected_rows = sorted(normalized_rows.values(), key=lambda item: item["timestamp"])
+            selected_rows = sorted(
+                normalized_rows.values(), key=lambda item: item["timestamp"]
+            )
             if not selected_rows:
                 self._logger.warning(
                     "INDICATOR_HISTORY_RESEED_EMPTY symbol=%s min_bars=%d source=%s",
@@ -466,7 +496,13 @@ class IndicatorEngine:
             history = self._histories.get(symbol)
             return len(history) if history is not None else 0
 
-    def get_history(self, symbol: str, count: int | None = None, *, field: Literal["close", "bars"] = "close") -> list[Any]:
+    def get_history(
+        self,
+        symbol: str,
+        count: int | None = None,
+        *,
+        field: Literal["close", "bars"] = "close",
+    ) -> list[Any]:
         """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
         LOGGER.debug(
             "Entered IndicatorEngine.get_history",
@@ -485,6 +521,20 @@ class IndicatorEngine:
                     except Exception:
                         market_open_now = True
                     if market_open_now:
+                        logging.getLogger(__name__).info(
+                            "Condition met: indicator_history_missing",
+                            extra={
+                                "event": "indicator_engine_history_missing",
+                                "symbol": symbol,
+                            },
+                        )
+                        LOGGER.info(
+                            "Condition met: indicator_history_missing",
+                            extra={
+                                "event": "indicator_engine_history_missing",
+                                "symbol": symbol,
+                            },
+                        )
                         log_throttled(
                             LOGGER,
                             f"indicator_history_missing:{symbol}",
@@ -520,8 +570,26 @@ class IndicatorEngine:
                     complete = history.get_completeness(count)
                     provisional = history.get_provisional_flags(count)
                     bars = [
-                        {"open": o, "high": h, "low": l, "close": c, "volume": v, "timestamp": ts, "is_complete": ic, "is_provisional": ip}
-                        for o, h, l, c, v, ts, ic, ip in zip(opens, highs, lows, closes, volumes, timestamps, complete, provisional)
+                        {
+                            "open": o,
+                            "high": h,
+                            "low": l,
+                            "close": c,
+                            "volume": v,
+                            "timestamp": ts,
+                            "is_complete": ic,
+                            "is_provisional": ip,
+                        }
+                        for o, h, l, c, v, ts, ic, ip in zip(
+                            opens,
+                            highs,
+                            lows,
+                            closes,
+                            volumes,
+                            timestamps,
+                            complete,
+                            provisional,
+                        )
                     ]
                 else:
                     bars = history.get_closes(count)
@@ -1113,7 +1181,9 @@ class IndicatorEngine:
                 LOGGER,
                 f"indicator_integrity_provisional_tail:{symbol}",
                 "indicator_integrity_provisional_tail",
-                interval_sec=float(os.getenv("INDICATOR_INTEGRITY_LOG_THROTTLE_SECONDS", "120")),
+                interval_sec=float(
+                    os.getenv("INDICATOR_INTEGRITY_LOG_THROTTLE_SECONDS", "120")
+                ),
                 level=logging.DEBUG,
                 extra={
                     "event": "indicator_integrity_provisional_tail",
@@ -1300,17 +1370,25 @@ class IndicatorEngine:
         provisional_flags = history.get_provisional_flags()
         if volumes:
             last_volume = (
-                float(volumes[-1]) if not provisional_flags or not provisional_flags[-1] else 0.0
+                float(volumes[-1])
+                if not provisional_flags or not provisional_flags[-1]
+                else 0.0
             )
             indicators["volume"] = last_volume
             upper_symbol = str(symbol).upper()
             is_option = upper_symbol.endswith("CE") or upper_symbol.endswith("PE")
-            zipped = list(zip(volumes, provisional_flags, strict=False)) if provisional_flags else [
-                (volume, False) for volume in volumes
-            ]
+            zipped = (
+                list(zip(volumes, provisional_flags, strict=False))
+                if provisional_flags
+                else [(volume, False) for volume in volumes]
+            )
             recent = zipped[-20:]
             if is_option:
-                tail = [float(volume) for volume, provisional in recent if not provisional and float(volume) > 0.0]
+                tail = [
+                    float(volume)
+                    for volume, provisional in recent
+                    if not provisional and float(volume) > 0.0
+                ]
                 if not tail:
                     tail = [
                         float(volume)
@@ -1318,7 +1396,9 @@ class IndicatorEngine:
                         if not provisional and float(volume) > 0.0
                     ][-20:]
             else:
-                tail = [float(volume) for volume, provisional in recent if not provisional]
+                tail = [
+                    float(volume) for volume, provisional in recent if not provisional
+                ]
             if tail:
                 avg_volume = sum(float(v) for v in tail) / len(tail)
                 indicators["avg_volume"] = avg_volume
@@ -1865,7 +1945,6 @@ class IndicatorEngine:
         except Exception as e:
             self._logger.error("Failure in IndicatorEngine.get_latest_price: %s", e)
             return None
-
 
     def supports_feature(self, feature_name: str) -> bool:
         """Args: feature_name. Returns: support flag. Raises: none."""

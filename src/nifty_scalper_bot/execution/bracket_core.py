@@ -46,6 +46,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -512,6 +513,7 @@ class BracketManager:
         self._on_exit_complete_hook: Callable[[str], None] | None = None
         self._on_position_open_priority_hook: Callable[[str], None] | None = None
         self._on_position_closed_priority_hook: Callable[[str], None] | None = None
+        self._active_bracket_symbols_hook: Callable[[Iterable[str]], None] | None = None
         self._current_atr: Dict[str, float] = {}
         self._last_price_cache: Dict[str, float] = {}
         self._exit_cooldowns: Dict[str, float] = {}
@@ -665,6 +667,31 @@ class BracketManager:
         """Attach MDM open-position priority hooks for immediate tick prioritization."""
         self._on_position_open_priority_hook = on_position_open
         self._on_position_closed_priority_hook = on_position_closed
+
+    def attach_active_bracket_symbols_hook(
+        self, hook: Callable[[Iterable[str]], None] | None = None
+    ) -> None:
+        """Attach MDM active-bracket symbol sync hook."""
+        self._active_bracket_symbols_hook = hook
+        self._sync_active_bracket_symbols_to_mdm()
+
+    def _sync_active_bracket_symbols_to_mdm(self) -> None:
+        """Publish current bracket-owned symbols to MDM without adding a registry."""
+        hook = self._active_bracket_symbols_hook
+        if hook is None and self._market_data is not None:
+            hook = getattr(self._market_data, "set_active_bracket_symbols", None)
+        if not callable(hook):
+            return
+        with self._lock:
+            symbols = [
+                bracket.symbol
+                for bracket in self._brackets.values()
+                if getattr(bracket, "remaining_quantity", 0) > 0
+            ]
+        try:
+            hook(symbols)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("active bracket symbol sync failed: %s", exc)
 
     def _notify_open_position_priority(self, action: str, symbol: str) -> None:
         hook = (
@@ -1107,6 +1134,7 @@ class BracketManager:
                 existing.exit_state = BracketExitLifecycle.OPEN_PENDING_FILL.value
                 existing.exit_pending = False
                 self.save_state()  # Persist updates
+                self._sync_active_bracket_symbols_to_mdm()
                 return
 
             # 2. Setup Trailing Config
@@ -1286,6 +1314,7 @@ class BracketManager:
 
             # ✅ FIX: Persist immediately so we don't lose this if we crash now
             self.save_state()
+            self._sync_active_bracket_symbols_to_mdm()
 
     def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
         """Activate a bracket once entry fill is confirmed.
@@ -1418,6 +1447,7 @@ class BracketManager:
                 },
             )
             self._notify_open_position_priority("open", bracket.symbol)
+            self._sync_active_bracket_symbols_to_mdm()
 
             # Persist state
             try:
@@ -3877,6 +3907,7 @@ class BracketManager:
 
                 # ✅ FIX: Persist removal immediately
                 self.save_state()
+                self._sync_active_bracket_symbols_to_mdm()
 
             # Cleanup reverse index (outside main check if orphaned)
             if entry_id in self._order_to_entry:
@@ -4372,6 +4403,7 @@ class BracketManager:
                 },
             )
             self._resubscribe_restored_brackets()
+            self._sync_active_bracket_symbols_to_mdm()
             return True
         except Exception as exc:
             self._mark_persistence_degraded("snapshot_restore_failed", exc)
