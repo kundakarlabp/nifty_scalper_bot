@@ -14,6 +14,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
+from nifty_scalper_bot.config.defaults import QUOTE_STALE_THRESHOLD_MS
 from nifty_scalper_bot.execution.readiness import (
     HistoryReadinessPolicy,
     resolve_max_quote_age_seconds,
@@ -80,7 +81,7 @@ def _live_tick_max_age_seconds() -> float:
     return resolve_max_quote_age_seconds(
         "HYDRATION_LIVE_TICK_MAX_AGE_SECONDS",
         "HYDRATION_LIVE_TICK_MAX_AGE_MS",
-        default_seconds=60.0,
+        default_seconds=float(QUOTE_STALE_THRESHOLD_MS) / 1000.0,
     )
 
 
@@ -88,7 +89,7 @@ def _context_max_age_seconds() -> float:
     return _live_tick_max_age_seconds()
 
 
-def _bar_max_age_seconds(manager: Any) -> float:
+def _bar_interval_seconds(manager: Any) -> float:
     interval = getattr(manager, "_bar_interval_seconds", None)
     if interval in (None, ""):
         interval = getattr(manager, "bar_interval_seconds", None)
@@ -96,7 +97,11 @@ def _bar_max_age_seconds(manager: Any) -> float:
         interval_s = float(interval)
     except (TypeError, ValueError):
         interval_s = 60.0
-    return max(1.0, interval_s * 1.25)
+    return max(1.0, interval_s)
+
+
+def _clock_skew_tolerance_seconds() -> float:
+    return 2.0
 
 
 def _coerce_epoch_seconds(value: Any) -> float | None:
@@ -142,7 +147,7 @@ def _boolish_false(value: Any) -> bool:
     }
 
 
-def _latest_bar_detail(manager: Any, symbol: str) -> dict[str, Any]:
+def _latest_bar_detail(manager: Any, symbol: str, *, now: float) -> dict[str, Any]:
     getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
     if not callable(getter):
         return {"reason": "live_latest_closed_bar_unavailable"}
@@ -156,44 +161,64 @@ def _latest_bar_detail(manager: Any, symbol: str) -> dict[str, Any]:
         }
     if not history:
         return {"reason": "live_latest_closed_bar_missing"}
-    latest = history[-1]
-    for key in ("closed", "is_closed", "complete", "is_complete", "final"):
-        value = _bar_get(latest, key, None)
-        if _boolish_false(value):
-            return {"reason": "live_latest_closed_bar_open", "closed_field": key}
-    epoch = None
-    for key in ("timestamp", "timestamp_ms", "ts", "date", "time"):
-        epoch = _coerce_epoch_seconds(_bar_get(latest, key, None))
-        if epoch is not None:
-            break
-    if epoch is None:
-        return {"reason": "live_latest_closed_bar_missing"}
-    return {"reason": "ready", "latest_bar_ts": epoch}
+    interval_s = _bar_interval_seconds(manager)
+    current_bucket_start = (now // interval_s) * interval_s
+    expected_closed_start = current_bucket_start - interval_s
+    latest_stale: dict[str, Any] | None = None
+    for row in reversed(history):
+        for key in ("closed", "is_closed", "complete", "is_complete", "final"):
+            value = _bar_get(row, key, None)
+            if _boolish_false(value):
+                latest_stale = {
+                    "reason": "live_latest_closed_bar_open",
+                    "closed_field": key,
+                }
+                break
+        else:
+            epoch = None
+            for key in ("timestamp", "timestamp_ms", "ts", "date", "time"):
+                epoch = _coerce_epoch_seconds(_bar_get(row, key, None))
+                if epoch is not None:
+                    break
+            if epoch is None:
+                latest_stale = {"reason": "live_latest_closed_bar_missing"}
+                continue
+            if epoch > now + _clock_skew_tolerance_seconds():
+                return {
+                    "reason": "live_latest_closed_bar_future_timestamp",
+                    "latest_bar_ts": epoch,
+                }
+            bucket_start = (epoch // interval_s) * interval_s
+            if bucket_start >= current_bucket_start:
+                latest_stale = {
+                    "reason": "live_latest_closed_bar_open",
+                    "latest_bar_ts": epoch,
+                }
+                continue
+            if bucket_start == expected_closed_start:
+                return {
+                    "reason": "ready",
+                    "latest_bar_ts": epoch,
+                    "latest_bar_bucket_start": bucket_start,
+                    "expected_latest_closed_start": expected_closed_start,
+                    "interval_s": interval_s,
+                }
+            if bucket_start < expected_closed_start:
+                latest_stale = {
+                    "reason": "live_latest_closed_bar_stale",
+                    "latest_bar_ts": epoch,
+                    "latest_bar_bucket_start": bucket_start,
+                    "expected_latest_closed_start": expected_closed_start,
+                    "interval_s": interval_s,
+                }
+                break
+    return latest_stale or {"reason": "live_latest_closed_bar_missing"}
 
 
 def _latest_bar_fresh_block(manager: Any, symbol: str) -> dict[str, Any] | None:
-    max_age = _bar_max_age_seconds(manager)
-    detail = _latest_bar_detail(manager, symbol)
+    detail = _latest_bar_detail(manager, symbol, now=time.time())
     if detail.get("reason") != "ready":
-        detail["max_bar_age_s"] = max_age
         return detail
-    epoch = float(detail["latest_bar_ts"])
-    age = time.time() - epoch
-    if age < -1.0:
-        return {
-            "reason": "live_latest_closed_bar_future_timestamp",
-            "latest_bar_ts": epoch,
-            "bar_age_s": age,
-            "max_bar_age_s": max_age,
-        }
-    age = max(0.0, age)
-    if age > max_age:
-        return {
-            "reason": "live_latest_closed_bar_stale",
-            "latest_bar_ts": epoch,
-            "bar_age_s": age,
-            "max_bar_age_s": max_age,
-        }
     return None
 
 
@@ -250,15 +275,15 @@ def _snapshot_age_seconds(snapshot: dict[str, Any]) -> float | None:
     for key in ("tick_age_s", "age_seconds", "context_age_seconds"):
         age = _num(snapshot.get(key))
         if age is not None:
-            return max(0.0, age)
+            return age
     for key in ("tick_age_ms", "quote_age_ms"):
         age_ms = _num(snapshot.get(key))
         if age_ms is not None:
-            return max(0.0, age_ms / 1000.0)
+            return age_ms / 1000.0
     for key in ("context_timestamp_epoch", "timestamp"):
         epoch = _coerce_epoch_seconds(snapshot.get(key))
         if epoch is not None:
-            return max(0.0, time.time() - epoch)
+            return time.time() - epoch
     return None
 
 
@@ -287,6 +312,8 @@ def _context_fresh_block(manager: Any, symbol: str) -> dict[str, Any] | None:
         details[f"{label}_context_age_s"] = age
         if age is None:
             return {"reason": f"live_{label}_context_freshness_unknown", **details}
+        if age < -_clock_skew_tolerance_seconds():
+            return {"reason": f"live_{label}_context_future_timestamp", **details}
         if age > max_age:
             return {"reason": f"live_{label}_context_stale", **details}
     return None

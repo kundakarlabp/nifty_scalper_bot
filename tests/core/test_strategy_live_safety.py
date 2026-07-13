@@ -17,17 +17,21 @@ class _Engine:
         indicators: dict | None = None,
         raises: bool = False,
         latest_extra: dict | None = None,
+        rows: list[dict] | None = None,
     ) -> None:
         self.bars = bars
         self.latest_age_s = latest_age_s
         self.indicators = dict(indicators or {})
         self.raises = raises
         self.latest_extra = dict(latest_extra or {})
+        self.rows = [dict(row) for row in rows] if rows is not None else None
         self.indicator_calls = 0
 
     def get_history(self, _symbol: str):
         if self.raises:
             raise RuntimeError("history unavailable")
+        if self.rows is not None:
+            return [dict(row) for row in self.rows]
         ts = time.time() - self.latest_age_s
         row = {"timestamp": ts, "open": 1, "high": 1, "low": 1, "close": 1}
         row.update(self.latest_extra)
@@ -50,6 +54,31 @@ def _live_env(monkeypatch) -> None:
     monkeypatch.setenv("PAPER_MODE", "false")
     monkeypatch.setenv("PAPER__ENABLED", "false")
     monkeypatch.setenv("SHADOW_MODE", "false")
+
+
+def _shadow_env(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "false")
+    monkeypatch.setenv("SHADOW_MODE", "true")
+
+
+def _set_now(monkeypatch, epoch: float) -> None:
+    monkeypatch.setattr(guard.time, "time", lambda: epoch)
+
+
+def _bars(*timestamps: float, extra: dict | None = None) -> list[dict]:
+    extra = dict(extra or {})
+    return [
+        dict({"timestamp": ts, "open": 1, "high": 1, "low": 1, "close": 1}, **extra)
+        for ts in timestamps
+    ]
+
+
+def _history_at(
+    timestamp: float, *, count: int = 5, extra: dict | None = None
+) -> list[dict]:
+    return _bars(*([timestamp] * count), extra=extra)
 
 
 def _signal(**metadata) -> Signal:
@@ -192,6 +221,9 @@ def _manager_with_strategy(
     engine: _Engine, strategy: _CallingStrategy | None = None
 ) -> tuple[StrategyManager, _CallingStrategy]:
     strategy = strategy or _CallingStrategy()
+    if engine.rows is None and not engine.raises:
+        now = guard.time.time()
+        engine.rows = _history_at((now // 60.0) * 60.0 - 60.0)
     manager = StrategyManager([strategy], engine, _Positions())
     manager._required_candles = 2
     manager._bar_interval_seconds = 60.0
@@ -201,10 +233,51 @@ def _manager_with_strategy(
     return manager, strategy
 
 
-def test_live_strategy_manager_fails_closed_on_stale_latest_bar(monkeypatch) -> None:
+def test_live_strategy_manager_accepts_expected_closed_bucket_early_next_minute(
+    monkeypatch,
+) -> None:
     _live_env(monkeypatch)
-    manager, strategy = _manager_with_strategy(_Engine(5, latest_age_s=60.0))
-    manager._bar_interval_seconds = 8.0
+    now = 11 * 3600 + 31 * 60 + 5
+    _set_now(monkeypatch, float(now))
+    manager, strategy = _manager_with_strategy(
+        _Engine(5, rows=_history_at(11 * 3600 + 30 * 60))
+    )
+
+    result = manager.generate_signal(
+        "NFO:NIFTY2662324050CE", 100.0, trace_id="fresh-bar-early"
+    )
+
+    assert result is None
+    assert strategy.calls == 1
+
+
+def test_live_strategy_manager_accepts_expected_closed_bucket_late_next_minute(
+    monkeypatch,
+) -> None:
+    _live_env(monkeypatch)
+    now = 11 * 3600 + 31 * 60 + 50
+    _set_now(monkeypatch, float(now))
+    manager, strategy = _manager_with_strategy(
+        _Engine(5, rows=_history_at(11 * 3600 + 30 * 60))
+    )
+
+    result = manager.generate_signal(
+        "NFO:NIFTY2662324050CE", 100.0, trace_id="fresh-bar-late"
+    )
+
+    assert result is None
+    assert strategy.calls == 1
+
+
+def test_live_strategy_manager_fails_closed_on_one_interval_old_bar(
+    monkeypatch,
+) -> None:
+    _live_env(monkeypatch)
+    now = 11 * 3600 + 32 * 60 + 5
+    _set_now(monkeypatch, float(now))
+    manager, strategy = _manager_with_strategy(
+        _Engine(5, rows=_history_at(11 * 3600 + 30 * 60))
+    )
 
     result = manager.generate_signal(
         "NFO:NIFTY2662324050CE", 100.0, trace_id="stale-bar"
@@ -215,6 +288,26 @@ def test_live_strategy_manager_fails_closed_on_stale_latest_bar(monkeypatch) -> 
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
         == "live_latest_closed_bar_stale"
+    )
+
+
+def test_live_strategy_manager_ignores_current_forming_bucket_as_closed(
+    monkeypatch,
+) -> None:
+    _live_env(monkeypatch)
+    now = 11 * 3600 + 31 * 60 + 5
+    _set_now(monkeypatch, float(now))
+    manager, strategy = _manager_with_strategy(
+        _Engine(5, rows=_history_at(11 * 3600 + 31 * 60))
+    )
+
+    result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+
+    assert result is None
+    assert strategy.calls == 0
+    assert (
+        manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
+        == "live_latest_closed_bar_open"
     )
 
 
@@ -454,8 +547,10 @@ def test_live_strategy_manager_does_not_prime_indicators_before_dispatch(
 
 def test_live_strategy_manager_blocks_latest_open_candle(monkeypatch) -> None:
     _live_env(monkeypatch)
+    now = 11 * 3600 + 31 * 60 + 5
+    _set_now(monkeypatch, float(now))
     manager, strategy = _manager_with_strategy(
-        _Engine(5, latest_extra={"is_closed": False})
+        _Engine(5, rows=_history_at(11 * 3600 + 30 * 60, extra={"is_closed": False}))
     )
 
     result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
@@ -470,7 +565,9 @@ def test_live_strategy_manager_blocks_latest_open_candle(monkeypatch) -> None:
 
 def test_live_strategy_manager_blocks_future_bar_timestamp(monkeypatch) -> None:
     _live_env(monkeypatch)
-    manager, strategy = _manager_with_strategy(_Engine(5, latest_age_s=-30.0))
+    now = 11 * 3600 + 31 * 60 + 5
+    _set_now(monkeypatch, float(now))
+    manager, strategy = _manager_with_strategy(_Engine(5, rows=_history_at(now + 30)))
 
     result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
 
@@ -480,3 +577,87 @@ def test_live_strategy_manager_blocks_future_bar_timestamp(monkeypatch) -> None:
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
         == "live_latest_closed_bar_future_timestamp"
     )
+
+
+def test_live_strategy_manager_blocks_future_spot_context_timestamp(
+    monkeypatch,
+) -> None:
+    _live_env(monkeypatch)
+    now = 11 * 3600 + 31 * 60 + 5
+    _set_now(monkeypatch, float(now))
+    manager, strategy = _manager_with_strategy(
+        _Engine(5, rows=_history_at(11 * 3600 + 30 * 60))
+    )
+    manager._latest_context_snapshots = {
+        "spot_context": {"timestamp": now + 30},
+        "futures_context": {"timestamp": now - 1},
+    }
+
+    result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+
+    assert result is None
+    assert strategy.calls == 0
+    assert (
+        manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
+        == "live_spot_context_future_timestamp"
+    )
+
+
+def test_live_strategy_manager_blocks_future_futures_context_timestamp(
+    monkeypatch,
+) -> None:
+    _live_env(monkeypatch)
+    now = 11 * 3600 + 31 * 60 + 5
+    _set_now(monkeypatch, float(now))
+    manager, strategy = _manager_with_strategy(
+        _Engine(5, rows=_history_at(11 * 3600 + 30 * 60))
+    )
+    manager._latest_context_snapshots = {
+        "spot_context": {"timestamp": now - 1},
+        "futures_context": {"timestamp": now + 30},
+    }
+
+    result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+
+    assert result is None
+    assert strategy.calls == 0
+    assert (
+        manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
+        == "live_futures_context_future_timestamp"
+    )
+
+
+def test_live_strategy_manager_production_wired_fresh_runtime_invokes_once(
+    monkeypatch,
+) -> None:
+    _shadow_env(monkeypatch)
+    now = 11 * 3600 + 31 * 60 + 5
+    _set_now(monkeypatch, float(now))
+    strategy = _CallingStrategy()
+    engine = _Engine(
+        5,
+        rows=_history_at(11 * 3600 + 30 * 60),
+        indicators={"ltp": 100.0, "close": 100.0},
+    )
+    if engine.rows is None and not engine.raises:
+        now = guard.time.time()
+        engine.rows = _history_at((now // 60.0) * 60.0 - 60.0)
+    manager = StrategyManager([strategy], engine, _Positions())
+    manager._required_candles = 2
+    manager._bar_interval_seconds = 60.0
+    mdm = _TickMDM(age=1.0)
+    manager._market_data_manager = mdm
+    manager._active_basket_version = "v1"
+
+    manager.generate_signal("NSE:NIFTY", 100.0, trace_id="publish-spot")
+    manager.generate_signal("NFO:NIFTY26JUN25000FUT", 100.0, trace_id="publish-futures")
+
+    _live_env(monkeypatch)
+    result = manager.generate_signal(
+        "NFO:NIFTY2662324050CE", 100.0, trace_id="live-option"
+    )
+
+    assert result is None
+    assert strategy.calls == 1
+    assert mdm.get_active_contract_basket()["selected_ce"] == "NFO:NIFTY2662324050CE"
+    assert set(manager._latest_context_snapshots) >= {"spot_context", "futures_context"}
