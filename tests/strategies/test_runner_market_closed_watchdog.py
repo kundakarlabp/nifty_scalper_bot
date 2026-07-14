@@ -311,7 +311,7 @@ def test_runner_watchdog_counts_one_required_no_tick_symbol_once(monkeypatch):
         def _required_live_symbols(self) -> set[str]:
             return {"NFO:NIFTY2671423950CE"}
 
-        def _current_symbol_token_locked(self, symbol: str) -> int:
+        def current_live_token(self, symbol: str) -> int:
             return 101
 
         def classify_live_tick_readiness(
@@ -385,7 +385,7 @@ def test_runner_watchdog_counts_two_required_stale_symbols(monkeypatch):
         def _required_live_symbols(self) -> set[str]:
             return {"NFO:NIFTY2671423950CE", "NFO:NIFTY2671423950PE"}
 
-        def _current_symbol_token_locked(self, symbol: str) -> int:
+        def current_live_token(self, symbol: str) -> int:
             return 101 if symbol.endswith("CE") else 102
 
         def classify_live_tick_readiness(
@@ -468,7 +468,7 @@ def test_runner_local_fresh_timestamp_cannot_override_generation_mismatch(
         def _required_live_symbols(self) -> set[str]:
             return {"NFO:NIFTY2671423950CE"}
 
-        def _current_symbol_token_locked(self, symbol: str) -> int:
+        def current_live_token(self, symbol: str) -> int:
             return 101
 
         def classify_live_tick_readiness(
@@ -543,7 +543,7 @@ def test_runner_required_symbol_ready_after_current_generation_tick_not_stale(
         def _required_live_symbols(self) -> set[str]:
             return {"NFO:NIFTY2671423950CE"}
 
-        def _current_symbol_token_locked(self, symbol: str) -> int:
+        def current_live_token(self, symbol: str) -> int:
             return 101
 
         def classify_live_tick_readiness(

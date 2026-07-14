@@ -7768,7 +7768,7 @@ class StrategyRunner:
             stale_reasons.setdefault(normalize_symbol(str(symbol)), reason)
 
         def _resolve_mdm_token(symbol: str) -> int | None:
-            resolver = getattr(self._market_data, "_current_symbol_token_locked", None)
+            resolver = getattr(self._market_data, "current_live_token", None)
             if callable(resolver):
                 try:
                     token = resolver(symbol)
@@ -8010,7 +8010,7 @@ class StrategyRunner:
                         check_zombie_ticks()
                     else:
                         self._logger.warning(
-                            "WS_RESTART_SKIPPED reason=transport_evidence_unavailable stale_symbols=%d",
+                            "WS_RESTART_SKIPPED reason=transport_evidence_unavailable stale_count=%d",
                             stale_count,
                             extra={
                                 "event": "WS_RESTART_SKIPPED",

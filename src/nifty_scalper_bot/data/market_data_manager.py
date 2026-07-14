@@ -3007,6 +3007,11 @@ class MarketDataManager:
         except (TypeError, ValueError):
             return None
 
+    def current_live_token(self, symbol: str) -> int | None:
+        """Return the current canonical live token under MDM lock."""
+        with self._lock:
+            return self._current_symbol_token_locked(symbol)
+
     def classify_live_tick_readiness(
         self,
         symbol: str,
