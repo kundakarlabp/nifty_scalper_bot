@@ -712,3 +712,78 @@ def test_subscription_divergence_needs_grace_and_symbol_recovery(monkeypatch):
     mdm._check_zombie_ticks()
 
     assert restarted == [True]
+
+
+def test_pipeline_overload_enters_recovers_with_hysteresis() -> None:
+    """PR-1 item E: canonical overload state. Enters on pending backlog OR
+    oldest-pending age; recovers only when BOTH are below exit thresholds
+    (hysteresis). New entries consult MarketDataManager.pipeline_overloaded
+    via the runner signal-prep guard; exits never pass through that guard."""
+    import collections
+    import logging
+    import threading
+    import time as time_mod
+
+    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+
+    mdm = MarketDataManager.__new__(MarketDataManager)
+    mdm._logger = logging.getLogger("test")
+    mdm._pending_tick_lock = threading.Lock()
+    mdm._pending_tick_queues = collections.defaultdict(collections.deque)
+    mdm._pending_far_ticks = {}
+    mdm._overload_enter_pending = 5
+    mdm._overload_exit_pending = 2
+    mdm._overload_enter_oldest_ms = 2000.0
+    mdm._overload_exit_oldest_ms = 800.0
+    mdm._pipeline_overloaded = False
+    mdm._overload_since_mono = None
+    mdm._pending_count_locked = lambda: (
+        sum(len(q) for q in mdm._pending_tick_queues.values())
+        + len(mdm._pending_far_ticks)
+    )
+
+    now = time_mod.monotonic()
+    for i in range(6):
+        mdm._pending_tick_queues[f"s{i}"].append({"_mdm_enqueued_mono": now})
+    with mdm._pending_tick_lock:
+        mdm._update_pipeline_overload_locked()
+    assert mdm.pipeline_overloaded is True
+
+    for i in range(3):  # partially drained: still above exit bound
+        mdm._pending_tick_queues.pop(f"s{i}")
+    with mdm._pending_tick_lock:
+        mdm._update_pipeline_overload_locked()
+    assert mdm.pipeline_overloaded is True, "hysteresis must hold"
+
+    for i in range(3, 5):
+        mdm._pending_tick_queues.pop(f"s{i}")
+    with mdm._pending_tick_lock:
+        mdm._update_pipeline_overload_locked()
+    assert mdm.pipeline_overloaded is False
+
+    # Oldest-age evidence alone triggers even with tiny backlog.
+    mdm._pending_tick_queues["x"].append(
+        {"_mdm_enqueued_mono": time_mod.monotonic() - 3.0}
+    )
+    with mdm._pending_tick_lock:
+        mdm._update_pipeline_overload_locked()
+    assert mdm.pipeline_overloaded is True
+
+
+def test_runner_signal_prep_blocks_on_overload_before_unarmed_guard() -> None:
+    """The overload guard sits at the same choke point as the unarmed guard,
+    BEFORE _schedule_signal_preparation, and exits (bracket paths) never
+    reference it."""
+    import inspect
+
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+    from nifty_scalper_bot.execution import bracket_core
+
+    src = inspect.getsource(StrategyRunner)
+    i_over = src.index("RUNNER_SIGNAL_PREP_BLOCKED_OVERLOAD")
+    i_unarmed = src.index("RUNNER_SIGNAL_PREP_BLOCKED_UNARMED")
+    i_sched = src.index(
+        "scheduled, prepare_reason = self._schedule_signal_preparation"
+    )
+    assert i_over < i_unarmed < i_sched
+    assert "pipeline_overloaded" not in inspect.getsource(bracket_core)

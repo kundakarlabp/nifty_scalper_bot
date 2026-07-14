@@ -1975,6 +1975,10 @@ class DataHub:
                 LOGGER.debug("probe_quote delegate failed for %s: %s", symbol, exc)
         return self.get_quote(symbol) or {}
 
+    @property
+    def pipeline_overloaded(self) -> bool:
+        return bool(getattr(self._mdm, "pipeline_overloaded", False))
+
     def get_ohlc_bars(self, symbol: str, *, limit: Optional[int] = None) -> list:
         mdm_fn = getattr(self._mdm, "get_ohlc_bars", None)
         if callable(mdm_fn):
