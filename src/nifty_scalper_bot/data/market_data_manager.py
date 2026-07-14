@@ -10119,7 +10119,13 @@ class MarketDataManager:
         """
 
         bar_symbol = self._bar_symbol_key(symbol)
-        candidate_keys = {bar_symbol, str(symbol or "").strip()}
+        raw_symbol = str(symbol or "").strip()
+        # Canonical-key storage is authoritative. Reading the raw symbol key is
+        # temporary backward compatibility for rows written before canonical live
+        # candle storage was enforced; no new writes may target the raw key.
+        candidate_keys = [bar_symbol]
+        if raw_symbol and raw_symbol != bar_symbol:
+            candidate_keys.append(raw_symbol)
         merged: dict[datetime, tuple[int, int, dict[str, Any]]] = {}
         sequence = 0
         with self._lock:
@@ -10139,7 +10145,7 @@ class MarketDataManager:
             row.setdefault("symbol", bar_symbol)
             precedence = self._completed_bar_precedence(row)
             existing = merged.get(ts_key)
-            if existing is None or (precedence, sequence) >= (existing[0], existing[1]):
+            if existing is None or precedence > existing[0]:
                 merged[ts_key] = (precedence, sequence, row)
         bars = [entry[2] for _, entry in sorted(merged.items(), key=lambda item: item[0])]
         if limit is not None and limit >= 0:

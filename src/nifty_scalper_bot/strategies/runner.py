@@ -1961,10 +1961,11 @@ class StrategyRunner:
         indicator_count = indicator_before
         source_ready = source_count >= required_count
         indicator_ready = indicator_count >= required_count
+        runner_ready = runner_before >= required_count
         needs_seed = bool(
             rows
-            and not indicator_ready
-            and (source_count > indicator_count or source_ready)
+            and (not indicator_ready or not runner_ready)
+            and (source_count > min(indicator_count, runner_before) or source_ready)
         )
         if needs_seed:
             try:
@@ -1992,7 +1993,7 @@ class StrategyRunner:
                         "failure_reason": failure_reason,
                     },
                 )
-        elif not source_ready and not indicator_ready and failure_reason is None:
+        if not source_ready and failure_reason is None:
             failure_reason = "source_history_short"
         runner_after = len(
             getattr(self, "_symbol_history", {}).get(normalized, []) or []

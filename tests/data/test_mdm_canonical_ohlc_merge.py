@@ -249,3 +249,74 @@ def test_invalid_timestamp_is_rejected_deterministically() -> None:
     assert len(bars) == 1
     assert bars[0]["source"] == "ws_candle"
     assert bars[0]["timestamp_quality"] == "exchange_timestamp"
+
+
+def test_canonical_and_raw_key_merge_order_is_deterministic_and_canonical_authoritative() -> (
+    None
+):
+    mdm = _mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    raw_symbol = "  NFO:NIFTY26JUN24000CE  "
+    canonical_key = mdm._bar_symbol_key(symbol)
+    mdm._ohlc[canonical_key].append(
+        _custom_bar(
+            datetime(2026, 1, 1, 9, 15),
+            source="historical",
+            close=111.0,
+            synthetic=False,
+            timestamp_quality="canonical_history",
+        )
+    )
+    mdm._ohlc[raw_symbol].append(
+        _custom_bar(
+            datetime(2026, 1, 1, 9, 15),
+            source="historical",
+            close=999.0,
+            synthetic=True,
+            timestamp_quality="legacy_raw_history",
+        )
+    )
+
+    first = mdm.get_ohlc_bars(raw_symbol)
+    second = mdm.get_ohlc_bars(raw_symbol)
+
+    assert first == second
+    assert len(first) == 1
+    assert first[0]["close"] == 111.0
+    assert first[0]["timestamp_quality"] == "canonical_history"
+    assert first[0]["synthetic"] is False
+
+
+def test_repeated_canonical_getter_calls_keep_same_live_winner_metadata() -> None:
+    mdm = _mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    key = mdm._bar_symbol_key(symbol)
+    mdm._ohlc[key].append(
+        _custom_bar(
+            datetime(2026, 1, 1, 9, 15),
+            source="historical",
+            close=111.0,
+            synthetic=False,
+            timestamp_quality="broker_history",
+        )
+    )
+    mdm._ohlc[key].append(
+        _custom_bar(
+            datetime(2026, 1, 1, 9, 15, 30),
+            source="ws_candle",
+            close=222.0,
+            synthetic=True,
+            timestamp_quality="exchange_timestamp",
+            provisional=False,
+        )
+    )
+
+    first = mdm.get_ohlc_bars(symbol)
+    second = mdm.get_ohlc_bars(symbol)
+
+    assert first == second
+    assert len(first) == 1
+    assert first[0]["source"] == "ws_candle"
+    assert first[0]["synthetic"] is True
+    assert first[0]["timestamp_quality"] == "exchange_timestamp"
+    assert first[0]["provisional"] is False

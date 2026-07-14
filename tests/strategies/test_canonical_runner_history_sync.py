@@ -362,3 +362,66 @@ async def test_repeated_sync_is_idempotent_for_same_canonical_bars() -> None:
     assert second.success is True
     assert second.runner_bars == first.runner_bars == 30
     assert second.indicator_bars == first.indicator_bars == 30
+
+
+async def test_runner_short_indicator_ready_source_warm_reseeds_and_succeeds() -> None:
+    r = _runner(_bars(50))
+    symbol = "NFO:NIFTY26JUN24000CE"
+    r._symbol_history[symbol] = _bars(15)
+    for bar in _bars(30):
+        r._indicator_engine.ingest_historical_bar(symbol, bar)
+
+    result = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is True
+    assert result.runner_bars >= 30
+    assert result.indicator_bars >= 30
+
+
+async def test_short_source_fails_even_when_runner_and_indicator_are_warm() -> None:
+    r = _runner(_bars(15))
+    symbol = "NFO:NIFTY26JUN24000CE"
+    r._symbol_history[symbol] = _bars(30)
+    for bar in _bars(30):
+        r._indicator_engine.ingest_historical_bar(symbol, bar)
+
+    result = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is False
+    assert result.mdm_bars == 15
+    assert result.runner_bars == 30
+    assert result.indicator_bars == 30
+    assert result.failure_reason == "source_history_short"
+
+
+async def test_short_source_repairs_short_runner_but_remains_fail_closed() -> None:
+    r = _runner(_bars(20))
+    symbol = "NFO:NIFTY26JUN24000CE"
+    r._symbol_history[symbol] = _bars(15)
+    for bar in _bars(30):
+        r._indicator_engine.ingest_historical_bar(symbol, bar)
+
+    result = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is False
+    assert result.mdm_bars == 20
+    assert result.runner_bars == 20
+    assert result.failure_reason == "source_history_short"
