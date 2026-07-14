@@ -352,8 +352,16 @@ def test_rest_fallback_does_not_mark_ws_tick_freshness():
 def test_valid_ws_tick_updates_canonical_live_timestamp():
     mdm = MarketDataManager(kite=None)
     symbol = "NFO:NIFTY26JUN24000CE"
+    token = 24000
+    assert mdm.request_token_subscription(token, symbol=symbol)
     mdm._ingest_normalized_tick(
-        {"symbol": symbol, "ltp": 10.0, "timestamp": time.time(), "source": "ws"}
+        {
+            "symbol": symbol,
+            "instrument_token": token,
+            "ltp": 10.0,
+            "timestamp": time.time(),
+            "source": "ws",
+        }
     )
 
     assert mdm.time_since_last_live_ws_tick(symbol) is not None
