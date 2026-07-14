@@ -276,3 +276,89 @@ async def test_create_task_failure_closes_coroutine_and_does_not_overwrite_newer
     assert r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] == 30
     assert r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] == "recovery_or_open_position"
     assert [w for w in recwarn if "was never awaited" in str(w.message)] == []
+
+async def test_selected_option_with_canonical_source_warm_indicator_short_reseeds_immediately() -> None:
+    r = _runner(_bars(50))
+    symbol = "NFO:NIFTY26JUN24000CE"
+    r._symbol_history[symbol] = _bars(15)
+    for bar in _bars(15):
+        r._indicator_engine.ingest_historical_bar(symbol, bar)
+
+    result = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is True
+    assert result.mdm_bars == 30
+    assert result.runner_bars >= 30
+    assert result.indicator_bars >= 30
+
+
+async def test_indicator_equal_to_short_source_remains_not_ready_without_false_success() -> None:
+    r = _runner(_bars(15))
+    symbol = "NFO:NIFTY26JUN24000CE"
+    r._symbol_history[symbol] = _bars(15)
+    for bar in _bars(15):
+        r._indicator_engine.ingest_historical_bar(symbol, bar)
+
+    result = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is False
+    assert result.mdm_bars == 15
+    assert result.indicator_bars == 15
+    assert result.failure_reason == "source_history_short"
+
+
+async def test_partial_source_availability_seeds_useful_bars_but_remains_fail_closed() -> None:
+    r = _runner(_bars(20))
+    symbol = "NFO:NIFTY26JUN24000CE"
+    for bar in _bars(15):
+        r._indicator_engine.ingest_historical_bar(symbol, bar)
+
+    result = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is False
+    assert result.mdm_bars == 20
+    assert result.runner_bars == 20
+    assert result.indicator_bars == 20
+
+
+async def test_repeated_sync_is_idempotent_for_same_canonical_bars() -> None:
+    r = _runner(_bars(50))
+    symbol = "NFO:NIFTY26JUN24000CE"
+
+    first = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+    second = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert second.runner_bars == first.runner_bars == 30
+    assert second.indicator_bars == first.indicator_bars == 30
