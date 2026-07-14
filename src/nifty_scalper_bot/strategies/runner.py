@@ -1953,17 +1953,24 @@ class StrategyRunner:
         except (AttributeError, TypeError, ValueError) as exc:
             rows = []
             failure_reason = f"mdm_history_read_failed:{type(exc).__name__}"
-        mdm_bars = len(rows)
+        source_count = len(rows)
+        required_count = target
         runner_before = len(
             getattr(self, "_symbol_history", {}).get(normalized, []) or []
         )
-        if rows and (
-            runner_before < min(target, mdm_bars)
-            or indicator_before < min(target, mdm_bars)
-        ):
+        indicator_count = indicator_before
+        source_ready = source_count >= required_count
+        indicator_ready = indicator_count >= required_count
+        runner_ready = runner_before >= required_count
+        needs_seed = bool(
+            rows
+            and (not indicator_ready or not runner_ready)
+            and (source_count > min(indicator_count, runner_before) or source_ready)
+        )
+        if needs_seed:
             try:
                 self.reseed_history_from_bars(
-                    normalized, rows, source=reason, min_bars=target
+                    normalized, rows, source=reason, min_bars=required_count
                 )
             except (
                 Exception
@@ -1986,6 +1993,8 @@ class StrategyRunner:
                         "failure_reason": failure_reason,
                     },
                 )
+        if not source_ready and failure_reason is None:
+            failure_reason = "source_history_short"
         runner_after = len(
             getattr(self, "_symbol_history", {}).get(normalized, []) or []
         )
@@ -1998,7 +2007,7 @@ class StrategyRunner:
             )
         success = (
             failure_reason is None
-            and mdm_bars >= target
+            and source_count >= target
             and runner_after >= target
             and indicator_after >= target
         )
@@ -2015,7 +2024,7 @@ class StrategyRunner:
         # memory-tight host. Throttle the healthy/steady case per symbol+state
         # (60s); failures and state changes still log immediately. Same pattern as
         # LIVE_TRADING_READINESS_SNAPSHOT / LIVE_UNIVERSE_BOOTSTRAP_STATUS.
-        _sync_key = f"hist_sync:{normalized}:{role}:{success}:{reason}:{mdm_bars}:{runner_after}:{indicator_after}"
+        _sync_key = f"hist_sync:{normalized}:{role}:{success}:{reason}:{source_count}:{runner_after}:{indicator_after}"
         _sync_interval = float(
             os.getenv("RUNNER_HISTORY_SYNC_LOG_INTERVAL_SECONDS", "60") or "60"
         )
@@ -2026,7 +2035,7 @@ class StrategyRunner:
                 role,
                 reason,
                 target,
-                mdm_bars,
+                source_count,
                 runner_after,
                 indicator_after,
                 success,
@@ -2037,7 +2046,7 @@ class StrategyRunner:
                     "role": role,
                     "reason": reason,
                     "required_bars": target,
-                    "mdm_after": mdm_bars,
+                    "mdm_after": source_count,
                     "runner_after": runner_after,
                     "indicator_after": indicator_after,
                     "success": success,
@@ -2058,7 +2067,7 @@ class StrategyRunner:
             role,
             reason,
             target,
-            mdm_bars,
+            source_count,
             runner_after,
             indicator_after,
             success,

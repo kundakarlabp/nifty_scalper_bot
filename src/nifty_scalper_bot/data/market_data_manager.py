@@ -58,6 +58,7 @@ from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.data.candle_engine import CandleEngine
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.normalizers import normalize_history_row
+from nifty_scalper_bot.data.time_contract import coerce_market_timestamp
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.instruments.active_contracts import (
@@ -7167,7 +7168,7 @@ class MarketDataManager:
                 ),
                 "source": "ws_candle",
             }
-            self._ohlc[symbol].append(bar)
+            self._ohlc[self._bar_symbol_key(symbol)].append(bar)
             self._publish_closed_bar(bar)
             verbose_candles = str(
                 os.getenv("LOG_VERBOSE_CANDLES", "false")
@@ -10075,14 +10076,78 @@ class MarketDataManager:
         }
         return snapshot
 
+    @staticmethod
+    def _bar_timestamp_key(row: Mapping[str, Any]) -> datetime | None:
+        """Return UTC minute key using the canonical market timestamp policy."""
+
+        ts = row.get("timestamp") if isinstance(row, Mapping) else None
+        if ts is None and isinstance(row, Mapping):
+            ts = row.get("date")
+        try:
+            market_ts = coerce_market_timestamp(ts)
+        except (TypeError, ValueError, OSError):
+            return None
+        return (
+            market_ts.tz_convert(timezone.utc)
+            .floor("min")
+            .to_pydatetime()
+            .replace(second=0, microsecond=0)
+        )
+
+    @staticmethod
+    def _completed_bar_precedence(row: Mapping[str, Any]) -> int:
+        """Return deterministic precedence for duplicate completed candle timestamps."""
+
+        if bool(row.get("provisional")):
+            return -1
+        source = str(row.get("source") or "").lower()
+        if source in {"ws_candle", "live", "websocket", "ws"}:
+            return 30
+        if source in {"historical", "broker", "broker_history"}:
+            return 20
+        return 10
+
     def get_ohlc_bars(
         self, symbol: str, *, limit: int | None = None
     ) -> list[dict[str, Any]]:
-        """Return trailing one-minute OHLC bars for *symbol*."""
+        """Return canonical completed one-minute OHLC bars for *symbol*.
+
+        The canonical view is a pure read: it merges accepted broker-history rows
+        with completed live-built candles for the normalized bar key, deduplicates
+        by candle timestamp, prefers completed live candles over broker history on
+        identical timestamps, and never exposes provisional current candles.
+        """
 
         bar_symbol = self._bar_symbol_key(symbol)
+        raw_symbol = str(symbol or "").strip()
+        # Canonical-key storage is authoritative. Reading the raw symbol key is
+        # temporary backward compatibility for rows written before canonical live
+        # candle storage was enforced; no new writes may target the raw key.
+        candidate_keys = [bar_symbol]
+        if raw_symbol and raw_symbol != bar_symbol:
+            candidate_keys.append(raw_symbol)
+        merged: dict[datetime, tuple[int, int, dict[str, Any]]] = {}
+        sequence = 0
         with self._lock:
-            bars = list(self._ohlc.get(bar_symbol, ()))
+            rows: list[dict[str, Any]] = []
+            for key in candidate_keys:
+                if not key:
+                    continue
+                rows.extend(dict(row) for row in self._ohlc.get(key, ()) or ())
+        for row in rows:
+            sequence += 1
+            if bool(row.get("provisional")):
+                continue
+            ts_key = self._bar_timestamp_key(row)
+            if ts_key is None:
+                continue
+            row["timestamp"] = ts_key
+            row.setdefault("symbol", bar_symbol)
+            precedence = self._completed_bar_precedence(row)
+            existing = merged.get(ts_key)
+            if existing is None or precedence > existing[0]:
+                merged[ts_key] = (precedence, sequence, row)
+        bars = [entry[2] for _, entry in sorted(merged.items(), key=lambda item: item[0])]
         if limit is not None and limit >= 0:
             bars = bars[-limit:]
         return bars
