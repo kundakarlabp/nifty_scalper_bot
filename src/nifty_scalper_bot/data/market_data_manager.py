@@ -552,6 +552,14 @@ class MarketDataManager:
         self._pending_subscriptions: set[int] = set()
         self._dispatched_subscriptions: set[int] = set()
         self._confirmed_subscriptions: set[int] = set()
+        self._subscription_generation = 0
+        self._symbol_subscription_generation: dict[str, int] = {}
+        self._symbol_first_tick_generation: dict[str, int] = {}
+        self._ws_restart_generation = 0
+        self._ws_restart_inflight = False
+        self._ws_restart_lock = threading.Lock()
+        self._ws_restart_started_at: float | None = None
+        self._ws_restart_diagnostics: dict[str, Any] = {}
         self._last_rest_refresh_attempt: dict[str, float] = {}
         self._tick_warn_last: dict[str, float] = (
             {}
@@ -1405,6 +1413,9 @@ class MarketDataManager:
         if not self._started:
             return
         self._started = False
+        with self._ws_restart_lock:
+            self._ws_restart_inflight = False
+            self._ws_restart_started_at = None
         if self._ws is not None:
             try:
                 self._ws.stop()
@@ -1824,6 +1835,9 @@ class MarketDataManager:
         try:
             changed = ws.set_tokens(sorted(self._desired_tokens))
             self._dispatched_subscriptions.update(self._desired_tokens)
+            if changed:
+                with self._lock:
+                    self._subscription_generation += 1
             connected = self._is_ws_connected()
             self._logger.debug(
                 "ws_tokens_reconciled desired=%d changed=%s connected=%s",
@@ -2529,6 +2543,15 @@ class MarketDataManager:
                 self._set_symbol_token_mapping(
                     normalized_symbol, token_int, source="request_token_subscription"
                 )
+                self._subscription_generation += 1
+                self._symbol_subscription_generation[normalized_symbol] = (
+                    self._subscription_generation
+                )
+                self._symbol_first_tick_generation.pop(normalized_symbol, None)
+                self._last_valid_live_tick_mono.pop(normalized_symbol, None)
+                self._last_tick_ts.pop(normalized_symbol, None)
+                self._last_tick_snapshot.pop(normalized_symbol, None)
+                self._last_cumulative_volume_by_symbol.pop(normalized_symbol, None)
         if active_future:
             self.purge_stale_nifty_futures(
                 active_future, reason="request_token_subscription_post"
@@ -2595,6 +2618,8 @@ class MarketDataManager:
             before = len(self._desired_tokens)
             self._desired_tokens.update(accepted)
             added_count = len(self._desired_tokens) - before
+            if added_count:
+                self._subscription_generation += 1
         if active_future:
             self.purge_stale_nifty_futures(
                 active_future, reason="request_token_subscriptions_post"
@@ -2918,6 +2943,70 @@ class MarketDataManager:
         if mono is None:
             return None
         return max(time.monotonic() - float(mono), 0.0)
+
+    def classify_live_tick_readiness(
+        self,
+        symbol: str,
+        token: int | None,
+        *,
+        max_age_s: float,
+    ) -> dict[str, Any]:
+        """Classify current-generation live tick readiness for execution gates."""
+        canonical = self._canonical_symbol(symbol)
+        try:
+            token_int = int(token) if token is not None else None
+        except (TypeError, ValueError):
+            token_int = None
+        with self._lock:
+            desired = set(getattr(self, "_desired_tokens", set()) or set())
+            confirmed = set(getattr(self, "_confirmed_subscriptions", set()) or set())
+            dispatched = set(getattr(self, "_dispatched_subscriptions", set()) or set())
+            sub_gen = self._symbol_subscription_generation.get(canonical)
+            tick_gen = self._symbol_first_tick_generation.get(canonical)
+            tick_mono = self._last_valid_live_tick_mono.get(canonical)
+        expected = token_int in desired if token_int is not None else False
+        subscribed = (
+            (token_int in confirmed or token_int in dispatched)
+            if token_int is not None
+            else False
+        )
+        age_s = (
+            None
+            if tick_mono is None
+            else max(time.monotonic() - float(tick_mono), 0.0)
+        )
+        if token_int is None:
+            reason = "subscription_missing"
+        elif not expected:
+            reason = "symbol_not_expected_live"
+        elif not subscribed:
+            reason = (
+                "subscription_pending"
+                if token_int in desired
+                else "subscription_missing"
+            )
+        elif sub_gen is not None and tick_gen is not None and tick_gen < sub_gen:
+            reason = "subscription_generation_mismatch"
+        elif tick_mono is None:
+            reason = "never_received_tick"
+        elif age_s is None:
+            reason = "tick_timestamp_missing"
+        elif age_s > max_age_s:
+            reason = "tick_stale"
+        else:
+            reason = "ready"
+        return {
+            "ready": reason == "ready",
+            "reason": reason,
+            "symbol": canonical,
+            "token": token_int,
+            "expected": expected,
+            "subscribed": subscribed,
+            "subscription_generation": sub_gen,
+            "tick_generation": tick_gen,
+            "first_tick_received": tick_gen is not None,
+            "tick_age_s": age_s,
+        }
 
     async def _rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
@@ -7524,6 +7613,11 @@ class MarketDataManager:
             canonical_symbol = self._canonical_symbol(symbol)
             with self._lock:
                 self._last_valid_live_tick_mono[canonical_symbol] = now_mono
+                self._symbol_first_tick_generation[canonical_symbol] = (
+                    self._symbol_subscription_generation.get(
+                        canonical_symbol, self._subscription_generation
+                    )
+                )
             try:
                 token_value = tick.get("instrument_token") or tick.get("token")
                 token_int = int(token_value) if token_value is not None else None
@@ -8318,6 +8412,42 @@ class MarketDataManager:
         ws = self._ws
         if ws is None:
             return
+        with self._ws_restart_lock:
+            if self._ws_restart_inflight:
+                self._logger.info(
+                    "MDM_ZOMBIE_WS_RESTART_COALESCED generation=%s",
+                    self._ws_restart_generation,
+                    extra={
+                        "event": "MDM_ZOMBIE_WS_RESTART_COALESCED",
+                        "restart_generation": self._ws_restart_generation,
+                        "state": "inflight",
+                    },
+                )
+                return
+            self._ws_restart_inflight = True
+            self._ws_restart_generation += 1
+            self._ws_restart_started_at = now
+            self._ws_restart_diagnostics = {
+                "restart_generation": self._ws_restart_generation,
+                "initiator": "mdm_zombie_watchdog",
+                "reason": "transport_failure",
+                "started_at": now,
+                "desired_tokens": sorted(self._desired_tokens),
+            }
+            self._subscription_generation += 1
+            for token in list(self._desired_tokens):
+                sym = self._resolve_symbol_for_token(int(token))
+                if not sym:
+                    continue
+                canonical = self._canonical_symbol(sym)
+                self._symbol_subscription_generation[canonical] = (
+                    self._subscription_generation
+                )
+                self._symbol_first_tick_generation.pop(canonical, None)
+                self._last_valid_live_tick_mono.pop(canonical, None)
+                self._last_tick_ts.pop(canonical, None)
+                self._last_tick_snapshot.pop(canonical, None)
+                self._last_cumulative_volume_by_symbol.pop(canonical, None)
 
         reconnect = getattr(ws, "force_reconnect", None)
         if not callable(reconnect):
@@ -8325,6 +8455,18 @@ class MarketDataManager:
         else:
             try:
                 reconnect()
+                self._reconcile_ws_subscriptions()
+                recovery = self.verify_websocket_recovery()
+                if not recovery.get("ok"):
+                    self._logger.error(
+                        "MDM_ZOMBIE_WS_RECOVERY_FAILED reason=%s generation=%s",
+                        recovery.get("reason"),
+                        self._ws_restart_generation,
+                        extra={
+                            "event": "MDM_ZOMBIE_WS_RECOVERY_FAILED",
+                            **recovery,
+                        },
+                    )
                 self._zombie_restart_failures = 0
                 self._zombie_restart_consecutive += 1
                 self._zombie_restart_attempts.append(now)
@@ -8350,6 +8492,10 @@ class MarketDataManager:
                     extra={"event": "mdm_zombie_ws_restart_error"},
                     exc_info=exc,
                 )
+            finally:
+                with self._ws_restart_lock:
+                    self._ws_restart_inflight = False
+                    self._ws_restart_started_at = None
 
         if len(self._zombie_restart_attempts) > 5:
             self._logger.critical(
@@ -8359,7 +8505,9 @@ class MarketDataManager:
                     "attempts_in_2m": len(self._zombie_restart_attempts),
                 },
             )
-            raise RuntimeError("WebSocket restart circuit breaker exceeded: >5 in 120s")
+            raise RuntimeError(
+                "WebSocket restart circuit breaker exceeded: >5 in 120s"
+            )
 
         if self._zombie_restart_failures > self._zombie_restart_limit:
             self._zombie_breaker_open_until = now + self._zombie_restart_window
@@ -8371,6 +8519,29 @@ class MarketDataManager:
                     "open_seconds": self._zombie_restart_window,
                 },
             )
+
+    def verify_websocket_recovery(self) -> dict[str, Any]:
+        """Verify websocket recovery state without assuming reconnect success."""
+        connected = self._is_ws_connected()
+        with self._lock:
+            desired = set(self._desired_tokens)
+            dispatched = set(self._dispatched_subscriptions)
+            confirmed = set(self._confirmed_subscriptions)
+        represented = desired <= (dispatched | confirmed)
+        reason = "ok"
+        if not connected:
+            reason = "websocket_not_connected"
+        elif not represented:
+            reason = "expected_tokens_not_restored"
+        return {
+            "ok": connected and represented,
+            "reason": reason,
+            "restart_generation": self._ws_restart_generation,
+            "connected": connected,
+            "desired_tokens": sorted(desired),
+            "dispatched_tokens": sorted(dispatched),
+            "confirmed_tokens": sorted(confirmed),
+        }
 
     def _start_rest_poll(self) -> None:
         if self._rest_poll_thread is not None and self._rest_poll_thread.is_alive():
