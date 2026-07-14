@@ -11,7 +11,9 @@ Production Entrypoint
 import asyncio
 import logging
 import os
-from nifty_scalper_bot.config.defaults import DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
 import socket
 import sys
 from contextlib import asynccontextmanager, suppress
@@ -136,6 +138,8 @@ def _release_bot_start_guard() -> None:
 
     global _BOT_START_GUARD
     _BOT_START_GUARD = False
+
+
 _EVENT_LOOP_LAG_MS = 0.0
 
 
@@ -160,7 +164,11 @@ async def _event_loop_lag_monitor() -> None:
             persistence_state = None
             try:
                 ctx = _latest_context()
-                mdm = getattr(ctx, "market_data_manager", None) if ctx is not None else None
+                mdm = (
+                    getattr(ctx, "market_data_manager", None)
+                    if ctx is not None
+                    else None
+                )
                 stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
                 if callable(stats_fn):
                     stats = stats_fn() or {}
@@ -178,7 +186,14 @@ async def _event_loop_lag_monitor() -> None:
                     persistence_state = status_fn()
             except Exception:
                 pass
-            LOG.warning("EVENT_LOOP_LAG_HIGH lag_ms=%.1f tick_pending=%s drain_state=%s quote_checkpoint_inflight=%s persistence_state=%s", lag_ms, pending, drain_state, quote_inflight, persistence_state)
+            LOG.warning(
+                "EVENT_LOOP_LAG_HIGH lag_ms=%.1f tick_pending=%s drain_state=%s quote_checkpoint_inflight=%s persistence_state=%s",
+                lag_ms,
+                pending,
+                drain_state,
+                quote_inflight,
+                persistence_state,
+            )
 
 
 async def _run_bot_background(
@@ -377,37 +392,145 @@ def _symbol_bar_counts(ctx, symbol):  # noqa: ANN001
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
     try:
-        mdm_count = int(mdm.ohlc_count(symbol)) if callable(getattr(mdm, "ohlc_count", None)) else len(mdm.get_ohlc_bars(symbol) or [])
+        mdm_count = (
+            int(mdm.ohlc_count(symbol))
+            if callable(getattr(mdm, "ohlc_count", None))
+            else len(mdm.get_ohlc_bars(symbol) or [])
+        )
     except Exception:
         mdm_count = 0
     try:
-        runner_count = int(runner.runner_history_count(symbol)) if callable(getattr(runner, "runner_history_count", None)) else 0
+        runner_count = (
+            int(runner.runner_history_count(symbol))
+            if callable(getattr(runner, "runner_history_count", None))
+            else 0
+        )
     except Exception:
         runner_count = 0
     try:
-        indicator_count = int(runner.indicator_history_count(symbol)) if callable(getattr(runner, "indicator_history_count", None)) else 0
+        indicator_count = (
+            int(runner.indicator_history_count(symbol))
+            if callable(getattr(runner, "indicator_history_count", None))
+            else 0
+        )
     except Exception:
         indicator_count = 0
     return {"mdm": mdm_count, "runner": runner_count, "indicator": indicator_count}
 
 
+def _broker_session_status(ctx):  # noqa: ANN001
+    market_data_authenticated = bool(
+        getattr(ctx, "market_data_authenticated", False)
+        or getattr(ctx, "broker_authenticated", False)
+        or getattr(ctx, "broker_auth_verified", False)
+    )
+    funds_endpoint_verified = bool(getattr(ctx, "broker_balance_valid", False))
+    order_endpoint_verified = bool(
+        getattr(ctx, "order_endpoint_verified", False)
+        or getattr(ctx, "broker_order_endpoint_verified", False)
+        or getattr(ctx, "broker_auth_verified", False)
+        or getattr(ctx, "broker_authenticated", False)
+    )
+    auth_invalid = bool(
+        getattr(ctx, "broker_auth_invalid", False)
+        or getattr(ctx, "broker_session_invalid", False)
+    )
+    if auth_invalid:
+        state = "invalid"
+        authentication_known = True
+    elif order_endpoint_verified:
+        state = "order_verified"
+        authentication_known = True
+    elif funds_endpoint_verified:
+        state = "funds_verified"
+        authentication_known = False
+    elif market_data_authenticated:
+        state = "market_data_only"
+        authentication_known = True
+    else:
+        state = "unknown"
+        authentication_known = False
+    return {
+        "broker_session_state": state,
+        "authentication_known": authentication_known,
+        "market_data_authenticated": market_data_authenticated,
+        "funds_endpoint_verified": funds_endpoint_verified,
+        "order_endpoint_verified": order_endpoint_verified,
+    }
+
+
+def _live_order_readiness(ctx, *, blockers=None):  # noqa: ANN001
+    blockers = list(blockers or _context_blockers(ctx))
+    broker_status = _broker_session_status(ctx)
+    reconciliation_completed = bool(
+        getattr(ctx, "position_reconciliation_completed", False)
+    )
+    reconciliation_failed = bool(getattr(ctx, "position_reconciliation_failed", False))
+    unresolved = bool(
+        getattr(ctx, "unprotected_broker_positions", set())
+        or getattr(ctx, "unresolved_reconciliation_symbols", set())
+    )
+    mdm = getattr(ctx, "market_data_manager", None)
+    pipeline_overloaded = bool(getattr(mdm, "pipeline_overloaded", False))
+    ready = bool(
+        broker_status["order_endpoint_verified"]
+        and reconciliation_completed
+        and not reconciliation_failed
+        and not unresolved
+        and bool(
+            getattr(ctx, "evaluation_ready", getattr(ctx, "data_hard_ready", False))
+        )
+        and not pipeline_overloaded
+        and not blockers
+    )
+    missing = []
+    if not broker_status["order_endpoint_verified"]:
+        missing.append("order_endpoint_unverified")
+    if not reconciliation_completed:
+        missing.append("position_reconciliation_incomplete")
+    if reconciliation_failed:
+        missing.append("position_reconciliation_failed")
+    if unresolved:
+        missing.append("unprotected_or_unresolved_position")
+    if pipeline_overloaded:
+        missing.append("data_pipeline_overloaded")
+    missing.extend(str(b) for b in blockers if b)
+    return {"ready": ready, "missing": list(dict.fromkeys(missing))}
+
+
 def _structured_runtime_status(ctx):  # noqa: ANN001
     basket = getattr(ctx, "active_contract_basket", None) or {}
+
     def _get(key):
-        return basket.get(key) if isinstance(basket, dict) else getattr(basket, key, None)
+        return (
+            basket.get(key) if isinstance(basket, dict) else getattr(basket, key, None)
+        )
+
     selected_ce = getattr(ctx, "selected_ce", None) or _get("selected_ce")
     selected_pe = getattr(ctx, "selected_pe", None) or _get("selected_pe")
-    selected = {"atm": getattr(ctx, "atm_strike", None) or _get("atm_strike"), "ce": selected_ce, "pe": selected_pe}
-    required = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS))) or _DEFAULT_OPT_MIN_BARS)
+    selected = {
+        "atm": getattr(ctx, "atm_strike", None) or _get("atm_strike"),
+        "ce": selected_ce,
+        "pe": selected_pe,
+    }
+    required = int(
+        os.getenv(
+            "READINESS_OPTION_EXEC_MIN_BARS",
+            os.getenv("OPTION_EXECUTION_MIN_BARS", str(_DEFAULT_OPT_MIN_BARS)),
+        )
+        or _DEFAULT_OPT_MIN_BARS
+    )
     mdm = getattr(ctx, "market_data_manager", None)
     stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
     tick_pressure = stats_fn() if callable(stats_fn) else {}
-    auth_state = "unknown"
-    if bool(getattr(ctx, "broker_auth_verified", False) or getattr(ctx, "broker_authenticated", False)):
-        auth_state = "authenticated"
-    if bool(getattr(ctx, "broker_auth_invalid", False) or getattr(ctx, "broker_session_invalid", False)):
-        auth_state = "invalid"
-    reconciliation_completed = bool(getattr(ctx, "position_reconciliation_completed", False)) and auth_state == "authenticated"
+    broker_status = _broker_session_status(ctx)
+    auth_state = {
+        "order_verified": "authenticated",
+        "invalid": "invalid",
+        "funds_verified": "unknown",
+        "market_data_only": "unknown",
+        "unknown": "unknown",
+    }.get(str(broker_status["broker_session_state"]), "unknown")
     return {
         "selected": selected,
         "history": {
@@ -416,12 +539,15 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
             "pe": _symbol_bar_counts(ctx, selected_pe),
         },
         "state": {
-            "startup_ready": bool(getattr(ctx, "startup_ready", getattr(ctx, "data_hard_ready", False))),
+            "startup_ready": bool(
+                getattr(ctx, "startup_ready", getattr(ctx, "data_hard_ready", False))
+            ),
             "data_hard_ready": bool(getattr(ctx, "data_hard_ready", False)),
             "evaluation_ready": bool(getattr(ctx, "evaluation_ready", False)),
             "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False)),
         },
         "broker_authentication": auth_state,
+        **broker_status,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
         "tick_pressure": tick_pressure,
         "install_proof": build_runtime_install_proof(ctx),
@@ -463,7 +589,9 @@ def readyz():
     }
     live_mode = enable_live and execution_mode == "LIVE"
     if live_mode:
-        auth_state = _structured_runtime_status(ctx).get("broker_authentication", "unknown")
+        auth_state = _structured_runtime_status(ctx).get(
+            "broker_authentication", "unknown"
+        )
         if auth_state == "invalid":
             blockers.insert(0, "broker_authentication_invalid")
         elif auth_state != "authenticated":
@@ -491,9 +619,7 @@ def readyz():
             "primary_blocker": (
                 operational_blockers[0]
                 if operational_blockers
-                else blockers[0]
-                if blockers
-                else None
+                else blockers[0] if blockers else None
             ),
             "blockers": blockers,
         },
@@ -523,16 +649,18 @@ def health_trading():
     execution_ready = bool(
         getattr(decision, "execution_ready", getattr(ctx, "execution_armed", False))
     )
-    primary = getattr(decision, "primary_blocker", None) or (blockers[0] if blockers else None)
+    primary = getattr(decision, "primary_blocker", None) or (
+        blockers[0] if blockers else None
+    )
     if not live_orders_armed and not primary:
         primary = "startup_pipeline_incomplete"
         blockers = blockers or [primary]
     structured_status = _structured_runtime_status(ctx)
     auth_state = structured_status.get("broker_authentication", "unknown")
-    reconciliation_completed = (
-        bool(getattr(ctx, "position_reconciliation_completed", False))
-        and auth_state == "authenticated"
-    )
+    live_order_readiness = _live_order_readiness(ctx, blockers=blockers)
+    reconciliation_completed = bool(
+        getattr(ctx, "position_reconciliation_completed", False)
+    ) and bool(structured_status.get("order_endpoint_verified", False))
     return JSONResponse(
         status_code=200,
         content={
@@ -550,12 +678,31 @@ def health_trading():
                 "balance_valid": bool(getattr(ctx, "broker_balance_valid", False)),
                 "balance": getattr(ctx, "last_valid_broker_balance", None),
                 "balance_error": getattr(ctx, "broker_balance_error", None),
+                "broker_session_state": structured_status.get("broker_session_state"),
+                "authentication_known": structured_status.get("authentication_known"),
+                "market_data_authenticated": structured_status.get(
+                    "market_data_authenticated"
+                ),
+                "funds_endpoint_verified": structured_status.get(
+                    "funds_endpoint_verified"
+                ),
+                "order_endpoint_verified": structured_status.get(
+                    "order_endpoint_verified"
+                ),
             },
+            "live_order_readiness": live_order_readiness,
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
                 "completed": reconciliation_completed,
                 "failed": bool(getattr(ctx, "position_reconciliation_failed", False)),
                 "error": getattr(ctx, "position_reconciliation_error", None),
+                "reconciliation_started": bool(
+                    getattr(ctx, "position_reconciliation_started", False)
+                ),
+                "reconciliation_completed": reconciliation_completed,
+                "reconciliation_failed": bool(
+                    getattr(ctx, "position_reconciliation_failed", False)
+                ),
                 "unprotected_positions": sorted(
                     getattr(ctx, "unprotected_broker_positions", set()) or []
                 ),
@@ -626,7 +773,11 @@ def trading_status():
     exec_mode = os.getenv("EXECUTION_MODE", "SHADOW")
 
     ctx = _latest_context()
-    structured = _structured_runtime_status(ctx) if ctx is not None else {"install_proof": build_runtime_install_proof(None)}
+    structured = (
+        _structured_runtime_status(ctx)
+        if ctx is not None
+        else {"install_proof": build_runtime_install_proof(None)}
+    )
     return {
         "enable_live": enable_live,
         "execution_mode": exec_mode,

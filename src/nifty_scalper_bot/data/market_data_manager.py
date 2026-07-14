@@ -391,6 +391,9 @@ class MarketDataManager:
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._last_cumulative_volume_by_symbol: dict[str, float] = {}
+        self._volume_baseline_by_identity: dict[
+            tuple[str, int | None, int, int], dict[str, Any]
+        ] = {}
         self._volume_delta_clamp_stats: dict[str, dict[str, float]] = {}
         self._last_volume_delta_clamp_summary_ts: dict[str, float] = {}
         self._last_tick_snapshot: dict[str, dict[str, Any]] = {}
@@ -449,6 +452,7 @@ class MarketDataManager:
         self._pending_tick_count = 0
         self._pending_tick_oldest_heap: list[tuple[float, int, str]] = []
         self._pending_tick_heap_seq = 0
+        self._pending_heap_compactions_total = 0
         self._tick_drain_scheduled = False
         self._tick_drain_start_pending = False
         self._tick_drain_task: asyncio.Task[None] | None = None
@@ -6097,20 +6101,99 @@ class MarketDataManager:
                 now
             )
 
+    def _required_context_symbols_for_backlog(
+        self, symbol: str | None = None
+    ) -> list[str]:
+        if symbol:
+            return [self._canonical_symbol(symbol)]
+        required: set[str] = set()
+        try:
+            required.update(self._required_live_symbols())
+        except Exception:
+            pass
+        required.add("NSE:NIFTY")
+        active_future = getattr(self, "_active_nifty_future_symbol", None) or getattr(
+            self, "_active_future_symbol", None
+        )
+        if active_future:
+            required.add(self._canonical_symbol(str(active_future)))
+        basket = getattr(self, "_active_contract_basket", None)
+        for name in ("active_future", "futures_symbol", "selected_future"):
+            value = (
+                self._basket_value(basket, name, None) if basket is not None else None
+            )
+            if value:
+                required.add(self._canonical_symbol(str(value)))
+        required.update(getattr(self, "_open_position_symbols", set()) or set())
+        return sorted(required)
+
+    def _raw_receive_age_for_symbol(self, symbol: str, now: float) -> float | None:
+        canonical = self._canonical_symbol(symbol)
+        token = self._token_by_symbol.get(canonical) or self._symbol_to_token.get(
+            canonical
+        )
+        ages: list[float] = []
+        by_symbol = getattr(self, "_last_raw_ws_receive_by_symbol", {})
+        if canonical in by_symbol:
+            ages.append(max(0.0, now - float(by_symbol[canonical])))
+        if token is not None:
+            by_token = getattr(self, "_last_raw_ws_receive_by_token", {})
+            if int(token) in by_token:
+                ages.append(max(0.0, now - float(by_token[int(token)])))
+        return min(ages) if ages else None
+
+    def _required_current_generation_raw_fresh(
+        self, symbols: Sequence[str], now: float, threshold: float
+    ) -> bool:
+        for sym in symbols:
+            canonical = self._canonical_symbol(sym)
+            token = self._token_by_symbol.get(canonical) or self._symbol_to_token.get(
+                canonical
+            )
+            if token is None or int(token) not in getattr(
+                self, "_desired_tokens", set()
+            ):
+                continue
+            age = self._raw_receive_age_for_symbol(canonical, now)
+            if age is None or age > threshold:
+                continue
+            expected_generation = self._symbol_subscription_generation.get(
+                canonical, self._subscription_generation
+            )
+            first_generation = self._symbol_first_tick_generation.get(canonical)
+            if first_generation is None or first_generation == expected_generation:
+                return True
+        return False
+
     def classify_transport_backlog(self, symbol: str | None = None) -> dict[str, Any]:
-        """Classify websocket transport versus internal processing backlog."""
+        """Classify websocket transport versus required-context processing backlog."""
         now = time.monotonic()
+        threshold = float(getattr(self, "_zombie_tick_threshold_sec", 30.0))
         raw_mono = getattr(self, "_last_raw_ws_receive_mono", None)
         raw_age = None if raw_mono is None else max(0.0, now - float(raw_mono))
-        processed_mono = None
-        if symbol:
-            processed_mono = self._last_valid_live_tick_mono.get(
-                self._canonical_symbol(symbol)
-            )
-        if processed_mono is None and self._last_valid_live_tick_mono:
-            processed_mono = max(self._last_valid_live_tick_mono.values())
-        processed_age = (
-            None if processed_mono is None else max(0.0, now - float(processed_mono))
+        raw_transport_fresh = raw_age is not None and raw_age <= threshold
+        required_symbols = self._required_context_symbols_for_backlog(symbol)
+        processed_ages: dict[str, float | None] = {}
+        raw_ages: dict[str, float | None] = {}
+        stale_required: list[str] = []
+        for sym in required_symbols:
+            canonical = self._canonical_symbol(sym)
+            processed = self._last_valid_live_tick_mono.get(canonical)
+            age = None if processed is None else max(0.0, now - float(processed))
+            processed_ages[canonical] = age
+            raw_ages[canonical] = self._raw_receive_age_for_symbol(canonical, now)
+            if age is None or age > threshold:
+                stale_required.append(canonical)
+        concrete_processed = [age for age in processed_ages.values() if age is not None]
+        required_processed_age = max(concrete_processed) if concrete_processed else None
+        concrete_raw = [age for age in raw_ages.values() if age is not None]
+        required_raw_receive_age = min(concrete_raw) if concrete_raw else None
+        required_raw_receive_fresh = (
+            required_raw_receive_age is not None
+            and required_raw_receive_age <= threshold
+        )
+        required_generation_raw_fresh = self._required_current_generation_raw_fresh(
+            required_symbols, now, threshold
         )
         heartbeat_age = (
             None if self._last_hb_mono is None else max(0.0, now - self._last_hb_mono)
@@ -6120,24 +6203,16 @@ class MarketDataManager:
             stats.get("pending_tick_count", stats.get("pending_ticks", 0)) or 0
         )
         overloaded = bool(stats.get("overload_state"))
-        threshold = float(getattr(self, "_zombie_tick_threshold_sec", 30.0))
-        if (
-            raw_age is not None
-            and raw_age <= threshold
-            and processed_age is not None
-            and processed_age > threshold
-            and (pending > 0 or overloaded)
-        ):
+        backlog_proven = pending > 0 or overloaded
+        if raw_transport_fresh and backlog_proven and stale_required:
             state = "processing_backlog"
             restart_eligible = False
-        elif (
-            raw_age is None
-            or raw_age > threshold
-            or (heartbeat_age is not None and heartbeat_age > threshold)
+        elif not raw_transport_fresh or (
+            heartbeat_age is not None and heartbeat_age > threshold
         ):
             state = "transport_silent"
             restart_eligible = True
-        elif symbol and processed_age is not None and processed_age > threshold:
+        elif stale_required:
             state = "symbol_feed_stale"
             restart_eligible = False
         else:
@@ -6147,7 +6222,13 @@ class MarketDataManager:
             "transport_classification": state,
             "global_restart_eligible": restart_eligible,
             "raw_receive_age_s": raw_age,
-            "processed_tick_age_s": processed_age,
+            "processed_tick_age_s": required_processed_age,
+            "required_processed_age_s": required_processed_age,
+            "required_raw_receive_age_s": required_raw_receive_age,
+            "required_symbols_stale": stale_required,
+            "raw_transport_fresh": raw_transport_fresh,
+            "required_raw_receive_fresh": required_raw_receive_fresh,
+            "required_current_generation_raw_receive_fresh": required_generation_raw_fresh,
             "pipeline_overloaded": overloaded,
             "pending_ticks": pending,
             "oldest_pending_age_ms": stats.get("oldest_pending_age_ms", 0.0),
@@ -6182,25 +6263,7 @@ class MarketDataManager:
         return canonical_symbol, priority, bucket, "ok"
 
     def _pending_count_locked(self) -> int:
-        # O(1) canonical pending count maintained under _pending_tick_lock.
-        if not hasattr(self, "_pending_tick_count"):
-            self._pending_tick_count = sum(
-                len(q) for q in self._pending_tick_queues.values()
-            ) + len(self._pending_far_ticks)
-        # Compatibility for tests/legacy callers that seed queues directly. Normal
-        # enqueue/dequeue paths maintain this counter without scanning.
-        if int(self._pending_tick_count) <= 1:
-            actual = sum(len(q) for q in self._pending_tick_queues.values()) + len(
-                self._pending_far_ticks
-            )
-            self._pending_tick_count = actual
-            if actual > 0:
-                for key, q in self._pending_tick_queues.items():
-                    if q:
-                        self._pending_heap_push_locked(q[0], key)
-                for key, tick in self._pending_far_ticks.items():
-                    self._pending_heap_push_locked(tick, key)
-        return max(0, int(self._pending_tick_count))
+        return max(0, int(getattr(self, "_pending_tick_count", 0)))
 
     def _pending_heap_push_locked(self, tick: Mapping[str, Any], key: str) -> None:
         ts = tick.get("_mdm_enqueued_mono")
@@ -6231,11 +6294,40 @@ class MarketDataManager:
                 break
             heapq.heappop(heap)
 
+    def _maybe_compact_pending_heap_locked(self) -> None:
+        heap = getattr(self, "_pending_tick_oldest_heap", [])
+        active = max(1, self._pending_count_locked())
+        if len(heap) <= max(64, active * 4):
+            return
+        rebuilt: list[tuple[float, int, str]] = []
+        seq = int(getattr(self, "_pending_tick_heap_seq", 0))
+        for key in list(self._pending_tick_queues.keys()):
+            queue = self._pending_tick_queues.get(key)
+            if not queue:
+                self._pending_tick_queues.pop(key, None)
+                continue
+            ts = queue[0].get("_mdm_enqueued_mono")
+            if isinstance(ts, (int, float)):
+                seq += 1
+                rebuilt.append((float(ts), seq, key))
+        for key, tick in self._pending_far_ticks.items():
+            ts = tick.get("_mdm_enqueued_mono")
+            if isinstance(ts, (int, float)):
+                seq += 1
+                rebuilt.append((float(ts), seq, key))
+        heapq.heapify(rebuilt)
+        self._pending_tick_oldest_heap = rebuilt
+        self._pending_tick_heap_seq = seq
+        self._pending_heap_compactions_total = (
+            int(getattr(self, "_pending_heap_compactions_total", 0)) + 1
+        )
+
     def _pending_increment_locked(self, tick: Mapping[str, Any], key: str) -> None:
         if not hasattr(self, "_pending_tick_count"):
             self._pending_tick_count = 0
         self._pending_tick_count = max(0, int(self._pending_tick_count)) + 1
         self._pending_heap_push_locked(tick, key)
+        self._maybe_compact_pending_heap_locked()
 
     def _pending_decrement_locked(self, count: int = 1) -> None:
         if not hasattr(self, "_pending_tick_count"):
@@ -6389,16 +6481,7 @@ class MarketDataManager:
                 start = time.monotonic()
                 batch = self._pop_pending_tick_batch()
                 if not batch:
-                    # The websocket producer may be between enqueue operations. Linger
-                    # briefly on the single active drain to avoid thousands of
-                    # schedule/complete cycles during bursts without blocking the loop.
-                    for _ in range(10):
-                        await asyncio.sleep(0)
-                        batch = self._pop_pending_tick_batch()
-                        if batch:
-                            break
-                    if not batch:
-                        return
+                    return
                 for index, raw in enumerate(batch):
                     try:
                         self._process_queued_tick(raw)
@@ -6582,6 +6665,12 @@ class MarketDataManager:
                 "oldest_pending_age_ms": oldest_ms,
                 "overload_state": bool(self._pipeline_overloaded),
                 "overload_duration_s": overload_duration_s,
+                "pending_heap_size": len(
+                    getattr(self, "_pending_tick_oldest_heap", [])
+                ),
+                "pending_heap_compactions_total": int(
+                    getattr(self, "_pending_heap_compactions_total", 0)
+                ),
                 "pending_max_seen": self._tick_pending_max_seen,
                 "coalesced_by_priority": dict(self._tick_coalesced_by_priority),
                 "dropped_by_reason": dict(self._tick_dropped_by_reason),
@@ -7136,85 +7225,203 @@ class MarketDataManager:
             ),
         }
 
+    def _volume_identity(
+        self, symbol: str, raw: Mapping[str, Any]
+    ) -> tuple[str, int | None, int, int]:
+        canonical = self._canonical_symbol(symbol)
+        token_raw = raw.get("instrument_token") or raw.get("token")
+        try:
+            token = (
+                int(token_raw)
+                if token_raw is not None
+                else self._token_by_symbol.get(canonical)
+            )
+        except (TypeError, ValueError):
+            token = self._token_by_symbol.get(canonical)
+        subscription_generation = int(
+            self._symbol_subscription_generation.get(
+                canonical, self._subscription_generation
+            )
+        )
+        restart_generation = int(getattr(self, "_ws_restart_generation", 0) or 0)
+        return canonical, token, subscription_generation, restart_generation
+
     def _normalise_tick_volume_delta(
         self, symbol: str, raw: dict[str, Any]
     ) -> dict[str, Any]:
-        """Convert cumulative broker volume into per-tick delta volume. Args: symbol/raw. Returns: normalized payload. Raises: none."""
+        """Convert broker cumulative daily volume into trusted per-tick interval delta.
+
+        Semantics:
+        - volume_traded_today / volume_traded / total_traded_volume: exchange cumulative daily volume.
+        - volume_cumulative / cumulative_volume: retained cumulative diagnostic only.
+        - volume_delta / effective_volume_delta / volume: accepted tick-to-tick interval delta.
+        - candle volume: sum of accepted effective deltas in the candle engine.
+        """
         payload = dict(raw)
         cumulative_raw = (
             payload.get("volume_traded_today")
             or payload.get("volume_traded")
             or payload.get("total_traded_volume")
+            or payload.get("cumulative_volume")
         )
         if cumulative_raw is None:
             return payload
+        transition = {
+            "state": "invalid",
+            "accepted": False,
+            "trusted": False,
+            "reason": "invalid_cumulative",
+            "symbol": self._canonical_symbol(symbol),
+            "token": None,
+            "generation": None,
+            "previous_cumulative": None,
+            "current_cumulative": None,
+            "raw_delta": None,
+            "effective_delta": 0.0,
+        }
         try:
             cumulative = float(cumulative_raw)
         except (TypeError, ValueError):
+            payload["volume_transition"] = transition
+            payload["volume_delta"] = 0
+            payload["effective_volume_delta"] = 0
+            payload["volume"] = 0
+            payload["volume_delta_untrusted"] = True
             return payload
-        key = self._canonical_symbol(symbol)
-        previous = self._last_cumulative_volume_by_symbol.get(key)
-        if previous is None:
-            ltq_raw = (
-                payload.get("last_traded_quantity")
-                or payload.get("last_quantity")
-                or payload.get("ltq")
+        if cumulative < 0:
+            payload["volume_transition"] = transition
+            payload["volume_delta"] = 0
+            payload["effective_volume_delta"] = 0
+            payload["volume"] = 0
+            payload["volume_delta_untrusted"] = True
+            return payload
+        identity = self._volume_identity(symbol, payload)
+        canonical, token, subscription_generation, restart_generation = identity
+        transition.update(
+            {
+                "symbol": canonical,
+                "token": token,
+                "generation": subscription_generation,
+                "restart_generation": restart_generation,
+                "current_cumulative": cumulative,
+            }
+        )
+        previous_entry = self._volume_baseline_by_identity.get(identity)
+        previous = (
+            None if previous_entry is None else float(previous_entry["cumulative"])
+        )
+        raw_delta = None if previous is None else cumulative - previous
+        transition["previous_cumulative"] = previous
+        transition["raw_delta"] = raw_delta
+        effective_delta = 0.0
+        state = "baseline_initialized"
+        trusted = True
+        accepted = False
+        reason = "baseline_initialized"
+        if previous_entry is None:
+            self._volume_baseline_by_identity[identity] = {
+                "cumulative": cumulative,
+                "timestamp": payload.get("timestamp"),
+            }
+        elif raw_delta is None:
+            pass
+        elif raw_delta == 0:
+            state = "duplicate"
+            reason = "duplicate_cumulative"
+        elif raw_delta < 0:
+            rollback_abs = abs(raw_delta)
+            state = (
+                "counter_reset"
+                if cumulative <= max(previous * 0.05, 1.0)
+                else "counter_rollback"
             )
-            try:
-                delta = max(float(ltq_raw), 0.0) if ltq_raw is not None else 0.0
-            except (TypeError, ValueError):
-                delta = 0.0
-        elif cumulative >= previous:
-            delta = cumulative - previous
+            reason = state
+            payload["volume_delta_reset"] = state == "counter_reset"
+            if state == "counter_reset":
+                self._volume_baseline_by_identity[identity] = {
+                    "cumulative": cumulative,
+                    "timestamp": payload.get("timestamp"),
+                }
+            trusted = False
+            transition["rollback_amount"] = rollback_abs
         else:
-            delta = 0.0
-        symbol_upper = str(symbol or "").upper()
-        is_option_symbol = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
-        volume_delta_untrusted = False
-        if previous is not None and cumulative < previous:
-            payload["volume_delta_reset"] = True
-        if is_option_symbol:
             max_delta = float(
                 os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000")
                 or "1000000"
             )
-            if delta > max_delta:
-                volume_delta_untrusted = True
+            is_option_symbol = canonical.upper().endswith(("CE", "PE"))
+            if is_option_symbol and raw_delta > max_delta:
+                state = "suspicious_jump"
+                reason = "suspicious_option_cumulative_jump"
+                trusted = False
+                accepted = False
+                effective_delta = 0.0
                 stats = self._volume_delta_clamp_stats.setdefault(
-                    key, {"interval_count": 0.0, "interval_max_delta": 0.0}
+                    canonical, {"interval_count": 0.0, "interval_max_delta": 0.0}
                 )
                 stats["interval_count"] = float(stats.get("interval_count", 0.0)) + 1.0
                 stats["interval_max_delta"] = max(
-                    float(stats.get("interval_max_delta", 0.0)), float(delta)
+                    float(stats.get("interval_max_delta", 0.0)), float(raw_delta)
                 )
                 now_mono = time.monotonic()
                 last_summary = float(
-                    self._last_volume_delta_clamp_summary_ts.get(key, 0.0) or 0.0
+                    self._last_volume_delta_clamp_summary_ts.get(canonical, 0.0) or 0.0
                 )
                 if now_mono - last_summary >= 60.0:
-                    self._last_volume_delta_clamp_summary_ts[key] = now_mono
+                    self._last_volume_delta_clamp_summary_ts[canonical] = now_mono
                     self._logger.warning(
-                        "OPTION_VOLUME_DELTA_CLAMP_SUMMARY symbol=%s interval_count=%d interval_max_delta=%s threshold=%s",
-                        symbol,
+                        "OPTION_VOLUME_DELTA_UNTRUSTED symbol=%s interval_count=%d interval_max_delta=%s threshold=%s reason=suspicious_jump",
+                        canonical,
                         int(stats.get("interval_count", 0.0)),
                         stats.get("interval_max_delta", 0.0),
                         max_delta,
                         extra={
-                            "event": "OPTION_VOLUME_DELTA_CLAMP_SUMMARY",
-                            "symbol": symbol,
+                            "event": "OPTION_VOLUME_DELTA_UNTRUSTED",
+                            "symbol": canonical,
                             "interval_count": int(stats.get("interval_count", 0.0)),
                             "interval_max_delta": stats.get("interval_max_delta", 0.0),
                             "threshold": max_delta,
+                            "reason": "suspicious_jump",
                         },
                     )
                     stats["interval_count"] = 0.0
                     stats["interval_max_delta"] = 0.0
-                delta = max_delta
-        self._last_cumulative_volume_by_symbol[key] = cumulative
+                # Do not update baseline: the suspicious cumulative value is quarantined.
+            else:
+                effective_delta = max(0.0, raw_delta)
+                accepted = True
+                state = (
+                    "accepted_high_volume"
+                    if is_option_symbol and raw_delta > max_delta * 0.5
+                    else "accepted"
+                )
+                reason = state
+                self._volume_baseline_by_identity[identity] = {
+                    "cumulative": cumulative,
+                    "timestamp": payload.get("timestamp"),
+                }
+        self._last_cumulative_volume_by_symbol[canonical] = float(
+            self._volume_baseline_by_identity.get(identity, {"cumulative": cumulative})[
+                "cumulative"
+            ]
+        )
+        transition.update(
+            {
+                "state": state,
+                "accepted": accepted,
+                "trusted": trusted,
+                "reason": reason,
+                "effective_delta": effective_delta,
+            }
+        )
         payload["volume_cumulative"] = cumulative
-        payload["volume_delta"] = delta
-        payload["volume"] = delta
-        payload["volume_delta_untrusted"] = volume_delta_untrusted
+        payload["cumulative_volume"] = cumulative
+        payload["volume_raw_delta"] = raw_delta
+        payload["volume_delta"] = effective_delta
+        payload["effective_volume_delta"] = effective_delta
+        payload["volume"] = effective_delta
+        payload["volume_delta_untrusted"] = not trusted
+        payload["volume_transition"] = transition
         return payload
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
@@ -10397,6 +10604,24 @@ class MarketDataManager:
             return 20
         return 10
 
+    @staticmethod
+    def _normalize_bar_timestamp(
+        row: Mapping[str, Any],
+    ) -> tuple[datetime, datetime] | None:
+        raw = row.get("timestamp")
+        if raw is None:
+            raw = row.get("date")
+        if raw is None:
+            return None
+        try:
+            market_ts = coerce_market_timestamp(raw).floor("min")
+        except Exception:
+            return None
+        if pd.isna(market_ts):
+            return None
+        utc_key = market_ts.tz_convert("UTC").to_pydatetime()
+        return utc_key, market_ts.to_pydatetime()
+
     def get_ohlc_bars(
         self, symbol: str, *, limit: int | None = None
     ) -> list[dict[str, Any]]:
@@ -10428,28 +10653,31 @@ class MarketDataManager:
                 if not key:
                     continue
                 rows.extend(dict(row) for row in self._ohlc.get(key, ()) or ())
+        invalid_rows = 0
         for row in rows:
             sequence += 1
             if bool(row.get("provisional")):
                 continue
-            ts_key = self._bar_timestamp_key(row)
-            if ts_key is None:
-                log_throttled(
-                    getattr(self, "_logger", _logger),
-                    f"canonical_ohlc_rejected:{bar_symbol}",
-                    "CANONICAL_OHLC_ROWS_REJECTED symbol=%s rows_seen=1 rows_rejected=1 reason=invalid_timestamp"
-                    % bar_symbol,
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                )
+            normalized_ts = self._normalize_bar_timestamp(row)
+            if normalized_ts is None:
+                invalid_rows += 1
                 continue
-            market_ts = coerce_market_timestamp(row.get("timestamp")).floor("min")
-            row["timestamp"] = market_ts.to_pydatetime()
+            ts_key, market_ts = normalized_ts
+            row["timestamp"] = market_ts
             row.setdefault("symbol", bar_symbol)
             precedence = self._completed_bar_precedence(row)
             existing = merged.get(ts_key)
             if existing is None or precedence > existing[0]:
                 merged[ts_key] = (precedence, sequence, row)
+        if invalid_rows:
+            log_throttled(
+                getattr(self, "_logger", _logger),
+                f"canonical_ohlc_rejected:{bar_symbol}",
+                "CANONICAL_OHLC_ROWS_REJECTED symbol=%s rows_seen=%d rows_rejected=%d reason=invalid_timestamp"
+                % (bar_symbol, len(rows), invalid_rows),
+                interval_sec=30.0,
+                level=logging.WARNING,
+            )
         bars = [
             entry[2] for _, entry in sorted(merged.items(), key=lambda item: item[0])
         ]

@@ -16,6 +16,23 @@ def _make_mdm():
     return mdm
 
 
+def _set_pending_far(mdm, symbol="NFO:NIFTY26JUN24000CE", *, enqueued_mono=None):
+    tick = {"symbol": symbol, "last_price": 1, "timestamp": 1}
+    if enqueued_mono is not None:
+        tick["_mdm_enqueued_mono"] = enqueued_mono
+    mdm._pending_far_ticks[symbol] = tick
+    mdm._pending_tick_count = max(0, int(getattr(mdm, "_pending_tick_count", 0))) + 1
+    if enqueued_mono is not None:
+        mdm._pending_heap_push_locked(tick, symbol)
+    return tick
+
+
+def _set_pending_queue(mdm, symbol, tick):
+    mdm._pending_tick_queues[symbol].append(tick)
+    mdm._pending_tick_count = max(0, int(getattr(mdm, "_pending_tick_count", 0))) + 1
+    mdm._pending_heap_push_locked(tick, symbol)
+
+
 async def _stop_mdm(mdm):
     await mdm.stop_tick_drain(timeout=1.0)
     task = getattr(mdm, "_tick_consumer_task", None)
@@ -487,11 +504,7 @@ async def test_stale_scheduled_drain_with_done_task_is_repaired_once(monkeypatch
     mdm._tick_drain_scheduled = True
     mdm._tick_drain_callbacks_scheduled = 2
     mdm._tick_drain_callbacks_completed = 1
-    mdm._pending_far_ticks["NFO:NIFTY26JUN24000CE"] = {
-        "symbol": "NFO:NIFTY26JUN24000CE",
-        "last_price": 1,
-        "timestamp": 1,
-    }
+    _set_pending_far(mdm)
     mdm._schedule_tick_drain_locked(loop)
     mdm._schedule_tick_drain_locked(loop)
     await asyncio.sleep(0)
@@ -511,11 +524,7 @@ async def test_cancelled_scheduled_drain_with_pending_is_repaired_once():
         await cancelled_task
     mdm._tick_drain_task = cancelled_task
     mdm._tick_drain_scheduled = True
-    mdm._pending_far_ticks["NFO:NIFTY26JUN24000CE"] = {
-        "symbol": "NFO:NIFTY26JUN24000CE",
-        "last_price": 1,
-        "timestamp": 1,
-    }
+    _set_pending_far(mdm)
     mdm._schedule_tick_drain_locked(loop)
     mdm._schedule_tick_drain_locked(loop)
     await asyncio.sleep(0)
@@ -532,11 +541,7 @@ async def test_transient_scheduled_active_zero_with_live_task_not_rescheduled():
     live_task = loop.create_task(asyncio.sleep(0.05))
     mdm._tick_drain_task = live_task
     mdm._tick_drain_scheduled = True
-    mdm._pending_far_ticks["NFO:NIFTY26JUN24000CE"] = {
-        "symbol": "NFO:NIFTY26JUN24000CE",
-        "last_price": 1,
-        "timestamp": 1,
-    }
+    _set_pending_far(mdm)
     mdm._schedule_tick_drain_locked(loop)
 
     assert mdm.get_tick_pressure_stats()["callbacks_scheduled"] == 0
@@ -737,34 +742,34 @@ def test_pipeline_overload_enters_recovers_with_hysteresis() -> None:
     mdm._overload_exit_oldest_ms = 800.0
     mdm._pipeline_overloaded = False
     mdm._overload_since_mono = None
-    mdm._pending_count_locked = lambda: (
-        sum(len(q) for q in mdm._pending_tick_queues.values())
-        + len(mdm._pending_far_ticks)
-    )
+    mdm._pending_tick_count = 0
+    mdm._pending_tick_oldest_heap = []
+    mdm._pending_tick_heap_seq = 0
+    mdm._pending_heap_compactions_total = 0
 
     now = time_mod.monotonic()
     for i in range(6):
-        mdm._pending_tick_queues[f"s{i}"].append({"_mdm_enqueued_mono": now})
+        _set_pending_queue(mdm, f"s{i}", {"_mdm_enqueued_mono": now})
     with mdm._pending_tick_lock:
         mdm._update_pipeline_overload_locked()
     assert mdm.pipeline_overloaded is True
 
     for i in range(3):  # partially drained: still above exit bound
         mdm._pending_tick_queues.pop(f"s{i}")
+        mdm._pending_decrement_locked(1)
     with mdm._pending_tick_lock:
         mdm._update_pipeline_overload_locked()
     assert mdm.pipeline_overloaded is True, "hysteresis must hold"
 
     for i in range(3, 5):
         mdm._pending_tick_queues.pop(f"s{i}")
+        mdm._pending_decrement_locked(1)
     with mdm._pending_tick_lock:
         mdm._update_pipeline_overload_locked()
     assert mdm.pipeline_overloaded is False
 
     # Oldest-age evidence alone triggers even with tiny backlog.
-    mdm._pending_tick_queues["x"].append(
-        {"_mdm_enqueued_mono": time_mod.monotonic() - 3.0}
-    )
+    _set_pending_queue(mdm, "x", {"_mdm_enqueued_mono": time_mod.monotonic() - 3.0})
     with mdm._pending_tick_lock:
         mdm._update_pipeline_overload_locked()
     assert mdm.pipeline_overloaded is True
@@ -831,3 +836,128 @@ def test_transport_classifier_distinguishes_processing_backlog_from_silence() ->
     state = mdm.classify_transport_backlog(symbol)
     assert state["transport_classification"] == "transport_silent"
     assert state["global_restart_eligible"] is True
+
+
+class _NoValuesDict(dict):
+    def values(self):  # pragma: no cover - failure path if production scans
+        raise AssertionError("pending count must not scan queue values")
+
+
+def test_pending_count_zero_one_and_many_keys_do_not_scan_values() -> None:
+    mdm = _make_mdm()
+    mdm._pending_tick_queues = _NoValuesDict({f"s{i}": [] for i in range(10_000)})
+    mdm._pending_far_ticks = {}
+    mdm._pending_tick_count = 0
+    assert mdm._pending_count_locked() == 0
+    mdm._pending_tick_count = 1
+    assert mdm._pending_count_locked() == 1
+
+
+def test_pending_counter_exact_across_enqueue_coalesce_pop_requeue_and_drop() -> None:
+    mdm = _make_mdm()
+    loop = asyncio.new_event_loop()
+    try:
+        far = "NFO:NIFTY26JUN26000CE"
+        mdm._symbol_by_token[2] = far
+        mdm._symbol_to_token[far] = 2
+        mdm._enqueue_latest_tick_for_drain(
+            {"instrument_token": 2, "last_price": 1, "timestamp": 1}, loop
+        )
+        assert mdm._pending_count_locked() == 1
+        mdm._enqueue_latest_tick_for_drain(
+            {"instrument_token": 2, "last_price": 2, "timestamp": 2}, loop
+        )
+        assert (
+            mdm._pending_count_locked() == 1
+        ), "far coalesce replaces without count growth"
+        popped = mdm._pop_pending_tick_batch()
+        assert len(popped) == 1
+        assert mdm._pending_count_locked() == 0
+        mdm._requeue_unprocessed_ticks(popped)
+        assert mdm._pending_count_locked() == 1
+        mdm._pending_decrement_locked(99)
+        assert mdm._pending_count_locked() == 0
+    finally:
+        loop.close()
+
+
+def test_pending_heap_compacts_after_repeated_far_replacements() -> None:
+    mdm = _make_mdm()
+    far = "NFO:NIFTY26JUN26000CE"
+    now = time.monotonic()
+    with mdm._pending_tick_lock:
+        mdm._pending_far_ticks[far] = {"_mdm_enqueued_mono": now, "symbol": far}
+        mdm._pending_tick_count = 1
+        for i in range(2_000):
+            mdm._pending_tick_heap_seq += 1
+            mdm._pending_tick_oldest_heap.append(
+                (now - i - 1, mdm._pending_tick_heap_seq, far)
+            )
+        mdm._maybe_compact_pending_heap_locked()
+    stats = mdm.get_tick_pressure_stats()
+    assert stats["pending_tick_count"] == 1
+    assert stats["pending_heap_size"] == 1
+    assert stats["pending_heap_compactions_total"] > 0
+    assert stats["oldest_pending_age_ms"] < 1000
+
+
+def test_global_classifier_uses_required_context_not_fresh_irrelevant_option() -> None:
+    now = time.monotonic()
+    mdm = _make_mdm()
+    mdm._zombie_tick_threshold_sec = 10.0
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_raw_ws_receive_by_symbol["NSE:NIFTY"] = now
+    mdm._last_raw_ws_receive_by_symbol["NFO:NIFTY26JUNFUT"] = now
+    mdm._required_live_symbols = lambda: {"NSE:NIFTY", "NFO:NIFTY26JUNFUT"}
+    mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 30
+    mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now - 30
+    mdm._last_valid_live_tick_mono["NFO:IRRELEVANT26JUN26000CE"] = now
+    mdm._pending_tick_count = 10
+    mdm._pipeline_overloaded = True
+
+    state = mdm.classify_transport_backlog()
+
+    assert state["transport_classification"] == "processing_backlog"
+    assert state["global_restart_eligible"] is False
+    assert set(state["required_symbols_stale"]) >= {"NSE:NIFTY", "NFO:NIFTY26JUNFUT"}
+    assert state["raw_transport_fresh"] is True
+
+
+def test_global_classifier_requires_current_generation_raw_evidence() -> None:
+    now = time.monotonic()
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._zombie_tick_threshold_sec = 10.0
+    mdm._required_live_symbols = lambda: {symbol}
+    mdm._desired_tokens.add(1)
+    mdm._token_by_symbol[symbol] = 1
+    mdm._symbol_to_token[symbol] = 1
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_raw_ws_receive_by_token[1] = now
+    mdm._last_valid_live_tick_mono[symbol] = now - 30
+    mdm._symbol_subscription_generation[symbol] = 2
+    mdm._symbol_first_tick_generation[symbol] = 1
+    mdm._subscription_generation = 2
+    mdm._pending_tick_count = 1
+
+    state = mdm.classify_transport_backlog()
+
+    assert state["transport_classification"] == "processing_backlog"
+    assert state["required_current_generation_raw_receive_fresh"] is False
+
+
+def test_global_classifier_recovers_to_transport_healthy() -> None:
+    now = time.monotonic()
+    mdm = _make_mdm()
+    symbol = "NSE:NIFTY"
+    mdm._zombie_tick_threshold_sec = 10.0
+    mdm._required_live_symbols = lambda: {symbol}
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_valid_live_tick_mono[symbol] = now
+    mdm._pending_tick_count = 0
+    mdm._pipeline_overloaded = False
+
+    state = mdm.classify_transport_backlog()
+
+    assert state["transport_classification"] == "transport_healthy"
+    assert state["global_restart_eligible"] is False
