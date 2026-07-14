@@ -3007,6 +3007,11 @@ class MarketDataManager:
         except (TypeError, ValueError):
             return None
 
+    def current_live_token(self, symbol: str) -> int | None:
+        """Return the current canonical live token under MDM lock."""
+        with self._lock:
+            return self._current_symbol_token_locked(symbol)
+
     def classify_live_tick_readiness(
         self,
         symbol: str,
@@ -7220,6 +7225,15 @@ class MarketDataManager:
             normalized = self._symbol_by_token.get(
                 token_int
             ) or self._token_to_symbol.get(token_int)
+        if normalized is not None and normalized not in self._required_live_symbols():
+            self._active_subscribed_symbols.discard(normalized)
+            self._tracked_symbols.discard(normalized)
+            self._suspended_context_symbols.discard(normalized)
+            self._suspended_context_symbol_until.pop(normalized, None)
+            self._symbols_with_tick.discard(normalized)
+            self._last_valid_live_tick_mono.pop(normalized, None)
+            self._symbol_first_tick_generation.pop(normalized, None)
+            self._required_symbol_since_mono.pop(normalized, None)
         if normalized is not None:
             self._token_by_symbol.pop(normalized, None)
             self._symbol_to_token.pop(normalized, None)

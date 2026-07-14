@@ -373,6 +373,109 @@ def test_time_since_last_live_ws_tick_returns_none_without_ws_tick():
     assert mdm.time_since_last_live_ws_tick("NFO:NIFTY26JUN24000CE") is None
 
 
+def test_required_symbol_without_current_generation_tick_is_not_fresh(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    missing = "NFO:NIFTY26JUN24000CE"
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    for sym in required - {missing}:
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._desired_tokens.add(1)
+    mdm._dispatched_subscriptions.add(1)
+    mdm._confirmed_subscriptions.add(1)
+    mdm._required_symbol_since_mono[missing] = now - 120.0
+    mdm._required_symbol_missing_grace_sec = 1.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)),
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("never-ticked one option must not restart globally"),
+    )
+
+    readiness = mdm.classify_live_tick_readiness(missing, 1, max_age_s=60.0)
+    assert mdm.time_since_last_live_ws_tick(missing) is None
+    assert readiness["tick_age_s"] is None
+    assert readiness["first_tick_received"] is False
+    assert readiness["current_generation_tick_received"] is False
+    assert readiness["reason"] == "never_received_tick"
+
+    mdm._check_zombie_ticks()
+
+    assert rest_requests == [(missing, "ws_symbol_stale_recovery")]
+
+
+def test_basket_reentry_same_token_requires_new_current_generation_tick():
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    symbol = "NFO:NIFTY26JUN24000CE"
+    token = 1
+    mdm._begin_subscription_generation_locked(
+        symbol, token, reason="test_initial_entry"
+    )
+    mdm._desired_tokens.add(token)
+    mdm._dispatched_subscriptions.add(token)
+    mdm._confirmed_subscriptions.add(token)
+    mdm._ingest_normalized_tick(
+        {
+            "symbol": symbol,
+            "instrument_token": token,
+            "ltp": 10.0,
+            "timestamp": time.time(),
+            "source": "ws",
+        }
+    )
+    old_generation = mdm._symbol_subscription_generation[symbol]
+    assert mdm.classify_live_tick_readiness(symbol, token, max_age_s=60.0)["ready"]
+
+    mdm.set_active_contract_basket(
+        {
+            "all_tokens": [2, 3, 4],
+            "token_by_symbol": {
+                "NFO:NIFTY26JUN24000PE": 2,
+                "NSE:NIFTY": 3,
+                "NFO:NIFTY26JUNFUT": 4,
+            },
+            "spot_symbol": "NSE:NIFTY",
+            "spot_token": 3,
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "selected_pe": "NFO:NIFTY26JUN24000PE",
+            "option_symbols": ["NFO:NIFTY26JUN24000PE"],
+        }
+    )
+    mdm.reconcile_active_subscriptions({2, 3, 4})
+    assert symbol not in mdm._required_live_symbols()
+    assert mdm.time_since_last_live_ws_tick(symbol) is None
+
+    assert mdm.request_token_subscription(token, symbol=symbol)
+    mdm._dispatched_subscriptions.add(token)
+    mdm._confirmed_subscriptions.add(token)
+    reentered = mdm.classify_live_tick_readiness(symbol, token, max_age_s=60.0)
+    assert mdm._symbol_subscription_generation[symbol] > old_generation
+    assert reentered["ready"] is False
+    assert reentered["tick_age_s"] is None
+    assert reentered["first_tick_received"] is False
+    assert reentered["reason"] == "never_received_tick"
+
+    mdm._symbol_first_tick_generation[symbol] = old_generation
+    mdm._last_valid_live_tick_mono[symbol] = time.monotonic()
+    old_tick = mdm.classify_live_tick_readiness(symbol, token, max_age_s=60.0)
+    assert old_tick["ready"] is False
+    assert old_tick["reason"] == "subscription_generation_mismatch"
+
+
 @pytest.mark.asyncio
 async def test_stale_scheduled_drain_with_done_task_is_repaired_once(monkeypatch):
     mdm = _make_mdm()
@@ -453,6 +556,9 @@ def test_required_symbol_without_first_ws_tick_gets_symbol_recovery(monkeypatch)
     required = mdm._required_live_symbols()
     for sym in required - {missing}:
         mdm._last_valid_live_tick_mono[sym] = now
+    mdm._desired_tokens.add(1)
+    mdm._dispatched_subscriptions.add(1)
+    mdm._confirmed_subscriptions.add(1)
     mdm._required_symbol_since_mono[missing] = now - 120.0
     mdm._required_symbol_missing_grace_sec = 1.0
     mdm._zombie_tick_threshold_sec = 60.0

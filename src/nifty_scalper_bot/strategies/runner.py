@@ -7735,15 +7735,119 @@ class StrategyRunner:
             self._eval_stall_recovery_attempted = False
 
         now_wall = time.time()
-        stale_count = 0
-        stale_symbols: list[str] = []
+        stale_reasons: dict[str, str] = {}
         active_option_symbols = {
             normalize_symbol(str(sym))
             for sym in (getattr(self, "_active_option_symbols", set()) or set())
             if sym
         }
+        required_live_symbols: set[str] | None = None
+        required_symbols_getter = getattr(
+            self._market_data, "_required_live_symbols", None
+        )
+        if callable(required_symbols_getter):
+            try:
+                required_live_symbols = {
+                    normalize_symbol(str(sym))
+                    for sym in (required_symbols_getter() or set())
+                    if sym
+                }
+            except Exception:
+                self._logger.exception(
+                    "CRITICAL: Failure in StrategyRunner._health_watchdog.required_symbols"
+                )
+                required_live_symbols = None
+        live_tick_age = getattr(
+            self._market_data, "time_since_last_live_ws_tick", None
+        )
+        classify_live_tick = getattr(
+            self._market_data, "classify_live_tick_readiness", None
+        )
+
+        def _mark_stale(symbol: str, reason: str) -> None:
+            stale_reasons.setdefault(normalize_symbol(str(symbol)), reason)
+
+        def _resolve_mdm_token(symbol: str) -> int | None:
+            resolver = getattr(self._market_data, "current_live_token", None)
+            if callable(resolver):
+                try:
+                    token = resolver(symbol)
+                    return int(token) if token is not None else None
+                except Exception:
+                    self._logger.exception(
+                        "CRITICAL: Failure in StrategyRunner._health_watchdog.token_resolve for %s",
+                        symbol,
+                    )
+                    return None
+            for attr in ("_symbol_to_token", "_token_by_symbol"):
+                mapping = getattr(self._market_data, attr, None)
+                if isinstance(mapping, dict):
+                    token = mapping.get(symbol)
+                    if token is not None:
+                        try:
+                            return int(token)
+                        except (TypeError, ValueError):
+                            return None
+            return None
+
+        def _mdm_required_freshness(symbol: str) -> tuple[bool, float | None, str]:
+            symbol_stale_threshold = stale_threshold_for_symbol(symbol, market_open)
+            token = _resolve_mdm_token(symbol)
+            if callable(classify_live_tick) and token is not None:
+                try:
+                    readiness = classify_live_tick(
+                        symbol, token, max_age_s=symbol_stale_threshold
+                    )
+                except Exception:
+                    self._logger.exception(
+                        "CRITICAL: Failure in StrategyRunner._health_watchdog.live_tick_readiness for %s",
+                        symbol,
+                    )
+                else:
+                    reason = str(readiness.get("reason") or "unknown")
+                    age = readiness.get("tick_age_s")
+                    try:
+                        age_value = float(age) if age is not None else None
+                    except (TypeError, ValueError):
+                        age_value = None
+                    return bool(readiness.get("ready")), age_value, reason
+            if callable(live_tick_age):
+                try:
+                    age = live_tick_age(symbol)
+                except Exception:
+                    self._logger.exception(
+                        "CRITICAL: Failure in StrategyRunner._health_watchdog.live_tick_age for %s",
+                        symbol,
+                    )
+                else:
+                    if age is None:
+                        return False, None, "never_received_tick"
+                    age_value = float(age)
+                    if age_value > symbol_stale_threshold:
+                        return False, age_value, "tick_stale"
+                    return True, age_value, "ready"
+            return False, None, "live_tick_readiness_unavailable"
+
+        for required_symbol in sorted(required_live_symbols or set()):
+            ready, _age, reason = _mdm_required_freshness(required_symbol)
+            if not ready:
+                _mark_stale(required_symbol, reason)
 
         for symbol, engine in self._candle_engines.items():
+            if required_live_symbols is not None and symbol not in required_live_symbols:
+                if self._should_log_throttled(
+                    f"ws_stale_skipped_not_required:{symbol}", 300.0
+                ):
+                    self._logger.debug(
+                        "WS_STALE_SKIPPED symbol=%s reason=outside_required_live_symbols",
+                        symbol,
+                        extra={
+                            "event": "WS_STALE_SKIPPED",
+                            "symbol": symbol,
+                            "reason": "outside_required_live_symbols",
+                        },
+                    )
+                continue
             if symbol not in self._active_symbols:
                 last_tick_ts = float(
                     self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0
@@ -7793,15 +7897,40 @@ class StrategyRunner:
                         },
                     )
                 continue
-            # 1. Use .get() to prevent KeyError on newly subscribed symbols
-            stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
+
+            if required_live_symbols is not None and symbol in required_live_symbols:
+                ready, age_from_mdm, reason = _mdm_required_freshness(symbol)
+                if not ready:
+                    _mark_stale(symbol, reason)
+                    if age_from_mdm is None:
+                        continue
+                    stale_for = age_from_mdm
+                else:
+                    continue
+            else:
+                last_tick_ts = self._last_tick_time_by_symbol.get(symbol)
+                if last_tick_ts is None:
+                    age_from_mdm = None
+                    if callable(live_tick_age):
+                        try:
+                            age_from_mdm = live_tick_age(symbol)
+                        except Exception:
+                            self._logger.exception(
+                                "CRITICAL: Failure in StrategyRunner._health_watchdog.live_tick_age for %s",
+                                symbol,
+                            )
+                    if age_from_mdm is None:
+                        _mark_stale(symbol, "never_received_tick")
+                        continue
+                    stale_for = float(age_from_mdm)
+                else:
+                    stale_for = now_wall - float(last_tick_ts)
 
             # 2. Use the centralised, market-session-aware threshold so that
             # off-market option/index tick gaps are not treated as faults.
             symbol_stale_threshold = stale_threshold_for_symbol(symbol, market_open)
             if stale_for > symbol_stale_threshold:
-                stale_count += 1
-                stale_symbols.append(symbol)
+                _mark_stale(symbol, "tick_stale")
 
                 # Off-market: never trigger a per-symbol WS-stale backfill or
                 # zombie restart. Just emit one DEBUG/throttled trace.
@@ -7843,6 +7972,9 @@ class StrategyRunner:
                             symbol,
                         )
 
+        sorted_stale_symbols = sorted(stale_reasons)
+        stale_count = len(sorted_stale_symbols)
+
         # 5. Move WS Reconnect OUTSIDE the symbol loop.
         # We only want to evaluate a WS restart once per cycle, not once per symbol.
         if stale_count > 0:
@@ -7857,7 +7989,7 @@ class StrategyRunner:
                     extra={
                         "event": "WS_RESTART_SKIPPED",
                         "reason": "market_closed",
-                        "stale_symbols": stale_symbols[:32],
+                        "stale_symbols": sorted_stale_symbols[:32],
                         "stale_count": stale_count,
                     },
                 )
@@ -7867,15 +7999,26 @@ class StrategyRunner:
             if now_wall - last_reconnect_ts >= 30.0:
                 self._last_ws_reconnect_attempt_ts = now_wall
                 try:
-                    reconnect = getattr(
-                        self._market_data, "_trigger_zombie_ws_restart", None
+                    check_zombie_ticks = getattr(
+                        self._market_data, "_check_zombie_ticks", None
                     )
-                    if callable(reconnect):
+                    if callable(check_zombie_ticks):
                         self._logger.warning(
-                            "🔄 Watchdog triggering zombie WS restart (%d symbols stale)",
+                            "🔎 Watchdog delegating stale-symbol recovery assessment (%d symbols stale)",
                             stale_count,
                         )
-                        reconnect()
+                        check_zombie_ticks()
+                    else:
+                        self._logger.warning(
+                            "WS_RESTART_SKIPPED reason=transport_evidence_unavailable stale_count=%d",
+                            stale_count,
+                            extra={
+                                "event": "WS_RESTART_SKIPPED",
+                                "reason": "transport_evidence_unavailable",
+                                "stale_symbols": sorted_stale_symbols[:32],
+                                "stale_count": stale_count,
+                            },
+                        )
                 except Exception:
                     self._logger.exception(
                         "CRITICAL: Failure in StrategyRunner._health_watchdog.reconnect"
