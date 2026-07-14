@@ -41,6 +41,7 @@ import logging
 import os
 from nifty_scalper_bot.config.defaults import (
     DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+    QUOTE_STALE_THRESHOLD_MS,
 )
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from pathlib import Path
@@ -113,6 +114,7 @@ from nifty_scalper_bot.execution.quote_readiness import (
 )
 from nifty_scalper_bot.execution.readiness import (
     HistoryReadinessPolicy,
+    resolve_max_quote_age_seconds,
     resolve_quote_bid_ask_spread,
 )
 from nifty_scalper_bot.execution.order_state_machine import (
@@ -10991,6 +10993,37 @@ class StrategyRunner:
             return _finish(False, "option_token_missing")
         if not candidate_orderable:
             return _finish(False, "lot_size_unresolved")
+        live_tick_check = None
+        mdm = getattr(self, "_market_data", None)
+        classifier = getattr(mdm, "classify_live_tick_readiness", None)
+        if callable(classifier):
+            max_live_tick_age_s = resolve_max_quote_age_seconds(
+                "HYDRATION_LIVE_TICK_MAX_AGE_SECONDS",
+                "HYDRATION_LIVE_TICK_MAX_AGE_MS",
+                default_seconds=float(QUOTE_STALE_THRESHOLD_MS) / 1000.0,
+            )
+            live_tick_check = classifier(
+                symbol_norm,
+                candidate_token,
+                max_age_s=max_live_tick_age_s,
+            )
+            details["max_live_tick_age_s"] = max_live_tick_age_s
+            details["live_tick_generation_ready"] = bool(
+                live_tick_check.get("ready")
+            )
+            details["live_tick_generation_reason"] = live_tick_check.get("reason")
+            details["subscription_generation"] = live_tick_check.get(
+                "subscription_generation"
+            )
+            details["tick_generation"] = live_tick_check.get("tick_generation")
+            details["first_tick_received"] = live_tick_check.get(
+                "first_tick_received"
+            )
+            details["tick_age_s"] = live_tick_check.get("tick_age_s")
+            details["expected_subscription_state"] = live_tick_check.get("expected")
+            details["actual_subscription_state"] = live_tick_check.get("subscribed")
+            if not bool(live_tick_check.get("ready")):
+                return _finish(False, str(live_tick_check.get("reason")))
         if not quote:
             details["tradable_quote"] = False
             details["depth_available"] = False

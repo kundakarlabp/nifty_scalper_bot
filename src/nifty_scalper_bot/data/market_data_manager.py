@@ -552,6 +552,24 @@ class MarketDataManager:
         self._pending_subscriptions: set[int] = set()
         self._dispatched_subscriptions: set[int] = set()
         self._confirmed_subscriptions: set[int] = set()
+        self._subscription_generation = 0
+        self._symbol_subscription_generation: dict[str, int] = {}
+        self._symbol_first_tick_generation: dict[str, int] = {}
+        self._symbol_token_generation: dict[str, tuple[int, int]] = {}
+        self._ws_restart_generation = 0
+        self._ws_restart_inflight = False
+        self._ws_restart_state = "idle"
+        self._ws_restart_lock = threading.Lock()
+        self._ws_restart_started_at: float | None = None
+        self._ws_restart_deadline_mono: float | None = None
+        self._ws_restart_affected: dict[str, int] = {}
+        self._ws_restart_unresolved_tokens: set[int] = set()
+        self._ws_restart_diagnostics: dict[str, Any] = {}
+        self._ws_recovery_timeout_sec = self._parse_float_env(
+            "MDM_WS_RECOVERY_TIMEOUT_SECONDS", default=15.0, minimum=1.0
+        )
+        self._ws_restart_fail_reason: str | None = None
+        self._mismatched_generation_tick_counts: dict[str, int] = defaultdict(int)
         self._last_rest_refresh_attempt: dict[str, float] = {}
         self._tick_warn_last: dict[str, float] = (
             {}
@@ -1405,6 +1423,12 @@ class MarketDataManager:
         if not self._started:
             return
         self._started = False
+        with self._ws_restart_lock:
+            self._ws_restart_inflight = False
+            self._ws_restart_state = "failed"
+            self._ws_restart_started_at = None
+            self._ws_restart_deadline_mono = None
+            self._ws_restart_fail_reason = "shutdown"
         if self._ws is not None:
             try:
                 self._ws.stop()
@@ -2524,11 +2548,34 @@ class MarketDataManager:
                 active_future, reason="request_token_subscription_pre"
             )
         with self._lock:
+            was_desired = token_int in self._desired_tokens
+            previous_token = (
+                self._symbol_to_token.get(normalized_symbol)
+                if normalized_symbol
+                else None
+            )
             self._desired_tokens.add(token_int)
             if normalized_symbol:
+                material_transition = (not was_desired) or previous_token != token_int
                 self._set_symbol_token_mapping(
                     normalized_symbol, token_int, source="request_token_subscription"
                 )
+                if material_transition:
+                    if previous_token not in (None, token_int):
+                        self._desired_tokens.discard(int(previous_token))
+                        self._pending_subscription_tokens.discard(int(previous_token))
+                        self._pending_subscriptions.discard(int(previous_token))
+                        self._dispatched_subscriptions.discard(int(previous_token))
+                        self._confirmed_subscriptions.discard(int(previous_token))
+                    self._begin_subscription_generation_locked(
+                        normalized_symbol,
+                        token_int,
+                        reason=(
+                            "token_changed"
+                            if previous_token not in (None, token_int)
+                            else "new_symbol_token"
+                        ),
+                    )
         if active_future:
             self.purge_stale_nifty_futures(
                 active_future, reason="request_token_subscription_post"
@@ -2595,6 +2642,8 @@ class MarketDataManager:
             before = len(self._desired_tokens)
             self._desired_tokens.update(accepted)
             added_count = len(self._desired_tokens) - before
+            if added_count:
+                self._subscription_generation += 1
         if active_future:
             self.purge_stale_nifty_futures(
                 active_future, reason="request_token_subscriptions_post"
@@ -2918,6 +2967,114 @@ class MarketDataManager:
         if mono is None:
             return None
         return max(time.monotonic() - float(mono), 0.0)
+
+    def _begin_subscription_generation_locked(
+        self, symbol: str, token: int, *, reason: str
+    ) -> int:
+        """Advance symbol lifecycle generation and invalidate old live state."""
+        canonical = self._canonical_symbol(symbol)
+        token_int = int(token)
+        self._subscription_generation += 1
+        generation = self._subscription_generation
+        self._symbol_subscription_generation[canonical] = generation
+        self._symbol_token_generation[canonical] = (token_int, generation)
+        self._symbol_first_tick_generation.pop(canonical, None)
+        self._last_valid_live_tick_mono.pop(canonical, None)
+        self._last_tick_ts.pop(canonical, None)
+        self._last_tick_snapshot.pop(canonical, None)
+        self._last_cumulative_volume_by_symbol.pop(canonical, None)
+        self._logger.info(
+            "MDM_SUBSCRIPTION_GENERATION_ADVANCED symbol=%s token=%s generation=%s reason=%s",
+            canonical,
+            token_int,
+            generation,
+            reason,
+            extra={
+                "event": "MDM_SUBSCRIPTION_GENERATION_ADVANCED",
+                "symbol": canonical,
+                "token": token_int,
+                "subscription_generation": generation,
+                "reason": reason,
+            },
+        )
+        return generation
+
+    def _current_symbol_token_locked(self, symbol: str) -> int | None:
+        canonical = self._canonical_symbol(symbol)
+        token = self._symbol_to_token.get(canonical) or self._token_by_symbol.get(canonical)
+        try:
+            return int(token) if token is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def classify_live_tick_readiness(
+        self,
+        symbol: str,
+        token: int | None,
+        *,
+        max_age_s: float,
+    ) -> dict[str, Any]:
+        """Classify current-generation live tick readiness for execution gates."""
+        canonical = self._canonical_symbol(symbol)
+        try:
+            token_int = int(token) if token is not None else None
+        except (TypeError, ValueError):
+            token_int = None
+        with self._lock:
+            desired = set(getattr(self, "_desired_tokens", set()) or set())
+            confirmed = set(getattr(self, "_confirmed_subscriptions", set()) or set())
+            dispatched = set(getattr(self, "_dispatched_subscriptions", set()) or set())
+            sub_gen = self._symbol_subscription_generation.get(canonical)
+            tick_gen = self._symbol_first_tick_generation.get(canonical)
+            tick_mono = self._last_valid_live_tick_mono.get(canonical)
+            current_token = self._current_symbol_token_locked(canonical)
+        expected = token_int in desired if token_int is not None else False
+        dispatch_attempted = token_int in dispatched if token_int is not None else False
+        confirmed_subscription = token_int in confirmed if token_int is not None else False
+        token_matches = bool(token_int is not None and token_int == current_token)
+        current_generation_tick_received = bool(
+            tick_gen is not None and sub_gen is not None and tick_gen >= sub_gen
+        )
+        age_s = (
+            None
+            if tick_mono is None
+            else max(time.monotonic() - float(tick_mono), 0.0)
+        )
+        if token_int is None:
+            reason = "subscription_missing"
+        elif not token_matches:
+            reason = "subscription_token_mismatch"
+        elif not expected:
+            reason = "symbol_not_expected_live"
+        elif not dispatch_attempted and not confirmed_subscription:
+            reason = "subscription_pending" if token_int in desired else "subscription_missing"
+        elif not current_generation_tick_received and tick_gen is not None:
+            reason = "subscription_generation_mismatch"
+        elif tick_mono is None:
+            reason = "never_received_tick"
+        elif age_s is None:
+            reason = "tick_timestamp_missing"
+        elif age_s > max_age_s:
+            reason = "tick_stale"
+        else:
+            reason = "ready"
+        return {
+            "ready": reason == "ready",
+            "reason": reason,
+            "symbol": canonical,
+            "token": token_int,
+            "expected": expected,
+            "desired": expected,
+            "dispatch_attempted": dispatch_attempted,
+            "confirmed": confirmed_subscription,
+            "subscribed": confirmed_subscription,
+            "token_matches": token_matches,
+            "current_generation_tick_received": current_generation_tick_received,
+            "subscription_generation": sub_gen,
+            "tick_generation": tick_gen,
+            "first_tick_received": current_generation_tick_received,
+            "tick_age_s": age_s,
+        }
 
     async def _rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
@@ -7517,16 +7674,57 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
-        self._store_tick(symbol, tick)
+        accepted_current_generation_tick = False
         if source == "ws":
             now_mono = time.monotonic()
             self._last_ws_tick_mono = now_mono
             canonical_symbol = self._canonical_symbol(symbol)
-            with self._lock:
-                self._last_valid_live_tick_mono[canonical_symbol] = now_mono
+            token_value = tick.get("instrument_token") or tick.get("token")
             try:
-                token_value = tick.get("instrument_token") or tick.get("token")
                 token_int = int(token_value) if token_value is not None else None
+            except (TypeError, ValueError):
+                token_int = None
+            with self._lock:
+                current_token = self._current_symbol_token_locked(canonical_symbol)
+                token_expected = token_int is not None and token_int in self._desired_tokens
+                requires_token_bound_generation = canonical_symbol.startswith(
+                    "NFO:"
+                ) and canonical_symbol.endswith(("CE", "PE"))
+                if requires_token_bound_generation and (
+                    token_int is None or token_int != current_token or not token_expected
+                ):
+                    self._mismatched_generation_tick_counts[canonical_symbol] += 1
+                    log_throttled(
+                        self._logger,
+                        f"ws_generation_tick_rejected:{canonical_symbol}",
+                        "WS_GENERATION_TICK_REJECTED symbol=%s token=%s expected_token=%s",
+                        canonical_symbol,
+                        token_int,
+                        current_token,
+                        interval_sec=60.0,
+                        level=logging.WARNING,
+                        extra={
+                            "event": "WS_GENERATION_TICK_REJECTED",
+                            "symbol": canonical_symbol,
+                            "token": token_int,
+                            "expected_token": current_token,
+                            "desired": token_expected,
+                        },
+                    )
+                    return
+                else:
+                    self._last_valid_live_tick_mono[canonical_symbol] = now_mono
+                    if token_int is not None:
+                        self._symbol_first_tick_generation[canonical_symbol] = (
+                            self._symbol_subscription_generation.get(
+                                canonical_symbol, self._subscription_generation
+                            )
+                        )
+                        self._confirmed_subscriptions.add(token_int)
+                        accepted_current_generation_tick = True
+            if accepted_current_generation_tick:
+                self.verify_websocket_recovery(now_mono=now_mono)
+            try:
                 now = time.monotonic()
                 last_logged = float(self._ws_stored_tick_log_at.get(symbol, 0.0))
                 if last_logged <= 0.0 or (now - last_logged) >= 60.0:
@@ -7560,6 +7758,7 @@ class MarketDataManager:
                     )
             except Exception:
                 pass
+        self._store_tick(symbol, tick)
         callbacks: list[TickCallback]
         tick_payload = to_json_safe(dict(tick))
         ts_payload = pd.to_datetime(
@@ -8297,6 +8496,23 @@ class MarketDataManager:
         now = time.monotonic()
         if now < self._zombie_breaker_open_until:
             return
+        recovery = self.verify_websocket_recovery(now_mono=now)
+        if recovery.get("state") in {
+            "reconnect_requested",
+            "waiting_for_connection",
+            "waiting_for_subscriptions",
+            "waiting_for_first_ticks",
+        }:
+            self._logger.info(
+                "MDM_ZOMBIE_WS_RESTART_COALESCED generation=%s state=%s",
+                recovery.get("restart_generation"),
+                recovery.get("state"),
+                extra={
+                    "event": "MDM_ZOMBIE_WS_RESTART_COALESCED",
+                    **recovery,
+                },
+            )
+            return
 
         # Exponential backoff between consecutive zombie restart
         # triggers.  WebSocketManager itself already does full-jitter
@@ -8318,38 +8534,97 @@ class MarketDataManager:
         ws = self._ws
         if ws is None:
             return
+        with self._ws_restart_lock:
+            if self._ws_restart_inflight:
+                self._logger.info(
+                    "MDM_ZOMBIE_WS_RESTART_COALESCED generation=%s",
+                    self._ws_restart_generation,
+                    extra={
+                        "event": "MDM_ZOMBIE_WS_RESTART_COALESCED",
+                        "restart_generation": self._ws_restart_generation,
+                        "state": "inflight",
+                    },
+                )
+                return
+            with self._lock:
+                desired_snapshot = set(self._desired_tokens)
+                affected: dict[str, int] = {}
+                unresolved: set[int] = set()
+                for token in list(desired_snapshot):
+                    sym = self._resolve_symbol_for_token(int(token))
+                    if sym:
+                        affected[self._canonical_symbol(sym)] = int(token)
+                    else:
+                        unresolved.add(int(token))
+                self._subscription_generation += 1
+                generation = self._subscription_generation
+                for canonical, token in affected.items():
+                    self._symbol_subscription_generation[canonical] = generation
+                    self._symbol_token_generation[canonical] = (
+                        int(token),
+                        generation,
+                    )
+                    self._symbol_first_tick_generation.pop(canonical, None)
+                    self._last_valid_live_tick_mono.pop(canonical, None)
+                    self._last_tick_ts.pop(canonical, None)
+                    self._last_tick_snapshot.pop(canonical, None)
+                    self._last_cumulative_volume_by_symbol.pop(canonical, None)
+            self._ws_restart_inflight = True
+            self._ws_restart_state = "reconnect_requested"
+            self._ws_restart_generation += 1
+            self._ws_restart_started_at = now
+            self._ws_restart_deadline_mono = now + self._ws_recovery_timeout_sec
+            self._ws_restart_affected = affected
+            self._ws_restart_unresolved_tokens = unresolved
+            self._ws_restart_fail_reason = None
+            self._ws_restart_diagnostics = {
+                "restart_generation": self._ws_restart_generation,
+                "initiator": "mdm_zombie_watchdog",
+                "reason": "transport_failure",
+                "started_at": now,
+                "desired_tokens": sorted(desired_snapshot),
+                "affected_symbols": sorted(affected),
+                "unresolved_tokens": sorted(unresolved),
+            }
 
         reconnect = getattr(ws, "force_reconnect", None)
         if not callable(reconnect):
+            self._fail_ws_recovery("force_reconnect_unavailable")
             self._zombie_restart_failures += 1
-        else:
-            try:
-                reconnect()
-                self._zombie_restart_failures = 0
-                self._zombie_restart_consecutive += 1
-                self._zombie_restart_attempts.append(now)
-                while (
-                    self._zombie_restart_attempts
-                    and (now - self._zombie_restart_attempts[0]) > 120.0
-                ):
-                    self._zombie_restart_attempts.popleft()
-                self._logger.warning(
-                    "Condition met: mdm_zombie_ws_restart",
-                    extra={
-                        "event": "mdm_zombie_ws_restart",
-                        "failure_count": self._zombie_restart_failures,
-                        "consecutive": self._zombie_restart_consecutive,
-                        "cooldown_sec": round(cooldown, 2),
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._zombie_restart_failures += 1
-                self._logger.error(
-                    "Failure in _trigger_zombie_ws_restart: %s",
-                    exc,
-                    extra={"event": "mdm_zombie_ws_restart_error"},
-                    exc_info=exc,
-                )
+            return
+        try:
+            reconnect()
+            with self._ws_restart_lock:
+                if self._ws_restart_inflight:
+                    self._ws_restart_state = "waiting_for_subscriptions"
+            self._reconcile_ws_subscriptions()
+            recovery = self.verify_websocket_recovery(now_mono=time.monotonic())
+            self._zombie_restart_consecutive += 1
+            self._zombie_restart_attempts.append(now)
+            while (
+                self._zombie_restart_attempts
+                and (now - self._zombie_restart_attempts[0]) > 120.0
+            ):
+                self._zombie_restart_attempts.popleft()
+            self._logger.warning(
+                "Condition met: mdm_zombie_ws_restart",
+                extra={
+                    "event": "mdm_zombie_ws_restart",
+                    "failure_count": self._zombie_restart_failures,
+                    "consecutive": self._zombie_restart_consecutive,
+                    "cooldown_sec": round(cooldown, 2),
+                    "recovery_state": recovery.get("state"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail_ws_recovery(type(exc).__name__)
+            self._zombie_restart_failures += 1
+            self._logger.error(
+                "Failure in _trigger_zombie_ws_restart: %s",
+                exc,
+                extra={"event": "mdm_zombie_ws_restart_error"},
+                exc_info=exc,
+            )
 
         if len(self._zombie_restart_attempts) > 5:
             self._logger.critical(
@@ -8359,7 +8634,9 @@ class MarketDataManager:
                     "attempts_in_2m": len(self._zombie_restart_attempts),
                 },
             )
-            raise RuntimeError("WebSocket restart circuit breaker exceeded: >5 in 120s")
+            raise RuntimeError(
+                "WebSocket restart circuit breaker exceeded: >5 in 120s"
+            )
 
         if self._zombie_restart_failures > self._zombie_restart_limit:
             self._zombie_breaker_open_until = now + self._zombie_restart_window
@@ -8371,6 +8648,130 @@ class MarketDataManager:
                     "open_seconds": self._zombie_restart_window,
                 },
             )
+
+    def _fail_ws_recovery(self, reason: str) -> None:
+        with self._ws_restart_lock:
+            self._ws_restart_state = "failed"
+            self._ws_restart_inflight = False
+            self._ws_restart_started_at = None
+            self._ws_restart_deadline_mono = None
+            self._ws_restart_fail_reason = reason
+        self._logger.error(
+            "MDM_ZOMBIE_WS_RECOVERY_FAILED reason=%s generation=%s",
+            reason,
+            self._ws_restart_generation,
+            extra={
+                "event": "MDM_ZOMBIE_WS_RECOVERY_FAILED",
+                "reason": reason,
+                "restart_generation": self._ws_restart_generation,
+            },
+        )
+
+    def verify_websocket_recovery(
+        self, *, now_mono: float | None = None
+    ) -> dict[str, Any]:
+        """Verify websocket recovery state without assuming reconnect success."""
+        now_value = time.monotonic() if now_mono is None else float(now_mono)
+        connected = self._is_ws_connected()
+        with self._ws_restart_lock:
+            affected = dict(self._ws_restart_affected)
+            unresolved = set(self._ws_restart_unresolved_tokens)
+            deadline = self._ws_restart_deadline_mono
+            restart_generation = self._ws_restart_generation
+            state = self._ws_restart_state
+            inflight = self._ws_restart_inflight
+            fail_reason = self._ws_restart_fail_reason
+            if state == "failed":
+                return {
+                    "ok": False,
+                    "reason": fail_reason or "recovery_failed",
+                    "state": "failed",
+                    "inflight": False,
+                    "restart_generation": restart_generation,
+                    "connected": connected,
+                    "desired_tokens": [],
+                    "dispatched_tokens": [],
+                    "confirmed_tokens": [],
+                    "dispatch_attempted": False,
+                    "affected_symbols": sorted(affected),
+                    "unresolved_tokens": sorted(unresolved),
+                    "missing_current_generation_ticks": sorted(affected),
+                }
+            with self._lock:
+                desired = set(self._desired_tokens)
+                dispatched = set(self._dispatched_subscriptions)
+                confirmed = set(self._confirmed_subscriptions)
+                sub_generations = dict(self._symbol_subscription_generation)
+                tick_generations = dict(self._symbol_first_tick_generation)
+                tick_monos = dict(self._last_valid_live_tick_mono)
+        dispatch_attempted = desired <= dispatched if desired else True
+        affected_ready = True
+        missing_ticks: list[str] = []
+        for symbol, token in affected.items():
+            sub_gen = sub_generations.get(symbol)
+            tick_gen = tick_generations.get(symbol)
+            has_tick = (
+                token in desired
+                and token in confirmed
+                and sub_gen is not None
+                and tick_gen is not None
+                and tick_gen >= sub_gen
+                and tick_monos.get(symbol) is not None
+            )
+            if not has_tick:
+                affected_ready = False
+                missing_ticks.append(symbol)
+        reason = "ok"
+        terminal_state = state
+        if not inflight and state not in {"failed", "recovered"}:
+            terminal_state = state
+        elif not connected:
+            reason = "websocket_not_connected"
+            terminal_state = "waiting_for_connection"
+        elif desired and unresolved:
+            reason = "affected_token_mapping_incomplete"
+            terminal_state = "waiting_for_subscriptions"
+        elif desired and not affected:
+            reason = "affected_token_mapping_incomplete"
+            terminal_state = "waiting_for_subscriptions"
+        elif not dispatch_attempted:
+            reason = "resubscription_not_attempted"
+            terminal_state = "waiting_for_subscriptions"
+        elif not affected_ready:
+            reason = "waiting_for_current_generation_ticks"
+            terminal_state = "waiting_for_first_ticks"
+        if inflight and deadline is not None and now_value >= deadline and reason != "ok":
+            self._fail_ws_recovery(reason)
+            terminal_state = "failed"
+            inflight = False
+        elif inflight and reason == "ok":
+            with self._ws_restart_lock:
+                self._ws_restart_state = "recovered"
+                self._ws_restart_inflight = False
+                self._ws_restart_started_at = None
+                self._ws_restart_deadline_mono = None
+                self._ws_restart_fail_reason = None
+                self._zombie_restart_failures = 0
+            terminal_state = "recovered"
+            inflight = False
+        elif inflight:
+            with self._ws_restart_lock:
+                self._ws_restart_state = terminal_state
+        return {
+            "ok": reason == "ok",
+            "reason": reason,
+            "state": terminal_state,
+            "inflight": inflight,
+            "restart_generation": restart_generation,
+            "connected": connected,
+            "desired_tokens": sorted(desired),
+            "dispatched_tokens": sorted(dispatched),
+            "confirmed_tokens": sorted(confirmed),
+            "dispatch_attempted": dispatch_attempted,
+            "affected_symbols": sorted(affected),
+            "unresolved_tokens": sorted(unresolved),
+            "missing_current_generation_ticks": missing_ticks,
+        }
 
     def _start_rest_poll(self) -> None:
         if self._rest_poll_thread is not None and self._rest_poll_thread.is_alive():
