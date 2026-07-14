@@ -72,8 +72,8 @@ def test_runner_skips_inactive_option_stale_restart_count():
     assert "is_nifty_option_symbol(symbol)" in source
     assert "self._is_selected_option_symbol(symbol)" in source
     skip_index = source.index("outside_active_option_basket")
-    stale_count_index = source.index("stale_count += 1", skip_index)
-    assert skip_index < stale_count_index
+    stale_mark_index = source.index("_mark_stale(symbol", skip_index)
+    assert skip_index < stale_mark_index
 
 
 def test_runner_watchdog_does_not_restart_for_inactive_option(monkeypatch):
@@ -124,7 +124,6 @@ def test_runner_watchdog_does_not_restart_for_inactive_option(monkeypatch):
     runner._health_watchdog()
 
     assert market_data.restart_count == 0
-
 
 
 def test_runner_watchdog_delegates_restart_decision_to_mdm_transport_gate(monkeypatch):
@@ -278,6 +277,302 @@ def test_runner_watchdog_excludes_superseded_non_required_option(monkeypatch):
     }
     runner._active_option_symbols = {selected_symbol}
     runner._active_selected_ce = selected_symbol
+    runner._active_selected_pe = None
+    runner._selected_ce_symbol = None
+    runner._selected_pe_symbol = None
+    runner._pending_selected_ce = None
+    runner._pending_selected_pe = None
+    runner._active_contract_basket = None
+    runner._data_hub = None
+    runner._last_ws_stale_log_ts_by_symbol = {}
+    runner._last_ws_reconnect_attempt_ts = 0.0
+    runner._market_data = market_data
+    runner._log_throttle_state = {}
+    runner._logger = logging.getLogger("test.runner.watchdog")
+
+    monkeypatch.setattr(runner_module, "is_market_open_now", lambda: True)
+
+    runner._health_watchdog()
+
+    assert market_data.zombie_checks == 0
+    assert market_data.restart_count == 0
+
+
+def test_runner_watchdog_counts_one_required_no_tick_symbol_once(monkeypatch):
+    """Args: monkeypatch, caplog. Returns: None. Raises: AssertionError."""
+    import nifty_scalper_bot.strategies.runner as runner_module
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    class _MarketData:
+        def __init__(self) -> None:
+            self.zombie_checks = 0
+            self.restart_count = 0
+
+        def _required_live_symbols(self) -> set[str]:
+            return {"NFO:NIFTY2671423950CE"}
+
+        def _current_symbol_token_locked(self, symbol: str) -> int:
+            return 101
+
+        def classify_live_tick_readiness(
+            self, symbol: str, token: int, *, max_age_s: float
+        ):
+            return {
+                "ready": False,
+                "reason": "never_received_tick",
+                "tick_age_s": None,
+            }
+
+        def time_since_last_live_ws_tick(self, symbol: str):
+            return None
+
+        def _check_zombie_ticks(self) -> None:
+            self.zombie_checks += 1
+
+        def _trigger_zombie_ws_restart(self) -> None:
+            self.restart_count += 1
+
+    symbol = "NFO:NIFTY2671423950CE"
+    market_data = _MarketData()
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner.ready = False
+    runner._last_tick_seen_ts = time.monotonic()
+    runner._last_global_eval_ts = time.monotonic()
+    runner._eval_stall_recovery_attempted = False
+    runner._candle_engines = {symbol: object()}
+    runner._active_symbols = {symbol}
+    runner._tracked_symbols = {symbol}
+    runner._last_tick_time_by_symbol = {}
+    runner._active_option_symbols = {symbol}
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = None
+    runner._selected_ce_symbol = None
+    runner._selected_pe_symbol = None
+    runner._pending_selected_ce = None
+    runner._pending_selected_pe = None
+    runner._active_contract_basket = None
+    runner._data_hub = None
+    runner._last_ws_stale_log_ts_by_symbol = {}
+    runner._last_ws_reconnect_attempt_ts = 0.0
+    runner._market_data = market_data
+    runner._log_throttle_state = {}
+    runner._logger = logging.getLogger("test.runner.watchdog")
+    warnings = []
+    runner._logger.warning = lambda msg, *args, **kwargs: warnings.append(
+        msg % args if args else msg
+    )
+
+    monkeypatch.setattr(runner_module, "is_market_open_now", lambda: True)
+
+    runner._health_watchdog()
+
+    assert market_data.zombie_checks == 1
+    assert market_data.restart_count == 0
+    assert any("(1 symbols stale)" in message for message in warnings)
+    assert not any("(2 symbols stale)" in message for message in warnings)
+
+
+def test_runner_watchdog_counts_two_required_stale_symbols(monkeypatch):
+    """Args: monkeypatch, caplog. Returns: None. Raises: AssertionError."""
+    import nifty_scalper_bot.strategies.runner as runner_module
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    class _MarketData:
+        def __init__(self) -> None:
+            self.zombie_checks = 0
+            self.restart_count = 0
+
+        def _required_live_symbols(self) -> set[str]:
+            return {"NFO:NIFTY2671423950CE", "NFO:NIFTY2671423950PE"}
+
+        def _current_symbol_token_locked(self, symbol: str) -> int:
+            return 101 if symbol.endswith("CE") else 102
+
+        def classify_live_tick_readiness(
+            self, symbol: str, token: int, *, max_age_s: float
+        ):
+            return {"ready": False, "reason": "tick_stale", "tick_age_s": 4000.0}
+
+        def time_since_last_live_ws_tick(self, symbol: str):
+            return 4000.0
+
+        def _check_zombie_ticks(self) -> None:
+            self.zombie_checks += 1
+
+        def _trigger_zombie_ws_restart(self) -> None:
+            self.restart_count += 1
+
+    ce = "NFO:NIFTY2671423950CE"
+    pe = "NFO:NIFTY2671423950PE"
+    market_data = _MarketData()
+    now_wall = time.time()
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner.ready = False
+    runner._last_tick_seen_ts = time.monotonic()
+    runner._last_global_eval_ts = time.monotonic()
+    runner._eval_stall_recovery_attempted = False
+    runner._candle_engines = {ce: object(), pe: object()}
+    runner._active_symbols = {ce, pe}
+    runner._tracked_symbols = {ce, pe}
+    runner._last_tick_time_by_symbol = {
+        ce: now_wall - 4000.0,
+        pe: now_wall - 4000.0,
+    }
+    runner._active_option_symbols = {ce, pe}
+    runner._active_selected_ce = ce
+    runner._active_selected_pe = pe
+    runner._selected_ce_symbol = None
+    runner._selected_pe_symbol = None
+    runner._pending_selected_ce = None
+    runner._pending_selected_pe = None
+    runner._active_contract_basket = None
+    runner._data_hub = None
+    runner._last_ws_stale_log_ts_by_symbol = {}
+    runner._last_ws_reconnect_attempt_ts = 0.0
+    runner._market_data = market_data
+    runner._log_throttle_state = {}
+    runner._logger = logging.getLogger("test.runner.watchdog")
+    warnings = []
+    runner._logger.warning = lambda msg, *args, **kwargs: warnings.append(
+        msg % args if args else msg
+    )
+    runner._required_candles = 50
+    runner._symbol_locks = {
+        ce: __import__("threading").Lock(),
+        pe: __import__("threading").Lock(),
+    }
+    runner._hydrate_missing_bars = lambda symbol, bars: []
+
+    monkeypatch.setattr(runner_module, "is_market_open_now", lambda: True)
+
+    runner._health_watchdog()
+
+    assert market_data.zombie_checks == 1
+    assert market_data.restart_count == 0
+    assert any("(2 symbols stale)" in message for message in warnings)
+    assert not any("(4 symbols stale)" in message for message in warnings)
+
+
+def test_runner_local_fresh_timestamp_cannot_override_generation_mismatch(
+    monkeypatch,
+):
+    """Args: monkeypatch, caplog. Returns: None. Raises: AssertionError."""
+    import nifty_scalper_bot.strategies.runner as runner_module
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    class _MarketData:
+        def __init__(self) -> None:
+            self.zombie_checks = 0
+            self.restart_count = 0
+
+        def _required_live_symbols(self) -> set[str]:
+            return {"NFO:NIFTY2671423950CE"}
+
+        def _current_symbol_token_locked(self, symbol: str) -> int:
+            return 101
+
+        def classify_live_tick_readiness(
+            self, symbol: str, token: int, *, max_age_s: float
+        ):
+            return {
+                "ready": False,
+                "reason": "subscription_generation_mismatch",
+                "tick_age_s": 0.1,
+            }
+
+        def time_since_last_live_ws_tick(self, symbol: str):
+            return 0.1
+
+        def _check_zombie_ticks(self) -> None:
+            self.zombie_checks += 1
+
+        def _trigger_zombie_ws_restart(self) -> None:
+            self.restart_count += 1
+
+    symbol = "NFO:NIFTY2671423950CE"
+    market_data = _MarketData()
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner.ready = False
+    runner._last_tick_seen_ts = time.monotonic()
+    runner._last_global_eval_ts = time.monotonic()
+    runner._eval_stall_recovery_attempted = False
+    runner._candle_engines = {symbol: object()}
+    runner._active_symbols = {symbol}
+    runner._tracked_symbols = {symbol}
+    runner._last_tick_time_by_symbol = {symbol: time.time()}
+    runner._active_option_symbols = {symbol}
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = None
+    runner._selected_ce_symbol = None
+    runner._selected_pe_symbol = None
+    runner._pending_selected_ce = None
+    runner._pending_selected_pe = None
+    runner._active_contract_basket = None
+    runner._data_hub = None
+    runner._last_ws_stale_log_ts_by_symbol = {}
+    runner._last_ws_reconnect_attempt_ts = 0.0
+    runner._market_data = market_data
+    runner._log_throttle_state = {}
+    runner._logger = logging.getLogger("test.runner.watchdog")
+    warnings = []
+    runner._logger.warning = lambda msg, *args, **kwargs: warnings.append(
+        msg % args if args else msg
+    )
+
+    monkeypatch.setattr(runner_module, "is_market_open_now", lambda: True)
+
+    runner._health_watchdog()
+
+    assert market_data.zombie_checks == 1
+    assert market_data.restart_count == 0
+    assert any("(1 symbols stale)" in message for message in warnings)
+
+
+def test_runner_required_symbol_ready_after_current_generation_tick_not_stale(
+    monkeypatch,
+):
+    """Args: monkeypatch. Returns: None. Raises: AssertionError."""
+    import nifty_scalper_bot.strategies.runner as runner_module
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    class _MarketData:
+        def __init__(self) -> None:
+            self.zombie_checks = 0
+            self.restart_count = 0
+
+        def _required_live_symbols(self) -> set[str]:
+            return {"NFO:NIFTY2671423950CE"}
+
+        def _current_symbol_token_locked(self, symbol: str) -> int:
+            return 101
+
+        def classify_live_tick_readiness(
+            self, symbol: str, token: int, *, max_age_s: float
+        ):
+            return {"ready": True, "reason": "ready", "tick_age_s": 0.1}
+
+        def time_since_last_live_ws_tick(self, symbol: str):
+            return 0.1
+
+        def _check_zombie_ticks(self) -> None:
+            self.zombie_checks += 1
+
+        def _trigger_zombie_ws_restart(self) -> None:
+            self.restart_count += 1
+
+    symbol = "NFO:NIFTY2671423950CE"
+    market_data = _MarketData()
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner.ready = False
+    runner._last_tick_seen_ts = time.monotonic()
+    runner._last_global_eval_ts = time.monotonic()
+    runner._eval_stall_recovery_attempted = False
+    runner._candle_engines = {symbol: object()}
+    runner._active_symbols = {symbol}
+    runner._tracked_symbols = {symbol}
+    runner._last_tick_time_by_symbol = {symbol: time.time()}
+    runner._active_option_symbols = {symbol}
+    runner._active_selected_ce = symbol
     runner._active_selected_pe = None
     runner._selected_ce_symbol = None
     runner._selected_pe_symbol = None
