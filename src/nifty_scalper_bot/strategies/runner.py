@@ -7742,8 +7742,53 @@ class StrategyRunner:
             for sym in (getattr(self, "_active_option_symbols", set()) or set())
             if sym
         }
+        required_live_symbols: set[str] | None = None
+        required_symbols_getter = getattr(
+            self._market_data, "_required_live_symbols", None
+        )
+        if callable(required_symbols_getter):
+            try:
+                required_live_symbols = {
+                    normalize_symbol(str(sym))
+                    for sym in (required_symbols_getter() or set())
+                    if sym
+                }
+            except Exception:
+                self._logger.exception(
+                    "CRITICAL: Failure in StrategyRunner._health_watchdog.required_symbols"
+                )
+                required_live_symbols = None
+        live_tick_age = getattr(
+            self._market_data, "time_since_last_live_ws_tick", None
+        )
+
+        for required_symbol in sorted(required_live_symbols or set()):
+            if callable(live_tick_age):
+                try:
+                    if live_tick_age(required_symbol) is None:
+                        stale_count += 1
+                        stale_symbols.append(required_symbol)
+                except Exception:
+                    self._logger.exception(
+                        "CRITICAL: Failure in StrategyRunner._health_watchdog.live_tick_age for %s",
+                        required_symbol,
+                    )
 
         for symbol, engine in self._candle_engines.items():
+            if required_live_symbols is not None and symbol not in required_live_symbols:
+                if self._should_log_throttled(
+                    f"ws_stale_skipped_not_required:{symbol}", 300.0
+                ):
+                    self._logger.debug(
+                        "WS_STALE_SKIPPED symbol=%s reason=outside_required_live_symbols",
+                        symbol,
+                        extra={
+                            "event": "WS_STALE_SKIPPED",
+                            "symbol": symbol,
+                            "reason": "outside_required_live_symbols",
+                        },
+                    )
+                continue
             if symbol not in self._active_symbols:
                 last_tick_ts = float(
                     self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0
@@ -7793,8 +7838,24 @@ class StrategyRunner:
                         },
                     )
                 continue
-            # 1. Use .get() to prevent KeyError on newly subscribed symbols
-            stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
+            last_tick_ts = self._last_tick_time_by_symbol.get(symbol)
+            if last_tick_ts is None:
+                age_from_mdm = None
+                if callable(live_tick_age):
+                    try:
+                        age_from_mdm = live_tick_age(symbol)
+                    except Exception:
+                        self._logger.exception(
+                            "CRITICAL: Failure in StrategyRunner._health_watchdog.live_tick_age for %s",
+                            symbol,
+                        )
+                if age_from_mdm is None:
+                    stale_count += 1
+                    stale_symbols.append(symbol)
+                    continue
+                stale_for = float(age_from_mdm)
+            else:
+                stale_for = now_wall - float(last_tick_ts)
 
             # 2. Use the centralised, market-session-aware threshold so that
             # off-market option/index tick gaps are not treated as faults.
