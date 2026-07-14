@@ -7867,15 +7867,26 @@ class StrategyRunner:
             if now_wall - last_reconnect_ts >= 30.0:
                 self._last_ws_reconnect_attempt_ts = now_wall
                 try:
-                    reconnect = getattr(
-                        self._market_data, "_trigger_zombie_ws_restart", None
+                    check_zombie_ticks = getattr(
+                        self._market_data, "_check_zombie_ticks", None
                     )
-                    if callable(reconnect):
+                    if callable(check_zombie_ticks):
                         self._logger.warning(
-                            "🔄 Watchdog triggering zombie WS restart (%d symbols stale)",
+                            "🔎 Watchdog delegating stale-symbol recovery assessment (%d symbols stale)",
                             stale_count,
                         )
-                        reconnect()
+                        check_zombie_ticks()
+                    else:
+                        self._logger.warning(
+                            "WS_RESTART_SKIPPED reason=transport_evidence_unavailable stale_symbols=%d",
+                            stale_count,
+                            extra={
+                                "event": "WS_RESTART_SKIPPED",
+                                "reason": "transport_evidence_unavailable",
+                                "stale_symbols": stale_symbols[:32],
+                                "stale_count": stale_count,
+                            },
+                        )
                 except Exception:
                     self._logger.exception(
                         "CRITICAL: Failure in StrategyRunner._health_watchdog.reconnect"

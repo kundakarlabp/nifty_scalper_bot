@@ -126,6 +126,59 @@ def test_runner_watchdog_does_not_restart_for_inactive_option(monkeypatch):
     assert market_data.restart_count == 0
 
 
+
+def test_runner_watchdog_delegates_restart_decision_to_mdm_transport_gate(monkeypatch):
+    """Args: monkeypatch. Returns: None. Raises: AssertionError."""
+    import nifty_scalper_bot.strategies.runner as runner_module
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    class _MarketData:
+        def __init__(self) -> None:
+            self.restart_count = 0
+            self.zombie_checks = 0
+
+        def _check_zombie_ticks(self) -> None:
+            self.zombie_checks += 1
+
+        def _trigger_zombie_ws_restart(self) -> None:
+            self.restart_count += 1
+
+    symbol = "NFO:NIFTY2671423950CE"
+    market_data = _MarketData()
+    now_mono = time.monotonic()
+    now_wall = time.time()
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner.ready = False
+    runner._last_tick_seen_ts = now_mono
+    runner._last_global_eval_ts = now_mono
+    runner._eval_stall_recovery_attempted = False
+    runner._candle_engines = {symbol: object()}
+    runner._active_symbols = {symbol}
+    runner._tracked_symbols = {symbol}
+    runner._last_tick_time_by_symbol = {symbol: now_wall - 4000.0}
+    runner._active_option_symbols = {symbol}
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = None
+    runner._selected_ce_symbol = None
+    runner._selected_pe_symbol = None
+    runner._pending_selected_ce = None
+    runner._pending_selected_pe = None
+    runner._active_contract_basket = None
+    runner._data_hub = None
+    runner._last_ws_stale_log_ts_by_symbol = {}
+    runner._last_ws_reconnect_attempt_ts = 0.0
+    runner._market_data = market_data
+    runner._log_throttle_state = {}
+    runner._logger = logging.getLogger("test.runner.watchdog")
+
+    monkeypatch.setattr(runner_module, "is_market_open_now", lambda: True)
+
+    runner._health_watchdog()
+
+    assert market_data.zombie_checks == 1
+    assert market_data.restart_count == 0
+
 def test_runner_stale_tick_offmarket_uses_central_threshold():
     """Args: none. Returns: None. Raises: AssertionError."""
     source = _read_runner_source()
