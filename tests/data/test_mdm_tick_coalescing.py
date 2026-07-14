@@ -782,8 +782,52 @@ def test_runner_signal_prep_blocks_on_overload_before_unarmed_guard() -> None:
     src = inspect.getsource(StrategyRunner)
     i_over = src.index("RUNNER_SIGNAL_PREP_BLOCKED_OVERLOAD")
     i_unarmed = src.index("RUNNER_SIGNAL_PREP_BLOCKED_UNARMED")
-    i_sched = src.index(
-        "scheduled, prepare_reason = self._schedule_signal_preparation"
-    )
+    i_sched = src.index("scheduled, prepare_reason = self._schedule_signal_preparation")
     assert i_over < i_unarmed < i_sched
     assert "pipeline_overloaded" not in inspect.getsource(bracket_core)
+
+
+def test_tick_pressure_stats_report_pruned_o1_pending_state() -> None:
+    mdm = _make_mdm()
+    loop = asyncio.new_event_loop()
+    try:
+        mdm._enqueue_latest_tick_for_drain(
+            {"instrument_token": 1, "last_price": 100, "timestamp": 1}, loop
+        )
+        stats = mdm.get_tick_pressure_stats()
+        assert stats["pending_tick_count"] == 1
+        assert stats["active_queue_count"] == 1
+        assert stats["retained_empty_queue_count"] == 0
+        assert stats["oldest_pending_age_ms"] >= 0
+        popped = mdm._pop_pending_tick_batch()
+        assert len(popped) == 1
+        stats = mdm.get_tick_pressure_stats()
+        assert stats["pending_tick_count"] == 0
+        assert stats["active_queue_count"] == 0
+        assert stats["retained_empty_queue_count"] == 0
+    finally:
+        loop.close()
+
+
+def test_transport_classifier_distinguishes_processing_backlog_from_silence() -> None:
+    import time as time_mod
+
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    now = time_mod.monotonic()
+    mdm._zombie_tick_threshold_sec = 10.0
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_valid_live_tick_mono[symbol] = now - 30.0
+    mdm._pending_tick_count = 2
+    mdm._pipeline_overloaded = True
+
+    state = mdm.classify_transport_backlog(symbol)
+
+    assert state["transport_classification"] == "processing_backlog"
+    assert state["global_restart_eligible"] is False
+    assert state["pipeline_overloaded"] is True
+
+    mdm._last_raw_ws_receive_mono = now - 30.0
+    state = mdm.classify_transport_backlog(symbol)
+    assert state["transport_classification"] == "transport_silent"
+    assert state["global_restart_eligible"] is True

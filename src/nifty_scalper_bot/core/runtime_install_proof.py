@@ -80,14 +80,52 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
             "DataHub",
             "_synthetic_timestamp_guard_installed",
         )
+
+    datahub_module = _module("nifty_scalper_bot.data.data_hub")
+    datahub_loaded = datahub_module is not None or datahub_cls is not None
+    native_owner = "nifty_scalper_bot.data.data_hub"
+    native_methods_owned = False
+    if datahub_cls is None and datahub_module is not None:
+        datahub_cls = getattr(datahub_module, "DataHub", None)
+    if datahub_cls is not None:
+        native_methods_owned = all(
+            getattr(getattr(datahub_cls, name, None), "__module__", None)
+            == native_owner
+            for name in ("store_quote", "_canonicalize_tick_payload", "get_cached_ltp")
+        )
+    datahub_native_guard_loaded = bool(
+        datahub_loaded and datahub_guarded and native_methods_owned
+    )
+    datahub_import_hook_required = not datahub_loaded
+    if datahub_native_guard_loaded:
+        datahub_hardening_satisfied = True
+        datahub_hardening_mode = "native"
+    elif datahub_import_hook_required and datahub_hook_count == 1:
+        datahub_hardening_satisfied = True
+        datahub_hardening_mode = "import_hook"
+    elif datahub_hook_count > 1:
+        datahub_hardening_satisfied = False
+        datahub_hardening_mode = "duplicate_hook"
+    elif datahub_loaded and not native_methods_owned:
+        datahub_hardening_satisfied = False
+        datahub_hardening_mode = "invalid_native_ownership"
+    else:
+        datahub_hardening_satisfied = False
+        datahub_hardening_mode = "missing"
     polling_failover_patched = bool(
-        _module_attr("nifty_scalper_bot.core.app", "_polling_failover_runtime_patch_installed")
+        _module_attr(
+            "nifty_scalper_bot.core.app", "_polling_failover_runtime_patch_installed"
+        )
     )
 
     return {
         "market_data_manager_hardened": market_data_manager_hardened,
         "websocket_hardened": websocket_hardened,
         "datahub_synthetic_guard_installed": datahub_guarded,
+        "datahub_native_guard_loaded": datahub_native_guard_loaded,
+        "datahub_import_hook_required": datahub_import_hook_required,
+        "datahub_hardening_satisfied": datahub_hardening_satisfied,
+        "datahub_hardening_mode": datahub_hardening_mode,
         "polling_failover_runtime_patch_installed": polling_failover_patched,
         "core_app_import_hook_installed": core_hook_count == 1,
         "datahub_import_hook_installed": datahub_hook_count == 1,
@@ -98,10 +136,9 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
         "all_required_installed": bool(
             market_data_manager_hardened
             and websocket_hardened
-            and datahub_guarded
+            and datahub_hardening_satisfied
             and polling_failover_patched
             and core_hook_count == 1
-            and datahub_hook_count == 1
         ),
     }
 

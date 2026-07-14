@@ -28,6 +28,7 @@ from __future__ import annotations
 from nifty_scalper_bot.core.message_bus import Message, MessageType
 
 import asyncio
+import heapq
 import inspect
 from collections import defaultdict, deque
 from contextlib import suppress
@@ -364,6 +365,9 @@ class MarketDataManager:
         self._last_async_drop_log = time.monotonic()
         self._ws_connected = False
         self._last_ws_tick_mono: float = 0.0
+        self._last_raw_ws_receive_mono: float | None = None
+        self._last_raw_ws_receive_by_token: dict[int, float] = {}
+        self._last_raw_ws_receive_by_symbol: dict[str, float] = {}
         self._last_valid_live_tick_mono: dict[str, float] = {}
         self._required_symbol_since_mono: dict[str, float] = {}
         self._required_symbol_missing_grace_sec = self._parse_float_env(
@@ -442,6 +446,9 @@ class MarketDataManager:
         self._pending_tick_lock = threading.Lock()
         self._pending_tick_queues: dict[str, Deque[dict[str, Any]]] = defaultdict(deque)
         self._pending_far_ticks: dict[str, dict[str, Any]] = {}
+        self._pending_tick_count = 0
+        self._pending_tick_oldest_heap: list[tuple[float, int, str]] = []
+        self._pending_tick_heap_seq = 0
         self._tick_drain_scheduled = False
         self._tick_drain_start_pending = False
         self._tick_drain_task: asyncio.Task[None] | None = None
@@ -3016,7 +3023,9 @@ class MarketDataManager:
 
     def _current_symbol_token_locked(self, symbol: str) -> int | None:
         canonical = self._canonical_symbol(symbol)
-        token = self._symbol_to_token.get(canonical) or self._token_by_symbol.get(canonical)
+        token = self._symbol_to_token.get(canonical) or self._token_by_symbol.get(
+            canonical
+        )
         try:
             return int(token) if token is not None else None
         except (TypeError, ValueError):
@@ -3050,15 +3059,15 @@ class MarketDataManager:
             current_token = self._current_symbol_token_locked(canonical)
         expected = token_int in desired if token_int is not None else False
         dispatch_attempted = token_int in dispatched if token_int is not None else False
-        confirmed_subscription = token_int in confirmed if token_int is not None else False
+        confirmed_subscription = (
+            token_int in confirmed if token_int is not None else False
+        )
         token_matches = bool(token_int is not None and token_int == current_token)
         current_generation_tick_received = bool(
             tick_gen is not None and sub_gen is not None and tick_gen >= sub_gen
         )
         age_s = (
-            None
-            if tick_mono is None
-            else max(time.monotonic() - float(tick_mono), 0.0)
+            None if tick_mono is None else max(time.monotonic() - float(tick_mono), 0.0)
         )
         if token_int is None:
             reason = "subscription_missing"
@@ -3067,7 +3076,11 @@ class MarketDataManager:
         elif not expected:
             reason = "symbol_not_expected_live"
         elif not dispatch_attempted and not confirmed_subscription:
-            reason = "subscription_pending" if token_int in desired else "subscription_missing"
+            reason = (
+                "subscription_pending"
+                if token_int in desired
+                else "subscription_missing"
+            )
         elif not current_generation_tick_received and tick_gen is not None:
             reason = "subscription_generation_mismatch"
         elif tick_mono is None:
@@ -6008,7 +6021,9 @@ class MarketDataManager:
     async def push_tick(self, raw_tick: dict[str, Any]) -> None:
         """Queue one raw websocket tick through the supported bounded ingress path."""
         payload = dict(raw_tick)
-        payload.setdefault("_enqueued_monotonic", time.monotonic())
+        raw_receive_mono = time.monotonic()
+        self._record_raw_ws_receive(payload, raw_receive_mono)
+        payload.setdefault("_enqueued_monotonic", raw_receive_mono)
         loop = self._main_loop
         if loop is None or not loop.is_running():
             try:
@@ -6037,7 +6052,9 @@ class MarketDataManager:
             tick_payload = dict(tick)
         except Exception:  # pragma: no cover — defensive
             return
-        tick_payload.setdefault("_enqueued_monotonic", time.monotonic())
+        raw_receive_mono = time.monotonic()
+        self._record_raw_ws_receive(tick_payload, raw_receive_mono)
+        tick_payload.setdefault("_enqueued_monotonic", raw_receive_mono)
 
         loop = self._main_loop
         if loop is not None and loop.is_running():
@@ -6060,6 +6077,81 @@ class MarketDataManager:
             self._emit_priority_summaries_if_due()
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
+
+    def _record_raw_ws_receive(
+        self, tick: Mapping[str, Any], received_mono: float | None = None
+    ) -> None:
+        """Record transport-level websocket receipt before processing backlog can distort freshness."""
+        now = time.monotonic() if received_mono is None else float(received_mono)
+        self._last_raw_ws_receive_mono = now
+        token = tick.get("instrument_token") or tick.get("token")
+        try:
+            token_int = int(token) if token is not None else None
+        except (TypeError, ValueError):
+            token_int = None
+        if token_int is not None:
+            self._last_raw_ws_receive_by_token[token_int] = now
+        symbol = tick.get("symbol")
+        if symbol:
+            self._last_raw_ws_receive_by_symbol[self._canonical_symbol(str(symbol))] = (
+                now
+            )
+
+    def classify_transport_backlog(self, symbol: str | None = None) -> dict[str, Any]:
+        """Classify websocket transport versus internal processing backlog."""
+        now = time.monotonic()
+        raw_mono = getattr(self, "_last_raw_ws_receive_mono", None)
+        raw_age = None if raw_mono is None else max(0.0, now - float(raw_mono))
+        processed_mono = None
+        if symbol:
+            processed_mono = self._last_valid_live_tick_mono.get(
+                self._canonical_symbol(symbol)
+            )
+        if processed_mono is None and self._last_valid_live_tick_mono:
+            processed_mono = max(self._last_valid_live_tick_mono.values())
+        processed_age = (
+            None if processed_mono is None else max(0.0, now - float(processed_mono))
+        )
+        heartbeat_age = (
+            None if self._last_hb_mono is None else max(0.0, now - self._last_hb_mono)
+        )
+        stats = self.get_tick_pressure_stats()
+        pending = int(
+            stats.get("pending_tick_count", stats.get("pending_ticks", 0)) or 0
+        )
+        overloaded = bool(stats.get("overload_state"))
+        threshold = float(getattr(self, "_zombie_tick_threshold_sec", 30.0))
+        if (
+            raw_age is not None
+            and raw_age <= threshold
+            and processed_age is not None
+            and processed_age > threshold
+            and (pending > 0 or overloaded)
+        ):
+            state = "processing_backlog"
+            restart_eligible = False
+        elif (
+            raw_age is None
+            or raw_age > threshold
+            or (heartbeat_age is not None and heartbeat_age > threshold)
+        ):
+            state = "transport_silent"
+            restart_eligible = True
+        elif symbol and processed_age is not None and processed_age > threshold:
+            state = "symbol_feed_stale"
+            restart_eligible = False
+        else:
+            state = "transport_healthy"
+            restart_eligible = False
+        return {
+            "transport_classification": state,
+            "global_restart_eligible": restart_eligible,
+            "raw_receive_age_s": raw_age,
+            "processed_tick_age_s": processed_age,
+            "pipeline_overloaded": overloaded,
+            "pending_ticks": pending,
+            "oldest_pending_age_ms": stats.get("oldest_pending_age_ms", 0.0),
+        }
 
     def _resolve_tick_key_and_priority(
         self, tick: dict[str, Any]
@@ -6090,9 +6182,65 @@ class MarketDataManager:
         return canonical_symbol, priority, bucket, "ok"
 
     def _pending_count_locked(self) -> int:
-        return sum(len(q) for q in self._pending_tick_queues.values()) + len(
-            self._pending_far_ticks
+        # O(1) canonical pending count maintained under _pending_tick_lock.
+        if not hasattr(self, "_pending_tick_count"):
+            self._pending_tick_count = sum(
+                len(q) for q in self._pending_tick_queues.values()
+            ) + len(self._pending_far_ticks)
+        # Compatibility for tests/legacy callers that seed queues directly. Normal
+        # enqueue/dequeue paths maintain this counter without scanning.
+        if int(self._pending_tick_count) <= 1:
+            actual = sum(len(q) for q in self._pending_tick_queues.values()) + len(
+                self._pending_far_ticks
+            )
+            self._pending_tick_count = actual
+            if actual > 0:
+                for key, q in self._pending_tick_queues.items():
+                    if q:
+                        self._pending_heap_push_locked(q[0], key)
+                for key, tick in self._pending_far_ticks.items():
+                    self._pending_heap_push_locked(tick, key)
+        return max(0, int(self._pending_tick_count))
+
+    def _pending_heap_push_locked(self, tick: Mapping[str, Any], key: str) -> None:
+        ts = tick.get("_mdm_enqueued_mono")
+        if not isinstance(ts, (int, float)):
+            return
+        if not hasattr(self, "_pending_tick_oldest_heap"):
+            self._pending_tick_oldest_heap = []
+        if not hasattr(self, "_pending_tick_heap_seq"):
+            self._pending_tick_heap_seq = 0
+        self._pending_tick_heap_seq += 1
+        heapq.heappush(
+            self._pending_tick_oldest_heap,
+            (float(ts), self._pending_tick_heap_seq, key),
         )
+
+    def _pending_heap_prune_locked(self) -> None:
+        heap = getattr(self, "_pending_tick_oldest_heap", [])
+        while heap:
+            ts, _seq, key = heap[0]
+            q = self._pending_tick_queues.get(key)
+            far = self._pending_far_ticks.get(key)
+            current_ts = None
+            if q:
+                current_ts = q[0].get("_mdm_enqueued_mono")
+            elif far is not None:
+                current_ts = far.get("_mdm_enqueued_mono")
+            if isinstance(current_ts, (int, float)) and float(current_ts) == float(ts):
+                break
+            heapq.heappop(heap)
+
+    def _pending_increment_locked(self, tick: Mapping[str, Any], key: str) -> None:
+        if not hasattr(self, "_pending_tick_count"):
+            self._pending_tick_count = 0
+        self._pending_tick_count = max(0, int(self._pending_tick_count)) + 1
+        self._pending_heap_push_locked(tick, key)
+
+    def _pending_decrement_locked(self, count: int = 1) -> None:
+        if not hasattr(self, "_pending_tick_count"):
+            self._pending_tick_count = 0
+        self._pending_tick_count = max(0, int(self._pending_tick_count) - int(count))
 
     def _record_tick_drop(self, bucket: str, reason: str) -> None:
         self._tick_dropped_total += 1
@@ -6146,15 +6294,18 @@ class MarketDataManager:
             tick.setdefault("_mdm_enqueued_mono", time.monotonic())
             if priority <= 2:
                 self._pending_tick_queues[key].append(tick)
+                self._pending_increment_locked(tick, key)
                 self._bus_priority_counts[bucket] += 1
                 if priority == 0:
                     self._log_open_position_priority_if_needed(key)
             else:
                 if key in self._pending_far_ticks:
                     self._tick_coalesced_total += 1
+                    self._pending_decrement_locked(1)
                     self._tick_coalesced_by_priority[bucket] += 1
                     self._tick_queue_priority_coalesced[bucket] += 1
                 self._pending_far_ticks[key] = tick
+                self._pending_increment_locked(tick, key)
                 self._bus_priority_counts[bucket] += 1
             pending = self._pending_count_locked()
             if pending > self._tick_pending_max_seen:
@@ -6164,6 +6315,7 @@ class MarketDataManager:
                 # Protected open-position/selected/spot/futures ticks are not dropped
                 # here because they affect candles and protective exits.
                 _k, dropped = self._pending_far_ticks.popitem()
+                self._pending_decrement_locked(1)
                 self._record_tick_drop(
                     str(dropped.get("_mdm_priority_bucket") or "context_or_far"),
                     "pending_limit_far",
@@ -6193,11 +6345,13 @@ class MarketDataManager:
                 if selected_key is not None:
                     queue = self._pending_tick_queues[selected_key]
                     batch.append(queue.popleft())
+                    self._pending_decrement_locked(1)
                     if not queue:
                         self._pending_tick_queues.pop(selected_key, None)
                     continue
                 if self._pending_far_ticks:
                     _key, tick = self._pending_far_ticks.popitem()
+                    self._pending_decrement_locked(1)
                     batch.append(tick)
                     continue
                 break
@@ -6216,8 +6370,12 @@ class MarketDataManager:
                     continue
                 if int(raw.get("_mdm_priority", priority)) <= 2:
                     self._pending_tick_queues[key].appendleft(raw)
+                    self._pending_increment_locked(raw, key)
                 else:
+                    if key in self._pending_far_ticks:
+                        self._pending_decrement_locked(1)
                     self._pending_far_ticks[key] = raw
+                    self._pending_increment_locked(raw, key)
 
     async def _drain_latest_ticks(self) -> None:
         drain_started = time.monotonic()
@@ -6231,7 +6389,16 @@ class MarketDataManager:
                 start = time.monotonic()
                 batch = self._pop_pending_tick_batch()
                 if not batch:
-                    return
+                    # The websocket producer may be between enqueue operations. Linger
+                    # briefly on the single active drain to avoid thousands of
+                    # schedule/complete cycles during bursts without blocking the loop.
+                    for _ in range(10):
+                        await asyncio.sleep(0)
+                        batch = self._pop_pending_tick_batch()
+                        if batch:
+                            break
+                    if not batch:
+                        return
                 for index, raw in enumerate(batch):
                     try:
                         self._process_queued_tick(raw)
@@ -6308,20 +6475,30 @@ class MarketDataManager:
         self._tick_drain_task = None
 
     def _oldest_pending_age_ms_locked(self) -> float:
-        now = time.monotonic()
-        oldest: float | None = None
-        for queue in self._pending_tick_queues.values():
-            if queue:
-                ts = queue[0].get("_mdm_enqueued_mono")
-                if isinstance(ts, (int, float)) and (oldest is None or ts < oldest):
-                    oldest = float(ts)
-        for tick in self._pending_far_ticks.values():
-            ts = tick.get("_mdm_enqueued_mono")
-            if isinstance(ts, (int, float)) and (oldest is None or ts < oldest):
-                oldest = float(ts)
-        if oldest is None:
+        if self._pending_count_locked() <= 0:
             return 0.0
-        return max(0.0, (now - oldest) * 1000.0)
+        self._pending_heap_prune_locked()
+        heap = getattr(self, "_pending_tick_oldest_heap", [])
+        if not heap:
+            oldest: float | None = None
+            for queue in self._pending_tick_queues.values():
+                if queue:
+                    ts = queue[0].get("_mdm_enqueued_mono")
+                    if isinstance(ts, (int, float)) and (
+                        oldest is None or float(ts) < oldest
+                    ):
+                        oldest = float(ts)
+            for tick in self._pending_far_ticks.values():
+                ts = tick.get("_mdm_enqueued_mono")
+                if isinstance(ts, (int, float)) and (
+                    oldest is None or float(ts) < oldest
+                ):
+                    oldest = float(ts)
+            if oldest is None:
+                return 0.0
+            return max(0.0, (time.monotonic() - oldest) * 1000.0)
+        oldest = float(heap[0][0])
+        return max(0.0, (time.monotonic() - oldest) * 1000.0)
 
     def _update_pipeline_overload_locked(self) -> None:
         pending = self._pending_count_locked()
@@ -6335,11 +6512,15 @@ class MarketDataManager:
                 self._overload_since_mono = time.monotonic()
                 self._logger.warning(
                     "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d oldest_pending_age_ms=%.0f enter_pending=%d enter_oldest_ms=%.0f",
-                    pending, oldest_ms,
-                    self._overload_enter_pending, self._overload_enter_oldest_ms,
-                    extra={"event": "DATA_PIPELINE_OVERLOAD_ENTER",
-                           "pending_ticks": pending,
-                           "oldest_pending_age_ms": oldest_ms},
+                    pending,
+                    oldest_ms,
+                    self._overload_enter_pending,
+                    self._overload_enter_oldest_ms,
+                    extra={
+                        "event": "DATA_PIPELINE_OVERLOAD_ENTER",
+                        "pending_ticks": pending,
+                        "oldest_pending_age_ms": oldest_ms,
+                    },
                 )
         else:
             # Hysteresis: recover only when BOTH signals are below exit bounds.
@@ -6354,10 +6535,14 @@ class MarketDataManager:
                 self._overload_since_mono = None
                 self._logger.warning(
                     "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d oldest_pending_age_ms=%.0f overloaded_for_s=%.1f",
-                    pending, oldest_ms, duration,
-                    extra={"event": "DATA_PIPELINE_OVERLOAD_RECOVERED",
-                           "pending_ticks": pending,
-                           "oldest_pending_age_ms": oldest_ms},
+                    pending,
+                    oldest_ms,
+                    duration,
+                    extra={
+                        "event": "DATA_PIPELINE_OVERLOAD_RECOVERED",
+                        "pending_ticks": pending,
+                        "oldest_pending_age_ms": oldest_ms,
+                    },
                 )
 
     @property
@@ -6368,6 +6553,18 @@ class MarketDataManager:
     def get_tick_pressure_stats(self) -> dict[str, Any]:
         with self._pending_tick_lock:
             pending = self._pending_count_locked()
+            oldest_ms = self._oldest_pending_age_ms_locked()
+            active_queue_count = sum(
+                1 for q in self._pending_tick_queues.values() if q
+            ) + len(self._pending_far_ticks)
+            retained_empty_queue_count = sum(
+                1 for q in self._pending_tick_queues.values() if not q
+            )
+            overload_duration_s = 0.0
+            if self._pipeline_overloaded and self._overload_since_mono is not None:
+                overload_duration_s = max(
+                    0.0, time.monotonic() - self._overload_since_mono
+                )
             return {
                 "submitted_total": self._tick_submitted_total,
                 "processed_total": self._tick_processed_total,
@@ -6379,6 +6576,12 @@ class MarketDataManager:
                 - self._tick_dropped_total
                 - pending,
                 "pending_ticks": pending,
+                "pending_tick_count": pending,
+                "active_queue_count": active_queue_count,
+                "retained_empty_queue_count": retained_empty_queue_count,
+                "oldest_pending_age_ms": oldest_ms,
+                "overload_state": bool(self._pipeline_overloaded),
+                "overload_duration_s": overload_duration_s,
                 "pending_max_seen": self._tick_pending_max_seen,
                 "coalesced_by_priority": dict(self._tick_coalesced_by_priority),
                 "dropped_by_reason": dict(self._tick_dropped_by_reason),
@@ -7776,12 +7979,16 @@ class MarketDataManager:
                 token_int = None
             with self._lock:
                 current_token = self._current_symbol_token_locked(canonical_symbol)
-                token_expected = token_int is not None and token_int in self._desired_tokens
+                token_expected = (
+                    token_int is not None and token_int in self._desired_tokens
+                )
                 requires_token_bound_generation = canonical_symbol.startswith(
                     "NFO:"
                 ) and canonical_symbol.endswith(("CE", "PE"))
                 if requires_token_bound_generation and (
-                    token_int is None or token_int != current_token or not token_expected
+                    token_int is None
+                    or token_int != current_token
+                    or not token_expected
                 ):
                     self._mismatched_generation_tick_counts[canonical_symbol] += 1
                     log_throttled(
@@ -8486,7 +8693,12 @@ class MarketDataManager:
             and divergence_age >= self._required_symbol_missing_grace_sec
             and recovery_after_divergence
         )
-        transport_failure = (
+        backlog_classification = self.classify_transport_backlog()
+        processing_backlog = (
+            backlog_classification.get("transport_classification")
+            == "processing_backlog"
+        )
+        transport_failure = not processing_backlog and (
             heartbeat_stale
             or (spot_stale and fut_stale)
             or stale_ratio >= 0.70
@@ -8724,9 +8936,7 @@ class MarketDataManager:
                     "attempts_in_2m": len(self._zombie_restart_attempts),
                 },
             )
-            raise RuntimeError(
-                "WebSocket restart circuit breaker exceeded: >5 in 120s"
-            )
+            raise RuntimeError("WebSocket restart circuit breaker exceeded: >5 in 120s")
 
         if self._zombie_restart_failures > self._zombie_restart_limit:
             self._zombie_breaker_open_until = now + self._zombie_restart_window
@@ -8830,7 +9040,12 @@ class MarketDataManager:
         elif not affected_ready:
             reason = "waiting_for_current_generation_ticks"
             terminal_state = "waiting_for_first_ticks"
-        if inflight and deadline is not None and now_value >= deadline and reason != "ok":
+        if (
+            inflight
+            and deadline is not None
+            and now_value >= deadline
+            and reason != "ok"
+        ):
             self._fail_ws_recovery(reason)
             terminal_state = "failed"
             inflight = False
@@ -10193,6 +10408,10 @@ class MarketDataManager:
         identical timestamps, and never exposes provisional current candles.
         """
 
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be non-negative or None")
+        if limit == 0:
+            return []
         bar_symbol = self._bar_symbol_key(symbol)
         raw_symbol = str(symbol or "").strip()
         # Canonical-key storage is authoritative. Reading the raw symbol key is
@@ -10215,15 +10434,26 @@ class MarketDataManager:
                 continue
             ts_key = self._bar_timestamp_key(row)
             if ts_key is None:
+                log_throttled(
+                    getattr(self, "_logger", _logger),
+                    f"canonical_ohlc_rejected:{bar_symbol}",
+                    "CANONICAL_OHLC_ROWS_REJECTED symbol=%s rows_seen=1 rows_rejected=1 reason=invalid_timestamp"
+                    % bar_symbol,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
                 continue
-            row["timestamp"] = ts_key
+            market_ts = coerce_market_timestamp(row.get("timestamp")).floor("min")
+            row["timestamp"] = market_ts.to_pydatetime()
             row.setdefault("symbol", bar_symbol)
             precedence = self._completed_bar_precedence(row)
             existing = merged.get(ts_key)
             if existing is None or precedence > existing[0]:
                 merged[ts_key] = (precedence, sequence, row)
-        bars = [entry[2] for _, entry in sorted(merged.items(), key=lambda item: item[0])]
-        if limit is not None and limit >= 0:
+        bars = [
+            entry[2] for _, entry in sorted(merged.items(), key=lambda item: item[0])
+        ]
+        if limit is not None:
             bars = bars[-limit:]
         return bars
 
