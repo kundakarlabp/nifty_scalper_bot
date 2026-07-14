@@ -466,6 +466,20 @@ class MarketDataManager:
         self._tick_dropped_by_priority: dict[str, int] = defaultdict(int)
         self._tick_max_active_drains = 0
         self._tick_active_drains = 0
+        # Canonical data-pipeline overload state (evidence: pending backlog +
+        # oldest pending tick age). While overloaded, NEW ENTRIES are blocked
+        # via the runner guard; protective exits, bracket monitoring and
+        # reconciliation are untouched.
+        self._overload_enter_pending = self._parse_int_env(
+            "MDM_TICK_OVERLOAD_PENDING", default=1000, minimum=50
+        )
+        self._overload_exit_pending = max(10, int(self._overload_enter_pending * 0.5))
+        self._overload_enter_oldest_ms = self._parse_float_env(
+            "MDM_TICK_OVERLOAD_OLDEST_MS", default=2000.0, minimum=100.0
+        )
+        self._overload_exit_oldest_ms = max(50.0, self._overload_enter_oldest_ms * 0.4)
+        self._pipeline_overloaded = False
+        self._overload_since_mono: float | None = None
         # Fallback worker thread for when no asyncio loop is registered
         # (e.g. early boot, polling-only mode).  Isolates the WS thread
         # from any processing work — the WS callback must only enqueue.
@@ -6129,6 +6143,7 @@ class MarketDataManager:
                 return
             tick["_mdm_priority"] = priority
             tick["_mdm_priority_bucket"] = bucket
+            tick.setdefault("_mdm_enqueued_mono", time.monotonic())
             if priority <= 2:
                 self._pending_tick_queues[key].append(tick)
                 self._bus_priority_counts[bucket] += 1
@@ -6154,6 +6169,7 @@ class MarketDataManager:
                     "pending_limit_far",
                 )
                 pending = self._pending_count_locked()
+            self._update_pipeline_overload_locked()
             self._schedule_tick_drain_locked(loop)
 
     def _pop_pending_tick_batch(self) -> list[dict[str, Any]]:
@@ -6245,6 +6261,7 @@ class MarketDataManager:
                     0.0, (time.monotonic() - drain_started) * 1000.0
                 )
                 self._tick_active_drains = max(0, self._tick_active_drains - 1)
+                self._update_pipeline_overload_locked()
                 has_more = self._pending_count_locked() > 0
                 self._tick_drain_scheduled = False
                 self._tick_drain_callbacks_completed += 1
@@ -6289,6 +6306,64 @@ class MarketDataManager:
                 with suppress(asyncio.CancelledError):
                     await task
         self._tick_drain_task = None
+
+    def _oldest_pending_age_ms_locked(self) -> float:
+        now = time.monotonic()
+        oldest: float | None = None
+        for queue in self._pending_tick_queues.values():
+            if queue:
+                ts = queue[0].get("_mdm_enqueued_mono")
+                if isinstance(ts, (int, float)) and (oldest is None or ts < oldest):
+                    oldest = float(ts)
+        for tick in self._pending_far_ticks.values():
+            ts = tick.get("_mdm_enqueued_mono")
+            if isinstance(ts, (int, float)) and (oldest is None or ts < oldest):
+                oldest = float(ts)
+        if oldest is None:
+            return 0.0
+        return max(0.0, (now - oldest) * 1000.0)
+
+    def _update_pipeline_overload_locked(self) -> None:
+        pending = self._pending_count_locked()
+        oldest_ms = self._oldest_pending_age_ms_locked()
+        if not self._pipeline_overloaded:
+            if (
+                pending >= self._overload_enter_pending
+                or oldest_ms >= self._overload_enter_oldest_ms
+            ):
+                self._pipeline_overloaded = True
+                self._overload_since_mono = time.monotonic()
+                self._logger.warning(
+                    "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d oldest_pending_age_ms=%.0f enter_pending=%d enter_oldest_ms=%.0f",
+                    pending, oldest_ms,
+                    self._overload_enter_pending, self._overload_enter_oldest_ms,
+                    extra={"event": "DATA_PIPELINE_OVERLOAD_ENTER",
+                           "pending_ticks": pending,
+                           "oldest_pending_age_ms": oldest_ms},
+                )
+        else:
+            # Hysteresis: recover only when BOTH signals are below exit bounds.
+            if (
+                pending <= self._overload_exit_pending
+                and oldest_ms <= self._overload_exit_oldest_ms
+            ):
+                duration = 0.0
+                if self._overload_since_mono is not None:
+                    duration = max(0.0, time.monotonic() - self._overload_since_mono)
+                self._pipeline_overloaded = False
+                self._overload_since_mono = None
+                self._logger.warning(
+                    "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d oldest_pending_age_ms=%.0f overloaded_for_s=%.1f",
+                    pending, oldest_ms, duration,
+                    extra={"event": "DATA_PIPELINE_OVERLOAD_RECOVERED",
+                           "pending_ticks": pending,
+                           "oldest_pending_age_ms": oldest_ms},
+                )
+
+    @property
+    def pipeline_overloaded(self) -> bool:
+        # True while the tick pipeline backlog exceeds safe bounds.
+        return bool(self._pipeline_overloaded)
 
     def get_tick_pressure_stats(self) -> dict[str, Any]:
         with self._pending_tick_lock:

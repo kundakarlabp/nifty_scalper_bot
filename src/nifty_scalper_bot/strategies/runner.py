@@ -14825,6 +14825,35 @@ class StrategyRunner:
                 # (materializing plans + order requests just to be rejected by
                 # the native gate wastes the event loop and floods logs —
                 # 2026-07-10 RCA: ORDER_PATH_ENTERED live_orders_armed=False).
+                _pipeline_overloaded = bool(
+                    getattr(self._market_data, "pipeline_overloaded", False)
+                    or getattr(self._data_hub, "pipeline_overloaded", False)
+                )
+                if _pipeline_overloaded:
+                    # DATA_PIPELINE_OVERLOAD: backlog/lag beyond safe bounds.
+                    # New entries stop here; protective exits, bracket
+                    # monitoring and reconciliation are untouched (they do
+                    # not pass through signal preparation).
+                    if self._should_log_throttled(
+                        f"signal_prep_overload:{symbol}", 30.0
+                    ):
+                        self._logger.warning(
+                            "RUNNER_SIGNAL_PREP_BLOCKED_OVERLOAD symbol=%s trace_id=%s broker_attempted=False",
+                            symbol,
+                            trace_id,
+                            extra={
+                                "event": "RUNNER_SIGNAL_PREP_BLOCKED_OVERLOAD",
+                                "symbol": symbol,
+                                "trace_id": trace_id,
+                            },
+                        )
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase10_execute",
+                        reason="data_pipeline_overloaded",
+                        allowed=False,
+                    )
+                    return
                 if getattr(self, "_live_mode", False) and not getattr(
                     self, "_runtime_live_orders_armed", True
                 ):
