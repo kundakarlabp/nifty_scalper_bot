@@ -11004,7 +11004,7 @@ class StrategyRunner:
             )
             live_tick_check = classifier(
                 symbol_norm,
-                int(candidate_token),
+                candidate_token,
                 max_age_s=max_live_tick_age_s,
             )
             details["max_live_tick_age_s"] = max_live_tick_age_s

@@ -563,6 +563,7 @@ class MarketDataManager:
         self._ws_restart_started_at: float | None = None
         self._ws_restart_deadline_mono: float | None = None
         self._ws_restart_affected: dict[str, int] = {}
+        self._ws_restart_unresolved_tokens: set[int] = set()
         self._ws_restart_diagnostics: dict[str, Any] = {}
         self._ws_recovery_timeout_sec = self._parse_float_env(
             "MDM_WS_RECOVERY_TIMEOUT_SECONDS", default=15.0, minimum=1.0
@@ -8545,83 +8546,85 @@ class MarketDataManager:
                     },
                 )
                 return
+            with self._lock:
+                desired_snapshot = set(self._desired_tokens)
+                affected: dict[str, int] = {}
+                unresolved: set[int] = set()
+                for token in list(desired_snapshot):
+                    sym = self._resolve_symbol_for_token(int(token))
+                    if sym:
+                        affected[self._canonical_symbol(sym)] = int(token)
+                    else:
+                        unresolved.add(int(token))
+                self._subscription_generation += 1
+                generation = self._subscription_generation
+                for canonical, token in affected.items():
+                    self._symbol_subscription_generation[canonical] = generation
+                    self._symbol_token_generation[canonical] = (
+                        int(token),
+                        generation,
+                    )
+                    self._symbol_first_tick_generation.pop(canonical, None)
+                    self._last_valid_live_tick_mono.pop(canonical, None)
+                    self._last_tick_ts.pop(canonical, None)
+                    self._last_tick_snapshot.pop(canonical, None)
+                    self._last_cumulative_volume_by_symbol.pop(canonical, None)
             self._ws_restart_inflight = True
             self._ws_restart_state = "reconnect_requested"
             self._ws_restart_generation += 1
             self._ws_restart_started_at = now
             self._ws_restart_deadline_mono = now + self._ws_recovery_timeout_sec
-            affected: dict[str, int] = {}
-            for token in list(self._desired_tokens):
-                sym = self._resolve_symbol_for_token(int(token))
-                if sym:
-                    affected[self._canonical_symbol(sym)] = int(token)
             self._ws_restart_affected = affected
+            self._ws_restart_unresolved_tokens = unresolved
+            self._ws_restart_fail_reason = None
             self._ws_restart_diagnostics = {
                 "restart_generation": self._ws_restart_generation,
                 "initiator": "mdm_zombie_watchdog",
                 "reason": "transport_failure",
                 "started_at": now,
-                "desired_tokens": sorted(self._desired_tokens),
+                "desired_tokens": sorted(desired_snapshot),
                 "affected_symbols": sorted(affected),
+                "unresolved_tokens": sorted(unresolved),
             }
-            self._subscription_generation += 1
-            for canonical, token in affected.items():
-                self._symbol_subscription_generation[canonical] = (
-                    self._subscription_generation
-                )
-                self._symbol_token_generation[canonical] = (
-                    int(token),
-                    self._subscription_generation,
-                )
-                self._symbol_first_tick_generation.pop(canonical, None)
-                self._last_valid_live_tick_mono.pop(canonical, None)
-                self._last_tick_ts.pop(canonical, None)
-                self._last_tick_snapshot.pop(canonical, None)
-                self._last_cumulative_volume_by_symbol.pop(canonical, None)
 
         reconnect = getattr(ws, "force_reconnect", None)
+        if not callable(reconnect):
+            self._fail_ws_recovery("force_reconnect_unavailable")
+            self._zombie_restart_failures += 1
+            return
         try:
-            if not callable(reconnect):
-                self._fail_ws_recovery("force_reconnect_unavailable")
-                self._zombie_restart_failures += 1
-                return
-            try:
-                reconnect()
-                with self._ws_restart_lock:
-                    if self._ws_restart_inflight:
-                        self._ws_restart_state = "waiting_for_subscriptions"
-                self._reconcile_ws_subscriptions()
-                recovery = self.verify_websocket_recovery(now_mono=time.monotonic())
-                self._zombie_restart_consecutive += 1
-                self._zombie_restart_attempts.append(now)
-                while (
-                    self._zombie_restart_attempts
-                    and (now - self._zombie_restart_attempts[0]) > 120.0
-                ):
-                    self._zombie_restart_attempts.popleft()
-                self._logger.warning(
-                    "Condition met: mdm_zombie_ws_restart",
-                    extra={
-                        "event": "mdm_zombie_ws_restart",
-                        "failure_count": self._zombie_restart_failures,
-                        "consecutive": self._zombie_restart_consecutive,
-                        "cooldown_sec": round(cooldown, 2),
-                        "recovery_state": recovery.get("state"),
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._fail_ws_recovery(type(exc).__name__)
-                self._zombie_restart_failures += 1
-                self._logger.error(
-                    "Failure in _trigger_zombie_ws_restart: %s",
-                    exc,
-                    extra={"event": "mdm_zombie_ws_restart_error"},
-                    exc_info=exc,
-                )
-        finally:
-            # Successful asynchronous recovery intentionally remains inflight
-            # until verify_websocket_recovery observes current-generation ticks.
-            pass
+            reconnect()
+            with self._ws_restart_lock:
+                if self._ws_restart_inflight:
+                    self._ws_restart_state = "waiting_for_subscriptions"
+            self._reconcile_ws_subscriptions()
+            recovery = self.verify_websocket_recovery(now_mono=time.monotonic())
+            self._zombie_restart_consecutive += 1
+            self._zombie_restart_attempts.append(now)
+            while (
+                self._zombie_restart_attempts
+                and (now - self._zombie_restart_attempts[0]) > 120.0
+            ):
+                self._zombie_restart_attempts.popleft()
+            self._logger.warning(
+                "Condition met: mdm_zombie_ws_restart",
+                extra={
+                    "event": "mdm_zombie_ws_restart",
+                    "failure_count": self._zombie_restart_failures,
+                    "consecutive": self._zombie_restart_consecutive,
+                    "cooldown_sec": round(cooldown, 2),
+                    "recovery_state": recovery.get("state"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail_ws_recovery(type(exc).__name__)
+            self._zombie_restart_failures += 1
+            self._logger.error(
+                "Failure in _trigger_zombie_ws_restart: %s",
+                exc,
+                extra={"event": "mdm_zombie_ws_restart_error"},
+                exc_info=exc,
+            )
 
         if len(self._zombie_restart_attempts) > 5:
             self._logger.critical(
@@ -8664,22 +8667,43 @@ class MarketDataManager:
             },
         )
 
-    def verify_websocket_recovery(self, *, now_mono: float | None = None) -> dict[str, Any]:
+    def verify_websocket_recovery(
+        self, *, now_mono: float | None = None
+    ) -> dict[str, Any]:
         """Verify websocket recovery state without assuming reconnect success."""
         now_value = time.monotonic() if now_mono is None else float(now_mono)
         connected = self._is_ws_connected()
-        with self._lock:
-            desired = set(self._desired_tokens)
-            dispatched = set(self._dispatched_subscriptions)
-            confirmed = set(self._confirmed_subscriptions)
+        with self._ws_restart_lock:
             affected = dict(self._ws_restart_affected)
-            sub_generations = dict(self._symbol_subscription_generation)
-            tick_generations = dict(self._symbol_first_tick_generation)
-            tick_monos = dict(self._last_valid_live_tick_mono)
+            unresolved = set(self._ws_restart_unresolved_tokens)
             deadline = self._ws_restart_deadline_mono
             restart_generation = self._ws_restart_generation
             state = self._ws_restart_state
             inflight = self._ws_restart_inflight
+            fail_reason = self._ws_restart_fail_reason
+            if state == "failed":
+                return {
+                    "ok": False,
+                    "reason": fail_reason or "recovery_failed",
+                    "state": "failed",
+                    "inflight": False,
+                    "restart_generation": restart_generation,
+                    "connected": connected,
+                    "desired_tokens": [],
+                    "dispatched_tokens": [],
+                    "confirmed_tokens": [],
+                    "dispatch_attempted": False,
+                    "affected_symbols": sorted(affected),
+                    "unresolved_tokens": sorted(unresolved),
+                    "missing_current_generation_ticks": sorted(affected),
+                }
+            with self._lock:
+                desired = set(self._desired_tokens)
+                dispatched = set(self._dispatched_subscriptions)
+                confirmed = set(self._confirmed_subscriptions)
+                sub_generations = dict(self._symbol_subscription_generation)
+                tick_generations = dict(self._symbol_first_tick_generation)
+                tick_monos = dict(self._last_valid_live_tick_mono)
         dispatch_attempted = desired <= dispatched if desired else True
         affected_ready = True
         missing_ticks: list[str] = []
@@ -8704,6 +8728,12 @@ class MarketDataManager:
         elif not connected:
             reason = "websocket_not_connected"
             terminal_state = "waiting_for_connection"
+        elif desired and unresolved:
+            reason = "affected_token_mapping_incomplete"
+            terminal_state = "waiting_for_subscriptions"
+        elif desired and not affected:
+            reason = "affected_token_mapping_incomplete"
+            terminal_state = "waiting_for_subscriptions"
         elif not dispatch_attempted:
             reason = "resubscription_not_attempted"
             terminal_state = "waiting_for_subscriptions"
@@ -8720,6 +8750,7 @@ class MarketDataManager:
                 self._ws_restart_inflight = False
                 self._ws_restart_started_at = None
                 self._ws_restart_deadline_mono = None
+                self._ws_restart_fail_reason = None
                 self._zombie_restart_failures = 0
             terminal_state = "recovered"
             inflight = False
@@ -8738,6 +8769,7 @@ class MarketDataManager:
             "confirmed_tokens": sorted(confirmed),
             "dispatch_attempted": dispatch_attempted,
             "affected_symbols": sorted(affected),
+            "unresolved_tokens": sorted(unresolved),
             "missing_current_generation_ticks": missing_ticks,
         }
 
