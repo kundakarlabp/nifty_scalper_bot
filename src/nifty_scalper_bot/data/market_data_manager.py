@@ -58,6 +58,7 @@ from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.data.candle_engine import CandleEngine
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.normalizers import normalize_history_row
+from nifty_scalper_bot.data.time_contract import coerce_market_timestamp
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.instruments.active_contracts import (
@@ -10077,25 +10078,21 @@ class MarketDataManager:
 
     @staticmethod
     def _bar_timestamp_key(row: Mapping[str, Any]) -> datetime | None:
-        """Return the UTC minute timestamp used to merge completed OHLC bars."""
+        """Return UTC minute key using the canonical market timestamp policy."""
 
         ts = row.get("timestamp") if isinstance(row, Mapping) else None
         if ts is None and isinstance(row, Mapping):
             ts = row.get("date")
         try:
-            if isinstance(ts, datetime):
-                parsed = ts
-            elif isinstance(ts, (int, float)):
-                parsed = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-            elif isinstance(ts, str):
-                parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            else:
-                return None
+            market_ts = coerce_market_timestamp(ts)
         except (TypeError, ValueError, OSError):
             return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        return (
+            market_ts.tz_convert(timezone.utc)
+            .floor("min")
+            .to_pydatetime()
+            .replace(second=0, microsecond=0)
+        )
 
     @staticmethod
     def _completed_bar_precedence(row: Mapping[str, Any]) -> int:

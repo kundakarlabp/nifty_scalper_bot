@@ -1955,7 +1955,6 @@ class StrategyRunner:
             failure_reason = f"mdm_history_read_failed:{type(exc).__name__}"
         source_count = len(rows)
         required_count = target
-        target_count = target
         runner_before = len(
             getattr(self, "_symbol_history", {}).get(normalized, []) or []
         )
