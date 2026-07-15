@@ -428,8 +428,6 @@ def _broker_session_status(ctx):  # noqa: ANN001
     order_endpoint_verified = bool(
         getattr(ctx, "order_endpoint_verified", False)
         or getattr(ctx, "broker_order_endpoint_verified", False)
-        or getattr(ctx, "broker_auth_verified", False)
-        or getattr(ctx, "broker_authenticated", False)
     )
     auth_invalid = bool(
         getattr(ctx, "broker_auth_invalid", False)

@@ -290,7 +290,7 @@ def test_readyz_live_requires_authenticated_broker(monkeypatch):
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     ctx = _ctx(
-        broker_auth_verified=True,
+        order_endpoint_verified=True,
         broker_balance_valid=True,
         position_reconciliation_completed=True,
     )
@@ -353,9 +353,9 @@ def test_health_trading_reconciliation_requires_authenticated_broker():
     assert body["reconciliation"]["completed"] is False
 
 
-def test_health_trading_reconciliation_completed_when_authenticated():
+def test_health_trading_reconciliation_completed_when_order_endpoint_verified():
     ctx = _ctx(
-        broker_authenticated=True,
+        order_endpoint_verified=True,
         position_reconciliation_started=True,
         position_reconciliation_completed=True,
     )
@@ -364,6 +364,7 @@ def test_health_trading_reconciliation_completed_when_authenticated():
     body = _json(main.health_trading())
 
     assert body["broker"]["authentication"] == "authenticated"
+    assert body["broker"]["order_endpoint_verified"] is True
     assert body["reconciliation"]["completed"] is True
 
 
@@ -408,7 +409,7 @@ def test_health_trading_balance_success_does_not_mark_order_endpoint_authenticat
 
 def test_health_trading_order_readiness_requires_reconciliation_completion():
     ctx = _ctx(
-        broker_auth_verified=True,
+        order_endpoint_verified=True,
         broker_balance_valid=True,
         evaluation_ready=True,
         position_reconciliation_started=True,
@@ -427,7 +428,7 @@ def test_health_trading_order_readiness_requires_reconciliation_completion():
 
 def test_health_trading_order_verified_and_reconciled_satisfies_readiness_portion():
     ctx = _ctx(
-        broker_auth_verified=True,
+        order_endpoint_verified=True,
         broker_balance_valid=True,
         evaluation_ready=True,
         position_reconciliation_started=True,
@@ -444,3 +445,23 @@ def test_health_trading_order_verified_and_reconciled_satisfies_readiness_portio
         "position_reconciliation_incomplete"
         not in body["live_order_readiness"]["missing"]
     )
+
+
+def test_generic_broker_auth_flags_do_not_verify_order_endpoint():
+    ctx = _ctx(
+        broker_authenticated=True,
+        broker_auth_verified=True,
+        broker_balance_valid=True,
+        evaluation_ready=True,
+        position_reconciliation_started=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["market_data_authenticated"] is True
+    assert body["broker"]["funds_endpoint_verified"] is True
+    assert body["broker"]["order_endpoint_verified"] is False
+    assert body["broker"]["broker_session_state"] == "funds_verified"
+    assert "order_endpoint_unverified" in body["live_order_readiness"]["missing"]

@@ -366,8 +366,8 @@ class MarketDataManager:
         self._ws_connected = False
         self._last_ws_tick_mono: float = 0.0
         self._last_raw_ws_receive_mono: float | None = None
-        self._last_raw_ws_receive_by_token: dict[int, float] = {}
-        self._last_raw_ws_receive_by_symbol: dict[str, float] = {}
+        self._last_raw_ws_receive_by_token: dict[int, dict[str, Any] | float] = {}
+        self._last_raw_ws_receive_by_symbol: dict[str, dict[str, Any] | float] = {}
         self._last_valid_live_tick_mono: dict[str, float] = {}
         self._required_symbol_since_mono: dict[str, float] = {}
         self._required_symbol_missing_grace_sec = self._parse_float_env(
@@ -453,6 +453,7 @@ class MarketDataManager:
         self._pending_tick_oldest_heap: list[tuple[float, int, str]] = []
         self._pending_tick_heap_seq = 0
         self._pending_heap_compactions_total = 0
+        self._pending_heap_repairs_total = 0
         self._tick_drain_scheduled = False
         self._tick_drain_start_pending = False
         self._tick_drain_task: asyncio.Task[None] | None = None
@@ -6082,10 +6083,64 @@ class MarketDataManager:
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
 
+    def _raw_receive_evidence(
+        self, received_mono: float, generation: int | None
+    ) -> dict[str, Any]:
+        return {
+            "received_mono": float(received_mono),
+            "subscription_generation": (
+                None if generation is None else int(generation)
+            ),
+        }
+
+    def _raw_evidence_mono(self, evidence: Any) -> float | None:
+        if isinstance(evidence, Mapping):
+            value = evidence.get("received_mono")
+        else:
+            value = evidence
+        try:
+            return None if value is None else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _raw_evidence_generation(self, evidence: Any) -> int | None:
+        if not isinstance(evidence, Mapping):
+            return None
+        value = evidence.get("subscription_generation")
+        try:
+            return None if value is None else int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _generation_for_raw_ingress(
+        self, canonical_symbol: str | None, token: int | None
+    ) -> int:
+        if canonical_symbol:
+            return int(
+                self._symbol_subscription_generation.get(
+                    canonical_symbol, self._subscription_generation
+                )
+            )
+        if token is not None:
+            mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(
+                token
+            )
+            if mapped:
+                try:
+                    canonical = self._canonical_symbol(str(mapped))
+                except Exception:
+                    canonical = str(mapped)
+                return int(
+                    self._symbol_subscription_generation.get(
+                        canonical, self._subscription_generation
+                    )
+                )
+        return int(getattr(self, "_subscription_generation", 0) or 0)
+
     def _record_raw_ws_receive(
         self, tick: Mapping[str, Any], received_mono: float | None = None
     ) -> None:
-        """Record transport-level websocket receipt before processing backlog can distort freshness."""
+        """Record transport-level websocket receipt without validating market data."""
         now = time.monotonic() if received_mono is None else float(received_mono)
         self._last_raw_ws_receive_mono = now
         token = tick.get("instrument_token") or tick.get("token")
@@ -6093,13 +6148,19 @@ class MarketDataManager:
             token_int = int(token) if token is not None else None
         except (TypeError, ValueError):
             token_int = None
-        if token_int is not None:
-            self._last_raw_ws_receive_by_token[token_int] = now
         symbol = tick.get("symbol")
+        canonical_symbol: str | None = None
         if symbol:
-            self._last_raw_ws_receive_by_symbol[self._canonical_symbol(str(symbol))] = (
-                now
-            )
+            try:
+                canonical_symbol = self._canonical_symbol(str(symbol))
+            except Exception:
+                canonical_symbol = None
+        generation = self._generation_for_raw_ingress(canonical_symbol, token_int)
+        evidence = self._raw_receive_evidence(now, generation)
+        if token_int is not None:
+            self._last_raw_ws_receive_by_token[token_int] = evidence
+        if canonical_symbol:
+            self._last_raw_ws_receive_by_symbol[canonical_symbol] = evidence
 
     def _required_context_symbols_for_backlog(
         self, symbol: str | None = None
@@ -6135,12 +6196,30 @@ class MarketDataManager:
         ages: list[float] = []
         by_symbol = getattr(self, "_last_raw_ws_receive_by_symbol", {})
         if canonical in by_symbol:
-            ages.append(max(0.0, now - float(by_symbol[canonical])))
+            received = self._raw_evidence_mono(by_symbol[canonical])
+            if received is not None:
+                ages.append(max(0.0, now - received))
         if token is not None:
             by_token = getattr(self, "_last_raw_ws_receive_by_token", {})
             if int(token) in by_token:
-                ages.append(max(0.0, now - float(by_token[int(token)])))
+                received = self._raw_evidence_mono(by_token[int(token)])
+                if received is not None:
+                    ages.append(max(0.0, now - received))
         return min(ages) if ages else None
+
+    def _raw_receive_generation_for_symbol(self, symbol: str) -> int | None:
+        canonical = self._canonical_symbol(symbol)
+        token = self._token_by_symbol.get(canonical) or self._symbol_to_token.get(
+            canonical
+        )
+        by_symbol = getattr(self, "_last_raw_ws_receive_by_symbol", {})
+        symbol_generation = self._raw_evidence_generation(by_symbol.get(canonical))
+        if symbol_generation is not None:
+            return symbol_generation
+        if token is not None:
+            by_token = getattr(self, "_last_raw_ws_receive_by_token", {})
+            return self._raw_evidence_generation(by_token.get(int(token)))
+        return None
 
     def _required_current_generation_raw_fresh(
         self, symbols: Sequence[str], now: float, threshold: float
@@ -6157,12 +6236,40 @@ class MarketDataManager:
             age = self._raw_receive_age_for_symbol(canonical, now)
             if age is None or age > threshold:
                 continue
-            expected_generation = self._symbol_subscription_generation.get(
-                canonical, self._subscription_generation
+            expected_generation = int(
+                self._symbol_subscription_generation.get(
+                    canonical, self._subscription_generation
+                )
             )
-            first_generation = self._symbol_first_tick_generation.get(canonical)
-            if first_generation is None or first_generation == expected_generation:
+            raw_generation = self._raw_receive_generation_for_symbol(canonical)
+            if raw_generation == expected_generation:
                 return True
+        return False
+
+    def _pending_required_current_generation_locked(
+        self, symbols: Sequence[str]
+    ) -> bool:
+        for sym in symbols:
+            canonical = self._canonical_symbol(sym)
+            expected_generation = int(
+                self._symbol_subscription_generation.get(
+                    canonical, self._subscription_generation
+                )
+            )
+            queue = self._pending_tick_queues.get(canonical)
+            if queue:
+                tick_generation = int(
+                    queue[0].get("_mdm_subscription_generation", expected_generation)
+                )
+                if tick_generation == expected_generation:
+                    return True
+            far = self._pending_far_ticks.get(canonical)
+            if far is not None:
+                tick_generation = int(
+                    far.get("_mdm_subscription_generation", expected_generation)
+                )
+                if tick_generation == expected_generation:
+                    return True
         return False
 
     def classify_transport_backlog(self, symbol: str | None = None) -> dict[str, Any]:
@@ -6203,8 +6310,15 @@ class MarketDataManager:
             stats.get("pending_tick_count", stats.get("pending_ticks", 0)) or 0
         )
         overloaded = bool(stats.get("overload_state"))
+        with self._pending_tick_lock:
+            pending_required_current_generation = (
+                self._pending_required_current_generation_locked(required_symbols)
+            )
         backlog_proven = pending > 0 or overloaded
-        if raw_transport_fresh and backlog_proven and stale_required:
+        backlog_explains_required = (
+            required_generation_raw_fresh or pending_required_current_generation
+        )
+        if backlog_proven and stale_required and backlog_explains_required:
             state = "processing_backlog"
             restart_eligible = False
         elif not raw_transport_fresh or (
@@ -6229,6 +6343,7 @@ class MarketDataManager:
             "raw_transport_fresh": raw_transport_fresh,
             "required_raw_receive_fresh": required_raw_receive_fresh,
             "required_current_generation_raw_receive_fresh": required_generation_raw_fresh,
+            "pending_required_current_generation": pending_required_current_generation,
             "pipeline_overloaded": overloaded,
             "pending_ticks": pending,
             "oldest_pending_age_ms": stats.get("oldest_pending_age_ms", 0.0),
@@ -6243,7 +6358,10 @@ class MarketDataManager:
         symbol = str(tick.get("symbol") or "").strip()
         token_raw = tick.get("instrument_token") or tick.get("token")
         if symbol:
-            canonical_symbol = self._canonical_symbol(symbol)
+            try:
+                canonical_symbol = self._canonical_symbol(symbol)
+            except Exception:
+                return None, 99, "malformed", "bad_symbol"
         elif token_raw is not None:
             try:
                 token = int(token_raw)
@@ -6255,7 +6373,10 @@ class MarketDataManager:
                 )
             if not mapped:
                 return None, 99, "unmapped", "unmapped_token"
-            canonical_symbol = self._canonical_symbol(str(mapped))
+            try:
+                canonical_symbol = self._canonical_symbol(str(mapped))
+            except Exception:
+                return None, 99, "malformed", "bad_symbol"
             tick.setdefault("symbol", canonical_symbol)
         else:
             return None, 99, "malformed", "missing_symbol_token"
@@ -6294,11 +6415,7 @@ class MarketDataManager:
                 break
             heapq.heappop(heap)
 
-    def _maybe_compact_pending_heap_locked(self) -> None:
-        heap = getattr(self, "_pending_tick_oldest_heap", [])
-        active = max(1, self._pending_count_locked())
-        if len(heap) <= max(64, active * 4):
-            return
+    def _rebuild_pending_heap_locked(self, *, repair: bool = False) -> None:
         rebuilt: list[tuple[float, int, str]] = []
         seq = int(getattr(self, "_pending_tick_heap_seq", 0))
         for key in list(self._pending_tick_queues.keys()):
@@ -6318,9 +6435,21 @@ class MarketDataManager:
         heapq.heapify(rebuilt)
         self._pending_tick_oldest_heap = rebuilt
         self._pending_tick_heap_seq = seq
-        self._pending_heap_compactions_total = (
-            int(getattr(self, "_pending_heap_compactions_total", 0)) + 1
-        )
+        if repair:
+            self._pending_heap_repairs_total = (
+                int(getattr(self, "_pending_heap_repairs_total", 0)) + 1
+            )
+        else:
+            self._pending_heap_compactions_total = (
+                int(getattr(self, "_pending_heap_compactions_total", 0)) + 1
+            )
+
+    def _maybe_compact_pending_heap_locked(self) -> None:
+        heap = getattr(self, "_pending_tick_oldest_heap", [])
+        active = max(1, self._pending_count_locked())
+        if len(heap) <= max(64, active * 4):
+            return
+        self._rebuild_pending_heap_locked(repair=False)
 
     def _pending_increment_locked(self, tick: Mapping[str, Any], key: str) -> None:
         if not hasattr(self, "_pending_tick_count"):
@@ -6383,6 +6512,11 @@ class MarketDataManager:
                 return
             tick["_mdm_priority"] = priority
             tick["_mdm_priority_bucket"] = bucket
+            tick["_mdm_subscription_generation"] = int(
+                self._symbol_subscription_generation.get(
+                    key, self._subscription_generation
+                )
+            )
             tick.setdefault("_mdm_enqueued_mono", time.monotonic())
             if priority <= 2:
                 self._pending_tick_queues[key].append(tick)
@@ -6563,23 +6697,11 @@ class MarketDataManager:
         self._pending_heap_prune_locked()
         heap = getattr(self, "_pending_tick_oldest_heap", [])
         if not heap:
-            oldest: float | None = None
-            for queue in self._pending_tick_queues.values():
-                if queue:
-                    ts = queue[0].get("_mdm_enqueued_mono")
-                    if isinstance(ts, (int, float)) and (
-                        oldest is None or float(ts) < oldest
-                    ):
-                        oldest = float(ts)
-            for tick in self._pending_far_ticks.values():
-                ts = tick.get("_mdm_enqueued_mono")
-                if isinstance(ts, (int, float)) and (
-                    oldest is None or float(ts) < oldest
-                ):
-                    oldest = float(ts)
-            if oldest is None:
+            self._rebuild_pending_heap_locked(repair=True)
+            self._pending_heap_prune_locked()
+            heap = getattr(self, "_pending_tick_oldest_heap", [])
+            if not heap:
                 return 0.0
-            return max(0.0, (time.monotonic() - oldest) * 1000.0)
         oldest = float(heap[0][0])
         return max(0.0, (time.monotonic() - oldest) * 1000.0)
 
@@ -6637,12 +6759,10 @@ class MarketDataManager:
         with self._pending_tick_lock:
             pending = self._pending_count_locked()
             oldest_ms = self._oldest_pending_age_ms_locked()
-            active_queue_count = sum(
-                1 for q in self._pending_tick_queues.values() if q
-            ) + len(self._pending_far_ticks)
-            retained_empty_queue_count = sum(
-                1 for q in self._pending_tick_queues.values() if not q
+            active_queue_count = len(self._pending_tick_queues) + len(
+                self._pending_far_ticks
             )
+            retained_empty_queue_count = 0
             overload_duration_s = 0.0
             if self._pipeline_overloaded and self._overload_since_mono is not None:
                 overload_duration_s = max(
@@ -6670,6 +6790,9 @@ class MarketDataManager:
                 ),
                 "pending_heap_compactions_total": int(
                     getattr(self, "_pending_heap_compactions_total", 0)
+                ),
+                "pending_heap_repairs_total": int(
+                    getattr(self, "_pending_heap_repairs_total", 0)
                 ),
                 "pending_max_seen": self._tick_pending_max_seen,
                 "coalesced_by_priority": dict(self._tick_coalesced_by_priority),
@@ -7246,6 +7369,52 @@ class MarketDataManager:
         restart_generation = int(getattr(self, "_ws_restart_generation", 0) or 0)
         return canonical, token, subscription_generation, restart_generation
 
+    def _volume_source_timestamp(
+        self, payload: Mapping[str, Any]
+    ) -> pd.Timestamp | None:
+        raw_ts = (
+            payload.get("exchange_timestamp")
+            or payload.get("timestamp")
+            or payload.get("received_at")
+        )
+        if raw_ts is None:
+            return None
+        ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+        if pd.isna(ts):
+            return None
+        return pd.Timestamp(ts)
+
+    def _volume_sequence(self, payload: Mapping[str, Any]) -> int | None:
+        for key in ("sequence", "tick_sequence", "exchange_sequence"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _volume_reset_evidence(
+        self,
+        payload: Mapping[str, Any],
+        incoming_ts: pd.Timestamp | None,
+        previous_ts: pd.Timestamp | None,
+    ) -> bool:
+        if any(
+            bool(payload.get(key))
+            for key in (
+                "counter_reset",
+                "volume_counter_reset",
+                "volume_delta_reset",
+                "explicit_counter_reset",
+            )
+        ):
+            return True
+        if incoming_ts is not None and previous_ts is not None:
+            return incoming_ts.date() > previous_ts.date()
+        return False
+
     def _normalise_tick_volume_delta(
         self, symbol: str, raw: dict[str, Any]
     ) -> dict[str, Any]:
@@ -7310,9 +7479,30 @@ class MarketDataManager:
         previous = (
             None if previous_entry is None else float(previous_entry["cumulative"])
         )
+        incoming_ts = self._volume_source_timestamp(payload)
+        incoming_sequence = self._volume_sequence(payload)
+        previous_ts = None
+        previous_sequence = None
+        if previous_entry is not None:
+            previous_ts = previous_entry.get("timestamp")
+            if previous_ts is not None and not isinstance(previous_ts, pd.Timestamp):
+                previous_ts = pd.to_datetime(previous_ts, utc=True, errors="coerce")
+                if pd.isna(previous_ts):
+                    previous_ts = None
+                else:
+                    previous_ts = pd.Timestamp(previous_ts)
+            previous_sequence = previous_entry.get("sequence")
         raw_delta = None if previous is None else cumulative - previous
         transition["previous_cumulative"] = previous
         transition["raw_delta"] = raw_delta
+        transition["timestamp"] = (
+            None if incoming_ts is None else incoming_ts.isoformat()
+        )
+        transition["previous_timestamp"] = (
+            None if previous_ts is None else previous_ts.isoformat()
+        )
+        transition["sequence"] = incoming_sequence
+        transition["previous_sequence"] = previous_sequence
         effective_delta = 0.0
         state = "baseline_initialized"
         trusted = True
@@ -7321,8 +7511,22 @@ class MarketDataManager:
         if previous_entry is None:
             self._volume_baseline_by_identity[identity] = {
                 "cumulative": cumulative,
-                "timestamp": payload.get("timestamp"),
+                "timestamp": incoming_ts,
+                "sequence": incoming_sequence,
             }
+        elif (
+            incoming_sequence is not None
+            and previous_sequence is not None
+            and int(incoming_sequence) < int(previous_sequence)
+        ) or (
+            incoming_ts is not None
+            and previous_ts is not None
+            and incoming_ts < previous_ts
+        ):
+            state = "out_of_order"
+            reason = "out_of_order_cumulative_tick"
+            trusted = False
+            accepted = False
         elif raw_delta is None:
             pass
         elif raw_delta == 0:
@@ -7330,9 +7534,12 @@ class MarketDataManager:
             reason = "duplicate_cumulative"
         elif raw_delta < 0:
             rollback_abs = abs(raw_delta)
+            reset_evidence = self._volume_reset_evidence(
+                payload, incoming_ts, previous_ts
+            )
             state = (
                 "counter_reset"
-                if cumulative <= max(previous * 0.05, 1.0)
+                if reset_evidence and cumulative <= max(previous * 0.05, 1.0)
                 else "counter_rollback"
             )
             reason = state
@@ -7340,7 +7547,8 @@ class MarketDataManager:
             if state == "counter_reset":
                 self._volume_baseline_by_identity[identity] = {
                     "cumulative": cumulative,
-                    "timestamp": payload.get("timestamp"),
+                    "timestamp": incoming_ts,
+                    "sequence": incoming_sequence,
                 }
             trusted = False
             transition["rollback_amount"] = rollback_abs
@@ -7398,7 +7606,8 @@ class MarketDataManager:
                 reason = state
                 self._volume_baseline_by_identity[identity] = {
                     "cumulative": cumulative,
-                    "timestamp": payload.get("timestamp"),
+                    "timestamp": incoming_ts,
+                    "sequence": incoming_sequence,
                 }
         self._last_cumulative_volume_by_symbol[canonical] = float(
             self._volume_baseline_by_identity.get(identity, {"cumulative": cumulative})[

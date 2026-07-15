@@ -822,6 +822,12 @@ def test_transport_classifier_distinguishes_processing_backlog_from_silence() ->
     now = time_mod.monotonic()
     mdm._zombie_tick_threshold_sec = 10.0
     mdm._last_raw_ws_receive_mono = now
+    mdm._desired_tokens.add(1)
+    mdm._token_by_symbol[symbol] = 1
+    mdm._last_raw_ws_receive_by_token[1] = {
+        "received_mono": now,
+        "subscription_generation": mdm._subscription_generation,
+    }
     mdm._last_valid_live_tick_mono[symbol] = now - 30.0
     mdm._pending_tick_count = 2
     mdm._pipeline_overloaded = True
@@ -833,6 +839,10 @@ def test_transport_classifier_distinguishes_processing_backlog_from_silence() ->
     assert state["pipeline_overloaded"] is True
 
     mdm._last_raw_ws_receive_mono = now - 30.0
+    mdm._last_raw_ws_receive_by_token[1] = {
+        "received_mono": now - 30.0,
+        "subscription_generation": mdm._subscription_generation,
+    }
     state = mdm.classify_transport_backlog(symbol)
     assert state["transport_classification"] == "transport_silent"
     assert state["global_restart_eligible"] is True
@@ -906,8 +916,19 @@ def test_global_classifier_uses_required_context_not_fresh_irrelevant_option() -
     mdm = _make_mdm()
     mdm._zombie_tick_threshold_sec = 10.0
     mdm._last_raw_ws_receive_mono = now
-    mdm._last_raw_ws_receive_by_symbol["NSE:NIFTY"] = now
-    mdm._last_raw_ws_receive_by_symbol["NFO:NIFTY26JUNFUT"] = now
+    mdm._symbol_to_token["NSE:NIFTY"] = 256265
+    mdm._token_by_symbol["NSE:NIFTY"] = 256265
+    mdm._symbol_to_token["NFO:NIFTY26JUNFUT"] = 2
+    mdm._token_by_symbol["NFO:NIFTY26JUNFUT"] = 2
+    mdm._desired_tokens.update({256265, 2})
+    mdm._last_raw_ws_receive_by_symbol["NSE:NIFTY"] = {
+        "received_mono": now,
+        "subscription_generation": mdm._subscription_generation,
+    }
+    mdm._last_raw_ws_receive_by_symbol["NFO:NIFTY26JUNFUT"] = {
+        "received_mono": now,
+        "subscription_generation": mdm._subscription_generation,
+    }
     mdm._required_live_symbols = lambda: {"NSE:NIFTY", "NFO:NIFTY26JUNFUT"}
     mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 30
     mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now - 30
@@ -933,7 +954,10 @@ def test_global_classifier_requires_current_generation_raw_evidence() -> None:
     mdm._token_by_symbol[symbol] = 1
     mdm._symbol_to_token[symbol] = 1
     mdm._last_raw_ws_receive_mono = now
-    mdm._last_raw_ws_receive_by_token[1] = now
+    mdm._last_raw_ws_receive_by_token[1] = {
+        "received_mono": now,
+        "subscription_generation": 1,
+    }
     mdm._last_valid_live_tick_mono[symbol] = now - 30
     mdm._symbol_subscription_generation[symbol] = 2
     mdm._symbol_first_tick_generation[symbol] = 1
@@ -942,7 +966,7 @@ def test_global_classifier_requires_current_generation_raw_evidence() -> None:
 
     state = mdm.classify_transport_backlog()
 
-    assert state["transport_classification"] == "processing_backlog"
+    assert state["transport_classification"] == "symbol_feed_stale"
     assert state["required_current_generation_raw_receive_fresh"] is False
 
 
@@ -961,3 +985,173 @@ def test_global_classifier_recovers_to_transport_healthy() -> None:
 
     assert state["transport_classification"] == "transport_healthy"
     assert state["global_restart_eligible"] is False
+
+
+def test_raw_ws_ingress_malformed_symbol_cannot_break_diagnostics(monkeypatch) -> None:
+    mdm = _make_mdm()
+    original = mdm._canonical_symbol
+
+    def raising_canonical(symbol: str) -> str:
+        if symbol == "%%%BAD%%%":
+            raise ValueError("malformed symbol")
+        return original(symbol)
+
+    monkeypatch.setattr(mdm, "_canonical_symbol", raising_canonical)
+    now = time.monotonic()
+
+    mdm._record_raw_ws_receive(
+        {"symbol": "%%%BAD%%%", "instrument_token": 1, "last_price": 100}, now
+    )
+    key, _priority, _bucket, reason = mdm._resolve_tick_key_and_priority(
+        {"symbol": "%%%BAD%%%", "instrument_token": 1, "last_price": 100}
+    )
+
+    assert key is None
+    assert reason == "bad_symbol"
+    assert mdm._last_raw_ws_receive_mono == now
+    assert mdm._last_raw_ws_receive_by_token[1]["received_mono"] == now
+    assert "%%%BAD%%%" not in mdm._last_raw_ws_receive_by_symbol
+
+
+def test_current_generation_raw_receive_requires_matching_generation() -> None:
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    now = time.monotonic()
+    mdm._desired_tokens.add(1)
+    mdm._token_by_symbol[symbol] = 1
+    mdm._symbol_subscription_generation[symbol] = 2
+    mdm._subscription_generation = 2
+
+    assert mdm._required_current_generation_raw_fresh([symbol], now, 10.0) is False
+
+    mdm._last_raw_ws_receive_by_token[1] = {
+        "received_mono": now,
+        "subscription_generation": 1,
+    }
+    assert mdm._required_current_generation_raw_fresh([symbol], now, 10.0) is False
+
+    mdm._last_raw_ws_receive_by_token[1] = {
+        "received_mono": now,
+        "subscription_generation": 2,
+    }
+    assert mdm._required_current_generation_raw_fresh([symbol], now, 10.0) is True
+
+
+def test_global_classifier_does_not_treat_irrelevant_socket_traffic_as_backlog() -> (
+    None
+):
+    now = time.monotonic()
+    mdm = _make_mdm()
+    mdm._zombie_tick_threshold_sec = 10.0
+    mdm._required_live_symbols = lambda: {"NSE:NIFTY"}
+    mdm._token_by_symbol["NSE:NIFTY"] = 256265
+    mdm._symbol_to_token["NSE:NIFTY"] = 256265
+    mdm._desired_tokens.add(256265)
+    mdm._symbol_subscription_generation["NSE:NIFTY"] = 3
+    mdm._subscription_generation = 3
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_raw_ws_receive_by_token[1] = {
+        "received_mono": now,
+        "subscription_generation": 3,
+    }
+    mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 30
+    mdm._last_valid_live_tick_mono["NFO:IRRELEVANT26JUN26000CE"] = now
+    mdm._pending_tick_count = 10
+    mdm._pipeline_overloaded = True
+
+    state = mdm.classify_transport_backlog()
+
+    assert state["transport_classification"] == "symbol_feed_stale"
+    assert state["global_restart_eligible"] is False
+    assert state["raw_transport_fresh"] is True
+    assert state["required_current_generation_raw_receive_fresh"] is False
+
+
+def test_pending_current_required_work_can_explain_required_backlog() -> None:
+    now = time.monotonic()
+    mdm = _make_mdm()
+    mdm._zombie_tick_threshold_sec = 10.0
+    mdm._required_live_symbols = lambda: {"NSE:NIFTY"}
+    mdm._symbol_subscription_generation["NSE:NIFTY"] = 4
+    mdm._subscription_generation = 4
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 30
+    with mdm._pending_tick_lock:
+        _set_pending_queue(
+            mdm,
+            "NSE:NIFTY",
+            {
+                "symbol": "NSE:NIFTY",
+                "last_price": 100,
+                "_mdm_enqueued_mono": now,
+                "_mdm_subscription_generation": 4,
+            },
+        )
+    mdm._pipeline_overloaded = True
+
+    state = mdm.classify_transport_backlog()
+
+    assert state["transport_classification"] == "processing_backlog"
+    assert state["pending_required_current_generation"] is True
+    assert state["global_restart_eligible"] is False
+
+
+def test_oldest_pending_age_repairs_empty_heap_once() -> None:
+    mdm = _make_mdm()
+    now = time.monotonic() - 0.25
+    with mdm._pending_tick_lock:
+        mdm._pending_tick_queues["NSE:NIFTY"].append(
+            {"symbol": "NSE:NIFTY", "_mdm_enqueued_mono": now}
+        )
+        mdm._pending_tick_count = 1
+        mdm._pending_tick_oldest_heap.clear()
+        first = mdm._oldest_pending_age_ms_locked()
+        second = mdm._oldest_pending_age_ms_locked()
+
+    assert first >= 0
+    assert second >= 0
+    assert mdm._pending_heap_repairs_total == 1
+    assert mdm._pending_tick_oldest_heap
+
+
+@pytest.mark.asyncio
+async def test_high_rate_burst_preserves_heartbeat_and_single_drain(monkeypatch):
+    mdm = _make_mdm()
+    processed: list[int] = []
+    monkeypatch.setattr(
+        mdm, "_process_queued_tick", lambda raw: processed.append(raw["last_price"])
+    )
+    loop = asyncio.get_running_loop()
+    mdm.set_event_loop(loop)
+    heartbeat = 0
+    running = True
+
+    async def beat():
+        nonlocal heartbeat
+        while running:
+            heartbeat += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(beat())
+
+    def submit():
+        for i in range(20_000):
+            mdm._enqueue_tick_threadsafe(
+                {"instrument_token": 1, "last_price": i, "timestamp": i}
+            )
+
+    thread = threading.Thread(target=submit)
+    thread.start()
+    while thread.is_alive():
+        await asyncio.sleep(0)
+    thread.join()
+    await mdm.drain_pending_ticks(timeout=3.0)
+    running = False
+    await task
+
+    stats = mdm.get_tick_pressure_stats()
+    assert heartbeat > 0
+    assert stats["max_active_drains"] == 1
+    assert processed[-1] == 19_999
+    assert stats["unexplained_loss"] == 0
+    await _stop_mdm(mdm)
