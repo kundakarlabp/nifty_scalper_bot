@@ -9090,32 +9090,87 @@ class StrategyRunner:
             len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
         )
         min_bars = int(self._required_bars_for_symbol(ce_symbol or pe_symbol or symbol))
-        reason = None
-        if not (ce_sub and pe_sub):
-            reason = "selected_option_subscription_pending"
-        elif not (ce_quote and pe_quote):
-            reason = "selected_option_quote_missing"
-        elif _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False) and not (
-            ce_depth and pe_depth
-        ):
-            reason = "selected_option_depth_missing"
-        elif ce_hist < min_bars or pe_hist < min_bars:
-            reason = "selected_option_history_cold"
+
+        # ── Per-side readiness (CE and PE decoupled) ────────────────────────
+        # A directional candidate must depend only on ITS OWN side. The old
+        # pair-wide ladder blocked a fully-ready CE because PE was stale (and
+        # vice versa). Context/global bootstrap requires at least ONE
+        # executable side. Candidate quote safety is unchanged: each side's
+        # own subscription/quote/depth/history requirements are identical to
+        # before — only the cross-leg coupling is removed.
+        _require_depth = _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False)
+
+        def _side_blockers(
+            sym_present: bool, sub: bool, quote: bool, depth: bool, hist: int
+        ) -> tuple[str, ...]:
+            if not sym_present:
+                return ("symbol_missing",)
+            blockers: list[str] = []
+            if not sub:
+                blockers.append("subscription_pending")
+            if not quote:
+                blockers.append("quote_missing")
+            if _require_depth and not depth:
+                blockers.append("depth_missing")
+            if hist < min_bars:
+                blockers.append("history_cold")
+            return tuple(blockers)
+
+        ce_blockers = _side_blockers(bool(ce_symbol), ce_sub, ce_quote, ce_depth, ce_hist)
+        pe_blockers = _side_blockers(bool(pe_symbol), pe_sub, pe_quote, pe_depth, pe_hist)
+        ce_executable = bool(ce_symbol) and not ce_blockers
+        pe_executable = bool(pe_symbol) and not pe_blockers
+
         normalized_boot_symbol = normalize_symbol(str(symbol or ""))
-        selected_boot_symbols = {
-            normalize_symbol(str(item)) for item in (ce_symbol, pe_symbol) if item
-        }
-        if (
-            reason == "selected_option_depth_missing"
-            and normalized_boot_symbol not in selected_boot_symbols
-        ):
-            if normalized_boot_symbol.startswith(
-                "NFO:"
-            ) and normalized_boot_symbol.endswith(("CE", "PE")):
-                reason = "option_context_depth_missing"
-            else:
-                reason = "context_symbol_not_tradable"
+        _norm_ce = normalize_symbol(str(ce_symbol or "")) if ce_symbol else None
+        _norm_pe = normalize_symbol(str(pe_symbol or "")) if pe_symbol else None
+
+        reason = None
+        if _norm_ce and normalized_boot_symbol == _norm_ce:
+            if not ce_executable:
+                reason = "selected_ce_unready"
+        elif _norm_pe and normalized_boot_symbol == _norm_pe:
+            if not pe_executable:
+                reason = "selected_pe_unready"
+        else:
+            if not (ce_executable or pe_executable):
+                reason = "selected_options_unavailable"
         ready = reason is None
+        log_on_change(
+            self._logger,
+            key="OPTION_SIDE_READINESS",
+            state=(
+                ce_symbol, pe_symbol, ce_executable, pe_executable,
+                ce_blockers, pe_blockers,
+            ),
+            message=(
+                "OPTION_SIDE_READINESS selected_ce=%s ce_executable=%s ce_blockers=%s "
+                "selected_pe=%s pe_executable=%s pe_blockers=%s "
+                "at_least_one_side_executable=%s both_sides_executable=%s"
+            )
+            % (
+                ce_symbol, ce_executable, list(ce_blockers),
+                pe_symbol, pe_executable, list(pe_blockers),
+                ce_executable or pe_executable, ce_executable and pe_executable,
+            ),
+            reminder_seconds=600.0,
+            level=logging.INFO,
+            extra={
+                "event": "OPTION_SIDE_READINESS",
+                "selected_ce": ce_symbol,
+                "selected_pe": pe_symbol,
+                "ce_subscribed": ce_sub, "ce_quote_fresh": ce_quote,
+                "ce_depth_ready": ce_depth, "ce_history_count": ce_hist,
+                "ce_required_bars": min_bars, "ce_executable": ce_executable,
+                "ce_blockers": list(ce_blockers),
+                "pe_subscribed": pe_sub, "pe_quote_fresh": pe_quote,
+                "pe_depth_ready": pe_depth, "pe_history_count": pe_hist,
+                "pe_required_bars": min_bars, "pe_executable": pe_executable,
+                "pe_blockers": list(pe_blockers),
+                "at_least_one_side_executable": ce_executable or pe_executable,
+                "both_sides_executable": ce_executable and pe_executable,
+            },
+        )
         try:
             symbol_role = self._symbol_role_for_runner(normalized_boot_symbol)
         except Exception:
