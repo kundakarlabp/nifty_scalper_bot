@@ -4,7 +4,10 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 import threading
 
+import pytest
+
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+import nifty_scalper_bot.data.market_data_manager as mdm_module
 
 
 def _mdm() -> MarketDataManager:
@@ -320,3 +323,46 @@ def test_repeated_canonical_getter_calls_keep_same_live_winner_metadata() -> Non
     assert first[0]["synthetic"] is True
     assert first[0]["timestamp_quality"] == "exchange_timestamp"
     assert first[0]["provisional"] is False
+
+
+def test_canonical_getter_accepts_date_only_and_aggregates_invalid_rows(
+    monkeypatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        mdm_module,
+        "log_throttled",
+        lambda logger, key, message, **kwargs: calls.append(message),
+    )
+    mdm = _mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    key = mdm._bar_symbol_key(symbol)
+    source = _bar(0, source="historical")
+    source.pop("timestamp")
+    source["date"] = "2026-01-01T09:15:00+05:30"
+    stored = dict(source)
+    mdm._ohlc[key].append(source)
+    mdm._ohlc[key].append(
+        {"timestamp": "bad", "open": 1, "high": 1, "low": 1, "close": 1}
+    )
+    mdm._ohlc[key].append(
+        {"date": "also-bad", "open": 1, "high": 1, "low": 1, "close": 1}
+    )
+
+    bars = mdm.get_ohlc_bars(symbol)
+
+    assert len(bars) == 1
+    assert bars[0]["timestamp"].tzinfo is not None
+    assert bars[0]["timestamp"].utcoffset().total_seconds() == 19800
+    assert dict(mdm._ohlc[key][0]) == stored
+    assert len(calls) == 1
+    assert "rows_seen=3 rows_rejected=2" in calls[0]
+
+
+def test_canonical_getter_limit_zero_and_negative_limit() -> None:
+    mdm = _mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._ohlc[mdm._bar_symbol_key(symbol)].append(_bar(0))
+    assert mdm.get_ohlc_bars(symbol, limit=0) == []
+    with pytest.raises(ValueError):
+        mdm.get_ohlc_bars(symbol, limit=-1)

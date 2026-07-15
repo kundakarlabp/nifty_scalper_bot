@@ -249,11 +249,17 @@ def test_health_trading_structured_status_and_unknown_auth():
     class MDM:
         def get_tick_pressure_stats(self):
             return {"pending_ticks": 2, "active_drains": 0}
+
         def get_ohlc_bars(self, symbol):
             return [{}] * 30
+
     class Runner:
-        def runner_history_count(self, symbol): return 30
-        def indicator_history_count(self, symbol): return 30
+        def runner_history_count(self, symbol):
+            return 30
+
+        def indicator_history_count(self, symbol):
+            return 30
+
     ctx = _ctx(
         blockers=(),
         primary_blocker=None,
@@ -284,7 +290,7 @@ def test_readyz_live_requires_authenticated_broker(monkeypatch):
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     ctx = _ctx(
-        broker_auth_verified=True,
+        order_endpoint_verified=True,
         broker_balance_valid=True,
         position_reconciliation_completed=True,
     )
@@ -336,7 +342,9 @@ def test_readyz_live_blocks_invalid_broker_authentication(monkeypatch):
 
 
 def test_health_trading_reconciliation_requires_authenticated_broker():
-    ctx = _ctx(position_reconciliation_started=True, position_reconciliation_completed=True)
+    ctx = _ctx(
+        position_reconciliation_started=True, position_reconciliation_completed=True
+    )
     main.app.state.bot = SimpleNamespace(_ctx=ctx)
 
     body = _json(main.health_trading())
@@ -345,9 +353,9 @@ def test_health_trading_reconciliation_requires_authenticated_broker():
     assert body["reconciliation"]["completed"] is False
 
 
-def test_health_trading_reconciliation_completed_when_authenticated():
+def test_health_trading_reconciliation_completed_when_order_endpoint_verified():
     ctx = _ctx(
-        broker_authenticated=True,
+        order_endpoint_verified=True,
         position_reconciliation_started=True,
         position_reconciliation_completed=True,
     )
@@ -356,6 +364,7 @@ def test_health_trading_reconciliation_completed_when_authenticated():
     body = _json(main.health_trading())
 
     assert body["broker"]["authentication"] == "authenticated"
+    assert body["broker"]["order_endpoint_verified"] is True
     assert body["reconciliation"]["completed"] is True
 
 
@@ -384,3 +393,75 @@ def test_readyz_live_unknown_broker_still_blocks_once(monkeypatch):
 
     assert body["ready"] is False
     assert body["blockers"].count("broker_authentication_unknown") == 1
+
+
+def test_health_trading_balance_success_does_not_mark_order_endpoint_authenticated():
+    ctx = _ctx(broker_balance_valid=True, position_reconciliation_completed=True)
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["funds_endpoint_verified"] is True
+    assert body["broker"]["order_endpoint_verified"] is False
+    assert body["broker"]["broker_session_state"] == "funds_verified"
+    assert body["live_order_readiness"]["ready"] is False
+
+
+def test_health_trading_order_readiness_requires_reconciliation_completion():
+    ctx = _ctx(
+        order_endpoint_verified=True,
+        broker_balance_valid=True,
+        evaluation_ready=True,
+        position_reconciliation_started=True,
+        position_reconciliation_completed=False,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["order_endpoint_verified"] is True
+    assert body["live_order_readiness"]["ready"] is False
+    assert (
+        "position_reconciliation_incomplete" in body["live_order_readiness"]["missing"]
+    )
+
+
+def test_health_trading_order_verified_and_reconciled_satisfies_readiness_portion():
+    ctx = _ctx(
+        order_endpoint_verified=True,
+        broker_balance_valid=True,
+        evaluation_ready=True,
+        position_reconciliation_started=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["broker_session_state"] == "order_verified"
+    assert body["reconciliation"]["reconciliation_completed"] is True
+    assert "order_endpoint_unverified" not in body["live_order_readiness"]["missing"]
+    assert (
+        "position_reconciliation_incomplete"
+        not in body["live_order_readiness"]["missing"]
+    )
+
+
+def test_generic_broker_auth_flags_do_not_verify_order_endpoint():
+    ctx = _ctx(
+        broker_authenticated=True,
+        broker_auth_verified=True,
+        broker_balance_valid=True,
+        evaluation_ready=True,
+        position_reconciliation_started=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["market_data_authenticated"] is True
+    assert body["broker"]["funds_endpoint_verified"] is True
+    assert body["broker"]["order_endpoint_verified"] is False
+    assert body["broker"]["broker_session_state"] == "funds_verified"
+    assert "order_endpoint_unverified" in body["live_order_readiness"]["missing"]
