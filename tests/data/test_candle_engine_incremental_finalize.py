@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+
 import pandas as pd
 import pytest
 
@@ -157,3 +158,64 @@ def test_same_minute_identical_ignored_and_conflicting_rejected() -> None:
     with pytest.raises(DataIntegrityError):
         _finalize(engine, _mk(_ts(40), c=100.75))
     assert engine.diagnostics()["same_minute_conflict_total"] == 1
+
+
+def test_df_getter_is_defensive_copy_and_replacement_methods_work() -> None:
+    engine = CandleEngine(symbol="NFO:T", max_bars=5)
+    first = pd.DataFrame([_mk(_ts(50), c=100.5)])
+    engine.df = first
+    copy_frame = engine.df
+    copy_frame.loc[0, "close"] = 999.0
+    copy_frame["extra"] = "ignored"
+    stored = engine.get_df()
+    assert float(stored.loc[0, "close"]) == 100.5
+    assert "extra" not in stored.columns
+
+    assigned = pd.DataFrame([_mk(_ts(51), h=103.0, c=101.5)])
+    engine.df = assigned
+    assert float(engine.get_df().loc[0, "close"]) == 101.5
+
+    replaced = pd.DataFrame([_mk(_ts(52), h=104.0, c=102.5)])
+    engine.replace_history(replaced)
+    assert float(engine.get_df().loc[0, "close"]) == 102.5
+
+
+def test_candle_engine_df_callers_do_not_use_in_place_mutation() -> None:
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    production = list((root / "src" / "nifty_scalper_bot").rglob("*.py"))
+    offenders: list[str] = []
+    for path in production:
+        source = path.read_text()
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                child.parent = node
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in {"loc", "iloc"}:
+                parent = getattr(node, "parent", None)
+                if (
+                    isinstance(parent, ast.Attribute)
+                    and isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "df"
+                ):
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "df"
+            ):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if (
+                        kw.arg == "inplace"
+                        and isinstance(kw.value, ast.Constant)
+                        and kw.value.value is True
+                    ):
+                        text = ast.get_source_segment(source, node) or ""
+                        if ".df" in text:
+                            offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert offenders == []

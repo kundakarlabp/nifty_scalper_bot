@@ -2398,7 +2398,7 @@ class StrategyRunner:
             df = df.drop_duplicates(subset="timestamp", keep="last")
             df = df.sort_values("timestamp").reset_index(drop=True)
             engine = self._candle_engines.setdefault(symbol, CandleEngine())
-            engine.df = df.tail(engine.max_bars).reset_index(drop=True)
+            engine.replace_history(df.tail(engine.max_bars).reset_index(drop=True))
             self._logger.debug(
                 "candle_engine_seeded",
                 extra={
@@ -7990,7 +7990,7 @@ class StrategyRunner:
                                 max_bars=engine.max_bars,
                             )
                             if not repaired.empty:
-                                engine.df = repaired
+                                engine.replace_history(repaired)
                     except Exception:
                         # 4. Use .exception to capture traceback and stop silent failures
                         self._logger.exception(
@@ -9454,6 +9454,66 @@ class StrategyRunner:
         for readiness in snap.values():
             if readiness.symbol and normalize_symbol(str(readiness.symbol)) == norm:
                 return readiness
+        return None
+
+    def _candidate_contract_mismatch_details(
+        self, candidate_symbol: str | None
+    ) -> dict[str, Any] | None:
+        if not candidate_symbol or not is_nifty_option_symbol(str(candidate_symbol)):
+            return None
+        snap = self._option_side_readiness_snapshot()
+        selected = {"CE": snap["CE"], "PE": snap["PE"]}
+        candidate_norms = self._symbol_match_keys(candidate_symbol)
+        candidate_token = self._candidate_token_for_symbol(candidate_symbol)
+        for readiness in selected.values():
+            if readiness.symbol and candidate_norms & self._symbol_match_keys(
+                readiness.symbol
+            ):
+                return None
+            if (
+                candidate_token is not None
+                and readiness.token is not None
+                and int(candidate_token) == int(readiness.token)
+            ):
+                return None
+        return {
+            "candidate_symbol": candidate_symbol,
+            "selected_ce": selected["CE"].symbol,
+            "selected_pe": selected["PE"].symbol,
+            "candidate_token": candidate_token,
+            "selected_ce_token": selected["CE"].token,
+            "selected_pe_token": selected["PE"].token,
+        }
+
+    def _symbol_match_keys(self, symbol: str | None) -> set[str]:
+        if not symbol:
+            return set()
+        raw = str(symbol).strip()
+        stripped = raw.split(":", 1)[-1]
+        keys = {raw.upper(), stripped.upper()}
+        with suppress(Exception):
+            keys.add(normalize_symbol(raw).upper())
+        with suppress(Exception):
+            keys.add(normalize_symbol(stripped).upper())
+        return {key for key in keys if key}
+
+    def _candidate_token_for_symbol(self, symbol: str | None) -> int | None:
+        if not symbol:
+            return None
+        mdm = getattr(self, "_market_data", None)
+        token_by_symbol = (
+            getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+        )
+        for key in self._symbol_match_keys(symbol):
+            raw = token_by_symbol.get(key)
+            if raw is None:
+                raw = token_by_symbol.get(key.split(":", 1)[-1])
+            try:
+                token = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if token > 0:
+                return token
         return None
 
     def _emit_candidate_execution_readiness(
@@ -18516,6 +18576,23 @@ class StrategyRunner:
                 os.getenv("ALLOW_MARKET_ENTRY", "false")
             ).strip().lower() in {"1", "true", "yes", "on"}
             order_symbol = trade_symbol or signal.symbol or base_symbol
+            contract_mismatch = self._candidate_contract_mismatch_details(order_symbol)
+            if contract_mismatch is not None:
+                self._logger.warning(
+                    "ORDER_BLOCKED selected_contract_mismatch "
+                    "candidate_symbol=%s selected_ce=%s selected_pe=%s",
+                    contract_mismatch.get("candidate_symbol"),
+                    contract_mismatch.get("selected_ce"),
+                    contract_mismatch.get("selected_pe"),
+                    extra={
+                        "event": "ORDER_BLOCKED",
+                        "reason": "selected_contract_mismatch",
+                        **contract_mismatch,
+                    },
+                )
+                return _reject_after_dedup(
+                    reason="selected_contract_mismatch", details=contract_mismatch
+                )
             candidate_readiness = self._readiness_for_candidate_symbol(order_symbol)
             if candidate_readiness is not None:
                 self._emit_candidate_execution_readiness(
@@ -18536,11 +18613,17 @@ class StrategyRunner:
                             "candidate_symbol": candidate_readiness.symbol,
                             "candidate_side": candidate_readiness.side,
                             "candidate_blockers": list(candidate_readiness.blockers),
-                            "candidate_subscription_ready": candidate_readiness.subscribed,
+                            "candidate_subscription_ready": (
+                                candidate_readiness.subscribed
+                            ),
                             "candidate_quote_fresh": candidate_readiness.quote_fresh,
                             "candidate_depth_ready": candidate_readiness.depth_ready,
-                            "candidate_history_count": candidate_readiness.history_count,
-                            "candidate_required_bars": candidate_readiness.required_bars,
+                            "candidate_history_count": (
+                                candidate_readiness.history_count
+                            ),
+                            "candidate_required_bars": (
+                                candidate_readiness.required_bars
+                            ),
                         },
                     )
             _resolved_lot_size = 0

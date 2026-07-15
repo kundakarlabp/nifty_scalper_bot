@@ -122,7 +122,15 @@ def _tick_timestamp(tick: Mapping[str, Any] | Tick) -> tuple[pd.Timestamp, str, 
 
 @dataclass(slots=True, init=False)
 class CandleEngine:
-    """Build deterministic 1-minute candles from validated ticks."""
+    """Build deterministic 1-minute candles from validated ticks.
+
+    ``df`` is a read-only compatibility alias for ``get_df()``. The getter
+    returns a defensive copy; mutating that DataFrame does not mutate this
+    engine. Whole-history replacement remains supported through ``engine.df =``
+    assignment or the explicit ``replace_history()`` method. Arbitrary pandas
+    in-place mutation is intentionally not proxied because the deque is the live
+    candle source of truth.
+    """
 
     interval: str = "1min"
     max_bars: int = 500
@@ -161,15 +169,26 @@ class CandleEngine:
         self._same_minute_idempotent_total = 0
         self._same_minute_conflict_total = 0
         if df is not None and not df.empty:
-            self._replace_completed_candles(df)
+            self.replace_history(df)
 
     @property
     def df(self) -> pd.DataFrame:
-        return self._cached_df_copy()
+        """Read-only compatibility alias for ``get_df()``.
+
+        The returned DataFrame is a defensive copy. Mutating it with ``loc``,
+        ``iloc``, column assignment, or ``inplace=True`` operations does not
+        mutate CandleEngine. Use ``replace_history()`` or ``engine.df = frame``
+        for whole-frame replacement.
+        """
+        return self.get_df()
 
     @df.setter
     def df(self, value: pd.DataFrame | None) -> None:
-        self._replace_completed_candles(value)
+        self.replace_history(value)
+
+    def replace_history(self, frame: pd.DataFrame | None) -> None:
+        """Sanitize and atomically replace the bounded candle store."""
+        self._replace_completed_candles(frame)
 
     def _replace_completed_candles(self, value: pd.DataFrame | None) -> None:
         self._completed_candles.clear()
@@ -514,6 +533,7 @@ class CandleEngine:
         return finalized
 
     def get_df(self) -> pd.DataFrame:
+        """Return a defensive canonical OHLCV copy."""
         return self._cached_df_copy()
 
 
@@ -531,14 +551,14 @@ def _normalize_completed_candle(
     tick_pending=1716 at market open).
     """
     out: dict[str, Any] = {"timestamp": incoming_ts}
-    for field in ("open", "high", "low", "close"):
+    for ohlcv_field in ("open", "high", "low", "close"):
         try:
-            value = float(candle.get(field))
+            value = float(candle.get(ohlcv_field))
         except (TypeError, ValueError):
             return None
         if not math.isfinite(value) or value <= 0.0:
             return None
-        out[field] = value
+        out[ohlcv_field] = value
     try:
         volume = float(candle.get("volume") or 0.0)
     except (TypeError, ValueError):
@@ -560,11 +580,11 @@ def _candles_equivalent(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
         right.get("timestamp")
     ):
         return False
-    for field in ("open", "high", "low", "close", "volume"):
+    for ohlcv_field in ("open", "high", "low", "close", "volume"):
         try:
             if not math.isclose(
-                float(left.get(field)),
-                float(right.get(field)),
+                float(left.get(ohlcv_field)),
+                float(right.get(ohlcv_field)),
                 rel_tol=1e-12,
                 abs_tol=1e-9,
             ):
@@ -696,5 +716,5 @@ def ensure_valid_data(
             },
         )
         return None
-    engine.df = hydrated.tail(engine.max_bars).reset_index(drop=True)
+    engine.replace_history(hydrated.tail(engine.max_bars).reset_index(drop=True))
     return engine.get_df()
