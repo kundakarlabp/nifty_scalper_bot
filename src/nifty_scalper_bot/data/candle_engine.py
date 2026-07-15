@@ -524,7 +524,7 @@ class CandleEngine:
                 "timestamp": incoming_ts.isoformat(),
             },
         )
-        return dict(normalized)
+        return normalized
 
     def flush(self) -> dict[str, Any] | None:
         finalized = self._finalize_current_candle()

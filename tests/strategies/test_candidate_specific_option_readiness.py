@@ -278,9 +278,9 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
         runner, StrategyRunner
     )
 
-    def wrapped(symbol):
+    def wrapped(symbol, **kwargs):
         calls["gate"] += 1
-        return real(symbol)
+        return real(symbol, **kwargs)
 
     runner._readiness_for_candidate_symbol = wrapped
     return runner, calls
@@ -375,3 +375,60 @@ def test_exit_path_does_not_apply_candidate_entry_gate(monkeypatch):
     assert calls["gate"] == 0
     assert len(submitted) == 1
     assert submitted[0].symbol == "NFO:PE"
+
+
+def test_readiness_snapshot_handles_none_mdm_mappings_fail_closed():
+    runner = _runner()
+    runner._market_data = SimpleNamespace(
+        _token_by_symbol=None,
+        _active_subscribed_symbols=None,
+        _desired_tokens=None,
+        _subscribed_tokens=None,
+        _confirmed_subscriptions=None,
+        _ws=SimpleNamespace(_tokens=None),
+        _symbol_subscription_generation=None,
+        _symbol_first_tick_generation=None,
+    )
+    runner._indicator_engine = SimpleNamespace(get_history=lambda sym: [1] * 50)
+    runner._current_active_contract_selection = lambda: SimpleNamespace(
+        selected_ce="NFO:CE", selected_pe="NFO:PE"
+    )
+    runner._get_cached_quote_for_live_entry = lambda sym: {
+        "ltp": 100,
+        "bid": 99,
+        "ask": 101,
+        "depth_available": True,
+    }
+    runner._is_option_symbol_tick_fresh = lambda sym, max_age_s=60.0: True
+    runner._selected_option_has_real_depth = lambda sym: True
+    runner._required_bars_for_symbol = lambda sym: 50
+    snap = runner._option_side_readiness_snapshot()
+    assert snap["CE"].token is None
+    assert snap["CE"].subscribed is False
+    assert snap["CE"].executable is False
+    assert "subscription_pending" in snap["CE"].blockers
+    assert snap["PE"].subscribed is False
+
+
+def test_entry_path_uses_one_readiness_snapshot_for_candidate_decision(monkeypatch):
+    runner, calls = _execution_runner(monkeypatch, ce_ok=True, pe_ok=False)
+    snapshot = _snap(True, False)
+    snapshot_calls = {"count": 0}
+
+    def snapshot_once(**kwargs):
+        snapshot_calls["count"] += 1
+        return snapshot
+
+    runner._option_side_readiness_snapshot = snapshot_once
+    result = runner._handle_entry_signal_inner(
+        _signal("NFO:CE"),
+        "NSE:NIFTY",
+        "NFO:CE",
+        100.0,
+        datetime.now(timezone.utc),
+        trace_id="t",
+    )
+    assert result.accepted is True
+    assert calls["gate"] == 1
+    assert snapshot_calls["count"] == 1
+    assert len(runner._order_manager.plans) == 1

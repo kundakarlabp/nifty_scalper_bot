@@ -8934,7 +8934,7 @@ class StrategyRunner:
         )
         mdm = getattr(self, "_market_data", None)
         token_by_symbol = (
-            getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+            (getattr(mdm, "_token_by_symbol", None) or {}) if mdm is not None else {}
         )
         ce_token = token_by_symbol.get(ce_symbol) if ce_symbol else None
         pe_token = token_by_symbol.get(pe_symbol) if pe_symbol else None
@@ -9327,7 +9327,7 @@ class StrategyRunner:
         )
         mdm = getattr(self, "_market_data", None)
         token_by_symbol = (
-            getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+            (getattr(mdm, "_token_by_symbol", None) or {}) if mdm is not None else {}
         )
         active_subs = set(getattr(mdm, "_active_subscribed_symbols", set()) or set())
         desired_tokens = (
@@ -9381,7 +9381,7 @@ class StrategyRunner:
                 and (quote.get("depth_available") or quote.get("depth"))
             )
             if sym and quote and self._is_option_symbol_tick_fresh(sym, max_age_s=60.0):
-                bid, ask, spread, _source = resolve_quote_bid_ask_spread(dict(quote))
+                bid, ask, spread, _source = resolve_quote_bid_ask_spread(quote)
                 ltp = (
                     _extract_float(quote, "ltp", "last_price", "last_traded_price")
                     or 0.0
@@ -9445,23 +9445,29 @@ class StrategyRunner:
         return {"CE": build("CE", ce_symbol), "PE": build("PE", pe_symbol)}
 
     def _readiness_for_candidate_symbol(
-        self, candidate_symbol: str | None
+        self,
+        candidate_symbol: str | None,
+        *,
+        snapshot: Mapping[str, OptionSideReadiness] | None = None,
     ) -> OptionSideReadiness | None:
         if not candidate_symbol:
             return None
         norm = normalize_symbol(str(candidate_symbol))
-        snap = self._option_side_readiness_snapshot()
+        snap = snapshot or self._option_side_readiness_snapshot()
         for readiness in snap.values():
             if readiness.symbol and normalize_symbol(str(readiness.symbol)) == norm:
                 return readiness
         return None
 
     def _candidate_contract_mismatch_details(
-        self, candidate_symbol: str | None
+        self,
+        candidate_symbol: str | None,
+        *,
+        snapshot: Mapping[str, OptionSideReadiness] | None = None,
     ) -> dict[str, Any] | None:
         if not candidate_symbol or not is_nifty_option_symbol(str(candidate_symbol)):
             return None
-        snap = self._option_side_readiness_snapshot()
+        snap = snapshot or self._option_side_readiness_snapshot()
         selected = {"CE": snap["CE"], "PE": snap["PE"]}
         candidate_norms = self._symbol_match_keys(candidate_symbol)
         candidate_token = self._candidate_token_for_symbol(candidate_symbol)
@@ -9502,7 +9508,7 @@ class StrategyRunner:
             return None
         mdm = getattr(self, "_market_data", None)
         token_by_symbol = (
-            getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+            (getattr(mdm, "_token_by_symbol", None) or {}) if mdm is not None else {}
         )
         for key in self._symbol_match_keys(symbol):
             raw = token_by_symbol.get(key)
@@ -9517,10 +9523,14 @@ class StrategyRunner:
         return None
 
     def _emit_candidate_execution_readiness(
-        self, readiness: OptionSideReadiness, *, live_orders_armed: bool
+        self,
+        readiness: OptionSideReadiness,
+        *,
+        live_orders_armed: bool,
+        snapshot: Mapping[str, OptionSideReadiness] | None = None,
     ) -> None:
         opposite = "PE" if readiness.side == "CE" else "CE"
-        snap = self._option_side_readiness_snapshot()
+        snap = snapshot or self._option_side_readiness_snapshot()
         opposite_ready = bool(snap.get(opposite) and snap[opposite].executable)
         log_on_change(
             self._logger,
@@ -18576,7 +18586,10 @@ class StrategyRunner:
                 os.getenv("ALLOW_MARKET_ENTRY", "false")
             ).strip().lower() in {"1", "true", "yes", "on"}
             order_symbol = trade_symbol or signal.symbol or base_symbol
-            contract_mismatch = self._candidate_contract_mismatch_details(order_symbol)
+            readiness_snapshot = self._option_side_readiness_snapshot()
+            contract_mismatch = self._candidate_contract_mismatch_details(
+                order_symbol, snapshot=readiness_snapshot
+            )
             if contract_mismatch is not None:
                 self._logger.warning(
                     "ORDER_BLOCKED selected_contract_mismatch "
@@ -18593,13 +18606,16 @@ class StrategyRunner:
                 return _reject_after_dedup(
                     reason="selected_contract_mismatch", details=contract_mismatch
                 )
-            candidate_readiness = self._readiness_for_candidate_symbol(order_symbol)
+            candidate_readiness = self._readiness_for_candidate_symbol(
+                order_symbol, snapshot=readiness_snapshot
+            )
             if candidate_readiness is not None:
                 self._emit_candidate_execution_readiness(
                     candidate_readiness,
                     live_orders_armed=bool(
                         getattr(self, "_runtime_live_orders_armed", False)
                     ),
+                    snapshot=readiness_snapshot,
                 )
                 if not candidate_readiness.executable:
                     reject_reason = (
