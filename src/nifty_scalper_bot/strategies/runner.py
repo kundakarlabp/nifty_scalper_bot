@@ -462,6 +462,22 @@ class ExecutionReadinessResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class OptionSideReadiness:
+    side: Literal["CE", "PE"]
+    symbol: str | None
+    token: int | None
+    subscribed: bool
+    quote_fresh: bool
+    depth_ready: bool
+    history_count: int
+    required_bars: int
+    history_ready: bool
+    executable: bool
+    blockers: tuple[str, ...]
+    subscription_requested: bool = False
+
+
 @dataclass(slots=True)
 class StrategyRunnerConfig:
     """Configuration controlling runner level behaviour."""
@@ -7766,9 +7782,7 @@ class StrategyRunner:
                     "CRITICAL: Failure in StrategyRunner._health_watchdog.required_symbols"
                 )
                 required_live_symbols = None
-        live_tick_age = getattr(
-            self._market_data, "time_since_last_live_ws_tick", None
-        )
+        live_tick_age = getattr(self._market_data, "time_since_last_live_ws_tick", None)
         classify_live_tick = getattr(
             self._market_data, "classify_live_tick_readiness", None
         )
@@ -7843,7 +7857,10 @@ class StrategyRunner:
                 _mark_stale(required_symbol, reason)
 
         for symbol, engine in self._candle_engines.items():
-            if required_live_symbols is not None and symbol not in required_live_symbols:
+            if (
+                required_live_symbols is not None
+                and symbol not in required_live_symbols
+            ):
                 if self._should_log_throttled(
                     f"ws_stale_skipped_not_required:{symbol}", 300.0
                 ):
@@ -8987,7 +9004,9 @@ class StrategyRunner:
             else False
         )
 
-        def _sub_state(sym: str | None, token: Any, fresh_tick: bool) -> bool:
+        def _sub_state(
+            sym: str | None, token: Any, fresh_tick: bool
+        ) -> tuple[bool, bool]:
             token_int = None
             try:
                 token_int = int(token) if token is not None else None
@@ -9015,6 +9034,23 @@ class StrategyRunner:
                 token_int is not None and token_int in _int_set(confirmed_tokens)
             )
             active_symbol = bool(sym and sym in active_subs)
+            current_generation_fresh_tick = False
+            if fresh_tick and sym and mdm is not None:
+                sub_gen = (
+                    getattr(mdm, "_symbol_subscription_generation", {}) or {}
+                ).get(sym)
+                tick_gen = (
+                    getattr(mdm, "_symbol_first_tick_generation", {}) or {}
+                ).get(sym)
+                current_generation_fresh_tick = bool(
+                    sub_gen is not None and tick_gen == sub_gen
+                )
+            subscription_ready = bool(
+                active_symbol
+                or subscribed
+                or confirmed
+                or current_generation_fresh_tick
+            )
             selected_pair = (
                 getattr(self, "_active_selected_ce", None),
                 getattr(self, "_active_selected_pe", None),
@@ -9038,8 +9074,8 @@ class StrategyRunner:
                     sym,
                     token_int,
                     desired,
-                    subscribed or active_symbol or confirmed,
-                    fresh_tick,
+                    subscription_ready,
+                    current_generation_fresh_tick,
                     None,
                 ),
                 reminder_seconds=float(
@@ -9051,20 +9087,19 @@ class StrategyRunner:
                     "symbol": sym,
                     "token": token_int,
                     "desired": desired,
-                    "subscribed": subscribed or active_symbol or confirmed,
-                    "fresh_tick": fresh_tick,
+                    "subscribed": subscription_ready,
+                    "subscription_requested": desired,
+                    "fresh_tick": current_generation_fresh_tick,
                     "tick_age_s": None,
                     "selected_ce": selected_pair[0],
                     "selected_pe": selected_pair[1],
                     "market_mode": get_runtime_market_mode(),
                 },
             )
-            return bool(
-                active_symbol or desired or subscribed or confirmed or fresh_tick
-            )
+            return subscription_ready, desired
 
-        ce_sub = _sub_state(ce_symbol, ce_token, ce_quote)
-        pe_sub = _sub_state(pe_symbol, pe_token, pe_quote)
+        ce_sub, ce_requested = _sub_state(ce_symbol, ce_token, ce_quote)
+        pe_sub, pe_requested = _sub_state(pe_symbol, pe_token, pe_quote)
         try:
             fut_token_int = int(fut_token) if fut_token is not None else None
         except (TypeError, ValueError):
@@ -9089,7 +9124,23 @@ class StrategyRunner:
         pe_hist = (
             len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
         )
-        min_bars = int(self._required_bars_for_symbol(ce_symbol or pe_symbol or symbol))
+        readiness_snapshot = self._option_side_readiness_snapshot(
+            ce_symbol=ce_symbol, pe_symbol=pe_symbol
+        )
+        ce_ready_snapshot = readiness_snapshot["CE"]
+        pe_ready_snapshot = readiness_snapshot["PE"]
+        ce_sub = ce_ready_snapshot.subscribed
+        pe_sub = pe_ready_snapshot.subscribed
+        ce_requested = ce_ready_snapshot.subscription_requested
+        pe_requested = pe_ready_snapshot.subscription_requested
+        ce_quote = ce_ready_snapshot.quote_fresh
+        pe_quote = pe_ready_snapshot.quote_fresh
+        ce_depth = ce_ready_snapshot.depth_ready
+        pe_depth = pe_ready_snapshot.depth_ready
+        ce_hist = ce_ready_snapshot.history_count
+        pe_hist = pe_ready_snapshot.history_count
+        ce_required_bars = ce_ready_snapshot.required_bars
+        pe_required_bars = pe_ready_snapshot.required_bars
 
         # ── Per-side readiness (CE and PE decoupled) ────────────────────────
         # A directional candidate must depend only on ITS OWN side. The old
@@ -9101,7 +9152,12 @@ class StrategyRunner:
         _require_depth = _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False)
 
         def _side_blockers(
-            sym_present: bool, sub: bool, quote: bool, depth: bool, hist: int
+            sym_present: bool,
+            sub: bool,
+            quote: bool,
+            depth: bool,
+            hist: int,
+            required_bars: int,
         ) -> tuple[str, ...]:
             if not sym_present:
                 return ("symbol_missing",)
@@ -9112,14 +9168,14 @@ class StrategyRunner:
                 blockers.append("quote_missing")
             if _require_depth and not depth:
                 blockers.append("depth_missing")
-            if hist < min_bars:
+            if hist < required_bars:
                 blockers.append("history_cold")
             return tuple(blockers)
 
-        ce_blockers = _side_blockers(bool(ce_symbol), ce_sub, ce_quote, ce_depth, ce_hist)
-        pe_blockers = _side_blockers(bool(pe_symbol), pe_sub, pe_quote, pe_depth, pe_hist)
-        ce_executable = bool(ce_symbol) and not ce_blockers
-        pe_executable = bool(pe_symbol) and not pe_blockers
+        ce_blockers = ce_ready_snapshot.blockers
+        pe_blockers = pe_ready_snapshot.blockers
+        ce_executable = ce_ready_snapshot.executable
+        pe_executable = pe_ready_snapshot.executable
 
         normalized_boot_symbol = normalize_symbol(str(symbol or ""))
         _norm_ce = normalize_symbol(str(ce_symbol or "")) if ce_symbol else None
@@ -9140,8 +9196,12 @@ class StrategyRunner:
             self._logger,
             key="OPTION_SIDE_READINESS",
             state=(
-                ce_symbol, pe_symbol, ce_executable, pe_executable,
-                ce_blockers, pe_blockers,
+                ce_symbol,
+                pe_symbol,
+                ce_executable,
+                pe_executable,
+                ce_blockers,
+                pe_blockers,
             ),
             message=(
                 "OPTION_SIDE_READINESS selected_ce=%s ce_executable=%s ce_blockers=%s "
@@ -9149,9 +9209,14 @@ class StrategyRunner:
                 "at_least_one_side_executable=%s both_sides_executable=%s"
             )
             % (
-                ce_symbol, ce_executable, list(ce_blockers),
-                pe_symbol, pe_executable, list(pe_blockers),
-                ce_executable or pe_executable, ce_executable and pe_executable,
+                ce_symbol,
+                ce_executable,
+                list(ce_blockers),
+                pe_symbol,
+                pe_executable,
+                list(pe_blockers),
+                ce_executable or pe_executable,
+                ce_executable and pe_executable,
             ),
             reminder_seconds=600.0,
             level=logging.INFO,
@@ -9159,13 +9224,21 @@ class StrategyRunner:
                 "event": "OPTION_SIDE_READINESS",
                 "selected_ce": ce_symbol,
                 "selected_pe": pe_symbol,
-                "ce_subscribed": ce_sub, "ce_quote_fresh": ce_quote,
-                "ce_depth_ready": ce_depth, "ce_history_count": ce_hist,
-                "ce_required_bars": min_bars, "ce_executable": ce_executable,
+                "ce_subscribed": ce_sub,
+                "ce_quote_fresh": ce_quote,
+                "ce_depth_ready": ce_depth,
+                "ce_history_count": ce_hist,
+                "ce_required_bars": ce_required_bars,
+                "ce_executable": ce_executable,
+                "ce_subscription_requested": ce_requested,
                 "ce_blockers": list(ce_blockers),
-                "pe_subscribed": pe_sub, "pe_quote_fresh": pe_quote,
-                "pe_depth_ready": pe_depth, "pe_history_count": pe_hist,
-                "pe_required_bars": min_bars, "pe_executable": pe_executable,
+                "pe_subscribed": pe_sub,
+                "pe_quote_fresh": pe_quote,
+                "pe_depth_ready": pe_depth,
+                "pe_history_count": pe_hist,
+                "pe_required_bars": pe_required_bars,
+                "pe_executable": pe_executable,
+                "pe_subscription_requested": pe_requested,
                 "pe_blockers": list(pe_blockers),
                 "at_least_one_side_executable": ce_executable or pe_executable,
                 "both_sides_executable": ce_executable and pe_executable,
@@ -9237,6 +9310,186 @@ class StrategyRunner:
             },
         )
         return ready, reason
+
+    def _option_side_readiness_snapshot(
+        self, *, ce_symbol: str | None = None, pe_symbol: str | None = None
+    ) -> dict[str, OptionSideReadiness]:
+        selection = self._current_active_contract_selection()
+        ce_symbol = (
+            ce_symbol
+            or selection.selected_ce
+            or getattr(self, "_active_selected_ce", None)
+        )
+        pe_symbol = (
+            pe_symbol
+            or selection.selected_pe
+            or getattr(self, "_active_selected_pe", None)
+        )
+        mdm = getattr(self, "_market_data", None)
+        token_by_symbol = (
+            getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+        )
+        active_subs = set(getattr(mdm, "_active_subscribed_symbols", set()) or set())
+        desired_tokens = (
+            {
+                int(v)
+                for v in (getattr(mdm, "_desired_tokens", set()) or set())
+                if str(v).isdigit()
+            }
+            if mdm is not None
+            else set()
+        )
+        subscribed_tokens = (
+            {
+                int(v)
+                for v in (getattr(mdm, "_subscribed_tokens", set()) or set())
+                if str(v).isdigit()
+            }
+            if mdm is not None
+            else set()
+        )
+        ws = getattr(mdm, "_ws", None) if mdm is not None else None
+        subscribed_tokens.update(
+            {
+                int(v)
+                for v in (getattr(ws, "_tokens", set()) or set())
+                if str(v).isdigit()
+            }
+        )
+        confirmed_tokens = (
+            {
+                int(v)
+                for v in (getattr(mdm, "_confirmed_subscriptions", set()) or set())
+                if str(v).isdigit()
+            }
+            if mdm is not None
+            else set()
+        )
+        require_depth = _env_bool("REQUIRE_FULL_DEPTH_FOR_EXECUTION", False)
+        max_boot_spread = float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5")
+
+        def build(side: Literal["CE", "PE"], sym: str | None) -> OptionSideReadiness:
+            token_raw = token_by_symbol.get(sym) if sym else None
+            try:
+                token = int(token_raw) if token_raw is not None else None
+            except (TypeError, ValueError):
+                token = None
+            quote = self._get_cached_quote_for_live_entry(sym) if sym else {}
+            quote_fresh = False
+            depth_ready = bool(
+                isinstance(quote, Mapping)
+                and (quote.get("depth_available") or quote.get("depth"))
+            )
+            if sym and quote and self._is_option_symbol_tick_fresh(sym, max_age_s=60.0):
+                bid, ask, spread, _source = resolve_quote_bid_ask_spread(dict(quote))
+                ltp = (
+                    _extract_float(quote, "ltp", "last_price", "last_traded_price")
+                    or 0.0
+                )
+                quote_fresh = bool(
+                    ltp > 0
+                    and bid is not None
+                    and ask is not None
+                    and bid > 0
+                    and ask > bid
+                    and spread is not None
+                    and spread <= max_boot_spread
+                )
+            if require_depth:
+                depth_ready = bool(sym and self._selected_option_has_real_depth(sym))
+            requested = bool(token is not None and token in desired_tokens)
+            current_gen_fresh = False
+            if quote_fresh and sym and mdm is not None:
+                sub_gen = (
+                    getattr(mdm, "_symbol_subscription_generation", {}) or {}
+                ).get(sym)
+                tick_gen = (
+                    getattr(mdm, "_symbol_first_tick_generation", {}) or {}
+                ).get(sym)
+                current_gen_fresh = bool(sub_gen is not None and tick_gen == sub_gen)
+            subscribed = bool(
+                (sym and sym in active_subs)
+                or (token is not None and token in subscribed_tokens)
+                or (token is not None and token in confirmed_tokens)
+                or current_gen_fresh
+            )
+            hist = len(self._indicator_engine.get_history(sym) or []) if sym else 0
+            required = int(self._required_bars_for_symbol(sym)) if sym else 0
+            blockers: list[str] = []
+            if not sym:
+                blockers.append("symbol_missing")
+            if not subscribed:
+                blockers.append("subscription_pending")
+            if not quote_fresh:
+                blockers.append("quote_missing")
+            if require_depth and not depth_ready:
+                blockers.append("depth_missing")
+            history_ready = hist >= required
+            if not history_ready:
+                blockers.append("history_cold")
+            return OptionSideReadiness(
+                side,
+                sym,
+                token,
+                subscribed,
+                quote_fresh,
+                depth_ready,
+                hist,
+                required,
+                history_ready,
+                bool(sym) and not blockers,
+                tuple(blockers),
+                requested,
+            )
+
+        return {"CE": build("CE", ce_symbol), "PE": build("PE", pe_symbol)}
+
+    def _readiness_for_candidate_symbol(
+        self, candidate_symbol: str | None
+    ) -> OptionSideReadiness | None:
+        if not candidate_symbol:
+            return None
+        norm = normalize_symbol(str(candidate_symbol))
+        snap = self._option_side_readiness_snapshot()
+        for readiness in snap.values():
+            if readiness.symbol and normalize_symbol(str(readiness.symbol)) == norm:
+                return readiness
+        return None
+
+    def _emit_candidate_execution_readiness(
+        self, readiness: OptionSideReadiness, *, live_orders_armed: bool
+    ) -> None:
+        opposite = "PE" if readiness.side == "CE" else "CE"
+        snap = self._option_side_readiness_snapshot()
+        opposite_ready = bool(snap.get(opposite) and snap[opposite].executable)
+        log_on_change(
+            self._logger,
+            key=f"CANDIDATE_EXECUTION_READINESS:{readiness.symbol}",
+            state=(
+                readiness.symbol,
+                readiness.executable,
+                readiness.blockers,
+                bool(live_orders_armed),
+            ),
+            message="CANDIDATE_EXECUTION_READINESS candidate_symbol=%s candidate_ready=%s blockers=%s"
+            % (readiness.symbol, readiness.executable, list(readiness.blockers)),
+            reminder_seconds=60.0,
+            level=logging.INFO,
+            extra={
+                "event": "CANDIDATE_EXECUTION_READINESS",
+                "candidate_symbol": readiness.symbol,
+                "candidate_side": readiness.side,
+                "candidate_ready": readiness.executable,
+                "candidate_blockers": list(readiness.blockers),
+                "candidate_subscription_ready": readiness.subscribed,
+                "candidate_quote_fresh": readiness.quote_fresh,
+                "candidate_depth_ready": readiness.depth_ready,
+                "candidate_history_count": readiness.history_count,
+                "candidate_required_bars": readiness.required_bars,
+                "opposite_side_ready": opposite_ready,
+                "live_orders_armed": bool(live_orders_armed),
+            },
+        )
 
     def _selected_option_has_real_depth(self, symbol: str | None) -> bool:
         """Return true only when selected option has real bid/ask/depth proof."""
@@ -11215,17 +11468,13 @@ class StrategyRunner:
                 max_age_s=max_live_tick_age_s,
             )
             details["max_live_tick_age_s"] = max_live_tick_age_s
-            details["live_tick_generation_ready"] = bool(
-                live_tick_check.get("ready")
-            )
+            details["live_tick_generation_ready"] = bool(live_tick_check.get("ready"))
             details["live_tick_generation_reason"] = live_tick_check.get("reason")
             details["subscription_generation"] = live_tick_check.get(
                 "subscription_generation"
             )
             details["tick_generation"] = live_tick_check.get("tick_generation")
-            details["first_tick_received"] = live_tick_check.get(
-                "first_tick_received"
-            )
+            details["first_tick_received"] = live_tick_check.get("first_tick_received")
             details["tick_age_s"] = live_tick_check.get("tick_age_s")
             details["expected_subscription_state"] = live_tick_check.get("expected")
             details["actual_subscription_state"] = live_tick_check.get("subscribed")
@@ -18267,6 +18516,33 @@ class StrategyRunner:
                 os.getenv("ALLOW_MARKET_ENTRY", "false")
             ).strip().lower() in {"1", "true", "yes", "on"}
             order_symbol = trade_symbol or signal.symbol or base_symbol
+            candidate_readiness = self._readiness_for_candidate_symbol(order_symbol)
+            if candidate_readiness is not None:
+                self._emit_candidate_execution_readiness(
+                    candidate_readiness,
+                    live_orders_armed=bool(
+                        getattr(self, "_runtime_live_orders_armed", False)
+                    ),
+                )
+                if not candidate_readiness.executable:
+                    reject_reason = (
+                        "selected_ce_unready"
+                        if candidate_readiness.side == "CE"
+                        else "selected_pe_unready"
+                    )
+                    return _reject_after_dedup(
+                        reason=reject_reason,
+                        details={
+                            "candidate_symbol": candidate_readiness.symbol,
+                            "candidate_side": candidate_readiness.side,
+                            "candidate_blockers": list(candidate_readiness.blockers),
+                            "candidate_subscription_ready": candidate_readiness.subscribed,
+                            "candidate_quote_fresh": candidate_readiness.quote_fresh,
+                            "candidate_depth_ready": candidate_readiness.depth_ready,
+                            "candidate_history_count": candidate_readiness.history_count,
+                            "candidate_required_bars": candidate_readiness.required_bars,
+                        },
+                    )
             _resolved_lot_size = 0
             _requested_lots = 0
             _instrument_token = None

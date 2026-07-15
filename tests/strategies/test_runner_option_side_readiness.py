@@ -1,10 +1,8 @@
 """CE/PE readiness decoupling: a candidate depends only on its own side."""
+
 from __future__ import annotations
 
 import inspect
-import logging
-import types
-
 import pytest
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -29,10 +27,10 @@ def test_pair_wide_coupling_removed_and_side_reasons_present() -> None:
 @pytest.mark.parametrize(
     "ce_ok,pe_ok,candidate_is_ce,expected_ready",
     [
-        (True, False, True, True),    # CE ready, PE stale, CE candidate -> allowed
+        (True, False, True, True),  # CE ready, PE stale, CE candidate -> allowed
         (True, False, False, False),  # CE ready, PE stale, PE candidate -> rejected
-        (False, True, False, True),   # PE ready, CE stale, PE candidate -> allowed
-        (False, True, True, False),   # PE ready, CE stale, CE candidate -> rejected
+        (False, True, False, True),  # PE ready, CE stale, PE candidate -> allowed
+        (False, True, True, False),  # PE ready, CE stale, CE candidate -> rejected
         (True, True, True, True),
         (True, True, False, True),
         (False, False, True, False),  # both stale -> nothing executable
@@ -75,8 +73,9 @@ def test_side_blocker_attribution_is_per_side() -> None:
     side (drives the real inner helper via a bound re-implementation check
     against source: subscription/quote/depth/history are per-side inputs)."""
     src = inspect.getsource(StrategyRunner._emit_live_universe_bootstrap_status)
-    assert "_side_blockers(bool(ce_symbol), ce_sub, ce_quote, ce_depth, ce_hist)" in src
-    assert "_side_blockers(bool(pe_symbol), pe_sub, pe_quote, pe_depth, pe_hist)" in src
+    assert "readiness_snapshot = self._option_side_readiness_snapshot" in src
+    assert "ce_required_bars = ce_ready_snapshot.required_bars" in src
+    assert "pe_required_bars = pe_ready_snapshot.required_bars" in src
     # Exit paths never consult side readiness:
     from nifty_scalper_bot.execution import bracket_core
 
