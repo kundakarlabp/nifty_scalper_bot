@@ -288,7 +288,7 @@ class CandleEngine:
             )
             self.current_candle = None
             return None
-        existing = self.df.dropna(how="all") if self.df is not None else pd.DataFrame(columns=_OHLC_COLUMNS)
+        existing = self.df if self.df is not None else pd.DataFrame(columns=_OHLC_COLUMNS)
         if not existing.empty:
             last_ts = _to_ist_timestamp(existing["timestamp"].iloc[-1])
             if not pd.isna(last_ts):
@@ -306,16 +306,30 @@ class CandleEngine:
                     self.current_candle = None
                     return None
         candle["timestamp"] = incoming_ts
-        new_row = pd.DataFrame([candle]).dropna(how="all")
-        if new_row.empty:
+        normalized = _normalize_completed_candle(
+            candle, symbol=symbol, incoming_ts=incoming_ts
+        )
+        if normalized is None:
+            log_throttled(
+                LOGGER,
+                f"candle_invalid_{symbol}",
+                "invalid_live_candle_rejected symbol=%s ts=%s" % (symbol, incoming_ts.isoformat()),
+                interval_sec=30.0,
+                level=logging.WARNING,
+                extra={"event": "invalid_live_candle_rejected", "symbol": symbol},
+            )
+            self.current_candle = None
             return None
-        frame = new_row.reset_index(drop=True) if existing.empty else pd.concat([existing, new_row], ignore_index=True)
-        frame = sanitize(frame).tail(self.max_bars).reset_index(drop=True)
-        if frame["timestamp"].duplicated().any():
-            raise DataIntegrityError("duplicate candle timestamps")
-        if not frame["timestamp"].is_monotonic_increasing:
-            raise DataIntegrityError("candle timestamps must be monotonic")
-        self.df = frame
+        # Incremental O(1)-amortized append: monotonicity, dedupe and the
+        # future check were enforced above against the last stored row, so a
+        # full-frame sanitize/sort/dedupe pass is unnecessary and forbidden on
+        # the live path (bootstrap/repair paths still sanitize).
+        if existing.empty:
+            self.df = pd.DataFrame([normalized], columns=list(_OHLC_COLUMNS))
+        else:
+            self.df.loc[len(self.df)] = normalized
+            if len(self.df) > self.max_bars:
+                self.df = self.df.iloc[-self.max_bars :].reset_index(drop=True)
         self.last_candle_close = incoming_ts.to_pydatetime()
         LOGGER.debug("candle_finalized", extra={"event": "candle_finalized", "symbol": symbol, "timestamp": incoming_ts.isoformat()})
         return candle
@@ -328,6 +342,46 @@ class CandleEngine:
 
     def get_df(self) -> pd.DataFrame:
         return self.df.copy(deep=True)
+
+
+def _normalize_completed_candle(
+    candle: Mapping[str, Any],
+    *,
+    symbol: str,
+    incoming_ts: pd.Timestamp,
+) -> dict[str, Any] | None:
+    """O(1) normalizer for ONE completed live candle (no DataFrame work).
+
+    Full-frame sanitize() remains reserved for bootstrap/persisted-history/
+    repair paths; running it per live candle was O(history) pandas work at
+    every minute boundary across all active symbols (production: lag_ms=851,
+    tick_pending=1716 at market open).
+    """
+    import math
+
+    out: dict[str, Any] = {"timestamp": incoming_ts}
+    for field in ("open", "high", "low", "close"):
+        try:
+            value = float(candle.get(field))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        out[field] = value
+    try:
+        volume = float(candle.get("volume") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(volume) or volume < 0.0:
+        return None
+    out["volume"] = volume
+    if out["high"] < max(out["open"], out["close"]):
+        return None
+    if out["low"] > min(out["open"], out["close"]):
+        return None
+    if out["high"] < out["low"]:
+        return None
+    return out
 
 
 def _validate_ohlc_row(row: Mapping[str, Any]) -> None:
