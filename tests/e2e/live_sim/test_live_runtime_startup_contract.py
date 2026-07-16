@@ -4,7 +4,6 @@ import asyncio
 import inspect
 from dataclasses import asdict
 from datetime import date, timedelta
-import time
 from typing import Any
 
 import pandas as pd
@@ -368,8 +367,14 @@ async def _initialize_runtime() -> BotContext:
     return initialize_components()
 
 
-def _publish_tick(ctx: BotContext, symbol: str, token: int, price: float) -> None:
-    now = pd.Timestamp.now(tz="UTC")
+def _publish_tick(
+    ctx: BotContext,
+    symbol: str,
+    token: int,
+    price: float,
+    *,
+    timestamp: pd.Timestamp,
+) -> None:
     tick = {
         "instrument_token": int(token),
         "symbol": symbol,
@@ -382,13 +387,69 @@ def _publish_tick(ctx: BotContext, symbol: str, token: int, price: float) -> Non
             "sell": [{"price": float(price) + 0.05, "quantity": 1000}],
         },
         "volume": 10000,
-        "timestamp": now.to_pydatetime(),
-        "exchange_timestamp": now.to_pydatetime(),
-        "timestamp_ms": float(now.timestamp() * 1000.0),
+        "timestamp": timestamp.to_pydatetime(),
+        "exchange_timestamp": timestamp.to_pydatetime(),
+        "timestamp_ms": float(timestamp.timestamp() * 1000.0),
         "source": "websocket",
     }
     assert ctx.websocket_manager is not None
     ctx.websocket_manager.publish_tick(tick)
+
+
+def _pump_runtime(
+    loop: asyncio.AbstractEventLoop,
+    ctx: BotContext,
+    *,
+    iterations: int = 100,
+) -> None:
+    for _ in range(iterations):
+        ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
+        loop.run_until_complete(asyncio.sleep(0.01))
+
+
+def _wait_until(
+    loop: asyncio.AbstractEventLoop,
+    ctx: BotContext,
+    predicate,
+    *,
+    iterations: int = 200,
+    failure_message: str,
+) -> None:
+    for _ in range(iterations):
+        ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
+        loop.run_until_complete(asyncio.sleep(0.01))
+        if predicate():
+            return
+    raise AssertionError(failure_message)
+
+
+def _quote_ltp(ctx: BotContext, symbol: str) -> float:
+    quote = ctx.data_hub.get_quote(symbol, allow_pull=False) if ctx.data_hub else None
+    if quote is None and ctx.market_data_manager is not None:
+        quote = ctx.market_data_manager.get_quote(symbol)
+    if isinstance(quote, dict):
+        value = quote.get("ltp") or quote.get("last_price")
+    else:
+        value = getattr(quote, "ltp", 0.0)
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _broker_symbol_qty(broker: Any, symbol: str) -> int:
+    return sum(
+        int(p.get("quantity", 0))
+        for p in broker.get_positions()
+        if p.get("symbol") == symbol
+    )
+
+
+def _position_manager_qty(ctx: BotContext, symbol: str) -> int:
+    position = ctx.position_manager.get_position(symbol)
+    if position is None:
+        return 0
+    return int(getattr(position, "quantity", 0) or 0)
 
 
 @pytest.mark.simulation_component
@@ -590,12 +651,21 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             ctx.order_manager.apply_broker_order_update
         )
 
-        for sym, tok, price in (
-            ("NSE:NIFTY", basket.spot_token, 25000.0),
-            (basket.futures_symbol, basket.futures_token, 25020.0),
-            (basket.selected_ce, basket.selected_ce_token, 112.0),
-            (basket.selected_pe, basket.selected_pe_token, 96.0),
-        ):
+        fixed_base_tick_time = pd.Timestamp(
+            "2026-07-16 10:00:00",
+            tz="Asia/Kolkata",
+        ).tz_convert("UTC")
+        fresh_base_tick_time = pd.Timestamp.now(tz="UTC").floor("s") - pd.Timedelta(
+            seconds=31
+        )
+        base_tick_time = max(fixed_base_tick_time, fresh_base_tick_time)
+        startup_ticks = (
+            ("NSE:NIFTY", basket.spot_token, 25000.0, 1),
+            (basket.futures_symbol, basket.futures_token, 25020.0, 2),
+            (basket.selected_ce, basket.selected_ce_token, 112.0, 3),
+            (basket.selected_pe, basket.selected_pe_token, 96.0, 4),
+        )
+        for sym, tok, price, offset_seconds in startup_ticks:
             assert core_app._register_and_subscribe_live_symbol(  # noqa: SLF001 - production app subscribe helper
                 ctx,
                 sym,
@@ -603,7 +673,20 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
                 "live_sim",
                 role="tradable_option" if sym.endswith(("CE", "PE")) else "context",
             )
-            _publish_tick(ctx, sym, int(tok), price)
+            _publish_tick(
+                ctx,
+                sym,
+                int(tok),
+                price,
+                timestamp=base_tick_time + pd.Timedelta(seconds=offset_seconds),
+            )
+            _wait_until(
+                loop,
+                ctx,
+                lambda sym=sym, price=price: _quote_ltp(ctx, sym) == float(price),
+                failure_message=f"startup tick did not reach DataHub for {sym}",
+            )
+        _pump_runtime(loop, ctx, iterations=20)
 
         assert ctx.live_orders_armed is False
         loop.run_until_complete(
@@ -612,89 +695,117 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         assert ctx.live_orders_armed is True, ctx.live_block_reason
 
         submitted_before = len(broker.get_orders())
-        ctx.strategy_runner._last_same_bar_eval_ts_by_symbol.pop(  # noqa: SLF001 - test-only throttle reset
+        _publish_tick(
+            ctx,
             basket.selected_ce,
-            None,
+            basket.selected_ce_token,
+            116.0,
+            timestamp=base_tick_time + pd.Timedelta(seconds=15),
         )
-        ctx.strategy_runner._last_periodic_eval_at_by_symbol.pop(  # noqa: SLF001 - test-only throttle reset
-            basket.selected_ce,
-            None,
+        _wait_until(
+            loop,
+            ctx,
+            lambda: _quote_ltp(ctx, basket.selected_ce) == 116.0,
+            failure_message="CE trigger tick did not reach DataHub",
         )
-        _publish_tick(ctx, basket.selected_ce, basket.selected_ce_token, 116.0)
+        _wait_until(
+            loop,
+            ctx,
+            lambda: len(broker.get_orders()) == submitted_before + 1,
+            failure_message=str(
+                {
+                    "orders": broker.get_orders(),
+                    "no_signal": ctx.strategy_manager.get_last_no_signal_decision(
+                        basket.selected_ce
+                    ),
+                    "tick_ready": ctx.market_data_manager.classify_live_tick_readiness(
+                        basket.selected_ce,
+                        basket.selected_ce_token,
+                        max_age_s=20.0,
+                    ),
+                }
+            ),
+        )
         orders = broker.get_orders()
-        for _ in range(100):
-            if len(orders) == submitted_before + 1:
-                break
-            ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
-            time.sleep(0.01)
-            orders = broker.get_orders()
-        assert len(orders) == submitted_before + 1, {
-            "orders": orders,
-            "no_signal": ctx.strategy_manager.get_last_no_signal_decision(
-                basket.selected_ce
-            ),
-            "mdm_tracked": ctx.market_data_manager.is_symbol_tracked(
-                basket.selected_ce
-            ),
-            "tick_ready": ctx.market_data_manager.classify_live_tick_readiness(
-                basket.selected_ce, basket.selected_ce_token, max_age_s=5.0
-            ),
-        }
         entry = orders[-1]
         assert entry["symbol"] == basket.selected_ce
         assert entry["transaction_type"] == "BUY"
-        for _ in range(50):
-            if entry["order_id"] in getattr(ctx.position_manager, "_orders", {}):
-                break
-            time.sleep(0.01)
-        assert entry["order_id"] in getattr(ctx.position_manager, "_orders", {})
+        _wait_until(
+            loop,
+            ctx,
+            lambda: entry["order_id"] in getattr(ctx.position_manager, "_orders", {}),
+            failure_message="entry order was not tracked internally",
+        )
 
         broker.fill_order(
             entry["order_id"], average_price=float(entry["price"] or 116.0)
         )
-        position = ctx.position_manager.get_position(basket.selected_ce)
-        assert position is not None
-        assert int(getattr(position, "quantity", 0)) > 0
-        assert ctx.bracket_manager.is_symbol_managed(basket.selected_ce)
+        _wait_until(
+            loop,
+            ctx,
+            lambda: _position_manager_qty(ctx, basket.selected_ce) > 0,
+            failure_message="entry fill did not update PositionManager",
+        )
+        _wait_until(
+            loop,
+            ctx,
+            lambda: ctx.bracket_manager.is_symbol_managed(basket.selected_ce),
+            failure_message="entry fill did not activate bracket management",
+        )
 
         # Let production bracket logic see the target-side market move through the
         # normal MDM/DataHub path, then fill the resulting simulated exit order.
-        _publish_tick(ctx, basket.selected_ce, basket.selected_ce_token, 200.0)
-        target_orders: list[dict[str, Any]] = []
-        for _ in range(50):
-            target_orders = [
-                order
-                for order in broker.get_orders()
-                if order["order_id"] != entry["order_id"]
+        _publish_tick(
+            ctx,
+            basket.selected_ce,
+            basket.selected_ce_token,
+            200.0,
+            timestamp=base_tick_time + pd.Timedelta(seconds=30),
+        )
+        _wait_until(
+            loop,
+            ctx,
+            lambda: _quote_ltp(ctx, basket.selected_ce) == 200.0,
+            failure_message="CE target tick did not reach DataHub",
+        )
+        _wait_until(
+            loop,
+            ctx,
+            lambda: any(
+                order["order_id"] != entry["order_id"]
                 and order.get("transaction_type") == "SELL"
-            ]
-            if target_orders:
-                break
-            ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
-            time.sleep(0.01)
-        assert target_orders, broker.get_orders()
+                for order in broker.get_orders()
+            ),
+            failure_message=f"target SELL order did not appear: {broker.get_orders()}",
+        )
+        target_orders = [
+            order
+            for order in broker.get_orders()
+            if order["order_id"] != entry["order_id"]
+            and order.get("transaction_type") == "SELL"
+        ]
         target_id = target_orders[-1]["order_id"]
-        for _ in range(50):
-            if target_id in getattr(ctx.order_manager, "_orders", {}):
-                break
-            time.sleep(0.01)
-        assert target_id in getattr(ctx.order_manager, "_orders", {})
+        _wait_until(
+            loop,
+            ctx,
+            lambda: target_id in getattr(ctx.order_manager, "_orders", {}),
+            failure_message="target order was not tracked internally",
+        )
         broker.fill_order(target_id, average_price=200.0)
+        _pump_runtime(loop, ctx)
         loop.run_until_complete(core_app._reconcile_state(ctx))  # noqa: SLF001
         assert ctx.position_reconciliation_completed is True
 
-        final_qty = sum(
-            int(p.get("quantity", 0))
-            for p in broker.get_positions()
-            if p.get("symbol") == basket.selected_ce
+        _wait_until(
+            loop,
+            ctx,
+            lambda: _broker_symbol_qty(broker, basket.selected_ce) == 0
+            and _position_manager_qty(ctx, basket.selected_ce) == 0
+            and not ctx.bracket_manager.is_symbol_managed(basket.selected_ce),
+            failure_message="exit fill did not flatten broker/internal state and clear bracket",
         )
-        assert final_qty == 0
-        final_position = ctx.position_manager.get_position(basket.selected_ce)
-        assert (
-            final_position is None or int(getattr(final_position, "quantity", 0)) == 0
-        )
-        if ctx.bracket_manager.is_symbol_managed(basket.selected_ce):
-            ctx.bracket_manager.reconcile_symbol_flat(basket.selected_ce)
+        assert _broker_symbol_qty(broker, basket.selected_ce) == 0
+        assert _position_manager_qty(ctx, basket.selected_ce) == 0
         assert not ctx.bracket_manager.is_symbol_managed(basket.selected_ce)
     finally:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
