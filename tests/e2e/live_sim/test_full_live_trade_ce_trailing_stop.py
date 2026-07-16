@@ -1,6 +1,6 @@
 import pytest
 
-pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.live_runtime_e2e]
+pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.simulation_component]
 
 
 def test_full_live_trade_ce_trailing_stop(live_sim_system):

@@ -2,7 +2,7 @@ import pytest
 
 from .assertions import assert_candle_ssot_consistent
 
-pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.live_runtime_e2e]
+pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.simulation_component]
 
 
 def test_full_live_trade_ce_target_exit(live_sim_system):

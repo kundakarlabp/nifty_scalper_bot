@@ -1,6 +1,6 @@
 import pytest
 
-pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.live_runtime_e2e]
+pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.simulation_component]
 
 
 def test_partial_fill_and_bracket_resize(live_sim_system):

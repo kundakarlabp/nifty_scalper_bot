@@ -1,6 +1,6 @@
 import pytest
 
-pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.live_runtime_e2e]
+pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.simulation_component]
 
 
 def test_context_candidate_side_isolation(live_sim_system):
