@@ -4847,7 +4847,7 @@ def _resolve_startup_risk_initial_balance(
         .strip()
         .upper()
     )
-    if execution_mode == "LIVE":
+    if execution_mode in {"LIVE", "LIVE_SIMULATION"}:
         if startup_available_balance is None:
             raise BrokerBalanceUnavailableError(
                 "LIVE startup requires validated broker balance"
@@ -4961,6 +4961,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         api_secret=config.broker.api_secret,
         access_token=config.broker.access_token,
     )
+    _assert_live_simulation_adapter_safe(broker_client, component="broker")
 
     async def _provider_notify(event: str, data: dict[str, Any]) -> None:
         """Forward provider notifications to telegram notifier. Args: event/data. Returns: None. Raises: none."""
@@ -5337,6 +5338,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             heartbeat_interval_seconds=20.0,
             heartbeat_timeout_seconds=10.0,
         )
+        _assert_live_simulation_adapter_safe(websocket_manager, component="websocket")
 
         # WebSocketManager is the primary streamer in WS mode.
         streamer = websocket_manager
@@ -5781,7 +5783,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         "ENABLE_LIVE",
         default=settings.enable_live,
     )
-    live_possible = bool(live_toggle_env and settings.orders.enable_live)
+    live_simulation_mode = _is_live_simulation_mode()
+    live_possible = bool(
+        (live_toggle_env and settings.orders.enable_live) or live_simulation_mode
+    )
     paper_toggle_env = coalesce_bool("PAPER__ENABLED", default=not live_possible)
     shadow_mode_env = get_bool("SHADOW_MODE", default=not live_possible)
     paper_initial = bool((not live_possible) or paper_toggle_env or shadow_mode_env)
@@ -6265,7 +6270,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         )
     market_data_manager.subscribe_bars(strategy_runner.ingest_historical_bar)
     strategy_runner.restore_trades(persistent_state.load_trades())
-    settings.enable_live = bool(live_toggle_env)
+    settings.enable_live = bool(live_toggle_env or live_simulation_mode)
     mandatory_paper = not live_possible
     paper_state: dict[str, bool] = {"enabled": bool(paper_initial or mandatory_paper)}
     ctx_ref: dict[str, BotContext | None] = {"ctx": None}
@@ -7498,6 +7503,40 @@ def force_enable_trading_override() -> str:
 _SYNTHETIC_FALLBACK_SPOT = 25600.0
 
 
+def _is_live_simulation_mode(configured_mode: str | None = None) -> bool:
+    """Return True for the no-network live-simulation runtime mode."""
+
+    mode = (
+        str(
+            configured_mode
+            if configured_mode is not None
+            else os.getenv("EXECUTION_MODE", "")
+        )
+        .strip()
+        .upper()
+    )
+    mode_name = mode.rsplit(".", 1)[-1]
+    return mode_name == "LIVE_SIMULATION"
+
+
+def _assert_live_simulation_adapter_safe(adapter: Any, *, component: str) -> None:
+    """Fail fast if LIVE_SIMULATION is wired to a real external adapter."""
+
+    if not _is_live_simulation_mode():
+        return
+    cls = adapter.__class__
+    module = str(getattr(cls, "__module__", ""))
+    name = str(getattr(cls, "__name__", ""))
+    real_markers = (
+        "nifty_scalper_bot.data.rest",
+        "nifty_scalper_bot.streaming.websocket_manager",
+    )
+    if name in {"ZerodhaKiteClient", "WebSocketManager"} or module.startswith(
+        real_markers
+    ):
+        raise RuntimeError(f"LIVE_SIMULATION requires simulated {component} adapter")
+
+
 def _is_live_execution_mode(configured_mode: str | None = None) -> bool:
     """Return True when the bot is configured to place live broker orders.
 
@@ -7523,7 +7562,8 @@ def _is_live_execution_mode(configured_mode: str | None = None) -> bool:
         .strip()
         .upper()
     )
-    if mode == "LIVE":
+    mode_name = mode.rsplit(".", 1)[-1]
+    if mode_name in {"LIVE", "LIVE_SIMULATION"}:
         return True
     flag = str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
     return flag in {"1", "true", "yes", "on"}
@@ -9343,7 +9383,10 @@ async def _recompute_and_push_runtime_readiness(
     )
     runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
     evaluation_ready = bool(data_hard_ready and runner_running)
-    live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
+    configured_mode = str(
+        getattr(getattr(ctx, "settings", None), "execution_mode", "") or ""
+    ).strip().upper()
+    live_mode = _is_live_execution_mode(configured_mode) or _is_live_execution_mode()
     market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(
         getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)
@@ -10071,6 +10114,8 @@ def _register_and_subscribe_live_symbol(
         )
     mdm = getattr(ctx, "market_data_manager", None)
     if mdm is not None and resolved_token is not None:
+        if hasattr(mdm, "ensure_tracking"):
+            mdm.ensure_tracking(normalized, seed=False, subscribe=False)
         if hasattr(mdm, "register_symbol"):
             mdm.register_symbol(normalized, int(resolved_token))
         if hasattr(mdm, "request_token_subscription"):

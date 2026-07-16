@@ -1,0 +1,61 @@
+name: E2E live simulation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  simulation-components:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ALLOW_NETWORK: "false"
+      ALLOW_REAL_BROKER: "false"
+      BROKER_SIMULATION: "true"
+      EXECUTION_MODE: LIVE_SIMULATION
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - run: pytest -q -m simulation_component tests/e2e/live_sim
+      - name: Upload component artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-sim-component-artifacts
+          path: |
+            e2e_event_timeline.json
+            e2e_orders.json
+            e2e_positions.json
+            e2e_candles.json
+          if-no-files-found: ignore
+
+  live-runtime-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ALLOW_NETWORK: "false"
+      ALLOW_REAL_BROKER: "false"
+      BROKER_SIMULATION: "true"
+      EXECUTION_MODE: LIVE_SIMULATION
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - run: pytest -q -m live_runtime_e2e tests/e2e/live_sim
+      - name: Upload runtime artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-runtime-e2e-artifacts
+          path: |
+            e2e_event_timeline.json
+            e2e_orders.json
+            e2e_positions.json
+            e2e_candles.json
+          if-no-files-found: ignore

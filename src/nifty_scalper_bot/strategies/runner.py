@@ -3733,7 +3733,7 @@ class StrategyRunner:
     def _is_symbol_execution_ready(self, symbol: str) -> bool:
         """Return per-symbol execution readiness in live mode. Args: symbol. Returns: bool. Raises: none."""
         mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-        is_live_mode = mode == "LIVE" or (
+        is_live_mode = mode in {"LIVE", "LIVE_SIMULATION"} or (
             str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
             in {"1", "true", "yes", "on"}
         )
@@ -16092,7 +16092,7 @@ class StrategyRunner:
                 False, "outside_market_hours", details={"trace_id": trace_id}
             )
         mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-        is_live_mode = mode == "LIVE" or (
+        is_live_mode = mode in {"LIVE", "LIVE_SIMULATION"} or (
             str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
             in {"1", "true", "yes", "on"}
         )

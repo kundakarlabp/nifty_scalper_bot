@@ -2583,7 +2583,12 @@ class MarketDataManager:
             )
             self._desired_tokens.add(token_int)
             if normalized_symbol:
-                material_transition = (not was_desired) or previous_token != token_int
+                missing_generation = normalized_symbol not in self._symbol_subscription_generation
+                material_transition = (
+                    (not was_desired)
+                    or previous_token != token_int
+                    or missing_generation
+                )
                 self._set_symbol_token_mapping(
                     normalized_symbol, token_int, source="request_token_subscription"
                 )

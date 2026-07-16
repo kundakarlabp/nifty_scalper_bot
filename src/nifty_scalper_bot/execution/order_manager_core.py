@@ -741,8 +741,9 @@ class OrderManager:
     def _execution_mode_env() -> str:
         """Return normalized execution mode from environment."""
         mode = str(os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
-        if mode in {"LIVE", "PAPER", "SHADOW", "SIMULATION"}:
-            return mode
+        mode_name = mode.rsplit(".", 1)[-1]
+        if mode_name in {"LIVE", "LIVE_SIMULATION", "PAPER", "SHADOW", "SIMULATION"}:
+            return mode_name
         return "SHADOW"
 
     @classmethod
@@ -764,8 +765,8 @@ class OrderManager:
     def _order_live_execution_enabled(cls) -> bool:
         """Return True only when actual live order execution is enabled."""
         return (
-            cls._execution_mode_env() == "LIVE"
-            and cls._live_flag_enabled()
+            cls._execution_mode_env() in {"LIVE", "LIVE_SIMULATION"}
+            and (cls._live_flag_enabled() or cls._execution_mode_env() == "LIVE_SIMULATION")
             and not cls._shadow_mode_enabled()
             and not cls._paper_mode_enabled()
         )
@@ -781,7 +782,7 @@ class OrderManager:
 
     def is_live_mode(self) -> bool:
         """Return True only when this manager is allowed to place live orders."""
-        return self.execution_mode == "LIVE" and self._order_live_execution_enabled()
+        return self.execution_mode in {"LIVE", "LIVE_SIMULATION"} and self._order_live_execution_enabled()
 
     @classmethod
     def _sanitize_broker_error(cls, exc_or_text: Any) -> str:

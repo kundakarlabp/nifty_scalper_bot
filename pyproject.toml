@@ -15,6 +15,7 @@ dependencies = [
     "pytz>=2024.1",
     "PyYAML>=6.0,<7",
     "prometheus-client>=0.20,<1",
+    "streamlit>=1.40,<2",
     "tenacity>=8.2,<10",
     "uvicorn>=0.29,<1",
     "fastapi>=0.111,<1",
