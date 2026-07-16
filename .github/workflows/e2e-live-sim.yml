@@ -20,7 +20,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -r requirements.txt
-      - run: pytest -q -m e2e_live_sim tests/e2e/live_sim
+      - run: pytest -q -m simulation_component tests/e2e/live_sim
+      - run: pytest -q -m live_runtime_e2e tests/e2e/live_sim
       - name: Upload simulation artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4

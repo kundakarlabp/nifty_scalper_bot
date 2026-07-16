@@ -3,6 +3,8 @@ import pytest
 from .event_recorder import EventRecorder
 from .virtual_clock import VirtualClock
 
+pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.simulation_component]
+
 
 def test_event_recorder_assertions_and_diagnostics():
     events = EventRecorder(VirtualClock())

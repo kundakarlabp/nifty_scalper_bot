@@ -33,6 +33,7 @@ from .market_scenarios import CEBreakoutScenario
 from .simulated_broker import SimulatedBroker
 from .simulated_exchange import Instrument, SimulatedExchange
 from .simulated_history_provider import SimulatedHistoryProvider, make_history
+from .simulated_websocket import SimulatedWebSocket
 from .virtual_clock import VirtualClock
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -162,6 +163,7 @@ class LiveSimSystem:
     invariants: TradingInvariantChecker
     scenario: CEBreakoutScenario
     market_data: MarketDataManager
+    websocket: SimulatedWebSocket
     indicator_engine: IndicatorEngine
     strategy_manager: SignalStrategyManager
     core_strategy_manager: CoreStrategyManager
@@ -190,16 +192,7 @@ class LiveSimSystem:
         assert isinstance(self.risk_manager, RiskManager)
         assert isinstance(self.order_manager, OrderManager)
         for symbol, inst in self.exchange.instruments.items():
-            self.market_data.register_symbol(symbol, inst.token)
-            self.market_data.request_token_subscription(inst.token, symbol=symbol)
-            with self.market_data._lock:  # noqa: SLF001 - deterministic simulated ACK
-                self.market_data._tracked_symbols.add(symbol)  # noqa: SLF001
-                self.market_data._dispatched_subscriptions.add(
-                    inst.token
-                )  # noqa: SLF001
-                self.market_data._confirmed_subscriptions.add(
-                    inst.token
-                )  # noqa: SLF001
+            self.websocket.activate(symbol, inst.token)
             self.market_data.subscribe(symbol, self.runner.on_datahub_tick)
             self.runner._active_symbols.add(symbol)  # noqa: SLF001
             self.runner._tracked_symbols.add(symbol)  # noqa: SLF001
@@ -476,6 +469,7 @@ def build_trading_runtime(
         )
     resolver = FixedInstrumentResolver(instruments)
     market_data = MarketDataManager(broker=broker, websocket=None, cache_len=250)
+    websocket = SimulatedWebSocket(market_data, event_observer)
     indicator = IndicatorEngine()
     position_manager = PositionManager(str(tmp_path / "positions.json"))
     observers = RuntimeObservers()
@@ -534,6 +528,7 @@ def build_trading_runtime(
         invariants=TradingInvariantChecker(broker),
         scenario=scenario,
         market_data=market_data,
+        websocket=websocket,
         indicator_engine=indicator,
         strategy_manager=strategy_manager,
         core_strategy_manager=core_strategy_manager,

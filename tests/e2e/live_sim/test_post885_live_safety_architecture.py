@@ -6,7 +6,7 @@ import pytest
 
 from nifty_scalper_bot.strategies.runner import EntryEvaluationRoute
 
-pytestmark = pytest.mark.e2e_live_sim
+pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.simulation_component]
 
 
 def _mark_activation(

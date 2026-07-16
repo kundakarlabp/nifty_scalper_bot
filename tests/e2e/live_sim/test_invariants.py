@@ -4,6 +4,8 @@ from .invariants import InternalState, TradingInvariantChecker
 from .simulated_broker import SimulatedBroker
 from .virtual_clock import VirtualClock
 
+pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.simulation_component]
+
 
 def test_invariant_checker_reports_precise_failures():
     broker = SimulatedBroker(VirtualClock())
