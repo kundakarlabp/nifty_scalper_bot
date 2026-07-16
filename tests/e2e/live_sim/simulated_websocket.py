@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -14,12 +16,57 @@ class SubscriptionProof:
 
 
 class SimulatedWebSocket:
+    is_simulated_adapter = True
     """Production-stream seam for deterministic subscription lifecycle tests."""
 
     def __init__(self, market_data: Any, recorder: Any | None = None) -> None:
         self.market_data = market_data
         self.recorder = recorder
         self.transitions: list[SubscriptionProof] = []
+        self._callbacks: dict[str, Any] = {}
+        self.connected = False
+
+
+    def set_callbacks(self, **callbacks: Any) -> None:
+        existing = getattr(self, "_callbacks", {})
+        existing.update(callbacks)
+        self._callbacks = existing
+
+    def connect(self) -> None:
+        self.connected = True
+
+        callback = (
+            self._callbacks.get("on_connect")
+            or self._callbacks.get("on_open")
+        )
+
+        if callback is not None:
+            result = callback()
+            if inspect.isawaitable(result):
+                asyncio.get_event_loop().run_until_complete(result)
+
+    def publish_tick(self, tick: dict[str, Any]) -> None:
+        if not self.connected:
+            raise RuntimeError("simulated websocket is not connected")
+
+        callback = (
+            self._callbacks.get("on_ticks")
+            or self._callbacks.get("on_tick")
+        )
+
+        if callback is None:
+            raise RuntimeError(
+                "production websocket tick callback was not registered"
+            )
+
+        try:
+            result = callback([tick])
+        except TypeError:
+            result = callback(tick)
+
+        if inspect.isawaitable(result):
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(result)
 
     def request(self, symbol: str, token: int) -> SubscriptionProof:
         self.market_data.register_symbol(symbol, token)

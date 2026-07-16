@@ -7519,22 +7519,38 @@ def _is_live_simulation_mode(configured_mode: str | None = None) -> bool:
     return mode_name == "LIVE_SIMULATION"
 
 
+def _is_explicit_simulated_adapter(adapter: Any) -> bool:
+    if adapter is None:
+        return False
+
+    if bool(getattr(adapter, "is_simulated_adapter", False)):
+        return True
+
+    wrapped = getattr(adapter, "client", None)
+    if wrapped is not None and bool(
+        getattr(wrapped, "is_simulated_adapter", False)
+    ):
+        return True
+
+    wrapped = getattr(adapter, "_broker", None)
+    if wrapped is not None and bool(
+        getattr(wrapped, "is_simulated_adapter", False)
+    ):
+        return True
+
+    return False
+
+
 def _assert_live_simulation_adapter_safe(adapter: Any, *, component: str) -> None:
     """Fail fast if LIVE_SIMULATION is wired to a real external adapter."""
 
     if not _is_live_simulation_mode():
         return
-    cls = adapter.__class__
-    module = str(getattr(cls, "__module__", ""))
-    name = str(getattr(cls, "__name__", ""))
-    real_markers = (
-        "nifty_scalper_bot.data.rest",
-        "nifty_scalper_bot.streaming.websocket_manager",
-    )
-    if name in {"ZerodhaKiteClient", "WebSocketManager"} or module.startswith(
-        real_markers
-    ):
-        raise RuntimeError(f"LIVE_SIMULATION requires simulated {component} adapter")
+
+    if not _is_explicit_simulated_adapter(adapter):
+        raise RuntimeError(
+            f"LIVE_SIMULATION requires an explicitly simulated {component} adapter"
+        )
 
 
 def _is_live_execution_mode(configured_mode: str | None = None) -> bool:

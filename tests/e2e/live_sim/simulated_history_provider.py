@@ -17,6 +17,7 @@ class HistoryRequest:
 
 
 class SimulatedHistoryProvider:
+    is_simulated_adapter = True
     def __init__(self, clock, recorder=None) -> None:
         self.clock = clock
         self.recorder = recorder
