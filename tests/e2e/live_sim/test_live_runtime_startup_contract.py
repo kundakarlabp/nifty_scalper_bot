@@ -171,8 +171,8 @@ def test_live_runtime_starts_from_production_composition_with_simulated_adapters
     monkeypatch.setenv("WEBSOCKET__DISABLED", "false")
     monkeypatch.setenv("TELEGRAM__ENABLED", "false")
     monkeypatch.setenv("TELEGRAM__WEBHOOK_ENABLED", "false")
-    monkeypatch.setenv("SHADOW_MODE", "true")
-    monkeypatch.setenv("PAPER__ENABLED", "true")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
 
     monkeypatch.setattr(core_app, "ZerodhaKiteClient", _NoNetworkBroker)
     monkeypatch.setattr(core_app, "RobustDataProvider", _NoNetworkRobustProvider)
@@ -197,6 +197,8 @@ def test_live_runtime_starts_from_production_composition_with_simulated_adapters
     assert isinstance(ctx.bracket_manager, BracketManager)
     assert isinstance(ctx.broker_client, _NoNetworkRobustProvider)
     assert isinstance(ctx.websocket_manager, _NoNetworkWebSocketManager)
+    assert ctx.shadow_mode_enabled is False
+    assert ctx.settings.enable_live is True
 
     ctx.instrument_manager.load()
     basket = ctx.instrument_manager.get_active_nifty_contracts(25000.0)
