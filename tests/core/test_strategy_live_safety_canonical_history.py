@@ -21,7 +21,7 @@ class MDM:
     def get_ohlc_bars(self, symbol, *, limit=None):
         return self.rows[-limit:] if limit else list(self.rows)
 
-    def get_latest_closed_bar(self, symbol, interval="1min"):
+    def get_latest_closed_bar(self, symbol):
         return self.rows[-1] if self.rows else None
 
 

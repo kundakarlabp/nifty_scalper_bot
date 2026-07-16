@@ -672,6 +672,13 @@ def apply_patches() -> None:
         if signal is None or not _is_live(self):
             return signal
         signal = _add_identity(signal)
+        metadata = dict(getattr(signal, "metadata", {}) or {})
+        if bool(metadata.get("is_approved")):
+            signal = _final_filter(self, signal, trace_id)
+            if signal is None:
+                return None
+            signal = _add_identity(signal)
+            metadata = dict(getattr(signal, "metadata", {}) or {})
         candidate_symbol = normalize_symbol(getattr(signal, "symbol", ""))
         block = _candidate_execution_block(self, candidate_symbol)
         if block is not None:
@@ -683,13 +690,6 @@ def apply_patches() -> None:
                 block,
             )
             return None
-        metadata = dict(getattr(signal, "metadata", {}) or {})
-        if bool(metadata.get("is_approved")):
-            signal = _final_filter(self, signal, trace_id)
-            if signal is None:
-                return None
-            signal = _add_identity(signal)
-            metadata = dict(getattr(signal, "metadata", {}) or {})
         orderflow_block = _orderflow_selected_option_block(signal)
         if orderflow_block is not None:
             _record(

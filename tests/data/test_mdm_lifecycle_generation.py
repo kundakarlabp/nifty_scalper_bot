@@ -343,7 +343,21 @@ def test_runner_live_tick_classifier_uses_canonical_freshness_policy(
             captured["symbol"] = symbol
             captured["token"] = token
             captured["max_age_s"] = max_age_s
-            return {"ready": False, "reason": "sentinel_block"}
+            return {
+                "symbol": symbol,
+                "token": token,
+                "tracked": True,
+                "subscription_requested": True,
+                "subscription_confirmed": True,
+                "token_matches": True,
+                "expected_generation": 1,
+                "tick_generation": None,
+                "current_generation_tick_received": False,
+                "tick_age_s": None,
+                "fresh": False,
+                "ready": False,
+                "reason": "sentinel_block",
+            }
 
     class _FakeIndicator:
         def get_history(self, symbol):

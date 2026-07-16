@@ -57,7 +57,7 @@ class MDM:
         ]
         return rows[-limit:] if limit else rows
 
-    def get_latest_closed_bar(self, symbol, interval="1min"):
+    def get_latest_closed_bar(self, symbol):
         return self.get_ohlc_bars(symbol, limit=1)[-1]
 
     def time_since_last_live_ws_tick(self, symbol):
@@ -128,3 +128,50 @@ def test_generated_non_selected_candidate_fails_closed():
 
     assert block is not None
     assert block["reason"] == "live_selected_contract_mismatch"
+
+
+def test_candidate_readiness_applies_to_final_filtered_signal_symbol(monkeypatch):
+    checked = []
+    ce_a = "NFO:NIFTY2662324050CE"
+    ce_b = "NFO:NIFTY2662324050PE"
+    signal = Signal(
+        "BUY",
+        ce_a,
+        1,
+        0.9,
+        "ok",
+        90.0,
+        120.0,
+        metadata={"timestamp": time.time(), "is_approved": True},
+    )
+    mgr = SimpleNamespace(
+        _filter_signal=lambda _signal: True,
+        _orchestrator=SimpleNamespace(
+            filter_signal=lambda _signal, _metadata, _pm: Signal(
+                _signal.action,
+                ce_b,
+                _signal.quantity,
+                _signal.confidence,
+                _signal.reason,
+                _signal.stop_loss,
+                _signal.take_profit,
+                metadata={
+                    **_signal.metadata,
+                    "timestamp": time.time(),
+                    "is_approved": False,
+                },
+            )
+        ),
+        _position_manager=None,
+        _last_no_signal_decision_by_symbol={},
+    )
+    monkeypatch.setattr(
+        guard, "_candidate_execution_block", lambda _m, s: checked.append(s) or None
+    )
+
+    filtered = guard._final_filter(mgr, guard._add_identity(signal), "trace")
+    filtered = guard._add_identity(filtered)
+    block = guard._candidate_execution_block(mgr, filtered.symbol)
+
+    assert block is None
+    assert checked == [ce_b]

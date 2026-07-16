@@ -22,10 +22,18 @@ class MDM:
 
     def classify_live_tick_readiness(self, symbol, token, *, max_age_s):
         return {
-            "expected": True,
-            "confirmed": self.confirmed,
+            "symbol": symbol,
+            "token": token,
+            "tracked": True,
+            "subscription_requested": True,
+            "subscription_confirmed": self.confirmed,
+            "token_matches": True,
+            "expected_generation": 1,
+            "tick_generation": 1 if self.current else None,
             "current_generation_tick_received": self.current,
-            "first_tick_received": self.current,
+            "tick_age_s": 1.0 if self.current else None,
+            "fresh": self.current,
+            "ready": self.current and self.confirmed,
             "reason": "ready" if self.current and self.confirmed else self.reason,
         }
 
@@ -40,6 +48,7 @@ def runner(mdm):
     r._context_required_bars = 2
     r._option_required_bars = 2
     r._history_count_for_symbol = lambda _s: 10
+    r._mdm_callback_registered = True
     return r
 
 
@@ -65,3 +74,29 @@ def test_current_generation_tick_promotes_symbol():
     )
     assert activation.executable is True
     assert activation.blockers == ()
+
+
+def test_runner_consumes_canonical_mdm_readiness_schema():
+    activation = runner(MDM(confirmed=True, current=True))._live_symbol_activation(
+        "NFO:NIFTY26JUN24000CE"
+    )
+    assert activation.executable is True
+
+
+def test_runner_activation_uses_mdm_tracking_not_runner_sets():
+    class UntrackedMDM(MDM):
+        def classify_live_tick_readiness(self, symbol, token, *, max_age_s):
+            snapshot = super().classify_live_tick_readiness(
+                symbol, token, max_age_s=max_age_s
+            )
+            snapshot["tracked"] = False
+            return snapshot
+
+    r = runner(UntrackedMDM(confirmed=True, current=True))
+    r._active_symbols = {"NFO:NIFTY26JUN24000CE"}
+    r._tracked_symbols = {"NFO:NIFTY26JUN24000CE"}
+
+    activation = r._live_symbol_activation("NFO:NIFTY26JUN24000CE")
+
+    assert activation.executable is False
+    assert "mdm_not_tracked" in activation.blockers
