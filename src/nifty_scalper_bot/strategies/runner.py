@@ -4838,6 +4838,10 @@ class StrategyRunner:
     def _subscribe_symbol(self, symbol: str) -> None:
         """Subscribe to tick updates for a symbol."""
         normalized_symbol = normalize_symbol(symbol)
+        if not hasattr(self, "_datahub_registered_symbols"):
+            self._datahub_registered_symbols = set()
+        if not hasattr(self, "_callbacks"):
+            self._callbacks = {}
         if self._data_hub is not None:
             if normalized_symbol not in self._datahub_registered_symbols:
                 self._data_hub.subscribe_ticks(symbol, self.on_datahub_tick)
@@ -11951,8 +11955,12 @@ class StrategyRunner:
             return EntryEvaluationRoute.POSITION_MANAGEMENT
         if roles & {"selected_option", "trigger_candidate"}:
             return EntryEvaluationRoute.OPTION_CANDIDATE
-        if roles & {"underlying", "spot_context", "futures_context"}:
+        if roles & {"underlying", "spot_context"}:
             return EntryEvaluationRoute.UNDERLYING
+        if "futures_trigger_candidate" in roles:
+            return EntryEvaluationRoute.UNDERLYING
+        if "futures_context" in roles:
+            return EntryEvaluationRoute.CONTEXT_ONLY
         return EntryEvaluationRoute.CONTEXT_ONLY
 
     def _symbol_may_trigger_entry(self, symbol: str) -> bool:
