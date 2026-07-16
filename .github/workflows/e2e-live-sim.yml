@@ -18,8 +18,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -r requirements.txt
-      - run: pytest -q -m simulation_component tests/e2e/live_sim
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+      - name: Run simulation component tests
+        run: python -m pytest -q -m simulation_component tests/e2e/live_sim
       - name: Upload component artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -45,8 +50,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -r requirements.txt
-      - run: pytest -q -m live_runtime_e2e tests/e2e/live_sim
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+      - name: Run live runtime E2E tests
+        run: python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim
       - name: Upload runtime artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
