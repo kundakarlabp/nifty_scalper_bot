@@ -13,7 +13,7 @@ jobs:
       ALLOW_NETWORK: "false"
       ALLOW_REAL_BROKER: "false"
       BROKER_SIMULATION: "true"
-      EXECUTION_MODE: LIVE
+      EXECUTION_MODE: LIVE_SIMULATION
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,7 +40,7 @@ jobs:
       ALLOW_NETWORK: "false"
       ALLOW_REAL_BROKER: "false"
       BROKER_SIMULATION: "true"
-      EXECUTION_MODE: LIVE
+      EXECUTION_MODE: LIVE_SIMULATION
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

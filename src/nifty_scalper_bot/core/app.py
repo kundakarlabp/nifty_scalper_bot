@@ -7515,7 +7515,8 @@ def _is_live_simulation_mode(configured_mode: str | None = None) -> bool:
         .strip()
         .upper()
     )
-    return mode == "LIVE_SIMULATION"
+    mode_name = mode.rsplit(".", 1)[-1]
+    return mode_name == "LIVE_SIMULATION"
 
 
 def _assert_live_simulation_adapter_safe(adapter: Any, *, component: str) -> None:
@@ -7561,7 +7562,8 @@ def _is_live_execution_mode(configured_mode: str | None = None) -> bool:
         .strip()
         .upper()
     )
-    if mode in {"LIVE", "LIVE_SIMULATION"}:
+    mode_name = mode.rsplit(".", 1)[-1]
+    if mode_name in {"LIVE", "LIVE_SIMULATION"}:
         return True
     flag = str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
     return flag in {"1", "true", "yes", "on"}
@@ -9381,7 +9383,10 @@ async def _recompute_and_push_runtime_readiness(
     )
     runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
     evaluation_ready = bool(data_hard_ready and runner_running)
-    live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
+    configured_mode = str(
+        getattr(getattr(ctx, "settings", None), "execution_mode", "") or ""
+    ).strip().upper()
+    live_mode = _is_live_execution_mode(configured_mode) or _is_live_execution_mode()
     market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(
         getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)
@@ -10109,6 +10114,8 @@ def _register_and_subscribe_live_symbol(
         )
     mdm = getattr(ctx, "market_data_manager", None)
     if mdm is not None and resolved_token is not None:
+        if hasattr(mdm, "ensure_tracking"):
+            mdm.ensure_tracking(normalized, seed=False, subscribe=False)
         if hasattr(mdm, "register_symbol"):
             mdm.register_symbol(normalized, int(resolved_token))
         if hasattr(mdm, "request_token_subscription"):
