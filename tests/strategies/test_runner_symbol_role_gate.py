@@ -12,6 +12,7 @@ from nifty_scalper_bot.core.message_bus import MessageBus
 from nifty_scalper_bot.strategies.runner import (
     EntryEvaluationRoute,
     MarketRegime,
+    MarketState,
     RunnerState,
     StrategyRunner,
     StrategyRunnerConfig,
@@ -203,12 +204,21 @@ class _DataHub:
         self.subscribed.append((symbol, callback))
 
 
-def _build_phase9_runner(monkeypatch, *, current_generation_ready: bool = True):
+def _build_phase9_runner(
+    monkeypatch,
+    *,
+    current_generation_ready: bool = True,
+    expire_boot_grace: bool = True,
+):
     monkeypatch.setenv("BROKER_API_KEY", "test")
     monkeypatch.setenv("BROKER_API_SECRET", "test")
     monkeypatch.setenv("BROKER_ACCESS_TOKEN", "test")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.get_market_state",
+        lambda: MarketState.OPEN,
+    )
     selected_ce = "NFO:NIFTY26JUN24000CE"
     risk_manager = SimpleNamespace(
         available_balance=100000.0,
@@ -261,7 +271,12 @@ def _build_phase9_runner(monkeypatch, *, current_generation_ready: bool = True):
     runner_obj._runtime_live_orders_armed = True
     runner_obj._runtime_readiness_reason = "ready"
     runner_obj.ready = True
-    runner_obj._runner_state = RunnerState.EXECUTION_ENABLED
+    runner_obj._runner_state = (
+        RunnerState.EXECUTION_ENABLED if expire_boot_grace else RunnerState.STARTING
+    )
+    runner_obj._startup_timestamp = (
+        time.time() - 16.0 if expire_boot_grace else time.time()
+    )
     runner_obj._emit_runner_eval_decision = Mock()
     runner_obj._health_watchdog = lambda: None
     runner_obj._should_log_throttled = lambda *_args, **_kwargs: False
@@ -348,6 +363,27 @@ def test_underlying_generated_candidate_activation_failure_blocks_after_signal(
         call.kwargs.get("reason") == "candidate_activation_pending"
         for call in runner_obj._emit_runner_eval_decision.call_args_list
     )
+
+
+def test_underlying_does_not_evaluate_during_boot_grace(monkeypatch):
+    runner_obj, strategy_manager, risk_manager, order_manager, _ = (
+        _build_phase9_runner(monkeypatch, expire_boot_grace=False)
+    )
+
+    runner_obj._on_tick(
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "last_price": 24000.0,
+            "timestamp": time.time(),
+            "trace_id": "boot-grace",
+            "source": "ws",
+        },
+    )
+
+    strategy_manager.generate_signal.assert_not_called()
+    risk_manager.validate.assert_not_called()
+    order_manager.submit.assert_not_called()
 
 
 def test_underlying_does_not_require_option_subscription_activation():
