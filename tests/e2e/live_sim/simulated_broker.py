@@ -65,6 +65,7 @@ class SimulatedTrade:
 
 
 class SimulatedBroker:
+    is_simulated_adapter = True
     """Deterministic broker/matcher.
 
     Long protective stops trigger on bid or LTP <= stop.

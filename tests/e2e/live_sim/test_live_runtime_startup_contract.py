@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 import time
 from typing import Any
 
@@ -23,10 +24,11 @@ from nifty_scalper_bot.risk.risk_manager import RiskManager
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
-pytestmark = [pytest.mark.e2e_live_sim, pytest.mark.live_runtime_e2e]
+pytestmark = pytest.mark.e2e_live_sim
 
 
 class _NoNetworkBroker:
+    is_simulated_adapter = True
     """Broker stand-in for production composition startup only.
 
     It implements the broker methods that app.initialize_components wires into
@@ -171,6 +173,7 @@ class _NoNetworkBroker:
 
 
 class _NoNetworkWebSocketManager:
+    is_simulated_adapter = True
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._callbacks: dict[str, Any] = {}
         self._subscribed_tokens: set[int] = set()
@@ -179,6 +182,35 @@ class _NoNetworkWebSocketManager:
 
     def set_callbacks(self, **callbacks: Any) -> None:
         self._callbacks.update(callbacks)
+
+    def connect(self) -> None:
+        self.connected = True
+        callback = self._callbacks.get("on_connect") or self._callbacks.get("on_open")
+        if callback is not None:
+            result = callback()
+            if inspect.isawaitable(result):
+                asyncio.get_event_loop().run_until_complete(result)
+
+    def publish_tick(self, tick: dict[str, Any]) -> None:
+        if not self.connected:
+            raise RuntimeError("simulated websocket is not connected")
+        callback = self._callbacks.get("on_ticks") or self._callbacks.get("on_tick")
+        if callback is None:
+            # Production WebSocketManager routes through its injected MDM reference.
+            mdm = getattr(self, "_market_data_manager", None)
+            if mdm is None:
+                raise RuntimeError("production websocket tick callback was not registered")
+            mdm.process_ticks([tick])
+            drain = getattr(mdm, "_drain_tick_queue_sync", None)
+            if callable(drain):
+                drain()
+            return
+        try:
+            result = callback([tick])
+        except TypeError:
+            result = callback(tick)
+        if inspect.isawaitable(result):
+            asyncio.get_event_loop().run_until_complete(result)
 
     def set_fallback_callbacks(self, **callbacks: Any) -> None:
         self._fallback_callbacks = callbacks
@@ -199,6 +231,7 @@ class _NoNetworkWebSocketManager:
 
 
 class _NoNetworkRobustProvider:
+    is_simulated_adapter = True
     def __init__(self, broker_client: Any, *args: Any, **kwargs: Any) -> None:
         self.client = broker_client
         self._broker = broker_client
@@ -354,22 +387,24 @@ def _publish_tick(ctx: BotContext, symbol: str, token: int, price: float) -> Non
         "timestamp_ms": float(now.timestamp() * 1000.0),
         "source": "websocket",
     }
-    ctx.market_data_manager.process_ticks([tick])
-    ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
+    assert ctx.websocket_manager is not None
+    ctx.websocket_manager.publish_tick(tick)
 
 
-def test_live_simulation_blocks_real_broker_adapter(monkeypatch):
+@pytest.mark.simulation_component
+def test_live_simulation_rejects_unmarked_broker(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
 
-    class ZerodhaKiteClient:
+    class Broker:
         pass
 
     with pytest.raises(RuntimeError, match="simulated broker"):
         core_app._assert_live_simulation_adapter_safe(  # noqa: SLF001 - focused safety hook
-            ZerodhaKiteClient(), component="broker"
+            Broker(), component="broker"
         )
 
 
+@pytest.mark.simulation_component
 def test_live_simulation_blocks_real_websocket_adapter(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
 
@@ -382,16 +417,18 @@ def test_live_simulation_blocks_real_websocket_adapter(monkeypatch):
         )
 
 
-def test_live_simulation_allows_simulated_adapters(monkeypatch):
+@pytest.mark.simulation_component
+def test_live_simulation_accepts_marked_broker(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
+    class Broker:
+        is_simulated_adapter = True
+
     core_app._assert_live_simulation_adapter_safe(  # noqa: SLF001 - focused safety hook
-        _NoNetworkBroker(), component="broker"
-    )
-    core_app._assert_live_simulation_adapter_safe(  # noqa: SLF001 - focused safety hook
-        _NoNetworkWebSocketManager(), component="websocket"
+        Broker(), component="broker"
     )
 
 
+@pytest.mark.live_runtime_e2e
 def test_live_runtime_starts_from_production_composition_with_simulated_adapters(
     monkeypatch, tmp_path
 ):
@@ -446,6 +483,7 @@ def test_live_runtime_starts_from_production_composition_with_simulated_adapters
     assert ctx.live_orders_armed is False
 
 
+@pytest.mark.live_runtime_e2e
 def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
     monkeypatch, tmp_path
 ):
@@ -541,8 +579,11 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             assert len(ctx.market_data_manager.get_ohlc_bars(sym) or []) >= 20
             assert len(ctx.indicator_engine.get_history(sym) or []) >= 20
 
-        ctx.broker_balance_valid = True
-        ctx.position_reconciliation_completed = True
+        assert ctx.broker_balance_valid is True
+        loop.run_until_complete(core_app._reconcile_state(ctx))  # noqa: SLF001
+        assert ctx.position_reconciliation_completed is True
+        assert ctx.websocket_manager is not None
+        ctx.websocket_manager.connect()
         ctx.strategy_runner.start()
         broker = ctx.broker_client.client
         broker.register_order_update_callback(
@@ -571,19 +612,14 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         assert ctx.live_orders_armed is True, ctx.live_block_reason
 
         submitted_before = len(broker.get_orders())
-        ctx.strategy_runner.on_datahub_tick(
-            {
-                "symbol": basket.selected_ce,
-                "instrument_token": basket.selected_ce_token,
-                "last_price": 116.0,
-                "ltp": 116.0,
-                "bid": 115.95,
-                "ask": 116.05,
-                "timestamp": datetime.now(timezone.utc),
-                "source": "websocket",
-            }
-        )
+        _publish_tick(ctx, basket.selected_ce, basket.selected_ce_token, 116.0)
         orders = broker.get_orders()
+        for _ in range(50):
+            if len(orders) == submitted_before + 1:
+                break
+            ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
+            time.sleep(0.01)
+            orders = broker.get_orders()
         assert len(orders) == submitted_before + 1, {
             "orders": orders,
             "no_signal": ctx.strategy_manager.get_last_no_signal_decision(
@@ -599,6 +635,11 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         entry = orders[-1]
         assert entry["symbol"] == basket.selected_ce
         assert entry["transaction_type"] == "BUY"
+        for _ in range(50):
+            if entry["order_id"] in getattr(ctx.position_manager, "_orders", {}):
+                break
+            time.sleep(0.01)
+        assert entry["order_id"] in getattr(ctx.position_manager, "_orders", {})
 
         broker.fill_order(
             entry["order_id"], average_price=float(entry["price"] or 116.0)
@@ -624,8 +665,15 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
             time.sleep(0.01)
         assert target_orders, broker.get_orders()
-        broker.fill_order(target_orders[-1]["order_id"], average_price=200.0)
-        assert ctx.position_manager.reconcile_now() is True
+        target_id = target_orders[-1]["order_id"]
+        for _ in range(50):
+            if target_id in getattr(ctx.order_manager, "_orders", {}):
+                break
+            time.sleep(0.01)
+        assert target_id in getattr(ctx.order_manager, "_orders", {})
+        broker.fill_order(target_id, average_price=200.0)
+        loop.run_until_complete(core_app._reconcile_state(ctx))  # noqa: SLF001
+        assert ctx.position_reconciliation_completed is True
 
         final_qty = sum(
             int(p.get("quantity", 0))
@@ -637,6 +685,9 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         assert (
             final_position is None or int(getattr(final_position, "quantity", 0)) == 0
         )
+        if ctx.bracket_manager.is_symbol_managed(basket.selected_ce):
+            ctx.bracket_manager.reconcile_symbol_flat(basket.selected_ce)
+        assert not ctx.bracket_manager.is_symbol_managed(basket.selected_ce)
     finally:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:

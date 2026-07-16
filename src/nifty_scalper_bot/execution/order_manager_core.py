@@ -2285,12 +2285,44 @@ class OrderManager:
         )
         return any(marker in text for marker in signature_markers)
 
+    def _validate_execution_adapter(self) -> None:
+        mode = self._execution_mode_env()
+
+        if mode != "LIVE_SIMULATION":
+            return
+
+        broker = getattr(self, "broker", None)
+        if broker is None:
+            broker = getattr(self, "_broker", None)
+        if broker is None:
+            broker = getattr(self, "broker_client", None)
+
+        is_simulated = bool(getattr(broker, "is_simulated_adapter", False))
+
+        wrapped = getattr(broker, "client", None)
+        if wrapped is not None:
+            is_simulated = is_simulated or bool(
+                getattr(wrapped, "is_simulated_adapter", False)
+            )
+
+        wrapped = getattr(broker, "_broker", None)
+        if wrapped is not None:
+            is_simulated = is_simulated or bool(
+                getattr(wrapped, "is_simulated_adapter", False)
+            )
+
+        if not is_simulated:
+            raise RuntimeError(
+                "LIVE_SIMULATION cannot submit orders through a non-simulated broker"
+            )
+
     def _submit_broker_order(
         self,
         payload: dict[str, object],
         *,
         legacy_payload: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        self._validate_execution_adapter()
         try:
             response = self._broker.place_order(**payload)
         except TypeError as exc:
@@ -6990,6 +7022,7 @@ class OrderManager:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order. Intercepts Virtual Brackets for clean shutdown."""
 
+        self._validate_execution_adapter()
         # 1. Intercept Virtual Bracket Cancellation
         if self._bracket_manager:
             # If strategy tries to cancel the Entry ID, it implies "Abort Trade"
@@ -7307,6 +7340,7 @@ class OrderManager:
                 )
 
             # 3. Execute Modification
+            self._validate_execution_adapter()
             self._broker.modify_order(
                 order_id=order_id,
                 price=price,
@@ -10899,6 +10933,7 @@ class OrderManager:
         return payload
 
     def _submit_order_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_execution_adapter()
         last_error: Exception | None = None
         client_order_id = str(payload.get("client_order_id") or "").strip()
         if client_order_id:
