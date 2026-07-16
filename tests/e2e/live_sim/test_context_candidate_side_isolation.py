@@ -14,5 +14,5 @@ def test_context_candidate_side_isolation(live_sim_system):
     assert pe_ready is not None
     assert system.observers.risk_requests == risk_before
     mismatch = system.evaluate_candidate_readiness("NFO:NIFTY26JUL25100CE")
-    assert mismatch is None
+    assert mismatch is not None and not mismatch.executable
     assert system.observers.risk_requests == risk_before

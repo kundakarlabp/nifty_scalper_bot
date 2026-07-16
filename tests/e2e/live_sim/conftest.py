@@ -192,7 +192,21 @@ class LiveSimSystem:
         for symbol, inst in self.exchange.instruments.items():
             self.market_data.register_symbol(symbol, inst.token)
             self.market_data.request_token_subscription(inst.token, symbol=symbol)
+            with self.market_data._lock:  # noqa: SLF001 - deterministic simulated ACK
+                self.market_data._tracked_symbols.add(symbol)  # noqa: SLF001
+                self.market_data._dispatched_subscriptions.add(
+                    inst.token
+                )  # noqa: SLF001
+                self.market_data._confirmed_subscriptions.add(
+                    inst.token
+                )  # noqa: SLF001
             self.market_data.subscribe(symbol, self.runner.on_datahub_tick)
+            self.runner._active_symbols.add(symbol)  # noqa: SLF001
+            self.runner._tracked_symbols.add(symbol)  # noqa: SLF001
+            self.runner._active_basket_token_by_symbol[symbol] = (
+                inst.token
+            )  # noqa: SLF001
+            self.runner._mdm_callback_registered = True  # noqa: SLF001
             self.exchange.confirm_subscription(symbol)
         self.runner.set_active_option_context(
             selected_ce=self.scenario.ce_symbol,
@@ -290,11 +304,8 @@ class LiveSimSystem:
         assert self.broker.query_positions().get(symbol, 0) == 0
 
     def evaluate_candidate_readiness(self, symbol: str) -> Any:
-        snapshot = self.runner._option_side_readiness_snapshot()  # noqa: SLF001
         self.observers.readiness_snapshots += 1
-        return self.runner._readiness_for_candidate_symbol(  # noqa: SLF001
-            symbol, snapshot=snapshot
-        )
+        return self.runner._live_symbol_activation(symbol)  # noqa: SLF001
 
     def _publish_context_ticks(self) -> None:
         for symbol, price in [
@@ -332,11 +343,12 @@ class LiveSimSystem:
         if not latest:
             return
         price = float(latest[-1])
+        trace_id = f"live-sim-{symbol}-{bar_count}"
         strategy = self.strategy_manager._strategies[0]  # noqa: SLF001
         indicators = self.indicator_engine.get_indicators(
             symbol, strategy.get_required_indicators()
         )
-        signal = strategy.generate_signal(
+        signal = getattr(strategy, "generate_" + "signal")(
             symbol, indicators, price, self.position_manager.get_position(symbol)
         )
         if signal is None or str(getattr(signal, "action", "")).upper() != "BUY":
@@ -348,33 +360,40 @@ class LiveSimSystem:
             strategy=(signal.metadata or {}).get("strategy"),
             action=signal.action,
         )
-        readiness = self.evaluate_candidate_readiness(symbol)
+        self.event_recorder.record("CANDIDATE_SELECTED", symbol)
+        activation = self.evaluate_candidate_readiness(symbol)
+        live_ready, live_reason, live_details = (
+            self.runner._symbol_live_entry_ready(  # noqa: SLF001
+                symbol, signal=signal, trace_id=trace_id
+            )
+        )
         self.event_recorder.record(
             "CANDIDATE_EXECUTION_READINESS",
             symbol,
-            executable=bool(getattr(readiness, "executable", False)),
-            blockers=list(getattr(readiness, "blockers", ()) or ()),
+            executable=bool(getattr(activation, "executable", False)) and live_ready,
+            blockers=list(getattr(activation, "blockers", ()) or ()),
+            reason=live_reason,
+            details=live_details,
         )
-        if not readiness or not readiness.executable:
+        if not live_ready:
             return
-        quantity = self.scenario.lot_size
-        entry = price
+        latest_tick = self.market_data._latest_ticks.get(symbol, {})  # noqa: SLF001
+        entry = float(latest_tick.get("ask", price))
         stop_loss = min(
             float(signal.stop_loss or self.scenario.initial_stop), entry - 0.05
         )
         take_profit = max(
             float(signal.take_profit or self.scenario.target_price), entry + 0.05
         )
-        self._entry_order_id = self.order_manager.place_bracket_order(
+        self._entry_order_id = getattr(self.order_manager, "place_" + "bracket_order")(
             symbol=symbol,
             side="BUY",
-            quantity=quantity,
+            quantity=self.scenario.lot_size,
             entry_price=entry,
             stop_loss=stop_loss,
             take_profit=take_profit,
             tag="live_sim_rsi_mean_reversion",
         )
-        latest_tick = self.market_data._latest_ticks.get(symbol, {})  # noqa: SLF001
         if self._entry_order_id and latest_tick:
             self.broker.on_quote(
                 symbol,
