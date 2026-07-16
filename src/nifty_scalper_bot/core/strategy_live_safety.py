@@ -60,13 +60,39 @@ def _metadata_true(value: Any) -> bool:
     return str(value or "").strip().lower() in TRUTHY
 
 
-def _bars_available(manager: Any, symbol: str) -> int:
+def _indicator_bars_available(manager: Any, symbol: str) -> int:
     getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
     if not callable(getter):
         return 0
     with suppress(Exception):
         return len(getter(symbol) or [])
     return 0
+
+
+def _canonical_bars(manager: Any, symbol: str) -> list[Any]:
+    authoritative_seen = False
+    for source in (_market_data_manager(manager), getattr(manager, "_data_hub", None)):
+        if source is None:
+            continue
+        getter = getattr(source, "get_ohlc_bars", None) or getattr(
+            source, "get_ohlc", None
+        )
+        if callable(getter):
+            authoritative_seen = True
+            with suppress(Exception):
+                bars = getter(symbol)
+                return list(bars or [])
+    if authoritative_seen:
+        return []
+    getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
+    if callable(getter):
+        with suppress(Exception):
+            return list(getter(symbol) or [])
+    return []
+
+
+def _canonical_bars_available(manager: Any, symbol: str) -> int:
+    return len(_canonical_bars(manager, symbol))
 
 
 def _required_bars(manager: Any) -> int:
@@ -148,17 +174,19 @@ def _boolish_false(value: Any) -> bool:
 
 
 def _latest_bar_detail(manager: Any, symbol: str, *, now: float) -> dict[str, Any]:
-    getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
-    if not callable(getter):
-        return {"reason": "live_latest_closed_bar_unavailable"}
-    history: list[Any] = []
-    try:
-        history = list(getter(symbol) or [])
-    except Exception as exc:  # noqa: BLE001 - safety gate must fail closed, not crash
-        return {
-            "reason": "live_latest_closed_bar_unavailable",
-            "error_type": type(exc).__name__,
-        }
+    mdm = _market_data_manager(manager)
+    latest_getter = getattr(mdm, "get_latest_closed_bar", None)
+    if callable(latest_getter):
+        try:
+            latest = latest_getter(symbol)
+        except Exception as exc:  # noqa: BLE001 - safety gate must fail closed
+            return {
+                "reason": "live_latest_closed_bar_unavailable",
+                "error_type": type(exc).__name__,
+            }
+        history = [latest] if latest else []
+    else:
+        history = _canonical_bars(manager, symbol)
     if not history:
         return {"reason": "live_latest_closed_bar_missing"}
     interval_s = _bar_interval_seconds(manager)
@@ -215,7 +243,9 @@ def _latest_bar_detail(manager: Any, symbol: str, *, now: float) -> dict[str, An
     return latest_stale or {"reason": "live_latest_closed_bar_missing"}
 
 
-def _latest_bar_fresh_block(manager: Any, symbol: str) -> dict[str, Any] | None:
+def _latest_underlying_bar_fresh_block(
+    manager: Any, symbol: str
+) -> dict[str, Any] | None:
     detail = _latest_bar_detail(manager, symbol, now=time.time())
     if detail.get("reason") != "ready":
         return detail
@@ -440,35 +470,53 @@ def _record(
     )
 
 
-def _readiness_block(manager: Any, symbol: str) -> dict[str, Any] | None:
+def _evaluation_readiness_block(
+    manager: Any, underlying_symbol: str
+) -> dict[str, Any] | None:
     if not _is_live(manager):
         return None
     required = _required_bars(manager)
-    available = _bars_available(manager, symbol)
+    available = _canonical_bars_available(manager, underlying_symbol)
+    indicator_available = _indicator_bars_available(manager, underlying_symbol)
     if available < required:
         return {
-            "reason": "live_indicators_not_ready",
+            "reason": "live_underlying_history_not_ready",
             "bars_available": available,
+            "mdm_bars": available,
+            "indicator_bars": indicator_available,
             "required_bars": required,
         }
     if _hub_ready(manager) is False:
         return {
             "reason": "live_hub_indicators_not_ready",
             "bars_available": available,
+            "mdm_bars": available,
+            "indicator_bars": indicator_available,
             "required_bars": required,
         }
-    for checker in (
-        _latest_bar_fresh_block,
-        _live_option_tick_block,
-        _context_fresh_block,
-        _selected_contract_block,
-    ):
-        block = checker(manager, symbol)
+    for checker in (_latest_underlying_bar_fresh_block, _context_fresh_block):
+        block = checker(manager, underlying_symbol)
         if block is not None:
             block.setdefault("bars_available", available)
+            block.setdefault("mdm_bars", available)
+            block.setdefault("indicator_bars", indicator_available)
             block.setdefault("required_bars", required)
             return block
     return None
+
+
+def _candidate_execution_block(
+    manager: Any, candidate_symbol: str
+) -> dict[str, Any] | None:
+    for checker in (_selected_contract_block, _live_option_tick_block):
+        block = checker(manager, candidate_symbol)
+        if block is not None:
+            return block
+    return None
+
+
+def _readiness_block(manager: Any, symbol: str) -> dict[str, Any] | None:
+    return _evaluation_readiness_block(manager, symbol)
 
 
 def _has_identity(signal: Signal) -> bool:
@@ -610,12 +658,12 @@ def apply_patches() -> None:
         trace_id: str | None = None,
     ) -> Signal | None:
         symbol_norm = normalize_symbol(symbol)
-        block = _readiness_block(self, symbol_norm)
+        block = _evaluation_readiness_block(self, symbol_norm)
         if block is not None:
             _record(
                 self,
                 symbol_norm,
-                str(block.get("reason") or "live_indicators_not_ready"),
+                str(block.get("reason") or "live_underlying_history_not_ready"),
                 trace_id,
                 block,
             )
@@ -624,6 +672,17 @@ def apply_patches() -> None:
         if signal is None or not _is_live(self):
             return signal
         signal = _add_identity(signal)
+        candidate_symbol = normalize_symbol(getattr(signal, "symbol", ""))
+        block = _candidate_execution_block(self, candidate_symbol)
+        if block is not None:
+            _record(
+                self,
+                candidate_symbol,
+                str(block.get("reason") or "live_candidate_not_ready"),
+                trace_id,
+                block,
+            )
+            return None
         metadata = dict(getattr(signal, "metadata", {}) or {})
         if bool(metadata.get("is_approved")):
             signal = _final_filter(self, signal, trace_id)

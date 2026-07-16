@@ -2609,10 +2609,8 @@ class MarketDataManager:
             )
         self._reconcile_ws_subscriptions()
         if normalized_symbol and normalized_symbol.endswith(("CE", "PE")):
-            with self._lock:
-                self._active_subscribed_symbols.add(normalized_symbol)
             self._logger.info(
-                "MDM_OPTION_SUBSCRIPTION_CONFIRMED symbol=%s token=%s",
+                "MDM_OPTION_SUBSCRIPTION_REQUEST_RECORDED symbol=%s token=%s",
                 normalized_symbol,
                 token_int,
             )
@@ -3069,7 +3067,7 @@ class MarketDataManager:
         )
         token_matches = bool(token_int is not None and token_int == current_token)
         current_generation_tick_received = bool(
-            tick_gen is not None and sub_gen is not None and tick_gen >= sub_gen
+            tick_gen is not None and sub_gen is not None and tick_gen == sub_gen
         )
         age_s = (
             None if tick_mono is None else max(time.monotonic() - float(tick_mono), 0.0)
@@ -3086,8 +3084,12 @@ class MarketDataManager:
                 if token_int in desired
                 else "subscription_missing"
             )
-        elif not current_generation_tick_received and tick_gen is not None:
+        elif not confirmed_subscription:
+            reason = "subscription_not_confirmed"
+        elif tick_gen is not None and not current_generation_tick_received:
             reason = "subscription_generation_mismatch"
+        elif not current_generation_tick_received:
+            reason = "current_generation_tick_pending"
         elif tick_mono is None:
             reason = "never_received_tick"
         elif age_s is None:
@@ -8426,14 +8428,15 @@ class MarketDataManager:
                     )
                     return
                 else:
-                    self._last_valid_live_tick_mono[canonical_symbol] = now_mono
                     if token_int is not None:
+                        self._confirmed_subscriptions.add(token_int)
+                        self._last_valid_live_tick_mono[canonical_symbol] = now_mono
                         self._symbol_first_tick_generation[canonical_symbol] = (
                             self._symbol_subscription_generation.get(
                                 canonical_symbol, self._subscription_generation
                             )
                         )
-                        self._confirmed_subscriptions.add(token_int)
+                        self._active_subscribed_symbols.add(canonical_symbol)
                         accepted_current_generation_tick = True
             if accepted_current_generation_tick:
                 self.verify_websocket_recovery(now_mono=now_mono)
@@ -10893,6 +10896,13 @@ class MarketDataManager:
         if limit is not None:
             bars = bars[-limit:]
         return bars
+
+    def get_latest_closed_bar(
+        self, symbol: str, interval: str = "1min"
+    ) -> dict[str, Any] | None:
+        """Return the latest canonical finalized OHLC bar without exposing a forming candle."""
+        bars = self.get_ohlc_bars(symbol, limit=1)
+        return dict(bars[-1]) if bars else None
 
     def get_ohlc(self, symbol: str) -> list[dict[str, Any]]:
         """Return finalized candles for *symbol*. Args: symbol. Returns: list of candles. Raises: None."""

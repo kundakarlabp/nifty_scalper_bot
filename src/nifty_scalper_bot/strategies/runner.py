@@ -225,6 +225,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+@dataclass(frozen=True, slots=True)
+class LiveSymbolActivation:
+    symbol: str
+    token: int | None
+    history_ready: bool
+    mdm_tracked: bool
+    subscription_requested: bool
+    subscription_confirmed: bool
+    current_generation_tick_received: bool
+    runner_delivery_ready: bool
+    executable: bool
+    blockers: tuple[str, ...]
+
+
 def _ranked_candidate_for_symbol(candidates: Iterable[Any], symbol: str) -> Any | None:
     """Return the ranked candidate whose instrument exactly matches ``symbol``."""
 
@@ -11896,6 +11910,101 @@ class StrategyRunner:
             return "tradable_option"
         return "unknown"
 
+    def _roles_for_symbol(self, symbol: str) -> set[str]:
+        normalized = normalize_symbol(str(symbol or ""))
+        role = self._symbol_role_for_runner(normalized)
+        roles: set[str] = set()
+        if role:
+            roles.add(role)
+        if role == "tradable_option":
+            roles.add("option_context")
+        if self._is_selected_option_symbol(normalized):
+            roles.add("selected_option")
+            roles.add("trigger_candidate")
+        try:
+            pm = getattr(self, "_position_manager", None)
+            has_position = getattr(pm, "has_open_position", None)
+            if callable(has_position) and bool(has_position(normalized)):
+                roles.add("open_position")
+        except Exception:
+            pass
+        if normalized in getattr(self, "_trigger_candidate_symbols", set()):
+            roles.add("trigger_candidate")
+        return roles
+
+    def _symbol_may_trigger_entry(self, symbol: str) -> bool:
+        return bool(
+            self._roles_for_symbol(symbol)
+            & {"selected_option", "trigger_candidate", "open_position"}
+        )
+
+    def _live_symbol_activation(self, symbol: str) -> LiveSymbolActivation:
+        normalized = normalize_symbol(str(symbol or ""))
+        token = None
+        mdm = getattr(self, "_market_data", None)
+        if mdm is not None:
+            current_live_token = getattr(mdm, "current_live_token", None)
+            if callable(current_live_token):
+                try:
+                    token = current_live_token(normalized)
+                except Exception:
+                    token = None
+        history_ready = self._history_count_for_symbol(
+            normalized
+        ) >= self._required_bars_for_symbol(normalized)
+        mdm_tracked = normalized in getattr(
+            self, "_active_symbols", set()
+        ) or normalized in getattr(self, "_tracked_symbols", set())
+        subscription_requested = subscription_confirmed = current_tick = False
+        reason = None
+        if mdm is not None and token is not None:
+            classifier = getattr(mdm, "classify_live_tick_readiness", None)
+            if callable(classifier):
+                try:
+                    readiness = classifier(normalized, token, max_age_s=60.0)
+                    subscription_requested = bool(
+                        readiness.get("expected") or readiness.get("desired")
+                    )
+                    subscription_confirmed = bool(
+                        readiness.get("confirmed") or readiness.get("subscribed")
+                    )
+                    current_tick = bool(
+                        readiness.get("current_generation_tick_received")
+                        or readiness.get("first_tick_received")
+                    )
+                    reason = readiness.get("reason")
+                except Exception as exc:
+                    reason = type(exc).__name__
+        runner_delivery_ready = bool(
+            getattr(self, "_strategy_manager", None) is not None
+        )
+        blockers: list[str] = []
+        if not history_ready:
+            blockers.append("history_not_ready")
+        if not mdm_tracked:
+            blockers.append("mdm_not_tracked")
+        if not subscription_requested:
+            blockers.append("subscription_not_requested")
+        if not subscription_confirmed:
+            blockers.append("subscription_not_confirmed")
+        if not current_tick:
+            blockers.append(str(reason or "current_generation_tick_pending"))
+        if not runner_delivery_ready:
+            blockers.append("runner_delivery_not_ready")
+        executable = not blockers
+        return LiveSymbolActivation(
+            normalized,
+            token,
+            history_ready,
+            mdm_tracked,
+            subscription_requested,
+            subscription_confirmed,
+            current_tick,
+            runner_delivery_ready,
+            executable,
+            tuple(dict.fromkeys(blockers)),
+        )
+
     def _required_bars_for_symbol(self, symbol: str) -> int:
         """Return readiness bars by role. Args: symbol. Returns: int. Raises: none."""
         return (
@@ -13550,6 +13659,53 @@ class StrategyRunner:
             # =================================================================
             # PHASE 9: SIGNAL SELECTION & STRATEGY MANAGER EVALUATION
             # =================================================================
+
+            if not self._symbol_may_trigger_entry(symbol):
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="phase9",
+                    reason="symbol_role_context_only",
+                    allowed=False,
+                    trace_id=trace_id,
+                    symbol_roles=sorted(self._roles_for_symbol(symbol)),
+                )
+                return
+            if self._is_tradable_symbol(symbol):
+                activation = self._live_symbol_activation(symbol)
+                if not activation.executable:
+                    log_throttled(
+                        self._logger,
+                        f"live_symbol_pending_activation:{symbol}",
+                        "LIVE_SYMBOL_ACTIVATION symbol=%s token=%s executable=%s blockers=%s",
+                        activation.symbol,
+                        activation.token,
+                        activation.executable,
+                        list(activation.blockers),
+                        interval_sec=30.0,
+                        level=logging.INFO,
+                        extra={
+                            "event": "LIVE_SYMBOL_ACTIVATION",
+                            "symbol": activation.symbol,
+                            "token": activation.token,
+                            "history_ready": activation.history_ready,
+                            "mdm_tracked": activation.mdm_tracked,
+                            "subscription_requested": activation.subscription_requested,
+                            "subscription_confirmed": activation.subscription_confirmed,
+                            "current_generation_tick_received": activation.current_generation_tick_received,
+                            "runner_delivery_ready": activation.runner_delivery_ready,
+                            "executable": activation.executable,
+                            "blockers": list(activation.blockers),
+                        },
+                    )
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase9",
+                        reason="live_symbol_pending_activation",
+                        allowed=False,
+                        trace_id=trace_id,
+                        blockers=list(activation.blockers),
+                    )
+                    return
 
             self._eval_counter = getattr(self, "_eval_counter", 0) + 1
             phase = "phase9_strategy_manager"

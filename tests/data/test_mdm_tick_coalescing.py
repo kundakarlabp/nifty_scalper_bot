@@ -427,7 +427,7 @@ def test_required_symbol_without_current_generation_tick_is_not_fresh(monkeypatc
     assert readiness["tick_age_s"] is None
     assert readiness["first_tick_received"] is False
     assert readiness["current_generation_tick_received"] is False
-    assert readiness["reason"] == "never_received_tick"
+    assert readiness["reason"] == "current_generation_tick_pending"
 
     mdm._check_zombie_ticks()
 
@@ -484,7 +484,7 @@ def test_basket_reentry_same_token_requires_new_current_generation_tick():
     assert reentered["ready"] is False
     assert reentered["tick_age_s"] is None
     assert reentered["first_tick_received"] is False
-    assert reentered["reason"] == "never_received_tick"
+    assert reentered["reason"] == "current_generation_tick_pending"
 
     mdm._symbol_first_tick_generation[symbol] = old_generation
     mdm._last_valid_live_tick_mono[symbol] = time.monotonic()
