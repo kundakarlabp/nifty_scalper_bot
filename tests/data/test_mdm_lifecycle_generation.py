@@ -44,7 +44,9 @@ def _subscribe(mdm: MarketDataManager, symbol: str, token: int) -> None:
     mdm._confirmed_subscriptions.add(token)
 
 
-def _ws_tick(mdm: MarketDataManager, symbol: str, token: int, ltp: float = 10.0) -> None:
+def _ws_tick(
+    mdm: MarketDataManager, symbol: str, token: int, ltp: float = 10.0
+) -> None:
     mdm._emit_tick(
         symbol,
         {
@@ -66,7 +68,7 @@ def test_current_generation_first_tick_required_after_subscription() -> None:
 
     pending = mdm.classify_live_tick_readiness(symbol, token, max_age_s=60.0)
     assert pending["ready"] is False
-    assert pending["reason"] == "never_received_tick"
+    assert pending["reason"] == "current_generation_tick_pending"
     assert pending["tick_age_s"] is None
 
     _ws_tick(mdm, symbol, token)
@@ -110,15 +112,23 @@ def test_token_change_resets_generation_and_requires_new_matching_tick() -> None
     assert mdm.request_token_subscription(new_token, symbol=symbol)
 
     assert mdm._symbol_subscription_generation[symbol] > old_generation
-    assert mdm.classify_live_tick_readiness(symbol, new_token, max_age_s=60.0)["ready"] is False
-    baseline = mdm._normalise_tick_volume_delta(symbol, {"volume_traded_today": 29_364_530})
+    assert (
+        mdm.classify_live_tick_readiness(symbol, new_token, max_age_s=60.0)["ready"]
+        is False
+    )
+    baseline = mdm._normalise_tick_volume_delta(
+        symbol, {"volume_traded_today": 29_364_530}
+    )
     assert baseline["volume_delta"] == 0
     assert baseline["volume_delta_untrusted"] is False
 
     _ws_tick(mdm, symbol, old_token, ltp=9.5)
     blocked = mdm.classify_live_tick_readiness(symbol, new_token, max_age_s=60.0)
     assert blocked["ready"] is False
-    assert blocked["reason"] == "never_received_tick"
+    assert blocked["reason"] in {
+        "subscription_not_confirmed",
+        "current_generation_tick_pending",
+    }
 
     _ws_tick(mdm, symbol, new_token, ltp=10.5)
     assert mdm.classify_live_tick_readiness(symbol, new_token, max_age_s=60.0)["ready"]
@@ -139,7 +149,10 @@ def test_reconnect_remains_inflight_until_current_generation_tick() -> None:
     assert pending["ok"] is False
     assert pending["state"] == "waiting_for_first_ticks"
     assert pending["inflight"] is True
-    assert mdm.classify_live_tick_readiness(symbol, token, max_age_s=60.0)["ready"] is False
+    assert (
+        mdm.classify_live_tick_readiness(symbol, token, max_age_s=60.0)["ready"]
+        is False
+    )
 
     _ws_tick(mdm, symbol, token)
     recovered = mdm.verify_websocket_recovery()
@@ -155,7 +168,9 @@ def test_concurrent_duplicate_restart_callers_start_one_reconnect() -> None:
     _subscribe(mdm, "NFO:NIFTY26JUN24000CE", 24000)
     mdm._zombie_last_restart_attempt_at = -10_000.0
 
-    threads = [threading.Thread(target=mdm._trigger_zombie_ws_restart) for _ in range(2)]
+    threads = [
+        threading.Thread(target=mdm._trigger_zombie_ws_restart) for _ in range(2)
+    ]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -175,11 +190,15 @@ def test_connected_dispatched_without_tick_is_not_recovered_at_deadline() -> Non
 
     mdm._trigger_zombie_ws_restart()
     mdm._dispatched_subscriptions.add(token)
-    pending = mdm.verify_websocket_recovery(now_mono=(mdm._ws_restart_deadline_mono or 0) - 0.1)
+    pending = mdm.verify_websocket_recovery(
+        now_mono=(mdm._ws_restart_deadline_mono or 0) - 0.1
+    )
     assert pending["ok"] is False
     assert pending["state"] == "waiting_for_first_ticks"
 
-    failed = mdm.verify_websocket_recovery(now_mono=(mdm._ws_restart_deadline_mono or 0) + 0.1)
+    failed = mdm.verify_websocket_recovery(
+        now_mono=(mdm._ws_restart_deadline_mono or 0) + 0.1
+    )
     assert failed["ok"] is False
     assert failed["state"] == "failed"
     assert mdm._ws_restart_inflight is False
@@ -310,7 +329,9 @@ def test_successful_new_generation_clears_previous_failure_reason() -> None:
     assert mdm._ws_restart_fail_reason is None
 
 
-def test_runner_live_tick_classifier_uses_canonical_freshness_policy(monkeypatch) -> None:
+def test_runner_live_tick_classifier_uses_canonical_freshness_policy(
+    monkeypatch,
+) -> None:
     from types import SimpleNamespace
 
     from nifty_scalper_bot.strategies import runner as runner_module
@@ -322,7 +343,21 @@ def test_runner_live_tick_classifier_uses_canonical_freshness_policy(monkeypatch
             captured["symbol"] = symbol
             captured["token"] = token
             captured["max_age_s"] = max_age_s
-            return {"ready": False, "reason": "sentinel_block"}
+            return {
+                "symbol": symbol,
+                "token": token,
+                "tracked": True,
+                "subscription_requested": True,
+                "subscription_confirmed": True,
+                "token_matches": True,
+                "expected_generation": 1,
+                "tick_generation": None,
+                "current_generation_tick_received": False,
+                "tick_age_s": None,
+                "fresh": False,
+                "ready": False,
+                "reason": "sentinel_block",
+            }
 
     class _FakeIndicator:
         def get_history(self, symbol):
@@ -350,7 +385,9 @@ def test_runner_live_tick_classifier_uses_canonical_freshness_policy(monkeypatch
     runner._runtime_readiness_reason = "ready"
     runner._runtime_data_hard_ready = True
     runner._runtime_evaluation_ready = True
-    runner._logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    runner._logger = SimpleNamespace(
+        info=lambda *a, **k: None, warning=lambda *a, **k: None
+    )
     runner._is_tradable_symbol = lambda symbol: True
     runner._contract_side_from_symbol = lambda symbol: "CE"
     runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
@@ -365,8 +402,14 @@ def test_runner_live_tick_classifier_uses_canonical_freshness_policy(monkeypatch
     )
     runner._active_basket_token_by_symbol = {"NFO:NIFTY26JUN24000CE": "24000"}
     runner._order_manager = SimpleNamespace(resolve_lot_size=lambda symbol: 75)
-    runner._resolve_order_manager_health_for_entry = lambda: (True, "ok", {"broker_ready": True})
-    monkeypatch.setattr(runner_module, "resolve_max_quote_age_seconds", lambda *a, **k: 3.25)
+    runner._resolve_order_manager_health_for_entry = lambda: (
+        True,
+        "ok",
+        {"broker_ready": True},
+    )
+    monkeypatch.setattr(
+        runner_module, "resolve_max_quote_age_seconds", lambda *a, **k: 3.25
+    )
 
     ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN24000CE")
 

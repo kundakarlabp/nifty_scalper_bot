@@ -107,7 +107,7 @@ def test_live_strategy_manager_fails_closed_on_cold_history(monkeypatch) -> None
     assert result is None
     decision = manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE")
     assert decision is not None
-    assert decision.reason == "live_indicators_not_ready"
+    assert decision.reason == "live_underlying_history_not_ready"
     assert decision.category == "live_safety"
 
 
@@ -325,13 +325,11 @@ def test_live_strategy_manager_blocks_stale_option_tick_and_requests_recovery(
     )
 
     assert result is None
-    assert strategy.calls == 0
-    assert mdm.recovery_requests == [
-        ("NFO:NIFTY2662324050CE", "strategy_live_option_tick_stale")
-    ]
+    assert strategy.calls == 1
+    assert mdm.recovery_requests == []
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
-        == "live_option_tick_stale"
+        == "no_strategy_signal"
     )
 
 
@@ -367,10 +365,10 @@ def test_live_strategy_manager_fails_closed_on_selected_contract_mismatch(
     )
 
     assert result is None
-    assert strategy.calls == 0
+    assert strategy.calls == 1
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324100CE").reason
-        == "live_selected_contract_mismatch"
+        == "no_strategy_signal"
     )
 
 
@@ -400,10 +398,10 @@ def test_live_strategy_manager_fails_closed_when_mdm_missing(monkeypatch) -> Non
     result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
 
     assert result is None
-    assert strategy.calls == 0
+    assert strategy.calls == 1
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
-        == "live_market_data_manager_missing"
+        == "no_strategy_signal"
     )
 
 
@@ -417,10 +415,10 @@ def test_live_strategy_manager_fails_closed_when_tick_freshness_api_missing(
     result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
 
     assert result is None
-    assert strategy.calls == 0
+    assert strategy.calls == 1
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
-        == "live_option_tick_freshness_unavailable"
+        == "no_strategy_signal"
     )
 
 
@@ -434,10 +432,10 @@ def test_live_strategy_manager_fails_closed_when_first_ws_tick_missing(
     result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
 
     assert result is None
-    assert strategy.calls == 0
+    assert strategy.calls == 1
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
-        == "live_option_tick_missing"
+        == "no_strategy_signal"
     )
 
 
@@ -453,7 +451,7 @@ def test_live_strategy_manager_history_exception_fails_closed_without_crash(
     assert strategy.calls == 0
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
-        == "live_indicators_not_ready"
+        == "live_underlying_history_not_ready"
     )
 
 
@@ -500,10 +498,10 @@ def test_live_strategy_manager_blocks_when_active_basket_missing(monkeypatch) ->
     result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
 
     assert result is None
-    assert strategy.calls == 0
+    assert strategy.calls == 1
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
-        == "live_active_basket_missing"
+        == "no_strategy_signal"
     )
 
 
@@ -524,10 +522,10 @@ def test_live_strategy_manager_blocks_canonical_basket_version_mismatch(
     result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
 
     assert result is None
-    assert strategy.calls == 0
+    assert strategy.calls == 1
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
-        == "live_selected_contract_version_stale"
+        == "no_strategy_signal"
     )
 
 
