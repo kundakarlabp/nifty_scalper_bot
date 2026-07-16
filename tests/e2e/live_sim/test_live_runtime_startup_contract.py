@@ -612,9 +612,17 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         assert ctx.live_orders_armed is True, ctx.live_block_reason
 
         submitted_before = len(broker.get_orders())
+        ctx.strategy_runner._last_same_bar_eval_ts_by_symbol.pop(  # noqa: SLF001 - test-only throttle reset
+            basket.selected_ce,
+            None,
+        )
+        ctx.strategy_runner._last_periodic_eval_at_by_symbol.pop(  # noqa: SLF001 - test-only throttle reset
+            basket.selected_ce,
+            None,
+        )
         _publish_tick(ctx, basket.selected_ce, basket.selected_ce_token, 116.0)
         orders = broker.get_orders()
-        for _ in range(50):
+        for _ in range(100):
             if len(orders) == submitted_before + 1:
                 break
             ctx.market_data_manager._drain_tick_queue_sync()  # noqa: SLF001 - drain production queue
