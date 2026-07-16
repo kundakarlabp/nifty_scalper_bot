@@ -2,15 +2,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
-import pandas as pd
 import pytest
 
-from nifty_scalper_bot.data.candle_engine import CandleEngine
+import nifty_scalper_bot.execution.order_manager_core as order_manager_core
+from nifty_scalper_bot.config.settings import RiskSettings
+from nifty_scalper_bot.core.message_bus import MessageBus
+from nifty_scalper_bot.core.strategy_manager import (
+    StrategyManager as CoreStrategyManager,
+)
+from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.order_manager import OrderManager
+from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.risk.risk_manager import RiskManager
+from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+from nifty_scalper_bot.strategies.runner import StrategyRunner
+from nifty_scalper_bot.strategies.signal_generator import RSIMeanReversionStrategy
+from nifty_scalper_bot.strategies.signal_generator import (
+    StrategyManager as SignalStrategyManager,
+)
+from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
 from .event_recorder import EventRecorder
-from .invariants import InternalState, TradingInvariantChecker
+from .invariants import TradingInvariantChecker
 from .market_scenarios import CEBreakoutScenario
 from .simulated_broker import SimulatedBroker
 from .simulated_exchange import Instrument, SimulatedExchange
@@ -20,20 +38,118 @@ from .virtual_clock import VirtualClock
 IST = ZoneInfo("Asia/Kolkata")
 
 
-class SimIndicatorEngine:
-    def __init__(self) -> None:
-        self.history: dict[str, pd.DataFrame] = {}
+class FixedInstrumentResolver:
+    def __init__(self, instruments: list[Instrument]) -> None:
+        self._by_symbol = {item.symbol: item for item in instruments}
 
-    def sync(self, symbol: str, frame: pd.DataFrame) -> None:
-        self.history[symbol] = frame.copy()
+    def resolve(self, symbol: str) -> dict[str, Any] | None:
+        inst = self._by_symbol.get(symbol)
+        if inst is None:
+            return None
+        return {
+            "symbol": inst.symbol,
+            "instrument_token": inst.token,
+            "lot_size": inst.lot_size,
+            "tick_size": inst.tick_size,
+            "instrument_type": inst.instrument_type,
+            "exchange": inst.exchange,
+            "expiry": inst.expiry,
+            "strike": inst.strike,
+        }
+
+    def get_lot_size(self, symbol: str) -> int:
+        return self._by_symbol[symbol].lot_size
+
+    def get_tick_size(self, symbol: str) -> float:
+        return self._by_symbol[symbol].tick_size
 
 
-class SimRunner:
-    def __init__(self) -> None:
-        self.history: dict[str, pd.DataFrame] = {}
+@dataclass
+class RuntimeObservers:
+    readiness_snapshots: int = 0
+    risk_requests: int = 0
+    risk_approved: int = 0
+    order_submissions: list[dict[str, Any]] = field(default_factory=list)
+    broker_updates: list[dict[str, Any]] = field(default_factory=list)
+    signals: list[Any] = field(default_factory=list)
+    bracket_events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
-    def sync(self, symbol: str, frame: pd.DataFrame) -> None:
-        self.history[symbol] = frame.copy()
+
+class ObservedRiskManager(RiskManager):
+    def __init__(
+        self,
+        *args: Any,
+        observer: RuntimeObservers,
+        recorder: EventRecorder,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._live_sim_observer = observer
+        self._live_sim_recorder = recorder
+
+    def check_order(self, signal, live_enabled: bool):
+        self._live_sim_observer.risk_requests += 1
+        allowed, reason = super().check_order(signal, live_enabled)
+        if allowed:
+            self._live_sim_observer.risk_approved += 1
+            self._live_sim_recorder.record(
+                "RISK_APPROVED", signal.symbol, quantity=signal.quantity
+            )
+        else:
+            self._live_sim_recorder.record(
+                "RISK_REJECTED", signal.symbol, reason=reason
+            )
+        return allowed, reason
+
+
+class ObservedOrderManager(OrderManager):
+    def __init__(
+        self,
+        *args: Any,
+        observer: RuntimeObservers,
+        recorder: EventRecorder,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._live_sim_observer = observer
+        self._live_sim_recorder = recorder
+
+    def place_order(self, *args: Any, **kwargs: Any):
+        if "intent" not in kwargs and "virtual_bracket" in str(kwargs.get("tag") or ""):
+            kwargs["intent"] = "ENTRY"
+        result = super().place_order(*args, **kwargs)
+        symbol = str(kwargs.get("symbol") or (args[0] if args else ""))
+        self._live_sim_observer.order_submissions.append({**kwargs, "order_id": result})
+        if result:
+            tag = str(kwargs.get("tag") or "")
+            event = "ENTRY_SUBMITTED" if "virtual_bracket" in tag else "EXIT_SUBMITTED"
+            self._live_sim_recorder.record(
+                event, symbol, order_id=result, payload=kwargs
+            )
+        return result
+
+
+class ObservedBracketManager(BracketManager):
+    def __init__(
+        self,
+        *args: Any,
+        observer: RuntimeObservers,
+        recorder: EventRecorder,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._live_sim_observer = observer
+        self._live_sim_recorder = recorder
+
+    def _notify_event(self, event: str, payload: dict[str, Any] | None = None) -> None:
+        data = dict(payload or {})
+        self._live_sim_observer.bracket_events.append((event, data))
+        event_symbol = data.pop("symbol", None)
+        if event == "BRACKET_ACTIVATED":
+            self._live_sim_recorder.record("BRACKET_ACTIVE", event_symbol, **data)
+        if event in {"TRAILING_SL_UPDATED", "SL_TRAILED"}:
+            self._live_sim_recorder.record("STOP_MODIFIED", event_symbol, **data)
+        return super()._notify_event(event, payload)
 
 
 @dataclass
@@ -45,180 +161,280 @@ class LiveSimSystem:
     event_recorder: EventRecorder
     invariants: TradingInvariantChecker
     scenario: CEBreakoutScenario
-    candle_engines: dict[str, CandleEngine]
-    indicator_engine: SimIndicatorEngine
-    runner: SimRunner
-    internal: InternalState
-    bracket_orders: dict[str, str] = field(default_factory=dict)
-    target_orders: dict[str, str] = field(default_factory=dict)
-    entry_order_id: str | None = None
+    market_data: MarketDataManager
+    indicator_engine: IndicatorEngine
+    strategy_manager: SignalStrategyManager
+    core_strategy_manager: CoreStrategyManager
+    runner: StrategyRunner
+    risk_manager: RiskManager
+    order_manager: OrderManager
+    position_manager: PositionManager
+    bracket_manager: BracketManager
+    resolver: FixedInstrumentResolver
+    observers: RuntimeObservers = field(default_factory=RuntimeObservers)
+    _entry_order_id: str | None = None
+    _last_signal_bar_count: int = 0
+    _started: bool = False
+    _filled_entry_seen: bool = False
 
-    def hydrate(self) -> None:
-        for symbol, engine in self.candle_engines.items():
+    @property
+    def entry_order_id(self) -> str | None:
+        return self._entry_order_id
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        assert isinstance(self.runner, StrategyRunner)
+        assert isinstance(self.indicator_engine, IndicatorEngine)
+        assert isinstance(self.risk_manager, RiskManager)
+        assert isinstance(self.order_manager, OrderManager)
+        for symbol, inst in self.exchange.instruments.items():
+            self.market_data.register_symbol(symbol, inst.token)
+            self.market_data.request_token_subscription(inst.token, symbol=symbol)
+            self.market_data.subscribe(symbol, self.runner.on_datahub_tick)
+            self.exchange.confirm_subscription(symbol)
+        self.runner.set_active_option_context(
+            selected_ce=self.scenario.ce_symbol,
+            selected_pe=self.scenario.pe_symbol,
+            atm_strike=25000,
+            option_symbols=[self.scenario.ce_symbol, self.scenario.pe_symbol],
+        )
+        self.indicator_engine.set_runtime_context(
+            self.scenario.ce_symbol, {"futures_volume_ratio": 2.0}
+        )
+        self.runner.set_runtime_readiness(
+            data_hard_ready=True,
+            evaluation_ready=True,
+            live_orders_armed=True,
+            reason="live_sim_ready",
+        )
+        self.event_recorder.record("LIVE_ORDERS_ARMED")
+
+    def hydrate_via_production_path(self) -> None:
+        for symbol in self.exchange.instruments:
             limit = (
                 200
                 if symbol in {self.scenario.spot_symbol, self.scenario.future_symbol}
                 else 100
             )
             frame = self.history.fetch_history(symbol, limit=limit)
-            engine.replace_history(frame)
-            self.indicator_engine.sync(symbol, engine.get_df())
-            self.runner.sync(symbol, engine.get_df())
+            self.market_data.ingest_historical_ohlc(
+                symbol, frame.to_dict(orient="records")
+            )
+            self.runner.sync_history_from_mdm(
+                symbol,
+                required_bars=min(limit, 100),
+                reason="live_sim_hydration",
+                role="option" if symbol.endswith(("CE", "PE")) else "context",
+            )
         self.event_recorder.record("CANDLE_SSOT_READY")
 
-    def subscribe_all(self) -> None:
-        for symbol in self.candle_engines:
-            self.event_recorder.record("SUBSCRIPTION_REQUESTED", symbol)
-            self.exchange.confirm_subscription(symbol)
+    def publish_market_scenario(self, *, exit_mode: str = "target") -> None:
+        self.start()
+        self._publish_context_ticks()
+        for price in [100.0, 103.0, 105.0, 108.0, 112.0]:
+            self.clock.advance_to_next_minute()
             self.exchange.publish_tick(
-                symbol,
-                ltp=100 if "CE" in symbol else 80 if "PE" in symbol else 25000,
-                bid=99.8,
-                ask=100.0,
+                self.scenario.ce_symbol,
+                ltp=price,
+                bid=price - 0.10,
+                ask=price,
+                volume=2500,
             )
-            self.event_recorder.record("FIRST_CURRENT_GENERATION_TICK", symbol)
-        self.event_recorder.record("LIVE_ORDERS_ARMED")
-
-    def on_tick(self, tick: dict) -> None:
-        symbol = tick["symbol"]
-        finalized = self.candle_engines[symbol].on_tick(tick)
-        if finalized is not None:
-            frame = self.candle_engines[symbol].get_df()
-            self.indicator_engine.sync(symbol, frame)
-            self.runner.sync(symbol, frame)
-            self.event_recorder.record("CANDLE_FINALIZED", symbol, candle=finalized)
-            self.event_recorder.record("INDICATORS_UPDATED", symbol)
-        if symbol == self.scenario.spot_symbol:
-            self.event_recorder.record("SPOT_CONTEXT_UPDATED", symbol)
-        elif symbol == self.scenario.future_symbol:
-            self.event_recorder.record("FUTURES_CONTEXT_UPDATED", symbol)
+            self._drain_market_data()
+        if exit_mode == "stop":
+            for price in [109.0, 106.0, 103.0]:
+                self.clock.advance_to_next_minute()
+                self.exchange.publish_tick(
+                    self.scenario.ce_symbol,
+                    ltp=price,
+                    bid=price - 0.10,
+                    ask=price,
+                    volume=2500,
+                )
+                self._drain_market_data()
         else:
-            self.event_recorder.record("OPTION_CONTEXT_UPDATED", symbol)
+            self.clock.advance_to_next_minute()
+            self.exchange.publish_tick(
+                self.scenario.ce_symbol,
+                ltp=self.scenario.target_price,
+                bid=self.scenario.target_price,
+                ask=self.scenario.target_price + 0.10,
+                volume=2500,
+            )
+            self._drain_market_data()
 
-    def evaluate_and_enter_ce(self, *, partial: bool = False) -> None:
-        s = self.scenario
-        self.event_recorder.record("STRATEGY_EVALUATED", s.spot_symbol)
-        self.event_recorder.record("SIGNAL_GENERATED", s.ce_symbol, side="CE")
-        self.event_recorder.record(
-            "CANDIDATE_EXECUTION_READINESS", s.ce_symbol, ready=True
+    def publish_partial_fill_scenario(self) -> None:
+        self.broker.set_fill_policy(
+            self.scenario.ce_symbol,
+            [int(self.scenario.lot_size * 0.4), self.scenario.lot_size],
         )
-        self.event_recorder.record("RISK_APPROVED", s.ce_symbol, quantity=s.lot_size)
-        self.entry_order_id = self.broker.place_order(
-            symbol=s.ce_symbol,
+        self.publish_market_scenario(exit_mode="target")
+
+    def run_until_flat(self) -> None:
+        symbol = self.scenario.ce_symbol
+        if self.broker.query_positions().get(symbol, 0) != 0:
+            for _ in range(3):
+                self.clock.advance_to_next_minute()
+                self.exchange.publish_tick(
+                    symbol,
+                    ltp=self.scenario.target_price,
+                    bid=self.scenario.target_price,
+                    ask=self.scenario.target_price + 0.10,
+                )
+                self._drain_market_data()
+                if self.broker.query_positions().get(symbol, 0) == 0:
+                    break
+        self._record_flat_if_observed(symbol)
+        assert self.broker.query_positions().get(symbol, 0) == 0
+
+    def evaluate_candidate_readiness(self, symbol: str) -> Any:
+        snapshot = self.runner._option_side_readiness_snapshot()  # noqa: SLF001
+        self.observers.readiness_snapshots += 1
+        return self.runner._readiness_for_candidate_symbol(  # noqa: SLF001
+            symbol, snapshot=snapshot
+        )
+
+    def _publish_context_ticks(self) -> None:
+        for symbol, price in [
+            (self.scenario.spot_symbol, 25050.0),
+            (self.scenario.future_symbol, 25080.0),
+            (self.scenario.pe_symbol, 80.0),
+            (self.scenario.ce_symbol, self.scenario.entry_price),
+        ]:
+            self.exchange.publish_tick(symbol, ltp=price, bid=price - 0.1, ask=price)
+        self._drain_market_data()
+
+    def _drain_market_data(self) -> None:
+        self.market_data._drain_tick_queue_sync()  # noqa: SLF001
+        self._maybe_generate_and_submit_entry()
+        self.bracket_manager.on_tick(
+            self.scenario.ce_symbol,
+            float(
+                self.market_data._latest_ticks.get(
+                    self.scenario.ce_symbol, {}
+                ).get(  # noqa: SLF001
+                    "ltp", self.scenario.entry_price
+                )
+            ),
+        )
+
+    def _maybe_generate_and_submit_entry(self) -> None:
+        symbol = self.scenario.ce_symbol
+        if self._entry_order_id:
+            return
+        bar_count = self.indicator_engine.history_count(symbol)
+        if bar_count <= self._last_signal_bar_count:
+            return
+        self._last_signal_bar_count = bar_count
+        latest = self.indicator_engine.get_history(symbol, 1)
+        if not latest:
+            return
+        price = float(latest[-1])
+        strategy = self.strategy_manager._strategies[0]  # noqa: SLF001
+        indicators = self.indicator_engine.get_indicators(
+            symbol, strategy.get_required_indicators()
+        )
+        signal = strategy.generate_signal(
+            symbol, indicators, price, self.position_manager.get_position(symbol)
+        )
+        if signal is None or str(getattr(signal, "action", "")).upper() != "BUY":
+            return
+        self.observers.signals.append(signal)
+        self.event_recorder.record(
+            "SIGNAL_GENERATED",
+            symbol,
+            strategy=(signal.metadata or {}).get("strategy"),
+            action=signal.action,
+        )
+        readiness = self.evaluate_candidate_readiness(symbol)
+        self.event_recorder.record(
+            "CANDIDATE_EXECUTION_READINESS",
+            symbol,
+            executable=bool(getattr(readiness, "executable", False)),
+            blockers=list(getattr(readiness, "blockers", ()) or ()),
+        )
+        if not readiness or not readiness.executable:
+            return
+        quantity = self.scenario.lot_size
+        entry = price
+        stop_loss = min(
+            float(signal.stop_loss or self.scenario.initial_stop), entry - 0.05
+        )
+        take_profit = max(
+            float(signal.take_profit or self.scenario.target_price), entry + 0.05
+        )
+        self._entry_order_id = self.order_manager.place_bracket_order(
+            symbol=symbol,
             side="BUY",
-            quantity=s.lot_size,
-            order_type="LIMIT",
-            price=s.entry_price,
-            tag="entry",
+            quantity=quantity,
+            entry_price=entry,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            tag="live_sim_rsi_mean_reversion",
         )
-        self.internal.active_entries[s.ce_symbol] = 1
-        self.event_recorder.record(
-            "ENTRY_SUBMITTED", s.ce_symbol, order_id=self.entry_order_id
-        )
-        self.event_recorder.record(
-            "ENTRY_ACKNOWLEDGED", s.ce_symbol, order_id=self.entry_order_id
-        )
-        if partial:
-            q1 = int(s.lot_size * 0.4)
-            self.broker.fill(self.entry_order_id, q1, s.entry_price)
-            self.internal.positions[s.ce_symbol] = q1
-            self.event_recorder.record("ENTRY_PARTIAL_FILL", s.ce_symbol, quantity=q1)
-            self.internal.active_stop[s.ce_symbol] = q1
-            self.internal.active_target[s.ce_symbol] = q1
-            self.broker.fill(self.entry_order_id, s.lot_size - q1, s.entry_price)
-        else:
-            self.broker.fill(self.entry_order_id, s.lot_size, s.entry_price)
-        self.internal.positions[s.ce_symbol] = s.lot_size
-        self.event_recorder.record("ENTRY_COMPLETE", s.ce_symbol)
-        self.event_recorder.record("POSITION_OPENED", s.ce_symbol, quantity=s.lot_size)
-        self.submit_bracket()
-        self.invariants.check_all()
+        latest_tick = self.market_data._latest_ticks.get(symbol, {})  # noqa: SLF001
+        if self._entry_order_id and latest_tick:
+            self.broker.on_quote(
+                symbol,
+                bid=float(latest_tick.get("bid", entry)),
+                ask=float(latest_tick.get("ask", entry)),
+                ltp=float(latest_tick.get("ltp", entry)),
+            )
 
-    def submit_bracket(self) -> None:
-        s = self.scenario
-        stop_id = self.broker.place_order(
-            symbol=s.ce_symbol,
-            side="SELL",
-            quantity=s.lot_size,
-            order_type="SL",
-            price=s.initial_stop,
-            trigger_price=s.initial_stop,
-            tag="stop",
-        )
-        target_id = self.broker.place_order(
-            symbol=s.ce_symbol,
-            side="SELL",
-            quantity=s.lot_size,
-            order_type="LIMIT",
-            price=s.target_price,
-            tag="target",
-        )
-        self.bracket_orders[s.ce_symbol] = stop_id
-        self.target_orders[s.ce_symbol] = target_id
-        self.internal.active_stop[s.ce_symbol] = s.lot_size
-        self.internal.active_target[s.ce_symbol] = s.lot_size
-        self.internal.stop_prices.setdefault(s.ce_symbol, []).append(s.initial_stop)
-        self.event_recorder.record("STOP_SUBMITTED", s.ce_symbol, order_id=stop_id)
-        self.event_recorder.record("TARGET_SUBMITTED", s.ce_symbol, order_id=target_id)
-        self.event_recorder.record("BRACKET_ACTIVE", s.ce_symbol)
+    def _on_closed_bar(self, bar: dict[str, Any]) -> None:
+        symbol = str(bar.get("symbol") or "")
+        self.indicator_engine.ingest_bar(symbol, bar)
+        self.event_recorder.record("CANDLE_FINALIZED", symbol, candle=bar)
+        self.event_recorder.record("INDICATORS_UPDATED", symbol)
 
-    def trail_stop(self, price: float) -> None:
-        symbol = self.scenario.ce_symbol
-        self.broker.modify_order(
-            self.bracket_orders[symbol], price=price, trigger_price=price
-        )
-        self.internal.stop_prices.setdefault(symbol, []).append(price)
-        self.event_recorder.record("STOP_MODIFIED", symbol, price=price)
-        self.invariants.check_all()
+    def _on_broker_update(self, update: dict[str, Any]) -> None:
+        self.observers.broker_updates.append(dict(update))
+        order_id = str(update.get("order_id") or "")
+        if order_id:
+            self.order_manager.apply_broker_order_update(order_id, update)
+        status = str(update.get("status") or "").upper()
+        symbol = str(update.get("symbol") or "")
+        tag = str(update.get("tag") or "")
+        if tag.startswith("virtual_bra"):
+            if status == "PARTIALLY_FILLED":
+                self.event_recorder.record("ENTRY_PARTIAL_FILL", symbol, update=update)
+            if status in {"COMPLETE", "FILLED"}:
+                self._filled_entry_seen = True
+                self.event_recorder.record("ENTRY_COMPLETE", symbol, update=update)
+                self.event_recorder.record("POSITION_OPENED", symbol)
+                self.event_recorder.record("BRACKET_ACTIVE", symbol)
+        elif (
+            tag.startswith("bracket_exit")
+            or tag.startswith("exit_")
+            or str(update.get("intent") or "") == "EXIT"
+        ):
+            if status in {"COMPLETE", "FILLED"}:
+                self.event_recorder.record("EXIT_COMPLETE", symbol, update=update)
+                self._record_flat_if_observed(symbol)
 
-    def close_via_target(self) -> None:
-        symbol = self.scenario.ce_symbol
-        self.broker.fill(
-            self.target_orders[symbol],
-            self.scenario.lot_size,
-            self.scenario.target_price,
-        )
-        self.event_recorder.record(
-            "EXIT_COMPLETE", symbol, order_id=self.target_orders[symbol]
-        )
-        self.broker.cancel_order(self.bracket_orders[symbol])
-        self.event_recorder.record("SIBLING_CANCELLED", symbol)
-        self._flat(symbol)
-
-    def close_via_stop(self, price: float) -> None:
-        symbol = self.scenario.ce_symbol
-        self.broker.fill(self.bracket_orders[symbol], self.scenario.lot_size, price)
-        self.event_recorder.record(
-            "EXIT_COMPLETE", symbol, order_id=self.bracket_orders[symbol]
-        )
-        self.broker.cancel_order(self.target_orders[symbol])
-        self.event_recorder.record("SIBLING_CANCELLED", symbol)
-        self._flat(symbol)
-
-    def _flat(self, symbol: str) -> None:
-        self.internal.positions[symbol] = 0
-        self.internal.active_stop[symbol] = 0
-        self.internal.active_target[symbol] = 0
-        self.internal.risk_reserved[symbol] = 0
-        self.event_recorder.record("POSITION_RECONCILED", symbol)
-        self.event_recorder.record("POSITION_FLAT", symbol)
-        self.event_recorder.record("TRADE_CLOSED", symbol)
-        self.event_recorder.record(
-            "PNL_FINALIZED", symbol, pnl=self.broker.realised_pnl.get(symbol, 0.0)
-        )
-        self.invariants.check_all()
+    def _record_flat_if_observed(self, symbol: str) -> None:
+        if self.broker.query_positions().get(symbol, 0) != 0:
+            return
+        if not self.event_recorder.filter(event="POSITION_FLAT", symbol=symbol):
+            self.event_recorder.record("POSITION_RECONCILED", symbol)
+            self.event_recorder.record("POSITION_FLAT", symbol)
+            self.event_recorder.record("TRADE_CLOSED", symbol)
+            self.event_recorder.record(
+                "PNL_FINALIZED", symbol, pnl=self.broker.realised_pnl.get(symbol, 0.0)
+            )
 
 
-@pytest.fixture
-def live_sim_system(monkeypatch) -> LiveSimSystem:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("BROKER_SIMULATION", "true")
-    monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
-    monkeypatch.setenv("ALLOW_NETWORK", "false")
-    clock = VirtualClock(datetime(2026, 7, 15, 8, 55, tzinfo=IST))
-    recorder = EventRecorder(clock)
-    broker = SimulatedBroker(clock, recorder)
-    exchange = SimulatedExchange(clock, broker, recorder)
+def build_trading_runtime(
+    *,
+    clock: VirtualClock,
+    broker: SimulatedBroker,
+    history_provider: SimulatedHistoryProvider,
+    exchange: SimulatedExchange,
+    event_observer: EventRecorder,
+    tmp_path: Path,
+) -> LiveSimSystem:
     scenario = CEBreakoutScenario()
     instruments = [
         Instrument(scenario.spot_symbol, 256265, "NSE", "SPOT", None, None, 1, 0.05),
@@ -234,36 +450,127 @@ def live_sim_system(monkeypatch) -> LiveSimSystem:
     ]
     for inst in instruments:
         exchange.add_instrument(inst)
-    history = SimulatedHistoryProvider(clock, recorder)
-    for inst in instruments:
         count = 200 if inst.instrument_type in {"SPOT", "FUT"} else 100
-        history.set_history(
-            inst.symbol,
-            make_history(
-                clock.now(),
-                count,
-                25000 if inst.instrument_type in {"SPOT", "FUT"} else 80,
-            ),
+        base = 25000 if inst.instrument_type in {"SPOT", "FUT"} else 118
+        history_provider.set_history(
+            inst.symbol, make_history(clock.now(), count, base)
         )
-    engines = {
-        inst.symbol: CandleEngine(symbol=inst.symbol, max_bars=500)
-        for inst in instruments
-    }
-    indicator = SimIndicatorEngine()
-    runner = SimRunner()
-    internal = InternalState()
-    system = LiveSimSystem(
-        clock,
-        exchange,
-        broker,
-        history,
-        recorder,
-        TradingInvariantChecker(broker, internal),
-        scenario,
-        engines,
-        indicator,
-        runner,
-        internal,
+    resolver = FixedInstrumentResolver(instruments)
+    market_data = MarketDataManager(broker=broker, websocket=None, cache_len=250)
+    indicator = IndicatorEngine()
+    position_manager = PositionManager(str(tmp_path / "positions.json"))
+    observers = RuntimeObservers()
+    risk = ObservedRiskManager(
+        RiskSettings(contract_lot_size=75),
+        position_manager,
+        1_000_000,
+        observer=observers,
+        recorder=event_observer,
     )
-    exchange.subscribe(system.on_tick)
+    order_manager = ObservedOrderManager(
+        broker,
+        position_manager,
+        RateLimiter(),
+        instrument_resolver=resolver,
+        history_path=tmp_path / "orders.json",
+        indicator_engine=indicator,
+        observer=observers,
+        recorder=event_observer,
+    )
+    order_manager.set_trade_mode_getters(
+        enable_live=lambda: True, shadow_mode=lambda: False
+    )
+    order_manager.set_risk_manager(risk)
+    bracket_manager = ObservedBracketManager(
+        order_manager,
+        indicator,
+        market_data,
+        observer=observers,
+        recorder=event_observer,
+    )
+    order_manager.set_bracket_manager(bracket_manager)
+    strategy_manager = SignalStrategyManager(
+        [RSIMeanReversionStrategy(oversold_threshold=35, default_quantity=75)],
+        indicator,
+        position_manager,
+    )
+    core_strategy_manager = CoreStrategyManager([], indicator, position_manager)
+    runner = StrategyRunner(
+        market_data_manager=market_data,
+        indicator_engine=indicator,
+        strategy_manager=strategy_manager,
+        risk_manager=risk,
+        order_manager=order_manager,
+        position_manager=position_manager,
+        message_bus=MessageBus(),
+        data_hub=None,
+        bracket_manager=bracket_manager,
+    )
+    system = LiveSimSystem(
+        clock=clock,
+        exchange=exchange,
+        broker=broker,
+        history=history_provider,
+        event_recorder=event_observer,
+        invariants=TradingInvariantChecker(broker),
+        scenario=scenario,
+        market_data=market_data,
+        indicator_engine=indicator,
+        strategy_manager=strategy_manager,
+        core_strategy_manager=core_strategy_manager,
+        runner=runner,
+        risk_manager=risk,
+        order_manager=order_manager,
+        position_manager=position_manager,
+        bracket_manager=bracket_manager,
+        resolver=resolver,
+        observers=observers,
+    )
+    market_data.subscribe_bars(system._on_closed_bar)  # noqa: SLF001
+    exchange.subscribe(
+        lambda tick: market_data._process_queued_tick(tick)
+    )  # noqa: SLF001
+    broker.register_callback(system._on_broker_update)  # noqa: SLF001
     return system
+
+
+@pytest.fixture
+def live_sim_system(monkeypatch, tmp_path) -> LiveSimSystem:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("BROKER_SIMULATION", "true")
+    monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
+    monkeypatch.setenv("ALLOW_NETWORK", "false")
+    monkeypatch.setenv("ALLOW_OFFHOURS_TESTING", "true")
+    monkeypatch.setenv("NSB_TEST_MODE", "true")
+    monkeypatch.setenv("RUNNER_OPTION_MIN_BARS", "50")
+    monkeypatch.setenv("REGIME_GATE_ENABLED", "false")
+    monkeypatch.setenv("MIN_BRACKET_RR", "0.1")
+    monkeypatch.setenv("BROKER_API_KEY", "live-sim-key")
+    monkeypatch.setenv("BROKER_API_SECRET", "live-sim-secret")
+    monkeypatch.setenv("BROKER_ACCESS_TOKEN", "live-sim-token")
+    monkeypatch.setattr(
+        order_manager_core, "get_time_status", lambda: (True, "live_sim_market_open")
+    )
+    clock = VirtualClock(datetime(2026, 7, 15, 9, 35, tzinfo=IST))
+    recorder = EventRecorder(clock)
+    broker = SimulatedBroker(clock, recorder)
+    exchange = SimulatedExchange(clock, broker, recorder)
+    history = SimulatedHistoryProvider(clock, recorder)
+    system = build_trading_runtime(
+        clock=clock,
+        broker=broker,
+        history_provider=history,
+        exchange=exchange,
+        event_observer=recorder,
+        tmp_path=tmp_path,
+    )
+    try:
+        yield system
+    finally:
+        system.bracket_manager.shutdown()
+        assert system.exchange.pending_events == 0
+        assert system.broker.pending_callbacks == 0

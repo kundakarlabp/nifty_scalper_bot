@@ -11,7 +11,10 @@ def test_invariant_checker_reports_precise_failures():
     checker = TradingInvariantChecker(broker, state)
     with pytest.raises(AssertionError, match="unprotected open position"):
         checker.check_all()
-    oid = broker.place_order(symbol="S", side="BUY", quantity=1, order_type="MARKET")
+    response = broker.place_order(
+        symbol="S", side="BUY", quantity=1, order_type="MARKET"
+    )
+    oid = response["order_id"]
     broker.fill(oid, 1, 10)
     state.positions["S"] = 2
     state.active_stop["S"] = 2
