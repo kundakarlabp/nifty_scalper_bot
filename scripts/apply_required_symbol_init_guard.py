@@ -8,7 +8,6 @@ if needle not in text:
     raise SystemExit('required-live-symbols anchor not found or already changed')
 path.write_text(text.replace(needle, replacement, 1))
 
-# Add a direct regression beside the existing feed-health tests.
 test_path = Path('tests/data/test_canonical_history_hydration.py')
 test_text = test_path.read_text()
 marker = 'def test_feed_health_uses_selected_options_not_context_option_staleness'
