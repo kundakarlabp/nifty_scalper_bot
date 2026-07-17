@@ -267,15 +267,12 @@ def apply_app_patch(app_module: Any) -> bool:
     _APP_MODULE_REF = app_module
     if bool(getattr(app_module, _PATCH_ATTR, False)):
         return False
-    degraded = getattr(app_module, "_polling_fallback_degraded", None)
     supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
-    try:
-        degraded_params = inspect.signature(degraded).parameters if callable(degraded) else {}
-    except (TypeError, ValueError):
-        degraded_params = {}
-    if callable(supervisor) and "quote_stale_ms" in degraded_params:
+    if callable(supervisor) and getattr(
+        supervisor, "_nifty_polling_supervisor_version", None
+    ) == 2:
         setattr(app_module, _PATCH_ATTR, True)
-        return True
+        return False
 
     async def _installed_polling_failover_supervisor_iteration(
         ctx: Any,
@@ -298,6 +295,11 @@ def apply_app_patch(app_module: Any) -> bool:
             _app_module=app_module,
         )
 
+    setattr(
+        _installed_polling_failover_supervisor_iteration,
+        "_nifty_polling_supervisor_version",
+        2,
+    )
     setattr(app_module, "_polling_fallback_degraded", _polling_fallback_degraded)
     setattr(
         app_module,

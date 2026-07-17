@@ -328,7 +328,7 @@ def test_one_stale_noncritical_option_does_not_restart_full_ws(monkeypatch):
     assert rest_requests == [(stale, "ws_symbol_stale_recovery")]
 
 
-def test_spot_and_futures_both_stale_may_trigger_full_restart(monkeypatch):
+def test_spot_and_futures_stale_use_symbol_recovery_when_transport_healthy(monkeypatch):
     from nifty_scalper_bot.utils import market_hours
 
     mdm = MarketDataManager(kite=None)
@@ -342,9 +342,44 @@ def test_spot_and_futures_both_stale_may_trigger_full_restart(monkeypatch):
     mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
-    restarted = []
+    rest_requests: list[tuple[str, str]] = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)) or True,
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("healthy transport must not restart globally"),
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert {symbol for symbol, _ in rest_requests} == {
+        "NSE:NIFTY",
+        "NFO:NIFTY26JUNFUT",
+    }
+
+
+def test_heartbeat_stale_triggers_single_global_restart(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    mdm._symbols_with_tick.update(required)
+    for sym in required:
+        mdm._last_valid_live_tick_mono[sym] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now - 120.0
+    restarted: list[bool] = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: False)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
@@ -1155,3 +1190,60 @@ async def test_high_rate_burst_preserves_heartbeat_and_single_drain(monkeypatch)
     assert processed[-1] == 19_999
     assert stats["unexplained_loss"] == 0
     await _stop_mdm(mdm)
+
+
+def test_symbol_recovery_attempts_are_cooldown_bounded(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    stale = "NFO:NIFTY26JUN24000CE"
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    mdm._symbols_with_tick.update(required)
+    for sym in required:
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._symbol_recovery_cooldown_s = 30.0
+    requests: list[str] = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: requests.append(symbol) or True,
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("healthy transport must not restart globally"),
+    )
+
+    for _ in range(20):
+        mdm._check_zombie_ticks()
+
+    assert requests == [stale]
+
+
+def test_trading_feed_health_exposes_required_symbol_recovery():
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    mdm.set_readiness_requirements(
+        spot_symbol="NSE:NIFTY",
+        futures_symbol="NFO:NIFTY26JUNFUT",
+        atm_ce_symbol="NFO:NIFTY26JUN24000CE",
+        atm_pe_symbol="NFO:NIFTY26JUN24000PE",
+        option_symbols=[
+            "NFO:NIFTY26JUN24000CE",
+            "NFO:NIFTY26JUN24000PE",
+        ],
+    )
+
+    health = mdm.trading_feed_health(max_age_ms=60_000)
+
+    assert health["required_symbol_recovery_active"] is True
+    assert set(health["stale_required_symbols"]) == mdm._required_live_symbols()
+    assert health["trading_feed_healthy"] is False
