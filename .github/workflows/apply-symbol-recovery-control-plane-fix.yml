@@ -4,13 +4,17 @@ on:
   push:
     branches:
       - fix/symbol-recovery-control-plane-20260717
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   apply-fix:
-    if: "!contains(github.event.head_commit.message, '[native-symbol-recovery-applied]')"
+    if: "github.event_name == 'pull_request' || !contains(github.event.head_commit.message, '[native-symbol-recovery-applied]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
