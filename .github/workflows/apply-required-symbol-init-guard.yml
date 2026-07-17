@@ -1,0 +1,35 @@
+name: Apply required symbol initialization guard
+
+on:
+  push:
+    branches:
+      - fix/symbol-recovery-control-plane-20260717
+
+permissions:
+  contents: write
+
+jobs:
+  apply-guard:
+    if: "!contains(github.event.head_commit.message, '[required-symbol-init-applied]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/symbol-recovery-control-plane-20260717
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply deterministic source and regression edits
+        run: python scripts/apply_required_symbol_init_guard.py
+      - name: Install dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Run focused regressions
+        run: python -m pytest -q tests/data/test_canonical_history_hydration.py tests/data/test_mdm_tick_coalescing.py tests/core/test_polling_failover.py tests/core/test_import_safety.py
+      - name: Commit native correction and tests
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/data/market_data_manager.py tests/data/test_canonical_history_hydration.py
+          git commit -m 'Initialize required-symbol lifecycle state safely [required-symbol-init-applied]'
+          git push origin HEAD:fix/symbol-recovery-control-plane-20260717
