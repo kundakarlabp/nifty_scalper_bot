@@ -20,7 +20,6 @@ _COUNTERS: dict[int, defaultdict[str, int]] = {}
 
 
 def _lock_for(engine: Any) -> threading.RLock:
-    """Return the bounded per-engine lock for a slotted CandleEngine."""
     key = id(engine)
     with _REGISTRY_GUARD:
         lock = _ENGINE_LOCKS.get(key)
@@ -32,7 +31,6 @@ def _lock_for(engine: Any) -> threading.RLock:
 
 
 def _register_engine(engine: Any) -> None:
-    """Create clean registry state for one newly constructed engine instance."""
     key = id(engine)
     with _REGISTRY_GUARD:
         _ENGINE_LOCKS[key] = threading.RLock()
@@ -74,16 +72,11 @@ def _current_minute(engine: Any) -> pd.Timestamp:
 
 
 def reconcile_stale_current(engine: Any, *, reason: str) -> bool:
-    """Discard a current candle whose minute is already finalized.
-
-    History hydration and tick/clock finalization can race.  The completed deque
-    is authoritative; a current candle at or behind its watermark must never be
-    finalized again or used as the rollover source for a newer tick.
-    """
+    """Discard only a current candle duplicating the finalized watermark."""
     with _lock_for(engine):
         latest = _latest_completed_minute(engine)
         current = _current_minute(engine)
-        if pd.isna(latest) or pd.isna(current) or current > latest:
+        if pd.isna(latest) or pd.isna(current) or current != latest:
             return False
         engine.current_candle = None
         counters = _counters_for(engine)
@@ -127,7 +120,6 @@ def _state_consistent(engine: Any) -> bool:
 
 
 def install_candle_state_hardening(engine_cls: type[Any]) -> None:
-    """Serialize candle mutations and reject ticks for finalized minutes."""
     if bool(getattr(engine_cls, _INSTALLED_ATTR, False)):
         return
 
@@ -149,7 +141,6 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
                 _counters_for(self)["history_current_reconcile_total"] += 1
             if not _state_consistent(self):
                 from nifty_scalper_bot.data.source import DataIntegrityError
-
                 raise DataIntegrityError("inconsistent candle state after history replacement")
 
     def hardened_on_tick(self: Any, tick: Mapping[str, Any]) -> Any:
@@ -161,20 +152,11 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
                 timestamp_source = normalized.source
             except Exception:
                 return original_on_tick(self, tick)
-
-            # A hydration/finalization race can leave current_candle on a minute
-            # already present in completed history. Clear it before a newer tick
-            # asks the native engine to roll over and finalize it again.
             reconcile_stale_current(self, reason="tick")
             latest = _latest_completed_minute(self)
             if not pd.isna(latest) and tick_minute <= latest:
                 _counters_for(self)["finalized_minute_tick_reject_total"] += 1
-                symbol = (
-                    tick.get("symbol")
-                    or tick.get("trading_symbol")
-                    or getattr(self, "symbol", None)
-                    or "symbol_unset"
-                )
+                symbol = tick.get("symbol") or tick.get("trading_symbol") or getattr(self, "symbol", None) or "symbol_unset"
                 log_throttled(
                     LOGGER,
                     f"candle_tick_finalized_minute:{symbol}:{tick_minute.isoformat()}",
@@ -199,9 +181,6 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
             try:
                 return original_finalize(self)
             finally:
-                # Once finalization is attempted, this partial candle must never
-                # be reused. During rollover original on_tick installs the next
-                # minute immediately after this call returns.
                 self.current_candle = None
 
     def hardened_flush(self: Any) -> Any:
@@ -216,30 +195,16 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
             counters = _counters_for(self)
             latest = _latest_completed_minute(self)
             current = _current_minute(self)
-            diagnostics.update(
-                {
-                    "finalized_minute_tick_reject_total": counters[
-                        "finalized_minute_tick_reject_total"
-                    ],
-                    "history_current_reconcile_total": counters[
-                        "history_current_reconcile_total"
-                    ],
-                    "current_reconcile_total": counters["current_reconcile_total"],
-                    "current_reconcile_tick_total": counters[
-                        "current_reconcile_tick_total"
-                    ],
-                    "current_reconcile_flush_total": counters[
-                        "current_reconcile_flush_total"
-                    ],
-                    "last_completed_timestamp": None
-                    if pd.isna(latest)
-                    else latest.isoformat(),
-                    "current_candle_timestamp": None
-                    if pd.isna(current)
-                    else current.isoformat(),
-                    "state_consistent": _state_consistent(self),
-                }
-            )
+            diagnostics.update({
+                "finalized_minute_tick_reject_total": counters["finalized_minute_tick_reject_total"],
+                "history_current_reconcile_total": counters["history_current_reconcile_total"],
+                "current_reconcile_total": counters["current_reconcile_total"],
+                "current_reconcile_tick_total": counters["current_reconcile_tick_total"],
+                "current_reconcile_flush_total": counters["current_reconcile_flush_total"],
+                "last_completed_timestamp": None if pd.isna(latest) else latest.isoformat(),
+                "current_candle_timestamp": None if pd.isna(current) else current.isoformat(),
+                "state_consistent": _state_consistent(self),
+            })
             return diagnostics
 
     def is_state_consistent(self: Any) -> bool:
