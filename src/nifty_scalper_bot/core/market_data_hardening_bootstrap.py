@@ -13,22 +13,16 @@ from typing import Any
 
 _MDM_HARDENING_ATTR = "_freshness_hardening_installed"
 _WS_HARDENING_ATTR = "_market_data_hardening_installed"
+_CANDLE_HARDENING_ATTR = "_candle_state_hardening_installed"
 
 
 def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[str, bool]:
-    """Install and verify MDM/WebSocket market-data hardening.
+    """Install and verify candle, MDM, and WebSocket hardening layers."""
 
-    Args:
-        logger: Optional structured logger used for the startup confirmation.
-
-    Returns:
-        Mapping with ``mdm`` and ``websocket`` installation states.
-
-    Raises:
-        RuntimeError: If either hardening layer is unavailable after explicit
-            idempotent installation.
-    """
-
+    from nifty_scalper_bot.data.candle_engine import CandleEngine
+    from nifty_scalper_bot.data.candle_state_hardening import (
+        install_candle_state_hardening,
+    )
     from nifty_scalper_bot.data.market_data_hardening import (
         install_market_data_manager_hardening,
     )
@@ -38,21 +32,28 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
     )
     from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 
+    # Install candle hardening before MarketDataManager instances are created so
+    # every engine uses the same per-engine serialization and closed-minute
+    # watermark contract from its first tick.
+    install_candle_state_hardening(CandleEngine)
     install_market_data_manager_hardening(MarketDataManager)
     install_websocket_market_data_hardening(WebSocketManager)
 
     state = {
+        "candle": bool(getattr(CandleEngine, _CANDLE_HARDENING_ATTR, False)),
         "mdm": bool(getattr(MarketDataManager, _MDM_HARDENING_ATTR, False)),
         "websocket": bool(getattr(WebSocketManager, _WS_HARDENING_ATTR, False)),
     }
 
     if logger is not None:
         logger.info(
-            "MARKET_DATA_HARDENING_INSTALLED mdm=%s websocket=%s",
+            "MARKET_DATA_HARDENING_INSTALLED candle=%s mdm=%s websocket=%s",
+            state["candle"],
             state["mdm"],
             state["websocket"],
             extra={
                 "event": "MARKET_DATA_HARDENING_INSTALLED",
+                "candle": state["candle"],
                 "mdm": state["mdm"],
                 "websocket": state["websocket"],
             },
