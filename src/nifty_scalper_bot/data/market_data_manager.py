@@ -1996,6 +1996,13 @@ class MarketDataManager:
 
     def _required_live_symbols(self) -> set[str]:
         """Return symbols that are currently critical for live WS health."""
+        # Keep this ownership boundary safe during early lifecycle diagnostics
+        # and lightweight construction. Normal production instances already
+        # initialize the mapping in __init__.
+        required_since = getattr(self, "_required_symbol_since_mono", None)
+        if not isinstance(required_since, dict):
+            required_since = {}
+            self._required_symbol_since_mono = required_since
         required: set[str] = set()
 
         def add(value: Any) -> None:
@@ -3031,9 +3038,9 @@ class MarketDataManager:
 
     def _current_symbol_token_locked(self, symbol: str) -> int | None:
         canonical = self._canonical_symbol(symbol)
-        token = self._symbol_to_token.get(canonical) or self._token_by_symbol.get(
-            canonical
-        )
+        symbol_to_token = getattr(self, "_symbol_to_token", {}) or {}
+        token_by_symbol = getattr(self, "_token_by_symbol", {}) or {}
+        token = symbol_to_token.get(canonical) or token_by_symbol.get(canonical)
         try:
             return int(token) if token is not None else None
         except (TypeError, ValueError):
@@ -3067,11 +3074,11 @@ class MarketDataManager:
             desired = set(getattr(self, "_desired_tokens", set()) or set())
             confirmed = set(getattr(self, "_confirmed_subscriptions", set()) or set())
             dispatched = set(getattr(self, "_dispatched_subscriptions", set()) or set())
-            sub_gen = self._symbol_subscription_generation.get(canonical)
-            tick_gen = self._symbol_first_tick_generation.get(canonical)
-            tick_mono = self._last_valid_live_tick_mono.get(canonical)
+            sub_gen = (getattr(self, "_symbol_subscription_generation", {}) or {}).get(canonical)
+            tick_gen = (getattr(self, "_symbol_first_tick_generation", {}) or {}).get(canonical)
+            tick_mono = (getattr(self, "_last_valid_live_tick_mono", {}) or {}).get(canonical)
             current_token = self._current_symbol_token_locked(canonical)
-            tracked = canonical in self._tracked_symbols
+            tracked = canonical in (getattr(self, "_tracked_symbols", set()) or set())
         subscription_requested = (
             token_int in desired if token_int is not None else False
         )
