@@ -15,7 +15,7 @@ _CLOCK_FLUSH_HARDENING_ATTR = "_candle_clock_flush_hardening_installed"
 
 
 def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[str, bool]:
-    """Install and verify all live market-data hardening layers."""
+    """Install all hardening layers while preserving the public return contract."""
 
     from nifty_scalper_bot.data.candle_clock_flush_hardening import (
         install_candle_clock_flush_hardening,
@@ -35,12 +35,10 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
 
     install_candle_state_hardening(CandleEngine)
     install_market_data_manager_hardening(MarketDataManager)
-    # Install after the existing MDM hardening because that layer first exposes
-    # flush_due_candles; this final wrapper adds the expected-minute recheck.
     install_candle_clock_flush_hardening(MarketDataManager)
     install_websocket_market_data_hardening(WebSocketManager)
 
-    state = {
+    full_state = {
         "candle": bool(getattr(CandleEngine, _CANDLE_HARDENING_ATTR, False)),
         "clock_flush": bool(
             getattr(MarketDataManager, _CLOCK_FLUSH_HARDENING_ATTR, False)
@@ -48,19 +46,21 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
         "mdm": bool(getattr(MarketDataManager, _MDM_HARDENING_ATTR, False)),
         "websocket": bool(getattr(WebSocketManager, _WS_HARDENING_ATTR, False)),
     }
+    # Preserve the established API used by startup callers and existing tests.
+    state = {"mdm": full_state["mdm"], "websocket": full_state["websocket"]}
 
     if logger is not None:
         logger.info(
-            "MARKET_DATA_HARDENING_INSTALLED candle=%s clock_flush=%s mdm=%s websocket=%s",
-            state["candle"],
-            state["clock_flush"],
-            state["mdm"],
-            state["websocket"],
-            extra={"event": "MARKET_DATA_HARDENING_INSTALLED", **state},
+            "MARKET_DATA_HARDENING_INSTALLED mdm=%s websocket=%s candle=%s clock_flush=%s",
+            full_state["mdm"],
+            full_state["websocket"],
+            full_state["candle"],
+            full_state["clock_flush"],
+            extra={"event": "MARKET_DATA_HARDENING_INSTALLED", **full_state},
         )
 
-    if not all(state.values()):
-        raise RuntimeError(f"market_data_hardening_not_installed state={state}")
+    if not all(full_state.values()):
+        raise RuntimeError(f"market_data_hardening_not_installed state={full_state}")
 
     return state
 
