@@ -19,16 +19,27 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install -e '.[dev]'
-      - name: Run full suite with compact failure output
+      - name: Run full suite and build compact diagnostic
         shell: bash
         run: |
           set +e
           python -m pytest -q --tb=short > /tmp/full-suite.log 2>&1
           status=$?
-          echo '===== FAILURE SUMMARY ====='
+          echo "$status" > /tmp/full-suite.status
           if [ "$status" -ne 0 ]; then
-            grep -E -A30 -B10 '(^FAILED |^ERROR |short test summary info|AssertionError|TypeError|AttributeError)' /tmp/full-suite.log | tail -n 260 || true
+            grep -E -A35 -B12 '(^FAILED |^ERROR |short test summary info|AssertionError|TypeError|AttributeError)' /tmp/full-suite.log | tail -n 320 > /tmp/failure-summary.txt || true
           else
-            tail -n 20 /tmp/full-suite.log
+            tail -n 30 /tmp/full-suite.log > /tmp/failure-summary.txt
           fi
-          exit "$status"
+          exit 0
+      - name: Upload diagnostic summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr889-full-suite-diagnostic
+          path: |
+            /tmp/failure-summary.txt
+            /tmp/full-suite.status
+          if-no-files-found: error
+      - name: Preserve test result
+        shell: bash
+        run: exit "$(cat /tmp/full-suite.status)"
