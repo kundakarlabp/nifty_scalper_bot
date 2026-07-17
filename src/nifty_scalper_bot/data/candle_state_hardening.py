@@ -31,6 +31,20 @@ def _lock_for(engine: Any) -> threading.RLock:
         return lock
 
 
+def _register_engine(engine: Any) -> None:
+    """Create clean registry state for one newly constructed engine instance.
+
+    The registry is keyed by ``id(engine)`` because CandleEngine instances may be
+    slotted and not weak-referenceable. Python can reuse an object id after an
+    earlier engine is destroyed, so constructor registration must replace—not
+    reuse—the prior lock and diagnostic counters for that numeric id.
+    """
+    key = id(engine)
+    with _REGISTRY_GUARD:
+        _ENGINE_LOCKS[key] = threading.RLock()
+        _COUNTERS[key] = defaultdict(int)
+
+
 def _counters_for(engine: Any) -> defaultdict[str, int]:
     _lock_for(engine)
     return _COUNTERS[id(engine)]
@@ -96,7 +110,7 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
 
     def hardened_init(self: Any, *args: Any, **kwargs: Any) -> None:
         original_init(self, *args, **kwargs)
-        _lock_for(self)
+        _register_engine(self)
 
     def hardened_replace_history(self: Any, frame: Any) -> None:
         with _lock_for(self):

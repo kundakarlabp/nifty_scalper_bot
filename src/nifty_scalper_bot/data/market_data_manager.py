@@ -1996,6 +1996,13 @@ class MarketDataManager:
 
     def _required_live_symbols(self) -> set[str]:
         """Return symbols that are currently critical for live WS health."""
+        # Keep this ownership boundary safe during early lifecycle diagnostics
+        # and lightweight construction. Normal production instances already
+        # initialize the mapping in __init__.
+        required_since = getattr(self, "_required_symbol_since_mono", None)
+        if not isinstance(required_since, dict):
+            required_since = {}
+            self._required_symbol_since_mono = required_since
         required: set[str] = set()
 
         def add(value: Any) -> None:
@@ -3031,9 +3038,9 @@ class MarketDataManager:
 
     def _current_symbol_token_locked(self, symbol: str) -> int | None:
         canonical = self._canonical_symbol(symbol)
-        token = self._symbol_to_token.get(canonical) or self._token_by_symbol.get(
-            canonical
-        )
+        symbol_to_token = getattr(self, "_symbol_to_token", {}) or {}
+        token_by_symbol = getattr(self, "_token_by_symbol", {}) or {}
+        token = symbol_to_token.get(canonical) or token_by_symbol.get(canonical)
         try:
             return int(token) if token is not None else None
         except (TypeError, ValueError):
@@ -3067,11 +3074,11 @@ class MarketDataManager:
             desired = set(getattr(self, "_desired_tokens", set()) or set())
             confirmed = set(getattr(self, "_confirmed_subscriptions", set()) or set())
             dispatched = set(getattr(self, "_dispatched_subscriptions", set()) or set())
-            sub_gen = self._symbol_subscription_generation.get(canonical)
-            tick_gen = self._symbol_first_tick_generation.get(canonical)
-            tick_mono = self._last_valid_live_tick_mono.get(canonical)
+            sub_gen = (getattr(self, "_symbol_subscription_generation", {}) or {}).get(canonical)
+            tick_gen = (getattr(self, "_symbol_first_tick_generation", {}) or {}).get(canonical)
+            tick_mono = (getattr(self, "_last_valid_live_tick_mono", {}) or {}).get(canonical)
             current_token = self._current_symbol_token_locked(canonical)
-            tracked = canonical in self._tracked_symbols
+            tracked = canonical in (getattr(self, "_tracked_symbols", set()) or set())
         subscription_requested = (
             token_int in desired if token_int is not None else False
         )
@@ -5349,8 +5356,20 @@ class MarketDataManager:
         futures_fresh = self._is_futures_fresh(threshold)
         options_fresh = self._are_active_options_fresh(threshold)
         spot_fresh = self._is_spot_fresh(threshold)
+        required_symbols = sorted(self._required_live_symbols())
+        stale_required_symbols: list[str] = []
+        required_symbol_readiness: dict[str, dict[str, Any]] = {}
+        for symbol in required_symbols:
+            token = self.current_live_token(symbol)
+            readiness = self.classify_live_tick_readiness(
+                symbol, token, max_age_s=max(float(threshold) / 1000.0, 0.001)
+            )
+            required_symbol_readiness[symbol] = readiness
+            if not bool(readiness.get("ready")):
+                stale_required_symbols.append(symbol)
+        recovery_active = bool(stale_required_symbols)
         return {
-            "trading_feed_healthy": futures_fresh and options_fresh,
+            "trading_feed_healthy": futures_fresh and options_fresh and not recovery_active,
             "futures_fresh": futures_fresh,
             "options_fresh": options_fresh,
             "spot_fresh": spot_fresh,
@@ -5364,6 +5383,10 @@ class MarketDataManager:
             ),
             "option_symbols": option_symbols,
             "threshold_ms": threshold,
+            "required_symbols": required_symbols,
+            "stale_required_symbols": stale_required_symbols,
+            "required_symbol_recovery_active": recovery_active,
+            "required_symbol_readiness": required_symbol_readiness,
         }
 
     def ensure_spot_reference_fresh(
@@ -9135,16 +9158,37 @@ class MarketDataManager:
             backlog_classification.get("transport_classification")
             == "processing_backlog"
         )
-        transport_failure = not processing_backlog and (
+        # A broad set of stale symbols is not, by itself, proof that the
+        # WebSocket transport failed. A healthy socket can continue receiving
+        # heartbeats while one subscription generation is incomplete. Global
+        # reconnects are therefore reserved for explicit transport evidence.
+        transport_failure = bool(stale_or_missing_symbols) and not processing_backlog and (
             heartbeat_stale
-            or (spot_stale and fut_stale)
-            or stale_ratio >= 0.70
+            or not ws_healthy
             or subscription_transport_failure
         )
         if stale_or_missing_symbols and not transport_failure:
+            recovery_last = getattr(self, "_symbol_recovery_last_attempt_mono", None)
+            if not isinstance(recovery_last, dict):
+                recovery_last = {}
+                self._symbol_recovery_last_attempt_mono = recovery_last
+            recovery_cooldown_s = max(
+                float(getattr(self, "_symbol_recovery_cooldown_s", 5.0) or 5.0),
+                1.0,
+            )
+            dispatched_symbols: list[str] = []
             for sym in stale_or_missing_symbols:
+                last_attempt = float(recovery_last.get(sym, 0.0) or 0.0)
+                if now_mono - last_attempt < recovery_cooldown_s:
+                    continue
+                recovery_last[sym] = now_mono
                 age = self.time_since_last_live_ws_tick(sym)
-                self.request_fallback_refresh(sym, reason="ws_symbol_stale_recovery")
+                dispatched = self.request_fallback_refresh(
+                    sym, reason="ws_symbol_stale_recovery"
+                )
+                if not dispatched:
+                    continue
+                dispatched_symbols.append(sym)
                 self._last_symbol_level_recovery_mono = now_mono
                 self._logger.warning(
                     "WS_SYMBOL_STALE_RECOVERY symbol=%s required=%s stale_age_s=%s heartbeat_age_s=%s reason=%s",
@@ -9173,19 +9217,23 @@ class MarketDataManager:
                         ),
                     },
                 )
-            self._logger.warning(
-                "WS_GLOBAL_RESTART_SUPPRESSED stale_symbols=%d heartbeat_age_s=%s reason=no_transport_failure",
-                len(stale_symbols),
-                heartbeat_age,
+            log_throttled(
+                self._logger,
+                "ws_global_restart_suppressed_symbol_recovery",
+                "WS_GLOBAL_RESTART_SUPPRESSED stale_symbols=%d missing_symbols=%d heartbeat_age_s=%s reason=symbol_level_recovery"
+                % (len(stale_symbols), len(missing_symbols), heartbeat_age),
+                interval_sec=30.0,
+                level=logging.WARNING,
                 extra={
                     "event": "WS_GLOBAL_RESTART_SUPPRESSED",
                     "stale_symbols": stale_symbols,
                     "missing_symbols": missing_symbols,
+                    "recovery_dispatched_symbols": dispatched_symbols,
                     "heartbeat_age_s": heartbeat_age,
                     "ws_healthy": ws_healthy,
                     "subscription_divergence": subscription_divergence,
                     "subscription_divergence_age_s": divergence_age,
-                    "reason": "no_transport_failure",
+                    "reason": "symbol_level_recovery",
                 },
             )
             self._zombie_stale_logged = False

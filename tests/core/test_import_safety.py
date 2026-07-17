@@ -7,7 +7,9 @@ import sys
 
 def _reset_core_modules() -> None:
     for name in list(sys.modules):
-        if name == "nifty_scalper_bot.core" or name.startswith("nifty_scalper_bot.core.app"):
+        if name == "nifty_scalper_bot.core" or name.startswith(
+            "nifty_scalper_bot.core.app"
+        ):
             sys.modules.pop(name, None)
 
 
@@ -24,18 +26,27 @@ def test_direct_core_app_import_applies_polling_patch_without_lazy_getattr() -> 
 
     app_module = importlib.import_module("nifty_scalper_bot.core.app")
 
-    assert getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
-    assert callable(getattr(app_module, "_polling_failover_supervisor_iteration", None))
-    assert app_module._polling_fallback_degraded.__module__ == app_module.__name__
-    assert "quote_stale_ms" in inspect.signature(app_module._polling_fallback_degraded).parameters
+    assert (
+        getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
+    )
+    supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
+    assert callable(supervisor)
+    assert getattr(supervisor, "_nifty_polling_supervisor_version", None) == 2
+    assert "quote_stale_ms" in inspect.signature(
+        app_module._polling_fallback_degraded
+    ).parameters
 
 
 def test_core_lazy_app_resolution_applies_polling_patch() -> None:
     core = importlib.import_module("nifty_scalper_bot.core")
     app_module = core.__getattr__("app")
 
-    assert getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
-    assert callable(getattr(app_module, "_polling_failover_supervisor_iteration", None))
+    assert (
+        getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
+    )
+    supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
+    assert callable(supervisor)
+    assert getattr(supervisor, "_nifty_polling_supervisor_version", None) == 2
 
 
 def test_nifty_scalper_app_lazy_resolution_applies_app_patches() -> None:
@@ -44,16 +55,13 @@ def test_nifty_scalper_app_lazy_resolution_applies_app_patches() -> None:
     app_module = sys.modules.get("nifty_scalper_bot.core.app")
 
     assert app_cls is getattr(app_module, "NiftyScalperApp")
-    assert getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
+    assert (
+        getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
+    )
 
 
 def test_installed_polling_failover_iteration_accepts_recover_cooldown() -> None:
-    """2026-07-09 incident: the runtime patch replaced core.app's supervisor
-    iteration with a wrapper that rejected recover_cooldown, so every
-    supervisor loop iteration raised TypeError (213x in one session) and the
-    WS->REST polling failover safety net was dead. The installed wrapper must
-    accept the exact call shape used by core.app's supervisor loop and honor
-    the anti-flap recover cooldown."""
+    """The installed supervisor must accept core.app's complete call contract."""
     import asyncio
     import types
 
@@ -63,7 +71,7 @@ def test_installed_polling_failover_iteration_accepts_recover_cooldown() -> None
     pfr.apply_app_patch(app_module)
     installed = app_module._polling_failover_supervisor_iteration
 
-    stops: list = []
+    stops: list[bool] = []
 
     class _Fallback:
         def is_running(self) -> bool:

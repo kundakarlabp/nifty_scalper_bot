@@ -1,9 +1,12 @@
 """Polling fallback decision helpers.
 
-The poller is a recovery path, not a parallel quote authority.  A stale flag from
+The poller is a recovery path, not a parallel quote authority. A stale flag from
 feed-health diagnostics must therefore be cross-checked against the actual age of
 the selected option quotes before fallback is activated while WebSocket is still
-healthy.
+healthy. An explicit current-generation required-symbol recovery is authoritative:
+once MDM has classified a required symbol as unresolved, the supervisor must not
+stop the recovery poller merely because unrelated symbols keep the global feed age
+fresh.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ class PollingFallbackDecision:
     futures_age_ms: float | None = None
     selected_ce_age_ms: float | None = None
     selected_pe_age_ms: float | None = None
+    required_symbol_recovery_active: bool = False
+    stale_required_symbols: tuple[str, ...] = ()
 
     def as_log_extra(self) -> dict[str, Any]:
         """Return stable structured fields for operator logs."""
@@ -44,6 +49,8 @@ class PollingFallbackDecision:
             "futures_age_ms": self.futures_age_ms,
             "selected_ce_age_ms": self.selected_ce_age_ms,
             "selected_pe_age_ms": self.selected_pe_age_ms,
+            "required_symbol_recovery_active": self.required_symbol_recovery_active,
+            "stale_required_symbols": list(self.stale_required_symbols),
         }
 
 
@@ -67,6 +74,13 @@ def _first_age_ms(payload: Mapping[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _stale_required_symbols(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = payload.get("stale_required_symbols")
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(sorted({str(symbol) for symbol in raw if str(symbol).strip()}))
+
+
 def decide_polling_fallback(
     *,
     ws_ok: bool,
@@ -79,23 +93,10 @@ def decide_polling_fallback(
 ) -> PollingFallbackDecision:
     """Decide whether REST polling fallback should activate.
 
-    Args:
-        ws_ok: Whether the WebSocket transport is connected/healthy.
-        lagging: Whether the event loop or tick path is lagging.
-        futures_fresh: Freshness flag for futures context.
-        options_fresh: Freshness flag for selected CE/PE option quotes.
-        quote_stale_ms: Age threshold in milliseconds.
-        feed_health: Optional detailed age payload from MarketDataManager.
-        data_age_ms: Generic fallback age when role-specific ages are absent.
-
-    Returns:
-        PollingFallbackDecision with an explicit activation reason.
-
-    Safety rule:
-        If WebSocket is healthy and not lagging, a false ``options_fresh`` flag
-        alone is not enough. At least one selected option age must be known and
-        cross the threshold. This prevents activations like
-        ``age_ms=70 threshold_ms=120000``.
+    A healthy WebSocket transport does not cancel a current-generation symbol
+    recovery. MDM owns that classification and clears it only after the required
+    symbols receive valid current-generation ticks. Outside that explicit recovery
+    state, selected quote ages remain the activation authority.
     """
 
     threshold = max(0.0, float(quote_stale_ms or 0.0))
@@ -126,9 +127,15 @@ def decide_polling_fallback(
         "future_age_ms",
     )
 
-    selected_ages = [age for age in (selected_ce_age, selected_pe_age, option_age) if age is not None]
+    selected_ages = [
+        age for age in (selected_ce_age, selected_pe_age, option_age) if age is not None
+    ]
     max_option_age = max(selected_ages) if selected_ages else None
     max_age = max_option_age if max_option_age is not None else generic_age
+    stale_required = _stale_required_symbols(health)
+    recovery_active = bool(
+        health.get("required_symbol_recovery_active") or stale_required
+    )
 
     reason: str | None = None
     activate = False
@@ -138,16 +145,29 @@ def decide_polling_fallback(
     elif lagging:
         activate = True
         reason = "event_loop_lagging"
+    elif recovery_active:
+        activate = True
+        reason = "required_symbol_recovery"
     elif not futures_fresh and futures_age is not None and futures_age >= threshold:
         activate = True
         reason = "futures_stale"
-    elif not futures_fresh and futures_age is None and generic_age is not None and generic_age >= threshold:
+    elif (
+        not futures_fresh
+        and futures_age is None
+        and generic_age is not None
+        and generic_age >= threshold
+    ):
         activate = True
         reason = "futures_stale"
     elif not options_fresh and max_option_age is not None and max_option_age >= threshold:
         activate = True
         reason = "options_stale"
-    elif not options_fresh and max_option_age is None and generic_age is not None and generic_age >= threshold:
+    elif (
+        not options_fresh
+        and max_option_age is None
+        and generic_age is not None
+        and generic_age >= threshold
+    ):
         activate = True
         reason = "options_stale"
 
@@ -163,6 +183,8 @@ def decide_polling_fallback(
         futures_age_ms=futures_age,
         selected_ce_age_ms=selected_ce_age,
         selected_pe_age_ms=selected_pe_age,
+        required_symbol_recovery_active=recovery_active,
+        stale_required_symbols=stale_required,
     )
 
 

@@ -51,6 +51,19 @@ def test_delayed_tick_cannot_reopen_finalized_minute() -> None:
     assert diagnostics["state_consistent"] is True
 
 
+def test_new_engine_does_not_inherit_hardening_diagnostics() -> None:
+    minute = _minute()
+    first = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    first.replace_history(pd.DataFrame([_history_row(minute)]))
+    for second in (5, 15, 30):
+        assert first.on_tick(_tick(minute + pd.Timedelta(seconds=second), 101.0)) is None
+    assert first.diagnostics()["finalized_minute_tick_reject_total"] == 3
+
+    second = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    assert second.diagnostics()["finalized_minute_tick_reject_total"] == 0
+    assert second.diagnostics()["history_current_reconcile_total"] == 0
+
+
 def test_history_replacement_discards_overlapping_partial_candle() -> None:
     minute = _minute()
     engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
