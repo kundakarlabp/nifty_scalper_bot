@@ -1,15 +1,4 @@
-"""Runtime hardening for CandleEngine state reconciliation.
-
-This module installs narrow, idempotent wrappers around the existing candle
-engine.  It deliberately leaves strategy, order, subscription, and historical
-fetch policy unchanged while enforcing the closed-minute watermark invariant:
-
-    current_candle is None or current_minute > latest_completed_minute
-
-The wrappers also serialize history replacement, tick processing, and clock
-flush for each engine instance.  This prevents bootstrap/history synchronization
-and delayed WebSocket ticks from reconstructing an already-finalized minute.
-"""
+"""Runtime hardening for deterministic CandleEngine state transitions."""
 
 from __future__ import annotations
 
@@ -25,23 +14,13 @@ from nifty_scalper_bot.utils.logging import log_throttled
 
 LOGGER = logging.getLogger(__name__)
 _INSTALLED_ATTR = "_candle_state_hardening_installed"
-_ORIGINAL_INIT_ATTR = "_candle_state_hardening_original_init"
-_ORIGINAL_REPLACE_ATTR = "_candle_state_hardening_original_replace_history"
-_ORIGINAL_ON_TICK_ATTR = "_candle_state_hardening_original_on_tick"
-_ORIGINAL_FINALIZE_ATTR = "_candle_state_hardening_original_finalize"
-_ORIGINAL_FLUSH_ATTR = "_candle_state_hardening_original_flush"
-_ORIGINAL_DIAGNOSTICS_ATTR = "_candle_state_hardening_original_diagnostics"
-
-# CandleEngine is a slotted dataclass without a weak-reference slot, so runtime
-# synchronization state cannot safely be attached to the instance. Engine count
-# is bounded by the subscribed universe; entries therefore remain bounded by the
-# process's engine population.
 _REGISTRY_GUARD = threading.RLock()
 _ENGINE_LOCKS: dict[int, threading.RLock] = {}
 _COUNTERS: dict[int, defaultdict[str, int]] = {}
 
 
 def _lock_for(engine: Any) -> threading.RLock:
+    """Return the bounded per-engine lock for a slotted CandleEngine."""
     key = id(engine)
     with _REGISTRY_GUARD:
         lock = _ENGINE_LOCKS.get(key)
@@ -59,14 +38,14 @@ def _counters_for(engine: Any) -> defaultdict[str, int]:
 
 def _coerce_timestamp(value: Any) -> pd.Timestamp:
     try:
-        ts = pd.Timestamp(value)
+        timestamp = pd.Timestamp(value)
     except Exception:
         return pd.NaT
-    if pd.isna(ts):
+    if pd.isna(timestamp):
         return pd.NaT
-    if ts.tzinfo is None:
-        return ts.tz_localize("Asia/Kolkata")
-    return ts.tz_convert("Asia/Kolkata")
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("Asia/Kolkata")
+    return timestamp.tz_convert("Asia/Kolkata")
 
 
 def _latest_completed_minute(engine: Any) -> pd.Timestamp:
@@ -87,9 +66,8 @@ def _current_minute(engine: Any) -> pd.Timestamp:
 
 
 def _state_consistent(engine: Any) -> bool:
-    completed = getattr(engine, "_completed_candles", None) or ()
     previous = pd.NaT
-    for candle in completed:
+    for candle in getattr(engine, "_completed_candles", None) or ():
         if not isinstance(candle, Mapping):
             return False
         timestamp = _coerce_timestamp(candle.get("timestamp"))
@@ -105,7 +83,7 @@ def _state_consistent(engine: Any) -> bool:
 
 
 def install_candle_state_hardening(engine_cls: type[Any]) -> None:
-    """Install idempotent CandleEngine lifecycle hardening."""
+    """Serialize candle mutations and reject ticks for finalized minutes."""
     if bool(getattr(engine_cls, _INSTALLED_ATTR, False)):
         return
 
@@ -116,27 +94,18 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
     original_flush = engine_cls.flush
     original_diagnostics = engine_cls.diagnostics
 
-    setattr(engine_cls, _ORIGINAL_INIT_ATTR, original_init)
-    setattr(engine_cls, _ORIGINAL_REPLACE_ATTR, original_replace)
-    setattr(engine_cls, _ORIGINAL_ON_TICK_ATTR, original_on_tick)
-    setattr(engine_cls, _ORIGINAL_FINALIZE_ATTR, original_finalize)
-    setattr(engine_cls, _ORIGINAL_FLUSH_ATTR, original_flush)
-    setattr(engine_cls, _ORIGINAL_DIAGNOSTICS_ATTR, original_diagnostics)
-
     def hardened_init(self: Any, *args: Any, **kwargs: Any) -> None:
         original_init(self, *args, **kwargs)
         _lock_for(self)
 
     def hardened_replace_history(self: Any, frame: Any) -> None:
-        lock = _lock_for(self)
-        with lock:
+        with _lock_for(self):
             original_replace(self, frame)
             latest = _latest_completed_minute(self)
             current = _current_minute(self)
             if not pd.isna(latest) and not pd.isna(current) and current <= latest:
                 self.current_candle = None
-                counters = _counters_for(self)
-                counters["history_current_reconcile_total"] += 1
+                _counters_for(self)["history_current_reconcile_total"] += 1
                 LOGGER.warning(
                     "CANDLE_CURRENT_RECONCILED_AFTER_HISTORY symbol=%s current_minute=%s latest_completed_minute=%s",
                     getattr(self, "symbol", None) or "symbol_unset",
@@ -157,8 +126,7 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
                 raise DataIntegrityError("inconsistent candle state after history replacement")
 
     def hardened_on_tick(self: Any, tick: Mapping[str, Any]) -> Any:
-        lock = _lock_for(self)
-        with lock:
+        with _lock_for(self):
             try:
                 normalized = normalize_market_tick_timestamp(tick)
                 tick_timestamp = normalized.timestamp
@@ -169,8 +137,7 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
 
             latest = _latest_completed_minute(self)
             if not pd.isna(latest) and tick_minute <= latest:
-                counters = _counters_for(self)
-                counters["finalized_minute_tick_reject_total"] += 1
+                _counters_for(self)["finalized_minute_tick_reject_total"] += 1
                 symbol = (
                     tick.get("symbol")
                     or tick.get("trading_symbol")
@@ -197,26 +164,21 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
             return original_on_tick(self, tick)
 
     def hardened_finalize(self: Any) -> Any:
-        lock = _lock_for(self)
-        with lock:
+        with _lock_for(self):
             try:
                 return original_finalize(self)
             finally:
-                # A finalized, rejected, out-of-order, or conflicting candle is
-                # never reusable. on_tick immediately installs the next minute
-                # after a successful rollover.
+                # Once finalization is attempted, this partial candle must never
+                # be reused. During rollover original on_tick installs the next
+                # minute immediately after this call returns.
                 self.current_candle = None
 
     def hardened_flush(self: Any) -> Any:
-        lock = _lock_for(self)
-        with lock:
-            # Call the original flush; its call to _finalize_current_candle is
-            # routed through hardened_finalize under the same reentrant lock.
+        with _lock_for(self):
             return original_flush(self)
 
     def hardened_diagnostics(self: Any) -> dict[str, Any]:
-        lock = _lock_for(self)
-        with lock:
+        with _lock_for(self):
             diagnostics = dict(original_diagnostics(self))
             counters = _counters_for(self)
             latest = _latest_completed_minute(self)
@@ -241,13 +203,11 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
             return diagnostics
 
     def is_state_consistent(self: Any) -> bool:
-        lock = _lock_for(self)
-        with lock:
+        with _lock_for(self):
             return _state_consistent(self)
 
     engine_cls.__init__ = hardened_init
     engine_cls.replace_history = hardened_replace_history
-    engine_cls._replace_completed_candles = hardened_replace_history
     engine_cls.on_tick = hardened_on_tick
     engine_cls._finalize_current_candle = hardened_finalize
     engine_cls.flush = hardened_flush
