@@ -1,4 +1,4 @@
-name: Diagnose PR889 constructor safety
+name: Commit PR889 constructor safety correction
 
 on:
   pull_request:
@@ -6,32 +6,33 @@ on:
     types: [synchronize]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose-constructor-safety:
+  commit-constructor-safety:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: fix/symbol-recovery-control-plane-20260717
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: python scripts/apply_required_symbol_init_guard.py
       - run: python -m pip install -e '.[dev]'
-      - name: Run exact regression and capture traceback
-        shell: bash
+      - name: Run actual regression and surrounding control-plane tests
+        run: >-
+          python -m pytest -q
+          tests/data/test_canonical_history_hydration.py
+          tests/data/test_mdm_tick_coalescing.py
+          tests/core/test_polling_failover.py
+          tests/core/test_polling_failover_runtime_installation.py
+          tests/core/test_import_safety.py
+      - name: Commit native source correction
         run: |
-          set +e
-          python -m pytest -q tests/data/test_canonical_history_hydration.py::test_feed_health_uses_selected_options_not_context_option_staleness --tb=long > /tmp/constructor-safety.txt 2>&1
-          echo $? > /tmp/constructor-safety.status
-          exit 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pr889-constructor-safety
-          path: |
-            /tmp/constructor-safety.txt
-            /tmp/constructor-safety.status
-      - name: Preserve result
-        run: exit "$(cat /tmp/constructor-safety.status)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/data/market_data_manager.py
+          git commit -m 'Initialize required-symbol lifecycle state safely [required-symbol-init-applied]'
+          git push origin HEAD:fix/symbol-recovery-control-plane-20260717
