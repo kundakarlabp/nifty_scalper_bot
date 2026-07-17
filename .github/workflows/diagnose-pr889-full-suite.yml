@@ -1,0 +1,30 @@
+name: Diagnose PR889 full suite
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      BRACKET_AUTO_RESTORE: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[dev]'
+      - name: Run full suite with compact failure tail
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q --tb=short 2>&1 | tee /tmp/full-suite.log
+          status=${PIPESTATUS[0]}
+          echo '===== FAILURE SUMMARY ====='
+          grep -E -A25 -B8 '(^FAILED |^ERROR |short test summary info|AssertionError|TypeError|AttributeError)' /tmp/full-suite.log | tail -n 240 || true
+          exit "$status"
