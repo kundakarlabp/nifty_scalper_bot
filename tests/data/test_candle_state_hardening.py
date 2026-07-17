@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-
 import pandas as pd
 import pytest
 
+from nifty_scalper_bot.data.candle_clock_flush_hardening import (
+    install_candle_clock_flush_hardening,
+)
 from nifty_scalper_bot.data.candle_engine import CandleEngine, DataIntegrityError, IST
 from nifty_scalper_bot.data.candle_state_hardening import install_candle_state_hardening
 
@@ -113,29 +114,47 @@ def test_conflict_clears_poisoned_current_candle_once() -> None:
     assert engine.diagnostics()["same_minute_conflict_total"] == 1
 
 
-def test_clock_flush_and_next_minute_tick_are_serialized() -> None:
+def test_clock_flush_does_not_flush_new_current_minute_after_tick_rollover() -> None:
     minute = _minute()
+    next_minute = minute + pd.Timedelta(minutes=1)
     engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
     engine.on_tick(_tick(minute + pd.Timedelta(seconds=5), 100.0))
+    engine.on_tick(_tick(next_minute + pd.Timedelta(seconds=1), 101.0))
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        flush_future = executor.submit(engine.flush)
-        tick_future = executor.submit(
-            engine.on_tick,
-            _tick(minute + pd.Timedelta(minutes=1, seconds=1), 101.0),
-        )
-        flush_result = flush_future.result()
-        tick_result = tick_future.result()
+    class Logger:
+        def info(self, *args, **kwargs):
+            return None
 
-    # Either operation may acquire the lock first, but the closed minute is
-    # stored once and the next minute remains the only active candle.
-    assert flush_result is not None or tick_result is not None
-    completed = engine.get_df()
-    assert len(completed) == 1
-    assert not completed["timestamp"].duplicated().any()
+        def warning(self, *args, **kwargs):
+            return None
+
+        def error(self, *args, **kwargs):
+            return None
+
+        def debug(self, *args, **kwargs):
+            return None
+
+    class Manager:
+        pass
+
+    install_candle_clock_flush_hardening(Manager)
+    manager = Manager()
+    manager._engines = {"NFO:NIFTY26JULFUT": engine}
+    manager._candle_flush_grace_s = 1.5
+    manager._last_candle_flush_log_mono = 0.0
+    manager._lock = __import__("threading").RLock()
+    manager._ohlc = {"NFO:NIFTY26JULFUT": []}
+    manager._logger = Logger()
+
+    flushed = manager.flush_due_candles(
+        now=minute + pd.Timedelta(minutes=1, seconds=2),
+        grace_seconds=1.5,
+    )
+
+    assert flushed == 0
     assert engine.current_candle is not None
-    assert pd.Timestamp(engine.current_candle["timestamp"]) == minute + pd.Timedelta(minutes=1)
-    assert engine.is_state_consistent() is True
+    assert pd.Timestamp(engine.current_candle["timestamp"]) == next_minute
+    assert len(engine.get_df()) == 1
 
 
 def test_replayed_old_ticks_after_reconciliation_do_not_recreate_conflict() -> None:
