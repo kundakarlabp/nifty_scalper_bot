@@ -1,0 +1,36 @@
+name: Diagnose PR889 final full suite
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      BRACKET_AUTO_RESTORE: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e '.[dev]'
+      - name: Run full suite and capture failure
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q --tb=long > /tmp/full-suite.txt 2>&1
+          echo $? > /tmp/full-suite.status
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr889-final-full-suite
+          path: |
+            /tmp/full-suite.txt
+            /tmp/full-suite.status
+      - name: Preserve result
+        run: exit "$(cat /tmp/full-suite.status)"
