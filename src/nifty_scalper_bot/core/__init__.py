@@ -64,17 +64,50 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
         extra={"event": "BOOT_LOG_RATE_CONTROL_FAILED", "error_type": type(exc).__name__},
     )
 
-# Market-data hardening verification moved to initialize_components (app.py):
-# running it at package-import time re-introduced the hidden-hook pattern
-# removed in #792 and could fire during a partially-initialized settings
-# import (circular), silently skipping verification outside live mode.
-
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
 
 _LOGGER = get_logger(__name__)
 
 
+def _install_market_data_runtime_hardening() -> dict[str, bool]:
+    """Install candle/manager/WebSocket hardening in the real app import path.
+
+    This is deliberately called after ``core.app`` has completed importing, so
+    settings and production classes are fully initialized. Live startup fails
+    closed if any required market-data layer cannot be installed.
+    """
+    from nifty_scalper_bot.core.market_data_hardening_bootstrap import (
+        install_market_data_hardening_or_raise,
+    )
+
+    try:
+        state = install_market_data_hardening_or_raise(_LOGGER)
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.error(
+            "MARKET_DATA_RUNTIME_HARDENING_FAILED error=%s",
+            exc,
+            exc_info=True,
+            extra={
+                "event": "MARKET_DATA_RUNTIME_HARDENING_FAILED",
+                "error_type": type(exc).__name__,
+            },
+        )
+        if _real_live_mode_requested():
+            raise RuntimeError("market_data_runtime_hardening_failed") from exc
+        return {
+            "candle": False,
+            "clock_flush": False,
+            "mdm": False,
+            "websocket": False,
+        }
+    return state
+
+
 def _apply_app_runtime_patches(app_module: Any) -> None:
+    # The production app import is the single authoritative installation point.
+    # Do not require tests or callers to invoke market-data hardening manually.
+    _install_market_data_runtime_hardening()
+
     from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
     from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
 
@@ -133,18 +166,7 @@ _install_core_app_patch_import_hook()
 
 
 def __getattr__(name: str) -> Any:
-    """Return lazily imported core entry points.
-
-    Args:
-        name: Attribute requested from the package.
-
-    Returns:
-        Any: Resolved attribute when exported by the package.
-
-    Raises:
-        AttributeError: If the requested attribute is not available.
-    """
-
+    """Return lazily imported core entry points."""
     _LOGGER.debug(
         "Entered core.__getattr__",
         extra={"event": "core_init_getattr_enter", "attribute": name},
