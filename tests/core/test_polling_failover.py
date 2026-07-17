@@ -81,3 +81,44 @@ def test_futures_stale_requires_age_threshold_when_websocket_is_healthy() -> Non
     assert fresh_enough.activate is False
     assert stale.activate is True
     assert stale.reason == "futures_stale"
+
+
+def test_required_symbol_recovery_keeps_fallback_active_with_fresh_global_age() -> None:
+    decision = decide_polling_fallback(
+        ws_ok=True,
+        lagging=False,
+        futures_fresh=True,
+        options_fresh=True,
+        quote_stale_ms=120_000,
+        feed_health={
+            "required_symbol_recovery_active": True,
+            "stale_required_symbols": ["NFO:NIFTY26JUL24000CE"],
+            "options_age_ms": 70,
+        },
+        data_age_ms=70,
+    )
+
+    assert decision.activate is True
+    assert decision.reason == "required_symbol_recovery"
+    assert decision.required_symbol_recovery_active is True
+    assert decision.stale_required_symbols == ("NFO:NIFTY26JUL24000CE",)
+
+
+def test_recovered_required_symbols_allow_normal_fallback_deactivation() -> None:
+    decision = decide_polling_fallback(
+        ws_ok=True,
+        lagging=False,
+        futures_fresh=True,
+        options_fresh=True,
+        quote_stale_ms=120_000,
+        feed_health={
+            "required_symbol_recovery_active": False,
+            "stale_required_symbols": [],
+            "options_age_ms": 70,
+        },
+        data_age_ms=70,
+    )
+
+    assert decision.activate is False
+    assert decision.reason is None
+    assert decision.required_symbol_recovery_active is False
