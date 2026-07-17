@@ -1,12 +1,27 @@
 from pathlib import Path
+import re
 
 path = Path('src/nifty_scalper_bot/data/market_data_manager.py')
 text = path.read_text()
-needle = '''    def _required_live_symbols(self) -> set[str]:\n        """Return canonical symbols required for live trading health checks."""\n'''
-replacement = '''    def _required_live_symbols(self) -> set[str]:\n        """Return canonical symbols required for live trading health checks."""\n        # Keep the ownership boundary safe for early lifecycle diagnostics and\n        # lightweight instances created without the full constructor. Production\n        # instances already initialize this mapping in __init__.\n        required_since = getattr(self, "_required_symbol_since_mono", None)\n        if not isinstance(required_since, dict):\n            required_since = {}\n            self._required_symbol_since_mono = required_since\n'''
-if needle not in text:
-    raise SystemExit('required-live-symbols anchor not found or already changed')
-path.write_text(text.replace(needle, replacement, 1))
+pattern = re.compile(
+    r'(    def _required_live_symbols\(self\) -> set\[str\]:\n'
+    r'(?:        """[^\n]*"""\n)?)'
+)
+match = pattern.search(text)
+if match is None:
+    raise SystemExit('required-live-symbols definition not found')
+if '_required_live_symbols(self) -> set[str]:' in text and 'required_since = getattr(self, "_required_symbol_since_mono", None)' not in text[match.start():match.start()+800]:
+    guard = (
+        '        # Keep this ownership boundary safe during early lifecycle diagnostics\n'
+        '        # and lightweight construction. Normal production instances already\n'
+        '        # initialize the mapping in __init__.\n'
+        '        required_since = getattr(self, "_required_symbol_since_mono", None)\n'
+        '        if not isinstance(required_since, dict):\n'
+        '            required_since = {}\n'
+        '            self._required_symbol_since_mono = required_since\n'
+    )
+    text = text[:match.end()] + guard + text[match.end():]
+    path.write_text(text)
 
 test_path = Path('tests/data/test_canonical_history_hydration.py')
 test_text = test_path.read_text()
