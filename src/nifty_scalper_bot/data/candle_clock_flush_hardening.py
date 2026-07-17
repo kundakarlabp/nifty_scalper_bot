@@ -8,7 +8,10 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from nifty_scalper_bot.data.candle_state_hardening import _lock_for
+from nifty_scalper_bot.data.candle_state_hardening import (
+    _lock_for,
+    reconcile_stale_current,
+)
 
 _IST_TZ = "Asia/Kolkata"
 _INSTALLED_ATTR = "_candle_clock_flush_hardening_installed"
@@ -66,6 +69,12 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                 continue
 
             with _lock_for(engine):
+                # Completed history is authoritative. Hydration can race with a
+                # live partial candle and leave current_candle on an already
+                # finalized minute; discard that stale state instead of retrying
+                # the same DataIntegrityError every flush cycle.
+                if reconcile_stale_current(engine, reason="clock_flush"):
+                    continue
                 locked_current = getattr(engine, "current_candle", None)
                 if not isinstance(locked_current, Mapping):
                     continue
