@@ -32,13 +32,7 @@ def _lock_for(engine: Any) -> threading.RLock:
 
 
 def _register_engine(engine: Any) -> None:
-    """Create clean registry state for one newly constructed engine instance.
-
-    The registry is keyed by ``id(engine)`` because CandleEngine instances may be
-    slotted and not weak-referenceable. Python can reuse an object id after an
-    earlier engine is destroyed, so constructor registration must replace—not
-    reuse—the prior lock and diagnostic counters for that numeric id.
-    """
+    """Create clean registry state for one newly constructed engine instance."""
     key = id(engine)
     with _REGISTRY_GUARD:
         _ENGINE_LOCKS[key] = threading.RLock()
@@ -79,6 +73,42 @@ def _current_minute(engine: Any) -> pd.Timestamp:
     return _coerce_timestamp(current.get("timestamp"))
 
 
+def reconcile_stale_current(engine: Any, *, reason: str) -> bool:
+    """Discard a current candle whose minute is already finalized.
+
+    History hydration and tick/clock finalization can race.  The completed deque
+    is authoritative; a current candle at or behind its watermark must never be
+    finalized again or used as the rollover source for a newer tick.
+    """
+    with _lock_for(engine):
+        latest = _latest_completed_minute(engine)
+        current = _current_minute(engine)
+        if pd.isna(latest) or pd.isna(current) or current > latest:
+            return False
+        engine.current_candle = None
+        counters = _counters_for(engine)
+        counters["current_reconcile_total"] += 1
+        counters[f"current_reconcile_{reason}_total"] += 1
+        symbol = getattr(engine, "symbol", None) or "symbol_unset"
+        log_throttled(
+            LOGGER,
+            f"candle_current_reconciled:{symbol}:{reason}:{current.isoformat()}",
+            "CANDLE_CURRENT_RECONCILED symbol=%s reason=%s current_minute=%s latest_completed_minute=%s"
+            % (symbol, reason, current.isoformat(), latest.isoformat()),
+            interval_sec=30.0,
+            level=logging.WARNING,
+            extra={
+                "event": "CANDLE_CURRENT_RECONCILED",
+                "symbol": symbol,
+                "reason": reason,
+                "current_minute": current.isoformat(),
+                "latest_completed_minute": latest.isoformat(),
+                "action": "discarded",
+            },
+        )
+        return True
+
+
 def _state_consistent(engine: Any) -> bool:
     previous = pd.NaT
     for candle in getattr(engine, "_completed_candles", None) or ():
@@ -115,25 +145,8 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
     def hardened_replace_history(self: Any, frame: Any) -> None:
         with _lock_for(self):
             original_replace(self, frame)
-            latest = _latest_completed_minute(self)
-            current = _current_minute(self)
-            if not pd.isna(latest) and not pd.isna(current) and current <= latest:
-                self.current_candle = None
+            if reconcile_stale_current(self, reason="history"):
                 _counters_for(self)["history_current_reconcile_total"] += 1
-                LOGGER.warning(
-                    "CANDLE_CURRENT_RECONCILED_AFTER_HISTORY symbol=%s current_minute=%s latest_completed_minute=%s",
-                    getattr(self, "symbol", None) or "symbol_unset",
-                    current.isoformat(),
-                    latest.isoformat(),
-                    extra={
-                        "event": "CANDLE_CURRENT_RECONCILED_AFTER_HISTORY",
-                        "symbol": getattr(self, "symbol", None) or "symbol_unset",
-                        "current_minute": current.isoformat(),
-                        "latest_completed_minute": latest.isoformat(),
-                        "action": "discarded",
-                        "reason": "current_not_newer_than_completed",
-                    },
-                )
             if not _state_consistent(self):
                 from nifty_scalper_bot.data.source import DataIntegrityError
 
@@ -149,6 +162,10 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
             except Exception:
                 return original_on_tick(self, tick)
 
+            # A hydration/finalization race can leave current_candle on a minute
+            # already present in completed history. Clear it before a newer tick
+            # asks the native engine to roll over and finalize it again.
+            reconcile_stale_current(self, reason="tick")
             latest = _latest_completed_minute(self)
             if not pd.isna(latest) and tick_minute <= latest:
                 _counters_for(self)["finalized_minute_tick_reject_total"] += 1
@@ -189,6 +206,8 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
 
     def hardened_flush(self: Any) -> Any:
         with _lock_for(self):
+            if reconcile_stale_current(self, reason="flush"):
+                return None
             return original_flush(self)
 
     def hardened_diagnostics(self: Any) -> dict[str, Any]:
@@ -204,6 +223,13 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
                     ],
                     "history_current_reconcile_total": counters[
                         "history_current_reconcile_total"
+                    ],
+                    "current_reconcile_total": counters["current_reconcile_total"],
+                    "current_reconcile_tick_total": counters[
+                        "current_reconcile_tick_total"
+                    ],
+                    "current_reconcile_flush_total": counters[
+                        "current_reconcile_flush_total"
                     ],
                     "last_completed_timestamp": None
                     if pd.isna(latest)
@@ -230,4 +256,4 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
     setattr(engine_cls, _INSTALLED_ATTR, True)
 
 
-__all__ = ["install_candle_state_hardening"]
+__all__ = ["install_candle_state_hardening", "reconcile_stale_current"]
