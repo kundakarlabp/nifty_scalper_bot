@@ -226,13 +226,14 @@ class CandleEngine:
         self.import_history(value, mode="bootstrap")
 
     def _cached_df_copy(self) -> pd.DataFrame:
-        if self._df_cache_dirty or self._df_cache is None:
-            self._df_cache = pd.DataFrame(
-                list(self._completed_candles), columns=list(_OHLC_COLUMNS)
-            )
-            self._df_cache_dirty = False
-            self._df_cache_rebuild_total += 1
-        return self._df_cache.copy(deep=True)
+        with self._lock:
+            if self._df_cache_dirty or self._df_cache is None:
+                self._df_cache = pd.DataFrame(
+                    list(self._completed_candles), columns=list(_OHLC_COLUMNS)
+                )
+                self._df_cache_dirty = False
+                self._df_cache_rebuild_total += 1
+            return self._df_cache.copy(deep=True)
 
     def diagnostics(self) -> dict[str, Any]:
         with self._lock:
@@ -276,12 +277,13 @@ class CandleEngine:
 
     def latest_finalized_minute(self) -> pd.Timestamp | None:
         """Return the latest completed candle minute, normalized to market TZ."""
-        if not self._completed_candles:
-            return None
-        ts = _to_ist_timestamp(self._completed_candles[-1].get("timestamp"))
-        if pd.isna(ts):
-            return None
-        return pd.Timestamp(ts)
+        with self._lock:
+            if not self._completed_candles:
+                return None
+            ts = _to_ist_timestamp(self._completed_candles[-1].get("timestamp"))
+            if pd.isna(ts):
+                return None
+            return pd.Timestamp(ts)
 
     def _current_candle_minute(self) -> pd.Timestamp:
         if not isinstance(self.current_candle, Mapping):
@@ -291,39 +293,57 @@ class CandleEngine:
     def is_state_consistent(self) -> bool:
         """Return whether finalized/current candle state satisfies native invariants."""
         with self._lock:
-            previous = pd.NaT
-            seen: set[pd.Timestamp] = set()
-            if len(self._completed_candles) > int(self.max_bars):
+            completed = [dict(row) for row in self._completed_candles]
+            current = (
+                dict(self.current_candle) if self.current_candle is not None else None
+            )
+            return self._candidate_state_consistent(
+                completed,
+                current,
+                self.last_candle_close,
+            )
+
+    def _candidate_state_consistent(
+        self,
+        completed: list[dict[str, Any]],
+        current: dict[str, Any] | None,
+        last_candle_close: datetime | pd.Timestamp | None,
+    ) -> bool:
+        previous = pd.NaT
+        seen: set[pd.Timestamp] = set()
+        if len(completed) > int(self.max_bars):
+            return False
+        for candle in completed:
+            if not isinstance(candle, Mapping):
                 return False
-            for candle in self._completed_candles:
-                if not isinstance(candle, Mapping):
-                    return False
-                ts = _to_ist_timestamp(candle.get("timestamp"))
-                if pd.isna(ts) or ts.tzinfo is None or str(ts.tzinfo) != str(IST):
-                    return False
-                if ts in seen or (not pd.isna(previous) and ts <= previous):
-                    return False
-                seen.add(ts)
-                previous = ts
-            cached_latest = None
-            if self.last_candle_close is not None:
-                cached = _to_ist_timestamp(self.last_candle_close)
-                if pd.isna(cached):
-                    return False
-                cached_latest = cached
-            latest = None if pd.isna(previous) else previous
-            if (
-                cached_latest is not None
-                and latest is not None
-                and cached_latest != latest
-            ):
+            ts = _to_ist_timestamp(candle.get("timestamp"))
+            if pd.isna(ts) or ts.tzinfo is None or str(ts.tzinfo) != str(IST):
                 return False
-            current = self._current_candle_minute()
-            if pd.isna(current):
-                return self.current_candle is None
-            if current.tzinfo is None or str(current.tzinfo) != str(IST):
+            if ts in seen or (not pd.isna(previous) and ts <= previous):
                 return False
-            return latest is None or current > latest
+            seen.add(ts)
+            previous = ts
+
+        latest = None if pd.isna(previous) else previous
+        cached_latest: pd.Timestamp | None = None
+        if last_candle_close is not None:
+            cached = _to_ist_timestamp(last_candle_close)
+            if pd.isna(cached):
+                return False
+            cached_latest = pd.Timestamp(cached)
+        if latest != cached_latest:
+            return False
+
+        if current is None:
+            return True
+        if not isinstance(current, Mapping):
+            return False
+        current_ts = _to_ist_timestamp(current.get("timestamp"))
+        if pd.isna(current_ts):
+            return False
+        if current_ts.tzinfo is None or str(current_ts.tzinfo) != str(IST):
+            return False
+        return latest is None or current_ts > latest
 
     def reconcile_current_with_finalized(self, *, reason: str) -> bool:
         """Discard a current candle only when it duplicates the finalized watermark."""
@@ -369,11 +389,15 @@ class CandleEngine:
 
     def get_completed_bars(self) -> list[dict[str, Any]]:
         """Return defensive copies of canonical finalized OHLCV bars."""
-        return [dict(row) for row in self._completed_candles]
+        with self._lock:
+            return [dict(row) for row in self._completed_candles]
 
     def get_current_candle(self) -> dict[str, Any] | None:
         """Return a defensive copy of the current partial candle, if any."""
-        return dict(self.current_candle) if self.current_candle is not None else None
+        with self._lock:
+            return (
+                dict(self.current_candle) if self.current_candle is not None else None
+            )
 
     def import_history(
         self,
@@ -479,12 +503,40 @@ class CandleEngine:
             )
             raise
 
-        self._completed_candles = deque(
-            [dict(row) for row in bounded], maxlen=int(self.max_bars)
-        )
+        try:
+            bounded_rows = [dict(row) for row in bounded]
+            latest = (
+                _to_ist_timestamp(bounded_rows[-1].get("timestamp"))
+                if bounded_rows
+                else None
+            )
+            if latest is not None and pd.isna(latest):
+                latest = None
+            last_candle_close_after = (
+                latest.to_pydatetime() if latest is not None else None
+            )
+            if not self._candidate_state_consistent(
+                bounded_rows, current_after, last_candle_close_after
+            ):
+                raise DataIntegrityError(
+                    "inconsistent candle state after history import"
+                )
+        except Exception:
+            self._history_import_failure_total += 1
+            LOGGER.exception(
+                "history_import_failed",
+                extra={
+                    "event": "history_import_failed",
+                    "symbol": symbol,
+                    "mode": mode,
+                    "source": source,
+                },
+            )
+            raise
+
+        self._completed_candles = deque(bounded_rows, maxlen=int(self.max_bars))
         self.current_candle = current_after
-        latest = self.latest_finalized_minute()
-        self.last_candle_close = latest.to_pydatetime() if latest is not None else None
+        self.last_candle_close = last_candle_close_after
         if history_reconciled_current:
             self._current_reconcile_total += 1
             self._history_current_reconcile_total += 1
@@ -514,8 +566,6 @@ class CandleEngine:
                         "action": "discarded",
                     },
                 )
-        if not self.is_state_consistent():
-            raise DataIntegrityError("inconsistent candle state after history import")
         self._df_cache_dirty = True
         self._history_import_total += 1
         self._history_import_bar_total += len(incoming)
@@ -865,6 +915,26 @@ class CandleEngine:
             },
         )
         return normalized
+
+    def flush_if_current_minute(
+        self, expected_minute: pd.Timestamp
+    ) -> dict[str, Any] | None:
+        """Atomically flush only when current candle still matches expected minute."""
+        expected = _to_ist_timestamp(expected_minute)
+        if pd.isna(expected):
+            return None
+        with self._lock:
+            if self.reconcile_current_with_finalized(reason="flush"):
+                return None
+            current_minute = self._current_candle_minute()
+            if pd.isna(current_minute) or current_minute != expected:
+                return None
+            finalized = self._finalize_current_candle()
+            if finalized is not None:
+                self.current_candle = None
+            if not self.is_state_consistent():
+                raise DataIntegrityError("inconsistent candle state after flush")
+            return finalized
 
     def flush(self) -> dict[str, Any] | None:
         with self._lock:

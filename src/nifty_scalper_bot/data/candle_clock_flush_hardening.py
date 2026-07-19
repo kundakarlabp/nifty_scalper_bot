@@ -65,23 +65,18 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
             if now_ts < expected_minute + pd.Timedelta(minutes=1, seconds=grace):
                 continue
 
-            # Completed history is authoritative. Hydration can race with a
-            # live partial candle and leave current_candle on an already
-            # finalized minute; delegate that reconciliation to CandleEngine.
-            if reconcile_stale_current(engine, reason="clock_flush"):
-                continue
-            locked_current = getattr(engine, "current_candle", None)
-            if not isinstance(locked_current, Mapping):
-                continue
-            locked_minute = _coerce_ist_timestamp(locked_current.get("timestamp"))
-            if locked_minute is None or locked_minute != expected_minute:
-                # Tick-driven rollover won the race. Never flush the newly
-                # opened minute based on the stale pre-lock due decision.
-                continue
-            if now_ts < locked_minute + pd.Timedelta(minutes=1, seconds=grace):
-                continue
+            # Completed history is authoritative, and tick-driven rollover can
+            # race this clock path after the due snapshot. Delegate the final
+            # recheck and finalization to CandleEngine under its native lock so
+            # a newer current minute is never flushed using this stale decision.
+            flush_expected = getattr(engine, "flush_if_current_minute", None)
             try:
-                candle = engine.flush()
+                if callable(flush_expected):
+                    candle = flush_expected(expected_minute)
+                else:
+                    if reconcile_stale_current(engine, reason="clock_flush"):
+                        continue
+                    candle = engine.flush()
             except Exception as exc:  # noqa: BLE001
                 self._logger.error(
                     "MDM_CANDLE_CLOCK_FLUSH_FAILED symbol=%s error=%r",
