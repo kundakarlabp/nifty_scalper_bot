@@ -144,8 +144,10 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                 ),
                 "source": "clock_flush_candle",
             }
+            refresher = getattr(self, "_refresh_candle_projection", None)
+            if callable(refresher):
+                refresher(symbol, source="clock_flush_candle")
             with self._lock:
-                self._ohlc[symbol].append(bar)
                 published[symbol] = timestamp
 
             publisher = getattr(self, "_publish_closed_bar", None)

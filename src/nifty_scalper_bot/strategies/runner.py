@@ -83,10 +83,8 @@ from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 from nifty_scalper_bot.data.candle_engine import (
-    CandleEngine,
     ensure_valid_data,
     normalize_ohlc_timezone,
-    repair_with_backfill,
     sanitize,
     validate_dataframe,
 )
@@ -1113,14 +1111,9 @@ class StrategyRunner:
         self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
         self._last_ws_reconnect_attempt_ts: float = 0.0
         self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
-        # Runner-LOCAL candle buffers: used ONLY as (a) the symbol registry for
-        # the staleness/backfill supervisor loop and (b) validity seeds for
-        # ensure_valid_data(). NOT a market-data source of truth — the single
-        # runtime OHLC authority is MarketDataManager (pipeline store mirrors
-        # its closed bars). Do not read prices from here for strategy or
-        # execution decisions. Consolidation into MDM reads is the deferred
-        # "runner-candle-consolidation" slice.
-        self._candle_engines: dict[str, CandleEngine] = {}
+        # Compatibility mirror of authoritative MDM CandleEngine objects only.
+        # StrategyRunner must never instantiate or mutate separate engines.
+        self._candle_engines: dict[str, Any] = {}
         # STEP 1/4: Single deterministic pipeline — ticks flow here → closed candles only
         self._pipeline: MarketDataPipeline = get_pipeline(store_maxlen=1500)
         # STEP 5: counter for "invalid data" drops — never silently discarded
@@ -1527,6 +1520,25 @@ class StrategyRunner:
                 exc_info=exc,
             )
 
+    def _mirror_authoritative_candle_engine(self, symbol: str) -> Any | None:
+        """Mirror the MDM-owned CandleEngine object without creating one locally."""
+        getter = getattr(self._market_data, "get_candle_engine", None)
+        if not callable(getter):
+            try:
+                is_live_mode = self._resolve_execution_mode_snapshot().is_live_mode
+            except Exception:
+                is_live_mode = False
+            if is_live_mode:
+                raise RuntimeError(
+                    "MarketDataManager CandleEngine accessor unavailable"
+                )
+            return None
+        normalized = self._normalize_symbol(symbol)
+        engine = getter(normalized)
+        with self._lock:
+            self._candle_engines[normalized] = engine
+        return engine
+
     def add_symbol(self, symbol: str) -> None:
         """Begin tracking a new symbol."""
         normalized = self._normalize_symbol(symbol)
@@ -1538,8 +1550,8 @@ class StrategyRunner:
             and normalized.startswith("NFO:")
             and ("CE" in normalized or "PE" in normalized)
         )
+        self._mirror_authoritative_candle_engine(normalized)
         with self._lock:
-            self._candle_engines.setdefault(normalized, CandleEngine())
             state = self._symbol_state.get(normalized)
             if state is None:
                 state = SymbolRuntimeState(
@@ -2415,17 +2427,22 @@ class StrategyRunner:
                         "volume": float(volumes[i]) if i < len(volumes) else 0.0,
                     }
                 )
-            df = pd.DataFrame(rows)
-            df = df.drop_duplicates(subset="timestamp", keep="last")
-            df = df.sort_values("timestamp").reset_index(drop=True)
-            engine = self._candle_engines.setdefault(symbol, CandleEngine())
-            engine.replace_history(df.tail(engine.max_bars).reset_index(drop=True))
+            ingest = getattr(self._market_data, "ingest_historical_ohlc", None)
+            if not callable(ingest):
+                if self._resolve_execution_mode_snapshot().is_live_mode:
+                    raise RuntimeError("MarketDataManager history import unavailable")
+                return
+            accepted = ingest(symbol, rows)
+            engine = self._mirror_authoritative_candle_engine(symbol)
             self._logger.debug(
                 "candle_engine_seeded",
                 extra={
                     "event": "candle_engine_seeded",
                     "symbol": symbol,
-                    "bars": len(engine.df),
+                    "bars": (
+                        len(engine.get_completed_bars()) if engine is not None else 0
+                    ),
+                    "accepted_rows": accepted,
                 },
             )
         except Exception as exc:
@@ -7577,9 +7594,7 @@ class StrategyRunner:
                         "history_count": history_count,
                     },
                 )
-            engine = self._candle_engines.setdefault(normalized_symbol, CandleEngine())
-            with self._symbol_locks[normalized_symbol]:
-                engine.on_tick(tick)
+            self._mirror_authoritative_candle_engine(normalized_symbol)
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
 
@@ -7881,7 +7896,11 @@ class StrategyRunner:
             if not ready:
                 _mark_stale(required_symbol, reason)
 
-        for symbol, engine in self._candle_engines.items():
+        watchdog_symbols = set(self._candle_engines)
+        if required_live_symbols is not None:
+            watchdog_symbols.update(required_live_symbols)
+        for symbol in sorted(watchdog_symbols):
+            self._mirror_authoritative_candle_engine(symbol)
             if (
                 required_live_symbols is not None
                 and symbol not in required_live_symbols
@@ -8008,14 +8027,15 @@ class StrategyRunner:
                             continue
 
                         with self._symbol_locks[symbol]:
-                            repaired = repair_with_backfill(
-                                symbol,
-                                sanitize(engine.get_df()),
-                                fetch_recent_rest=lambda _sym: repair_input,
-                                max_bars=engine.max_bars,
+                            ingest = getattr(
+                                self._market_data, "ingest_historical_ohlc", None
                             )
-                            if not repaired.empty:
-                                engine.replace_history(repaired)
+                            if callable(ingest):
+                                ingest(symbol, repair_input.to_dict("records"))
+                            elif self._resolve_execution_mode_snapshot().is_live_mode:
+                                raise RuntimeError(
+                                    "MarketDataManager backfill unavailable"
+                                )
                     except Exception:
                         # 4. Use .exception to capture traceback and stop silent failures
                         self._logger.exception(

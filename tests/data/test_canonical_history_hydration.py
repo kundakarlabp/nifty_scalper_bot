@@ -312,7 +312,14 @@ def _storage_mdm() -> MarketDataManager:
     mdm._min_required_bars = 2
     mdm._raw_tick_history = defaultdict(lambda: deque(maxlen=100))
     mdm._ohlc = defaultdict(lambda: deque(maxlen=100))
+    mdm._engines = {}
+    mdm._cache_len = 100
+    mdm._candle_metrics = defaultdict(float)
+    mdm._candle_queue_watermarks = {}
+    mdm._last_history_import_result = None
     mdm._last_historical_ts = {}
+    import asyncio
+    mdm._tick_queue = asyncio.Queue(maxsize=100)
     mdm._bar_symbol_key = lambda s: str(s)
     mdm._canonical_symbol = lambda s: str(s)
     mdm._active_subscribed_symbols = set()
@@ -339,14 +346,29 @@ def _storage_mdm() -> MarketDataManager:
     return mdm
 
 
-def test_historical_bar_writes_only_canonical_ohlc_not_raw_ticks() -> None:
+def test_historical_bar_imports_through_candle_engine_projection_not_raw_ticks() -> None:
     mdm = _storage_mdm()
     bar = {"symbol": "NSE:NIFTY", "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10}
     mdm.ingest_historical_bar(bar)
+    engine = mdm._get_engine("NSE:NIFTY")
+    assert len(engine.get_completed_bars()) == 1
     assert len(mdm._ohlc["NSE:NIFTY"]) == 1
     assert len(mdm._raw_tick_history["NSE:NIFTY"]) == 0
+    mdm._ohlc["NSE:NIFTY"][0]["close"] = 999
+    assert engine.get_completed_bars()[0]["close"] == 2.0
     assert mdm.is_ohlc_ready("NSE:NIFTY", required_bars=1) is True
     assert mdm.is_tick_ready("NSE:NIFTY") is False
+
+
+def test_conflicting_rehydration_leaves_projection_unchanged() -> None:
+    mdm = _storage_mdm()
+    first = {"symbol": "NSE:NIFTY", "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10}
+    conflict = {**first, "close": 1.5}
+    assert mdm.ingest_historical_ohlc("NSE:NIFTY", [first]) == 1
+    before = mdm.get_ohlc_bars("NSE:NIFTY")
+    assert mdm.ingest_historical_ohlc("NSE:NIFTY", [conflict]) == 0
+    assert mdm.get_ohlc_bars("NSE:NIFTY") == before
+    assert mdm._candle_metrics["history_hydration_conflict_total"] == 1
 
 
 def test_missing_readiness_requirements_fail_closed_even_with_ready_bars() -> None:

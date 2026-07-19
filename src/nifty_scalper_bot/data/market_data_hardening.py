@@ -523,8 +523,9 @@ def _flush_due_candles(self: Any, *, now: Any | None = None, grace_seconds: floa
             "volume": int(float((candle.get("volume", 0) if isinstance(candle, dict) else getattr(candle, "volume", 0)) or 0)),
             "source": "clock_flush_candle",
         }
-        with self._lock:
-            self._ohlc[symbol].append(bar)
+        refresher = getattr(self, "_refresh_candle_projection", None)
+        if callable(refresher):
+            refresher(symbol, source="clock_flush_candle")
         publisher = getattr(self, "_publish_closed_bar", None)
         if callable(publisher):
             try:
