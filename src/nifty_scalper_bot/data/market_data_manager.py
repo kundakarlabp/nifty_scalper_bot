@@ -39,7 +39,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from random import uniform
 from typing import (
@@ -130,6 +130,10 @@ class HistoryImportResult:
     accepted_rows: int
     returned_rows: int
     stored_rows: int
+    idempotent_rows: int = 0
+    validation_rejected_rows: int = 0
+    imported_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    final_cache_rows: int = 0
     error: str | None = None
     reason: HistoryImportReason = "hydration"
 
@@ -443,6 +447,7 @@ class MarketDataManager:
         ] = {}
         self._last_history_import_result: HistoryImportResult | None = None
         self._last_history_import_result_by_symbol: dict[str, HistoryImportResult] = {}
+        self._last_hydration_result_by_symbol: dict[str, HydrationResult] = {}
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._last_cumulative_volume_by_symbol: dict[str, float] = {}
@@ -1039,6 +1044,10 @@ class MarketDataManager:
                 accepted_rows=accepted,
                 returned_rows=len(bars or ()),
                 stored_rows=len(after),
+                idempotent_rows=max(0, len(normalized_rows) - accepted),
+                validation_rejected_rows=max(0, len(bars or ()) - len(normalized_rows)),
+                imported_at=datetime.now(timezone.utc),
+                final_cache_rows=len(after),
                 reason=reason,
             )
             with self._lock:
@@ -1082,6 +1091,10 @@ class MarketDataManager:
                 accepted_rows=0,
                 returned_rows=len(bars or ()),
                 stored_rows=len(before),
+                idempotent_rows=0,
+                validation_rejected_rows=len(bars or ()),
+                imported_at=datetime.now(timezone.utc),
+                final_cache_rows=len(before),
                 error=str(exc),
                 reason=reason,
             )
@@ -12765,7 +12778,7 @@ class MarketDataManager:
             accepted_rows: int,
             failure_reason: str | None = None,
         ) -> HydrationResult:
-            return HydrationResult(
+            result = HydrationResult(
                 symbol=normalized,
                 interval=normalized_interval,
                 role=role,
@@ -12784,6 +12797,10 @@ class MarketDataManager:
                 target_ready=cached_after >= target and failure_reason is None,
                 failure_reason=failure_reason,
             )
+            if not hasattr(self, "_last_hydration_result_by_symbol"):
+                self._last_hydration_result_by_symbol = {}
+            self._last_hydration_result_by_symbol[normalized] = result
+            return result
 
         cached_before = _cached_count()
         skip_reason: str | None = None

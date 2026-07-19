@@ -35,15 +35,19 @@ Safe-edit notes:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.defaults import (
     DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
 )
 from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.core.active_basket import pick_atm_option_symbols_from_basket
+from nifty_scalper_bot.core.history_quality import (
+    evaluate_history_quality,
+)
 from nifty_scalper_bot.core.history_roles import (
     resolve_symbol_history_role as _shared_resolve_symbol_history_role,
 )
@@ -54,6 +58,7 @@ from nifty_scalper_bot.execution.readiness import (
 )
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import get_runtime_market_mode
+from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.core.app import BotContext
@@ -61,42 +66,58 @@ if TYPE_CHECKING:
 LOGGER = get_logger("nifty_scalper_bot.core.history_readiness")
 
 
-def _count_bars_from_provider(provider: Any, symbol: str, *, limit: int = 500) -> int:
-    """Count OHLC bars from a provider without fetching history."""
+@dataclass(frozen=True, slots=True)
+class HistoryProviderRead:
+    provider_name: str
+    bars: tuple[Any, ...]
+    count: int
+    error: str | None
+
+
+def _read_bars_from_provider(
+    provider: Any, symbol: str, *, limit: int = 500
+) -> HistoryProviderRead:
+    """Read cached OHLC bars from a provider without triggering historical fetch."""
+    name = type(provider).__name__ if provider is not None else "missing"
     if provider is None or not symbol:
-        return 0
+        return HistoryProviderRead(name, (), 0, None)
     fn = getattr(provider, "get_ohlc_bars", None)
     if not callable(fn):
-        return 0
+        return HistoryProviderRead(name, (), 0, None)
     try:
-        return len(list(fn(symbol, limit=limit) or []))
+        bars = tuple(fn(symbol, limit=limit) or ())
+        return HistoryProviderRead(name, bars, len(bars), None)
     except TypeError:
         try:
-            return len(list(fn(symbol) or []))
-        except Exception:
-            return 0
-    except Exception:
-        return 0
+            bars = tuple(fn(symbol) or ())
+            return HistoryProviderRead(name, bars, len(bars), None)
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+    LOGGER.warning(
+        "HISTORY_PROVIDER_READ_FAILED symbol=%s provider=%s exception_type=%s",
+        symbol,
+        name,
+        error.split(":", 1)[0],
+        extra={
+            "event": "HISTORY_PROVIDER_READ_FAILED",
+            "symbol": symbol,
+            "provider": name,
+            "exception_type": error.split(":", 1)[0],
+        },
+    )
+    return HistoryProviderRead(name, (), 0, error)
+
+
+def _count_bars_from_provider(provider: Any, symbol: str, *, limit: int = 500) -> int:
+    return _read_bars_from_provider(provider, symbol, limit=limit).count
 
 
 def _get_bars_from_provider(
     provider: Any, symbol: str, *, limit: int = 500
 ) -> list[Any]:
-    """Read cached OHLC bars from a provider without triggering historical fetch."""
-    if provider is None or not symbol:
-        return []
-    fn = getattr(provider, "get_ohlc_bars", None)
-    if not callable(fn):
-        return []
-    try:
-        return list(fn(symbol, limit=limit) or [])
-    except TypeError:
-        try:
-            return list(fn(symbol) or [])
-        except Exception:
-            return []
-    except Exception:
-        return []
+    return list(_read_bars_from_provider(provider, symbol, limit=limit).bars)
 
 
 def _bar_timestamp(row: Any) -> datetime | None:
@@ -257,12 +278,14 @@ def build_symbol_hydration_status(
                 except Exception:
                     token = None
 
-    mdm_bars = _count_bars_from_provider(mdm, normalized)
-    datahub_bars = (
-        _count_bars_from_provider(datahub, normalized)
+    mdm_read = _read_bars_from_provider(mdm, normalized)
+    datahub_read = (
+        _read_bars_from_provider(datahub, normalized)
         if datahub is not None
-        else mdm_bars
+        else HistoryProviderRead("mdm_projection", mdm_read.bars, mdm_read.count, None)
     )
+    mdm_bars = mdm_read.count
+    datahub_bars = datahub_read.count
     runner_bars = 0
     indicator_bars = 0
     if runner is not None:
@@ -278,12 +301,23 @@ def build_symbol_hydration_status(
                 indicator_bars = 0
         if runner_bars == 0 and indicator_bars > 0:
             runner_bars = indicator_bars
-    bars_for_ts = _get_bars_from_provider(mdm, normalized) or _get_bars_from_provider(
-        datahub, normalized
+    bars_for_ts = list(mdm_read.bars) or list(datahub_read.bars)
+    grace = parse_float_env(os.getenv("HISTORY_PUBLICATION_GRACE_SECONDS"), 90.0)
+    continuity_window = int(os.getenv("HISTORY_CONTINUITY_WINDOW_BARS", "50") or 50)
+    allowed_missing = int(os.getenv("HISTORY_ALLOWED_RECENT_MISSING_MINUTES", "0") or 0)
+    quality = evaluate_history_quality(
+        symbol=normalized,
+        role=role,
+        bars=bars_for_ts,
+        required_bars=required,
+        now=datetime.now(timezone.utc),
+        market_timezone=ZoneInfo("Asia/Kolkata"),
+        trading_day_resolver=is_nse_trading_day,
+        publication_grace_seconds=grace,
+        allowed_recent_missing_minutes=allowed_missing,
+        continuity_window_bars=continuity_window,
+        provider_error=mdm_read.error,
     )
-    timestamps = [
-        ts for ts in (_bar_timestamp(row) for row in bars_for_ts) if ts is not None
-    ]
     quote = _get_cached_quote(ctx, normalized)
     max_quote_age_s = resolve_max_quote_age_seconds(
         "HYDRATION_LIVE_TICK_MAX_AGE_SECONDS",
@@ -338,6 +372,8 @@ def build_symbol_hydration_status(
         )
     if required > 0 and any(count < required for count in gating_counts):
         blockers.append(f"{role}_history_cold")
+    if required > 0:
+        blockers.extend(quality.blocker_reasons)
     selected_role = role in {"selected_ce", "selected_pe"}
     if selected_role and quote_ready.reason != "ready":
         blockers.append(quote_ready.reason)
@@ -345,6 +381,14 @@ def build_symbol_hydration_status(
         normalized
         and required >= 0
         and all(count >= required for count in gating_counts)
+        and (
+            required <= 0
+            or (
+                quality.latest_bar_fresh
+                and quality.recent_window_contiguous
+                and not mdm_read.error
+            )
+        )
     )
     ready_for_execution = bool(
         ready_for_evaluation
@@ -360,8 +404,140 @@ def build_symbol_hydration_status(
         tradingsymbol=tradingsymbol,
         exchange=exchange,
         required_bars=required,
-        historical_rows_returned=mdm_bars,
-        historical_rows_accepted=mdm_bars,
+        historical_rows_returned=(
+            int(
+                getattr(
+                    getattr(mdm, "get_last_hydration_result", lambda _s: None)(
+                        normalized
+                    ),
+                    "fetched_rows",
+                    0,
+                )
+                or 0
+            )
+            if mdm is not None
+            else 0
+        ),
+        historical_rows_accepted=(
+            int(
+                getattr(
+                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                        normalized
+                    ),
+                    "accepted_rows",
+                    0,
+                )
+                or 0
+            )
+            if mdm is not None
+            else 0
+        ),
+        fetch_returned_rows=(
+            int(
+                getattr(
+                    getattr(mdm, "get_last_hydration_result", lambda _s: None)(
+                        normalized
+                    ),
+                    "fetched_rows",
+                    0,
+                )
+                or 0
+            )
+            if mdm is not None
+            else 0
+        ),
+        import_accepted_new_rows=(
+            int(
+                getattr(
+                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                        normalized
+                    ),
+                    "accepted_rows",
+                    0,
+                )
+                or 0
+            )
+            if mdm is not None
+            else 0
+        ),
+        import_idempotent_rows=(
+            int(
+                getattr(
+                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                        normalized
+                    ),
+                    "idempotent_rows",
+                    0,
+                )
+                or 0
+            )
+            if mdm is not None
+            else 0
+        ),
+        validation_rejected_rows=(
+            int(
+                getattr(
+                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                        normalized
+                    ),
+                    "validation_rejected_rows",
+                    0,
+                )
+                or 0
+            )
+            if mdm is not None
+            else 0
+        ),
+        final_cache_rows=mdm_bars,
+        latest_import_status=(
+            getattr(
+                getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                    normalized
+                ),
+                "status",
+                None,
+            )
+            if mdm is not None
+            else None
+        ),
+        latest_import_reason=(
+            str(
+                getattr(
+                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                        normalized
+                    ),
+                    "reason",
+                    "",
+                )
+                or ""
+            )
+            or None
+            if mdm is not None
+            else None
+        ),
+        latest_import_error=(
+            getattr(
+                getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                    normalized
+                ),
+                "error",
+                None,
+            )
+            if mdm is not None
+            else None
+        ),
+        latest_import_at=(
+            getattr(
+                getattr(mdm, "get_last_history_import_result", lambda _s: None)(
+                    normalized
+                ),
+                "imported_at",
+                None,
+            )
+            if mdm is not None
+            else None
+        ),
+        history_provider_error=mdm_read.error,
         mdm_bars=mdm_bars,
         datahub_bars=datahub_bars,
         runner_bars=runner_bars,
@@ -375,11 +551,33 @@ def build_symbol_hydration_status(
         ready_for_evaluation=ready_for_evaluation,
         ready_for_execution=ready_for_execution,
         blocker_reasons=list(dict.fromkeys(blockers)),
-        first_bar_ts=min(timestamps) if timestamps else None,
-        last_bar_ts=max(timestamps) if timestamps else None,
-        live_merge_applied=bool(
-            mdm_bars and datahub_bars and (mdm_bars == datahub_bars)
-        ),
+        first_bar_ts=quality.first_bar_ts,
+        last_bar_ts=quality.last_bar_ts,
+        expected_latest_closed_ts=quality.expected_latest_closed_ts,
+        latest_bar_age_seconds=quality.latest_bar_age_seconds,
+        latest_bar_fresh=quality.latest_bar_fresh,
+        recent_window_contiguous=quality.recent_window_contiguous,
+        missing_expected_minute_count=quality.missing_expected_minute_count,
+        largest_intraday_gap_minutes=quality.largest_intraday_gap_minutes,
+        propagation_consistent=bool(mdm_bars == runner_bars == indicator_bars),
+        live_merge_applied=False,
+    )
+    LOGGER.info(
+        "HISTORY_QUALITY_RESULT symbol=%s role=%s required_bars=%s "
+        "available_bars=%s latest_bar_fresh=%s recent_window_contiguous=%s "
+        "missing_expected_minute_count=%s largest_intraday_gap_minutes=%s "
+        "provider_error=%s blocker_reasons=%s",
+        quality.symbol,
+        quality.role,
+        quality.required_bars,
+        quality.available_bars,
+        quality.latest_bar_fresh,
+        quality.recent_window_contiguous,
+        quality.missing_expected_minute_count,
+        quality.largest_intraday_gap_minutes,
+        quality.provider_error,
+        quality.blocker_reasons,
+        extra={"event": "HISTORY_QUALITY_RESULT", **asdict(quality)},
     )
     LOGGER.debug(
         "HYDRATION_PROPAGATION_RESULT symbol=%s role=%s required_bars=%s "
