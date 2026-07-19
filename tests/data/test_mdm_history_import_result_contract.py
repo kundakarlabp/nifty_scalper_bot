@@ -168,3 +168,45 @@ def test_concurrent_two_symbol_history_result_getter_remains_associated() -> Non
     bank = mdm.get_last_history_import_result(other)
     assert nifty is not None and nifty.symbol == SYMBOL and nifty.success
     assert bank is not None and bank.symbol == other and bank.success
+
+
+def test_concurrent_hydration_counters_and_lazy_maps_are_thread_safe() -> None:
+    mdm = _mdm()
+    # Exercise the compatibility path where older constructed managers have not
+    # initialized the per-symbol result map yet.
+    if hasattr(mdm, "_last_history_import_result_by_symbol"):
+        del mdm._last_history_import_result_by_symbol
+    symbols = [f"NSE:NIFTY{i}" for i in range(8)]
+    barrier = __import__("threading").Barrier(len(symbols))
+    errors: list[BaseException] = []
+
+    def import_symbol(index: int, symbol: str) -> None:
+        try:
+            row = _bar(close=1.5)
+            row["symbol"] = symbol
+            row["timestamp"] = datetime(2026, 1, 1, 0, index, tzinfo=timezone.utc)
+            barrier.wait(timeout=2)
+            mdm.import_historical_ohlc(symbol, [row], reason="live_gap_fill")
+        except BaseException as exc:  # noqa: BLE001 - test captures worker errors
+            errors.append(exc)
+
+    threads = [
+        __import__("threading").Thread(target=import_symbol, args=(idx, symbol))
+        for idx, symbol in enumerate(symbols)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert errors == []
+    assert mdm._candle_metrics["history_hydration_request_total"] == len(symbols)
+    assert mdm._candle_metrics["history_hydration_success_total"] == len(symbols)
+    assert mdm._candle_metrics["historical_gap_fill_request_total"] == len(symbols)
+    assert mdm._candle_metrics["historical_gap_fill_success_total"] == len(symbols)
+    for symbol in symbols:
+        result = mdm.get_last_history_import_result(symbol)
+        assert result is not None
+        assert result.symbol == symbol
+        assert result.success
+        assert result.reason == "live_gap_fill"

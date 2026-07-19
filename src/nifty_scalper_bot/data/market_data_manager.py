@@ -983,18 +983,19 @@ class MarketDataManager:
         )
         if not hasattr(self, "_lock"):
             self._lock = threading.RLock()
-        if not hasattr(self, "_candle_metrics"):
-            self._candle_metrics = defaultdict(float)
-        if not hasattr(self, "_engines"):
-            self._engines = {}
-        if not hasattr(self, "_candle_queue_watermarks"):
-            self._candle_queue_watermarks = {}
-        if not hasattr(self, "_last_history_import_result_by_symbol"):
-            self._last_history_import_result_by_symbol = {}
-        self._candle_metrics["history_hydration_request_total"] += 1
-        gap_metric_import = reason in {"live_gap_fill", "recovery_gap_fill"}
-        if gap_metric_import:
-            self._candle_metrics["historical_gap_fill_request_total"] += 1
+        with self._lock:
+            if not hasattr(self, "_candle_metrics"):
+                self._candle_metrics = defaultdict(float)
+            if not hasattr(self, "_engines"):
+                self._engines = {}
+            if not hasattr(self, "_candle_queue_watermarks"):
+                self._candle_queue_watermarks = {}
+            if not hasattr(self, "_last_history_import_result_by_symbol"):
+                self._last_history_import_result_by_symbol = {}
+            self._candle_metrics["history_hydration_request_total"] += 1
+            gap_metric_import = reason in {"live_gap_fill", "recovery_gap_fill"}
+            if gap_metric_import:
+                self._candle_metrics["historical_gap_fill_request_total"] += 1
         before = (
             self.get_ohlc_bars(normalized_symbol)
             if hasattr(self, "get_ohlc_bars")
@@ -1029,10 +1030,11 @@ class MarketDataManager:
             self.update_hydration_status(normalized_symbol, after)
             latest = engine.latest_finalized_minute()
             if latest is not None:
-                self._last_historical_ts[normalized_symbol] = latest.timestamp()
-                self._candle_metrics["history_hydration_last_success_timestamp"] = (
-                    latest.timestamp()
-                )
+                with self._lock:
+                    self._last_historical_ts[normalized_symbol] = latest.timestamp()
+                    self._candle_metrics["history_hydration_last_success_timestamp"] = (
+                        latest.timestamp()
+                    )
             before_ts: set[datetime] = set()
             for row in before:
                 normalized_ts = self._normalize_bar_timestamp(row)
@@ -1047,9 +1049,10 @@ class MarketDataManager:
             status: Literal["success_new_bars", "success_idempotent"] = (
                 "success_new_bars" if accepted > 0 else "success_idempotent"
             )
-            if status == "success_idempotent" and normalized_rows:
-                self._candle_metrics["history_hydration_idempotent_total"] += 1
-            self._candle_metrics["history_hydration_success_total"] += 1
+            with self._lock:
+                if status == "success_idempotent" and normalized_rows:
+                    self._candle_metrics["history_hydration_idempotent_total"] += 1
+                self._candle_metrics["history_hydration_success_total"] += 1
             result = HistoryImportResult(
                 symbol=normalized_symbol,
                 status=status,
@@ -1062,7 +1065,8 @@ class MarketDataManager:
                 self._last_history_import_result = result
                 self._last_history_import_result_by_symbol[normalized_symbol] = result
             if gap_metric_import:
-                self._candle_metrics["historical_gap_fill_success_total"] += 1
+                with self._lock:
+                    self._candle_metrics["historical_gap_fill_success_total"] += 1
             self._record_queue_watermark_after_hydration(normalized_symbol)
             self._logger.info(
                 "HYDRATION_INGEST_RESULT symbol=%s returned_rows=%s accepted_rows=%s final_mdm_bars=%s first_ts=%s last_ts=%s",
@@ -1082,14 +1086,16 @@ class MarketDataManager:
             )
             return result
         except Exception as exc:  # noqa: BLE001
-            self._candle_metrics["history_hydration_failure_total"] += 1
+            with self._lock:
+                self._candle_metrics["history_hydration_failure_total"] += 1
             status: Literal["failed_validation", "finalized_candle_conflict"] = (
                 "finalized_candle_conflict"
                 if isinstance(exc, CandleHistoryConflictError)
                 else "failed_validation"
             )
             if isinstance(exc, CandleHistoryConflictError):
-                self._candle_metrics["history_hydration_conflict_total"] += 1
+                with self._lock:
+                    self._candle_metrics["history_hydration_conflict_total"] += 1
             result = HistoryImportResult(
                 symbol=normalized_symbol,
                 status=status,
@@ -1103,7 +1109,8 @@ class MarketDataManager:
                 self._last_history_import_result = result
                 self._last_history_import_result_by_symbol[normalized_symbol] = result
             if gap_metric_import:
-                self._candle_metrics["historical_gap_fill_failure_total"] += 1
+                with self._lock:
+                    self._candle_metrics["historical_gap_fill_failure_total"] += 1
             self._logger.error(
                 "Failure in ingest_historical_ohlc: %s", exc, exc_info=exc
             )
