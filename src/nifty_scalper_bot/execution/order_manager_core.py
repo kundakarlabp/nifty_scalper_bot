@@ -207,6 +207,7 @@ class OrderDetails:
     average_price: float = 0.0
     fill_price: float | None = None
     filled_quantity: int = 0
+    applied_filled_quantity: int = 0
     pending_quantity: int = 0
     message: str = ""
     timestamp: float = field(default_factory=time.time)
@@ -2763,39 +2764,47 @@ class OrderManager:
                     details={"quote": quote_diag},
                 )
                 return None
-        try:
-            lot_size = self._lot_size_for_symbol(normalized_symbol)
-        except OrderPlacementError as exc:
-            self._logger.warning(
-                "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s reason=%s",
-                normalized_symbol,
-                quantity,
-                exc,
-                extra={
-                    "event": "ORDER_BLOCKED",
-                    "block_reason": "invalid_lot_quantity",
-                    "symbol": normalized_symbol,
-                    "qty": quantity,
-                },
-            )
-            _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
-            return None
-        if quantity <= 0 or quantity % lot_size != 0:
-            self._logger.warning(
-                "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s",
-                normalized_symbol,
-                quantity,
-                lot_size,
-                extra={
-                    "event": "ORDER_BLOCKED",
-                    "block_reason": "invalid_lot_quantity",
-                    "symbol": normalized_symbol,
-                    "qty": quantity,
-                    "lot_size": lot_size,
-                },
-            )
-            _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
-            return None
+        is_option_entry = (
+            normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"}
+            and normalized_symbol.endswith(("CE", "PE"))
+        )
+        if is_option_entry:
+            try:
+                lot_size = self._lot_size_for_symbol(normalized_symbol)
+            except OrderPlacementError as exc:
+                self._logger.warning(
+                    "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s reason=%s",
+                    normalized_symbol,
+                    quantity,
+                    exc,
+                    extra={
+                        "event": "INVALID_LOT_QUANTITY",
+                        "block_reason": "invalid_lot_quantity",
+                        "symbol": normalized_symbol,
+                        "quantity_units": quantity,
+                        "intent": normalized_intent,
+                    },
+                )
+                _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
+                return None
+            if quantity <= 0 or quantity % lot_size != 0:
+                self._logger.warning(
+                    "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s",
+                    normalized_symbol,
+                    quantity,
+                    lot_size,
+                    extra={
+                        "event": "INVALID_LOT_QUANTITY",
+                        "block_reason": "invalid_lot_quantity",
+                        "symbol": normalized_symbol,
+                        "quantity_units": quantity,
+                        "lot_size": lot_size,
+                        "remainder": quantity % lot_size if lot_size else None,
+                        "intent": normalized_intent,
+                    },
+                )
+                _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
+                return None
         # ---------------------------------------------------------------------
         # 🛑 FIX 1: Smart Idempotency with Timeout
         # ---------------------------------------------------------------------
@@ -6801,8 +6810,19 @@ class OrderManager:
             new_status = self._parse_status(status_raw)
 
             order.status = new_status
-            old_filled_quantity = int(getattr(order, "filled_quantity", 0) or 0)
-            order.filled_quantity = int(float(order_update.get("filled_quantity", 0)))
+            incoming_filled_quantity = max(
+                0, int(float(order_update.get("filled_quantity", 0) or 0))
+            )
+            previous_broker_filled = max(
+                0, int(getattr(order, "filled_quantity", 0) or 0)
+            )
+            applied_filled_quantity = max(
+                0, int(getattr(order, "applied_filled_quantity", 0) or 0)
+            )
+            broker_filled_quantity = max(
+                previous_broker_filled, incoming_filled_quantity
+            )
+            order.filled_quantity = broker_filled_quantity
 
             # Update Price: Prefer actual fill price ('average_price')
             avg_px = order_update.get("average_price")
@@ -6814,7 +6834,7 @@ class OrderManager:
             # -----------------------------------------------------
             # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
             # -----------------------------------------------------
-            fill_delta = max(0, int(order.filled_quantity or 0) - old_filled_quantity)
+            fill_delta = max(0, broker_filled_quantity - applied_filled_quantity)
             is_fill_update = status_raw in [
                 "PARTIALLY FILLED",
                 "PARTIAL",
@@ -6855,6 +6875,7 @@ class OrderManager:
                         raise
 
                 self._confirm_position_protection_for_fill(order)
+                order.applied_filled_quantity = broker_filled_quantity
 
             is_failed_entry_terminal = (
                 status_raw in {"REJECTED", "CANCELLED", "CANCELED", "FAILED", "EXPIRED"}
@@ -10163,8 +10184,6 @@ class OrderManager:
         if not order_id:
             raise OrderPlacementError("Broker response missing order_id")
         status = self._parse_status(response.get("status"))
-        if bool(response.get("submitted")) and status == OrderStatus.FILLED:
-            status = OrderStatus.SUBMITTED
         message = response.get("message") or response.get("status_message")
         timestamp = datetime.now(timezone.utc)
         response_client_id = (
@@ -11073,6 +11092,7 @@ class OrderManager:
                     last_error = OrderPlacementError(
                         response.get("message") or "Order rejected"
                     )
+                    break
                 else:
                     self._logger.info(
                         "Condition met: broker_order_submit_success",
@@ -11310,6 +11330,9 @@ class OrderManager:
 
     def _parse_status(self, raw_status: Any) -> OrderStatus:
         if raw_status is None:
+            return OrderStatus.SUBMITTED
+        status_text = str(raw_status).strip().upper()
+        if status_text == "SUBMITTED":
             return OrderStatus.SUBMITTED
         canonical_status = normalize_broker_order_status(raw_status)
         if canonical_status is not None:
@@ -12911,6 +12934,24 @@ class OrderManager:
                 str(exc),
             )
             raise OrderPlacementError("Failed to resolve lot size") from exc
+        if (
+            source != "instrument_dump"
+            and "NIFTY" in normalized_symbol
+            and normalized_symbol.endswith(("CE", "PE"))
+            and callable(getattr(self, "is_live_mode", None))
+            and self.is_live_mode()
+        ):
+            self._logger.warning(
+                "LOT_SIZE_UNRESOLVED symbol=%s source=%s",
+                normalized_symbol,
+                source,
+                extra={
+                    "event": "LOT_SIZE_UNRESOLVED",
+                    "symbol": normalized_symbol,
+                    "source": source,
+                },
+            )
+            raise OrderPlacementError("lot_size_unresolved")
         if source in {"env_fallback", "fallback_default"}:
             self._logger.info(
                 "LOT_SIZE_FALLBACK_USED symbol=%s normalized_symbol=%s underlying=%s lot_size=%s source=%s",

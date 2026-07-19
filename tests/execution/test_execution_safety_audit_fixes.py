@@ -1294,3 +1294,82 @@ def test_non_incremental_fill_warning_dedupes_per_snapshot(tmp_path) -> None:
     warnings = [m for m in records if "non-incremental" in m]
     assert len(warnings) == 1, warnings
     assert manager.get_position("NFO:NIFTY2671424100CE").quantity == 65
+
+
+def test_order_update_side_effect_failure_keeps_fill_delta_replayable(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot.execution.order_manager import (
+        OrderDetails,
+        OrderManager,
+        OrderStatus,
+        OrderType,
+    )
+
+    class Broker:
+        is_simulated_adapter = True
+
+    class Positions:
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+
+        def add_pending_order(self, **_kwargs):
+            return None
+
+        def update_order_status(self, *_args, **_kwargs):
+            return None
+
+        def apply_broker_order_update(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("position side effect failed")
+
+        def get_open_positions(self):
+            return []
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    positions = Positions()
+    manager = OrderManager(Broker(), positions, object())
+    order = OrderDetails(
+        order_id="OID-FAIL",
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=130,
+        order_type=OrderType.LIMIT,
+        status=OrderStatus.SUBMITTED,
+        price=100.0,
+        fill_price=100.0,
+        filled_quantity=65,
+    )
+    order.applied_filled_quantity = 65
+    manager._orders[order.order_id] = order
+    monkeypatch.setattr(
+        manager, "_register_virtual_bracket_for_fill", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        manager, "_confirm_position_protection_for_fill", lambda *_a, **_k: None
+    )
+
+    with pytest.raises(RuntimeError, match="position side effect failed"):
+        manager.apply_broker_order_update(
+            "OID-FAIL",
+            {
+                "status": "PARTIALLY FILLED",
+                "filled_quantity": 130,
+                "average_price": 100.0,
+            },
+        )
+
+    assert order.filled_quantity == 130
+    assert order.applied_filled_quantity == 65
+
+    positions.fail = False
+    manager.apply_broker_order_update(
+        "OID-FAIL",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 130, "average_price": 100.0},
+    )
+
+    assert positions.calls == 2
+    assert order.applied_filled_quantity == 130

@@ -165,21 +165,22 @@ async def test_sl_order_removes_supplied_market_protection_and_keeps_prices(
     assert "market_protection" not in captured["data"]
 
 
-async def test_market_order_explicit_zero_market_protection_is_preserved(
+async def test_market_order_zero_market_protection_is_rejected_before_broker_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, captured = _make_client(monkeypatch)
 
-    client.place_order(
-        symbol="NFO:NIFTY2662324150CE",
-        side="SELL",
-        quantity=65,
-        order_type="MARKET",
-        product="MIS",
-        market_protection=0,
-    )
+    with pytest.raises(Exception, match="market_protection must be -1"):
+        client.place_order(
+            symbol="NFO:NIFTY2662324150CE",
+            side="SELL",
+            quantity=65,
+            order_type="MARKET",
+            product="MIS",
+            market_protection=0,
+        )
 
-    assert captured["data"]["market_protection"] == 0
+    assert "data" not in captured
 
 
 async def test_invalid_order_type_rejects_before_broker_call(
@@ -240,3 +241,61 @@ async def test_acknowledgement_without_order_id_is_failure(
         )
 
     assert calls["count"] == 1
+
+
+@pytest.mark.parametrize("value", [-2, 0, 101, "invalid", 1.5])
+async def test_market_order_invalid_market_protection_rejected_before_broker_call(
+    monkeypatch: pytest.MonkeyPatch,
+    value: Any,
+) -> None:
+    client, captured = _make_client(monkeypatch)
+
+    with pytest.raises(Exception, match="market_protection must be -1"):
+        client.place_order(
+            symbol="NFO:NIFTY2662324150CE",
+            side="SELL",
+            quantity=65,
+            order_type="MARKET",
+            product="MIS",
+            market_protection=value,
+        )
+
+    assert "data" not in captured
+
+
+@pytest.mark.parametrize("value", [-1, 1, 10, 100])
+async def test_market_order_valid_market_protection_values_are_sent(
+    monkeypatch: pytest.MonkeyPatch,
+    value: int,
+) -> None:
+    client, captured = _make_client(monkeypatch)
+
+    client.place_order(
+        symbol="NFO:NIFTY2662324150CE",
+        side="SELL",
+        quantity=65,
+        order_type="MARKET",
+        product="MIS",
+        market_protection=value,
+    )
+
+    assert captured["data"]["market_protection"] == value
+
+
+async def test_market_order_removes_price_and_trigger_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, captured = _make_client(monkeypatch)
+
+    client.place_order(
+        symbol="NFO:NIFTY2662324150CE",
+        side="BUY",
+        quantity=65,
+        order_type="MARKET",
+        price=123.0,
+        trigger_price=122.0,
+        product="MIS",
+    )
+
+    assert "price" not in captured["data"]
+    assert "trigger_price" not in captured["data"]

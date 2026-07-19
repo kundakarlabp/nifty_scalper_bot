@@ -78,7 +78,9 @@ def _live_sim_order_manager(tmp_path, broker):
     )
 
 
-def test_live_simulation_order_submission_rejects_unmarked_broker(monkeypatch, tmp_path):
+def test_live_simulation_order_submission_rejects_unmarked_broker(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -106,3 +108,167 @@ def test_live_simulation_order_submission_allows_marked_broker(monkeypatch, tmp_
 
     assert response["order_id"] == "SIM-1"
     assert broker.calls == 1
+
+
+def test_order_status_parser_preserves_submitted_and_known_broker_states(tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderStatus
+
+    manager = _live_sim_order_manager(tmp_path, _MarkedSubmittingBroker())
+
+    cases = {
+        "SUBMITTED": OrderStatus.SUBMITTED,
+        "OPEN": OrderStatus.SUBMITTED,
+        "TRIGGER PENDING": OrderStatus.SUBMITTED,
+        "PARTIALLY FILLED": OrderStatus.PARTIALLY_FILLED,
+        "COMPLETE": OrderStatus.FILLED,
+        "REJECTED": OrderStatus.REJECTED,
+        "CANCELLED": OrderStatus.CANCELLED,
+        "SOME NEW NONTERMINAL": OrderStatus.SUBMITTED,
+    }
+    for raw, expected in cases.items():
+        assert manager._parse_status(raw) is expected
+
+
+def test_nifty_option_entry_rejects_unit_quantity_not_lot_multiple(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+        check_risk=False,
+        intent="ENTRY",
+        signal_id="bad-qty",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+
+
+@pytest.mark.parametrize("quantity", [65, 130])
+def test_nifty_option_entry_uses_unit_quantity_at_broker_boundary(
+    monkeypatch, tmp_path, quantity
+):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker(_MarkedSubmittingBroker):
+        def __init__(self):
+            super().__init__()
+            self.payloads = []
+
+        def place_order(self, **kwargs):
+            self.payloads.append(dict(kwargs))
+            return {"order_id": f"SIM-{len(self.payloads)}", "status": "SUBMITTED"}
+
+    broker = Broker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=quantity,
+        order_type=OrderType.LIMIT,
+        price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+        check_risk=False,
+        intent="ENTRY",
+        signal_id=f"qty-{quantity}",
+    )
+
+    assert order_id is not None
+    assert broker.payloads[-1]["quantity"] == quantity
+
+
+@pytest.mark.parametrize("quantity", [1, 50, 75, 129])
+def test_nifty_option_entry_rejects_invalid_unit_quantities_before_broker(
+    monkeypatch, tmp_path, quantity
+):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=quantity,
+        order_type=OrderType.LIMIT,
+        price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+        check_risk=False,
+        intent="ENTRY",
+        signal_id=f"bad-qty-{quantity}",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+
+
+def test_non_option_quantity_validator_remains_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = _live_sim_order_manager(tmp_path, _MarkedSubmittingBroker())
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    manager._validate_quantity("NSE:SBIN", 1)
+
+
+def test_protective_exit_uses_partial_position_units_without_lot_reject(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker(_MarkedSubmittingBroker):
+        def __init__(self):
+            super().__init__()
+            self.payloads = []
+
+        def place_order(self, **kwargs):
+            self.payloads.append(dict(kwargs))
+            return {"order_id": "EXIT-1", "status": "SUBMITTED"}
+
+    broker = Broker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(
+        manager,
+        "_lot_size_for_symbol",
+        lambda _symbol: (_ for _ in ()).throw(
+            AssertionError("exit must not resolve lot size")
+        ),
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=32,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="protective-exit",
+    )
+
+    assert order_id == "EXIT-1"
+    assert broker.payloads[-1]["quantity"] == 32

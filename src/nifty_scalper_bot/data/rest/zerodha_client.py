@@ -925,13 +925,36 @@ class ZerodhaKiteClient(BaseBrokerClient):
             clean_params.pop("trigger_price", None)
             clean_params.pop("price", None)
         if order_type in {"MARKET", "SL-M"}:
-            if "market_protection" not in clean_params:
-                clean_params["market_protection"] = int(
-                    os.getenv("ZERODHA_MARKET_PROTECTION", "-1")
+            clean_params["market_protection"] = self._normalize_market_protection(
+                clean_params.get(
+                    "market_protection",
+                    os.getenv("ZERODHA_MARKET_PROTECTION", "-1"),
                 )
+            )
         else:
             clean_params.pop("market_protection", None)
         return clean_params
+
+    @staticmethod
+    def _normalize_market_protection(raw_value: Any) -> int:
+        """Validate Zerodha market protection: -1 or integer 1..100."""
+
+        try:
+            protection_float = float(raw_value)
+            protection = int(protection_float)
+        except (TypeError, ValueError) as exc:
+            raise BrokerError(
+                "market_protection must be -1 or an integer from 1 to 100"
+            ) from exc
+        if protection_float != float(protection):
+            raise BrokerError(
+                "market_protection must be -1 or an integer from 1 to 100"
+            )
+        if protection != -1 and not 1 <= protection <= 100:
+            raise BrokerError(
+                "market_protection must be -1 or an integer from 1 to 100"
+            )
+        return protection
 
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:
