@@ -92,6 +92,71 @@ def test_current_candle_overlap_rules_are_atomic() -> None:
         engine.import_history(pd.DataFrame([_row(5)]))
 
 
+def test_bootstrap_import_preserves_newer_current_candle() -> None:
+    engine = CandleEngine(symbol="NFO:T")
+    engine.current_candle = _row(2)
+
+    engine.import_history(pd.DataFrame([_row(0), _row(1)]), mode="bootstrap")
+
+    assert engine.get_current_candle() == _row(2)
+    assert len(engine.get_completed_bars()) == 2
+
+
+def test_bootstrap_equal_minute_overlap_uses_history_authoritative_compatibility() -> (
+    None
+):
+    engine = CandleEngine(symbol="NFO:T")
+    engine.current_candle = _row(1, close=100.75)
+
+    engine.import_history(pd.DataFrame([_row(0), _row(1)]), mode="bootstrap")
+
+    assert engine.get_current_candle() is None
+    assert float(engine.get_df().iloc[-1]["close"]) == 100.5
+
+
+def test_bootstrap_rejects_older_current_candle_atomically() -> None:
+    engine = CandleEngine(symbol="NFO:T")
+    engine.import_history(pd.DataFrame([_row(0)]), mode="bootstrap")
+    engine.current_candle = _row(1)
+    before = engine.get_df()
+
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(
+            pd.DataFrame([_row(0), _row(1), _row(2)]), mode="bootstrap"
+        )
+
+    pd.testing.assert_frame_equal(engine.get_df(), before)
+    assert engine.get_current_candle() == _row(1)
+
+
+def test_empty_bootstrap_import_preserves_current_candle() -> None:
+    engine = CandleEngine(symbol="NFO:T")
+    engine.import_history(pd.DataFrame([_row(0)]), mode="bootstrap")
+    engine.current_candle = _row(1)
+
+    engine.import_history(pd.DataFrame(), mode="bootstrap")
+
+    assert engine.get_completed_bars() == []
+    assert engine.get_current_candle() == _row(1)
+
+
+def test_history_import_failure_and_conflict_counters_are_distinct() -> None:
+    engine = CandleEngine(symbol="NFO:T")
+    engine.import_history(pd.DataFrame([_row(0)]), mode="bootstrap")
+
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(pd.DataFrame([{**_row(1), "high": 99.0}]))
+    diagnostics = engine.diagnostics()
+    assert diagnostics["history_import_failure_total"] == 1
+    assert diagnostics["history_import_conflict_total"] == 0
+
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(pd.DataFrame([_row(0, close=100.75)]))
+    diagnostics = engine.diagnostics()
+    assert diagnostics["history_import_failure_total"] == 2
+    assert diagnostics["history_import_conflict_total"] == 1
+
+
 def test_max_bars_and_defensive_readers_are_enforced() -> None:
     engine = CandleEngine(symbol="NFO:T", max_bars=3)
     engine.import_history(pd.DataFrame([_row(i) for i in range(5)]), mode="bootstrap")

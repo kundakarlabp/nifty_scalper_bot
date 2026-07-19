@@ -31,6 +31,10 @@ FetchRecentFn = Callable[[str], pd.DataFrame | None]
 _OHLC_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
 
 
+class CandleHistoryConflictError(DataIntegrityError):
+    """Historical import conflicts with a finalized candle identity."""
+
+
 def _to_ist_timestamp(value: Any) -> pd.Timestamp:
     try:
         return coerce_market_timestamp(value)
@@ -149,6 +153,7 @@ class CandleEngine:
     _history_import_bar_total: int = field(default=0, init=False)
     _history_import_idempotent_total: int = field(default=0, init=False)
     _history_import_conflict_total: int = field(default=0, init=False)
+    _history_import_failure_total: int = field(default=0, init=False)
     _finalized_minute_tick_reject_total: int = field(default=0, init=False)
 
     def __init__(
@@ -177,6 +182,7 @@ class CandleEngine:
         self._history_import_bar_total = 0
         self._history_import_idempotent_total = 0
         self._history_import_conflict_total = 0
+        self._history_import_failure_total = 0
         self._finalized_minute_tick_reject_total = 0
         if df is not None and not df.empty:
             self.replace_history(df)
@@ -230,6 +236,7 @@ class CandleEngine:
             "history_import_bar_total": self._history_import_bar_total,
             "history_import_idempotent_total": self._history_import_idempotent_total,
             "history_import_conflict_total": self._history_import_conflict_total,
+            "history_import_failure_total": self._history_import_failure_total,
             "finalized_minute_tick_reject_total": (
                 self._finalized_minute_tick_reject_total
             ),
@@ -320,11 +327,23 @@ class CandleEngine:
                             "current candle older than imported finalized history"
                         )
             else:
-                current_after = None
+                if current_after is not None and incoming:
+                    latest_imported_ts = _to_ist_timestamp(incoming[-1]["timestamp"])
+                    current_ts = _to_ist_timestamp(current_after.get("timestamp"))
+                    if pd.isna(current_ts):
+                        raise DataIntegrityError("current candle timestamp is invalid")
+                    if current_ts < latest_imported_ts:
+                        raise DataIntegrityError(
+                            "current candle older than imported finalized history"
+                        )
+                    if current_ts == latest_imported_ts:
+                        current_after = None
 
             bounded = candidate[-int(self.max_bars) :]
-        except Exception:
-            self._history_import_conflict_total += 1
+        except Exception as exc:
+            self._history_import_failure_total += 1
+            if isinstance(exc, CandleHistoryConflictError):
+                self._history_import_conflict_total += 1
             LOGGER.exception(
                 "history_import_failed",
                 extra={
@@ -776,7 +795,7 @@ def _history_conflict(
     ts: pd.Timestamp,
     stored: Mapping[str, Any],
     incoming: Mapping[str, Any],
-) -> DataIntegrityError:
+) -> CandleHistoryConflictError:
     LOGGER.error(
         "FINALIZED_CANDLE_CONFLICT",
         extra={
@@ -791,7 +810,7 @@ def _history_conflict(
             },
         },
     )
-    return DataIntegrityError(
+    return CandleHistoryConflictError(
         f"conflicting finalized candle symbol={symbol} timestamp={ts}"
     )
 
