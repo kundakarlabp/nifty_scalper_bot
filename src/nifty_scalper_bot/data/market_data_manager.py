@@ -2,7 +2,7 @@
 
 Runtime role:
 - Receives broker ticks (WebSocket/REST), maintains the live quote cache, and
-  builds one-minute OHLC bars per symbol.
+  routes accepted ticks/history through CandleEngine for one-minute OHLC bars.
 - Fans ticks out to subscribers via the message bus.
 - Performs broker history fetch/backfill (ensure_history) and is the sole holder
   of the OHLC bar cache used for readiness and indicators.
@@ -12,14 +12,16 @@ Position in the pipeline:
     → data/data_hub.py → strategies/runner.py
 
 Owns / does NOT own:
-- Owns: tick cache, OHLC bar history, broker history fetch, tick fan-out, the
-  committed active-contract basket's futures symbol (read via the basket).
+- Owns: tick cache, read-only CandleEngine OHLC projection, broker history
+  fetch, tick fan-out, the committed active-contract basket's futures symbol
+  (read via the basket).
 - Does NOT own: contract selection (InstrumentManager owns that) and strategy
   logic. MDM returns the active future from the committed basket only.
 
 Safe-edit notes:
-- This is the SSOT for history (PR #562). DataHub is a read facade over MDM and
-  stores no history; never reintroduce a parallel history cache elsewhere.
+- CandleEngine is the SSOT for history and live OHLC. DataHub is a read
+  facade over MDM and stores no history; never reintroduce a parallel history
+  cache elsewhere.
 - get_ohlc_bars normalizes the symbol via _bar_symbol_key; keep symbol
   normalization consistent so bar counts agree across the readiness chain.
 """
@@ -384,10 +386,12 @@ class MarketDataManager:
         self.bus = None
         self._poll_jitter_pct = 0.0
         self._poll_batch_ceiling = 0
+        # Read-only completed-candle projection derived exclusively from CandleEngine.
         self._ohlc: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self._cache_len)
         )
         self._engines: dict[str, CandleEngine] = {}
+        self._candle_metrics: dict[str, float] = defaultdict(float)
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._last_cumulative_volume_by_symbol: dict[str, float] = {}
@@ -975,58 +979,38 @@ class MarketDataManager:
             self._logger.error("Poll candle emit failed: %s", e)
 
     def ingest_historical_bar(self, bar: Mapping[str, Any]) -> None:
-        """Ingest one historical OHLC bar into MDM-owned state.
-
-        Args: bar payload containing symbol/open/high/low/close/volume/timestamp.
-        Returns: None.
-        Raises: None.
-        """
-        try:
-            symbol = normalize_symbol(str(bar.get("symbol") or ""))
-            if not symbol:
-                return
-            ts = bar.get("timestamp")
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if isinstance(ts, (int, float)):
-                ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-            if isinstance(ts, datetime) and ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            payload = {
-                "symbol": symbol,
-                "open": float(bar.get("open", 0.0) or 0.0),
-                "high": float(bar.get("high", 0.0) or 0.0),
-                "low": float(bar.get("low", 0.0) or 0.0),
-                "close": float(bar.get("close", 0.0) or 0.0),
-                "volume": int(float(bar.get("volume", 0) or 0)),
-                "timestamp": ts.isoformat(),
-                "source": "historical",
-            }
-            # Historical OHLC belongs only in the canonical candle store.
-            # _raw_tick_history is reserved for raw/live tick payloads.
-            self._ohlc[self._bar_symbol_key(symbol)].append(dict(payload))
-            if isinstance(ts, datetime):
-                self._last_historical_ts[symbol] = ts.timestamp()
-            self.update_hydration_status(
-                symbol, self._ohlc[self._bar_symbol_key(symbol)]
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in ingest_historical_bar: %s", exc, exc_info=exc
-            )
+        """Import one broker-completed OHLC bar through CandleEngine."""
+        symbol = normalize_symbol(str(bar.get("symbol") or ""))
+        if not symbol:
+            return
+        self.ingest_historical_ohlc(symbol, [bar])
 
     def ingest_historical_ohlc(
         self, symbol: str, bars: Sequence[Mapping[str, Any]]
     ) -> int:
-        """Ingest sorted UTC historical OHLC bars and return newly accepted rows."""
-        accepted = 0
+        """Import sorted historical OHLC bars through CandleEngine.
+
+        MDM fetches/transports history, but CandleEngine is the only writer that
+        validates, reconciles, conflicts, and commits completed candles. The
+        MDM ``_ohlc`` cache is refreshed only after CandleEngine acceptance.
+        """
         normalized_symbol = (
             self._canonical_symbol(symbol)
             if hasattr(self, "_canonical_symbol")
             else str(symbol)
         )
+        if not hasattr(self, "_candle_metrics"):
+            self._candle_metrics = defaultdict(float)
+        if not hasattr(self, "_engines"):
+            self._engines = {}
+        self._candle_metrics["history_hydration_request_total"] += 1
+        before = (
+            self.get_ohlc_bars(normalized_symbol)
+            if hasattr(self, "get_ohlc_bars")
+            else []
+        )
         try:
-            normalized_rows: dict[datetime, dict[str, Any]] = {}
+            normalized_rows: list[dict[str, Any]] = []
             for row in bars or ():
                 normalized = self.normalize_history_row(
                     normalized_symbol, row, source="historical"
@@ -1034,70 +1018,189 @@ class MarketDataManager:
                 if normalized is None:
                     continue
                 ts = normalized.get("timestamp")
-                if not isinstance(ts, datetime):
-                    continue
-                normalized["timestamp"] = ts.astimezone(timezone.utc).replace(
-                    microsecond=0
-                )
-                normalized["symbol"] = normalized_symbol
-                normalized_rows[normalized["timestamp"]] = normalized
-            sorted_rows = [normalized_rows[ts] for ts in sorted(normalized_rows)]
-            key = (
-                self._bar_symbol_key(normalized_symbol)
-                if hasattr(self, "_bar_symbol_key")
-                else normalized_symbol
-            )
-            existing = list(getattr(self, "_ohlc", {}).get(key, []) or [])
-            existing_ts: set[datetime] = set()
-            for existing_row in existing:
-                ts = (
-                    existing_row.get("timestamp")
-                    if isinstance(existing_row, Mapping)
-                    else None
-                )
-                if isinstance(ts, str):
-                    try:
-                        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    existing_ts.add(
-                        parsed.astimezone(timezone.utc).replace(microsecond=0)
+                if isinstance(ts, datetime):
+                    normalized["timestamp"] = ts.astimezone(timezone.utc).replace(
+                        microsecond=0
                     )
-                elif isinstance(ts, datetime):
-                    existing_ts.add(ts.astimezone(timezone.utc).replace(microsecond=0))
-            for row in sorted_rows:
-                ts = row["timestamp"]
-                if ts in existing_ts:
-                    continue
-                self.ingest_historical_bar(row)
-                existing_ts.add(ts)
-                accepted += 1
-            final_count = (
-                len(self.get_ohlc_bars(normalized_symbol))
-                if hasattr(self, "get_ohlc_bars")
-                else accepted
-            )
+                normalized["symbol"] = normalized_symbol
+                normalized_rows.append(normalized)
+            if normalized_rows:
+                frame = pd.DataFrame(normalized_rows)
+            else:
+                frame = pd.DataFrame(
+                    columns=["timestamp", "open", "high", "low", "close", "volume"]
+                )
+            engine = self._get_engine(normalized_symbol)
+            engine.import_history(frame, mode="incremental", source="historical")
+            after = self._refresh_candle_projection(normalized_symbol)
+            self.update_hydration_status(normalized_symbol, after)
+            latest = engine.latest_finalized_minute()
+            if latest is not None:
+                self._last_historical_ts[normalized_symbol] = latest.timestamp()
+                self._candle_metrics[
+                    "history_hydration_last_success_timestamp"
+                ] = latest.timestamp()
+            before_ts = {
+                normalized[0]
+                for row in before
+                if (normalized := self._normalize_bar_timestamp(row)) is not None
+            }
+            after_ts = {
+                normalized[0]
+                for row in after
+                if (normalized := self._normalize_bar_timestamp(row)) is not None
+            }
+            accepted = len(after_ts - before_ts)
+            if accepted == 0 and normalized_rows:
+                self._candle_metrics["history_hydration_idempotent_total"] += 1
+            self._candle_metrics["history_hydration_success_total"] += 1
+            self._purge_queued_ticks_at_or_before_watermark(normalized_symbol)
             self._logger.info(
                 "HYDRATION_INGEST_RESULT symbol=%s returned_rows=%s accepted_rows=%s final_mdm_bars=%s first_ts=%s last_ts=%s",
                 normalized_symbol,
                 len(bars or ()),
                 accepted,
-                final_count,
-                sorted_rows[0]["timestamp"].isoformat() if sorted_rows else None,
-                sorted_rows[-1]["timestamp"].isoformat() if sorted_rows else None,
+                len(after),
+                normalized_rows[0].get("timestamp") if normalized_rows else None,
+                normalized_rows[-1].get("timestamp") if normalized_rows else None,
                 extra={
                     "event": "HYDRATION_INGEST_RESULT",
                     "symbol": normalized_symbol,
                     "returned_rows": len(bars or ()),
                     "accepted_rows": accepted,
-                    "final_mdm_bars": final_count,
+                    "final_mdm_bars": len(after),
                 },
             )
+            return accepted
         except Exception as exc:  # noqa: BLE001
+            self._candle_metrics["history_hydration_failure_total"] += 1
+            if isinstance(exc, DataIntegrityError):
+                self._candle_metrics["history_hydration_conflict_total"] += 1
             self._logger.error(
                 "Failure in ingest_historical_ohlc: %s", exc, exc_info=exc
             )
-        return accepted
+            return 0
+
+    def _refresh_candle_projection(
+        self, symbol: str, *, source: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Refresh MDM's read-only OHLC projection from CandleEngine."""
+        normalized = (
+            self._canonical_symbol(symbol)
+            if hasattr(self, "_canonical_symbol")
+            else str(symbol)
+        )
+        key = (
+            self._bar_symbol_key(normalized)
+            if hasattr(self, "_bar_symbol_key")
+            else normalized
+        )
+        engine = self._get_engine(normalized)
+        completed = engine.get_completed_bars()
+        projected: Deque[dict[str, Any]] = deque(maxlen=self._cache_len)
+        for row in completed[-self._cache_len :]:
+            bar = dict(row)
+            bar["symbol"] = normalized
+            bar["source"] = source or bar.get("source") or "candle_engine"
+            projected.append(bar)
+        with self._lock:
+            previous = list(self._ohlc.get(key, ()) or ())
+            self._ohlc[key] = projected
+        self._candle_metrics["candle_projection_refresh_total"] += 1
+        self._candle_metrics["candle_projection_last_refresh"] = time.time()
+        self._candle_metrics["candle_projection_size"] = float(len(projected))
+        previous_ts = [
+            normalized_ts[0]
+            for row in previous
+            if (normalized_ts := self._normalize_bar_timestamp(row)) is not None
+        ]
+        projected_ts = [
+            normalized_ts[0]
+            for row in projected
+            if (normalized_ts := self._normalize_bar_timestamp(row)) is not None
+        ]
+        if (
+            len(previous_ts) > len(projected_ts)
+            and previous_ts[: len(projected_ts)] != projected_ts
+        ):
+            self._candle_metrics["candle_projection_divergence_total"] += 1
+            self._logger.warning(
+                "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s",
+                normalized,
+                len(previous),
+                len(projected),
+                extra={"event": "CANDLE_PROJECTION_DIVERGENCE", "symbol": normalized},
+            )
+        return [dict(row) for row in projected]
+
+    def _purge_queued_ticks_at_or_before_watermark(self, symbol: str) -> None:
+        """Drop queued ticks for minutes CandleEngine has already finalized."""
+        normalized = (
+            self._canonical_symbol(symbol)
+            if hasattr(self, "_canonical_symbol")
+            else str(symbol)
+        )
+        watermark = self._get_engine(normalized).latest_finalized_minute()
+        if watermark is None:
+            return
+        try:
+            watermark_utc = pd.Timestamp(watermark).tz_convert("UTC").floor("min")
+        except Exception:
+            return
+        retained: list[dict[str, Any]] = []
+        purged = 0
+        while True:
+            try:
+                raw = self._tick_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                raw_symbol = self._canonical_symbol(
+                    str(raw.get("symbol") or raw.get("tradingsymbol") or "")
+                )
+                raw_ts = (
+                    raw.get("timestamp")
+                    or raw.get("exchange_timestamp")
+                    or raw.get("last_trade_time")
+                )
+                tick_minute = pd.to_datetime(
+                    raw_ts, utc=True, errors="coerce"
+                ).floor("min")
+                if (
+                    raw_symbol == normalized
+                    and not pd.isna(tick_minute)
+                    and tick_minute <= watermark_utc
+                ):
+                    purged += 1
+                    try:
+                        self._tick_queue.task_done()
+                    except ValueError:
+                        pass
+                    continue
+            except Exception:
+                pass
+            retained.append(raw)
+        for raw in retained:
+            self._tick_queue.put_nowait(raw)
+        self._candle_metrics["queued_ticks_purged_after_hydration"] += purged
+        self._candle_metrics["queued_ticks_retained_after_hydration"] += len(
+            retained
+        )
+        self._candle_metrics["queue_watermark_timestamp"] = watermark_utc.timestamp()
+        if purged or retained:
+            self._logger.info(
+                "MDM_QUEUE_WATERMARK_PURGE symbol=%s purged=%s retained=%s watermark=%s",
+                normalized,
+                purged,
+                len(retained),
+                watermark_utc.isoformat(),
+                extra={
+                    "event": "MDM_QUEUE_WATERMARK_PURGE",
+                    "symbol": normalized,
+                    "purged": purged,
+                    "retained": len(retained),
+                },
+            )
 
     def subscribe_bars(self, callback: Callable[[dict[str, Any]], None]) -> None:
         """Args: callback. Returns: None. Raises: None."""
@@ -7905,7 +8008,7 @@ class MarketDataManager:
                 ),
                 "source": "ws_candle",
             }
-            self._ohlc[self._bar_symbol_key(symbol)].append(bar)
+            self._refresh_candle_projection(symbol)
             self._publish_closed_bar(bar)
             verbose_candles = str(
                 os.getenv("LOG_VERBOSE_CANDLES", "false")
@@ -7928,8 +8031,10 @@ class MarketDataManager:
 
     def _get_engine(self, symbol: str) -> CandleEngine:
         """Return or create candle engine for symbol."""
+        if not hasattr(self, "_engines"):
+            self._engines = {}
         if symbol not in self._engines:
-            self._engines[symbol] = CandleEngine()
+            self._engines[symbol] = CandleEngine(symbol=symbol)
         return self._engines[symbol]
 
     def _set_symbol_token_mapping(

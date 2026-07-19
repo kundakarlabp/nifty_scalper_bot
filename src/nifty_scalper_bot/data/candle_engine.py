@@ -1166,6 +1166,17 @@ def normalize_ohlc_timezone(df: pd.DataFrame) -> pd.DataFrame:
     return normalized.set_index("timestamp")
 
 
+def import_candle_history(
+    engine: CandleEngine,
+    frame: pd.DataFrame | None,
+    *,
+    mode: str = "incremental",
+    source: str | None = None,
+) -> pd.DataFrame:
+    """Compatibility adapter for non-owner modules to import history safely."""
+    return engine.import_history(frame, mode=mode, source=source)
+
+
 def ensure_valid_data(
     symbol: str,
     engine: CandleEngine,
@@ -1197,5 +1208,9 @@ def ensure_valid_data(
             },
         )
         return None
-    engine.replace_history(hydrated.tail(engine.max_bars).reset_index(drop=True))
+    engine.import_history(
+        hydrated.tail(engine.max_bars).reset_index(drop=True),
+        mode="incremental",
+        source="historical_hydration",
+    )
     return engine.get_df()

@@ -84,6 +84,7 @@ from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 from nifty_scalper_bot.data.candle_engine import (
     CandleEngine,
+    import_candle_history,
     ensure_valid_data,
     normalize_ohlc_timezone,
     repair_with_backfill,
@@ -2419,7 +2420,12 @@ class StrategyRunner:
             df = df.drop_duplicates(subset="timestamp", keep="last")
             df = df.sort_values("timestamp").reset_index(drop=True)
             engine = self._candle_engines.setdefault(symbol, CandleEngine())
-            engine.replace_history(df.tail(engine.max_bars).reset_index(drop=True))
+            import_candle_history(
+                engine,
+                df.tail(engine.max_bars).reset_index(drop=True),
+                mode="bootstrap",
+                source="strategy_runner_seed",
+            )
             self._logger.debug(
                 "candle_engine_seeded",
                 extra={
@@ -8015,7 +8021,12 @@ class StrategyRunner:
                                 max_bars=engine.max_bars,
                             )
                             if not repaired.empty:
-                                engine.replace_history(repaired)
+                                import_candle_history(
+                                    engine,
+                                    repaired,
+                                    mode="incremental",
+                                    source="strategy_runner_backfill",
+                                )
                     except Exception:
                         # 4. Use .exception to capture traceback and stop silent failures
                         self._logger.exception(
