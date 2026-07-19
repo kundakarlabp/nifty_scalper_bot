@@ -8701,7 +8701,8 @@ async def ensure_symbol_runtime_history(
         policy = replace(policy, required_bars=req, target_bars=tgt)
     hydration: Any | None = None
     failure_reason: str | None = None
-    if mdm is None or not callable(getattr(mdm, "ensure_history", None)):
+    ensure_history = getattr(mdm, "ensure_history", None)
+    if mdm is None or not callable(ensure_history):
         failure_reason = "mdm_ensure_history_missing"
         return RuntimeHistoryResult(
             symbol=symbol,
@@ -8720,7 +8721,7 @@ async def ensure_symbol_runtime_history(
             failure_reason=failure_reason,
         )
     if policy.allow_broker_fetch:
-        hydration = await mdm.ensure_history(
+        hydration = await ensure_history(
             symbol,
             interval="minute",
             required_bars=policy.required_bars,
@@ -8835,6 +8836,7 @@ async def _ensure_active_basket_history(
     option_required_bars: int,
     context_required_bars: int,
     reason: str,
+    phase: str,
 ) -> dict[str, Any]:
     """Single runtime-readiness path that initiates active-basket history."""
     ensure_bot_context_runtime_fields(ctx)
@@ -8849,15 +8851,7 @@ async def _ensure_active_basket_history(
 
     def canon(symbol: Any) -> str:
         raw = str(symbol or "").strip()
-        if not raw:
-            return ""
-        fn = getattr(mdm, "_canonical_symbol", None)
-        if callable(fn):
-            try:
-                return str(fn(raw))
-            except Exception:
-                return raw.upper()
-        return raw.upper()
+        return canonical(raw) if raw else ""
 
     spot = canon(_basket_attr(basket, "spot_symbol", None) or "NSE:NIFTY")
     futures = canon(
@@ -8936,10 +8930,10 @@ async def _ensure_active_basket_history(
         ensure_reason = (
             "history_short"
             if short
-            else "recovery_gap_fill" if gap else "history_stale"
+            else "recovery_gap_fill" if gap else "history_stale" if stale else ""
         )
         requirement_increased = required > int(reqs.get(symbol, 0) or 0)
-        if not (short or stale or gap or basket_changed or requirement_increased):
+        if not ensure_reason:
             result[symbol] = {"skipped": True, "reason": "ready"}
             continue
         last = float(attempts.get(symbol, 0.0) or 0.0)
@@ -8952,13 +8946,18 @@ async def _ensure_active_basket_history(
             continue
         attempts[symbol] = now_mono
         reqs[symbol] = required
+        hydration_phase = (
+            "recovery"
+            if ensure_reason in {"history_stale", "recovery_gap_fill"}
+            else phase
+        )
         hydration = await ensure(
             symbol,
             interval="minute",
             required_bars=required,
             target_bars=required,
             role=str(spec["role"]),
-            phase="startup",
+            phase=hydration_phase,
             reason=ensure_reason,
             minimum_only=False,
         )
@@ -8984,65 +8983,19 @@ async def _ensure_context_history_hydrated(
     futures_symbol: str | None,
     required_bars: int,
     reason: str,
-) -> dict[str, dict[str, int | bool]]:
-    """Ensure spot/futures history through the canonical runtime orchestrator."""
-    result: dict[str, dict[str, int | bool]] = {}
-    for sym in [s for s in (spot_symbol or "NSE:NIFTY", futures_symbol) if s]:
-        before_mdm = _count_symbol_bars(ctx, sym)
-        before_runner = 0
-        runner = getattr(ctx, "strategy_runner", None)
-        if runner is not None and hasattr(runner, "_indicator_engine"):
-            before_runner = len(runner._indicator_engine.get_history(sym) or [])
-        role = "futures_context" if str(sym).endswith("FUT") else "spot_context"
-        runtime = await ensure_symbol_runtime_history(
-            ctx,
-            sym,
-            role=role,
-            phase="startup",
-            reason=f"{reason}_context",
-            required_bars=required_bars,
-        )
-        fetched_rows = int(getattr(runtime.hydration, "fetched_rows", 0) or 0)
-        accepted_rows = int(getattr(runtime.hydration, "accepted_rows", 0) or 0)
-        LOGGER.info(
-            "CONTEXT_HISTORY_HYDRATION_TRACE symbol=%s source=%s requested_bars=%d fetched_bars=%d new_ingested_bars=%d duplicate_bars=%s final_indicator_history_count=%d rejection_reason=%s",
-            sym,
-            f"{reason}_context",
-            runtime.required_bars,
-            fetched_rows,
-            max(0, runtime.indicator_bars - before_runner),
-            None,
-            runtime.indicator_bars,
-            (
-                "none"
-                if runtime.ready
-                else (runtime.failure_reason or "insufficient_bars")
-            ),
-            extra={
-                "event": "CONTEXT_HISTORY_HYDRATION_TRACE",
-                "symbol": sym,
-                "source": f"{reason}_context",
-                "requested_bars": runtime.required_bars,
-                "fetched_bars": fetched_rows,
-                "accepted_rows": accepted_rows,
-                "new_ingested_bars": max(0, runtime.indicator_bars - before_runner),
-                "duplicate_bars": None,
-                "final_indicator_history_count": runtime.indicator_bars,
-                "rejection_reason": (
-                    "none"
-                    if runtime.ready
-                    else (runtime.failure_reason or "insufficient_bars")
-                ),
-            },
-        )
-        result[sym] = {
-            "before_mdm_bars": before_mdm,
-            "after_mdm_bars": runtime.mdm_bars,
-            "before_runner_bars": before_runner,
-            "after_runner_bars": runtime.indicator_bars,
-            "ready": runtime.ready,
-        }
-    return result
+) -> dict[str, Any]:
+    """Compatibility delegate; production hydration remains active-basket-only."""
+    results = await _ensure_active_basket_history(
+        ctx,
+        option_required_bars=required_bars,
+        context_required_bars=required_bars,
+        reason=reason,
+        phase="runtime",
+    )
+    wanted = {canonical(s) for s in (spot_symbol or "NSE:NIFTY", futures_symbol) if s}
+    return {
+        symbol: results.get(symbol, {"ready": False}) for symbol in wanted if symbol
+    }
 
 
 async def _ensure_selected_options_hydrated(
@@ -9051,68 +9004,19 @@ async def _ensure_selected_options_hydrated(
     selected_pe: str | None,
     required_bars: int,
     reason: str,
-) -> dict[str, dict[str, int | bool]]:
-    """Ensure selected options through the canonical runtime orchestrator."""
-    hydration_result: dict[str, dict[str, int | bool]] = {}
-    runner = getattr(ctx, "strategy_runner", None)
-    for sym in (selected_ce, selected_pe):
-        if not sym:
-            continue
-        before_mdm = _count_symbol_bars(ctx, sym)
-        before_runner = 0
-        if runner is not None and hasattr(runner, "_indicator_engine"):
-            before_runner = len(runner._indicator_engine.get_history(sym) or [])
-        runtime = await ensure_symbol_runtime_history(
-            ctx,
-            sym,
-            role="selected_option",
-            phase="startup",
-            reason=f"{reason}_selected_option",
-            required_bars=required_bars,
-        )
-        LOGGER.info(
-            "SELECTED_OPTION_RUNNER_SYNC_FROM_MDM symbol=%s mdm_bars=%d runner_bars=%d required_bars=%d reason=%s",
-            sym,
-            runtime.mdm_bars,
-            runtime.indicator_bars,
-            required_bars,
-            reason,
-        )
-        hydration_result[sym] = {
-            "before_mdm_bars": before_mdm,
-            "after_mdm_bars": runtime.mdm_bars,
-            "before_runner_bars": before_runner,
-            "after_runner_bars": runtime.indicator_bars,
-            "ready": runtime.ready,
-        }
-        if not runtime.ready:
-            LOGGER.warning(
-                "SELECTED_OPTION_HYDRATION_NOT_READY symbol=%s after_mdm_bars=%d after_runner_bars=%d required_bars=%d reason=%s",
-                sym,
-                runtime.mdm_bars,
-                runtime.indicator_bars,
-                required_bars,
-                reason,
-            )
-    # Spec §8: derive the cold/ready verdict from the single canonical readiness
-    # function so every path (startup, dynamic, rearm, /why, diagnostics) shares
-    # one source of truth and never carries a stale blocker forward.
-    readiness = compute_selected_option_history_readiness(ctx, selected_ce, selected_pe)
-    LOGGER.info(
-        "SELECTED_OPTION_HISTORY_READINESS selected_ce=%s selected_pe=%s both_ready=%s blocker=%s",
-        selected_ce,
-        selected_pe,
-        readiness.both_ready,
-        readiness.blocker,
-        extra={
-            "event": "SELECTED_OPTION_HISTORY_READINESS",
-            "selected_ce": selected_ce,
-            "selected_pe": selected_pe,
-            "both_ready": readiness.both_ready,
-            "blocker": readiness.blocker,
-        },
+) -> dict[str, Any]:
+    """Compatibility delegate; production hydration remains active-basket-only."""
+    results = await _ensure_active_basket_history(
+        ctx,
+        option_required_bars=required_bars,
+        context_required_bars=required_bars,
+        reason=reason,
+        phase="runtime",
     )
-    return hydration_result
+    wanted = {canonical(s) for s in (selected_ce, selected_pe) if s}
+    return {
+        symbol: results.get(symbol, {"ready": False}) for symbol in wanted if symbol
+    }
 
 
 async def _recompute_and_push_runtime_readiness(
@@ -9342,6 +9246,7 @@ async def _recompute_and_push_runtime_readiness(
         option_required_bars=option_execution_min_bars,
         context_required_bars=context_execution_min_bars,
         reason=reason,
+        phase="runtime",
     )
     basket_hard_ready = True
     basket_missing: list[str] = []

@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
+import pandas as pd
+
 from nifty_scalper_bot.config.defaults import (
     DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
 )
@@ -57,6 +59,7 @@ from nifty_scalper_bot.execution.readiness import (
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import IST, get_runtime_market_mode
 from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
+from nifty_scalper_bot.utils.symbols import canonical
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.core.app import BotContext
@@ -170,26 +173,20 @@ def _coerce_history_timestamp_utc(
                 unit = "us"
             elif abs(raw) >= 1e11:
                 unit = "ms"
-            import pandas as pd
-
             ts = pd.to_datetime(raw, unit=unit, utc=True, errors="coerce")
         else:
             ts = coerce_market_timestamp(value).tz_convert("UTC")
     except Exception:
         return None
     try:
-        import pandas as pd
-
         if pd.isna(ts):
             return None
         out = pd.Timestamp(ts).to_pydatetime().astimezone(timezone.utc)
     except Exception:
         return None
-    now = (
-        now_utc.astimezone(timezone.utc)
-        if now_utc.tzinfo
-        else now_utc.replace(tzinfo=timezone.utc)
-    )
+    if now_utc.tzinfo is None:
+        raise ValueError("now_utc must be timezone-aware")
+    now = now_utc.astimezone(timezone.utc)
     if out < datetime(2000, 1, 1, tzinfo=timezone.utc):
         return None
     if out > now + timedelta(seconds=max(float(future_grace_seconds), 0.0)):
@@ -210,11 +207,9 @@ def _expected_latest_bar_start_utc(
     now_utc: datetime, *, publication_grace_seconds: float
 ) -> datetime | None:
     """Return expected latest finalized one-minute bar start in UTC."""
-    now = (
-        now_utc.astimezone(timezone.utc)
-        if now_utc.tzinfo
-        else now_utc.replace(tzinfo=timezone.utc)
-    )
+    if now_utc.tzinfo is None:
+        raise ValueError("now_utc must be timezone-aware")
+    now = now_utc.astimezone(timezone.utc)
     now_ist = now.astimezone(IST)
     market_open = time(9, 15)
     last_start = time(15, 29)
@@ -465,13 +460,15 @@ def build_symbol_hydration_status(
     symbol: str | None,
     role: str,
     required_bars: int,
+    *,
+    now_utc: datetime | None = None,
 ) -> HydrationStatus:
     """Build the canonical startup hydration status for one symbol.
 
     This reads only existing MDM/DataHub/Runner/Indicator caches; historical
     fetching remains in scheduled hydration/backfill paths, never tick paths.
     """
-    normalized = str(symbol or "").strip()
+    normalized = canonical(str(symbol or "").strip())
     required = max(0, int(required_bars or 0))
     mdm = getattr(ctx, "market_data_manager", None)
     datahub = getattr(ctx, "data_hub", None) or getattr(ctx, "datahub", None)
@@ -526,7 +523,10 @@ def build_symbol_hydration_status(
                 indicator_bars = 0
         if runner_bars == 0 and indicator_bars > 0:
             runner_bars = indicator_bars
-    now_utc = datetime.now(timezone.utc)
+    evaluated_at_utc = now_utc or datetime.now(timezone.utc)
+    if evaluated_at_utc.tzinfo is None:
+        raise ValueError("now_utc must be timezone-aware")
+    evaluated_at_utc = evaluated_at_utc.astimezone(timezone.utc)
     grace = float(_clamped_int_env("HISTORY_PUBLICATION_GRACE_SECONDS", 90, 0, 300))
     max_lag = _clamped_int_env("HISTORY_LATEST_BAR_MAX_LAG_MINUTES", 2, 0, 5)
     continuity_window = _clamped_int_env(
@@ -539,7 +539,7 @@ def build_symbol_hydration_status(
         mdm_read.bars,
         role=role,
         required_bars=required,
-        now_utc=now_utc,
+        now_utc=evaluated_at_utc,
         publication_grace_seconds=grace,
         max_lag_minutes=max_lag,
         continuity_window_bars=continuity_window,
