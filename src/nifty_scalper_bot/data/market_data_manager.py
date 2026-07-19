@@ -58,7 +58,10 @@ from typing import (
 import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.data.candle_engine import CandleEngine
+from nifty_scalper_bot.data.candle_engine import (
+    CandleEngine,
+    CandleHistoryConflictError,
+)
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.data.time_contract import coerce_market_timestamp
@@ -392,6 +395,8 @@ class MarketDataManager:
         )
         self._engines: dict[str, CandleEngine] = {}
         self._candle_metrics: dict[str, float] = defaultdict(float)
+        self._candle_queue_watermarks: dict[str, pd.Timestamp] = {}
+        self._last_history_import_result: dict[str, Any] | None = None
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._last_cumulative_volume_by_symbol: dict[str, float] = {}
@@ -1003,6 +1008,13 @@ class MarketDataManager:
             self._candle_metrics = defaultdict(float)
         if not hasattr(self, "_engines"):
             self._engines = {}
+        if not hasattr(self, "_candle_queue_watermarks"):
+            self._candle_queue_watermarks = {}
+        self._last_history_import_result = {
+            "symbol": normalized_symbol,
+            "status": "started",
+            "accepted_rows": 0,
+        }
         self._candle_metrics["history_hydration_request_total"] += 1
         before = (
             self.get_ohlc_bars(normalized_symbol)
@@ -1024,6 +1036,8 @@ class MarketDataManager:
                     )
                 normalized["symbol"] = normalized_symbol
                 normalized_rows.append(normalized)
+            if not normalized_rows and bars:
+                raise DataIntegrityError("no valid historical OHLC rows to import")
             if normalized_rows:
                 frame = pd.DataFrame(normalized_rows)
             else:
@@ -1040,21 +1054,29 @@ class MarketDataManager:
                 self._candle_metrics[
                     "history_hydration_last_success_timestamp"
                 ] = latest.timestamp()
-            before_ts = {
-                normalized[0]
-                for row in before
-                if (normalized := self._normalize_bar_timestamp(row)) is not None
-            }
-            after_ts = {
-                normalized[0]
-                for row in after
-                if (normalized := self._normalize_bar_timestamp(row)) is not None
-            }
+            before_ts: set[datetime] = set()
+            for row in before:
+                normalized_ts = self._normalize_bar_timestamp(row)
+                if normalized_ts is not None:
+                    before_ts.add(normalized_ts[0])
+            after_ts: set[datetime] = set()
+            for row in after:
+                normalized_ts = self._normalize_bar_timestamp(row)
+                if normalized_ts is not None:
+                    after_ts.add(normalized_ts[0])
             accepted = len(after_ts - before_ts)
-            if accepted == 0 and normalized_rows:
+            status = "success_new_bars" if accepted > 0 else "success_idempotent"
+            if status == "success_idempotent" and normalized_rows:
                 self._candle_metrics["history_hydration_idempotent_total"] += 1
             self._candle_metrics["history_hydration_success_total"] += 1
-            self._purge_queued_ticks_at_or_before_watermark(normalized_symbol)
+            self._last_history_import_result = {
+                "symbol": normalized_symbol,
+                "status": status,
+                "accepted_rows": accepted,
+                "returned_rows": len(bars or ()),
+                "stored_rows": len(after),
+            }
+            self._record_queue_watermark_after_hydration(normalized_symbol)
             self._logger.info(
                 "HYDRATION_INGEST_RESULT symbol=%s returned_rows=%s accepted_rows=%s final_mdm_bars=%s first_ts=%s last_ts=%s",
                 normalized_symbol,
@@ -1074,8 +1096,17 @@ class MarketDataManager:
             return accepted
         except Exception as exc:  # noqa: BLE001
             self._candle_metrics["history_hydration_failure_total"] += 1
-            if isinstance(exc, DataIntegrityError):
+            status = "finalized_candle_conflict" if isinstance(
+                exc, CandleHistoryConflictError
+            ) else "failed_validation"
+            if isinstance(exc, CandleHistoryConflictError):
                 self._candle_metrics["history_hydration_conflict_total"] += 1
+            self._last_history_import_result = {
+                "symbol": normalized_symbol,
+                "status": status,
+                "accepted_rows": 0,
+                "error": str(exc),
+            }
             self._logger.error(
                 "Failure in ingest_historical_ohlc: %s", exc, exc_info=exc
             )
@@ -1109,20 +1140,9 @@ class MarketDataManager:
         self._candle_metrics["candle_projection_refresh_total"] += 1
         self._candle_metrics["candle_projection_last_refresh"] = time.time()
         self._candle_metrics["candle_projection_size"] = float(len(projected))
-        previous_ts = [
-            normalized_ts[0]
-            for row in previous
-            if (normalized_ts := self._normalize_bar_timestamp(row)) is not None
-        ]
-        projected_ts = [
-            normalized_ts[0]
-            for row in projected
-            if (normalized_ts := self._normalize_bar_timestamp(row)) is not None
-        ]
-        if (
-            len(previous_ts) > len(projected_ts)
-            and previous_ts[: len(projected_ts)] != projected_ts
-        ):
+        previous_fingerprint = self._candle_projection_fingerprint(previous)
+        projected_fingerprint = self._candle_projection_fingerprint(projected)
+        if previous and previous_fingerprint != projected_fingerprint:
             self._candle_metrics["candle_projection_divergence_total"] += 1
             self._logger.warning(
                 "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s",
@@ -1133,8 +1153,35 @@ class MarketDataManager:
             )
         return [dict(row) for row in projected]
 
-    def _purge_queued_ticks_at_or_before_watermark(self, symbol: str) -> None:
-        """Drop queued ticks for minutes CandleEngine has already finalized."""
+
+    def _candle_projection_fingerprint(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> list[tuple[Any, float, float, float, float, float]]:
+        """Return bounded canonical OHLCV identity for projection comparisons."""
+        fingerprint: list[tuple[Any, float, float, float, float, float]] = []
+        for row in rows:
+            normalized_ts = self._normalize_bar_timestamp(row)
+            if normalized_ts is None:
+                fingerprint.append((None, 0.0, 0.0, 0.0, 0.0, 0.0))
+                continue
+            ts_key, _market_ts = normalized_ts
+            try:
+                fingerprint.append(
+                    (
+                        ts_key,
+                        float(row.get("open", 0.0) or 0.0),
+                        float(row.get("high", 0.0) or 0.0),
+                        float(row.get("low", 0.0) or 0.0),
+                        float(row.get("close", 0.0) or 0.0),
+                        float(row.get("volume", 0.0) or 0.0),
+                    )
+                )
+            except (TypeError, ValueError):
+                fingerprint.append((ts_key, 0.0, 0.0, 0.0, 0.0, 0.0))
+        return fingerprint
+
+    def _record_queue_watermark_after_hydration(self, symbol: str) -> None:
+        """Record consumer-enforced stale-tick watermark after history import."""
         normalized = (
             self._canonical_symbol(symbol)
             if hasattr(self, "_canonical_symbol")
@@ -1147,60 +1194,51 @@ class MarketDataManager:
             watermark_utc = pd.Timestamp(watermark).tz_convert("UTC").floor("min")
         except Exception:
             return
-        retained: list[dict[str, Any]] = []
-        purged = 0
-        while True:
-            try:
-                raw = self._tick_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            try:
-                raw_symbol = self._canonical_symbol(
-                    str(raw.get("symbol") or raw.get("tradingsymbol") or "")
-                )
-                raw_ts = (
-                    raw.get("timestamp")
-                    or raw.get("exchange_timestamp")
-                    or raw.get("last_trade_time")
-                )
-                tick_minute = pd.to_datetime(
-                    raw_ts, utc=True, errors="coerce"
-                ).floor("min")
-                if (
-                    raw_symbol == normalized
-                    and not pd.isna(tick_minute)
-                    and tick_minute <= watermark_utc
-                ):
-                    purged += 1
-                    try:
-                        self._tick_queue.task_done()
-                    except ValueError:
-                        pass
-                    continue
-            except Exception:
-                pass
-            retained.append(raw)
-        for raw in retained:
-            self._tick_queue.put_nowait(raw)
-        self._candle_metrics["queued_ticks_purged_after_hydration"] += purged
-        self._candle_metrics["queued_ticks_retained_after_hydration"] += len(
-            retained
-        )
+        if not hasattr(self, "_candle_queue_watermarks"):
+            self._candle_queue_watermarks = {}
+        self._candle_queue_watermarks[normalized] = watermark_utc
+        retained = self._tick_queue.qsize() if hasattr(self, "_tick_queue") else 0
+        self._candle_metrics["queued_ticks_retained_after_hydration"] += retained
         self._candle_metrics["queue_watermark_timestamp"] = watermark_utc.timestamp()
-        if purged or retained:
-            self._logger.info(
-                "MDM_QUEUE_WATERMARK_PURGE symbol=%s purged=%s retained=%s watermark=%s",
-                normalized,
-                purged,
-                len(retained),
-                watermark_utc.isoformat(),
-                extra={
-                    "event": "MDM_QUEUE_WATERMARK_PURGE",
-                    "symbol": normalized,
-                    "purged": purged,
-                    "retained": len(retained),
-                },
-            )
+        self._logger.info(
+            "MDM_QUEUE_WATERMARK_ARMED symbol=%s retained=%s watermark=%s",
+            normalized,
+            retained,
+            watermark_utc.isoformat(),
+            extra={
+                "event": "MDM_QUEUE_WATERMARK_ARMED",
+                "symbol": normalized,
+                "purged": 0,
+                "retained": retained,
+                "watermark": watermark_utc.isoformat(),
+            },
+        )
+
+    def _queued_tick_at_or_before_watermark(self, raw: Mapping[str, Any]) -> bool:
+        """Return True when a queued tick is stale under a hydration watermark."""
+        watermarks = getattr(self, "_candle_queue_watermarks", {}) or {}
+        if not watermarks:
+            return False
+        raw_symbol = str(raw.get("symbol") or raw.get("tradingsymbol") or "")
+        if not raw_symbol:
+            return False
+        normalized = (
+            self._canonical_symbol(raw_symbol)
+            if hasattr(self, "_canonical_symbol")
+            else raw_symbol
+        )
+        watermark = watermarks.get(normalized)
+        if watermark is None:
+            return False
+        raw_ts = (
+            raw.get("timestamp")
+            or raw.get("exchange_timestamp")
+            or raw.get("last_trade_time")
+        )
+        tick_minute = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+        if pd.isna(tick_minute):
+            return False
+        return tick_minute.floor("min") <= watermark
 
     def subscribe_bars(self, callback: Callable[[dict[str, Any]], None]) -> None:
         """Args: callback. Returns: None. Raises: None."""
@@ -6997,9 +7035,15 @@ class MarketDataManager:
                     return
                 continue
             try:
+                if self._queued_tick_at_or_before_watermark(raw):
+                    self._candle_metrics["queued_ticks_purged_after_hydration"] += 1
+                    self._candle_metrics["stale_tick_escape_reject_total"] += 1
+                    continue
                 self._process_queued_tick(raw)
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("tick worker drain error: %s", exc)
+            finally:
+                self._tick_queue.task_done()
 
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Legacy tick-bus hook routed to queue ingestion."""
@@ -7298,6 +7342,10 @@ class MarketDataManager:
         while True:
             raw = await self._tick_queue.get()
             try:
+                if self._queued_tick_at_or_before_watermark(raw):
+                    self._candle_metrics["queued_ticks_purged_after_hydration"] += 1
+                    self._candle_metrics["stale_tick_escape_reject_total"] += 1
+                    continue
                 self._process_queued_tick(raw)
             except Exception as exc:
                 preview = {}

@@ -315,6 +315,8 @@ def _storage_mdm() -> MarketDataManager:
     mdm._engines = {}
     mdm._cache_len = 100
     mdm._candle_metrics = defaultdict(float)
+    mdm._candle_queue_watermarks = {}
+    mdm._last_history_import_result = None
     mdm._last_historical_ts = {}
     import asyncio
     mdm._tick_queue = asyncio.Queue(maxsize=100)
