@@ -33,6 +33,7 @@ def _bars(n: int):
 class _Provider:
     def __init__(self, n):
         self._n = n
+
     def get_ohlc_bars(self, symbol, limit=None):
         return _bars(self._n)
 
@@ -40,6 +41,7 @@ class _Provider:
 class _Indicator:
     def __init__(self, n):
         self._n = n
+
     def get_history(self, symbol):
         return _bars(self._n)
 

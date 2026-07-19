@@ -156,6 +156,9 @@ BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
     "_runtime_readiness_log_key": None,
     "last_runtime_readiness_log_at": None,
     "_bot_context_runtime_fields_patch_logged": False,
+    "history_hydration_attempt_mono_by_symbol": dict,
+    "history_hydration_requirement_by_symbol": dict,
+    "history_hydration_fingerprint": None,
 }
 
 
@@ -3070,6 +3073,13 @@ class BotContext:
     _runtime_readiness_log_key: object | None = None
     last_runtime_readiness_log_at: float | None = None
     _bot_context_runtime_fields_patch_logged: bool = False
+    history_hydration_attempt_mono_by_symbol: dict[str, float] = field(
+        default_factory=dict
+    )
+    history_hydration_requirement_by_symbol: dict[str, int] = field(
+        default_factory=dict
+    )
+    history_hydration_fingerprint: tuple[object, ...] | None = None
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     execution_locked_symbols: set[str] = field(default_factory=set)
@@ -8810,6 +8820,164 @@ async def ensure_symbol_runtime_history(
     )
 
 
+def _runtime_hydration_cooldown_seconds() -> float:
+    raw = os.getenv("HISTORY_HYDRATION_RETRY_COOLDOWN_SECONDS", "15")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 15.0
+    return max(1.0, min(120.0, value))
+
+
+async def _ensure_active_basket_history(
+    ctx: BotContext,
+    *,
+    option_required_bars: int,
+    context_required_bars: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Single runtime-readiness path that initiates active-basket history."""
+    ensure_bot_context_runtime_fields(ctx)
+    mdm = getattr(ctx, "market_data_manager", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    basket = (
+        getattr(ctx, "active_contract_basket", None)
+        or getattr(ctx, "active_trading_universe", {})
+        or {}
+    )
+    selection = get_active_contract_selection(ctx)
+
+    def canon(symbol: Any) -> str:
+        raw = str(symbol or "").strip()
+        if not raw:
+            return ""
+        fn = getattr(mdm, "_canonical_symbol", None)
+        if callable(fn):
+            try:
+                return str(fn(raw))
+            except Exception:
+                return raw.upper()
+        return raw.upper()
+
+    spot = canon(_basket_attr(basket, "spot_symbol", None) or "NSE:NIFTY")
+    futures = canon(
+        selection.futures_symbol
+        or _basket_attr(basket, "futures_symbol", None)
+        or _basket_attr(basket, "future_symbol", None)
+    )
+    selected_ce = canon(
+        selection.selected_ce
+        or _basket_attr(basket, "selected_ce", None)
+        or _basket_attr(basket, "atm_ce", None)
+    )
+    selected_pe = canon(
+        selection.selected_pe
+        or _basket_attr(basket, "selected_pe", None)
+        or _basket_attr(basket, "atm_pe", None)
+    )
+    fingerprint = (
+        str(
+            _basket_attr(basket, "basket_version", None)
+            or _basket_attr(basket, "version", None)
+            or ""
+        ),
+        spot,
+        futures,
+        selected_ce,
+        selected_pe,
+        int(option_required_bars),
+        int(context_required_bars),
+    )
+    basket_changed = fingerprint != getattr(ctx, "history_hydration_fingerprint", None)
+    ctx.history_hydration_fingerprint = fingerprint
+    requirements: dict[str, dict[str, Any]] = {}
+
+    def put(symbol: str, role: str, required: int, gating: bool) -> None:
+        if not symbol:
+            return
+        current = requirements.get(symbol)
+        if current is None or (gating, required) > (
+            current["gating"],
+            current["required"],
+        ):
+            requirements[symbol] = {
+                "role": role,
+                "required": int(required),
+                "gating": gating,
+            }
+
+    put(spot, "spot", context_required_bars, True)
+    put(futures, "futures_context", context_required_bars, True)
+    for sym in (
+        _basket_attr(basket, "option_symbols", None)
+        or _basket_attr(basket, "symbols", ())
+        or ()
+    ):
+        cs = canon(sym)
+        if cs.endswith(("CE", "PE")):
+            put(cs, "option_context", option_required_bars, False)
+    put(selected_ce, "selected_ce", option_required_bars, True)
+    put(selected_pe, "selected_pe", option_required_bars, True)
+
+    result: dict[str, Any] = {}
+    ensure = getattr(mdm, "ensure_history", None)
+    if not callable(ensure):
+        return result
+    attempts = getattr(ctx, "history_hydration_attempt_mono_by_symbol", {})
+    reqs = getattr(ctx, "history_hydration_requirement_by_symbol", {})
+    cooldown = _runtime_hydration_cooldown_seconds()
+    now_mono = time_module.monotonic()
+    for symbol, spec in requirements.items():
+        required = int(spec["required"])
+        status = build_symbol_hydration_status(ctx, symbol, str(spec["role"]), required)
+        short = int(status.mdm_bars or 0) < required
+        stale = required > 0 and not bool(status.latest_bar_fresh)
+        gap = required > 0 and not bool(status.recent_window_contiguous)
+        ensure_reason = (
+            "history_short"
+            if short
+            else "recovery_gap_fill" if gap else "history_stale"
+        )
+        requirement_increased = required > int(reqs.get(symbol, 0) or 0)
+        if not (short or stale or gap or basket_changed or requirement_increased):
+            result[symbol] = {"skipped": True, "reason": "ready"}
+            continue
+        last = float(attempts.get(symbol, 0.0) or 0.0)
+        if (
+            not (basket_changed or requirement_increased)
+            and last
+            and now_mono - last < cooldown
+        ):
+            result[symbol] = {"skipped": True, "reason": "cooldown"}
+            continue
+        attempts[symbol] = now_mono
+        reqs[symbol] = required
+        hydration = await ensure(
+            symbol,
+            interval="minute",
+            required_bars=required,
+            target_bars=required,
+            role=str(spec["role"]),
+            phase="startup",
+            reason=ensure_reason,
+            minimum_only=False,
+        )
+        result[symbol] = hydration
+        if not getattr(hydration, "failure_reason", None):
+            sync = getattr(runner, "sync_history_from_mdm", None)
+            if callable(sync):
+                sync(
+                    symbol,
+                    required_bars=required,
+                    role=str(spec["role"]),
+                    request_if_short=False,
+                    reason=ensure_reason,
+                )
+    ctx.history_hydration_attempt_mono_by_symbol = attempts
+    ctx.history_hydration_requirement_by_symbol = reqs
+    return result
+
+
 async def _ensure_context_history_hydrated(
     ctx: BotContext,
     spot_symbol: str | None,
@@ -9169,53 +9337,14 @@ async def _recompute_and_push_runtime_readiness(
         configured_context_min_bars, runner_context_required_bars
     )
     futures_symbol = str(basket.get("futures_symbol") or "")
-    _ = await _ensure_context_history_hydrated(
-        ctx, spot_symbol, futures_symbol, context_execution_min_bars, reason
-    )
-    _ = await _ensure_selected_options_hydrated(
-        ctx, selected_ce, selected_pe, option_execution_min_bars, reason
+    _ = await _ensure_active_basket_history(
+        ctx,
+        option_required_bars=option_execution_min_bars,
+        context_required_bars=context_execution_min_bars,
+        reason=reason,
     )
     basket_hard_ready = True
     basket_missing: list[str] = []
-    hydrate_basket = (
-        getattr(mdm, "hydrate_active_contract_basket", None)
-        if mdm is not None
-        else None
-    )
-    if callable(hydrate_basket):
-        try:
-            hydration_status = await _maybe_await(hydrate_basket(basket))
-            if isinstance(hydration_status, Mapping):
-                basket_hard_ready = bool(hydration_status.get("hard_ready", True))
-                basket_missing = [
-                    str(item) for item in hydration_status.get("missing", []) or []
-                ]
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 - readiness remains blocked by explicit diagnostic
-            basket_hard_ready = False
-            basket_missing = [f"active_basket_hydration_failed:{type(exc).__name__}"]
-            LOGGER.warning(
-                "ACTIVE_BASKET_HYDRATION_STATUS_FAILED reason=%s",
-                exc,
-                extra={
-                    "event": "ACTIVE_BASKET_HYDRATION_STATUS_FAILED",
-                    "error": str(exc),
-                },
-            )
-    elif str(
-        os.getenv("ALLOW_MISSING_HYDRATION_GATE", "false") or "false"
-    ).strip().lower() not in {"1", "true", "yes", "on"}:
-        basket_hard_ready = False
-        basket_missing = ["hydrate_active_contract_basket_missing"]
-        LOGGER.warning(
-            "ACTIVE_BASKET_HYDRATION_METHOD_MISSING hard_ready=False reason=hydrator_missing",
-            extra={
-                "event": "ACTIVE_BASKET_HYDRATION_METHOD_MISSING",
-                "missing": list(basket_missing),
-                "reason": "hydrator_missing",
-            },
-        )
     statuses = _hydration_status_map(
         ctx,
         required_option_bars=option_execution_min_bars,

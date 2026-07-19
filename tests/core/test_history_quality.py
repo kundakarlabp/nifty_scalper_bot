@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-from nifty_scalper_bot.core.history_quality import (
-    coerce_history_timestamp,
-    evaluate_history_quality,
-    expected_latest_closed_market_minute,
+from nifty_scalper_bot.core.history_readiness import (
+    _coerce_history_timestamp_utc,
+    _evaluate_recent_history_quality,
+    _expected_latest_bar_start_utc,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -19,31 +19,85 @@ def trading(day: date) -> bool:
 def test_coerce_history_timestamp_units_and_shapes() -> None:
     expected = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     seconds = int(expected.timestamp())
-    assert coerce_history_timestamp(seconds) == expected
-    assert coerce_history_timestamp(seconds * 1000) == expected
-    assert coerce_history_timestamp(seconds * 1_000_000) == expected
-    assert coerce_history_timestamp(expected.isoformat()) == expected
-    assert coerce_history_timestamp(expected) == expected
-    assert coerce_history_timestamp(datetime(2026, 1, 2, 8, 34)) == expected
+    assert (
+        _coerce_history_timestamp_utc(
+            seconds, now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+        )
+        == expected
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            seconds * 1000, now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+        )
+        == expected
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            seconds * 1_000_000, now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+        )
+        == expected
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            expected.isoformat(),
+            now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc),
+        )
+        == expected
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            expected, now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+        )
+        == expected
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            datetime(2026, 1, 2, 8, 34),
+            now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc),
+        )
+        == expected
+    )
 
 
 def test_coerce_history_timestamp_rejects_invalid_values() -> None:
-    assert coerce_history_timestamp("not-a-time") is None
-    assert coerce_history_timestamp(float("nan")) is None
-    assert coerce_history_timestamp(float("inf")) is None
-    assert coerce_history_timestamp(datetime(1999, 1, 1, tzinfo=timezone.utc)) is None
-    assert coerce_history_timestamp(datetime(2099, 1, 1, tzinfo=timezone.utc)) is None
+    assert (
+        _coerce_history_timestamp_utc(
+            "not-a-time", now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+        )
+        is None
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            float("nan"), now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+        )
+        is None
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            float("inf"), now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+        )
+        is None
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            datetime(1999, 1, 1, tzinfo=timezone.utc),
+            now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc),
+        )
+        is None
+    )
+    assert (
+        _coerce_history_timestamp_utc(
+            datetime(2099, 1, 1, tzinfo=timezone.utc),
+            now_utc=datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc),
+        )
+        is None
+    )
 
 
 def test_expected_latest_closed_minute_obeys_publication_grace() -> None:
     now = datetime(2026, 1, 2, 9, 18, 0, tzinfo=IST)
-    assert expected_latest_closed_market_minute(
-        now=now,
-        market_timezone=IST,
-        market_open=time(9, 15),
-        market_close=time(15, 30),
-        trading_day_resolver=trading,
-        publication_grace_seconds=90,
+    assert _expected_latest_bar_start_utc(
+        now.astimezone(timezone.utc), publication_grace_seconds=90
     ) == datetime(2026, 1, 2, 3, 45, tzinfo=timezone.utc)
 
 
@@ -53,23 +107,22 @@ def test_quality_detects_stale_and_gap_for_selected_option() -> None:
         {"timestamp": datetime(2026, 1, 2, 9, 15, tzinfo=IST)},
         {"timestamp": datetime(2026, 1, 2, 9, 17, tzinfo=IST)},
     ]
-    result = evaluate_history_quality(
-        symbol="NFO:XCE",
+    result = _evaluate_recent_history_quality(
+        bars,
         role="selected_ce",
-        bars=bars,
         required_bars=2,
-        now=now,
-        market_timezone=IST,
-        trading_day_resolver=trading,
+        now_utc=now.astimezone(timezone.utc),
+        max_lag_minutes=0,
         publication_grace_seconds=0,
-        allowed_recent_missing_minutes=0,
+        allowed_missing_minutes=0,
         continuity_window_bars=2,
+        provider_error=None,
     )
     assert result.latest_bar_fresh is False
     assert result.recent_window_contiguous is False
-    assert "selected_ce_history_stale" in result.blocker_reasons
-    assert "selected_ce_history_gap_detected" in result.blocker_reasons
-    assert result.missing_expected_minute_count == 1
+    assert "selected_ce_history_stale" in result.blockers
+    assert "selected_ce_history_gap_detected" in result.blockers
+    assert result.missing_minute_count == 1
 
 
 def test_quality_ignores_overnight_and_weekend_boundaries() -> None:
@@ -77,17 +130,16 @@ def test_quality_ignores_overnight_and_weekend_boundaries() -> None:
         {"timestamp": datetime(2026, 1, 2, 15, 30, tzinfo=IST)},  # Friday
         {"timestamp": datetime(2026, 1, 5, 9, 15, tzinfo=IST)},  # Monday
     ]
-    result = evaluate_history_quality(
-        symbol="NSE:NIFTY",
+    result = _evaluate_recent_history_quality(
+        bars,
         role="spot",
-        bars=bars,
         required_bars=2,
-        now=datetime(2026, 1, 5, 9, 16, tzinfo=IST),
-        market_timezone=IST,
-        trading_day_resolver=trading,
+        now_utc=datetime(2026, 1, 5, 9, 16, tzinfo=IST).astimezone(timezone.utc),
+        max_lag_minutes=2,
         publication_grace_seconds=90,
-        allowed_recent_missing_minutes=0,
+        allowed_missing_minutes=0,
         continuity_window_bars=2,
+        provider_error=None,
     )
     assert result.recent_window_contiguous is True
-    assert result.missing_expected_minute_count == 0
+    assert result.missing_minute_count == 0

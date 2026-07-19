@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -82,9 +82,7 @@ def _fresh_tick_ts() -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_runtime_readiness_uses_live_tick_proof_when_confirmed_subscription_missing() -> (
-    None
-):
+async def test_runtime_readiness_uses_live_tick_without_subscription() -> None:
     snaps = {
         "NSE:NIFTY": Snap(25000, 2),
         "NFO:CE": Snap(100, 2),

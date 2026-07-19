@@ -152,6 +152,7 @@ class CandleEngine:
     _same_minute_conflict_total: int = field(default=0, init=False)
     _history_import_total: int = field(default=0, init=False)
     _history_import_bar_total: int = field(default=0, init=False)
+    _history_import_new_bar_total: int = field(default=0, init=False)
     _history_import_idempotent_total: int = field(default=0, init=False)
     _history_import_conflict_total: int = field(default=0, init=False)
     _history_import_failure_total: int = field(default=0, init=False)
@@ -187,6 +188,7 @@ class CandleEngine:
         self._same_minute_conflict_total = 0
         self._history_import_total = 0
         self._history_import_bar_total = 0
+        self._history_import_new_bar_total = 0
         self._history_import_idempotent_total = 0
         self._history_import_conflict_total = 0
         self._history_import_failure_total = 0
@@ -249,6 +251,7 @@ class CandleEngine:
                 "same_minute_conflict_total": self._same_minute_conflict_total,
                 "history_import_total": self._history_import_total,
                 "history_import_bar_total": self._history_import_bar_total,
+                "history_import_new_bar_total": self._history_import_new_bar_total,
                 "history_import_idempotent_total": (
                     self._history_import_idempotent_total
                 ),
@@ -435,6 +438,7 @@ class CandleEngine:
                 dict(self.current_candle) if self.current_candle is not None else None
             )
             history_reconciled_current = False
+            new_bars = 0
             if mode == "incremental":
                 existing = list(self._completed_candles)
                 merged_by_ts: dict[pd.Timestamp, dict[str, Any]] = {
@@ -449,6 +453,7 @@ class CandleEngine:
                         idempotent += 1
                         continue
                     merged_by_ts[ts] = dict(row)
+                    new_bars += 1
                 candidate = [merged_by_ts[ts] for ts in sorted(merged_by_ts)]
                 if current_after is not None and incoming:
                     latest_imported_ts = _to_ist_timestamp(incoming[-1]["timestamp"])
@@ -474,6 +479,7 @@ class CandleEngine:
                             "current candle older than imported finalized history"
                         )
             else:
+                new_bars = len(incoming)
                 if current_after is not None and incoming:
                     latest_imported_ts = _to_ist_timestamp(incoming[-1]["timestamp"])
                     current_ts = _to_ist_timestamp(current_after.get("timestamp"))
@@ -569,6 +575,7 @@ class CandleEngine:
         self._df_cache_dirty = True
         self._history_import_total += 1
         self._history_import_bar_total += len(incoming)
+        self._history_import_new_bar_total += new_bars
         self._history_import_idempotent_total += idempotent
         LOGGER.info(
             "history_import_completed",
@@ -580,6 +587,7 @@ class CandleEngine:
                 "incoming_bars": len(incoming),
                 "stored_bars": len(self._completed_candles),
                 "idempotent_bars": idempotent,
+                "new_bars": new_bars,
                 "latest_finalized_minute": (
                     latest.isoformat() if latest is not None else None
                 ),

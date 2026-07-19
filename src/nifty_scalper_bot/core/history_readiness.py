@@ -34,30 +34,28 @@ Safe-edit notes:
 
 from __future__ import annotations
 
+import math
 import os
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Mapping
-from zoneinfo import ZoneInfo
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from nifty_scalper_bot.config.defaults import (
     DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
 )
 from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.core.active_basket import pick_atm_option_symbols_from_basket
-from nifty_scalper_bot.core.history_quality import (
-    evaluate_history_quality,
-)
 from nifty_scalper_bot.core.history_roles import (
     resolve_symbol_history_role as _shared_resolve_symbol_history_role,
 )
+from nifty_scalper_bot.data.time_contract import coerce_market_timestamp
 from nifty_scalper_bot.execution.readiness import (
     HydrationStatus,
     evaluate_quote_readiness,
     resolve_max_quote_age_seconds,
 )
 from nifty_scalper_bot.utils.logging import get_logger
-from nifty_scalper_bot.utils.market_hours import get_runtime_market_mode
+from nifty_scalper_bot.utils.market_hours import IST, get_runtime_market_mode
 from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 if TYPE_CHECKING:
@@ -68,10 +66,29 @@ LOGGER = get_logger("nifty_scalper_bot.core.history_readiness")
 
 @dataclass(frozen=True, slots=True)
 class HistoryProviderRead:
-    provider_name: str
     bars: tuple[Any, ...]
     count: int
-    error: str | None
+    error_type: str | None
+    error_category: str | None
+
+    @property
+    def error(self) -> str | None:
+        return self.error_category
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoryQuality:
+    first_ts_utc: datetime | None
+    last_ts_utc: datetime | None
+    expected_latest_ts_utc: datetime | None
+    market_date_ist: date | None
+    latest_bar_age_seconds: float | None
+    latest_bar_fresh: bool
+    recent_window_contiguous: bool
+    missing_minute_count: int
+    largest_gap_minutes: int
+    invalid_timestamp_count: int
+    blockers: tuple[str, ...]
 
 
 def _read_bars_from_provider(
@@ -80,34 +97,37 @@ def _read_bars_from_provider(
     """Read cached OHLC bars from a provider without triggering historical fetch."""
     name = type(provider).__name__ if provider is not None else "missing"
     if provider is None or not symbol:
-        return HistoryProviderRead(name, (), 0, None)
+        return HistoryProviderRead((), 0, None, None)
     fn = getattr(provider, "get_ohlc_bars", None)
     if not callable(fn):
-        return HistoryProviderRead(name, (), 0, None)
+        return HistoryProviderRead((), 0, None, None)
     try:
         bars = tuple(fn(symbol, limit=limit) or ())
-        return HistoryProviderRead(name, bars, len(bars), None)
+        return HistoryProviderRead(bars, len(bars), None, None)
     except TypeError:
         try:
             bars = tuple(fn(symbol) or ())
-            return HistoryProviderRead(name, bars, len(bars), None)
+            return HistoryProviderRead(bars, len(bars), None, None)
         except Exception as exc:  # noqa: BLE001
-            error = f"{type(exc).__name__}: {exc}"
+            error_type = type(exc).__name__
+            error_category = "provider_read_failed"
     except Exception as exc:  # noqa: BLE001
-        error = f"{type(exc).__name__}: {exc}"
+        error_type = type(exc).__name__
+        error_category = "provider_read_failed"
     LOGGER.warning(
         "HISTORY_PROVIDER_READ_FAILED symbol=%s provider=%s exception_type=%s",
         symbol,
         name,
-        error.split(":", 1)[0],
+        error_type,
         extra={
             "event": "HISTORY_PROVIDER_READ_FAILED",
             "symbol": symbol,
             "provider": name,
-            "exception_type": error.split(":", 1)[0],
+            "exception_type": error_type,
+            "category": error_category,
         },
     )
-    return HistoryProviderRead(name, (), 0, error)
+    return HistoryProviderRead((), 0, error_type, error_category)
 
 
 def _count_bars_from_provider(provider: Any, symbol: str, *, limit: int = 500) -> int:
@@ -118,6 +138,211 @@ def _get_bars_from_provider(
     provider: Any, symbol: str, *, limit: int = 500
 ) -> list[Any]:
     return list(_read_bars_from_provider(provider, symbol, limit=limit).bars)
+
+
+def _clamped_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name)
+    try:
+        value = int(float(str(raw).strip())) if raw not in {None, ""} else default
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _coerce_history_timestamp_utc(
+    value: Any,
+    *,
+    now_utc: datetime,
+    future_grace_seconds: float = 300.0,
+) -> datetime | None:
+    """Normalize history timestamps to UTC without using local machine time."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+        if isinstance(value, (int, float)):
+            raw = float(value)
+            unit = "s"
+            if abs(raw) >= 1e17:
+                unit = "ns"
+            elif abs(raw) >= 1e14:
+                unit = "us"
+            elif abs(raw) >= 1e11:
+                unit = "ms"
+            import pandas as pd
+
+            ts = pd.to_datetime(raw, unit=unit, utc=True, errors="coerce")
+        else:
+            ts = coerce_market_timestamp(value).tz_convert("UTC")
+    except Exception:
+        return None
+    try:
+        import pandas as pd
+
+        if pd.isna(ts):
+            return None
+        out = pd.Timestamp(ts).to_pydatetime().astimezone(timezone.utc)
+    except Exception:
+        return None
+    now = (
+        now_utc.astimezone(timezone.utc)
+        if now_utc.tzinfo
+        else now_utc.replace(tzinfo=timezone.utc)
+    )
+    if out < datetime(2000, 1, 1, tzinfo=timezone.utc):
+        return None
+    if out > now + timedelta(seconds=max(float(future_grace_seconds), 0.0)):
+        return None
+    return out
+
+
+def _previous_nse_trading_day(day: date) -> date:
+    cur = day
+    for _ in range(370):
+        if is_nse_trading_day(cur):
+            return cur
+        cur -= timedelta(days=1)
+    return day
+
+
+def _expected_latest_bar_start_utc(
+    now_utc: datetime, *, publication_grace_seconds: float
+) -> datetime | None:
+    """Return expected latest finalized one-minute bar start in UTC."""
+    now = (
+        now_utc.astimezone(timezone.utc)
+        if now_utc.tzinfo
+        else now_utc.replace(tzinfo=timezone.utc)
+    )
+    now_ist = now.astimezone(IST)
+    market_open = time(9, 15)
+    last_start = time(15, 29)
+    grace = timedelta(seconds=max(float(publication_grace_seconds), 0.0))
+
+    def close_for(day: date) -> datetime:
+        return datetime.combine(day, last_start, tzinfo=IST).astimezone(timezone.utc)
+
+    if not is_nse_trading_day(now_ist.date()):
+        return close_for(_previous_nse_trading_day(now_ist.date() - timedelta(days=1)))
+    open_dt = datetime.combine(now_ist.date(), market_open, tzinfo=IST)
+    final_dt = datetime.combine(now_ist.date(), last_start, tzinfo=IST)
+    effective = now_ist - grace
+    if effective < open_dt + timedelta(minutes=1):
+        return close_for(_previous_nse_trading_day(now_ist.date() - timedelta(days=1)))
+    expected = effective.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    if expected < open_dt:
+        expected = open_dt
+    if expected > final_dt:
+        expected = final_dt
+    return expected.astimezone(timezone.utc)
+
+
+def _extract_history_ts(row: Any) -> Any:
+    if isinstance(row, Mapping):
+        return (
+            row.get("timestamp")
+            or row.get("start")
+            or row.get("date")
+            or row.get("time")
+        )
+    return getattr(row, "timestamp", None) or getattr(row, "start", None)
+
+
+def _role_stale_blocker(role: str) -> str:
+    return {
+        "spot": "spot_history_stale",
+        "spot_context": "spot_history_stale",
+        "futures_context": "futures_context_history_stale",
+        "selected_ce": "selected_ce_history_stale",
+        "selected_pe": "selected_pe_history_stale",
+    }.get(role, f"{role}_history_stale")
+
+
+def _role_gap_blocker(role: str) -> str:
+    return {
+        "spot": "spot_history_gap_detected",
+        "spot_context": "spot_history_gap_detected",
+        "futures_context": "futures_context_history_gap_detected",
+        "selected_ce": "selected_ce_history_gap_detected",
+        "selected_pe": "selected_pe_history_gap_detected",
+    }.get(role, f"{role}_history_gap_detected")
+
+
+def _evaluate_recent_history_quality(
+    bars: Sequence[Any],
+    *,
+    role: str,
+    required_bars: int,
+    now_utc: datetime,
+    publication_grace_seconds: float,
+    max_lag_minutes: int,
+    continuity_window_bars: int,
+    allowed_missing_minutes: int,
+    provider_error: str | None,
+) -> _HistoryQuality:
+    valid: list[datetime] = []
+    invalid = 0
+    for row in bars or ():
+        ts = _coerce_history_timestamp_utc(_extract_history_ts(row), now_utc=now_utc)
+        if ts is None:
+            invalid += 1
+        else:
+            valid.append(ts.replace(second=0, microsecond=0))
+    ordered = sorted(set(valid))
+    expected = _expected_latest_bar_start_utc(
+        now_utc, publication_grace_seconds=publication_grace_seconds
+    )
+    last = ordered[-1] if ordered else None
+    latest_age = (
+        (now_utc.astimezone(timezone.utc) - last).total_seconds() if last else None
+    )
+    latest_fresh = bool(
+        last is not None
+        and expected is not None
+        and last >= expected - timedelta(minutes=max_lag_minutes)
+    )
+    window_size = max(required_bars, continuity_window_bars)
+    window = ordered[-window_size:] if window_size > 0 else ordered
+    missing = 0
+    largest_gap = 0
+    for left, right in zip(window, window[1:]):
+        l_ist = left.astimezone(IST)
+        r_ist = right.astimezone(IST)
+        if l_ist.date() != r_ist.date() or not is_nse_trading_day(l_ist.date()):
+            continue
+        if not (
+            time(9, 15) <= l_ist.time() <= time(15, 29)
+            and time(9, 15) <= r_ist.time() <= time(15, 29)
+        ):
+            continue
+        gap = int((r_ist - l_ist).total_seconds() // 60)
+        if gap > 1:
+            missing += gap - 1
+            largest_gap = max(largest_gap, gap)
+    contiguous = missing <= allowed_missing_minutes
+    blockers: list[str] = []
+    if invalid:
+        blockers.append("history_timestamp_invalid")
+    if provider_error:
+        blockers.append("history_provider_error")
+    if not latest_fresh:
+        blockers.append(_role_stale_blocker(role))
+    if not contiguous:
+        blockers.append(_role_gap_blocker(role))
+    return _HistoryQuality(
+        first_ts_utc=ordered[0] if ordered else None,
+        last_ts_utc=last,
+        expected_latest_ts_utc=expected,
+        market_date_ist=now_utc.astimezone(IST).date(),
+        latest_bar_age_seconds=latest_age,
+        latest_bar_fresh=latest_fresh,
+        recent_window_contiguous=contiguous,
+        missing_minute_count=missing,
+        largest_gap_minutes=largest_gap,
+        invalid_timestamp_count=invalid,
+        blockers=tuple(dict.fromkeys(blockers)),
+    )
 
 
 def _bar_timestamp(row: Any) -> datetime | None:
@@ -282,7 +507,7 @@ def build_symbol_hydration_status(
     datahub_read = (
         _read_bars_from_provider(datahub, normalized)
         if datahub is not None
-        else HistoryProviderRead("mdm_projection", mdm_read.bars, mdm_read.count, None)
+        else HistoryProviderRead(mdm_read.bars, mdm_read.count, None, None)
     )
     mdm_bars = mdm_read.count
     datahub_bars = datahub_read.count
@@ -301,22 +526,37 @@ def build_symbol_hydration_status(
                 indicator_bars = 0
         if runner_bars == 0 and indicator_bars > 0:
             runner_bars = indicator_bars
-    bars_for_ts = list(mdm_read.bars) or list(datahub_read.bars)
-    grace = parse_float_env(os.getenv("HISTORY_PUBLICATION_GRACE_SECONDS"), 90.0)
-    continuity_window = int(os.getenv("HISTORY_CONTINUITY_WINDOW_BARS", "50") or 50)
-    allowed_missing = int(os.getenv("HISTORY_ALLOWED_RECENT_MISSING_MINUTES", "0") or 0)
-    quality = evaluate_history_quality(
-        symbol=normalized,
+    now_utc = datetime.now(timezone.utc)
+    grace = float(_clamped_int_env("HISTORY_PUBLICATION_GRACE_SECONDS", 90, 0, 300))
+    max_lag = _clamped_int_env("HISTORY_LATEST_BAR_MAX_LAG_MINUTES", 2, 0, 5)
+    continuity_window = _clamped_int_env(
+        "HISTORY_CONTINUITY_WINDOW_BARS", 50, required, 500
+    )
+    allowed_missing = _clamped_int_env(
+        "HISTORY_ALLOWED_RECENT_MISSING_MINUTES", 0, 0, 5
+    )
+    quality = _evaluate_recent_history_quality(
+        mdm_read.bars,
         role=role,
-        bars=bars_for_ts,
         required_bars=required,
-        now=datetime.now(timezone.utc),
-        market_timezone=ZoneInfo("Asia/Kolkata"),
-        trading_day_resolver=is_nse_trading_day,
+        now_utc=now_utc,
         publication_grace_seconds=grace,
-        allowed_recent_missing_minutes=allowed_missing,
+        max_lag_minutes=max_lag,
         continuity_window_bars=continuity_window,
-        provider_error=mdm_read.error,
+        allowed_missing_minutes=allowed_missing,
+        provider_error=mdm_read.error_category,
+    )
+    hydration_getter = getattr(mdm, "get_last_hydration_result", None)
+    hydration_result = (
+        hydration_getter(normalized)
+        if mdm is not None and callable(hydration_getter)
+        else None
+    )
+    import_getter = getattr(mdm, "get_last_history_import_result", None)
+    import_result = (
+        import_getter(normalized)
+        if mdm is not None and callable(import_getter)
+        else None
     )
     quote = _get_cached_quote(ctx, normalized)
     max_quote_age_s = resolve_max_quote_age_seconds(
@@ -373,7 +613,7 @@ def build_symbol_hydration_status(
     if required > 0 and any(count < required for count in gating_counts):
         blockers.append(f"{role}_history_cold")
     if required > 0:
-        blockers.extend(quality.blocker_reasons)
+        blockers.extend(quality.blockers)
     selected_role = role in {"selected_ce", "selected_pe"}
     if selected_role and quote_ready.reason != "ready":
         blockers.append(quote_ready.reason)
@@ -386,7 +626,8 @@ def build_symbol_hydration_status(
             or (
                 quality.latest_bar_fresh
                 and quality.recent_window_contiguous
-                and not mdm_read.error
+                and not mdm_read.error_category
+                and quality.invalid_timestamp_count == 0
             )
         )
     )
@@ -404,140 +645,20 @@ def build_symbol_hydration_status(
         tradingsymbol=tradingsymbol,
         exchange=exchange,
         required_bars=required,
-        historical_rows_returned=(
-            int(
-                getattr(
-                    getattr(mdm, "get_last_hydration_result", lambda _s: None)(
-                        normalized
-                    ),
-                    "fetched_rows",
-                    0,
-                )
-                or 0
-            )
-            if mdm is not None
-            else 0
-        ),
-        historical_rows_accepted=(
-            int(
-                getattr(
-                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                        normalized
-                    ),
-                    "accepted_rows",
-                    0,
-                )
-                or 0
-            )
-            if mdm is not None
-            else 0
-        ),
-        fetch_returned_rows=(
-            int(
-                getattr(
-                    getattr(mdm, "get_last_hydration_result", lambda _s: None)(
-                        normalized
-                    ),
-                    "fetched_rows",
-                    0,
-                )
-                or 0
-            )
-            if mdm is not None
-            else 0
-        ),
-        import_accepted_new_rows=(
-            int(
-                getattr(
-                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                        normalized
-                    ),
-                    "accepted_rows",
-                    0,
-                )
-                or 0
-            )
-            if mdm is not None
-            else 0
-        ),
-        import_idempotent_rows=(
-            int(
-                getattr(
-                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                        normalized
-                    ),
-                    "idempotent_rows",
-                    0,
-                )
-                or 0
-            )
-            if mdm is not None
-            else 0
-        ),
-        validation_rejected_rows=(
-            int(
-                getattr(
-                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                        normalized
-                    ),
-                    "validation_rejected_rows",
-                    0,
-                )
-                or 0
-            )
-            if mdm is not None
-            else 0
+        historical_rows_returned=int(getattr(hydration_result, "fetched_rows", 0) or 0),
+        historical_rows_accepted=int(getattr(import_result, "accepted_rows", 0) or 0),
+        fetch_returned_rows=int(getattr(hydration_result, "fetched_rows", 0) or 0),
+        import_accepted_new_rows=int(getattr(import_result, "accepted_rows", 0) or 0),
+        import_idempotent_rows=int(getattr(import_result, "idempotent_rows", 0) or 0),
+        validation_rejected_rows=int(
+            getattr(import_result, "validation_rejected_rows", 0) or 0
         ),
         final_cache_rows=mdm_bars,
-        latest_import_status=(
-            getattr(
-                getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                    normalized
-                ),
-                "status",
-                None,
-            )
-            if mdm is not None
-            else None
-        ),
-        latest_import_reason=(
-            str(
-                getattr(
-                    getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                        normalized
-                    ),
-                    "reason",
-                    "",
-                )
-                or ""
-            )
-            or None
-            if mdm is not None
-            else None
-        ),
-        latest_import_error=(
-            getattr(
-                getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                    normalized
-                ),
-                "error",
-                None,
-            )
-            if mdm is not None
-            else None
-        ),
-        latest_import_at=(
-            getattr(
-                getattr(mdm, "get_last_history_import_result", lambda _s: None)(
-                    normalized
-                ),
-                "imported_at",
-                None,
-            )
-            if mdm is not None
-            else None
-        ),
-        history_provider_error=mdm_read.error,
+        latest_import_status=getattr(import_result, "status", None),
+        latest_import_reason=str(getattr(import_result, "reason", "") or "") or None,
+        latest_import_error=getattr(import_result, "error", None),
+        latest_import_at=getattr(import_result, "imported_at", None),
+        history_provider_error=mdm_read.error_category,
         mdm_bars=mdm_bars,
         datahub_bars=datahub_bars,
         runner_bars=runner_bars,
@@ -551,33 +672,51 @@ def build_symbol_hydration_status(
         ready_for_evaluation=ready_for_evaluation,
         ready_for_execution=ready_for_execution,
         blocker_reasons=list(dict.fromkeys(blockers)),
-        first_bar_ts=quality.first_bar_ts,
-        last_bar_ts=quality.last_bar_ts,
-        expected_latest_closed_ts=quality.expected_latest_closed_ts,
+        first_bar_ts=quality.first_ts_utc,
+        last_bar_ts=quality.last_ts_utc,
+        expected_latest_closed_ts=quality.expected_latest_ts_utc,
         latest_bar_age_seconds=quality.latest_bar_age_seconds,
         latest_bar_fresh=quality.latest_bar_fresh,
         recent_window_contiguous=quality.recent_window_contiguous,
-        missing_expected_minute_count=quality.missing_expected_minute_count,
-        largest_intraday_gap_minutes=quality.largest_intraday_gap_minutes,
-        propagation_consistent=bool(mdm_bars == runner_bars == indicator_bars),
+        missing_expected_minute_count=quality.missing_minute_count,
+        largest_intraday_gap_minutes=quality.largest_gap_minutes,
+        propagation_consistent=bool(
+            mdm_bars >= required
+            and runner_bars >= required
+            and indicator_bars >= required
+        ),
         live_merge_applied=False,
     )
-    LOGGER.info(
-        "HISTORY_QUALITY_RESULT symbol=%s role=%s required_bars=%s "
-        "available_bars=%s latest_bar_fresh=%s recent_window_contiguous=%s "
-        "missing_expected_minute_count=%s largest_intraday_gap_minutes=%s "
-        "provider_error=%s blocker_reasons=%s",
-        quality.symbol,
-        quality.role,
-        quality.required_bars,
-        quality.available_bars,
+    LOGGER.debug(
+        "HISTORY_QUALITY_RESULT symbol=%s role=%s latest_bar_fresh=%s "
+        "recent_window_contiguous=%s blockers=%s",
+        normalized,
+        role,
         quality.latest_bar_fresh,
         quality.recent_window_contiguous,
-        quality.missing_expected_minute_count,
-        quality.largest_intraday_gap_minutes,
-        quality.provider_error,
-        quality.blocker_reasons,
-        extra={"event": "HISTORY_QUALITY_RESULT", **asdict(quality)},
+        quality.blockers,
+        extra={
+            "event": "HISTORY_QUALITY_RESULT",
+            "symbol": normalized,
+            "role": role,
+            "first_bar_ts_utc": (
+                quality.first_ts_utc.isoformat() if quality.first_ts_utc else None
+            ),
+            "last_bar_ts_utc": (
+                quality.last_ts_utc.isoformat() if quality.last_ts_utc else None
+            ),
+            "expected_latest_bar_ts_utc": (
+                quality.expected_latest_ts_utc.isoformat()
+                if quality.expected_latest_ts_utc
+                else None
+            ),
+            "market_date_ist": (
+                quality.market_date_ist.isoformat() if quality.market_date_ist else None
+            ),
+            "latest_bar_fresh": quality.latest_bar_fresh,
+            "recent_window_contiguous": quality.recent_window_contiguous,
+            "blocker_reasons": quality.blockers,
+        },
     )
     LOGGER.debug(
         "HYDRATION_PROPAGATION_RESULT symbol=%s role=%s required_bars=%s "

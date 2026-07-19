@@ -392,8 +392,8 @@ class HydrationStatus:
     last_bar_ts: datetime | None = None
     expected_latest_closed_ts: datetime | None = None
     latest_bar_age_seconds: float | None = None
-    latest_bar_fresh: bool = True
-    recent_window_contiguous: bool = True
+    latest_bar_fresh: bool = False
+    recent_window_contiguous: bool = False
     missing_expected_minute_count: int = 0
     largest_intraday_gap_minutes: int = 0
     propagation_consistent: bool = False
