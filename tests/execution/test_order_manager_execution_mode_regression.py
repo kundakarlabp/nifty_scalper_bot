@@ -233,10 +233,10 @@ def test_non_option_quantity_validator_remains_unchanged(monkeypatch, tmp_path):
     manager._validate_quantity("NSE:SBIN", 1)
 
 
-def test_full_protective_exit_uses_open_position_units_without_lot_lookup(
+def test_full_protective_exit_uses_open_position_units_when_lot_lookup_unavailable(
     monkeypatch, tmp_path
 ):
-    from nifty_scalper_bot.execution.order_manager import OrderType
+    from nifty_scalper_bot.execution.order_manager import OrderPlacementError, OrderType
 
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -255,13 +255,11 @@ def test_full_protective_exit_uses_open_position_units_without_lot_lookup(
     manager._positions.open_position(
         "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
     )
-    monkeypatch.setattr(
-        manager,
-        "_lot_size_for_symbol",
-        lambda _symbol: (_ for _ in ()).throw(
-            AssertionError("exit must not resolve lot size")
-        ),
-    )
+
+    def _raise_unresolved(_symbol):
+        raise OrderPlacementError("lot_size_unresolved")
+
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", _raise_unresolved)
 
     order_id = manager.place_order(
         symbol="NFO:NIFTY2671423950CE",
@@ -354,9 +352,7 @@ def test_option_exit_wrong_side_is_blocked_before_broker(monkeypatch, tmp_path):
     assert manager._last_order_decision["block_reason"] == "exit_side_not_reducing"
 
 
-def test_partial_option_exit_is_allowed_when_reducing_open_position(
-    monkeypatch, tmp_path
-):
+def test_valid_partial_option_exit_requires_lot_multiple(monkeypatch, tmp_path):
     from nifty_scalper_bot.execution.order_manager import OrderType
 
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
@@ -373,14 +369,15 @@ def test_partial_option_exit_is_allowed_when_reducing_open_position(
 
     broker = Broker()
     manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
     manager._positions.open_position(
-        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+        "NFO:NIFTY2671423950CE", "LONG", 130, 100.0, order_id="entry-1"
     )
 
     order_id = manager.place_order(
         symbol="NFO:NIFTY2671423950CE",
         side="SELL",
-        quantity=32,
+        quantity=65,
         order_type=OrderType.MARKET,
         check_risk=False,
         intent="EXIT",
@@ -388,7 +385,100 @@ def test_partial_option_exit_is_allowed_when_reducing_open_position(
     )
 
     assert order_id == "EXIT-PART"
-    assert broker.payloads[-1]["quantity"] == 32
+    assert broker.payloads[-1]["quantity"] == 65
+
+
+def test_valid_full_option_exit_accepts_lot_multiple(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 130, 100.0, order_id="entry-1"
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=130,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="manual-square-off",
+    )
+
+    assert order_id == "SIM-1"
+    assert broker.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("open_units", "exit_units"),
+    [(65, 32), (65, 1), (130, 100)],
+)
+def test_option_exit_rejects_non_lot_multiple_quantities(
+    monkeypatch, tmp_path, open_units, exit_units
+):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", open_units, 100.0, order_id="entry-1"
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=exit_units,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="manual-square-off",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+    assert (
+        manager._last_order_decision["block_reason"] == "exit_quantity_not_lot_multiple"
+    )
+
+
+def test_partial_option_exit_blocks_when_lot_lookup_unavailable(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderPlacementError, OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 130, 100.0, order_id="entry-1"
+    )
+
+    def _raise_unresolved(_symbol):
+        raise OrderPlacementError("lot_size_unresolved")
+
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", _raise_unresolved)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="manual-square-off",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+    assert manager._last_order_decision["block_reason"] == "exit_lot_size_unresolved"
 
 
 class _ExactLotResolver:

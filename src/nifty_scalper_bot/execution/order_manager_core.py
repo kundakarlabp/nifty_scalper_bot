@@ -12935,6 +12935,18 @@ class OrderManager:
             reason = "exit_side_not_reducing"
         elif position_side not in {"LONG", "SHORT"}:
             reason = "exit_side_not_reducing"
+        lot_size: int | None = None
+        if reason is None:
+            try:
+                lot_size = self._lot_size_for_symbol(symbol)
+            except OrderPlacementError:
+                if quantity != open_units:
+                    reason = "exit_lot_size_unresolved"
+            else:
+                if lot_size <= 0:
+                    reason = "exit_lot_size_unresolved"
+                elif quantity % lot_size != 0:
+                    reason = "exit_quantity_not_lot_multiple"
         if reason is None:
             return None
         details = {
@@ -12942,6 +12954,8 @@ class OrderManager:
             "symbol": symbol,
             "requested_exit_units": quantity,
             "open_position_units": open_units,
+            "lot_size": lot_size,
+            "remainder": quantity % lot_size if lot_size else None,
             "side": side,
             "intent": intent,
         }
