@@ -61,12 +61,13 @@ def test_production_candle_engine_instantiation_is_limited_to_mdm_owner() -> Non
 
 def test_rest_poll_path_does_not_construct_completed_ohlc_candle() -> None:
     text = (SRC_ROOT / "data" / "market_data_manager.py").read_text(encoding="utf-8")
-    process_body = re.search(
-        r"def _process_poll_quote\(.*?\n    def _emit_poll_candle", text, re.S
+    ingest_body = re.search(
+        r"def ingest_rest_quote\(.*?\n    def ingest_historical_bar", text, re.S
     )
-    assert process_body is not None
-    assert "open" not in process_body.group(0)
-    assert "ingest_historical_ohlc" not in process_body.group(0)
+    assert ingest_body is not None
+    assert "_process_poll_quote" not in text
+    assert "_emit_poll_candle" not in text
+    assert "ingest_historical_ohlc" not in ingest_body.group(0)
     assert "POLL CANDLE EMITTED" not in text
 
 

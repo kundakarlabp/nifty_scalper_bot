@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -31,7 +32,7 @@ def _storage_mdm() -> MarketDataManager:
         error=lambda *a, **k: None,
         debug=lambda *a, **k: None,
     )
-    mdm._lock = None
+    mdm._lock = threading.RLock()
     mdm._cache_len = 100
     mdm._ohlc = defaultdict(lambda: deque(maxlen=100))
     mdm._engines = {}
@@ -170,3 +171,64 @@ def test_sync_drain_task_done_runs_when_processing_raises() -> None:
     with pytest.raises(RuntimeError):
         mdm._drain_tick_queue_sync()
     assert mdm._tick_queue._unfinished_tasks == 0
+
+
+def test_watermark_updates_metrics_under_lock_without_lost_retained_count() -> None:
+    mdm = _storage_mdm()
+    engine = mdm.get_candle_engine(SYMBOL)
+    engine.import_history(
+        pd.DataFrame(
+            [
+                {
+                    "timestamp": datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc),
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "volume": 1,
+                }
+            ]
+        )
+    )
+    mdm._tick_queue.put_nowait(_tick("queued", SYMBOL, 16))
+
+    mdm._record_queue_watermark_after_hydration(SYMBOL)
+    mdm._record_queue_watermark_after_hydration(SYMBOL)
+
+    assert mdm._candle_queue_watermarks[SYMBOL] == pd.Timestamp(
+        datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
+    )
+    assert mdm._candle_metrics["queued_ticks_retained_after_hydration"] == 2
+
+
+def test_watermark_read_is_symbol_specific_and_canonicalized() -> None:
+    mdm = _storage_mdm()
+    mdm._canonical_symbol = lambda s: s.upper()
+    mdm._candle_queue_watermarks[SYMBOL] = pd.Timestamp(
+        datetime(2026, 1, 1, 9, 16, tzinfo=timezone.utc)
+    )
+    mdm._candle_queue_watermarks[OTHER_SYMBOL] = pd.Timestamp(
+        datetime(2026, 1, 1, 9, 10, tzinfo=timezone.utc)
+    )
+
+    assert mdm._queued_tick_at_or_before_watermark(_tick("a", SYMBOL.lower(), 16))
+    assert not mdm._queued_tick_at_or_before_watermark(_tick("b", OTHER_SYMBOL, 16))
+
+
+@pytest.mark.asyncio
+async def test_stop_settles_running_tick_tasks_without_pending_task_warning() -> None:
+    mdm = MarketDataManager(broker=None, websocket=None, settings={})
+    loop = asyncio.get_running_loop()
+    mdm._started = True
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    mdm._tick_drain_task = loop.create_task(wait_forever())
+    mdm._tick_consumer_task = loop.create_task(wait_forever())
+
+    mdm.stop()
+    await asyncio.sleep(0)
+
+    assert mdm._tick_drain_task is None
+    assert mdm._tick_consumer_task is None

@@ -701,10 +701,7 @@ class MarketDataManager:
             configured_poll_max if self._rest_poll_enabled else 0
         )
         self._fallback_enabled = self._rest_poll_enabled
-        # Deprecated diagnostics only: REST fallback quotes are ticks,
-        # not candle writers.
-        self._poll_bar_state: dict[str, dict[str, float | None | int]] = {}
-        self._last_poll_bucket: dict[str, int] = {}
+        # REST fallback quotes are ticks only; CandleEngine owns candle formation.
         self._rest_poll_stop = threading.Event()
         self._rest_poll_thread: threading.Thread | None = None
         self._health_monitor_stop = threading.Event()
@@ -933,23 +930,6 @@ class MarketDataManager:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("ingest_rest_quote failed for %s: %s", symbol, exc)
 
-    def _process_poll_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
-        """Deprecated: REST fallback quotes must not fabricate completed candles."""
-        self._candle_metrics["fallback_quote_tick_reject_total"] += 1
-        self._logger.debug(
-            "POLL_CANDLE_BUILDER_DISABLED symbol=%s reason=rest_quotes_are_ticks",
-            symbol,
-        )
-
-    def _emit_poll_candle(self, candle: Mapping[str, Any]) -> None:
-        """Deprecated: poll-built candles are not authoritative production input."""
-        symbol = str(candle.get("symbol") or "") if isinstance(candle, Mapping) else ""
-        self._candle_metrics["fallback_quote_tick_reject_total"] += 1
-        self._logger.debug(
-            "POLL_CANDLE_EMIT_DISABLED symbol=%s reason=use_broker_historical_gap_fill",
-            symbol,
-        )
-
     def ingest_historical_bar(self, bar: Mapping[str, Any]) -> None:
         """Import one broker-completed OHLC bar through CandleEngine."""
         symbol = normalize_symbol(str(bar.get("symbol") or ""))
@@ -1176,36 +1156,68 @@ class MarketDataManager:
         lag_after_seconds, lag_after_bars = self._projection_lag(
             completed, canonical_latest_ts, refreshed_latest
         )
+        refreshed_at = time.time()
+        canonical_latest_value = (
+            canonical_latest_ts.timestamp() if canonical_latest_ts is not None else None
+        )
+        previous_latest_value = (
+            previous_latest.timestamp() if previous_latest is not None else None
+        )
+        refreshed_latest_value = (
+            refreshed_latest.timestamp() if refreshed_latest is not None else None
+        )
         with self._lock:
             self._ohlc[key] = projected
-
-        self._candle_metrics["candle_projection_refresh_total"] += 1
-        self._candle_metrics["candle_projection_last_refresh"] = time.time()
-        self._candle_metrics["candle_projection_size"] = float(len(projected))
-        if canonical_latest_ts is not None:
-            self._candle_metrics["candle_engine_latest_finalized_timestamp"] = (
-                canonical_latest_ts.timestamp()
+            self._candle_metrics["candle_projection_refresh_total"] += 1
+            self._candle_metrics["candle_projection_last_refresh"] = refreshed_at
+            self._candle_metrics["candle_projection_size"] = float(len(projected))
+            if canonical_latest_value is not None:
+                self._candle_metrics["candle_engine_latest_finalized_timestamp"] = (
+                    canonical_latest_value
+                )
+            if refreshed_latest_value is not None:
+                self._candle_metrics["candle_projection_latest_timestamp"] = (
+                    refreshed_latest_value
+                )
+            self._candle_metrics["candle_projection_lag_before_refresh_seconds"] = (
+                lag_before_seconds
             )
-        if refreshed_latest is not None:
-            self._candle_metrics["candle_projection_latest_timestamp"] = (
-                refreshed_latest.timestamp()
+            self._candle_metrics["candle_projection_lag_before_refresh_bars"] = (
+                lag_before_bars
             )
-        self._candle_metrics["candle_projection_lag_before_refresh_seconds"] = (
-            lag_before_seconds
-        )
-        self._candle_metrics["candle_projection_lag_before_refresh_bars"] = (
-            lag_before_bars
-        )
-        self._candle_metrics["candle_projection_lag_after_refresh_seconds"] = (
-            lag_after_seconds
-        )
-        self._candle_metrics["candle_projection_lag_after_refresh_bars"] = (
-            lag_after_bars
-        )
-        self._candle_metrics["candle_projection_lag_seconds"] = lag_after_seconds
-        self._candle_metrics["candle_projection_lag_bars"] = lag_after_bars
+            self._candle_metrics["candle_projection_lag_after_refresh_seconds"] = (
+                lag_after_seconds
+            )
+            self._candle_metrics["candle_projection_lag_after_refresh_bars"] = (
+                lag_after_bars
+            )
+            self._candle_metrics["candle_projection_lag_seconds"] = lag_after_seconds
+            self._candle_metrics["candle_projection_lag_bars"] = lag_after_bars
+            if divergence:
+                self._candle_metrics["candle_projection_divergence_total"] += 1
+            if not hasattr(self, "_candle_projection_diagnostics"):
+                self._candle_projection_diagnostics = {}
+            previous_divergence_total = float(
+                (self._candle_projection_diagnostics.get(normalized, {}) or {}).get(
+                    "divergence_total", 0.0
+                )
+                or 0.0
+            )
+            diagnostics = {
+                "canonical_latest_timestamp": canonical_latest_value,
+                "previous_projection_latest_timestamp": previous_latest_value,
+                "refreshed_projection_latest_timestamp": refreshed_latest_value,
+                "lag_before_refresh_seconds": lag_before_seconds,
+                "lag_before_refresh_bars": lag_before_bars,
+                "lag_after_refresh_seconds": lag_after_seconds,
+                "lag_after_refresh_bars": lag_after_bars,
+                "projection_size": len(projected),
+                "refreshed_at": refreshed_at,
+                "divergence_total": previous_divergence_total
+                + (1.0 if divergence else 0.0),
+            }
+            self._candle_projection_diagnostics[normalized] = diagnostics
         if divergence:
-            self._candle_metrics["candle_projection_divergence_total"] += 1
             self._logger.warning(
                 "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s",
                 normalized,
@@ -1213,36 +1225,6 @@ class MarketDataManager:
                 len(projected),
                 extra={"event": "CANDLE_PROJECTION_DIVERGENCE", "symbol": normalized},
             )
-        divergence_total = float(
-            (getattr(self, "_candle_projection_diagnostics", {}) or {})
-            .get(normalized, {})
-            .get("divergence_total", 0.0)
-            or 0.0
-        ) + (1.0 if divergence else 0.0)
-        diagnostics = {
-            "canonical_latest_timestamp": (
-                canonical_latest_ts.timestamp()
-                if canonical_latest_ts is not None
-                else None
-            ),
-            "previous_projection_latest_timestamp": (
-                previous_latest.timestamp() if previous_latest is not None else None
-            ),
-            "refreshed_projection_latest_timestamp": (
-                refreshed_latest.timestamp() if refreshed_latest is not None else None
-            ),
-            "lag_before_refresh_seconds": lag_before_seconds,
-            "lag_before_refresh_bars": lag_before_bars,
-            "lag_after_refresh_seconds": lag_after_seconds,
-            "lag_after_refresh_bars": lag_after_bars,
-            "projection_size": len(projected),
-            "refreshed_at": time.time(),
-            "divergence_total": divergence_total,
-        }
-        if not hasattr(self, "_candle_projection_diagnostics"):
-            self._candle_projection_diagnostics = {}
-        with self._lock:
-            self._candle_projection_diagnostics[normalized] = diagnostics
         return [dict(row) for row in projected]
 
     def _latest_projection_timestamp(
@@ -1335,12 +1317,15 @@ class MarketDataManager:
             watermark_utc = pd.Timestamp(watermark).tz_convert("UTC").floor("min")
         except Exception:
             return
-        if not hasattr(self, "_candle_queue_watermarks"):
-            self._candle_queue_watermarks = {}
-        self._candle_queue_watermarks[normalized] = watermark_utc
         retained = self._tick_queue.qsize() if hasattr(self, "_tick_queue") else 0
-        self._candle_metrics["queued_ticks_retained_after_hydration"] += retained
-        self._candle_metrics["queue_watermark_timestamp"] = watermark_utc.timestamp()
+        with self._lock:
+            if not hasattr(self, "_candle_queue_watermarks"):
+                self._candle_queue_watermarks = {}
+            self._candle_queue_watermarks[normalized] = watermark_utc
+            self._candle_metrics["queued_ticks_retained_after_hydration"] += retained
+            self._candle_metrics["queue_watermark_timestamp"] = (
+                watermark_utc.timestamp()
+            )
         self._logger.info(
             "MDM_QUEUE_WATERMARK_ARMED symbol=%s retained=%s watermark=%s",
             normalized,
@@ -1357,9 +1342,6 @@ class MarketDataManager:
 
     def _queued_tick_at_or_before_watermark(self, raw: Mapping[str, Any]) -> bool:
         """Return True when a queued tick is stale under a hydration watermark."""
-        watermarks = getattr(self, "_candle_queue_watermarks", {}) or {}
-        if not watermarks:
-            return False
         raw_symbol = str(raw.get("symbol") or raw.get("tradingsymbol") or "")
         if not raw_symbol:
             return False
@@ -1368,7 +1350,10 @@ class MarketDataManager:
             if hasattr(self, "_canonical_symbol")
             else raw_symbol
         )
-        watermark = watermarks.get(normalized)
+        with self._lock:
+            watermark = (getattr(self, "_candle_queue_watermarks", {}) or {}).get(
+                normalized
+            )
         if watermark is None:
             return False
         raw_ts = (
@@ -1728,6 +1713,32 @@ class MarketDataManager:
             self._ws_start_requested = False
             self._logger.exception("Failure in ws.start")
 
+    def _settle_cancelled_tick_task(
+        self, task: asyncio.Task[Any] | None, *, name: str
+    ) -> None:
+        if task is None:
+            return
+        if task.done():
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
+            return
+        try:
+            task.cancel()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("%s cancel raised: %s", name, exc)
+            return
+        loop = task.get_loop()
+        if loop.is_running():
+
+            def _consume_terminal_result(done: asyncio.Task[Any]) -> None:
+                with suppress(asyncio.CancelledError, Exception):
+                    done.result()
+
+            task.add_done_callback(_consume_terminal_result)
+            return
+        with suppress(asyncio.CancelledError, Exception):
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+
     def stop(self) -> None:
         if not self._started:
             return
@@ -1744,18 +1755,12 @@ class MarketDataManager:
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("ws.stop() raised: %s", exc)
         self._tick_drain_stopping = True
-        if self._tick_drain_task is not None:
-            try:
-                self._tick_drain_task.cancel()
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug("tick drain cancel raised: %s", exc)
-            self._tick_drain_task = None
-        if self._tick_consumer_task is not None:
-            try:
-                self._tick_consumer_task.cancel()
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug("tick consumer cancel raised: %s", exc)
-            self._tick_consumer_task = None
+        tick_drain_task = self._tick_drain_task
+        tick_consumer_task = self._tick_consumer_task
+        self._tick_drain_task = None
+        self._tick_consumer_task = None
+        self._settle_cancelled_tick_task(tick_drain_task, name="tick drain")
+        self._settle_cancelled_tick_task(tick_consumer_task, name="tick consumer")
         # Deprecated tick worker removed: only the owning asyncio loop drains ticks.
         if self._rest_poll_thread is not None:
             self._rest_poll_stop.set()
@@ -10720,8 +10725,6 @@ class MarketDataManager:
                 "_tick_cache",
                 "_last_tick_snapshot",
                 "_history",
-                "_poll_bar_state",
-                "_last_poll_bucket",
             ):
                 cache = getattr(self, cache_name, {})
                 if isinstance(cache, dict):
@@ -10753,8 +10756,6 @@ class MarketDataManager:
                 self._last_tick_snapshot.pop(symbol, None)
                 self._raw_tick_history.pop(symbol, None)
                 self._ohlc.pop(self._bar_symbol_key(symbol), None)
-                self._poll_bar_state.pop(symbol, None)
-                self._last_poll_bucket.pop(symbol, None)
                 self._last_tick_time.pop(symbol, None)
                 self._last_tick_ts.pop(symbol, None)
                 self._last_tick_wallclock.pop(symbol, None)

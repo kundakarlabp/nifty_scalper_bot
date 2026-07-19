@@ -490,10 +490,10 @@ async def test_mdm_readiness_requires_tradable_quote_and_canonical_bars() -> Non
 
 
 async def test_mdm_poll_quote_does_not_fabricate_completed_candles() -> None:
-    src = _func_source(SRC / "data" / "market_data_manager.py", "_process_poll_quote")
-    assert (
-        "Deprecated: REST fallback quotes must not fabricate completed candles" in src
-    )
+    text = _read_text(SRC / "data" / "market_data_manager.py")
+    src = _func_source(SRC / "data" / "market_data_manager.py", "ingest_rest_quote")
+    assert "_process_poll_quote" not in text
+    assert "_emit_poll_candle" not in text
     assert "_last_cumulative_volume_by_symbol" not in src
     assert "ingest_historical_ohlc" not in src
 

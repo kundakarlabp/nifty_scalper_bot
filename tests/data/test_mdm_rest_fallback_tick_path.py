@@ -19,9 +19,7 @@ def _manager(*, token: bool = True) -> MarketDataManager:
 def test_ingest_rest_quote_without_token_enters_candle_engine_once() -> None:
     mdm = _manager(token=False)
     engine = mdm.get_candle_engine(SYMBOL)
-    mdm._process_poll_quote = lambda *_a, **_k: (_ for _ in ()).throw(  # type: ignore[method-assign]
-        AssertionError("poll candle fabrication path must not be called")
-    )
+    assert not hasattr(mdm, "_process_poll_quote")
     mdm._enqueue_tick_threadsafe = lambda tick: mdm._process_queued_tick(tick)  # type: ignore[method-assign]
 
     mdm.ingest_rest_quote(SYMBOL, {"last_price": 100.0, "timestamp": TS})
