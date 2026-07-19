@@ -253,3 +253,118 @@ def test_replayed_old_ticks_after_reconciliation_do_not_recreate_conflict() -> N
     assert engine.current_candle is None
     assert engine.diagnostics()["finalized_minute_tick_reject_total"] == 4
     assert engine.is_state_consistent() is True
+
+
+def test_state_hardening_installer_is_native_idempotent() -> None:
+    on_tick = CandleEngine.on_tick
+    replace_history = CandleEngine.replace_history
+    flush = CandleEngine.flush
+
+    install_candle_state_hardening(CandleEngine)
+    install_candle_state_hardening(CandleEngine)
+
+    assert CandleEngine.on_tick is on_tick
+    assert CandleEngine.replace_history is replace_history
+    assert CandleEngine.flush is flush
+
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.replace_history(pd.DataFrame([_history_row(minute)]))
+    engine.on_tick(_tick(minute + pd.Timedelta(seconds=5), 101.0))
+    assert engine.diagnostics()["finalized_minute_tick_reject_total"] == 1
+
+
+def test_native_reconciliation_raises_for_current_older_than_finalized() -> None:
+    from nifty_scalper_bot.data.source import DataIntegrityError
+
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.replace_history(pd.DataFrame([_history_row(minute)]))
+    engine.current_candle = _history_row(minute - pd.Timedelta(minutes=1))
+
+    before = engine.get_current_candle()
+    try:
+        engine.reconcile_current_with_finalized(reason="flush")
+    except DataIntegrityError:
+        pass
+    else:
+        raise AssertionError("older current must fail closed")
+
+    assert engine.get_current_candle() == before
+    assert engine.is_state_consistent() is False
+
+
+def test_state_consistency_detects_duplicate_and_non_monotonic_completed_history() -> (
+    None
+):
+    from collections import deque
+
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine._completed_candles = deque(
+        [_history_row(minute), _history_row(minute)], maxlen=engine.max_bars
+    )
+    assert engine.is_state_consistent() is False
+
+    engine._completed_candles = deque(
+        [_history_row(minute), _history_row(minute - pd.Timedelta(minutes=1))],
+        maxlen=engine.max_bars,
+    )
+    assert engine.is_state_consistent() is False
+
+
+def test_bounded_concurrent_native_state_transitions_do_not_corrupt_state() -> None:
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.on_tick(_tick(minute + pd.Timedelta(seconds=1), 100.0))
+    barrier = threading.Barrier(4)
+    errors: list[BaseException] = []
+
+    def run(action):
+        try:
+            barrier.wait(timeout=5)
+            action()
+        except BaseException as exc:  # pragma: no cover - failure captured below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(
+            target=run,
+            args=(
+                lambda: engine.on_tick(
+                    _tick(minute + pd.Timedelta(minutes=1, seconds=1), 101.0)
+                ),
+            ),
+        ),
+        threading.Thread(
+            target=run,
+            args=(
+                lambda: engine.import_history(
+                    pd.DataFrame(
+                        [
+                            {
+                                "timestamp": minute,
+                                "open": 100.0,
+                                "high": 100.0,
+                                "low": 100.0,
+                                "close": 100.0,
+                                "volume": 1.0,
+                            }
+                        ]
+                    )
+                ),
+            ),
+        ),
+        threading.Thread(target=run, args=(engine.flush,)),
+        threading.Thread(target=run, args=(engine.diagnostics,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    timestamps = [row["timestamp"] for row in engine.get_completed_bars()]
+    assert len(timestamps) == len(set(timestamps))
+    assert engine.is_state_consistent() is True

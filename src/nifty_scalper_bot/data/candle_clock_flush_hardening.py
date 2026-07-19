@@ -8,10 +8,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from nifty_scalper_bot.data.candle_state_hardening import (
-    _lock_for,
-    reconcile_stale_current,
-)
+from nifty_scalper_bot.data.candle_state_hardening import reconcile_stale_current
 
 _IST_TZ = "Asia/Kolkata"
 _INSTALLED_ATTR = "_candle_clock_flush_hardening_installed"
@@ -68,38 +65,36 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
             if now_ts < expected_minute + pd.Timedelta(minutes=1, seconds=grace):
                 continue
 
-            with _lock_for(engine):
-                # Completed history is authoritative. Hydration can race with a
-                # live partial candle and leave current_candle on an already
-                # finalized minute; discard that stale state instead of retrying
-                # the same DataIntegrityError every flush cycle.
-                if reconcile_stale_current(engine, reason="clock_flush"):
-                    continue
-                locked_current = getattr(engine, "current_candle", None)
-                if not isinstance(locked_current, Mapping):
-                    continue
-                locked_minute = _coerce_ist_timestamp(locked_current.get("timestamp"))
-                if locked_minute is None or locked_minute != expected_minute:
-                    # Tick-driven rollover won the race. Never flush the newly
-                    # opened minute based on the stale pre-lock due decision.
-                    continue
-                if now_ts < locked_minute + pd.Timedelta(minutes=1, seconds=grace):
-                    continue
-                try:
-                    candle = engine.flush()
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "MDM_CANDLE_CLOCK_FLUSH_FAILED symbol=%s error=%r",
-                        symbol,
-                        exc,
-                        exc_info=True,
-                        extra={
-                            "event": "MDM_CANDLE_CLOCK_FLUSH_FAILED",
-                            "symbol": symbol,
-                            "error": repr(exc),
-                        },
-                    )
-                    continue
+            # Completed history is authoritative. Hydration can race with a
+            # live partial candle and leave current_candle on an already
+            # finalized minute; delegate that reconciliation to CandleEngine.
+            if reconcile_stale_current(engine, reason="clock_flush"):
+                continue
+            locked_current = getattr(engine, "current_candle", None)
+            if not isinstance(locked_current, Mapping):
+                continue
+            locked_minute = _coerce_ist_timestamp(locked_current.get("timestamp"))
+            if locked_minute is None or locked_minute != expected_minute:
+                # Tick-driven rollover won the race. Never flush the newly
+                # opened minute based on the stale pre-lock due decision.
+                continue
+            if now_ts < locked_minute + pd.Timedelta(minutes=1, seconds=grace):
+                continue
+            try:
+                candle = engine.flush()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "MDM_CANDLE_CLOCK_FLUSH_FAILED symbol=%s error=%r",
+                    symbol,
+                    exc,
+                    exc_info=True,
+                    extra={
+                        "event": "MDM_CANDLE_CLOCK_FLUSH_FAILED",
+                        "symbol": symbol,
+                        "error": repr(exc),
+                    },
+                )
+                continue
 
             if not candle:
                 continue
@@ -113,7 +108,10 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
             previous = published.get(symbol)
             if previous is not None and timestamp <= previous:
                 self._logger.warning(
-                    "MDM_CANDLE_DUPLICATE_PUBLISH_SUPPRESSED symbol=%s timestamp=%s previous=%s",
+                    (
+                        "MDM_CANDLE_DUPLICATE_PUBLISH_SUPPRESSED "
+                        "symbol=%s timestamp=%s previous=%s"
+                    ),
                     symbol,
                     timestamp.isoformat(),
                     previous.isoformat(),
@@ -129,10 +127,16 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
             bar = {
                 "symbol": symbol,
                 "timestamp": timestamp,
-                "open": float(candle["open"] if isinstance(candle, dict) else candle.open),
-                "high": float(candle["high"] if isinstance(candle, dict) else candle.high),
+                "open": float(
+                    candle["open"] if isinstance(candle, dict) else candle.open
+                ),
+                "high": float(
+                    candle["high"] if isinstance(candle, dict) else candle.high
+                ),
                 "low": float(candle["low"] if isinstance(candle, dict) else candle.low),
-                "close": float(candle["close"] if isinstance(candle, dict) else candle.close),
+                "close": float(
+                    candle["close"] if isinstance(candle, dict) else candle.close
+                ),
                 "volume": int(
                     float(
                         (
