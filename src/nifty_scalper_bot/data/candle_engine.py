@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 import pandas as pd
 
@@ -155,6 +156,11 @@ class CandleEngine:
     _history_import_conflict_total: int = field(default=0, init=False)
     _history_import_failure_total: int = field(default=0, init=False)
     _finalized_minute_tick_reject_total: int = field(default=0, init=False)
+    _history_current_reconcile_total: int = field(default=0, init=False)
+    _current_reconcile_total: int = field(default=0, init=False)
+    _current_reconcile_tick_total: int = field(default=0, init=False)
+    _current_reconcile_flush_total: int = field(default=0, init=False)
+    _lock: threading.RLock = field(init=False, repr=False)
 
     def __init__(
         self,
@@ -171,6 +177,7 @@ class CandleEngine:
         self.last_candle_close = last_candle_close
         self._last_tick_ts = None
         self.symbol = symbol
+        self._lock = threading.RLock()
         self._completed_candles = deque(maxlen=int(self.max_bars))
         self._df_cache = None
         self._df_cache_dirty = True
@@ -184,6 +191,10 @@ class CandleEngine:
         self._history_import_conflict_total = 0
         self._history_import_failure_total = 0
         self._finalized_minute_tick_reject_total = 0
+        self._history_current_reconcile_total = 0
+        self._current_reconcile_total = 0
+        self._current_reconcile_tick_total = 0
+        self._current_reconcile_flush_total = 0
         if df is not None and not df.empty:
             self.replace_history(df)
 
@@ -215,54 +226,178 @@ class CandleEngine:
         self.import_history(value, mode="bootstrap")
 
     def _cached_df_copy(self) -> pd.DataFrame:
-        if self._df_cache_dirty or self._df_cache is None:
-            self._df_cache = pd.DataFrame(
-                list(self._completed_candles), columns=list(_OHLC_COLUMNS)
-            )
-            self._df_cache_dirty = False
-            self._df_cache_rebuild_total += 1
-        return self._df_cache.copy(deep=True)
+        with self._lock:
+            if self._df_cache_dirty or self._df_cache is None:
+                self._df_cache = pd.DataFrame(
+                    list(self._completed_candles), columns=list(_OHLC_COLUMNS)
+                )
+                self._df_cache_dirty = False
+                self._df_cache_rebuild_total += 1
+            return self._df_cache.copy(deep=True)
 
     def diagnostics(self) -> dict[str, Any]:
-        return {
-            "candle_store_size": len(self._completed_candles),
-            "candle_store_maxlen": self._completed_candles.maxlen,
-            "df_cache_dirty": self._df_cache_dirty,
-            "df_cache_rebuild_total": self._df_cache_rebuild_total,
-            "live_append_total": self._live_append_total,
-            "same_minute_idempotent_total": self._same_minute_idempotent_total,
-            "same_minute_conflict_total": self._same_minute_conflict_total,
-            "history_import_total": self._history_import_total,
-            "history_import_bar_total": self._history_import_bar_total,
-            "history_import_idempotent_total": self._history_import_idempotent_total,
-            "history_import_conflict_total": self._history_import_conflict_total,
-            "history_import_failure_total": self._history_import_failure_total,
-            "finalized_minute_tick_reject_total": (
-                self._finalized_minute_tick_reject_total
-            ),
-            "latest_finalized_minute": (
-                self.latest_finalized_minute().isoformat()
-                if self.latest_finalized_minute() is not None
-                else None
-            ),
-        }
+        with self._lock:
+            latest = self.latest_finalized_minute()
+            current = self._current_candle_minute()
+            return {
+                "candle_store_size": len(self._completed_candles),
+                "candle_store_maxlen": self._completed_candles.maxlen,
+                "df_cache_dirty": self._df_cache_dirty,
+                "df_cache_rebuild_total": self._df_cache_rebuild_total,
+                "live_append_total": self._live_append_total,
+                "same_minute_idempotent_total": self._same_minute_idempotent_total,
+                "same_minute_conflict_total": self._same_minute_conflict_total,
+                "history_import_total": self._history_import_total,
+                "history_import_bar_total": self._history_import_bar_total,
+                "history_import_idempotent_total": (
+                    self._history_import_idempotent_total
+                ),
+                "history_import_conflict_total": self._history_import_conflict_total,
+                "history_import_failure_total": self._history_import_failure_total,
+                "finalized_minute_tick_reject_total": (
+                    self._finalized_minute_tick_reject_total
+                ),
+                "history_current_reconcile_total": (
+                    self._history_current_reconcile_total
+                ),
+                "current_reconcile_total": self._current_reconcile_total,
+                "current_reconcile_tick_total": self._current_reconcile_tick_total,
+                "current_reconcile_flush_total": self._current_reconcile_flush_total,
+                "latest_finalized_minute": (
+                    latest.isoformat() if latest is not None else None
+                ),
+                "last_completed_timestamp": (
+                    latest.isoformat() if latest is not None else None
+                ),
+                "current_candle_timestamp": (
+                    None if pd.isna(current) else current.isoformat()
+                ),
+                "state_consistent": self.is_state_consistent(),
+            }
 
     def latest_finalized_minute(self) -> pd.Timestamp | None:
         """Return the latest completed candle minute, normalized to market TZ."""
-        if not self._completed_candles:
-            return None
-        ts = _to_ist_timestamp(self._completed_candles[-1].get("timestamp"))
-        if pd.isna(ts):
-            return None
-        return pd.Timestamp(ts)
+        with self._lock:
+            if not self._completed_candles:
+                return None
+            ts = _to_ist_timestamp(self._completed_candles[-1].get("timestamp"))
+            if pd.isna(ts):
+                return None
+            return pd.Timestamp(ts)
+
+    def _current_candle_minute(self) -> pd.Timestamp:
+        if not isinstance(self.current_candle, Mapping):
+            return pd.NaT
+        return _to_ist_timestamp(self.current_candle.get("timestamp"))
+
+    def is_state_consistent(self) -> bool:
+        """Return whether finalized/current candle state satisfies native invariants."""
+        with self._lock:
+            completed = [dict(row) for row in self._completed_candles]
+            current = (
+                dict(self.current_candle) if self.current_candle is not None else None
+            )
+            return self._candidate_state_consistent(
+                completed,
+                current,
+                self.last_candle_close,
+            )
+
+    def _candidate_state_consistent(
+        self,
+        completed: list[dict[str, Any]],
+        current: dict[str, Any] | None,
+        last_candle_close: datetime | pd.Timestamp | None,
+    ) -> bool:
+        previous = pd.NaT
+        seen: set[pd.Timestamp] = set()
+        if len(completed) > int(self.max_bars):
+            return False
+        for candle in completed:
+            if not isinstance(candle, Mapping):
+                return False
+            ts = _to_ist_timestamp(candle.get("timestamp"))
+            if pd.isna(ts) or ts.tzinfo is None or str(ts.tzinfo) != str(IST):
+                return False
+            if ts in seen or (not pd.isna(previous) and ts <= previous):
+                return False
+            seen.add(ts)
+            previous = ts
+
+        latest = None if pd.isna(previous) else previous
+        cached_latest: pd.Timestamp | None = None
+        if last_candle_close is not None:
+            cached = _to_ist_timestamp(last_candle_close)
+            if pd.isna(cached):
+                return False
+            cached_latest = pd.Timestamp(cached)
+        if latest != cached_latest:
+            return False
+
+        if current is None:
+            return True
+        if not isinstance(current, Mapping):
+            return False
+        current_ts = _to_ist_timestamp(current.get("timestamp"))
+        if pd.isna(current_ts):
+            return False
+        if current_ts.tzinfo is None or str(current_ts.tzinfo) != str(IST):
+            return False
+        return latest is None or current_ts > latest
+
+    def reconcile_current_with_finalized(self, *, reason: str) -> bool:
+        """Discard a current candle only when it duplicates the finalized watermark."""
+        with self._lock:
+            latest = self.latest_finalized_minute()
+            current = self._current_candle_minute()
+            if latest is None or pd.isna(current):
+                return False
+            if current > latest:
+                return False
+            if current < latest:
+                raise DataIntegrityError("current candle older than finalized history")
+            self.current_candle = None
+            self._current_reconcile_total += 1
+            if reason in {"history", "bootstrap", "incremental"}:
+                self._history_current_reconcile_total += 1
+            elif reason in {"tick"}:
+                self._current_reconcile_tick_total += 1
+            elif reason in {"flush", "clock_flush"}:
+                self._current_reconcile_flush_total += 1
+                self._same_minute_idempotent_total += 1
+            symbol = self.symbol or "symbol_unset"
+            log_throttled(
+                LOGGER,
+                f"candle_current_reconciled:{symbol}:{reason}:{current.isoformat()}",
+                (
+                    "CANDLE_CURRENT_RECONCILED symbol=%s reason=%s "
+                    "current_minute=%s latest_completed_minute=%s"
+                )
+                % (symbol, reason, current.isoformat(), latest.isoformat()),
+                interval_sec=30.0,
+                level=logging.WARNING,
+                extra={
+                    "event": "CANDLE_CURRENT_RECONCILED",
+                    "symbol": symbol,
+                    "reason": reason,
+                    "current_minute": current.isoformat(),
+                    "latest_completed_minute": latest.isoformat(),
+                    "action": "discarded",
+                },
+            )
+            return True
 
     def get_completed_bars(self) -> list[dict[str, Any]]:
         """Return defensive copies of canonical finalized OHLCV bars."""
-        return [dict(row) for row in self._completed_candles]
+        with self._lock:
+            return [dict(row) for row in self._completed_candles]
 
     def get_current_candle(self) -> dict[str, Any] | None:
         """Return a defensive copy of the current partial candle, if any."""
-        return dict(self.current_candle) if self.current_candle is not None else None
+        with self._lock:
+            return (
+                dict(self.current_candle) if self.current_candle is not None else None
+            )
 
     def import_history(
         self,
@@ -279,6 +414,16 @@ class CandleEngine:
         and fails closed on conflicts. ``source`` is diagnostic metadata only
         and is never part of candle identity.
         """
+        with self._lock:
+            return self._import_history_locked(frame, mode=mode, source=source)
+
+    def _import_history_locked(
+        self,
+        frame: pd.DataFrame | None,
+        *,
+        mode: str = "incremental",
+        source: str | None = None,
+    ) -> pd.DataFrame:
         if mode not in {"bootstrap", "incremental"}:
             raise ValueError(f"Unsupported history import mode: {mode}")
         symbol = self.symbol or "symbol_unset"
@@ -289,6 +434,7 @@ class CandleEngine:
             current_after = (
                 dict(self.current_candle) if self.current_candle is not None else None
             )
+            history_reconciled_current = False
             if mode == "incremental":
                 existing = list(self._completed_candles)
                 merged_by_ts: dict[pd.Timestamp, dict[str, Any]] = {
@@ -321,6 +467,7 @@ class CandleEngine:
                                 symbol, current_ts, imported, normalized_current
                             )
                         current_after = None
+                        history_reconciled_current = True
                         idempotent += 1
                     elif current_ts < latest_imported_ts:
                         raise DataIntegrityError(
@@ -338,6 +485,7 @@ class CandleEngine:
                         )
                     if current_ts == latest_imported_ts:
                         current_after = None
+                        history_reconciled_current = True
 
             bounded = candidate[-int(self.max_bars) :]
         except Exception as exc:
@@ -355,16 +503,73 @@ class CandleEngine:
             )
             raise
 
-        self._completed_candles = deque(
-            [dict(row) for row in bounded], maxlen=int(self.max_bars)
-        )
+        try:
+            bounded_rows = [dict(row) for row in bounded]
+            latest = (
+                _to_ist_timestamp(bounded_rows[-1].get("timestamp"))
+                if bounded_rows
+                else None
+            )
+            if latest is not None and pd.isna(latest):
+                latest = None
+            last_candle_close_after = (
+                latest.to_pydatetime() if latest is not None else None
+            )
+            if not self._candidate_state_consistent(
+                bounded_rows, current_after, last_candle_close_after
+            ):
+                raise DataIntegrityError(
+                    "inconsistent candle state after history import"
+                )
+        except Exception:
+            self._history_import_failure_total += 1
+            LOGGER.exception(
+                "history_import_failed",
+                extra={
+                    "event": "history_import_failed",
+                    "symbol": symbol,
+                    "mode": mode,
+                    "source": source,
+                },
+            )
+            raise
+
+        self._completed_candles = deque(bounded_rows, maxlen=int(self.max_bars))
         self.current_candle = current_after
+        self.last_candle_close = last_candle_close_after
+        if history_reconciled_current:
+            self._current_reconcile_total += 1
+            self._history_current_reconcile_total += 1
+            reconciled_minute = latest
+            if reconciled_minute is not None:
+                log_throttled(
+                    LOGGER,
+                    f"candle_current_reconciled:{symbol}:history:{reconciled_minute.isoformat()}",
+                    (
+                        "CANDLE_CURRENT_RECONCILED symbol=%s reason=%s "
+                        "current_minute=%s latest_completed_minute=%s"
+                    )
+                    % (
+                        symbol,
+                        "history",
+                        reconciled_minute.isoformat(),
+                        reconciled_minute.isoformat(),
+                    ),
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "CANDLE_CURRENT_RECONCILED",
+                        "symbol": symbol,
+                        "reason": "history",
+                        "current_minute": reconciled_minute.isoformat(),
+                        "latest_completed_minute": reconciled_minute.isoformat(),
+                        "action": "discarded",
+                    },
+                )
         self._df_cache_dirty = True
         self._history_import_total += 1
         self._history_import_bar_total += len(incoming)
         self._history_import_idempotent_total += idempotent
-        latest = self.latest_finalized_minute()
-        self.last_candle_close = latest.to_pydatetime() if latest is not None else None
         LOGGER.info(
             "history_import_completed",
             extra={
@@ -383,6 +588,10 @@ class CandleEngine:
         return self.get_df()
 
     def on_tick(self, tick: Mapping[str, Any]) -> dict[str, Any] | None:
+        with self._lock:
+            return self._on_tick_locked(tick)
+
+    def _on_tick_locked(self, tick: Mapping[str, Any]) -> dict[str, Any] | None:
         if self.interval != "1min":
             raise ValueError(f"Unsupported interval: {self.interval}")
         try:
@@ -482,6 +691,7 @@ class CandleEngine:
         payload["timestamp"] = timestamp
         payload["timestamp_source"] = timestamp_source
         minute = timestamp.floor("1min")
+        self.reconcile_current_with_finalized(reason="tick")
         latest_finalized = self.latest_finalized_minute()
         if latest_finalized is not None and minute <= latest_finalized:
             self._finalized_minute_tick_reject_total += 1
@@ -706,11 +916,36 @@ class CandleEngine:
         )
         return normalized
 
+    def flush_if_current_minute(
+        self, expected_minute: pd.Timestamp
+    ) -> dict[str, Any] | None:
+        """Atomically flush only when current candle still matches expected minute."""
+        expected = _to_ist_timestamp(expected_minute)
+        if pd.isna(expected):
+            return None
+        with self._lock:
+            if self.reconcile_current_with_finalized(reason="flush"):
+                return None
+            current_minute = self._current_candle_minute()
+            if pd.isna(current_minute) or current_minute != expected:
+                return None
+            finalized = self._finalize_current_candle()
+            if finalized is not None:
+                self.current_candle = None
+            if not self.is_state_consistent():
+                raise DataIntegrityError("inconsistent candle state after flush")
+            return finalized
+
     def flush(self) -> dict[str, Any] | None:
-        finalized = self._finalize_current_candle()
-        if finalized is not None:
-            self.current_candle = None
-        return finalized
+        with self._lock:
+            if self.reconcile_current_with_finalized(reason="flush"):
+                return None
+            finalized = self._finalize_current_candle()
+            if finalized is not None:
+                self.current_candle = None
+            if not self.is_state_consistent():
+                raise DataIntegrityError("inconsistent candle state after flush")
+            return finalized
 
     def get_df(self) -> pd.DataFrame:
         """Return a defensive canonical OHLCV copy."""
@@ -733,7 +968,7 @@ def _normalize_completed_candle(
     out: dict[str, Any] = {"timestamp": incoming_ts}
     for ohlcv_field in ("open", "high", "low", "close"):
         try:
-            value = float(candle.get(ohlcv_field))
+            value = float(cast(float | int | str, candle.get(ohlcv_field)))
         except (TypeError, ValueError):
             return None
         if not math.isfinite(value) or value <= 0.0:
@@ -823,8 +1058,8 @@ def _candles_equivalent(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
     for ohlcv_field in ("open", "high", "low", "close", "volume"):
         try:
             if not math.isclose(
-                float(left.get(ohlcv_field)),
-                float(right.get(ohlcv_field)),
+                float(cast(float | int | str, left.get(ohlcv_field))),
+                float(cast(float | int | str, right.get(ohlcv_field))),
                 rel_tol=1e-12,
                 abs_tol=1e-9,
             ):

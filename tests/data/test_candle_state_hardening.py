@@ -253,3 +253,238 @@ def test_replayed_old_ticks_after_reconciliation_do_not_recreate_conflict() -> N
     assert engine.current_candle is None
     assert engine.diagnostics()["finalized_minute_tick_reject_total"] == 4
     assert engine.is_state_consistent() is True
+
+
+def test_state_hardening_installer_is_native_idempotent() -> None:
+    on_tick = CandleEngine.on_tick
+    replace_history = CandleEngine.replace_history
+    flush = CandleEngine.flush
+
+    install_candle_state_hardening(CandleEngine)
+    install_candle_state_hardening(CandleEngine)
+
+    assert CandleEngine.on_tick is on_tick
+    assert CandleEngine.replace_history is replace_history
+    assert CandleEngine.flush is flush
+
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.replace_history(pd.DataFrame([_history_row(minute)]))
+    engine.on_tick(_tick(minute + pd.Timedelta(seconds=5), 101.0))
+    assert engine.diagnostics()["finalized_minute_tick_reject_total"] == 1
+
+
+def test_native_reconciliation_raises_for_current_older_than_finalized() -> None:
+    from nifty_scalper_bot.data.source import DataIntegrityError
+
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.replace_history(pd.DataFrame([_history_row(minute)]))
+    engine.current_candle = _history_row(minute - pd.Timedelta(minutes=1))
+
+    before = engine.get_current_candle()
+    try:
+        engine.reconcile_current_with_finalized(reason="flush")
+    except DataIntegrityError:
+        pass
+    else:
+        raise AssertionError("older current must fail closed")
+
+    assert engine.get_current_candle() == before
+    assert engine.is_state_consistent() is False
+
+
+def test_state_consistency_detects_duplicate_and_non_monotonic_completed_history() -> (
+    None
+):
+    from collections import deque
+
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine._completed_candles = deque(
+        [_history_row(minute), _history_row(minute)], maxlen=engine.max_bars
+    )
+    assert engine.is_state_consistent() is False
+
+    engine._completed_candles = deque(
+        [_history_row(minute), _history_row(minute - pd.Timedelta(minutes=1))],
+        maxlen=engine.max_bars,
+    )
+    assert engine.is_state_consistent() is False
+
+
+def test_bounded_concurrent_native_state_transitions_do_not_corrupt_state() -> None:
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.on_tick(_tick(minute + pd.Timedelta(seconds=1), 100.0))
+    barrier = threading.Barrier(4)
+    errors: list[BaseException] = []
+
+    def run(action):
+        try:
+            barrier.wait(timeout=5)
+            action()
+        except BaseException as exc:  # pragma: no cover - failure captured below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(
+            target=run,
+            args=(
+                lambda: engine.on_tick(
+                    _tick(minute + pd.Timedelta(minutes=1, seconds=1), 101.0)
+                ),
+            ),
+        ),
+        threading.Thread(
+            target=run,
+            args=(
+                lambda: engine.import_history(
+                    pd.DataFrame(
+                        [
+                            {
+                                "timestamp": minute,
+                                "open": 100.0,
+                                "high": 100.0,
+                                "low": 100.0,
+                                "close": 100.0,
+                                "volume": 1.0,
+                            }
+                        ]
+                    )
+                ),
+            ),
+        ),
+        threading.Thread(target=run, args=(engine.flush,)),
+        threading.Thread(target=run, args=(engine.diagnostics,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    timestamps = [row["timestamp"] for row in engine.get_completed_bars()]
+    assert len(timestamps) == len(set(timestamps))
+    assert engine.is_state_consistent() is True
+
+
+def test_clock_flush_atomic_api_does_not_flush_new_minute_after_rollover(
+    monkeypatch,
+) -> None:
+    minute = _minute()
+    next_minute = minute + pd.Timedelta(minutes=1)
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.on_tick(_tick(minute + pd.Timedelta(seconds=1), 100.0))
+    manager = _manager_for(engine)
+    observed_due = threading.Event()
+    allow_flush = threading.Event()
+    original_flush_if_current_minute = CandleEngine.flush_if_current_minute
+
+    def delayed_flush_if_current_minute(
+        self: CandleEngine, expected_minute: pd.Timestamp
+    ):
+        if self is engine:
+            observed_due.set()
+            assert allow_flush.wait(timeout=5)
+        return original_flush_if_current_minute(self, expected_minute)
+
+    monkeypatch.setattr(
+        CandleEngine, "flush_if_current_minute", delayed_flush_if_current_minute
+    )
+    result: list[int] = []
+
+    thread = threading.Thread(
+        target=lambda: result.append(
+            manager.flush_due_candles(
+                now=minute + pd.Timedelta(minutes=1, seconds=2),
+                grace_seconds=1.5,
+            )
+        )
+    )
+    thread.start()
+    assert observed_due.wait(timeout=5)
+
+    engine.on_tick(_tick(next_minute + pd.Timedelta(seconds=1), 101.0))
+    allow_flush.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert result == [0]
+    assert manager._ohlc["NFO:NIFTY26JULFUT"] == []
+    assert engine.current_candle is not None
+    assert pd.Timestamp(engine.current_candle["timestamp"]) == next_minute
+    assert len(engine.get_completed_bars()) == 1
+    assert engine.is_state_consistent() is True
+
+
+def test_import_history_validation_failure_preserves_previous_state(
+    monkeypatch,
+) -> None:
+    minute = _minute()
+    current_minute = minute + pd.Timedelta(minutes=1)
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.replace_history(pd.DataFrame([_history_row(minute)]))
+    engine.current_candle = _history_row(current_minute, close=101.0)
+    before_completed = engine.get_completed_bars()
+    before_current = engine.get_current_candle()
+    before_last_close = engine.last_candle_close
+    before_df = engine.get_df()
+    before_dirty = engine._df_cache_dirty
+    before_diagnostics = engine.diagnostics()
+
+    original_candidate_state_consistent = CandleEngine._candidate_state_consistent
+
+    def fail_candidate_for_engine(self: CandleEngine, *args):
+        if self is engine:
+            return False
+        return original_candidate_state_consistent(self, *args)
+
+    monkeypatch.setattr(
+        CandleEngine, "_candidate_state_consistent", fail_candidate_for_engine
+    )
+
+    from nifty_scalper_bot.data.source import DataIntegrityError
+
+    try:
+        engine.import_history(
+            pd.DataFrame([_history_row(minute), _history_row(current_minute)])
+        )
+    except DataIntegrityError:
+        pass
+    else:
+        raise AssertionError("candidate validation failure must fail closed")
+
+    assert engine.get_completed_bars() == before_completed
+    assert engine.get_current_candle() == before_current
+    assert engine.last_candle_close == before_last_close
+    pd.testing.assert_frame_equal(engine.get_df(), before_df)
+    assert engine._df_cache_dirty is before_dirty
+    after_diagnostics = engine.diagnostics()
+    for key in (
+        "history_import_total",
+        "history_import_bar_total",
+        "history_import_idempotent_total",
+        "history_current_reconcile_total",
+        "current_reconcile_total",
+    ):
+        assert after_diagnostics[key] == before_diagnostics[key]
+    assert after_diagnostics["history_import_failure_total"] == (
+        before_diagnostics["history_import_failure_total"] + 1
+    )
+
+
+def test_state_consistency_detects_last_close_mismatch_cases() -> None:
+    minute = _minute()
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.last_candle_close = minute.to_pydatetime()
+    assert engine.is_state_consistent() is False
+
+    engine = CandleEngine(symbol="NFO:NIFTY26JULFUT")
+    engine.replace_history(pd.DataFrame([_history_row(minute)]))
+    engine.last_candle_close = None
+    assert engine.is_state_consistent() is False
+
+    engine.last_candle_close = (minute - pd.Timedelta(minutes=1)).to_pydatetime()
+    assert engine.is_state_consistent() is False
