@@ -136,3 +136,37 @@ async def test_invalid_timestamp_tick_follows_consumer_policy_not_watermark_purg
 
     assert processed == ["invalid-ts"]
     assert mdm._candle_metrics["queued_ticks_purged_after_hydration"] == 0
+
+
+def test_sync_drain_applies_watermark_and_balances_task_done() -> None:
+    mdm = _storage_mdm()
+    mdm._candle_queue_watermarks[SYMBOL] = pd.Timestamp(
+        datetime(2026, 1, 1, 9, 16, tzinfo=timezone.utc)
+    )
+    processed: list[str] = []
+    mdm._process_queued_tick = lambda raw: processed.append(raw["id"])
+    for tick in [
+        _tick("stale", SYMBOL, 15),
+        _tick("equal", SYMBOL, 16),
+        _tick("newer", SYMBOL, 17),
+    ]:
+        mdm._tick_queue.put_nowait(tick)
+
+    mdm._drain_tick_queue_sync()
+
+    assert processed == ["newer"]
+    assert mdm._candle_metrics["queued_ticks_purged_after_hydration"] == 2
+    assert mdm._tick_queue._unfinished_tasks == 0
+
+
+def test_sync_drain_task_done_runs_when_processing_raises() -> None:
+    mdm = _storage_mdm()
+    mdm._tick_queue.put_nowait(_tick("newer", SYMBOL, 17))
+
+    def boom(_raw: dict) -> None:
+        raise RuntimeError("boom")
+
+    mdm._process_queued_tick = boom
+    with pytest.raises(RuntimeError):
+        mdm._drain_tick_queue_sync()
+    assert mdm._tick_queue._unfinished_tasks == 0

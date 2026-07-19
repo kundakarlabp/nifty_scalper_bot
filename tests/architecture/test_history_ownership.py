@@ -489,11 +489,13 @@ async def test_mdm_readiness_requires_tradable_quote_and_canonical_bars() -> Non
     assert '"ohlc_ready": False' in src
 
 
-async def test_mdm_poll_volume_uses_cumulative_delta() -> None:
+async def test_mdm_poll_quote_does_not_fabricate_completed_candles() -> None:
     src = _func_source(SRC / "data" / "market_data_manager.py", "_process_poll_quote")
-    assert "_last_cumulative_volume_by_symbol" in src
-    assert "cumulative_delta" in src
-    assert "volume_traded_today" in src
+    assert (
+        "Deprecated: REST fallback quotes must not fabricate completed candles" in src
+    )
+    assert "_last_cumulative_volume_by_symbol" not in src
+    assert "ingest_historical_ohlc" not in src
 
 
 async def test_runtime_execution_path_has_no_forbidden_router_imports() -> None:

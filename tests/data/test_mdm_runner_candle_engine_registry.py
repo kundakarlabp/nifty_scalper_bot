@@ -129,3 +129,77 @@ def test_normal_projection_append_and_rolling_maxlen_do_not_count_divergence() -
     assert len(mdm.get_ohlc_bars(SYMBOL)) == 3
     assert [bar["close"] for bar in mdm.get_ohlc_bars(SYMBOL)] == [101.0, 102.0, 103.0]
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 0
+
+
+def test_concurrent_first_use_history_and_engine_access_share_identity() -> None:
+    mdm = _mdm()
+    barrier = threading.Barrier(2)
+    results: dict[str, Any] = {}
+
+    def import_history() -> None:
+        barrier.wait(timeout=1)
+        results["accepted"] = mdm.ingest_historical_ohlc("nifty", [_row(0, 111.0)])
+        results["history_engine"] = mdm.get_candle_engine("NSE:NIFTY")
+
+    def live_access() -> None:
+        barrier.wait(timeout=1)
+        results["live_engine"] = mdm.get_candle_engine("nse:nifty")
+
+    threads = [
+        threading.Thread(target=import_history),
+        threading.Thread(target=live_access),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert results["accepted"] == 1
+    assert results["history_engine"] is results["live_engine"]
+    assert list(mdm._engines) == [SYMBOL]
+    assert results["live_engine"].get_completed_bars()[-1]["close"] == 111.0
+
+
+def test_projection_lag_reports_before_and_after_refresh() -> None:
+    mdm = _mdm()
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_row(0, 100.0)]) == 1
+    engine = mdm.get_candle_engine(SYMBOL)
+    engine.import_history(
+        __import__("pandas").DataFrame([_row(1, 101.0)]),
+        mode="incremental",
+        source="historical",
+    )
+
+    mdm._refresh_candle_projection(SYMBOL)
+
+    diagnostics = mdm._candle_projection_diagnostics[SYMBOL]
+    assert diagnostics["lag_before_refresh_seconds"] == 60.0
+    assert diagnostics["lag_before_refresh_bars"] == 1.0
+    assert diagnostics["lag_after_refresh_seconds"] == 0.0
+    assert diagnostics["lag_after_refresh_bars"] == 0.0
+    assert mdm._candle_metrics["candle_projection_lag_before_refresh_bars"] == 1.0
+    assert mdm._candle_metrics["candle_projection_lag_after_refresh_bars"] == 0.0
+
+
+def test_projection_diagnostics_are_per_symbol() -> None:
+    mdm = _mdm()
+    other = "NSE:BANKNIFTY"
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_row(0, 100.0)]) == 1
+    other_row = _row(0, 200.0)
+    other_row["symbol"] = other
+    assert mdm.ingest_historical_ohlc(other, [other_row]) == 1
+
+    assert SYMBOL in mdm._candle_projection_diagnostics
+    assert other in mdm._candle_projection_diagnostics
+    assert (
+        mdm._candle_projection_diagnostics[SYMBOL][
+            "refreshed_projection_latest_timestamp"
+        ]
+        == mdm._candle_projection_diagnostics[other][
+            "refreshed_projection_latest_timestamp"
+        ]
+    )
+    assert (
+        mdm._candle_projection_diagnostics[SYMBOL]
+        is not mdm._candle_projection_diagnostics[other]
+    )

@@ -57,3 +57,45 @@ def test_production_candle_engine_instantiation_is_limited_to_mdm_owner() -> Non
             line = text.count("\n", 0, match.start()) + 1
             offenders.append(f"{relative}:{line}:candle_engine_instantiation")
     assert offenders == []
+
+
+def test_rest_poll_path_does_not_construct_completed_ohlc_candle() -> None:
+    text = (SRC_ROOT / "data" / "market_data_manager.py").read_text(encoding="utf-8")
+    process_body = re.search(
+        r"def _process_poll_quote\(.*?\n    def _emit_poll_candle", text, re.S
+    )
+    assert process_body is not None
+    assert "open" not in process_body.group(0)
+    assert "ingest_historical_ohlc" not in process_body.group(0)
+    assert "POLL CANDLE EMITTED" not in text
+
+
+def test_strategy_runner_does_not_call_candle_engine_on_tick() -> None:
+    text = (SRC_ROOT / "strategies" / "runner.py").read_text(encoding="utf-8")
+    assert "from nifty_scalper_bot.data.candle_engine import CandleEngine" not in text
+    assert "CandleEngine(" not in text
+
+
+def test_live_production_callers_do_not_use_replace_history() -> None:
+    offenders: list[str] = []
+    pattern = re.compile(r"\.replace_history\s*\(")
+    for path in SRC_ROOT.rglob("*.py"):
+        relative = path.relative_to(SRC_ROOT)
+        if relative == Path("data/candle_engine.py") or relative == Path(
+            "strategies/indicators.py"
+        ):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 40) : match.start()]
+            if "_indicator_engine" in prefix:
+                continue
+            line = text.count("\n", 0, match.start()) + 1
+            offenders.append(f"{relative}:{line}:replace_history")
+    assert offenders == []
+
+
+def test_completed_historical_writes_use_candle_engine_import_history() -> None:
+    text = (SRC_ROOT / "data" / "market_data_manager.py").read_text(encoding="utf-8")
+    assert "engine.import_history(frame" in text
+    assert "_emit_poll_candle(candle)" not in text

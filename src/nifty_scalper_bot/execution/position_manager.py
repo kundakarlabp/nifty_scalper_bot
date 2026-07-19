@@ -865,6 +865,8 @@ class PositionManager:
             []
         )
         self._last_reconciled_state: Dict[str, Position] = {}
+        self._recently_flat_exit_until_monotonic: dict[str, float] = {}
+        self._recently_flat_exit_grace_seconds: float = 30.0
         self._last_reconcile_attempt: datetime | None = None
         self._last_reconcile_success_at: datetime | None = None
         self._last_reconcile_error: str | None = None
@@ -1567,6 +1569,7 @@ class PositionManager:
             position.current_price = float(exit_price)
             position.quantity = 0
             del self._positions[symbol_key]
+            self._mark_recent_exit_flat_locked(symbol_key)
         closed_at = close_time or _now()
         self._logger.info(
             "Closed %s position for %s at %.2f (%s) due to %s [PnL=%.2f]",
@@ -2593,6 +2596,10 @@ class PositionManager:
             reconciled: Dict[str, Position] = {}
             snapshot_realized_pnl = 0.0
             snapshot_realized_seen = False
+            snapshot_symbols = {row.symbol for row in snapshot.rows}
+            for recent_symbol in list(self._recently_flat_exit_until_monotonic):
+                if recent_symbol not in snapshot_symbols:
+                    self._recently_flat_exit_until_monotonic.pop(recent_symbol, None)
             for row in snapshot.rows:
                 record = row.raw
                 symbol = row.symbol
@@ -2614,6 +2621,19 @@ class PositionManager:
                     snapshot_realized_seen = True
                     snapshot_realized_pnl += realized_pnl
                 if quantity == 0:
+                    self._recently_flat_exit_until_monotonic.pop(symbol, None)
+                    continue
+                if self._should_ignore_recent_exit_stale_snapshot_locked(symbol):
+                    self._logger.info(
+                        "POSITION_SYNC_STALE_AFTER_EXIT_IGNORED symbol=%s qty=%s",
+                        symbol,
+                        quantity,
+                        extra={
+                            "event": "POSITION_SYNC_STALE_AFTER_EXIT_IGNORED",
+                            "symbol": symbol,
+                            "broker_quantity": quantity,
+                        },
+                    )
                     continue
                 side: Side = "LONG" if quantity > 0 else "SHORT"
                 abs_quantity = abs(quantity)
@@ -3548,6 +3568,7 @@ class PositionManager:
         if position.quantity == 0:
             self._logger.info("Position %s fully closed via order", position.symbol)
             del self._positions[position.symbol]
+            self._mark_recent_exit_flat_locked(position.symbol)
             self.clear_active_contract_by_symbol(position.symbol)
         else:
             self._logger.info(
@@ -3556,6 +3577,30 @@ class PositionManager:
                 reduce_qty,
                 position.quantity,
             )
+
+    def _mark_recent_exit_flat_locked(self, symbol: str) -> None:
+        """Remember symbols just flattened by exit fill."""
+        if not hasattr(self, "_recently_flat_exit_until_monotonic"):
+            self._recently_flat_exit_until_monotonic = {}
+        grace = float(getattr(self, "_recently_flat_exit_grace_seconds", 30.0) or 30.0)
+        self._recently_flat_exit_until_monotonic[symbol.upper()] = (
+            time.monotonic() + grace
+        )
+
+    def _should_ignore_recent_exit_stale_snapshot_locked(self, symbol: str) -> bool:
+        """Return true for a non-zero broker row that conflicts with a recent exit."""
+        if symbol.upper() in self._positions:
+            return False
+        if not hasattr(self, "_recently_flat_exit_until_monotonic"):
+            self._recently_flat_exit_until_monotonic = {}
+        key = symbol.upper()
+        until = self._recently_flat_exit_until_monotonic.get(key)
+        if until is None:
+            return False
+        if time.monotonic() > float(until):
+            self._recently_flat_exit_until_monotonic.pop(key, None)
+            return False
+        return True
 
     @staticmethod
     def _calculate_realized_pnl(

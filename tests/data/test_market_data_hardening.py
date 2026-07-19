@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import queue
 import time
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -10,7 +10,6 @@ from nifty_scalper_bot.data.market_data_hardening import (
     install_market_data_manager_hardening,
 )
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-
 
 SYMBOL = "NFO:NIFTY26JUL25000CE"
 TOKEN = 987654
@@ -23,15 +22,15 @@ def _manager() -> MarketDataManager:
     return mdm
 
 
-def test_ws_tick_without_broker_timestamp_is_tagged_synthetic() -> None:
+def test_ws_tick_without_broker_timestamp_is_rejected_for_candles() -> None:
     mdm = _manager()
 
     normalized = mdm._normalize_ws_tick(
         {"instrument_token": TOKEN, "last_price": 100.0}
     )
 
-    assert normalized is not None
-    assert normalized["timestamp_quality"] == "synthetic"
+    assert normalized is None
+    assert mdm._candle_metrics["invalid_candle_timestamp_total"] == 1
 
 
 def test_synthetic_timestamp_does_not_pass_fresh_ws_ltp() -> None:
@@ -76,12 +75,18 @@ def test_fallback_queue_coalesces_same_symbol_when_full() -> None:
     mdm = _manager()
     mdm._fallback_tick_queue = queue.Queue(maxsize=1)
 
-    assert mdm._put_fallback_tick_nowait(
-        {"symbol": SYMBOL, "instrument_token": TOKEN, "last_price": 101.0}
-    ) is True
-    assert mdm._put_fallback_tick_nowait(
-        {"symbol": SYMBOL, "instrument_token": TOKEN, "last_price": 102.0}
-    ) is True
+    assert (
+        mdm._put_fallback_tick_nowait(
+            {"symbol": SYMBOL, "instrument_token": TOKEN, "last_price": 101.0}
+        )
+        is True
+    )
+    assert (
+        mdm._put_fallback_tick_nowait(
+            {"symbol": SYMBOL, "instrument_token": TOKEN, "last_price": 102.0}
+        )
+        is True
+    )
 
     retained = mdm._fallback_tick_queue.get_nowait()
     assert retained["last_price"] == 102.0
@@ -90,7 +95,9 @@ def test_fallback_queue_coalesces_same_symbol_when_full() -> None:
 def test_clock_flush_finalizes_idle_candle_without_next_tick() -> None:
     mdm = _manager()
     engine = mdm._get_engine(SYMBOL)
-    candle_minute = pd.Timestamp.now(tz="Asia/Kolkata").floor("1min") - pd.Timedelta(minutes=2)
+    candle_minute = pd.Timestamp.now(tz="Asia/Kolkata").floor("1min") - pd.Timedelta(
+        minutes=2
+    )
     engine.current_candle = {
         "timestamp": candle_minute,
         "open": 100.0,
