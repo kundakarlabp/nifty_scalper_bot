@@ -9,7 +9,7 @@ import pandas as pd
 from nifty_scalper_bot.data.candle_clock_flush_hardening import (
     install_candle_clock_flush_hardening,
 )
-from nifty_scalper_bot.data.candle_engine import CandleEngine, IST
+from nifty_scalper_bot.data.candle_engine import IST, CandleEngine
 from nifty_scalper_bot.data.candle_state_hardening import install_candle_state_hardening
 
 install_candle_state_hardening(CandleEngine)
@@ -89,7 +89,9 @@ def test_new_engine_does_not_inherit_hardening_diagnostics() -> None:
     first = CandleEngine(symbol="NFO:NIFTY26JULFUT")
     first.replace_history(pd.DataFrame([_history_row(minute)]))
     for second in (5, 15, 30):
-        assert first.on_tick(_tick(minute + pd.Timedelta(seconds=second), 101.0)) is None
+        assert (
+            first.on_tick(_tick(minute + pd.Timedelta(seconds=second), 101.0)) is None
+        )
     assert first.diagnostics()["finalized_minute_tick_reject_total"] == 3
 
     second = CandleEngine(symbol="NFO:NIFTY26JULFUT")
@@ -244,7 +246,9 @@ def test_replayed_old_ticks_after_reconciliation_do_not_recreate_conflict() -> N
     engine.replace_history(pd.DataFrame([_history_row(minute)]))
 
     for second in (5, 15, 30, 45):
-        assert engine.on_tick(_tick(minute + pd.Timedelta(seconds=second), 101.0)) is None
+        assert (
+            engine.on_tick(_tick(minute + pd.Timedelta(seconds=second), 101.0)) is None
+        )
 
     assert engine.current_candle is None
     assert engine.diagnostics()["finalized_minute_tick_reject_total"] == 4

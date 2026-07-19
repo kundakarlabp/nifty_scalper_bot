@@ -136,12 +136,58 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
 
     def hardened_replace_history(self: Any, frame: Any) -> None:
         with _lock_for(self):
+            before_current = _current_minute(self)
             original_replace(self, frame)
-            if reconcile_stale_current(self, reason="history"):
+            reconciled = reconcile_stale_current(self, reason="history")
+            latest_after = _latest_completed_minute(self)
+            current_after = _current_minute(self)
+            if (
+                not reconciled
+                and pd.isna(current_after)
+                and not pd.isna(before_current)
+                and not pd.isna(latest_after)
+                and before_current == latest_after
+            ):
+                counters = _counters_for(self)
+                counters["current_reconcile_total"] += 1
+                counters["current_reconcile_history_total"] += 1
+                reconciled = True
+                symbol = getattr(self, "symbol", None) or "symbol_unset"
+                log_throttled(
+                    LOGGER,
+                    (
+                        "candle_current_reconciled:"
+                        f"{symbol}:history:{before_current.isoformat()}"
+                    ),
+                    (
+                        "CANDLE_CURRENT_RECONCILED symbol=%s reason=%s "
+                        "current_minute=%s latest_completed_minute=%s"
+                    )
+                    % (
+                        symbol,
+                        "history",
+                        before_current.isoformat(),
+                        latest_after.isoformat(),
+                    ),
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "CANDLE_CURRENT_RECONCILED",
+                        "symbol": symbol,
+                        "reason": "history",
+                        "current_minute": before_current.isoformat(),
+                        "latest_completed_minute": latest_after.isoformat(),
+                        "action": "discarded",
+                    },
+                )
+            if reconciled:
                 _counters_for(self)["history_current_reconcile_total"] += 1
             if not _state_consistent(self):
                 from nifty_scalper_bot.data.source import DataIntegrityError
-                raise DataIntegrityError("inconsistent candle state after history replacement")
+
+                raise DataIntegrityError(
+                    "inconsistent candle state after history replacement"
+                )
 
     def hardened_on_tick(self: Any, tick: Mapping[str, Any]) -> Any:
         with _lock_for(self):
@@ -156,7 +202,12 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
             latest = _latest_completed_minute(self)
             if not pd.isna(latest) and tick_minute <= latest:
                 _counters_for(self)["finalized_minute_tick_reject_total"] += 1
-                symbol = tick.get("symbol") or tick.get("trading_symbol") or getattr(self, "symbol", None) or "symbol_unset"
+                symbol = (
+                    tick.get("symbol")
+                    or tick.get("trading_symbol")
+                    or getattr(self, "symbol", None)
+                    or "symbol_unset"
+                )
                 log_throttled(
                     LOGGER,
                     f"candle_tick_finalized_minute:{symbol}:{tick_minute.isoformat()}",
@@ -195,16 +246,30 @@ def install_candle_state_hardening(engine_cls: type[Any]) -> None:
             counters = _counters_for(self)
             latest = _latest_completed_minute(self)
             current = _current_minute(self)
-            diagnostics.update({
-                "finalized_minute_tick_reject_total": counters["finalized_minute_tick_reject_total"],
-                "history_current_reconcile_total": counters["history_current_reconcile_total"],
-                "current_reconcile_total": counters["current_reconcile_total"],
-                "current_reconcile_tick_total": counters["current_reconcile_tick_total"],
-                "current_reconcile_flush_total": counters["current_reconcile_flush_total"],
-                "last_completed_timestamp": None if pd.isna(latest) else latest.isoformat(),
-                "current_candle_timestamp": None if pd.isna(current) else current.isoformat(),
-                "state_consistent": _state_consistent(self),
-            })
+            diagnostics.update(
+                {
+                    "finalized_minute_tick_reject_total": counters[
+                        "finalized_minute_tick_reject_total"
+                    ],
+                    "history_current_reconcile_total": counters[
+                        "history_current_reconcile_total"
+                    ],
+                    "current_reconcile_total": counters["current_reconcile_total"],
+                    "current_reconcile_tick_total": counters[
+                        "current_reconcile_tick_total"
+                    ],
+                    "current_reconcile_flush_total": counters[
+                        "current_reconcile_flush_total"
+                    ],
+                    "last_completed_timestamp": (
+                        None if pd.isna(latest) else latest.isoformat()
+                    ),
+                    "current_candle_timestamp": (
+                        None if pd.isna(current) else current.isoformat()
+                    ),
+                    "state_consistent": _state_consistent(self),
+                }
+            )
             return diagnostics
 
     def is_state_consistent(self: Any) -> bool:
