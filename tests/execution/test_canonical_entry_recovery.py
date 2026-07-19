@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from nifty_scalper_bot.execution.broker_recovery import (
     BrokerFailure,
     RecoveryAction,
@@ -382,3 +384,120 @@ def test_none_protection_result_is_not_verified_success() -> None:
 
     assert manager._last_order_decision["block_reason"] == "entry_protection_failed"
     assert order.entry_lifecycle_state["protected_lots"] == 0
+
+
+def test_core_submit_recovers_accepted_lost_response_without_second_post(tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderManager
+    from nifty_scalper_bot.utils.errors import BrokerError
+    from nifty_scalper_bot.utils.rate_limiter import RateLimiter
+
+    class Broker:
+        is_simulated_adapter = True
+
+        def __init__(self):
+            self.calls = 0
+            self.lookup_calls = 0
+            self.record = None
+
+        def place_order(self, **kwargs):
+            self.calls += 1
+            self.record = {"order_id": "BROKER-65", "status": "OPEN", **kwargs}
+            raise BrokerError("NetworkException: response lost after dispatch")
+
+        def get_order_by_client_order_id(self, client_order_id):
+            self.lookup_calls += 1
+            if self.record and self.record.get("client_order_id") == client_order_id:
+                return self.record
+            return None
+
+    broker = Broker()
+    manager = OrderManager(broker, object(), RateLimiter())
+    response = manager._submit_order_with_retry(
+        {
+            "symbol": "NFO:NIFTY2671423950CE",
+            "side": "BUY",
+            "quantity": 65,
+            "product": "MIS",
+            "order_type": "LIMIT",
+            "client_order_id": "cid-65",
+        }
+    )
+
+    assert response["order_id"] == "BROKER-65"
+    assert response["quantity"] == 65
+    assert broker.calls == 1
+    assert broker.lookup_calls >= 1
+
+
+def test_core_submit_unresolved_ambiguous_error_does_not_second_post(tmp_path):
+    from nifty_scalper_bot.execution.order_manager import (
+        OrderManager,
+        OrderPlacementError,
+    )
+    from nifty_scalper_bot.utils.errors import BrokerError
+    from nifty_scalper_bot.utils.rate_limiter import RateLimiter
+
+    class Broker:
+        is_simulated_adapter = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def place_order(self, **_kwargs):
+            self.calls += 1
+            raise BrokerError("NetworkException: response lost after dispatch")
+
+        def get_order_by_client_order_id(self, _client_order_id):
+            return None
+
+    broker = Broker()
+    manager = OrderManager(broker, object(), RateLimiter())
+
+    with pytest.raises(OrderPlacementError):
+        manager._submit_order_with_retry(
+            {
+                "symbol": "NFO:NIFTY2671423950CE",
+                "side": "BUY",
+                "quantity": 65,
+                "product": "MIS",
+                "order_type": "LIMIT",
+                "client_order_id": "cid-missing",
+            }
+        )
+
+    assert broker.calls == 1
+
+
+def test_core_submit_explicit_rejection_does_not_second_post(tmp_path):
+    from nifty_scalper_bot.execution.order_manager import (
+        OrderManager,
+        OrderPlacementError,
+    )
+    from nifty_scalper_bot.utils.rate_limiter import RateLimiter
+
+    class Broker:
+        is_simulated_adapter = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def place_order(self, **_kwargs):
+            self.calls += 1
+            return {"order_id": "REJ-1", "status": "REJECTED", "message": "bad qty"}
+
+    broker = Broker()
+    manager = OrderManager(broker, object(), RateLimiter())
+
+    with pytest.raises(OrderPlacementError, match="Order placement failed"):
+        manager._submit_order_with_retry(
+            {
+                "symbol": "NFO:NIFTY2671423950CE",
+                "side": "BUY",
+                "quantity": 65,
+                "product": "MIS",
+                "order_type": "LIMIT",
+                "client_order_id": "cid-reject",
+            }
+        )
+
+    assert broker.calls == 1

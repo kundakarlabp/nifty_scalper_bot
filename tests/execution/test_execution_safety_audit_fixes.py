@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
-import threading
 from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.execution import BracketManager
-from nifty_scalper_bot.execution import bracket_core
-from nifty_scalper_bot.execution.bracket_core import BracketState
+from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
+from nifty_scalper_bot.execution import BracketManager, bracket_core
 from nifty_scalper_bot.execution.execution_policy import ExecutionPolicy
 from nifty_scalper_bot.execution.margin_engine import MarginInputs
 from nifty_scalper_bot.execution.position_manager import (
@@ -18,9 +17,7 @@ from nifty_scalper_bot.execution.position_manager import (
     PositionManager,
     normalize_broker_order_status,
 )
-from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
-from nifty_scalper_bot.utils.errors import BrokerError
-from nifty_scalper_bot.utils.errors import OrderPlacementError
+from nifty_scalper_bot.utils.errors import BrokerError, OrderPlacementError
 
 SYMBOL = "NFO:NIFTY2662324050PE"
 
@@ -1373,3 +1370,195 @@ def test_order_update_side_effect_failure_keeps_fill_delta_replayable(
 
     assert positions.calls == 2
     assert order.applied_filled_quantity == 130
+
+
+def test_bracket_registration_is_idempotent_when_fill_replayed_after_position_failure(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.execution.order_manager import (
+        OrderDetails,
+        OrderManager,
+        OrderStatus,
+        OrderType,
+    )
+
+    class Broker:
+        is_simulated_adapter = True
+
+    class Positions:
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+
+        def add_pending_order(self, **_kwargs):
+            return None
+
+        def update_order_status(self, *_args, **_kwargs):
+            return None
+
+        def apply_broker_order_update(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("position side effect failed")
+
+        def get_open_positions(self):
+            return []
+
+        def confirm_entry_protection(self, *_args):
+            return None
+
+    class RecordingBracketManager:
+        def __init__(self):
+            self.bracket = None
+            self.register_calls = 0
+            self.confirm_calls = 0
+
+        def get_bracket(self, order_id):
+            return (
+                self.bracket
+                if self.bracket and self.bracket.order_id == order_id
+                else None
+            )
+
+        def has_active_bracket(self, _symbol):
+            return self.bracket is not None
+
+        def register_virtual_bracket(self, **kwargs):
+            self.register_calls += 1
+            self.bracket = SimpleNamespace(
+                order_id=kwargs["order_id"],
+                bracket_id=kwargs["order_id"],
+                quantity=kwargs["qty"],
+                protected_quantity=kwargs["qty"],
+                active=False,
+                entry_confirmed=False,
+                sl_trigger_price=kwargs["sl"],
+            )
+
+        def confirm_entry_fill(self, order_id, _entry_price):
+            assert self.bracket is not None and self.bracket.order_id == order_id
+            self.confirm_calls += 1
+            self.bracket.quantity = 130
+            self.bracket.protected_quantity = 130
+            self.bracket.active = True
+            self.bracket.entry_confirmed = True
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    positions = Positions()
+    manager = OrderManager(Broker(), positions, object())
+    brackets = RecordingBracketManager()
+    manager.set_bracket_manager(brackets)
+    order = OrderDetails(
+        order_id="OID-BRACKET",
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=130,
+        order_type=OrderType.LIMIT,
+        status=OrderStatus.SUBMITTED,
+        price=100.0,
+        fill_price=100.0,
+        filled_quantity=65,
+        stop_loss=95.0,
+        take_profit=110.0,
+        intent="ENTRY",
+    )
+    order.applied_filled_quantity = 65
+    manager._orders[order.order_id] = order
+
+    with pytest.raises(RuntimeError, match="position side effect failed"):
+        manager.apply_broker_order_update(
+            "OID-BRACKET",
+            {
+                "status": "PARTIALLY FILLED",
+                "filled_quantity": 130,
+                "average_price": 100.0,
+            },
+        )
+
+    assert brackets.register_calls == 1
+    assert order.applied_filled_quantity == 65
+
+    positions.fail = False
+    manager.apply_broker_order_update(
+        "OID-BRACKET",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 130, "average_price": 100.0},
+    )
+
+    assert brackets.register_calls == 1
+    assert brackets.bracket.protected_quantity == 130
+    assert positions.calls == 2
+    assert order.applied_filled_quantity == 130
+
+
+def test_order_details_applied_fill_persists_across_restart_and_replay(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot.execution.order_manager import (
+        OrderDetails,
+        OrderManager,
+        OrderStatus,
+        OrderType,
+    )
+
+    class Broker:
+        is_simulated_adapter = True
+
+    class Positions:
+        def __init__(self):
+            self.calls = 0
+
+        def add_pending_order(self, **_kwargs):
+            return None
+
+        def update_order_status(self, *_args, **_kwargs):
+            return None
+
+        def apply_broker_order_update(self, *_args, **_kwargs):
+            self.calls += 1
+
+        def get_open_positions(self):
+            return []
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    first = OrderManager(Broker(), Positions(), object())
+    order = OrderDetails(
+        order_id="OID-PERSIST",
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=130,
+        order_type=OrderType.LIMIT,
+        status=OrderStatus.PARTIALLY_FILLED,
+        price=100.0,
+        fill_price=100.0,
+        filled_quantity=130,
+        applied_filled_quantity=65,
+        stop_loss=95.0,
+        take_profit=110.0,
+        intent="ENTRY",
+    )
+    first._orders[order.order_id] = order
+    first.save_orders()
+
+    positions = Positions()
+    restarted = OrderManager(Broker(), positions, object())
+    restored = restarted._orders["OID-PERSIST"]
+    assert restored.filled_quantity == 130
+    assert restored.applied_filled_quantity == 65
+    monkeypatch.setattr(
+        restarted, "_register_virtual_bracket_for_fill", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        restarted, "_confirm_position_protection_for_fill", lambda *_a, **_k: None
+    )
+
+    restarted.apply_broker_order_update(
+        "OID-PERSIST",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 130, "average_price": 100.0},
+    )
+
+    assert positions.calls == 1
+    assert restored.applied_filled_quantity == 130

@@ -2805,6 +2805,21 @@ class OrderManager:
                 )
                 _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
                 return None
+        is_option_exit = (
+            normalized_intent in {"EXIT", "REDUCE"}
+            and normalized_symbol.endswith(("CE", "PE"))
+        )
+        if is_option_exit:
+            exit_validation = self._validate_option_exit_quantity(
+                normalized_symbol, normalized_side, int(quantity), normalized_intent
+            )
+            if exit_validation is not None:
+                _log_order_decision(
+                    allowed=False,
+                    block_reason=str(exit_validation.get("reason")),
+                    details=exit_validation,
+                )
+                return None
         # ---------------------------------------------------------------------
         # 🛑 FIX 1: Smart Idempotency with Timeout
         # ---------------------------------------------------------------------
@@ -5553,6 +5568,7 @@ class OrderManager:
                 },
                 exc_info=exc,
             )
+            raise
 
     def _confirm_position_protection_for_fill(self, order: OrderDetails) -> None:
         """Acknowledge protection only after fill accounting and bracket activation."""
@@ -8050,7 +8066,16 @@ class OrderManager:
                         price=float(record.get("price", 0)),
                         order_type=order_type,
                         status=status,
-                        # Add other fields as needed
+                        fill_price=(
+                            float(record["fill_price"])
+                            if record.get("fill_price") is not None
+                            else None
+                        ),
+                        filled_quantity=int(record.get("filled_quantity", 0) or 0),
+                        applied_filled_quantity=int(
+                            record.get("applied_filled_quantity", 0) or 0
+                        ),
+                        intent=record.get("intent") or "UNKNOWN",
                     )
 
                     with self._lock:
@@ -12875,6 +12900,57 @@ class OrderManager:
                 return True
 
         return True
+
+    def _validate_option_exit_quantity(
+        self, symbol: str, side: str, quantity: int, intent: str
+    ) -> dict[str, Any] | None:
+        getter = getattr(self._positions, "get_position", None)
+        position = None
+        if callable(getter):
+            for candidate in dict.fromkeys(
+                [symbol.upper(), symbol.split(":", 1)[-1].upper()]
+            ):
+                position = getter(candidate)
+                if position is not None:
+                    break
+        open_units = abs(int(getattr(position, "quantity", 0) or 0))
+        position_side = str(getattr(position, "side", "") or "").upper()
+        if open_units <= 0:
+            broker_positions = getattr(self._broker, "query_positions", None)
+            if callable(broker_positions):
+                broker_qty = int((broker_positions() or {}).get(symbol, 0) or 0)
+                if broker_qty != 0:
+                    open_units = abs(broker_qty)
+                    position_side = "LONG" if broker_qty > 0 else "SHORT"
+        reason: str | None = None
+        if open_units <= 0:
+            reason = "exit_without_open_position"
+        elif quantity <= 0:
+            reason = "exit_quantity_invalid"
+        elif quantity > open_units:
+            reason = "exit_quantity_exceeds_position"
+        elif position_side == "LONG" and side != "SELL":
+            reason = "exit_side_not_reducing"
+        elif position_side == "SHORT" and side != "BUY":
+            reason = "exit_side_not_reducing"
+        elif position_side not in {"LONG", "SHORT"}:
+            reason = "exit_side_not_reducing"
+        if reason is None:
+            return None
+        details = {
+            "reason": reason,
+            "symbol": symbol,
+            "requested_exit_units": quantity,
+            "open_position_units": open_units,
+            "side": side,
+            "intent": intent,
+        }
+        self._logger.warning(
+            "ORDER_BLOCKED: %s symbol=%s requested_exit_units=%s open_position_units=%s side=%s intent=%s",
+            reason, symbol, quantity, open_units, side, intent,
+            extra={"event": reason, **details},
+        )
+        return details
 
     def _configure_options_policy(self) -> None:
         policy = self._options_policy

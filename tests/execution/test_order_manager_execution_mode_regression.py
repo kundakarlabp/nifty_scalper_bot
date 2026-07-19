@@ -233,7 +233,7 @@ def test_non_option_quantity_validator_remains_unchanged(monkeypatch, tmp_path):
     manager._validate_quantity("NSE:SBIN", 1)
 
 
-def test_protective_exit_uses_partial_position_units_without_lot_reject(
+def test_full_protective_exit_uses_open_position_units_without_lot_lookup(
     monkeypatch, tmp_path
 ):
     from nifty_scalper_bot.execution.order_manager import OrderType
@@ -252,6 +252,9 @@ def test_protective_exit_uses_partial_position_units_without_lot_reject(
 
     broker = Broker()
     manager = _live_sim_order_manager(tmp_path, broker)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
     monkeypatch.setattr(
         manager,
         "_lot_size_for_symbol",
@@ -263,7 +266,7 @@ def test_protective_exit_uses_partial_position_units_without_lot_reject(
     order_id = manager.place_order(
         symbol="NFO:NIFTY2671423950CE",
         side="SELL",
-        quantity=32,
+        quantity=65,
         order_type=OrderType.MARKET,
         check_risk=False,
         intent="EXIT",
@@ -271,4 +274,174 @@ def test_protective_exit_uses_partial_position_units_without_lot_reject(
     )
 
     assert order_id == "EXIT-1"
+    assert broker.payloads[-1]["quantity"] == 65
+
+
+def test_option_exit_without_position_is_blocked_before_broker(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="protective-exit",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+    assert manager._last_order_decision["block_reason"] == "exit_without_open_position"
+
+
+def test_option_exit_exceeding_position_is_blocked_before_broker(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=130,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="protective-exit",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+    assert (
+        manager._last_order_decision["block_reason"] == "exit_quantity_exceeds_position"
+    )
+
+
+def test_option_exit_wrong_side_is_blocked_before_broker(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="protective-exit",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+    assert manager._last_order_decision["block_reason"] == "exit_side_not_reducing"
+
+
+def test_partial_option_exit_is_allowed_when_reducing_open_position(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker(_MarkedSubmittingBroker):
+        def __init__(self):
+            super().__init__()
+            self.payloads = []
+
+        def place_order(self, **kwargs):
+            self.payloads.append(dict(kwargs))
+            return {"order_id": "EXIT-PART", "status": "SUBMITTED"}
+
+    broker = Broker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=32,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="manual-square-off",
+    )
+
+    assert order_id == "EXIT-PART"
     assert broker.payloads[-1]["quantity"] == 32
+
+
+class _ExactLotResolver:
+    def __init__(self, lots):
+        self.lots = dict(lots)
+
+    def lot_size_for_symbol(self, symbol: str):
+        return self.lots.get(symbol.upper()) or self.lots.get(
+            symbol.split(":", 1)[-1].upper()
+        )
+
+
+def test_live_nifty_lot_size_resolves_exact_ce_from_instrument_dump(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = _live_sim_order_manager(tmp_path, _MarkedSubmittingBroker())
+    manager._resolver = _ExactLotResolver({"NIFTY2671423950CE": 65})
+    monkeypatch.setattr(manager, "is_live_mode", lambda: True)
+
+    assert manager._lot_size_for_symbol("NFO:NIFTY2671423950CE") == 65
+
+
+def test_live_nifty_lot_size_resolves_exact_pe_from_instrument_dump(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = _live_sim_order_manager(tmp_path, _MarkedSubmittingBroker())
+    manager._resolver = _ExactLotResolver({"NIFTY2671423950PE": 65})
+    monkeypatch.setattr(manager, "is_live_mode", lambda: True)
+
+    assert manager._lot_size_for_symbol("NFO:NIFTY2671423950PE") == 65
+
+
+def test_live_nifty_lot_size_missing_exact_contract_blocks_fallback(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot.execution.order_manager import OrderPlacementError
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("NIFTY_LOT_SIZE", "65")
+    manager = _live_sim_order_manager(tmp_path, _MarkedSubmittingBroker())
+    manager._resolver = _ExactLotResolver({"NIFTY2671424000CE": 65})
+    monkeypatch.setattr(manager, "is_live_mode", lambda: True)
+
+    with pytest.raises(OrderPlacementError, match="lot_size_unresolved"):
+        manager._lot_size_for_symbol("NFO:NIFTY2671423950CE")
+
+
+def test_non_nifty_option_uses_its_exact_metadata_lot_size(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = _live_sim_order_manager(tmp_path, _MarkedSubmittingBroker())
+    manager._resolver = _ExactLotResolver({"BANKNIFTY2671452000CE": 35})
+    monkeypatch.setattr(manager, "is_live_mode", lambda: True)
+
+    assert manager._lot_size_for_symbol("NFO:BANKNIFTY2671452000CE") == 35
