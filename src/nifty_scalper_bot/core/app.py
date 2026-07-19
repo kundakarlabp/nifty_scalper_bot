@@ -8915,63 +8915,77 @@ async def _ensure_active_basket_history(
 
     result: dict[str, Any] = {}
     ensure = getattr(mdm, "ensure_history", None)
-    if not callable(ensure):
-        return result
+    sync = getattr(runner, "sync_history_from_mdm", None)
     attempts = getattr(ctx, "history_hydration_attempt_mono_by_symbol", {})
     reqs = getattr(ctx, "history_hydration_requirement_by_symbol", {})
     cooldown = _runtime_hydration_cooldown_seconds()
     now_mono = time_module.monotonic()
     for symbol, spec in requirements.items():
         required = int(spec["required"])
-        status = build_symbol_hydration_status(ctx, symbol, str(spec["role"]), required)
-        short = int(status.mdm_bars or 0) < required
+        role = str(spec["role"])
+        status = build_symbol_hydration_status(ctx, symbol, role, required)
+        mdm_short = int(status.mdm_bars or 0) < required
+        runner_short = int(status.runner_bars or 0) < required
+        indicator_short = int(status.indicator_bars or 0) < required
         stale = required > 0 and not bool(status.latest_bar_fresh)
         gap = required > 0 and not bool(status.recent_window_contiguous)
         ensure_reason = (
             "history_short"
-            if short
+            if mdm_short
             else "recovery_gap_fill" if gap else "history_stale" if stale else ""
         )
+        needs_fetch = bool(ensure_reason)
+        needs_sync = bool(runner_short or indicator_short)
         requirement_increased = required > int(reqs.get(symbol, 0) or 0)
-        if not ensure_reason:
+        if not needs_fetch and not needs_sync:
             result[symbol] = {"skipped": True, "reason": "ready"}
             continue
-        last = float(attempts.get(symbol, 0.0) or 0.0)
-        if (
-            not (basket_changed or requirement_increased)
-            and last
-            and now_mono - last < cooldown
-        ):
-            result[symbol] = {"skipped": True, "reason": "cooldown"}
-            continue
-        attempts[symbol] = now_mono
-        reqs[symbol] = required
-        hydration_phase = (
-            "recovery"
-            if ensure_reason in {"history_stale", "recovery_gap_fill"}
-            else phase
-        )
-        hydration = await ensure(
-            symbol,
-            interval="minute",
-            required_bars=required,
-            target_bars=required,
-            role=str(spec["role"]),
-            phase=hydration_phase,
-            reason=ensure_reason,
-            minimum_only=False,
-        )
-        result[symbol] = hydration
-        if not getattr(hydration, "failure_reason", None):
-            sync = getattr(runner, "sync_history_from_mdm", None)
-            if callable(sync):
-                sync(
-                    symbol,
-                    required_bars=required,
-                    role=str(spec["role"]),
-                    request_if_short=False,
-                    reason=ensure_reason,
-                )
+        if needs_fetch:
+            if not callable(ensure):
+                result[symbol] = {"failure_reason": "mdm_ensure_history_missing"}
+                continue
+            last = float(attempts.get(symbol, 0.0) or 0.0)
+            if (
+                not (basket_changed or requirement_increased)
+                and last
+                and now_mono - last < cooldown
+            ):
+                result[symbol] = {"skipped": True, "reason": "cooldown"}
+                continue
+            attempts[symbol] = now_mono
+            reqs[symbol] = required
+            hydration_phase = (
+                "recovery"
+                if ensure_reason in {"history_stale", "recovery_gap_fill"}
+                else phase
+            )
+            hydration = await ensure(
+                symbol,
+                interval="minute",
+                required_bars=required,
+                target_bars=required,
+                role=role,
+                phase=hydration_phase,
+                reason=ensure_reason,
+                minimum_only=False,
+            )
+            result[symbol] = hydration
+            if getattr(hydration, "failure_reason", None):
+                continue
+        if callable(sync):
+            sync_result = sync(
+                symbol,
+                required_bars=required,
+                role=role,
+                request_if_short=False,
+                reason=ensure_reason or "mdm_cache_sync",
+            )
+            if not needs_fetch:
+                result[symbol] = {
+                    "skipped": True,
+                    "reason": "synced_from_mdm",
+                    "sync": sync_result,
+                }
     ctx.history_hydration_attempt_mono_by_symbol = attempts
     ctx.history_hydration_requirement_by_symbol = reqs
     return result

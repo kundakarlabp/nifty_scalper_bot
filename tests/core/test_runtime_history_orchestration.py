@@ -464,19 +464,36 @@ class _ActiveMDM:
 class _ActiveRunner:
     def __init__(self):
         self.calls = []
+        self.runner_bars = 0
+        self.indicator_bars = 0
 
     def sync_history_from_mdm(self, symbol, **kwargs):
         self.calls.append((symbol, kwargs))
+        self.runner_bars = kwargs["required_bars"]
+        self.indicator_bars = kwargs["required_bars"]
         return SimpleNamespace(
             success=True,
-            runner_bars=kwargs["required_bars"],
-            indicator_bars=kwargs["required_bars"],
+            runner_bars=self.runner_bars,
+            indicator_bars=self.indicator_bars,
         )
 
 
-def _status(*, bars=30, fresh=True, contiguous=True):
+def _status(
+    *,
+    bars=30,
+    runner_bars=30,
+    indicator_bars=30,
+    fresh=True,
+    contiguous=True,
+    ready=True,
+):
     return SimpleNamespace(
-        mdm_bars=bars, latest_bar_fresh=fresh, recent_window_contiguous=contiguous
+        mdm_bars=bars,
+        runner_bars=runner_bars,
+        indicator_bars=indicator_bars,
+        latest_bar_fresh=fresh,
+        recent_window_contiguous=contiguous,
+        ready_for_evaluation=ready,
     )
 
 
@@ -565,6 +582,64 @@ async def test_active_basket_helper_skips_ready_state_and_wrappers_delegate(
         c, "NSE:NIFTY", None, 20, "compat"
     )
     assert wrapped == {"NSE:NIFTY": {"ok": True}}
+
+
+@pytest.mark.asyncio
+async def test_warm_mdm_reseeds_cold_runner_without_broker_fetch(monkeypatch) -> None:
+    mdm = _ActiveMDM()
+    runner = _ActiveRunner()
+    c = _active_ctx(mdm, runner)
+    monkeypatch.setattr(
+        app,
+        "build_symbol_hydration_status",
+        lambda *_a, **_k: _status(
+            bars=40, runner_bars=0, indicator_bars=0, fresh=True, contiguous=True
+        ),
+    )
+
+    result = await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+
+    assert mdm.calls == []
+    assert runner.calls
+    selected = [call for call in runner.calls if call[0] == "NFO:NIFTY2661623000CE"]
+    assert len(selected) == 1
+    assert selected[0][1]["required_bars"] == 30
+    assert selected[0][1]["reason"] == "mdm_cache_sync"
+    assert runner.runner_bars >= 30
+    assert runner.indicator_bars >= 30
+    assert result["NFO:NIFTY2661623000CE"]["reason"] == "synced_from_mdm"
+
+
+@pytest.mark.asyncio
+async def test_warm_mdm_and_warm_runner_do_not_fetch_or_sync(monkeypatch) -> None:
+    mdm = _ActiveMDM()
+    runner = _ActiveRunner()
+    c = _active_ctx(mdm, runner)
+    monkeypatch.setattr(
+        app,
+        "build_symbol_hydration_status",
+        lambda *_a, **_k: _status(
+            bars=40, runner_bars=40, indicator_bars=40, fresh=True, contiguous=True
+        ),
+    )
+
+    result = await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+
+    assert mdm.calls == []
+    assert runner.calls == []
+    assert all(value["reason"] == "ready" for value in result.values())
 
 
 @pytest.mark.asyncio
