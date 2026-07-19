@@ -869,20 +869,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if hasattr(self, "_acquire_bucket") and hasattr(self, "_ORDER_BUCKET"):
             self._acquire_bucket(self._ORDER_BUCKET)
 
-        # [FIX] Filter out None values
-        clean_params = {k: v for k, v in params.items() if v is not None}
-        _ot = clean_params.get("order_type")
-        if _ot == "MARKET":
-            clean_params.pop("trigger_price", None)
-        if _ot in ("MARKET", "SL-M"):
-            # Zerodha rejects API MARKET/SL-M orders that lack market protection
-            # (mandatory since 2026-04-01); a bare market order returns HTTP 400.
-            # -1 => automatic protection per the exchange band. A caller may
-            # override per-order by passing market_protection explicitly.
-            clean_params.setdefault(
-                "market_protection",
-                int(os.getenv("ZERODHA_MARKET_PROTECTION", "-1")),
-            )
+        # [FIX] Filter out None values and normalize Kite-specific parameters once.
+        clean_params = self._normalize_order_params(params)
 
         try:
             # 3. Attempt Placement
@@ -898,11 +886,19 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
 
             data = response.get("data", {})
+            order_id = data.get("order_id")
+            if not order_id:
+                raise OrderPlacementError(
+                    "Order placement acknowledged without order_id"
+                )
             return {
-                "order_id": data.get("order_id"),
-                "status": response.get("status", "success"),
+                "order_id": order_id,
+                "submitted": True,
+                "status": "SUBMITTED",
+                "raw_status": response.get("status", "success"),
                 "message": response.get("message", ""),
                 "tag": final_tag,
+                "raw_response": response,
             }
 
         except Exception as e:
@@ -913,9 +909,52 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 )
 
             # [FIX] Fail Fast Logic
-            from nifty_scalper_bot.utils.errors import OrderPlacementError
-
             raise OrderPlacementError(f"Order placement failed: {e}")
+
+    def _normalize_order_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return Kite-compatible order parameters for a single broker call."""
+
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        order_type = str(clean_params.get("order_type", "")).upper()
+        if order_type not in {"MARKET", "LIMIT", "SL", "SL-M"}:
+            raise BrokerError(
+                f"Unsupported Zerodha order_type: {order_type or 'missing'}"
+            )
+        clean_params["order_type"] = order_type
+        if order_type == "MARKET":
+            clean_params.pop("trigger_price", None)
+            clean_params.pop("price", None)
+        if order_type in {"MARKET", "SL-M"}:
+            clean_params["market_protection"] = self._normalize_market_protection(
+                clean_params.get(
+                    "market_protection",
+                    os.getenv("ZERODHA_MARKET_PROTECTION", "-1"),
+                )
+            )
+        else:
+            clean_params.pop("market_protection", None)
+        return clean_params
+
+    @staticmethod
+    def _normalize_market_protection(raw_value: Any) -> int:
+        """Validate Zerodha market protection: -1 or integer 1..100."""
+
+        try:
+            protection_float = float(raw_value)
+            protection = int(protection_float)
+        except (TypeError, ValueError) as exc:
+            raise BrokerError(
+                "market_protection must be -1 or an integer from 1 to 100"
+            ) from exc
+        if protection_float != float(protection):
+            raise BrokerError(
+                "market_protection must be -1 or an integer from 1 to 100"
+            )
+        if protection != -1 and not 1 <= protection <= 100:
+            raise BrokerError(
+                "market_protection must be -1 or an integer from 1 to 100"
+            )
+        return protection
 
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:

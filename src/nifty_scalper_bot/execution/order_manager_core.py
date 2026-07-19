@@ -207,6 +207,7 @@ class OrderDetails:
     average_price: float = 0.0
     fill_price: float | None = None
     filled_quantity: int = 0
+    applied_filled_quantity: int = 0
     pending_quantity: int = 0
     message: str = ""
     timestamp: float = field(default_factory=time.time)
@@ -2763,39 +2764,62 @@ class OrderManager:
                     details={"quote": quote_diag},
                 )
                 return None
-        try:
-            lot_size = self._lot_size_for_symbol(normalized_symbol)
-        except OrderPlacementError as exc:
-            self._logger.warning(
-                "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s reason=%s",
-                normalized_symbol,
-                quantity,
-                exc,
-                extra={
-                    "event": "ORDER_BLOCKED",
-                    "block_reason": "invalid_lot_quantity",
-                    "symbol": normalized_symbol,
-                    "qty": quantity,
-                },
+        is_option_entry = (
+            normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"}
+            and normalized_symbol.endswith(("CE", "PE"))
+        )
+        if is_option_entry:
+            try:
+                lot_size = self._lot_size_for_symbol(normalized_symbol)
+            except OrderPlacementError as exc:
+                self._logger.warning(
+                    "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s reason=%s",
+                    normalized_symbol,
+                    quantity,
+                    exc,
+                    extra={
+                        "event": "INVALID_LOT_QUANTITY",
+                        "block_reason": "invalid_lot_quantity",
+                        "symbol": normalized_symbol,
+                        "quantity_units": quantity,
+                        "intent": normalized_intent,
+                    },
+                )
+                _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
+                return None
+            if quantity <= 0 or quantity % lot_size != 0:
+                self._logger.warning(
+                    "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s",
+                    normalized_symbol,
+                    quantity,
+                    lot_size,
+                    extra={
+                        "event": "INVALID_LOT_QUANTITY",
+                        "block_reason": "invalid_lot_quantity",
+                        "symbol": normalized_symbol,
+                        "quantity_units": quantity,
+                        "lot_size": lot_size,
+                        "remainder": quantity % lot_size if lot_size else None,
+                        "intent": normalized_intent,
+                    },
+                )
+                _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
+                return None
+        is_option_exit = (
+            normalized_intent in {"EXIT", "REDUCE"}
+            and normalized_symbol.endswith(("CE", "PE"))
+        )
+        if is_option_exit:
+            exit_validation = self._validate_option_exit_quantity(
+                normalized_symbol, normalized_side, int(quantity), normalized_intent
             )
-            _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
-            return None
-        if quantity <= 0 or quantity % lot_size != 0:
-            self._logger.warning(
-                "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s",
-                normalized_symbol,
-                quantity,
-                lot_size,
-                extra={
-                    "event": "ORDER_BLOCKED",
-                    "block_reason": "invalid_lot_quantity",
-                    "symbol": normalized_symbol,
-                    "qty": quantity,
-                    "lot_size": lot_size,
-                },
-            )
-            _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
-            return None
+            if exit_validation is not None:
+                _log_order_decision(
+                    allowed=False,
+                    block_reason=str(exit_validation.get("reason")),
+                    details=exit_validation,
+                )
+                return None
         # ---------------------------------------------------------------------
         # 🛑 FIX 1: Smart Idempotency with Timeout
         # ---------------------------------------------------------------------
@@ -5544,6 +5568,7 @@ class OrderManager:
                 },
                 exc_info=exc,
             )
+            raise
 
     def _confirm_position_protection_for_fill(self, order: OrderDetails) -> None:
         """Acknowledge protection only after fill accounting and bracket activation."""
@@ -6801,7 +6826,19 @@ class OrderManager:
             new_status = self._parse_status(status_raw)
 
             order.status = new_status
-            order.filled_quantity = int(float(order_update.get("filled_quantity", 0)))
+            incoming_filled_quantity = max(
+                0, int(float(order_update.get("filled_quantity", 0) or 0))
+            )
+            previous_broker_filled = max(
+                0, int(getattr(order, "filled_quantity", 0) or 0)
+            )
+            applied_filled_quantity = max(
+                0, int(getattr(order, "applied_filled_quantity", 0) or 0)
+            )
+            broker_filled_quantity = max(
+                previous_broker_filled, incoming_filled_quantity
+            )
+            order.filled_quantity = broker_filled_quantity
 
             # Update Price: Prefer actual fill price ('average_price')
             avg_px = order_update.get("average_price")
@@ -6813,9 +6850,15 @@ class OrderManager:
             # -----------------------------------------------------
             # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
             # -----------------------------------------------------
-            is_filled = status_raw in ["COMPLETE", "FILLED"]
+            fill_delta = max(0, broker_filled_quantity - applied_filled_quantity)
+            is_fill_update = status_raw in [
+                "PARTIALLY FILLED",
+                "PARTIAL",
+                "COMPLETE",
+                "FILLED",
+            ] and fill_delta > 0
 
-            if is_filled and (old_status != OrderStatus.FILLED or adopted):
+            if is_fill_update or (adopted and order.filled_quantity > 0):
                 self._logger.info(
                     f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}"
                 )
@@ -6848,6 +6891,7 @@ class OrderManager:
                         raise
 
                 self._confirm_position_protection_for_fill(order)
+                order.applied_filled_quantity = broker_filled_quantity
 
             is_failed_entry_terminal = (
                 status_raw in {"REJECTED", "CANCELLED", "CANCELED", "FAILED", "EXPIRED"}
@@ -8022,7 +8066,16 @@ class OrderManager:
                         price=float(record.get("price", 0)),
                         order_type=order_type,
                         status=status,
-                        # Add other fields as needed
+                        fill_price=(
+                            float(record["fill_price"])
+                            if record.get("fill_price") is not None
+                            else None
+                        ),
+                        filled_quantity=int(record.get("filled_quantity", 0) or 0),
+                        applied_filled_quantity=int(
+                            record.get("applied_filled_quantity", 0) or 0
+                        ),
+                        intent=record.get("intent") or "UNKNOWN",
                     )
 
                     with self._lock:
@@ -11019,12 +11072,14 @@ class OrderManager:
                     existing = self._lookup_existing_order(client_order_id)
                     if existing:
                         return existing
+                break
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if client_order_id:
                     existing = self._lookup_existing_order(client_order_id)
                     if existing:
                         return existing
+                break
             else:
                 status = self._parse_status(response.get("status"))
                 message = (response.get("message") or "").lower()
@@ -11062,6 +11117,7 @@ class OrderManager:
                     last_error = OrderPlacementError(
                         response.get("message") or "Order rejected"
                     )
+                    break
                 else:
                     self._logger.info(
                         "Condition met: broker_order_submit_success",
@@ -11299,6 +11355,9 @@ class OrderManager:
 
     def _parse_status(self, raw_status: Any) -> OrderStatus:
         if raw_status is None:
+            return OrderStatus.SUBMITTED
+        status_text = str(raw_status).strip().upper()
+        if status_text == "SUBMITTED":
             return OrderStatus.SUBMITTED
         canonical_status = normalize_broker_order_status(raw_status)
         if canonical_status is not None:
@@ -12842,6 +12901,71 @@ class OrderManager:
 
         return True
 
+    def _validate_option_exit_quantity(
+        self, symbol: str, side: str, quantity: int, intent: str
+    ) -> dict[str, Any] | None:
+        getter = getattr(self._positions, "get_position", None)
+        position = None
+        if callable(getter):
+            for candidate in dict.fromkeys(
+                [symbol.upper(), symbol.split(":", 1)[-1].upper()]
+            ):
+                position = getter(candidate)
+                if position is not None:
+                    break
+        open_units = abs(int(getattr(position, "quantity", 0) or 0))
+        position_side = str(getattr(position, "side", "") or "").upper()
+        if open_units <= 0:
+            broker_positions = getattr(self._broker, "query_positions", None)
+            if callable(broker_positions):
+                broker_qty = int((broker_positions() or {}).get(symbol, 0) or 0)
+                if broker_qty != 0:
+                    open_units = abs(broker_qty)
+                    position_side = "LONG" if broker_qty > 0 else "SHORT"
+        reason: str | None = None
+        if open_units <= 0:
+            reason = "exit_without_open_position"
+        elif quantity <= 0:
+            reason = "exit_quantity_invalid"
+        elif quantity > open_units:
+            reason = "exit_quantity_exceeds_position"
+        elif position_side == "LONG" and side != "SELL":
+            reason = "exit_side_not_reducing"
+        elif position_side == "SHORT" and side != "BUY":
+            reason = "exit_side_not_reducing"
+        elif position_side not in {"LONG", "SHORT"}:
+            reason = "exit_side_not_reducing"
+        lot_size: int | None = None
+        if reason is None:
+            try:
+                lot_size = self._lot_size_for_symbol(symbol)
+            except OrderPlacementError:
+                if quantity != open_units:
+                    reason = "exit_lot_size_unresolved"
+            else:
+                if lot_size <= 0:
+                    reason = "exit_lot_size_unresolved"
+                elif quantity % lot_size != 0:
+                    reason = "exit_quantity_not_lot_multiple"
+        if reason is None:
+            return None
+        details = {
+            "reason": reason,
+            "symbol": symbol,
+            "requested_exit_units": quantity,
+            "open_position_units": open_units,
+            "lot_size": lot_size,
+            "remainder": quantity % lot_size if lot_size else None,
+            "side": side,
+            "intent": intent,
+        }
+        self._logger.warning(
+            "ORDER_BLOCKED: %s symbol=%s requested_exit_units=%s open_position_units=%s side=%s intent=%s",
+            reason, symbol, quantity, open_units, side, intent,
+            extra={"event": reason, **details},
+        )
+        return details
+
     def _configure_options_policy(self) -> None:
         policy = self._options_policy
         if policy is None:
@@ -12900,6 +13024,24 @@ class OrderManager:
                 str(exc),
             )
             raise OrderPlacementError("Failed to resolve lot size") from exc
+        if (
+            source != "instrument_dump"
+            and "NIFTY" in normalized_symbol
+            and normalized_symbol.endswith(("CE", "PE"))
+            and callable(getattr(self, "is_live_mode", None))
+            and self.is_live_mode()
+        ):
+            self._logger.warning(
+                "LOT_SIZE_UNRESOLVED symbol=%s source=%s",
+                normalized_symbol,
+                source,
+                extra={
+                    "event": "LOT_SIZE_UNRESOLVED",
+                    "symbol": normalized_symbol,
+                    "source": source,
+                },
+            )
+            raise OrderPlacementError("lot_size_unresolved")
         if source in {"env_fallback", "fallback_default"}:
             self._logger.info(
                 "LOT_SIZE_FALLBACK_USED symbol=%s normalized_symbol=%s underlying=%s lot_size=%s source=%s",

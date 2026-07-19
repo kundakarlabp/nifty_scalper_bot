@@ -121,7 +121,10 @@ def test_margin_resize_uses_nifty_lot_fallback_not_single_unit(monkeypatch) -> N
     monkeypatch.delenv("NIFTY_LOT_SIZE", raising=False)
     monkeypatch.delenv("INSTRUMENTS__NIFTY_LOT_SIZE", raising=False)
     manager = _Manager(
-        [_reject("insufficient funds; required margin exceeds available margin"), _accept()],
+        [
+            _reject("insufficient funds; required margin exceeds available margin"),
+            _accept(),
+        ],
         margin=10_000.0,
     )
 
@@ -135,7 +138,10 @@ def test_margin_resize_uses_nifty_lot_fallback_not_single_unit(monkeypatch) -> N
 
 def test_margin_resize_prefers_instrument_resolver_lot_size() -> None:
     manager = _Manager(
-        [_reject("insufficient funds; required margin exceeds available margin"), _accept()],
+        [
+            _reject("insufficient funds; required margin exceeds available margin"),
+            _accept(),
+        ],
         resolver=_Resolver(lot=50),
         margin=8_000.0,
     )
@@ -162,10 +168,15 @@ def test_freeze_limit_recovery_caps_to_whole_nifty_lot(monkeypatch) -> None:
     assert result.details["entry_recovery"]["retry_quantity"] == 65
 
 
-def test_price_recovery_blocks_excessive_reprice_before_duplicate_entry(monkeypatch) -> None:
+def test_price_recovery_blocks_excessive_reprice_before_duplicate_entry(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("ENTRY_RECOVERY_MAX_REPRICE_DEVIATION_PCT", "3.0")
     manager = _Manager(
-        [_reject("invalid limit price: price out of range"), _accept("should-not-submit")],
+        [
+            _reject("invalid limit price: price out of range"),
+            _accept("should-not-submit"),
+        ],
         quote={"ask": 145.0, "bid": 144.5, "ltp": 144.8},
     )
 
@@ -182,7 +193,10 @@ def test_price_recovery_blocks_excessive_reprice_before_duplicate_entry(monkeypa
 def test_live_price_recovery_blocks_ltp_only_quote_before_retry(monkeypatch) -> None:
     monkeypatch.delenv("ENTRY_RECOVERY_MAX_REPRICE_DEVIATION_PCT", raising=False)
     manager = _Manager(
-        [_reject("invalid limit price: price out of range"), _accept("should-not-submit")],
+        [
+            _reject("invalid limit price: price out of range"),
+            _accept("should-not-submit"),
+        ],
         quote={"ltp": 101.0, "last_price": 101.0},
         live=True,
     )
