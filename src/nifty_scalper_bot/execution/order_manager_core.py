@@ -6801,6 +6801,7 @@ class OrderManager:
             new_status = self._parse_status(status_raw)
 
             order.status = new_status
+            old_filled_quantity = int(getattr(order, "filled_quantity", 0) or 0)
             order.filled_quantity = int(float(order_update.get("filled_quantity", 0)))
 
             # Update Price: Prefer actual fill price ('average_price')
@@ -6813,9 +6814,15 @@ class OrderManager:
             # -----------------------------------------------------
             # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
             # -----------------------------------------------------
-            is_filled = status_raw in ["COMPLETE", "FILLED"]
+            fill_delta = max(0, int(order.filled_quantity or 0) - old_filled_quantity)
+            is_fill_update = status_raw in [
+                "PARTIALLY FILLED",
+                "PARTIAL",
+                "COMPLETE",
+                "FILLED",
+            ] and fill_delta > 0
 
-            if is_filled and (old_status != OrderStatus.FILLED or adopted):
+            if is_fill_update or (adopted and order.filled_quantity > 0):
                 self._logger.info(
                     f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}"
                 )
@@ -10156,6 +10163,8 @@ class OrderManager:
         if not order_id:
             raise OrderPlacementError("Broker response missing order_id")
         status = self._parse_status(response.get("status"))
+        if bool(response.get("submitted")) and status == OrderStatus.FILLED:
+            status = OrderStatus.SUBMITTED
         message = response.get("message") or response.get("status_message")
         timestamp = datetime.now(timezone.utc)
         response_client_id = (
@@ -11019,12 +11028,14 @@ class OrderManager:
                     existing = self._lookup_existing_order(client_order_id)
                     if existing:
                         return existing
+                break
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if client_order_id:
                     existing = self._lookup_existing_order(client_order_id)
                     if existing:
                         return existing
+                break
             else:
                 status = self._parse_status(response.get("status"))
                 message = (response.get("message") or "").lower()
