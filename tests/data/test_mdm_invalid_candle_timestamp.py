@@ -37,6 +37,31 @@ def test_malformed_timestamp_rejected_for_candle_processing() -> None:
     assert mdm._candle_metrics["invalid_candle_timestamp_total"] == 1
 
 
+def test_invalid_exchange_timestamp_falls_back_to_valid_timestamp() -> None:
+    mdm = _mdm()
+    normalized = mdm._normalize_ws_tick(
+        _tick(exchange_timestamp="bad", timestamp="2026-01-01T00:00:00Z")
+    )
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "timestamp"
+
+
+def test_invalid_exchange_timestamp_falls_back_to_last_trade_time() -> None:
+    mdm = _mdm()
+    normalized = mdm._normalize_ws_tick(
+        _tick(exchange_timestamp="bad", last_trade_time="2026-01-01T00:00:00Z")
+    )
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "last_trade_time"
+
+
+def test_last_trade_time_only_broker_tick_is_accepted() -> None:
+    mdm = _mdm()
+    normalized = mdm._normalize_ws_tick(_tick(last_trade_time="2026-01-01T00:00:00Z"))
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "last_trade_time"
+
+
 def test_missing_timestamp_rejected_for_candle_processing() -> None:
     mdm = _mdm()
     assert mdm._normalize_ws_tick(_tick()) is None
@@ -69,3 +94,31 @@ def test_valid_rest_poll_timestamp_accepted_and_marked() -> None:
     assert normalized is not None
     assert normalized["timestamp_source"] == "rest_poll"
     assert normalized["source_timestamp_valid"] is True
+
+
+def test_all_source_timestamps_invalid_rejected() -> None:
+    mdm = _mdm()
+    assert (
+        mdm._normalize_ws_tick(
+            _tick(
+                exchange_timestamp="bad",
+                timestamp="2019-01-01T00:00:00Z",
+                last_trade_time="bad-too",
+            )
+        )
+        is None
+    )
+    assert mdm._candle_metrics["invalid_candle_timestamp_total"] == 1
+
+
+def test_invalid_timestamp_does_not_mutate_candle_engine() -> None:
+    mdm = _mdm()
+    mdm._cache_len = 10
+    mdm._ohlc = defaultdict(lambda: __import__("collections").deque(maxlen=10))
+    mdm._engines = {}
+    mdm._bar_symbol_key = lambda s: str(s)
+    mdm._canonical_symbol = lambda s: str(s)
+    engine = mdm.get_candle_engine("NFO:X")
+    mdm._process_queued_tick(_tick(exchange_timestamp="bad"))
+    assert engine.current_candle is None
+    assert engine.get_completed_bars() == []

@@ -160,7 +160,7 @@ def test_concurrent_first_use_history_and_engine_access_share_identity() -> None
     assert results["live_engine"].get_completed_bars()[-1]["close"] == 111.0
 
 
-def test_projection_lag_reports_engine_ahead_and_refresh_returns_zero() -> None:
+def test_projection_lag_reports_before_and_after_refresh() -> None:
     mdm = _mdm()
     assert mdm.ingest_historical_ohlc(SYMBOL, [_row(0, 100.0)]) == 1
     engine = mdm.get_candle_engine(SYMBOL)
@@ -170,8 +170,36 @@ def test_projection_lag_reports_engine_ahead_and_refresh_returns_zero() -> None:
         source="historical",
     )
 
-    # Existing projection is still a valid older canonical slice.
     mdm._refresh_candle_projection(SYMBOL)
 
-    assert mdm._candle_metrics["candle_projection_lag_seconds"] == 0
-    assert mdm._candle_metrics["candle_projection_lag_bars"] == 0
+    diagnostics = mdm._candle_projection_diagnostics[SYMBOL]
+    assert diagnostics["lag_before_refresh_seconds"] == 60.0
+    assert diagnostics["lag_before_refresh_bars"] == 1.0
+    assert diagnostics["lag_after_refresh_seconds"] == 0.0
+    assert diagnostics["lag_after_refresh_bars"] == 0.0
+    assert mdm._candle_metrics["candle_projection_lag_before_refresh_bars"] == 1.0
+    assert mdm._candle_metrics["candle_projection_lag_after_refresh_bars"] == 0.0
+
+
+def test_projection_diagnostics_are_per_symbol() -> None:
+    mdm = _mdm()
+    other = "NSE:BANKNIFTY"
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_row(0, 100.0)]) == 1
+    other_row = _row(0, 200.0)
+    other_row["symbol"] = other
+    assert mdm.ingest_historical_ohlc(other, [other_row]) == 1
+
+    assert SYMBOL in mdm._candle_projection_diagnostics
+    assert other in mdm._candle_projection_diagnostics
+    assert (
+        mdm._candle_projection_diagnostics[SYMBOL][
+            "refreshed_projection_latest_timestamp"
+        ]
+        == mdm._candle_projection_diagnostics[other][
+            "refreshed_projection_latest_timestamp"
+        ]
+    )
+    assert (
+        mdm._candle_projection_diagnostics[SYMBOL]
+        is not mdm._candle_projection_diagnostics[other]
+    )

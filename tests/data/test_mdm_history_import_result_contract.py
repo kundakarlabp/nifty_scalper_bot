@@ -116,3 +116,55 @@ def test_history_results_are_per_symbol() -> None:
     assert mdm._last_history_import_result_by_symbol[SYMBOL].success
     assert mdm._last_history_import_result_by_symbol[other].success
     assert set(mdm._last_history_import_result_by_symbol) == {SYMBOL, other}
+
+
+def test_history_result_getter_returns_per_symbol_snapshot() -> None:
+    mdm = _mdm()
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
+
+    result = mdm.get_last_history_import_result(SYMBOL)
+
+    assert result is not None
+    assert result.symbol == SYMBOL
+    assert result.success
+    assert result.reason == "hydration"
+
+
+def test_gap_fill_metrics_only_increment_for_live_gap_fill_reason() -> None:
+    mdm = _mdm()
+    assert mdm.import_historical_ohlc(
+        SYMBOL, [_bar()], reason="startup_bootstrap"
+    ).success
+    assert mdm._candle_metrics["historical_gap_fill_request_total"] == 0
+    row = _bar()
+    row["timestamp"] = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+    assert mdm.import_historical_ohlc(SYMBOL, [row], reason="live_gap_fill").success
+
+    assert mdm._candle_metrics["historical_gap_fill_request_total"] == 1
+    assert mdm._candle_metrics["historical_gap_fill_success_total"] == 1
+
+
+def test_concurrent_two_symbol_history_result_getter_remains_associated() -> None:
+    mdm = _mdm()
+    other = "NSE:BANKNIFTY"
+    barrier = __import__("threading").Barrier(2)
+
+    def import_symbol(symbol: str, close: float) -> None:
+        row = _bar(close=close)
+        row["symbol"] = symbol
+        barrier.wait(timeout=1)
+        mdm.import_historical_ohlc(symbol, [row], reason="hydration")
+
+    threads = [
+        __import__("threading").Thread(target=import_symbol, args=(SYMBOL, 2.0)),
+        __import__("threading").Thread(target=import_symbol, args=(other, 2.0)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    nifty = mdm.get_last_history_import_result(SYMBOL)
+    bank = mdm.get_last_history_import_result(other)
+    assert nifty is not None and nifty.symbol == SYMBOL and nifty.success
+    assert bank is not None and bank.symbol == other and bank.success

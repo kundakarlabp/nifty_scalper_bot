@@ -98,6 +98,16 @@ from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.serialization import to_json_safe
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
 
+HistoryImportReason = Literal[
+    "startup_bootstrap",
+    "hydration",
+    "live_gap_fill",
+    "recovery",
+    "recovery_gap_fill",
+    "runner_seed",
+    "manual",
+]
+
 
 class _DeferredTickLoop:
     """Loop-like sink used before asyncio startup."""
@@ -121,6 +131,7 @@ class HistoryImportResult:
     returned_rows: int
     stored_rows: int
     error: str | None = None
+    reason: HistoryImportReason = "hydration"
 
     @property
     def success(self) -> bool:
@@ -427,6 +438,9 @@ class MarketDataManager:
         self._engines: dict[str, CandleEngine] = {}
         self._candle_metrics: dict[str, float] = defaultdict(float)
         self._candle_queue_watermarks: dict[str, pd.Timestamp] = {}
+        self._candle_projection_diagnostics: dict[
+            str, dict[str, float | int | None]
+        ] = {}
         self._last_history_import_result: HistoryImportResult | None = None
         self._last_history_import_result_by_symbol: dict[str, HistoryImportResult] = {}
         self._last_historical_ts: dict[str, float] = {}
@@ -533,11 +547,7 @@ class MarketDataManager:
         self._overload_exit_oldest_ms = max(50.0, self._overload_enter_oldest_ms * 0.4)
         self._pipeline_overloaded = False
         self._overload_since_mono: float | None = None
-        # Fallback worker thread for when no asyncio loop is registered
-        # (e.g. early boot, polling-only mode).  Isolates the WS thread
-        # from any processing work — the WS callback must only enqueue.
-        self._tick_worker_stop = threading.Event()
-        self._tick_worker_thread: threading.Thread | None = None
+        # Deprecated compatibility hooks remain below; no OS thread consumes asyncio.Queue.
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
@@ -954,7 +964,11 @@ class MarketDataManager:
         return self.import_historical_ohlc(symbol, bars).accepted_rows
 
     def import_historical_ohlc(
-        self, symbol: str, bars: Sequence[Mapping[str, Any]]
+        self,
+        symbol: str,
+        bars: Sequence[Mapping[str, Any]],
+        *,
+        reason: HistoryImportReason = "hydration",
     ) -> HistoryImportResult:
         """Import sorted historical OHLC bars through CandleEngine.
 
@@ -967,6 +981,8 @@ class MarketDataManager:
             if hasattr(self, "_canonical_symbol")
             else str(symbol)
         )
+        if not hasattr(self, "_lock"):
+            self._lock = threading.RLock()
         if not hasattr(self, "_candle_metrics"):
             self._candle_metrics = defaultdict(float)
         if not hasattr(self, "_engines"):
@@ -976,7 +992,9 @@ class MarketDataManager:
         if not hasattr(self, "_last_history_import_result_by_symbol"):
             self._last_history_import_result_by_symbol = {}
         self._candle_metrics["history_hydration_request_total"] += 1
-        self._candle_metrics["historical_gap_fill_request_total"] += 1
+        gap_metric_import = reason in {"live_gap_fill", "recovery_gap_fill"}
+        if gap_metric_import:
+            self._candle_metrics["historical_gap_fill_request_total"] += 1
         before = (
             self.get_ohlc_bars(normalized_symbol)
             if hasattr(self, "get_ohlc_bars")
@@ -1038,10 +1056,13 @@ class MarketDataManager:
                 accepted_rows=accepted,
                 returned_rows=len(bars or ()),
                 stored_rows=len(after),
+                reason=reason,
             )
-            self._last_history_import_result = result
-            self._last_history_import_result_by_symbol[normalized_symbol] = result
-            self._candle_metrics["historical_gap_fill_success_total"] += 1
+            with self._lock:
+                self._last_history_import_result = result
+                self._last_history_import_result_by_symbol[normalized_symbol] = result
+            if gap_metric_import:
+                self._candle_metrics["historical_gap_fill_success_total"] += 1
             self._record_queue_watermark_after_hydration(normalized_symbol)
             self._logger.info(
                 "HYDRATION_INGEST_RESULT symbol=%s returned_rows=%s accepted_rows=%s final_mdm_bars=%s first_ts=%s last_ts=%s",
@@ -1076,14 +1097,31 @@ class MarketDataManager:
                 returned_rows=len(bars or ()),
                 stored_rows=len(before),
                 error=str(exc),
+                reason=reason,
             )
-            self._last_history_import_result = result
-            self._last_history_import_result_by_symbol[normalized_symbol] = result
-            self._candle_metrics["historical_gap_fill_failure_total"] += 1
+            with self._lock:
+                self._last_history_import_result = result
+                self._last_history_import_result_by_symbol[normalized_symbol] = result
+            if gap_metric_import:
+                self._candle_metrics["historical_gap_fill_failure_total"] += 1
             self._logger.error(
                 "Failure in ingest_historical_ohlc: %s", exc, exc_info=exc
             )
             return result
+
+    def get_last_history_import_result(
+        self, symbol: str | None = None
+    ) -> HistoryImportResult | None:
+        """Return a defensive snapshot of the last historical import result."""
+        with self._lock:
+            if symbol is None:
+                return self._last_history_import_result
+            normalized = (
+                self._canonical_symbol(symbol)
+                if hasattr(self, "_canonical_symbol")
+                else str(symbol)
+            )
+            return self._last_history_import_result_by_symbol.get(normalized)
 
     def _refresh_candle_projection(
         self, symbol: str, *, source: str | None = None
@@ -1101,58 +1139,65 @@ class MarketDataManager:
         )
         engine = self.get_candle_engine(normalized)
         completed = engine.get_completed_bars()
+        with self._lock:
+            previous = list(self._ohlc.get(key, ()) or ())
+        previous_fingerprint = self._candle_projection_fingerprint(previous)
+        canonical_fingerprint = self._candle_projection_fingerprint(completed)
+        engine_latest = engine.latest_finalized_minute()
+        canonical_latest_ts = (
+            pd.Timestamp(engine_latest) if engine_latest is not None else None
+        )
+        previous_latest = self._latest_projection_timestamp(previous)
+        lag_before_seconds, lag_before_bars = self._projection_lag(
+            completed, canonical_latest_ts, previous_latest
+        )
+        divergence = bool(
+            previous
+            and not self._projection_matches_canonical_slice(
+                previous_fingerprint, canonical_fingerprint
+            )
+        )
+
         projected: Deque[dict[str, Any]] = deque(maxlen=self._cache_len)
         for row in completed[-self._cache_len :]:
             bar = dict(row)
             bar["symbol"] = normalized
             bar["source"] = source or bar.get("source") or "candle_engine"
             projected.append(bar)
+
+        refreshed_latest = self._latest_projection_timestamp(projected)
+        lag_after_seconds, lag_after_bars = self._projection_lag(
+            completed, canonical_latest_ts, refreshed_latest
+        )
         with self._lock:
-            previous = list(self._ohlc.get(key, ()) or ())
             self._ohlc[key] = projected
+
         self._candle_metrics["candle_projection_refresh_total"] += 1
         self._candle_metrics["candle_projection_last_refresh"] = time.time()
         self._candle_metrics["candle_projection_size"] = float(len(projected))
-        engine_latest = engine.latest_finalized_minute()
-        projection_latest = None
-        if projected:
-            normalized_projection_ts = self._normalize_bar_timestamp(projected[-1])
-            if normalized_projection_ts is not None:
-                projection_latest = normalized_projection_ts[0]
-        lag_seconds = 0.0
-        lag_bars = 0.0
-        if engine_latest is not None:
-            engine_ts = pd.Timestamp(engine_latest)
+        if canonical_latest_ts is not None:
             self._candle_metrics["candle_engine_latest_finalized_timestamp"] = (
-                engine_ts.timestamp()
+                canonical_latest_ts.timestamp()
             )
-            if projection_latest is not None:
-                projection_ts = pd.Timestamp(projection_latest)
-                self._candle_metrics["candle_projection_latest_timestamp"] = (
-                    projection_ts.timestamp()
-                )
-                lag_seconds = max(0.0, (engine_ts - projection_ts).total_seconds())
-                if lag_seconds > 0:
-                    rows_ahead = 0
-                    projection_dt = projection_ts.to_pydatetime()
-                    for row in completed:
-                        normalized_row_ts = self._normalize_bar_timestamp(row)
-                        if (
-                            normalized_row_ts is not None
-                            and normalized_row_ts[0] > projection_dt
-                        ):
-                            rows_ahead += 1
-                    lag_bars = float(rows_ahead)
-            else:
-                lag_seconds = 60.0 * len(completed)
-                lag_bars = float(len(completed))
-        self._candle_metrics["candle_projection_lag_seconds"] = lag_seconds
-        self._candle_metrics["candle_projection_lag_bars"] = lag_bars
-        previous_fingerprint = self._candle_projection_fingerprint(previous)
-        canonical_fingerprint = self._candle_projection_fingerprint(completed)
-        if previous and not self._projection_matches_canonical_slice(
-            previous_fingerprint, canonical_fingerprint
-        ):
+        if refreshed_latest is not None:
+            self._candle_metrics["candle_projection_latest_timestamp"] = (
+                refreshed_latest.timestamp()
+            )
+        self._candle_metrics["candle_projection_lag_before_refresh_seconds"] = (
+            lag_before_seconds
+        )
+        self._candle_metrics["candle_projection_lag_before_refresh_bars"] = (
+            lag_before_bars
+        )
+        self._candle_metrics["candle_projection_lag_after_refresh_seconds"] = (
+            lag_after_seconds
+        )
+        self._candle_metrics["candle_projection_lag_after_refresh_bars"] = (
+            lag_after_bars
+        )
+        self._candle_metrics["candle_projection_lag_seconds"] = lag_after_seconds
+        self._candle_metrics["candle_projection_lag_bars"] = lag_after_bars
+        if divergence:
             self._candle_metrics["candle_projection_divergence_total"] += 1
             self._logger.warning(
                 "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s",
@@ -1161,7 +1206,71 @@ class MarketDataManager:
                 len(projected),
                 extra={"event": "CANDLE_PROJECTION_DIVERGENCE", "symbol": normalized},
             )
+        divergence_total = float(
+            (getattr(self, "_candle_projection_diagnostics", {}) or {})
+            .get(normalized, {})
+            .get("divergence_total", 0.0)
+            or 0.0
+        ) + (1.0 if divergence else 0.0)
+        diagnostics = {
+            "canonical_latest_timestamp": (
+                canonical_latest_ts.timestamp()
+                if canonical_latest_ts is not None
+                else None
+            ),
+            "previous_projection_latest_timestamp": (
+                previous_latest.timestamp() if previous_latest is not None else None
+            ),
+            "refreshed_projection_latest_timestamp": (
+                refreshed_latest.timestamp() if refreshed_latest is not None else None
+            ),
+            "lag_before_refresh_seconds": lag_before_seconds,
+            "lag_before_refresh_bars": lag_before_bars,
+            "lag_after_refresh_seconds": lag_after_seconds,
+            "lag_after_refresh_bars": lag_after_bars,
+            "projection_size": len(projected),
+            "refreshed_at": time.time(),
+            "divergence_total": divergence_total,
+        }
+        if not hasattr(self, "_candle_projection_diagnostics"):
+            self._candle_projection_diagnostics = {}
+        with self._lock:
+            self._candle_projection_diagnostics[normalized] = diagnostics
         return [dict(row) for row in projected]
+
+    def _latest_projection_timestamp(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> pd.Timestamp | None:
+        latest: pd.Timestamp | None = None
+        for row in rows:
+            normalized_ts = self._normalize_bar_timestamp(row)
+            if normalized_ts is None:
+                continue
+            candidate = pd.Timestamp(normalized_ts[0])
+            if latest is None or candidate > latest:
+                latest = candidate
+        return latest
+
+    def _projection_lag(
+        self,
+        completed: Sequence[Mapping[str, Any]],
+        canonical_latest: pd.Timestamp | None,
+        projection_latest: pd.Timestamp | None,
+    ) -> tuple[float, float]:
+        if canonical_latest is None:
+            return 0.0, 0.0
+        if projection_latest is None:
+            return (60.0 * len(completed), float(len(completed)))
+        lag_seconds = max(0.0, (canonical_latest - projection_latest).total_seconds())
+        if lag_seconds <= 0.0:
+            return 0.0, 0.0
+        bars = 0
+        projection_dt = projection_latest.to_pydatetime()
+        for row in completed:
+            normalized_ts = self._normalize_bar_timestamp(row)
+            if normalized_ts is not None and normalized_ts[0] > projection_dt:
+                bars += 1
+        return lag_seconds, float(bars)
 
     @staticmethod
     def _projection_matches_canonical_slice(
@@ -1640,11 +1749,7 @@ class MarketDataManager:
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("tick consumer cancel raised: %s", exc)
             self._tick_consumer_task = None
-        if self._tick_worker_thread is not None:
-            self._tick_worker_stop.set()
-            self._tick_worker_thread.join(timeout=2.0)
-            self._tick_worker_thread = None
-            self._tick_worker_stop.clear()
+        # Deprecated tick worker removed: only the owning asyncio loop drains ticks.
         if self._rest_poll_thread is not None:
             self._rest_poll_stop.set()
             self._rest_poll_thread.join(timeout=2.0)
@@ -7388,25 +7493,47 @@ class MarketDataManager:
                 self._tick_queue.task_done()
 
     def _normalize_ws_tick(self, raw: dict[str, Any]) -> dict[str, Any] | None:
-        """Normalize websocket tick payload. Args: raw. Returns: canonical tick or None. Raises: none."""
+        """Normalize websocket/fallback tick payload for CandleEngine ingestion."""
         if not isinstance(raw, dict):
             return None
 
+        source_lower = str(raw.get("source") or "").lower()
+        approved_rest_fallback = source_lower in {
+            "poll",
+            "rest",
+            "rest_poll",
+            "fallback",
+            "quote",
+            "rest_quote",
+        }
         token_raw = raw.get("instrument_token") or raw.get("token")
-        if token_raw is None:
-            return None
+        token: int | None = None
+        if token_raw is not None:
+            try:
+                token = int(token_raw)
+            except Exception:
+                if not approved_rest_fallback:
+                    return None
 
-        try:
-            token = int(token_raw)
-        except Exception:
-            return None
-
+        raw_symbol = (
+            raw.get("symbol") or raw.get("tradingsymbol") or raw.get("trading_symbol")
+        )
+        symbol: str | None = None
         with self._lock:
-            symbol = (
-                raw.get("symbol")
-                or self._symbol_by_token.get(token)
-                or self._token_to_symbol.get(token)
-            )
+            if raw_symbol:
+                try:
+                    symbol = self._canonical_symbol(str(raw_symbol))
+                except Exception:
+                    symbol = str(raw_symbol)
+            if symbol is None and token is not None:
+                symbol = self._symbol_by_token.get(token) or self._token_to_symbol.get(
+                    token
+                )
+            if approved_rest_fallback and symbol is not None and token is None:
+                token = self._token_by_symbol.get(symbol)
+
+        if token is None and not (approved_rest_fallback and symbol):
+            return None
 
         if not symbol:
             # A tick for a token not in the desired set is an expected artifact of
@@ -7414,7 +7541,7 @@ class MarketDataManager:
             # its mapping pruned, but the broker may stream a few more ticks before
             # the WS unsubscribe lands. Dropping it is correct; log at DEBUG. Only a
             # token that IS still desired but unmapped is a genuine anomaly (WARN).
-            if token in self._desired_tokens:
+            if token is not None and token in self._desired_tokens:
                 log_throttled(
                     self._logger,
                     f"mdm_unmapped_token_{token}",
@@ -7444,31 +7571,17 @@ class MarketDataManager:
         if price <= 0:
             return None
 
-        timestamp_source = (
-            "exchange_timestamp"
-            if raw.get("exchange_timestamp") is not None
-            else ("timestamp" if raw.get("timestamp") is not None else None)
+        timestamp_source, ts = self._resolve_candle_tick_timestamp(
+            raw, rest_fallback=approved_rest_fallback
         )
-        if (
-            str(raw.get("source") or "").lower()
-            in {"poll", "rest", "rest_poll", "fallback"}
-            and raw.get("timestamp") is not None
-        ):
-            timestamp_source = "rest_poll"
-        ts_raw = (
-            raw.get("exchange_timestamp")
-            if timestamp_source == "exchange_timestamp"
-            else raw.get("timestamp")
-        )
-        ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
-        source_timestamp_valid = not pd.isna(ts) and pd.Timestamp(ts).year >= 2020
+        source_timestamp_valid = timestamp_source is not None and ts is not None
         if not source_timestamp_valid:
             if not hasattr(self, "_candle_metrics"):
                 self._candle_metrics = defaultdict(float)
             self._candle_metrics["invalid_candle_timestamp_total"] += 1
             log_throttled(
                 self._logger,
-                f"mdm_invalid_candle_timestamp_{token}",
+                f"mdm_invalid_candle_timestamp_{token or symbol}",
                 "MDM_TICK_DROPPED reason=invalid_candle_timestamp token=%s" % token,
                 interval_sec=30.0,
                 level=logging.WARNING,
@@ -7476,12 +7589,14 @@ class MarketDataManager:
             return None
 
         quote_fields = self._extract_depth_quote_fields(raw)
+        token_fields: dict[str, Any] = {}
+        if token is not None:
+            token_fields = {"instrument_token": token, "token": token}
         return {
             **to_json_safe(dict(raw)),
             **quote_fields,
+            **token_fields,
             "symbol": str(symbol),
-            "instrument_token": token,
-            "token": token,
             "ltp": price,
             "last_price": price,
             "timestamp": ts.isoformat(),
@@ -7491,10 +7606,37 @@ class MarketDataManager:
             "source": (
                 "ws_full"
                 if bool(quote_fields.get("depth_available"))
+                and not approved_rest_fallback
                 else (raw.get("source") or "ws")
             ),
             "received_at": float(raw.get("received_at") or time.time()),
         }
+
+    def _resolve_candle_tick_timestamp(
+        self, raw: Mapping[str, Any], *, rest_fallback: bool
+    ) -> tuple[str | None, pd.Timestamp | None]:
+        if rest_fallback:
+            candidates = (
+                ("rest_poll", raw.get("timestamp")),
+                ("rest_poll", raw.get("broker_timestamp")),
+                ("last_trade_time", raw.get("last_trade_time")),
+            )
+        else:
+            candidates = (
+                ("exchange_timestamp", raw.get("exchange_timestamp")),
+                ("timestamp", raw.get("timestamp")),
+                ("last_trade_time", raw.get("last_trade_time")),
+            )
+        for source, value in candidates:
+            if value is None:
+                continue
+            ts = pd.to_datetime(value, utc=True, errors="coerce")
+            if pd.isna(ts):
+                continue
+            ts = pd.Timestamp(ts)
+            if ts.year >= 2020:
+                return source, ts
+        return None, None
 
     def _extract_depth_quote_fields(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         """Extract quote/depth fields. Args: raw. Returns: normalized quote fields. Raises: none."""
@@ -7971,7 +8113,13 @@ class MarketDataManager:
         price_value = raw.get("last_price") or raw.get("ltp") or tick.ltp
         tick_dict["last_price"] = price_value
         tick_dict["ltp"] = tick.ltp
-        tick_dict["source"] = "ws"
+        tick_dict["source"] = raw.get("source") or "ws"
+        tick_dict["timestamp_source"] = raw.get(
+            "timestamp_source", tick_dict.get("timestamp_source")
+        )
+        tick_dict["source_timestamp_valid"] = raw.get(
+            "source_timestamp_valid", tick_dict.get("source_timestamp_valid")
+        )
         tick_dict["received_at"] = raw.get("received_at", time.time())
         if raw.get("exchange_timestamp") is not None:
             tick_dict["exchange_timestamp"] = raw.get("exchange_timestamp")
@@ -7993,7 +8141,9 @@ class MarketDataManager:
         except Exception:
             pass
 
-        normalized_live = self.normalize_live_tick(tick_dict, source="ws")
+        normalized_live = self.normalize_live_tick(
+            tick_dict, source=str(tick_dict.get("source") or "ws")
+        )
         if normalized_live is None:
             return
         self._ingest_normalized_tick(normalized_live)
@@ -11803,12 +11953,21 @@ class MarketDataManager:
             ts = pd.to_datetime(
                 raw.get("timestamp")
                 or raw.get("exchange_timestamp")
-                or datetime.now(timezone.utc),
+                or raw.get("last_trade_time"),
                 utc=True,
                 errors="coerce",
             )
             if pd.isna(ts):
-                ts = pd.Timestamp.utcnow()
+                if str(source).lower() in {
+                    "poll",
+                    "rest",
+                    "rest_poll",
+                    "fallback",
+                    "quote",
+                    "rest_quote",
+                }:
+                    return None
+                ts = pd.Timestamp.now(tz="UTC")
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
             bid = _coerce_float(
                 raw.get("bid")
@@ -11895,7 +12054,18 @@ class MarketDataManager:
                 "bid_ask_source": bid_ask_source,
                 "tradable_quote": tradable_quote,
                 "timestamp": ts_py,
-                "source": "poll" if str(source).lower() == "poll" else "ws",
+                "timestamp_source": raw.get("timestamp_source"),
+                "source_timestamp_valid": raw.get("source_timestamp_valid"),
+                "source": (
+                    "poll"
+                    if str(source).lower() == "poll"
+                    else (
+                        str(source).lower()
+                        if str(source).lower()
+                        in {"rest", "rest_poll", "fallback", "quote", "rest_quote"}
+                        else "ws"
+                    )
+                ),
             }
         return None
 
@@ -12597,7 +12767,19 @@ class MarketDataManager:
                 )
                 fetched_rows = len(rows or [])
                 rows = list(rows or [])[-requested_bars:]
-                accepted_rows = int(self.ingest_historical_ohlc(normalized, rows) or 0)
+                import_reason: HistoryImportReason = (
+                    "startup_bootstrap" if reason == "startup" else "hydration"
+                )
+                if "ingest_historical_ohlc" in getattr(self, "__dict__", {}):
+                    accepted_rows = int(
+                        self.ingest_historical_ohlc(normalized, rows) or 0
+                    )
+                else:
+                    accepted_rows = int(
+                        self.import_historical_ohlc(
+                            normalized, rows, reason=import_reason
+                        ).accepted_rows
+                    )
                 self.update_hydration_status(normalized, self.get_ohlc_bars(normalized))
             except Exception as exc:  # noqa: BLE001 - broker/data boundary diagnostics
                 failure_reason = f"{type(exc).__name__}: {exc}"
