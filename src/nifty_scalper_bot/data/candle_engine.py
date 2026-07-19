@@ -145,6 +145,11 @@ class CandleEngine:
     _live_append_total: int = field(default=0, init=False)
     _same_minute_idempotent_total: int = field(default=0, init=False)
     _same_minute_conflict_total: int = field(default=0, init=False)
+    _history_import_total: int = field(default=0, init=False)
+    _history_import_bar_total: int = field(default=0, init=False)
+    _history_import_idempotent_total: int = field(default=0, init=False)
+    _history_import_conflict_total: int = field(default=0, init=False)
+    _finalized_minute_tick_reject_total: int = field(default=0, init=False)
 
     def __init__(
         self,
@@ -168,6 +173,11 @@ class CandleEngine:
         self._live_append_total = 0
         self._same_minute_idempotent_total = 0
         self._same_minute_conflict_total = 0
+        self._history_import_total = 0
+        self._history_import_bar_total = 0
+        self._history_import_idempotent_total = 0
+        self._history_import_conflict_total = 0
+        self._finalized_minute_tick_reject_total = 0
         if df is not None and not df.empty:
             self.replace_history(df)
 
@@ -187,26 +197,16 @@ class CandleEngine:
         self.replace_history(value)
 
     def replace_history(self, frame: pd.DataFrame | None) -> None:
-        """Sanitize and atomically replace the bounded candle store."""
-        self._replace_completed_candles(frame)
+        """Bootstrap/legacy whole-history replacement.
+
+        Prefer ``import_history(..., mode="incremental")`` during live
+        operation so historical hydration cannot silently overwrite
+        CandleEngine-owned finalized candles or a live current candle.
+        """
+        self.import_history(frame, mode="bootstrap")
 
     def _replace_completed_candles(self, value: pd.DataFrame | None) -> None:
-        self._completed_candles.clear()
-        clean = (
-            sanitize(value)
-            if value is not None
-            else pd.DataFrame(columns=_OHLC_COLUMNS)
-        )
-        for row in clean.tail(self.max_bars).to_dict(orient="records"):
-            ts = _to_ist_timestamp(row.get("timestamp"))
-            if pd.isna(ts):
-                continue
-            normalized = _normalize_completed_candle(
-                row, symbol=self.symbol or "symbol_unset", incoming_ts=ts
-            )
-            if normalized is not None:
-                self._completed_candles.append(normalized)
-        self._df_cache_dirty = True
+        self.import_history(value, mode="bootstrap")
 
     def _cached_df_copy(self) -> pd.DataFrame:
         if self._df_cache_dirty or self._df_cache is None:
@@ -226,7 +226,142 @@ class CandleEngine:
             "live_append_total": self._live_append_total,
             "same_minute_idempotent_total": self._same_minute_idempotent_total,
             "same_minute_conflict_total": self._same_minute_conflict_total,
+            "history_import_total": self._history_import_total,
+            "history_import_bar_total": self._history_import_bar_total,
+            "history_import_idempotent_total": self._history_import_idempotent_total,
+            "history_import_conflict_total": self._history_import_conflict_total,
+            "finalized_minute_tick_reject_total": (
+                self._finalized_minute_tick_reject_total
+            ),
+            "latest_finalized_minute": (
+                self.latest_finalized_minute().isoformat()
+                if self.latest_finalized_minute() is not None
+                else None
+            ),
         }
+
+    def latest_finalized_minute(self) -> pd.Timestamp | None:
+        """Return the latest completed candle minute, normalized to market TZ."""
+        if not self._completed_candles:
+            return None
+        ts = _to_ist_timestamp(self._completed_candles[-1].get("timestamp"))
+        if pd.isna(ts):
+            return None
+        return pd.Timestamp(ts)
+
+    def get_completed_bars(self) -> list[dict[str, Any]]:
+        """Return defensive copies of canonical finalized OHLCV bars."""
+        return [dict(row) for row in self._completed_candles]
+
+    def get_current_candle(self) -> dict[str, Any] | None:
+        """Return a defensive copy of the current partial candle, if any."""
+        return dict(self.current_candle) if self.current_candle is not None else None
+
+    def import_history(
+        self,
+        frame: pd.DataFrame | None,
+        *,
+        mode: str = "incremental",
+        source: str | None = None,
+    ) -> pd.DataFrame:
+        """Atomically import broker-completed historical candles.
+
+        ``mode="bootstrap"`` replaces completed history and is intended for
+        startup/legacy compatibility before live ticks are accepted.
+        ``mode="incremental"`` merges only idempotent or newer completed bars
+        and fails closed on conflicts. ``source`` is diagnostic metadata only
+        and is never part of candle identity.
+        """
+        if mode not in {"bootstrap", "incremental"}:
+            raise ValueError(f"Unsupported history import mode: {mode}")
+        symbol = self.symbol or "symbol_unset"
+        try:
+            incoming = _normalize_history_frame(frame, symbol=symbol)
+            candidate = list(incoming)
+            idempotent = 0
+            current_after = (
+                dict(self.current_candle) if self.current_candle is not None else None
+            )
+            if mode == "incremental":
+                existing = list(self._completed_candles)
+                merged_by_ts: dict[pd.Timestamp, dict[str, Any]] = {
+                    _to_ist_timestamp(row["timestamp"]): dict(row) for row in existing
+                }
+                for row in incoming:
+                    ts = _to_ist_timestamp(row["timestamp"])
+                    stored = merged_by_ts.get(ts)
+                    if stored is not None:
+                        if not _candles_equivalent(stored, row):
+                            raise _history_conflict(symbol, ts, stored, row)
+                        idempotent += 1
+                        continue
+                    merged_by_ts[ts] = dict(row)
+                candidate = [merged_by_ts[ts] for ts in sorted(merged_by_ts)]
+                if current_after is not None and incoming:
+                    latest_imported_ts = _to_ist_timestamp(incoming[-1]["timestamp"])
+                    current_ts = _to_ist_timestamp(current_after.get("timestamp"))
+                    if pd.isna(current_ts):
+                        raise DataIntegrityError("current candle timestamp is invalid")
+                    normalized_current = _normalize_completed_candle(
+                        current_after, symbol=symbol, incoming_ts=current_ts
+                    )
+                    if normalized_current is None:
+                        raise DataIntegrityError("current candle is invalid")
+                    if current_ts == latest_imported_ts:
+                        imported = incoming[-1]
+                        if not _candles_equivalent(normalized_current, imported):
+                            raise _history_conflict(
+                                symbol, current_ts, imported, normalized_current
+                            )
+                        current_after = None
+                        idempotent += 1
+                    elif current_ts < latest_imported_ts:
+                        raise DataIntegrityError(
+                            "current candle older than imported finalized history"
+                        )
+            else:
+                current_after = None
+
+            bounded = candidate[-int(self.max_bars) :]
+        except Exception:
+            self._history_import_conflict_total += 1
+            LOGGER.exception(
+                "history_import_failed",
+                extra={
+                    "event": "history_import_failed",
+                    "symbol": symbol,
+                    "mode": mode,
+                    "source": source,
+                },
+            )
+            raise
+
+        self._completed_candles = deque(
+            [dict(row) for row in bounded], maxlen=int(self.max_bars)
+        )
+        self.current_candle = current_after
+        self._df_cache_dirty = True
+        self._history_import_total += 1
+        self._history_import_bar_total += len(incoming)
+        self._history_import_idempotent_total += idempotent
+        latest = self.latest_finalized_minute()
+        self.last_candle_close = latest.to_pydatetime() if latest is not None else None
+        LOGGER.info(
+            "history_import_completed",
+            extra={
+                "event": "history_import_completed",
+                "symbol": symbol,
+                "mode": mode,
+                "source": source,
+                "incoming_bars": len(incoming),
+                "stored_bars": len(self._completed_candles),
+                "idempotent_bars": idempotent,
+                "latest_finalized_minute": (
+                    latest.isoformat() if latest is not None else None
+                ),
+            },
+        )
+        return self.get_df()
 
     def on_tick(self, tick: Mapping[str, Any]) -> dict[str, Any] | None:
         if self.interval != "1min":
@@ -328,6 +463,28 @@ class CandleEngine:
         payload["timestamp"] = timestamp
         payload["timestamp_source"] = timestamp_source
         minute = timestamp.floor("1min")
+        latest_finalized = self.latest_finalized_minute()
+        if latest_finalized is not None and minute <= latest_finalized:
+            self._finalized_minute_tick_reject_total += 1
+            log_throttled(
+                LOGGER,
+                f"finalized_minute_tick_rejected_{symbol}",
+                (
+                    "CANDLE_TICK_DROPPED reason=finalized_minute symbol=%s "
+                    "tick_minute=%s latest_finalized=%s"
+                )
+                % (symbol, minute.isoformat(), latest_finalized.isoformat()),
+                interval_sec=10.0,
+                level=logging.WARNING,
+                extra={
+                    "event": "candle_tick_dropped",
+                    "reason": "finalized_minute",
+                    "symbol": symbol,
+                    "tick_minute": minute.isoformat(),
+                    "latest_finalized_minute": latest_finalized.isoformat(),
+                },
+            )
+            return None
 
         if self._last_tick_ts is not None:
             last_ts = _to_ist_timestamp(self._last_tick_ts)
@@ -446,7 +603,10 @@ class CandleEngine:
                     log_throttled(
                         LOGGER,
                         f"candle_out_of_order_{symbol}",
-                        "candle_out_of_order symbol=%s incoming_ts=%s last_ts=%s source=candle_engine"
+                        (
+                            "candle_out_of_order symbol=%s incoming_ts=%s "
+                            "last_ts=%s source=candle_engine"
+                        )
                         % (symbol, incoming_ts.isoformat(), last_ts.isoformat()),
                         interval_sec=30.0,
                         level=logging.WARNING,
@@ -507,7 +667,8 @@ class CandleEngine:
                 )
                 self.current_candle = None
                 raise DataIntegrityError(
-                    f"conflicting finalized candle symbol={symbol} timestamp={incoming_ts}"
+                    "conflicting finalized candle "
+                    f"symbol={symbol} timestamp={incoming_ts}"
                 )
         # Live completed candles are stored in a bounded row-oriented deque.
         # Avoid DataFrame row insertion/concat here; pandas frames are rebuilt
@@ -573,6 +734,66 @@ def _normalize_completed_candle(
     if out["high"] < out["low"]:
         return None
     return out
+
+
+def _normalize_history_frame(
+    frame: pd.DataFrame | None, *, symbol: str
+) -> list[dict[str, Any]]:
+    if frame is None or frame.empty:
+        return []
+    if "timestamp" not in frame.columns:
+        raise DataIntegrityError("historical candle timestamp is required")
+    normalized_rows: list[dict[str, Any]] = []
+    for index, row in frame.copy().iterrows():
+        ts = _to_ist_timestamp(row.get("timestamp"))
+        if pd.isna(ts):
+            raise DataIntegrityError(
+                f"historical candle timestamp is invalid row={index}"
+            )
+        if _is_future_timestamp(ts):
+            raise DataIntegrityError(
+                f"historical candle timestamp is in the future row={index}"
+            )
+        normalized = _normalize_completed_candle(row, symbol=symbol, incoming_ts=ts)
+        if normalized is None:
+            raise DataIntegrityError(f"invalid historical OHLCV row={index}")
+        normalized_rows.append(normalized)
+
+    by_ts: dict[pd.Timestamp, dict[str, Any]] = {}
+    for row in normalized_rows:
+        ts = _to_ist_timestamp(row["timestamp"])
+        existing = by_ts.get(ts)
+        if existing is not None:
+            if not _candles_equivalent(existing, row):
+                raise _history_conflict(symbol, ts, existing, row)
+            continue
+        by_ts[ts] = row
+    return [by_ts[ts] for ts in sorted(by_ts)]
+
+
+def _history_conflict(
+    symbol: str,
+    ts: pd.Timestamp,
+    stored: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> DataIntegrityError:
+    LOGGER.error(
+        "FINALIZED_CANDLE_CONFLICT",
+        extra={
+            "event": "FINALIZED_CANDLE_CONFLICT",
+            "symbol": symbol,
+            "timestamp": ts.isoformat(),
+            "stored_ohlcv": {
+                k: stored.get(k) for k in ("open", "high", "low", "close", "volume")
+            },
+            "incoming_ohlcv": {
+                k: incoming.get(k) for k in ("open", "high", "low", "close", "volume")
+            },
+        },
+    )
+    return DataIntegrityError(
+        f"conflicting finalized candle symbol={symbol} timestamp={ts}"
+    )
 
 
 def _candles_equivalent(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
@@ -643,7 +864,10 @@ def fetch_historical_safe(
         if validate_dataframe(frame, min_required=min_required):
             return frame
         LOGGER.warning(
-            "data_integrity_error symbol=%s reason=historical_validation_failed attempt=%d",
+            (
+                "data_integrity_error symbol=%s "
+                "reason=historical_validation_failed attempt=%d"
+            ),
             symbol,
             attempt,
             extra={
@@ -705,7 +929,10 @@ def ensure_valid_data(
     )
     if hydrated is None:
         LOGGER.error(
-            "data_integrity_error symbol=%s reason=insufficient_historical min_required=%d",
+            (
+                "data_integrity_error symbol=%s "
+                "reason=insufficient_historical min_required=%d"
+            ),
             symbol,
             min_required,
             extra={
