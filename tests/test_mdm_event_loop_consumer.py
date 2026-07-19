@@ -23,13 +23,12 @@ def test_set_event_loop_starts_consumer_after_started_flag() -> None:
         time.sleep(0.05)
         mdm.set_event_loop(loop)
         time.sleep(0.2)
-        task = getattr(mdm, '_tick_consumer_task', None)
+        task = getattr(mdm, "_tick_consumer_task", None)
         assert task is not None
         assert not task.done()
     finally:
-        task = getattr(mdm, '_tick_consumer_task', None)
-        if task is not None:
-            loop.call_soon_threadsafe(task.cancel)
+        future = asyncio.run_coroutine_threadsafe(mdm.async_stop(), loop)
+        future.result(timeout=1.0)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=1.0)
         loop.close()

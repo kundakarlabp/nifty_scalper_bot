@@ -60,6 +60,25 @@ OrderStatus = Literal[
 ]
 
 _MIN_RECONCILE_DELAY_S = 0.5
+_EXIT_RECONCILIATION_GRACE_DEFAULT_S = 2.0
+_EXIT_RECONCILIATION_GRACE_MIN_S = 0.25
+_EXIT_RECONCILIATION_GRACE_MAX_S = 5.0
+
+
+def _resolve_exit_reconciliation_grace_seconds() -> float:
+    raw = os.getenv("EXIT_RECONCILIATION_SETTLEMENT_GRACE_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        return _EXIT_RECONCILIATION_GRACE_DEFAULT_S
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return _EXIT_RECONCILIATION_GRACE_DEFAULT_S
+    if not math.isfinite(value):
+        return _EXIT_RECONCILIATION_GRACE_DEFAULT_S
+    return min(
+        _EXIT_RECONCILIATION_GRACE_MAX_S,
+        max(_EXIT_RECONCILIATION_GRACE_MIN_S, value),
+    )
 
 
 _POSITION_RECONCILE_EVENTS = Counter(
@@ -131,6 +150,7 @@ def _normalize_intent(value: object | None) -> OrderIntent:
         return cast(OrderIntent, normalized)
     return "UNKNOWN"
 
+
 def _to_int(value: object) -> int:
     """Robust integer conversion handling None and strings."""
     if value is None:
@@ -184,7 +204,7 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
     Raises:
         None.
-        
+
     ✅ PRODUCTION FIX: Added Enum, datetime, Decimal serialization support.
     """
     import json
@@ -199,14 +219,14 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     class EnhancedJSONEncoder(json.JSONEncoder):
         def default(self, obj):
             if isinstance(obj, Enum):
-                return obj.value if hasattr(obj, 'value') else obj.name
+                return obj.value if hasattr(obj, "value") else obj.name
             if isinstance(obj, (datetime, date)):
                 return obj.isoformat()
             if isinstance(obj, Decimal):
                 return float(obj)
-            if hasattr(obj, 'to_dict'):
+            if hasattr(obj, "to_dict"):
                 return obj.to_dict()
-            if hasattr(obj, '__dict__') and not isinstance(obj, type):
+            if hasattr(obj, "__dict__") and not isinstance(obj, type):
                 return obj.__dict__
             return super().default(obj)
 
@@ -218,14 +238,14 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         elif isinstance(obj, (list, tuple)):
             return [_sanitize(item) for item in obj]
         elif isinstance(obj, Enum):
-            return obj.value if hasattr(obj, 'value') else obj.name
+            return obj.value if hasattr(obj, "value") else obj.name
         elif isinstance(obj, (datetime, date)):
             return obj.isoformat()
         elif isinstance(obj, Decimal):
             return float(obj)
-        elif hasattr(obj, 'to_dict'):
+        elif hasattr(obj, "to_dict"):
             return _sanitize(obj.to_dict())
-        elif hasattr(obj, '__dict__') and not isinstance(obj, type):
+        elif hasattr(obj, "__dict__") and not isinstance(obj, type):
             return _sanitize(vars(obj))
         return obj
 
@@ -240,8 +260,14 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
         # Write to unique temp file with custom encoder + default=str fallback
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(sanitized_payload, f, indent=2, sort_keys=True, 
-                      cls=EnhancedJSONEncoder, default=str)
+            json.dump(
+                sanitized_payload,
+                f,
+                indent=2,
+                sort_keys=True,
+                cls=EnhancedJSONEncoder,
+                default=str,
+            )
             f.flush()
             os.fsync(f.fileno())  # Force flush to disk for durability
 
@@ -253,10 +279,9 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         with suppress(OSError):
             if temp_path.exists():
                 os.remove(temp_path)
-        
+
         get_logger(__name__).error("Failure in _atomic_write_json: %s", exc)
         raise
-
 
 
 @dataclass(slots=True)
@@ -289,12 +314,12 @@ class Position:
 
         # Direction logic is correct
         direction = 1 if self.side == "LONG" else -1
-        
+
         # FIX: Guard against division by zero
         notional = abs(self.entry_price * self.quantity)
         if notional == 0:
             return 0.0
-            
+
         return (self.unrealized_pnl / notional) * 100.0
 
     @property
@@ -343,8 +368,19 @@ class Position:
                 else None
             ),
             realized_pnl=float(payload.get("realized_pnl", 0.0)),
-            state=str(payload.get("state")) if payload.get("state") is not None else None,
+            state=(
+                str(payload.get("state")) if payload.get("state") is not None else None
+            ),
         )
+
+
+@dataclass(slots=True)
+class ExitSettlementGuard:
+    completed_exit_at_monotonic: float
+    grace_until_monotonic: float
+    stale_snapshot_count: int = 0
+    last_stale_quantity: int = 0
+    last_log_monotonic: float = 0.0
 
 
 @dataclass(slots=True)
@@ -506,9 +542,13 @@ class ExitLifecycleRecord:
             "expected_exit_quantity": self.expected_exit_quantity,
             "state": self.state,
             "submitted_at": self.submitted_at.isoformat(),
-            "broker_flat_at": self.broker_flat_at.isoformat() if self.broker_flat_at else None,
+            "broker_flat_at": (
+                self.broker_flat_at.isoformat() if self.broker_flat_at else None
+            ),
             "final_fill_price": self.final_fill_price,
-            "finalized_at": self.finalized_at.isoformat() if self.finalized_at else None,
+            "finalized_at": (
+                self.finalized_at.isoformat() if self.finalized_at else None
+            ),
         }
 
     @staticmethod
@@ -531,7 +571,9 @@ class ExitLifecycleRecord:
                 if payload.get("bracket_id") is not None
                 else None
             ),
-            expected_exit_side=_normalize_order_side(str(payload["expected_exit_side"])),
+            expected_exit_side=_normalize_order_side(
+                str(payload["expected_exit_side"])
+            ),
             expected_exit_quantity=_to_int(payload.get("expected_exit_quantity", 0)),
             state=str(payload.get("state") or "EXIT_PENDING"),
             submitted_at=datetime.fromisoformat(str(payload["submitted_at"])),
@@ -685,7 +727,9 @@ class Order:
                 if payload.get("linked_entry_order_id") is not None
                 else None
             ),
-            pre_order_entry_price=_to_optional_float(payload.get("pre_order_entry_price")),
+            pre_order_entry_price=_to_optional_float(
+                payload.get("pre_order_entry_price")
+            ),
             protected_quantity=_to_int(payload.get("protected_quantity", 0)),
             protection_confirmed=bool(payload.get("protection_confirmed", False)),
             protection_confirmed_at=(
@@ -866,7 +910,10 @@ class PositionManager:
         )
         self._last_reconciled_state: Dict[str, Position] = {}
         self._recently_flat_exit_until_monotonic: dict[str, float] = {}
-        self._recently_flat_exit_grace_seconds: float = 30.0
+        self._recently_flat_exit_metadata: dict[str, ExitSettlementGuard] = {}
+        self._recently_flat_exit_grace_seconds: float = (
+            _resolve_exit_reconciliation_grace_seconds()
+        )
         self._last_reconcile_attempt: datetime | None = None
         self._last_reconcile_success_at: datetime | None = None
         self._last_reconcile_error: str | None = None
@@ -1247,7 +1294,9 @@ class PositionManager:
             snapshot = decode_position_snapshot(response)
         except Exception as exc:  # noqa: BLE001
             reason = canonical(
-                "payload_invalid" if isinstance(exc, PositionSnapshotError) else "fetch_error"
+                "payload_invalid"
+                if isinstance(exc, PositionSnapshotError)
+                else "fetch_error"
             )
             self._logger.warning(
                 "Position reconciliation snapshot failed: %s",
@@ -1541,6 +1590,7 @@ class PositionManager:
         with self._lock:
             if symbol_key in self._positions:
                 raise ValueError(f"Position already exists for {symbol_key}")
+            self._clear_recent_exit_guard_locked(symbol_key)
             self._positions[symbol_key] = position
         self._logger.info("Opened %s position for %s", position.side, symbol_key)
         self.save_state()
@@ -1752,6 +1802,7 @@ class PositionManager:
             return float(self._broker_realized_pnl) - float(
                 self._session_opening_realized_baseline
             )
+
     def get_realized_pnl(self) -> float:
         """Return conservative realised P&L used by capital-protection gates."""
         with self._lock:
@@ -1837,8 +1888,7 @@ class PositionManager:
                     continue
                 if (
                     not metadata.protection_confirmed
-                    or metadata.protected_quantity
-                    < metadata.cumulative_filled_quantity
+                    or metadata.protected_quantity < metadata.cumulative_filled_quantity
                 ):
                     return "entry_protection_incomplete"
         return None
@@ -1857,13 +1907,13 @@ class PositionManager:
         signal_fingerprint: str | None = None,
     ) -> None:
         """Track a newly submitted order.
-        
+
         ✅ PRODUCTION FIX: Skip orders that have already been fully processed.
         This prevents the infinite loop where historical filled orders are
         re-added and re-processed every reconciliation cycle.
         """
         order_id = str(order_id).strip()
-        
+
         # ✅ FIX 1: Don't re-add orders that were already processed
         if (
             hasattr(self, "_terminal_orders")
@@ -1872,15 +1922,15 @@ class PositionManager:
         ):
             self._logger.debug(
                 f"Skipping add_pending_order for already-processed: {order_id}",
-                extra={"event": "order_add_skip_processed", "order_id": order_id}
+                extra={"event": "order_add_skip_processed", "order_id": order_id},
             )
             return
-        
+
         # ✅ FIX 2: Don't re-add orders that are already being tracked
         if order_id in self._orders:
             self._logger.debug(
                 f"Order already tracked, skipping: {order_id}",
-                extra={"event": "order_add_skip_existing", "order_id": order_id}
+                extra={"event": "order_add_skip_existing", "order_id": order_id},
             )
             return
 
@@ -1916,7 +1966,8 @@ class PositionManager:
             trade_lifecycle_id=bracket_id or signal_id or order_id,
             linked_entry_order_id=(
                 existing_position.order_id
-                if existing_position is not None and normalized_intent in ("EXIT", "REDUCE")
+                if existing_position is not None
+                and normalized_intent in ("EXIT", "REDUCE")
                 else None
             ),
             pre_order_entry_price=(
@@ -1944,27 +1995,27 @@ class PositionManager:
         fill_price: float | None = None,
     ) -> None:
         """Update the status of a tracked order and react to fills.
-        
+
         ✅ PRODUCTION FIX: Added guard against re-processing completed orders.
         This prevents the position thrashing loop where the same filled orders
         are processed over and over again, causing:
-        - "Opened LONG position" 
+        - "Opened LONG position"
         - "Position fully closed via order"
         to repeat infinitely.
         """
         order_id = str(order_id).strip()
-        
+
         # ✅ FIX: Initialize _processed_order_ids if not exists (backward compat)
         if not hasattr(self, "_terminal_orders"):
             self._terminal_orders = {}
             self._max_terminal_orders = 5000
-        
+
         # ✅ FIX: Skip if this order was already fully processed
         terminal_record = self._terminal_orders.get(order_id)
         if terminal_record is not None and terminal_record.lifecycle_resolved:
             self._logger.debug(
                 f"Skipping already-processed order: {order_id}",
-                extra={"event": "order_already_processed", "order_id": order_id}
+                extra={"event": "order_already_processed", "order_id": order_id},
             )
             return
         incoming_status = normalize_broker_order_status(status)
@@ -1986,13 +2037,13 @@ class PositionManager:
                 },
             )
             return
-        
+
         order = self._orders.get(order_id)
         if order is None:
             # ✅ FIX: Also skip unknown orders that might be historical
             self._logger.debug(
                 f"Attempted to update unknown order {order_id} - may be historical",
-                extra={"event": "order_update_skip_unknown", "order_id": order_id}
+                extra={"event": "order_update_skip_unknown", "order_id": order_id},
             )
             return
 
@@ -2008,7 +2059,10 @@ class PositionManager:
             order.fill_price = float(fill_price)
 
         fill_result = FillApplicationResult()
-        if order.status in ("PARTIALLY_FILLED", "FILLED") and order.fill_price is not None:
+        if (
+            order.status in ("PARTIALLY_FILLED", "FILLED")
+            and order.fill_price is not None
+        ):
             if order.filled_quantity <= 0:
                 order.filled_quantity = order.quantity
             fill_result = self._handle_filled_order(order)
@@ -2046,7 +2100,9 @@ class PositionManager:
                 protection_failure_reason=order.protection_failure_reason,
             )
             if not self._terminal_orders[order_id].lifecycle_resolved:
-                self._unresolved_terminal_orders[order_id] = self._terminal_orders[order_id]
+                self._unresolved_terminal_orders[order_id] = self._terminal_orders[
+                    order_id
+                ]
             else:
                 self._unresolved_terminal_orders.pop(order_id, None)
             self._logger.debug(
@@ -2054,8 +2110,9 @@ class PositionManager:
                 extra={
                     "event": "order_terminal_recorded",
                     "order_id": order_id,
-                    "lifecycle_applied": fill_result.position_applied or fill_result.pnl_applied,
-                }
+                    "lifecycle_applied": fill_result.position_applied
+                    or fill_result.pnl_applied,
+                },
             )
             self._evict_old_terminal_orders()
 
@@ -2091,9 +2148,9 @@ class PositionManager:
                     or broker_payload.get("fill_price")
                     or broker_payload.get("price")
                 )
-                filled_qty = broker_payload.get("filled_quantity") or broker_payload.get(
-                    "filled"
-                )
+                filled_qty = broker_payload.get(
+                    "filled_quantity"
+                ) or broker_payload.get("filled")
                 if order is not None and filled_qty is not None:
                     with suppress(Exception):
                         order.filled_quantity = int(float(filled_qty))
@@ -2187,7 +2244,9 @@ class PositionManager:
         """Persist one coherent positions/orders snapshot to disk."""
         with self._lock:
             state = {
-                "positions": [position.to_dict() for position in self._positions.values()],
+                "positions": [
+                    position.to_dict() for position in self._positions.values()
+                ],
                 "orders": [order.to_dict() for order in self._orders.values()],
                 "terminal_orders": {
                     order_id: metadata.to_dict()
@@ -2557,11 +2616,12 @@ class PositionManager:
             try:
                 return int(float(value))
             except (TypeError, ValueError) as exc:
-                raise ValueError(f"invalid broker quantity field {key}={value!r}") from exc
+                raise ValueError(
+                    f"invalid broker quantity field {key}={value!r}"
+                ) from exc
         if not found:
             raise ValueError("broker position quantity field missing")
         raise ValueError("broker position quantity is null or invalid")
-    
 
     def synchronize_with_broker(
         self, broker_positions: Sequence[Mapping[str, object]]
@@ -2599,7 +2659,7 @@ class PositionManager:
             snapshot_symbols = {row.symbol for row in snapshot.rows}
             for recent_symbol in list(self._recently_flat_exit_until_monotonic):
                 if recent_symbol not in snapshot_symbols:
-                    self._recently_flat_exit_until_monotonic.pop(recent_symbol, None)
+                    self._clear_recent_exit_guard_locked(recent_symbol)
             for row in snapshot.rows:
                 record = row.raw
                 symbol = row.symbol
@@ -2614,26 +2674,16 @@ class PositionManager:
                         )
                     continue
                 quantity = row.quantity
-                realized_pnl = get_float(
-                    record, ("realised", "realized"), default=0.0
-                )
+                realized_pnl = get_float(record, ("realised", "realized"), default=0.0)
                 if "realised" in record or "realized" in record:
                     snapshot_realized_seen = True
                     snapshot_realized_pnl += realized_pnl
                 if quantity == 0:
-                    self._recently_flat_exit_until_monotonic.pop(symbol, None)
+                    self._clear_recent_exit_guard_locked(symbol)
                     continue
-                if self._should_ignore_recent_exit_stale_snapshot_locked(symbol):
-                    self._logger.info(
-                        "POSITION_SYNC_STALE_AFTER_EXIT_IGNORED symbol=%s qty=%s",
-                        symbol,
-                        quantity,
-                        extra={
-                            "event": "POSITION_SYNC_STALE_AFTER_EXIT_IGNORED",
-                            "symbol": symbol,
-                            "broker_quantity": quantity,
-                        },
-                    )
+                if self._should_ignore_recent_exit_stale_snapshot_locked(
+                    symbol, quantity
+                ):
                     continue
                 side: Side = "LONG" if quantity > 0 else "SHORT"
                 abs_quantity = abs(quantity)
@@ -3196,12 +3246,20 @@ class PositionManager:
             return FillApplicationResult(reason="non_incremental_cumulative_quantity")
 
         cumulative_avg = order.fill_price
-        if cumulative_avg is None or not math.isfinite(float(cumulative_avg)) or float(cumulative_avg) <= 0:
-            self._logger.warning("Missing/invalid cumulative fill price for order %s", order.order_id)
+        if (
+            cumulative_avg is None
+            or not math.isfinite(float(cumulative_avg))
+            or float(cumulative_avg) <= 0
+        ):
+            self._logger.warning(
+                "Missing/invalid cumulative fill price for order %s", order.order_id
+            )
             return FillApplicationResult(reason="invalid_cumulative_average_price")
 
         new_cumulative_notional = cumulative_qty * float(cumulative_avg)
-        delta_notional = new_cumulative_notional - float(order.applied_cumulative_notional or 0.0)
+        delta_notional = new_cumulative_notional - float(
+            order.applied_cumulative_notional or 0.0
+        )
         if delta_notional <= 0 or not math.isfinite(delta_notional):
             self._logger.warning(
                 "Ignoring invalid cumulative notional for order %s", order.order_id
@@ -3209,7 +3267,9 @@ class PositionManager:
             return FillApplicationResult(reason="invalid_cumulative_notional")
         fill_price = delta_notional / qty
         if not math.isfinite(fill_price) or fill_price <= 0:
-            self._logger.warning("Invalid delta fill price for order %s", order.order_id)
+            self._logger.warning(
+                "Invalid delta fill price for order %s", order.order_id
+            )
             return FillApplicationResult(reason="invalid_delta_fill_price")
 
         side = order.side
@@ -3264,7 +3324,9 @@ class PositionManager:
                 lifecycle = self._exit_lifecycles.get(order.order_id)
                 if lifecycle is not None:
                     lifecycle.final_fill_price = float(cumulative_avg)
-                    lifecycle.state = "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
+                    lifecycle.state = (
+                        "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
+                    )
                     if is_terminal:
                         lifecycle.finalized_at = _now()
                 mark_applied()
@@ -3277,7 +3339,11 @@ class PositionManager:
                     lifecycle_resolved=is_terminal,
                     quantity_delta=qty,
                     delta_fill_price=fill_price,
-                    reason="exit_fill_finalized_after_broker_flat" if is_terminal else "exit_partial_after_broker_flat",
+                    reason=(
+                        "exit_fill_finalized_after_broker_flat"
+                        if is_terminal
+                        else "exit_partial_after_broker_flat"
+                    ),
                 )
 
             if intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
@@ -3354,7 +3420,9 @@ class PositionManager:
                     lifecycle_resolved=True,
                 )
                 paired_qty = min(qty, abs(int(paired_exit.cumulative_filled_quantity)))
-                realized = (float(paired_exit.average_fill_price) - fill_price) * paired_qty
+                realized = (
+                    float(paired_exit.average_fill_price) - fill_price
+                ) * paired_qty
                 self._local_realized_pnl += realized
                 with self._lock:
                     self._refresh_realized_pnl_locked()
@@ -3411,9 +3479,8 @@ class PositionManager:
             )
 
         position = self._positions[symbol_key]
-        entry_side_matches = (
-            (position.side == "LONG" and side == "BUY")
-            or (position.side == "SHORT" and side == "SELL")
+        entry_side_matches = (position.side == "LONG" and side == "BUY") or (
+            position.side == "SHORT" and side == "SELL"
         )
         if intent in ("ENTRY", "SCALE_IN", "REVERSAL") and entry_side_matches:
             expected_post_fill_qty = int(order.pre_order_quantity or 0) + cumulative_qty
@@ -3481,7 +3548,9 @@ class PositionManager:
             lifecycle = self._exit_lifecycles.get(order.order_id)
             if lifecycle is not None:
                 lifecycle.final_fill_price = float(cumulative_avg)
-                lifecycle.state = "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
+                lifecycle.state = (
+                    "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
+                )
                 if is_terminal:
                     lifecycle.finalized_at = _now()
             mark_applied()
@@ -3579,27 +3648,79 @@ class PositionManager:
             )
 
     def _mark_recent_exit_flat_locked(self, symbol: str) -> None:
-        """Remember symbols just flattened by exit fill."""
+        """Remember symbols just flattened by exit fill with a fixed deadline."""
         if not hasattr(self, "_recently_flat_exit_until_monotonic"):
             self._recently_flat_exit_until_monotonic = {}
-        grace = float(getattr(self, "_recently_flat_exit_grace_seconds", 30.0) or 30.0)
-        self._recently_flat_exit_until_monotonic[symbol.upper()] = (
-            time.monotonic() + grace
+        if not hasattr(self, "_recently_flat_exit_metadata"):
+            self._recently_flat_exit_metadata = {}
+        key = symbol.upper()
+        now = time.monotonic()
+        grace = float(
+            getattr(
+                self,
+                "_recently_flat_exit_grace_seconds",
+                _EXIT_RECONCILIATION_GRACE_DEFAULT_S,
+            )
+            or _EXIT_RECONCILIATION_GRACE_DEFAULT_S
+        )
+        until = now + grace
+        self._recently_flat_exit_until_monotonic[key] = until
+        self._recently_flat_exit_metadata[key] = ExitSettlementGuard(
+            completed_exit_at_monotonic=now,
+            grace_until_monotonic=until,
         )
 
-    def _should_ignore_recent_exit_stale_snapshot_locked(self, symbol: str) -> bool:
+    def _clear_recent_exit_guard_locked(self, symbol: str) -> None:
+        key = symbol.upper()
+        if hasattr(self, "_recently_flat_exit_until_monotonic"):
+            self._recently_flat_exit_until_monotonic.pop(key, None)
+        if hasattr(self, "_recently_flat_exit_metadata"):
+            self._recently_flat_exit_metadata.pop(key, None)
+
+    def _should_ignore_recent_exit_stale_snapshot_locked(
+        self, symbol: str, quantity: int
+    ) -> bool:
         """Return true for a non-zero broker row that conflicts with a recent exit."""
         if symbol.upper() in self._positions:
             return False
         if not hasattr(self, "_recently_flat_exit_until_monotonic"):
             self._recently_flat_exit_until_monotonic = {}
+        if not hasattr(self, "_recently_flat_exit_metadata"):
+            self._recently_flat_exit_metadata = {}
         key = symbol.upper()
         until = self._recently_flat_exit_until_monotonic.get(key)
         if until is None:
             return False
-        if time.monotonic() > float(until):
-            self._recently_flat_exit_until_monotonic.pop(key, None)
+        now = time.monotonic()
+        if now > float(until):
+            self._clear_recent_exit_guard_locked(key)
             return False
+        guard = self._recently_flat_exit_metadata.get(key)
+        if guard is None:
+            guard = ExitSettlementGuard(
+                completed_exit_at_monotonic=now, grace_until_monotonic=float(until)
+            )
+            self._recently_flat_exit_metadata[key] = guard
+        guard.stale_snapshot_count += 1
+        guard.last_stale_quantity = int(quantity)
+        grace_remaining = max(0.0, float(until) - now)
+        if guard.last_log_monotonic <= 0.0 or now - guard.last_log_monotonic >= 1.0:
+            guard.last_log_monotonic = now
+            self._logger.info(
+                "POSITION_SYNC_DEFERRED_AFTER_EXIT symbol=%s qty=%s "
+                "remaining=%.3f stale_count=%s",
+                key,
+                quantity,
+                grace_remaining,
+                guard.stale_snapshot_count,
+                extra={
+                    "event": "POSITION_SYNC_DEFERRED_AFTER_EXIT",
+                    "symbol": key,
+                    "broker_quantity": quantity,
+                    "grace_remaining_s": grace_remaining,
+                    "stale_snapshot_count": guard.stale_snapshot_count,
+                },
+            )
         return True
 
     @staticmethod
