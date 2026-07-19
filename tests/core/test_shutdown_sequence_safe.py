@@ -14,7 +14,7 @@ class Ctx:
     market_data_manager = Dummy()
     position_manager = Dummy()
     persistent_state = Dummy()
-    config = type('Cfg', (), {'close_positions_on_shutdown': False})()
+    config = type("Cfg", (), {"close_positions_on_shutdown": False})()
     streamer = Dummy()
 
 
@@ -22,3 +22,22 @@ class Ctx:
 async def test_shutdown_sequence_no_proc():
     ctx = Ctx()
     await shutdown_sequence(ctx)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_sequence_awaits_market_data_manager_async_stop_first():
+    calls = []
+
+    class MDM:
+        async def async_stop(self):
+            calls.append("async_stop")
+
+        def stop(self):
+            calls.append("stop")
+
+    ctx = Ctx()
+    ctx.market_data_manager = MDM()
+
+    await shutdown_sequence(ctx)
+
+    assert calls == ["async_stop"]

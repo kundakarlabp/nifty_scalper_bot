@@ -289,3 +289,41 @@ def test_duplicate_terminal_callbacks_remain_idempotent(tmp_path) -> None:
     assert pm.get_position(SYMBOL) is None
     assert pm.unresolved_terminal_summary()["count"] == 0
     assert pm._terminal_orders["exit-1"].lifecycle_applied is True
+
+
+def test_persistent_position_after_grace_gets_orphan_protection(tmp_path) -> None:
+    pm = _position_manager(tmp_path)
+    bm = _bracket_manager()
+    pm._recently_flat_exit_grace_seconds = 0.25
+
+    pm.update_order_status("exit-1", "FILLED", 120.0)
+    bm.reconcile_symbol_flat(SYMBOL)
+    pm.synchronize_with_broker([_broker_row()])
+    assert pm.get_position(SYMBOL) is None
+    assert bm.is_symbol_managed(SYMBOL) is False
+
+    pm._recently_flat_exit_until_monotonic[SYMBOL] = 0.0
+    pm._recently_flat_exit_metadata[SYMBOL].grace_until_monotonic = 0.0
+    pm.synchronize_with_broker([_broker_row()])
+    restored = pm.get_position(SYMBOL)
+    assert restored is not None
+    assert restored.quantity == QTY
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._position_manager = pm
+    runner._bracket_manager = bm
+    runner._active_orphan_guards = set()
+    runner._orphan_retry_count = {}
+    runner._orphan_retry_last_attempt = {}
+    runner._logger = SimpleNamespace(
+        debug=lambda *a, **k: None,
+        info=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+        exception=lambda *a, **k: None,
+    )
+
+    runner._adopt_orphan_positions()
+
+    assert bm.is_symbol_managed(SYMBOL) is True
+    assert bm.get_bracket(f"orphan_{SYMBOL}") is not None

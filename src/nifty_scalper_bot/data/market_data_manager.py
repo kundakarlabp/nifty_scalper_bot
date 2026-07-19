@@ -1713,35 +1713,28 @@ class MarketDataManager:
             self._ws_start_requested = False
             self._logger.exception("Failure in ws.start")
 
-    def _settle_cancelled_tick_task(
-        self, task: asyncio.Task[Any] | None, *, name: str
-    ) -> None:
-        if task is None:
-            return
-        if task.done():
-            with suppress(asyncio.CancelledError, Exception):
-                task.result()
-            return
-        try:
-            task.cancel()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug("%s cancel raised: %s", name, exc)
-            return
-        loop = task.get_loop()
-        if loop.is_running():
+    def _capture_tick_shutdown_tasks(
+        self,
+    ) -> tuple[asyncio.Task[Any] | None, asyncio.Task[Any] | None]:
+        self._tick_drain_stopping = True
+        return self._tick_drain_task, self._tick_consumer_task
 
-            def _consume_terminal_result(done: asyncio.Task[Any]) -> None:
-                with suppress(asyncio.CancelledError, Exception):
-                    done.result()
+    def _stop_worker_threads_for_shutdown(self) -> None:
+        # Deprecated tick worker removed: only the owning asyncio loop drains ticks.
+        if self._rest_poll_thread is not None:
+            self._rest_poll_stop.set()
+            self._rest_poll_thread.join(timeout=2.0)
+            self._rest_poll_thread = None
+            self._rest_poll_stop.clear()
+        if self._health_monitor_thread is not None:
+            self._health_monitor_stop.set()
+            self._health_monitor_thread.join(timeout=2.0)
+            self._health_monitor_thread = None
+            self._health_monitor_stop.clear()
 
-            task.add_done_callback(_consume_terminal_result)
-            return
-        with suppress(asyncio.CancelledError, Exception):
-            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
-
-    def stop(self) -> None:
+    def _prepare_stop_state(self) -> bool:
         if not self._started:
-            return
+            return False
         self._started = False
         with self._ws_restart_lock:
             self._ws_restart_inflight = False
@@ -1754,24 +1747,102 @@ class MarketDataManager:
                 self._ws.stop()
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("ws.stop() raised: %s", exc)
-        self._tick_drain_stopping = True
-        tick_drain_task = self._tick_drain_task
-        tick_consumer_task = self._tick_consumer_task
+        return True
+
+    async def async_stop(self) -> None:
+        """Stop MDM and await owned asyncio tick tasks to terminal state."""
+        should_stop = self._prepare_stop_state()
+        tick_drain_task, tick_consumer_task = self._capture_tick_shutdown_tasks()
+        candle_flush_task = getattr(self, "_candle_flush_task", None)
+        tasks = [
+            task
+            for task in (tick_drain_task, tick_consumer_task, candle_flush_task)
+            if task is not None and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in (tick_drain_task, tick_consumer_task, candle_flush_task):
+            if task is not None and task.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    task.result()
         self._tick_drain_task = None
         self._tick_consumer_task = None
-        self._settle_cancelled_tick_task(tick_drain_task, name="tick drain")
-        self._settle_cancelled_tick_task(tick_consumer_task, name="tick consumer")
-        # Deprecated tick worker removed: only the owning asyncio loop drains ticks.
-        if self._rest_poll_thread is not None:
-            self._rest_poll_stop.set()
-            self._rest_poll_thread.join(timeout=2.0)
-            self._rest_poll_thread = None
-            self._rest_poll_stop.clear()
-        if self._health_monitor_thread is not None:
-            self._health_monitor_stop.set()
-            self._health_monitor_thread.join(timeout=2.0)
-            self._health_monitor_thread = None
-            self._health_monitor_stop.clear()
+        if hasattr(self, "_candle_flush_task"):
+            self._candle_flush_task = None
+        stop_fallback_worker = getattr(self, "_stop_fallback_tick_worker", None)
+        if callable(stop_fallback_worker):
+            stop_fallback_worker()
+        if should_stop:
+            self._stop_worker_threads_for_shutdown()
+
+    def _settle_cancelled_tick_task(
+        self, task: asyncio.Task[Any] | None, *, name: str
+    ) -> bool:
+        if task is None:
+            return True
+        if task.done():
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
+            return True
+        try:
+            task.cancel()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("%s cancel raised: %s", name, exc)
+            return False
+        loop = task.get_loop()
+        if loop.is_closed():
+            self._logger.warning(
+                "MDM_TICK_TASK_UNSETTLED_ON_CLOSED_LOOP name=%s",
+                name,
+                extra={"event": "MDM_TICK_TASK_UNSETTLED_ON_CLOSED_LOOP", "task": name},
+            )
+            return False
+        if loop.is_running():
+
+            def _consume_terminal_result(done: asyncio.Task[Any]) -> None:
+                with suppress(asyncio.CancelledError, Exception):
+                    done.result()
+
+            task.add_done_callback(_consume_terminal_result)
+            self._logger.warning(
+                "MDM_TICK_TASK_CANCEL_DEFERRED_RUNNING_LOOP name=%s",
+                name,
+                extra={
+                    "event": "MDM_TICK_TASK_CANCEL_DEFERRED_RUNNING_LOOP",
+                    "task": name,
+                },
+            )
+            return False
+        with suppress(asyncio.CancelledError, Exception):
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        return task.done()
+
+    def stop(self) -> None:
+        should_stop = self._prepare_stop_state()
+        tick_drain_task, tick_consumer_task = self._capture_tick_shutdown_tasks()
+        drain_settled = self._settle_cancelled_tick_task(
+            tick_drain_task, name="tick drain"
+        )
+        consumer_settled = self._settle_cancelled_tick_task(
+            tick_consumer_task, name="tick consumer"
+        )
+        if not drain_settled or not consumer_settled:
+            self._logger.warning(
+                "MDM_TICK_TASK_SHUTDOWN_UNSETTLED drain_settled=%s consumer_settled=%s",
+                drain_settled,
+                consumer_settled,
+                extra={
+                    "event": "MDM_TICK_TASK_SHUTDOWN_UNSETTLED",
+                    "drain_settled": drain_settled,
+                    "consumer_settled": consumer_settled,
+                },
+            )
+        self._tick_drain_task = None
+        self._tick_consumer_task = None
+        if should_stop:
+            self._stop_worker_threads_for_shutdown()
 
     def set_ws_connected(self, connected: bool) -> None:
         """Record WebSocket connectivity state for health reporting."""

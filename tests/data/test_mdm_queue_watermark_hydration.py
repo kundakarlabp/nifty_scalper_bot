@@ -50,8 +50,7 @@ async def _run_consumer_until_join(mdm: MarketDataManager) -> None:
     consumer = asyncio.create_task(mdm._consume_ticks())
     await asyncio.wait_for(mdm._tick_queue.join(), timeout=1.0)
     consumer.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await consumer
+    await asyncio.gather(consumer, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -114,8 +113,7 @@ async def test_concurrent_producer_has_no_tick_loss_or_reorder() -> None:
     mdm._tick_queue.put_nowait(_tick("producer-new", SYMBOL, 17))
     await asyncio.wait_for(mdm._tick_queue.join(), timeout=1.0)
     consumer.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await consumer
+    await asyncio.gather(consumer, return_exceptions=True)
 
     assert processed == ["same-symbol-new", "other-stale-minute", "producer-new"]
     assert mdm._tick_queue._unfinished_tasks == mdm._tick_queue.qsize() == 0
@@ -232,3 +230,101 @@ async def test_stop_settles_running_tick_tasks_without_pending_task_warning() ->
 
     assert mdm._tick_drain_task is None
     assert mdm._tick_consumer_task is None
+
+
+@pytest.mark.asyncio
+async def test_async_stop_awaits_tick_tasks_and_clears_references() -> None:
+    mdm = MarketDataManager(broker=None, websocket=None, settings={})
+    loop = asyncio.get_running_loop()
+    mdm._started = True
+    task_exits: list[str] = []
+
+    async def wait_forever(name: str) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            task_exits.append(name)
+
+    drain_task = loop.create_task(wait_forever("drain"))
+    consumer_task = loop.create_task(wait_forever("consumer"))
+    mdm._tick_drain_task = drain_task
+    mdm._tick_consumer_task = consumer_task
+    await asyncio.sleep(0)
+
+    await mdm.async_stop()
+
+    assert sorted(task_exits) == ["consumer", "drain"]
+    assert drain_task.done()
+    assert consumer_task.done()
+    assert mdm._tick_drain_task is None
+    assert mdm._tick_consumer_task is None
+
+
+@pytest.mark.asyncio
+async def test_async_stop_is_idempotent_and_leaves_no_pending_mdm_task() -> None:
+    mdm = MarketDataManager(broker=None, websocket=None, settings={})
+    loop = asyncio.get_running_loop()
+    mdm._started = True
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    drain_task = loop.create_task(wait_forever())
+    consumer_task = loop.create_task(wait_forever())
+    mdm._tick_drain_task = drain_task
+    mdm._tick_consumer_task = consumer_task
+
+    await mdm.async_stop()
+    await mdm.async_stop()
+    await asyncio.sleep(0)
+
+    assert drain_task.done()
+    assert consumer_task.done()
+    assert not [task for task in (drain_task, consumer_task) if not task.done()]
+
+
+@pytest.mark.asyncio
+async def test_async_stop_does_not_block_or_close_running_loop() -> None:
+    mdm = MarketDataManager(broker=None, websocket=None, settings={})
+    loop = asyncio.get_running_loop()
+    mdm._started = True
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    mdm._tick_drain_task = loop.create_task(wait_forever())
+    mdm._tick_consumer_task = loop.create_task(wait_forever())
+
+    await asyncio.wait_for(mdm.async_stop(), timeout=1.0)
+
+    assert loop.is_running()
+    assert not loop.is_closed()
+
+
+@pytest.mark.asyncio
+async def test_async_stop_produces_no_mdm_task_destroyed_pending_warning() -> None:
+    mdm = MarketDataManager(broker=None, websocket=None, settings={})
+    loop = asyncio.get_running_loop()
+    mdm._started = True
+    contexts: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    mdm._tick_drain_task = loop.create_task(wait_forever())
+    mdm._tick_consumer_task = loop.create_task(wait_forever())
+    mdm._candle_flush_task = loop.create_task(wait_forever())
+    try:
+        await mdm.async_stop()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert mdm._candle_flush_task is None
+    assert not [
+        context
+        for context in contexts
+        if "Task was destroyed but it is pending" in str(context.get("message"))
+    ]

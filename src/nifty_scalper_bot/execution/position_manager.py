@@ -3707,7 +3707,8 @@ class PositionManager:
         if guard.last_log_monotonic <= 0.0 or now - guard.last_log_monotonic >= 1.0:
             guard.last_log_monotonic = now
             self._logger.info(
-                "POSITION_SYNC_DEFERRED_AFTER_EXIT symbol=%s qty=%s remaining=%.3f stale_count=%s",
+                "POSITION_SYNC_DEFERRED_AFTER_EXIT symbol=%s qty=%s "
+                "remaining=%.3f stale_count=%s",
                 key,
                 quantity,
                 grace_remaining,

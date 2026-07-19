@@ -7527,15 +7527,11 @@ def _is_explicit_simulated_adapter(adapter: Any) -> bool:
         return True
 
     wrapped = getattr(adapter, "client", None)
-    if wrapped is not None and bool(
-        getattr(wrapped, "is_simulated_adapter", False)
-    ):
+    if wrapped is not None and bool(getattr(wrapped, "is_simulated_adapter", False)):
         return True
 
     wrapped = getattr(adapter, "_broker", None)
-    if wrapped is not None and bool(
-        getattr(wrapped, "is_simulated_adapter", False)
-    ):
+    if wrapped is not None and bool(getattr(wrapped, "is_simulated_adapter", False)):
         return True
 
     return False
@@ -9399,9 +9395,11 @@ async def _recompute_and_push_runtime_readiness(
     )
     runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
     evaluation_ready = bool(data_hard_ready and runner_running)
-    configured_mode = str(
-        getattr(getattr(ctx, "settings", None), "execution_mode", "") or ""
-    ).strip().upper()
+    configured_mode = (
+        str(getattr(getattr(ctx, "settings", None), "execution_mode", "") or "")
+        .strip()
+        .upper()
+    )
     live_mode = _is_live_execution_mode(configured_mode) or _is_live_execution_mode()
     market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(
@@ -14447,7 +14445,9 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     )
     await _call_component("streamer", streamer, ("stop", "shutdown", "close"))
     await _call_component(
-        "market_data_manager", market_data_manager, ("stop", "shutdown", "close")
+        "market_data_manager",
+        market_data_manager,
+        ("async_stop", "stop", "shutdown", "close"),
     )
     await _call_component("message_bus", message_bus, ("stop", "shutdown", "close"))
     try:
