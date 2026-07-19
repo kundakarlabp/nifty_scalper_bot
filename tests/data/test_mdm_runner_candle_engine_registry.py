@@ -129,3 +129,49 @@ def test_normal_projection_append_and_rolling_maxlen_do_not_count_divergence() -
     assert len(mdm.get_ohlc_bars(SYMBOL)) == 3
     assert [bar["close"] for bar in mdm.get_ohlc_bars(SYMBOL)] == [101.0, 102.0, 103.0]
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 0
+
+
+def test_concurrent_first_use_history_and_engine_access_share_identity() -> None:
+    mdm = _mdm()
+    barrier = threading.Barrier(2)
+    results: dict[str, Any] = {}
+
+    def import_history() -> None:
+        barrier.wait(timeout=1)
+        results["accepted"] = mdm.ingest_historical_ohlc("nifty", [_row(0, 111.0)])
+        results["history_engine"] = mdm.get_candle_engine("NSE:NIFTY")
+
+    def live_access() -> None:
+        barrier.wait(timeout=1)
+        results["live_engine"] = mdm.get_candle_engine("nse:nifty")
+
+    threads = [
+        threading.Thread(target=import_history),
+        threading.Thread(target=live_access),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert results["accepted"] == 1
+    assert results["history_engine"] is results["live_engine"]
+    assert list(mdm._engines) == [SYMBOL]
+    assert results["live_engine"].get_completed_bars()[-1]["close"] == 111.0
+
+
+def test_projection_lag_reports_engine_ahead_and_refresh_returns_zero() -> None:
+    mdm = _mdm()
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_row(0, 100.0)]) == 1
+    engine = mdm.get_candle_engine(SYMBOL)
+    engine.import_history(
+        __import__("pandas").DataFrame([_row(1, 101.0)]),
+        mode="incremental",
+        source="historical",
+    )
+
+    # Existing projection is still a valid older canonical slice.
+    mdm._refresh_candle_projection(SYMBOL)
+
+    assert mdm._candle_metrics["candle_projection_lag_seconds"] == 0
+    assert mdm._candle_metrics["candle_projection_lag_bars"] == 0

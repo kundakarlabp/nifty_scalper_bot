@@ -103,3 +103,16 @@ def test_projection_divergence_detects_equal_length_ohlcv_mismatch() -> None:
     mdm._refresh_candle_projection(SYMBOL)
 
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 1
+
+
+def test_history_results_are_per_symbol() -> None:
+    mdm = _mdm()
+    other = "NSE:BANKNIFTY"
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
+    row = _bar()
+    row["symbol"] = other
+    assert mdm.ingest_historical_ohlc(other, [row]) == 1
+
+    assert mdm._last_history_import_result_by_symbol[SYMBOL].success
+    assert mdm._last_history_import_result_by_symbol[other].success
+    assert set(mdm._last_history_import_result_by_symbol) == {SYMBOL, other}

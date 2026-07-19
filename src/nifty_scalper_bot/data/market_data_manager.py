@@ -27,63 +27,62 @@ Safe-edit notes:
 """
 
 from __future__ import annotations
-from nifty_scalper_bot.core.message_bus import Message, MessageType
 
 import asyncio
 import heapq
 import inspect
+import logging
+import math
+import os
+import re
+import threading
+import time
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-import logging
-import math
-import os
-
-from nifty_scalper_bot.config.env_utils import parse_int_env
-from nifty_scalper_bot.utils.errors import BrokerAuthenticationError, BrokerError
-import re
 from random import uniform
-import threading
-import time
 from typing import (
     Any,
     Callable,
     Deque,
     Iterable,
+    Literal,
     Mapping,
     Sequence,
     cast,
 )
+
 import pandas as pd
 
-from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.config.env_utils import parse_int_env
+from nifty_scalper_bot.core.message_bus import Message, MessageType
 from nifty_scalper_bot.data.candle_engine import (
     CandleEngine,
     CandleHistoryConflictError,
 )
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.normalizers import normalize_history_row
+from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.data.time_contract import coerce_market_timestamp
 from nifty_scalper_bot.data.validator import validate_tick
-from nifty_scalper_bot.data.source import DataIntegrityError
-from nifty_scalper_bot.instruments.active_contracts import (
-    canonical_nifty_future_symbol,
-    is_nifty_future_expired,
-)
-from nifty_scalper_bot.infra.metrics import METRICS
-from nifty_scalper_bot.streaming.websocket_manager import (
-    ConnectionState,
-    WebSocketManager,
-)
 from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
     resolve_quote_bid_ask_spread,
 )
-from nifty_scalper_bot.utils.env import get_str
+from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.instruments.active_contracts import (
+    canonical_nifty_future_symbol,
+    is_nifty_future_expired,
+)
+from nifty_scalper_bot.streaming.websocket_manager import ConnectionState
 from nifty_scalper_bot.utils.async_helpers import safe_task
+from nifty_scalper_bot.utils.env import get_str
+from nifty_scalper_bot.utils.errors import BrokerAuthenticationError, BrokerError
 from nifty_scalper_bot.utils.log_throttle import (
     log_on_change,
+)
+from nifty_scalper_bot.utils.log_throttle import (
     log_throttled as log_throttled_live,
 )
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
@@ -98,6 +97,38 @@ from nifty_scalper_bot.utils.market_hours import (
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.serialization import to_json_safe
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
+
+
+class _DeferredTickLoop:
+    """Loop-like sink used before asyncio startup."""
+
+    def call_soon_threadsafe(self, callback: Callable[[], None]) -> None:
+        raise RuntimeError("event loop not available yet")
+
+
+@dataclass(frozen=True)
+class HistoryImportResult:
+    """Structured per-symbol result for CandleEngine historical imports."""
+
+    symbol: str
+    status: Literal[
+        "success_new_bars",
+        "success_idempotent",
+        "failed_validation",
+        "finalized_candle_conflict",
+    ]
+    accepted_rows: int
+    returned_rows: int
+    stored_rows: int
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.status in {"success_new_bars", "success_idempotent"}
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
 
 # NOTE: resolver is attached at runtime by app.py (ctx.market_data_manager._resolver).
 # InstrumentManager is used as the resolver (Any type accepted).
@@ -396,7 +427,8 @@ class MarketDataManager:
         self._engines: dict[str, CandleEngine] = {}
         self._candle_metrics: dict[str, float] = defaultdict(float)
         self._candle_queue_watermarks: dict[str, pd.Timestamp] = {}
-        self._last_history_import_result: dict[str, Any] | None = None
+        self._last_history_import_result: HistoryImportResult | None = None
+        self._last_history_import_result_by_symbol: dict[str, HistoryImportResult] = {}
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._last_cumulative_volume_by_symbol: dict[str, float] = {}
@@ -659,6 +691,8 @@ class MarketDataManager:
             configured_poll_max if self._rest_poll_enabled else 0
         )
         self._fallback_enabled = self._rest_poll_enabled
+        # Deprecated diagnostics only: REST fallback quotes are ticks,
+        # not candle writers.
         self._poll_bar_state: dict[str, dict[str, float | None | int]] = {}
         self._last_poll_bucket: dict[str, int] = {}
         self._rest_poll_stop = threading.Event()
@@ -879,109 +913,32 @@ class MarketDataManager:
                 if poll_bucket > current_live_bucket:
                     return
             if self._is_duplicate(symbol, normalized):
+                self._candle_metrics["fallback_quote_tick_duplicate_total"] += 1
                 self._store_tick(symbol, normalized)
             else:
-                self._emit_tick(symbol, normalized, source=source)
-            self._process_poll_quote(symbol, normalized)
+                normalized["source"] = source or "rest_poll"
+                normalized["timestamp_source"] = "rest_poll"
+                self._candle_metrics["fallback_quote_tick_total"] += 1
+                self._enqueue_tick_threadsafe(dict(normalized))
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("ingest_rest_quote failed for %s: %s", symbol, exc)
 
     def _process_poll_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
-        """Aggregate poll quotes into minute candles. Args: symbol, quote. Returns: None. Raises: Exception."""
-        try:
-            ts = float(quote.get("timestamp") or time.time())
-            if ts > 1e12:
-                ts /= 1000.0
-
-            bucket = int(ts // 60)
-            state = self._poll_bar_state.setdefault(
-                symbol,
-                {
-                    "open": None,
-                    "high": None,
-                    "low": None,
-                    "close": None,
-                    "volume": 0,
-                    "volume_source": "missing",
-                },
-            )
-
-            price = float(quote.get("last_price") or quote.get("ltp") or 0.0)
-            if price <= 0:
-                return
-
-            if state["open"] is None:
-                state["open"] = price
-                state["high"] = price
-                state["low"] = price
-            else:
-                state["high"] = max(float(state["high"] or price), price)
-                state["low"] = min(float(state["low"] or price), price)
-            state["close"] = price
-            cumulative = (
-                quote.get("volume_traded_today")
-                or quote.get("volume_traded")
-                or quote.get("volume")
-            )
-            try:
-                cumulative_value = float(cumulative)
-            except (TypeError, ValueError):
-                cumulative_value = None
-            if cumulative_value is not None and cumulative_value >= 0:
-                prev = self._last_cumulative_volume_by_symbol.get(symbol)
-                delta = (
-                    0.0 if prev is None else max(0.0, cumulative_value - float(prev))
-                )
-                self._last_cumulative_volume_by_symbol[symbol] = cumulative_value
-                state["volume"] = float(state.get("volume") or 0.0) + delta
-                state["volume_source"] = "cumulative_delta"
-            elif self._safe_canonical_for_basket(symbol) == "NSE:NIFTY":
-                state["volume_source"] = "not_applicable_index"
-            else:
-                state["volume_source"] = "missing"
-
-            last_bucket = self._last_poll_bucket.get(symbol)
-            if last_bucket is None:
-                self._last_poll_bucket[symbol] = bucket
-                return
-
-            if bucket > last_bucket:
-                candle = {
-                    "symbol": symbol,
-                    "open": state["open"],
-                    "high": state["high"],
-                    "low": state["low"],
-                    "close": state["close"],
-                    "volume": int(state["volume"] or 0),
-                    "volume_source": state.get("volume_source", "missing"),
-                    "timestamp": last_bucket * 60,
-                    "source": "poll",
-                }
-                self._poll_bar_state[symbol] = {
-                    "open": price,
-                    "high": price,
-                    "low": price,
-                    "close": price,
-                    "volume": 0,
-                    "volume_source": "missing",
-                }
-                self._last_poll_bucket[symbol] = bucket
-                self._emit_poll_candle(candle)
-                self._logger.info("POLL CANDLE EMITTED: %s", symbol)
-        except Exception as e:
-            self._logger.error("Poll candle build failed for %s: %s", symbol, e)
+        """Deprecated: REST fallback quotes must not fabricate completed candles."""
+        self._candle_metrics["fallback_quote_tick_reject_total"] += 1
+        self._logger.debug(
+            "POLL_CANDLE_BUILDER_DISABLED symbol=%s reason=rest_quotes_are_ticks",
+            symbol,
+        )
 
     def _emit_poll_candle(self, candle: Mapping[str, Any]) -> None:
-        """Ingest poll-built candle into MDM historical buffers.
-
-        Args: candle mapping.
-        Returns: None.
-        Raises: None.
-        """
-        try:
-            self.ingest_historical_bar(dict(candle))
-        except Exception as e:
-            self._logger.error("Poll candle emit failed: %s", e)
+        """Deprecated: poll-built candles are not authoritative production input."""
+        symbol = str(candle.get("symbol") or "") if isinstance(candle, Mapping) else ""
+        self._candle_metrics["fallback_quote_tick_reject_total"] += 1
+        self._logger.debug(
+            "POLL_CANDLE_EMIT_DISABLED symbol=%s reason=use_broker_historical_gap_fill",
+            symbol,
+        )
 
     def ingest_historical_bar(self, bar: Mapping[str, Any]) -> None:
         """Import one broker-completed OHLC bar through CandleEngine."""
@@ -993,6 +950,12 @@ class MarketDataManager:
     def ingest_historical_ohlc(
         self, symbol: str, bars: Sequence[Mapping[str, Any]]
     ) -> int:
+        """Compatibility API returning accepted row count."""
+        return self.import_historical_ohlc(symbol, bars).accepted_rows
+
+    def import_historical_ohlc(
+        self, symbol: str, bars: Sequence[Mapping[str, Any]]
+    ) -> HistoryImportResult:
         """Import sorted historical OHLC bars through CandleEngine.
 
         MDM fetches/transports history, but CandleEngine is the only writer that
@@ -1010,12 +973,10 @@ class MarketDataManager:
             self._engines = {}
         if not hasattr(self, "_candle_queue_watermarks"):
             self._candle_queue_watermarks = {}
-        self._last_history_import_result = {
-            "symbol": normalized_symbol,
-            "status": "started",
-            "accepted_rows": 0,
-        }
+        if not hasattr(self, "_last_history_import_result_by_symbol"):
+            self._last_history_import_result_by_symbol = {}
         self._candle_metrics["history_hydration_request_total"] += 1
+        self._candle_metrics["historical_gap_fill_request_total"] += 1
         before = (
             self.get_ohlc_bars(normalized_symbol)
             if hasattr(self, "get_ohlc_bars")
@@ -1044,7 +1005,7 @@ class MarketDataManager:
                 frame = pd.DataFrame(
                     columns=["timestamp", "open", "high", "low", "close", "volume"]
                 )
-            engine = self._get_engine(normalized_symbol)
+            engine = self.get_candle_engine(normalized_symbol)
             engine.import_history(frame, mode="incremental", source="historical")
             after = self._refresh_candle_projection(normalized_symbol)
             self.update_hydration_status(normalized_symbol, after)
@@ -1065,17 +1026,22 @@ class MarketDataManager:
                 if normalized_ts is not None:
                     after_ts.add(normalized_ts[0])
             accepted = len(after_ts - before_ts)
-            status = "success_new_bars" if accepted > 0 else "success_idempotent"
+            status: Literal["success_new_bars", "success_idempotent"] = (
+                "success_new_bars" if accepted > 0 else "success_idempotent"
+            )
             if status == "success_idempotent" and normalized_rows:
                 self._candle_metrics["history_hydration_idempotent_total"] += 1
             self._candle_metrics["history_hydration_success_total"] += 1
-            self._last_history_import_result = {
-                "symbol": normalized_symbol,
-                "status": status,
-                "accepted_rows": accepted,
-                "returned_rows": len(bars or ()),
-                "stored_rows": len(after),
-            }
+            result = HistoryImportResult(
+                symbol=normalized_symbol,
+                status=status,
+                accepted_rows=accepted,
+                returned_rows=len(bars or ()),
+                stored_rows=len(after),
+            )
+            self._last_history_import_result = result
+            self._last_history_import_result_by_symbol[normalized_symbol] = result
+            self._candle_metrics["historical_gap_fill_success_total"] += 1
             self._record_queue_watermark_after_hydration(normalized_symbol)
             self._logger.info(
                 "HYDRATION_INGEST_RESULT symbol=%s returned_rows=%s accepted_rows=%s final_mdm_bars=%s first_ts=%s last_ts=%s",
@@ -1093,26 +1059,31 @@ class MarketDataManager:
                     "final_mdm_bars": len(after),
                 },
             )
-            return accepted
+            return result
         except Exception as exc:  # noqa: BLE001
             self._candle_metrics["history_hydration_failure_total"] += 1
-            status = (
+            status: Literal["failed_validation", "finalized_candle_conflict"] = (
                 "finalized_candle_conflict"
                 if isinstance(exc, CandleHistoryConflictError)
                 else "failed_validation"
             )
             if isinstance(exc, CandleHistoryConflictError):
                 self._candle_metrics["history_hydration_conflict_total"] += 1
-            self._last_history_import_result = {
-                "symbol": normalized_symbol,
-                "status": status,
-                "accepted_rows": 0,
-                "error": str(exc),
-            }
+            result = HistoryImportResult(
+                symbol=normalized_symbol,
+                status=status,
+                accepted_rows=0,
+                returned_rows=len(bars or ()),
+                stored_rows=len(before),
+                error=str(exc),
+            )
+            self._last_history_import_result = result
+            self._last_history_import_result_by_symbol[normalized_symbol] = result
+            self._candle_metrics["historical_gap_fill_failure_total"] += 1
             self._logger.error(
                 "Failure in ingest_historical_ohlc: %s", exc, exc_info=exc
             )
-            return 0
+            return result
 
     def _refresh_candle_projection(
         self, symbol: str, *, source: str | None = None
@@ -1142,6 +1113,41 @@ class MarketDataManager:
         self._candle_metrics["candle_projection_refresh_total"] += 1
         self._candle_metrics["candle_projection_last_refresh"] = time.time()
         self._candle_metrics["candle_projection_size"] = float(len(projected))
+        engine_latest = engine.latest_finalized_minute()
+        projection_latest = None
+        if projected:
+            normalized_projection_ts = self._normalize_bar_timestamp(projected[-1])
+            if normalized_projection_ts is not None:
+                projection_latest = normalized_projection_ts[0]
+        lag_seconds = 0.0
+        lag_bars = 0.0
+        if engine_latest is not None:
+            engine_ts = pd.Timestamp(engine_latest)
+            self._candle_metrics["candle_engine_latest_finalized_timestamp"] = (
+                engine_ts.timestamp()
+            )
+            if projection_latest is not None:
+                projection_ts = pd.Timestamp(projection_latest)
+                self._candle_metrics["candle_projection_latest_timestamp"] = (
+                    projection_ts.timestamp()
+                )
+                lag_seconds = max(0.0, (engine_ts - projection_ts).total_seconds())
+                if lag_seconds > 0:
+                    rows_ahead = 0
+                    projection_dt = projection_ts.to_pydatetime()
+                    for row in completed:
+                        normalized_row_ts = self._normalize_bar_timestamp(row)
+                        if (
+                            normalized_row_ts is not None
+                            and normalized_row_ts[0] > projection_dt
+                        ):
+                            rows_ahead += 1
+                    lag_bars = float(rows_ahead)
+            else:
+                lag_seconds = 60.0 * len(completed)
+                lag_bars = float(len(completed))
+        self._candle_metrics["candle_projection_lag_seconds"] = lag_seconds
+        self._candle_metrics["candle_projection_lag_bars"] = lag_bars
         previous_fingerprint = self._candle_projection_fingerprint(previous)
         canonical_fingerprint = self._candle_projection_fingerprint(completed)
         if previous and not self._projection_matches_canonical_slice(
@@ -1162,7 +1168,7 @@ class MarketDataManager:
         projection: list[tuple[Any, float, float, float, float, float]],
         canonical: list[tuple[Any, float, float, float, float, float]],
     ) -> bool:
-        """Return True when projection rows are an ordered contiguous canonical slice."""
+        """Return True when projection rows are a contiguous canonical slice."""
         if not projection:
             return True
         if len(projection) > len(canonical):
@@ -1206,7 +1212,7 @@ class MarketDataManager:
             if hasattr(self, "_canonical_symbol")
             else str(symbol)
         )
-        watermark = self._get_engine(normalized).latest_finalized_minute()
+        watermark = self.get_candle_engine(normalized).latest_finalized_minute()
         if watermark is None:
             return
         try:
@@ -5828,6 +5834,9 @@ class MarketDataManager:
 
             self._main_loop = loop
             self._ensure_tick_consumer(reason="event_loop_wired")
+            with self._pending_tick_lock:
+                if self._pending_count_locked() > 0:
+                    self._schedule_tick_drain_locked(loop)
         except Exception as e:
             self._logger.error(
                 "Failure in MarketDataManager.set_event_loop: %s",
@@ -6262,9 +6271,9 @@ class MarketDataManager:
         This function is called from the KiteTicker WS thread and MUST be
         non-blocking.  We never perform processing work here — we only
         enqueue.  If the queue is full we drop the oldest tick so a stall
-        in the consumer cannot back-pressure onto the WS thread.  If no
-        asyncio loop is registered we spin up a dedicated worker thread
-        that drains the queue — never the WS thread itself.
+        in the consumer cannot back-pressure onto the WS thread. If no
+        asyncio loop is registered, ticks are retained in the bounded
+        pending ingress buffer until the owning loop is wired.
         """
         try:
             tick_payload = dict(tick)
@@ -6279,19 +6288,10 @@ class MarketDataManager:
             self._enqueue_latest_tick_for_drain(tick_payload, loop)
             return
 
-        # No event loop available — ensure a worker thread exists so WS
-        # thread never performs processing work inline.
-        self._ensure_tick_worker()
+        # No event loop available: keep a bounded, lock-protected ingress buffer.
+        # The owning asyncio loop transfers this FIFO/coalesced buffer exactly once.
         try:
-            if not self._put_priority_tick_nowait(self._tick_queue, tick_payload):
-                self._tick_queue_dropped += 1
-                now = time.monotonic()
-                if now - self._last_tick_queue_full_log > 5.0:
-                    self._last_tick_queue_full_log = now
-                    self._logger.warning(
-                        "Tick queue full — dropped %d ticks so far",
-                        self._tick_queue_dropped,
-                    )
+            self._enqueue_latest_tick_for_drain(tick_payload, _DeferredTickLoop())
             self._emit_priority_summaries_if_due()
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
@@ -6714,9 +6714,7 @@ class MarketDataManager:
             self._tick_drain_start_pending = False
             self._logger.warning("MDM_TICK_DRAIN_SCHEDULE_FAILED error=%r", exc)
 
-    def _enqueue_latest_tick_for_drain(
-        self, tick: dict[str, Any], loop: asyncio.AbstractEventLoop
-    ) -> None:
+    def _enqueue_latest_tick_for_drain(self, tick: dict[str, Any], loop: Any) -> None:
         key, priority, bucket, reason = self._resolve_tick_key_and_priority(tick)
         with self._pending_tick_lock:
             self._tick_submitted_total += 1
@@ -7033,46 +7031,12 @@ class MarketDataManager:
             }
 
     def _ensure_tick_worker(self) -> None:
-        """Start the fallback drain thread once, on first need."""
-        # TODO: fallback worker currently uses asyncio.Queue from a worker thread.
-        # Runtime path normally uses run_coroutine_threadsafe() onto _main_loop.
-        # If fallback becomes production-critical, replace with queue.Queue for
-        # cross-thread safety.
-        t = self._tick_worker_thread
-        if t is not None and t.is_alive():
-            return
-        self._tick_worker_stop.clear()
-        self._tick_worker_thread = threading.Thread(
-            target=self._tick_worker_loop,
-            name="mdm-tick-worker",
-            daemon=True,
-        )
-        self._tick_worker_thread.start()
+        """Retained compatibility hook; async loop owns CandleEngine consumption."""
+        return
 
     def _tick_worker_loop(self) -> None:
-        """Drain the tick queue off-thread when no asyncio loop is running."""
-        while not self._tick_worker_stop.is_set():
-            # Prefer the loop when it comes online — self-terminate.
-            if self._main_loop is not None and self._main_loop.is_running():
-                return
-            try:
-                raw = self._tick_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                # Light spin — 25 ms pacing keeps latency low without
-                # burning CPU.
-                if self._tick_worker_stop.wait(0.025):
-                    return
-                continue
-            try:
-                if self._queued_tick_at_or_before_watermark(raw):
-                    self._candle_metrics["queued_ticks_purged_after_hydration"] += 1
-                    self._candle_metrics["stale_tick_escape_reject_total"] += 1
-                    continue
-                self._process_queued_tick(raw)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug("tick worker drain error: %s", exc)
-            finally:
-                self._tick_queue.task_done()
+        """Deprecated: never consume asyncio.Queue from an OS thread."""
+        return
 
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Legacy tick-bus hook routed to queue ingestion."""
@@ -7160,8 +7124,8 @@ class MarketDataManager:
         Called by WebSocketManager._on_ticks() for every tick batch —
         runs on the KiteTicker OS thread.  Under NO circumstances may
         this method block or raise; its only job is to hand each tick
-        to the async queue.  All processing happens in _consume_ticks
-        (asyncio task) or _tick_worker_loop (thread fallback).
+        to the async queue / pre-loop pending buffer. All CandleEngine processing
+        happens on the owning asyncio drain/consumer.
 
         Args:
             ticks: Raw tick dicts from KiteTicker (instrument_token + last_price).
@@ -7372,8 +7336,7 @@ class MarketDataManager:
             raw = await self._tick_queue.get()
             try:
                 if self._queued_tick_at_or_before_watermark(raw):
-                    self._candle_metrics["queued_ticks_purged_after_hydration"] += 1
-                    self._candle_metrics["stale_tick_escape_reject_total"] += 1
+                    self._record_watermark_tick_rejection(raw, consumer="async")
                     continue
                 self._process_queued_tick(raw)
             except Exception as exc:
@@ -7400,19 +7363,29 @@ class MarketDataManager:
                     exc_info=True,
                 )
             finally:
-                try:
-                    self._tick_queue.task_done()
-                except Exception:
-                    pass
+                self._tick_queue.task_done()
+
+    def _record_watermark_tick_rejection(
+        self, raw: Mapping[str, Any], *, consumer: str
+    ) -> None:
+        self._candle_metrics["queued_ticks_purged_after_hydration"] += 1
+        self._candle_metrics["stale_tick_escape_reject_total"] += 1
+        self._candle_metrics[f"stale_tick_escape_reject_{consumer}_total"] += 1
 
     def _drain_tick_queue_sync(self) -> None:
-        """Drain queued ticks serially when async loop is unavailable."""
+        """Drain legacy asyncio queue synchronously with watermark/accounting parity."""
         while True:
             try:
                 raw = self._tick_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            self._process_queued_tick(raw)
+            try:
+                if self._queued_tick_at_or_before_watermark(raw):
+                    self._record_watermark_tick_rejection(raw, consumer="sync")
+                    continue
+                self._process_queued_tick(raw)
+            finally:
+                self._tick_queue.task_done()
 
     def _normalize_ws_tick(self, raw: dict[str, Any]) -> dict[str, Any] | None:
         """Normalize websocket tick payload. Args: raw. Returns: canonical tick or None. Raises: none."""
@@ -7471,14 +7444,36 @@ class MarketDataManager:
         if price <= 0:
             return None
 
+        timestamp_source = (
+            "exchange_timestamp"
+            if raw.get("exchange_timestamp") is not None
+            else ("timestamp" if raw.get("timestamp") is not None else None)
+        )
+        if (
+            str(raw.get("source") or "").lower()
+            in {"poll", "rest", "rest_poll", "fallback"}
+            and raw.get("timestamp") is not None
+        ):
+            timestamp_source = "rest_poll"
         ts_raw = (
             raw.get("exchange_timestamp")
-            or raw.get("timestamp")
-            or raw.get("received_at")
+            if timestamp_source == "exchange_timestamp"
+            else raw.get("timestamp")
         )
         ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
-        if pd.isna(ts) or ts.year < 2020:
-            ts = pd.Timestamp.utcnow()
+        source_timestamp_valid = not pd.isna(ts) and pd.Timestamp(ts).year >= 2020
+        if not source_timestamp_valid:
+            if not hasattr(self, "_candle_metrics"):
+                self._candle_metrics = defaultdict(float)
+            self._candle_metrics["invalid_candle_timestamp_total"] += 1
+            log_throttled(
+                self._logger,
+                f"mdm_invalid_candle_timestamp_{token}",
+                "MDM_TICK_DROPPED reason=invalid_candle_timestamp token=%s" % token,
+                interval_sec=30.0,
+                level=logging.WARNING,
+            )
+            return None
 
         quote_fields = self._extract_depth_quote_fields(raw)
         return {
@@ -7491,6 +7486,8 @@ class MarketDataManager:
             "last_price": price,
             "timestamp": ts.isoformat(),
             "timestamp_ms": float(pd.Timestamp(ts).timestamp() * 1000.0),
+            "timestamp_source": timestamp_source,
+            "source_timestamp_valid": source_timestamp_valid,
             "source": (
                 "ws_full"
                 if bool(quote_fields.get("depth_available"))
@@ -7937,7 +7934,7 @@ class MarketDataManager:
             "volume": raw.get("volume_traded_today") or raw.get("volume_traded"),
         }
         self._last_tick_ts[symbol] = tick_ts
-        engine = self._get_engine(symbol)
+        engine = self.get_candle_engine(symbol)
         candle = engine.on_tick(tick)
         # ── EMIT TICK: replaces bare _store_tick call ─────────────────────────
         # _emit_tick calls _store_tick internally AND dispatches to _subscribers.
@@ -8108,18 +8105,19 @@ class MarketDataManager:
 
     def get_candle_engine(self, symbol: str) -> CandleEngine:
         """Return the authoritative CandleEngine for a canonicalized symbol."""
-        normalized = self._bar_symbol_key(self._canonical_symbol(symbol))
-        with self._lock:
-            return self._get_engine(normalized)
+        return self._get_engine(symbol)
 
     def _get_engine(self, symbol: str) -> CandleEngine:
-        """Return or create the authoritative candle engine for symbol."""
-        normalized = self._bar_symbol_key(symbol)
-        if not hasattr(self, "_engines"):
-            self._engines = {}
-        if normalized not in self._engines:
-            self._engines[normalized] = CandleEngine(symbol=normalized)
-        return self._engines[normalized]
+        """Return or create the authoritative candle engine for symbol, safely."""
+        normalized = self._bar_symbol_key(self._canonical_symbol(symbol))
+        with self._lock:
+            if not hasattr(self, "_engines"):
+                self._engines = {}
+            engine = self._engines.get(normalized)
+            if engine is None:
+                engine = CandleEngine(symbol=normalized)
+                self._engines[normalized] = engine
+            return engine
 
     def _set_symbol_token_mapping(
         self, symbol: str, token: int, *, source: str
@@ -11638,8 +11636,16 @@ class MarketDataManager:
             self._poll_fallback_count = (
                 int(getattr(self, "_poll_fallback_count", 0)) + 1
             )
-            self._ingest_normalized_tick(normalized_live)
-            self._process_poll_quote(symbol, normalized)
+            normalized_live["source"] = "rest_poll"
+            normalized_live["timestamp_source"] = "rest_poll"
+            if not (
+                normalized_live.get("instrument_token") or normalized_live.get("token")
+            ):
+                token = self._token_by_symbol.get(symbol)
+                if token is not None:
+                    normalized_live["instrument_token"] = token
+            self._candle_metrics["fallback_quote_tick_total"] += 1
+            self._enqueue_tick_threadsafe(dict(normalized_live))
             self._logger.info(
                 "POLL_TICK_INGESTED symbol=%s ltp=%s",
                 symbol,
