@@ -1051,9 +1051,9 @@ class MarketDataManager:
             latest = engine.latest_finalized_minute()
             if latest is not None:
                 self._last_historical_ts[normalized_symbol] = latest.timestamp()
-                self._candle_metrics[
-                    "history_hydration_last_success_timestamp"
-                ] = latest.timestamp()
+                self._candle_metrics["history_hydration_last_success_timestamp"] = (
+                    latest.timestamp()
+                )
             before_ts: set[datetime] = set()
             for row in before:
                 normalized_ts = self._normalize_bar_timestamp(row)
@@ -1096,9 +1096,11 @@ class MarketDataManager:
             return accepted
         except Exception as exc:  # noqa: BLE001
             self._candle_metrics["history_hydration_failure_total"] += 1
-            status = "finalized_candle_conflict" if isinstance(
-                exc, CandleHistoryConflictError
-            ) else "failed_validation"
+            status = (
+                "finalized_candle_conflict"
+                if isinstance(exc, CandleHistoryConflictError)
+                else "failed_validation"
+            )
             if isinstance(exc, CandleHistoryConflictError):
                 self._candle_metrics["history_hydration_conflict_total"] += 1
             self._last_history_import_result = {
@@ -1126,7 +1128,7 @@ class MarketDataManager:
             if hasattr(self, "_bar_symbol_key")
             else normalized
         )
-        engine = self._get_engine(normalized)
+        engine = self.get_candle_engine(normalized)
         completed = engine.get_completed_bars()
         projected: Deque[dict[str, Any]] = deque(maxlen=self._cache_len)
         for row in completed[-self._cache_len :]:
@@ -1141,8 +1143,10 @@ class MarketDataManager:
         self._candle_metrics["candle_projection_last_refresh"] = time.time()
         self._candle_metrics["candle_projection_size"] = float(len(projected))
         previous_fingerprint = self._candle_projection_fingerprint(previous)
-        projected_fingerprint = self._candle_projection_fingerprint(projected)
-        if previous and previous_fingerprint != projected_fingerprint:
+        canonical_fingerprint = self._candle_projection_fingerprint(completed)
+        if previous and not self._projection_matches_canonical_slice(
+            previous_fingerprint, canonical_fingerprint
+        ):
             self._candle_metrics["candle_projection_divergence_total"] += 1
             self._logger.warning(
                 "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s",
@@ -1153,6 +1157,21 @@ class MarketDataManager:
             )
         return [dict(row) for row in projected]
 
+    @staticmethod
+    def _projection_matches_canonical_slice(
+        projection: list[tuple[Any, float, float, float, float, float]],
+        canonical: list[tuple[Any, float, float, float, float, float]],
+    ) -> bool:
+        """Return True when projection rows are an ordered contiguous canonical slice."""
+        if not projection:
+            return True
+        if len(projection) > len(canonical):
+            return False
+        width = len(projection)
+        return any(
+            canonical[start : start + width] == projection
+            for start in range(len(canonical) - width + 1)
+        )
 
     def _candle_projection_fingerprint(
         self, rows: Iterable[Mapping[str, Any]]
@@ -2731,7 +2750,9 @@ class MarketDataManager:
             )
             self._desired_tokens.add(token_int)
             if normalized_symbol:
-                missing_generation = normalized_symbol not in self._symbol_subscription_generation
+                missing_generation = (
+                    normalized_symbol not in self._symbol_subscription_generation
+                )
                 material_transition = (
                     (not was_desired)
                     or previous_token != token_int
@@ -3215,9 +3236,15 @@ class MarketDataManager:
             desired = set(getattr(self, "_desired_tokens", set()) or set())
             confirmed = set(getattr(self, "_confirmed_subscriptions", set()) or set())
             dispatched = set(getattr(self, "_dispatched_subscriptions", set()) or set())
-            sub_gen = (getattr(self, "_symbol_subscription_generation", {}) or {}).get(canonical)
-            tick_gen = (getattr(self, "_symbol_first_tick_generation", {}) or {}).get(canonical)
-            tick_mono = (getattr(self, "_last_valid_live_tick_mono", {}) or {}).get(canonical)
+            sub_gen = (getattr(self, "_symbol_subscription_generation", {}) or {}).get(
+                canonical
+            )
+            tick_gen = (getattr(self, "_symbol_first_tick_generation", {}) or {}).get(
+                canonical
+            )
+            tick_mono = (getattr(self, "_last_valid_live_tick_mono", {}) or {}).get(
+                canonical
+            )
             current_token = self._current_symbol_token_locked(canonical)
             tracked = canonical in (getattr(self, "_tracked_symbols", set()) or set())
         subscription_requested = (
@@ -5510,7 +5537,9 @@ class MarketDataManager:
                 stale_required_symbols.append(symbol)
         recovery_active = bool(stale_required_symbols)
         return {
-            "trading_feed_healthy": futures_fresh and options_fresh and not recovery_active,
+            "trading_feed_healthy": futures_fresh
+            and options_fresh
+            and not recovery_active,
             "futures_fresh": futures_fresh,
             "options_fresh": options_fresh,
             "spot_fresh": spot_fresh,
@@ -8077,13 +8106,20 @@ class MarketDataManager:
         # racing paths (MDM consumer + runner), causing out-of-order drops
         # and readiness flapping.
 
+    def get_candle_engine(self, symbol: str) -> CandleEngine:
+        """Return the authoritative CandleEngine for a canonicalized symbol."""
+        normalized = self._bar_symbol_key(self._canonical_symbol(symbol))
+        with self._lock:
+            return self._get_engine(normalized)
+
     def _get_engine(self, symbol: str) -> CandleEngine:
-        """Return or create candle engine for symbol."""
+        """Return or create the authoritative candle engine for symbol."""
+        normalized = self._bar_symbol_key(symbol)
         if not hasattr(self, "_engines"):
             self._engines = {}
-        if symbol not in self._engines:
-            self._engines[symbol] = CandleEngine(symbol=symbol)
-        return self._engines[symbol]
+        if normalized not in self._engines:
+            self._engines[normalized] = CandleEngine(symbol=normalized)
+        return self._engines[normalized]
 
     def _set_symbol_token_mapping(
         self, symbol: str, token: int, *, source: str
@@ -9315,10 +9351,10 @@ class MarketDataManager:
         # WebSocket transport failed. A healthy socket can continue receiving
         # heartbeats while one subscription generation is incomplete. Global
         # reconnects are therefore reserved for explicit transport evidence.
-        transport_failure = bool(stale_or_missing_symbols) and not processing_backlog and (
-            heartbeat_stale
-            or not ws_healthy
-            or subscription_transport_failure
+        transport_failure = (
+            bool(stale_or_missing_symbols)
+            and not processing_backlog
+            and (heartbeat_stale or not ws_healthy or subscription_transport_failure)
         )
         if stale_or_missing_symbols and not transport_failure:
             recovery_last = getattr(self, "_symbol_recovery_last_attempt_mono", None)

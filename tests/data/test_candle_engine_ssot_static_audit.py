@@ -42,3 +42,18 @@ def test_market_data_manager_ohlc_projection_is_refreshed_not_appended() -> None
     assert "def _refresh_candle_projection" in text
     assert "_ohlc[self._bar_symbol_key(symbol)].append" not in text
     assert "ingest_historical_bar(row)" not in text
+
+
+def test_production_candle_engine_instantiation_is_limited_to_mdm_owner() -> None:
+    offenders: list[str] = []
+    allowed = {Path("data/market_data_manager.py")}
+    pattern = re.compile(r"\bCandleEngine\s*\(")
+    for path in SRC_ROOT.rglob("*.py"):
+        relative = path.relative_to(SRC_ROOT)
+        if relative in ALLOWED_RELATIVE_FILES or relative in allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in pattern.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            offenders.append(f"{relative}:{line}:candle_engine_instantiation")
+    assert offenders == []

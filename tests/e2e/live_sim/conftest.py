@@ -231,7 +231,7 @@ class LiveSimSystem:
             )
             self.runner.sync_history_from_mdm(
                 symbol,
-                required_bars=min(limit, 100),
+                required_bars=limit,
                 reason="live_sim_hydration",
                 role="option" if symbol.endswith(("CE", "PE")) else "context",
             )
