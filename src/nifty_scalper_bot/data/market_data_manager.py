@@ -2249,17 +2249,35 @@ class MarketDataManager:
             return
 
         try:
+            desired_snapshot = set(self._desired_tokens)
+            dispatched_snapshot = set(
+                getattr(self, "_dispatched_subscriptions", set()) or set()
+            )
+            undispatched = sorted(desired_snapshot - dispatched_snapshot)
             changed = ws.set_tokens(sorted(self._desired_tokens))
-            self._dispatched_subscriptions.update(self._desired_tokens)
+            if not changed and undispatched:
+                resubscribe = getattr(ws, "resubscribe", None)
+                subscribe = getattr(ws, "subscribe", None)
+                if callable(resubscribe):
+                    resubscribe(undispatched)
+                elif callable(subscribe):
+                    result = subscribe(undispatched)
+                    if inspect.isawaitable(result):
+                        self._dispatch_awaitable_callback_result(
+                            result,
+                            symbol=",".join(str(t) for t in undispatched),
+                            callback=subscribe,
+                        )
+            self._dispatched_subscriptions.update(desired_snapshot)
             connected = self._is_ws_connected()
             self._logger.debug(
                 "ws_tokens_reconciled desired=%d changed=%s connected=%s",
-                len(self._desired_tokens),
+                len(desired_snapshot),
                 changed,
                 connected,
                 extra={
                     "event": "ws_tokens_reconciled",
-                    "desired_tokens": len(self._desired_tokens),
+                    "desired_tokens": len(desired_snapshot),
                     "changed": changed,
                     "connected": connected,
                 },
@@ -3444,6 +3462,7 @@ class MarketDataManager:
             self._desired_tokens.add(int(token))
             self._pending_subscription_tokens.discard(int(token))
             self._pending_subscriptions.discard(int(token))
+            self._dispatched_subscriptions.discard(int(token))
             self._confirmed_subscriptions.discard(int(token))
             self._symbol_recovery_attempt_state[canonical] = {
                 "expected_symbol": canonical,
@@ -6823,9 +6842,7 @@ class MarketDataManager:
             None if self._last_hb_mono is None else max(0.0, now - self._last_hb_mono)
         )
         heartbeat_fresh = heartbeat_age is not None and heartbeat_age <= threshold
-        raw_transport_fresh = (
-            raw_age is not None and raw_age <= threshold
-        ) or heartbeat_fresh
+        raw_transport_fresh = raw_age is not None and raw_age <= threshold
         required_symbols = self._required_context_symbols_for_backlog(symbol)
         processed_ages: dict[str, float | None] = {}
         raw_ages: dict[str, float | None] = {}
@@ -6862,17 +6879,30 @@ class MarketDataManager:
         backlog_explains_required = (
             required_generation_raw_fresh or pending_required_current_generation
         )
+        isolated_stale_with_fresh_peers = bool(
+            heartbeat_fresh
+            and stale_required
+            and len(stale_required) < len(required_symbols)
+            and any(
+                age is not None and age <= threshold for age in processed_ages.values()
+            )
+        )
         if backlog_proven and stale_required and backlog_explains_required:
             state = "processing_backlog"
+            restart_eligible = False
+        elif stale_required and (
+            required_generation_raw_fresh
+            or required_raw_receive_fresh
+            or raw_transport_fresh
+            or isolated_stale_with_fresh_peers
+        ):
+            state = "symbol_subscription_stale"
             restart_eligible = False
         elif not raw_transport_fresh or (
             heartbeat_age is not None and heartbeat_age > threshold
         ):
             state = "transport_silent"
             restart_eligible = True
-        elif stale_required:
-            state = "symbol_subscription_stale"
-            restart_eligible = False
         else:
             state = "transport_healthy"
             restart_eligible = False
@@ -9747,18 +9777,12 @@ class MarketDataManager:
         # WebSocket transport failed. A healthy socket can continue receiving
         # heartbeats while one subscription generation is incomplete. Global
         # reconnects are therefore reserved for explicit transport evidence.
-        transport_failure = (
-            bool(stale_or_missing_symbols)
+        transport_failure = bool(
+            stale_or_missing_symbols
             and not processing_backlog
             and (
-                not symbol_subscription_stale
+                backlog_classification.get("global_restart_eligible")
                 or heartbeat_stale
-                or not ws_healthy
-                or subscription_transport_failure
-                or symbol_recovery_exceeded
-            )
-            and (
-                heartbeat_stale
                 or not ws_healthy
                 or subscription_transport_failure
                 or symbol_recovery_exceeded
@@ -13595,25 +13619,15 @@ class MarketDataManager:
                     }.values()
                 )
                 deduped.sort(key=lambda item: item["timestamp"])
-                if (
-                    min_rows > 0
-                    and len(deduped) < min_rows
-                    and attempt_name != attempt_specs[-1][0]
-                ):
+                if min_rows > 0 and len(deduped) < min_rows and attempt_name != attempt_specs[-1][0]:
                     if len(deduped) > len(best_so_far):
                         best_so_far = deduped
                         best_attempt_meta = (
-                            attempt_name,
-                            from_date,
-                            to_date,
-                            len(rows),
+                            attempt_name, from_date, to_date, len(rows)
                         )
                     self._logger.info(
                         "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING symbol=%s attempt=%s returned_rows=%s min_rows=%s",
-                        symbol,
-                        attempt_name,
-                        len(deduped),
-                        min_rows,
+                        symbol, attempt_name, len(deduped), min_rows,
                         extra={
                             "event": "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING",
                             "symbol": symbol,

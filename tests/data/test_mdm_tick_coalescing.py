@@ -761,6 +761,25 @@ def test_one_stale_active_future_uses_symbol_recovery_not_global_restart(monkeyp
 
     mdm = MarketDataManager(kite=None)
     mapping = _wire_symbols(mdm)
+    subscribe_calls = []
+
+    class FakeWS:
+        def __init__(self):
+            self.tokens = set(mapping)
+
+        def set_tokens(self, tokens):
+            new_tokens = set(tokens)
+            changed = new_tokens != self.tokens
+            self.tokens = new_tokens
+            return changed
+
+        def subscribe(self, tokens):
+            subscribe_calls.append(list(tokens))
+
+        def is_connected(self):
+            return True
+
+    mdm._ws = FakeWS()
     now = time.monotonic()
     required = mdm._required_live_symbols()
     for sym in required:
@@ -770,26 +789,71 @@ def test_one_stale_active_future_uses_symbol_recovery_not_global_restart(monkeyp
     mdm._desired_tokens = set(mapping)
     mdm._dispatched_subscriptions = set(mapping)
     mdm._confirmed_subscriptions = set(mapping)
+    for token, symbol in mapping.items():
+        if symbol != stale_future:
+            mdm._last_raw_ws_receive_by_token[token] = {
+                "received_mono": now,
+                "subscription_generation": mdm._symbol_subscription_generation.get(
+                    symbol, mdm._subscription_generation
+                ),
+            }
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
-    resubscribed = []
     restarted = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
-        mdm, "_reconcile_ws_subscriptions", lambda: resubscribed.append(True)
-    )
-    monkeypatch.setattr(
         mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
     )
 
-    state = mdm.classify_transport_backlog(stale_future)
+    state = mdm.classify_transport_backlog()
     mdm._check_zombie_ticks()
 
     assert state["transport_classification"] == "symbol_subscription_stale"
     assert restarted == []
-    assert len(resubscribed) == 1
+    assert subscribe_calls == [[4]]
+
+
+def test_symbol_recovery_forces_actual_resubscribe_for_dispatched_future():
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    future_token = 4
+    future_symbol = mapping[future_token]
+    subscribe_calls = []
+
+    class FakeWS:
+        def __init__(self):
+            self.tokens = {future_token}
+
+        def set_tokens(self, tokens):
+            assert set(tokens) == {future_token}
+            return False
+
+        def subscribe(self, tokens):
+            subscribe_calls.append(list(tokens))
+
+        def is_connected(self):
+            return True
+
+    mdm._ws = FakeWS()
+    mdm._desired_tokens = {future_token}
+    mdm._dispatched_subscriptions = {future_token}
+    mdm._confirmed_subscriptions = {future_token}
+    mdm._pending_subscription_tokens = {future_token}
+    mdm._pending_subscriptions = {future_token}
+
+    result = mdm._attempt_symbol_subscription_recovery(
+        future_symbol, reason="symbol_subscription_stale"
+    )
+
+    assert result["attempted"] is True
+    assert subscribe_calls == [[future_token]]
+    assert future_token in mdm._desired_tokens
+    assert future_token not in mdm._confirmed_subscriptions
+    assert future_token not in mdm._pending_subscription_tokens
+    assert future_token not in mdm._pending_subscriptions
+    assert future_token in mdm._dispatched_subscriptions
 
 
 def test_stale_entire_universe_triggers_global_recovery(monkeypatch):
@@ -815,6 +879,36 @@ def test_stale_entire_universe_triggers_global_recovery(monkeypatch):
 
     assert state["transport_classification"] == "transport_silent"
     assert restarted == [True]
+
+
+def test_fresh_heartbeat_does_not_mask_complete_market_data_silence(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now - 120.0
+    mdm._desired_tokens = {1, 2, 3, 4}
+    mdm._dispatched_subscriptions = {1, 2, 3, 4}
+    mdm._confirmed_subscriptions = {1, 2, 3, 4}
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._last_raw_ws_receive_mono = now - 120.0
+    restart_calls = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm, "_trigger_zombie_ws_restart", lambda: restart_calls.append(True)
+    )
+
+    state = mdm.classify_transport_backlog()
+    mdm._check_zombie_ticks()
+
+    assert state["transport_classification"] == "transport_silent"
+    assert state["global_restart_eligible"] is True
+    assert restart_calls == [True]
 
 
 def test_global_restart_requests_are_idempotent(monkeypatch):
