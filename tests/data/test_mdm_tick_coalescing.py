@@ -343,6 +343,7 @@ def test_spot_and_futures_stale_use_symbol_recovery_when_transport_healthy(monke
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
     rest_requests: list[tuple[str, str]] = []
+    resubscribed: list[bool] = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
@@ -352,6 +353,9 @@ def test_spot_and_futures_stale_use_symbol_recovery_when_transport_healthy(monke
         lambda symbol, reason: rest_requests.append((symbol, reason)) or True,
     )
     monkeypatch.setattr(
+        mdm, "_reconcile_ws_subscriptions", lambda: resubscribed.append(True)
+    )
+    monkeypatch.setattr(
         mdm,
         "_trigger_zombie_ws_restart",
         lambda: pytest.fail("healthy transport must not restart globally"),
@@ -359,10 +363,8 @@ def test_spot_and_futures_stale_use_symbol_recovery_when_transport_healthy(monke
 
     mdm._check_zombie_ticks()
 
-    assert {symbol for symbol, _ in rest_requests} == {
-        "NSE:NIFTY",
-        "NFO:NIFTY26JUNFUT",
-    }
+    assert {symbol for symbol, _ in rest_requests} == {"NSE:NIFTY"}
+    assert resubscribed == [True]
 
 
 def test_heartbeat_stale_triggers_single_global_restart(monkeypatch):
@@ -751,7 +753,130 @@ def test_subscription_divergence_needs_grace_and_symbol_recovery(monkeypatch):
     mdm._last_symbol_level_recovery_mono = now
     mdm._check_zombie_ticks()
 
+    assert restarted == []
+
+
+def test_one_stale_active_future_uses_symbol_recovery_not_global_restart(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    now = time.monotonic()
+    required = mdm._required_live_symbols()
+    for sym in required:
+        mdm._last_valid_live_tick_mono[sym] = now
+    stale_future = "NFO:NIFTY26JUNFUT"
+    mdm._last_valid_live_tick_mono[stale_future] = now - 120.0
+    mdm._desired_tokens = set(mapping)
+    mdm._dispatched_subscriptions = set(mapping)
+    mdm._confirmed_subscriptions = set(mapping)
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    resubscribed = []
+    restarted = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm, "_reconcile_ws_subscriptions", lambda: resubscribed.append(True)
+    )
+    monkeypatch.setattr(
+        mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
+    )
+
+    state = mdm.classify_transport_backlog(stale_future)
+    mdm._check_zombie_ticks()
+
+    assert state["transport_classification"] == "symbol_subscription_stale"
+    assert restarted == []
+    assert len(resubscribed) == 1
+
+
+def test_stale_entire_universe_triggers_global_recovery(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now - 120.0
+    restarted = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: False)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(
+        mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
+    )
+
+    state = mdm.classify_transport_backlog()
+    mdm._check_zombie_ticks()
+
+    assert state["transport_classification"] == "transport_silent"
     assert restarted == [True]
+
+
+def test_global_restart_requests_are_idempotent(monkeypatch):
+    mdm = MarketDataManager(kite=None)
+    calls = []
+    mdm._ws = type("WS", (), {"force_reconnect": lambda self: calls.append(True)})()
+    mdm._desired_tokens = {1}
+    mdm._symbol_by_token[1] = "NFO:NIFTY26JUNFUT"
+    mdm._token_to_symbol[1] = "NFO:NIFTY26JUNFUT"
+    mdm._zombie_last_restart_attempt_at = 0.0
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(mdm, "_reconcile_ws_subscriptions", lambda: None)
+
+    mdm._trigger_zombie_ws_restart()
+    mdm._trigger_zombie_ws_restart()
+    suppressed = mdm._global_restart_suppression_reason(time.monotonic())
+
+    assert calls == [True]
+    assert suppressed in {"inflight", "verification_window", "cooldown"}
+
+    mdm._ws_restart_inflight = False
+    mdm._ws_restart_state = "idle"
+    mdm._ws_restart_deadline_mono = None
+    mdm._zombie_last_restart_attempt_at = time.monotonic() - 60.0
+    mdm._trigger_zombie_ws_restart()
+    assert calls == [True, True]
+
+
+def test_symbol_recovery_requires_new_expected_generation_tick(monkeypatch):
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    symbol = "NFO:NIFTY26JUNFUT"
+    token = 4
+    mdm._desired_tokens.add(token)
+    mdm._dispatched_subscriptions.add(token)
+    monkeypatch.setattr(mdm, "_reconcile_ws_subscriptions", lambda: None)
+
+    attempt = mdm._attempt_symbol_subscription_recovery(
+        symbol, reason="symbol_subscription_stale"
+    )
+    assert attempt["attempted"] is True
+    generation = attempt["expected_subscription_generation"]
+    started = attempt["attempt_started_mono"]
+
+    mdm._emit_tick(
+        symbol, {"instrument_token": 999, "last_price": 1, "timestamp": 1}, source="ws"
+    )
+    assert mdm.verify_symbol_subscription_recovery(symbol)["ok"] is False
+    mdm._symbol_first_tick_generation[symbol] = generation - 1
+    mdm._last_valid_live_tick_mono[symbol] = started + 1.0
+    mdm._last_tick_ts[symbol] = time.time()
+    assert mdm.verify_symbol_subscription_recovery(symbol)["ok"] is False
+    mdm._symbol_first_tick_generation[symbol] = generation
+    mdm._last_valid_live_tick_mono[symbol] = started - 1.0
+    assert mdm.verify_symbol_subscription_recovery(symbol)["ok"] is False
+
+    mdm._emit_tick(
+        symbol,
+        {"instrument_token": token, "last_price": 2, "timestamp": time.time()},
+        source="ws",
+    )
+    assert mdm.verify_symbol_subscription_recovery(symbol)["ok"] is True
 
 
 def test_pipeline_overload_enters_recovers_with_hysteresis() -> None:
@@ -1001,7 +1126,7 @@ def test_global_classifier_requires_current_generation_raw_evidence() -> None:
 
     state = mdm.classify_transport_backlog()
 
-    assert state["transport_classification"] == "symbol_feed_stale"
+    assert state["transport_classification"] == "symbol_subscription_stale"
     assert state["required_current_generation_raw_receive_fresh"] is False
 
 
@@ -1096,7 +1221,7 @@ def test_global_classifier_does_not_treat_irrelevant_socket_traffic_as_backlog()
 
     state = mdm.classify_transport_backlog()
 
-    assert state["transport_classification"] == "symbol_feed_stale"
+    assert state["transport_classification"] == "symbol_subscription_stale"
     assert state["global_restart_eligible"] is False
     assert state["raw_transport_fresh"] is True
     assert state["required_current_generation_raw_receive_fresh"] is False

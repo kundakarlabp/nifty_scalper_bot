@@ -8936,6 +8936,22 @@ async def _ensure_active_basket_history(
         )
         needs_fetch = bool(ensure_reason)
         needs_sync = bool(runner_short or indicator_short)
+        if (
+            needs_fetch
+            and ensure_reason in {"history_stale", "recovery_gap_fill"}
+            and role == "futures_context"
+            and callable(getattr(mdm, "classify_transport_backlog", None))
+        ):
+            transport_state = mdm.classify_transport_backlog(symbol)
+            if (
+                transport_state.get("transport_classification")
+                == "symbol_subscription_stale"
+            ):
+                result[symbol] = {
+                    "skipped": True,
+                    "reason": "symbol_subscription_stale",
+                }
+                continue
         requirement_increased = required > int(reqs.get(symbol, 0) or 0)
         if not needs_fetch and not needs_sync:
             result[symbol] = {"skipped": True, "reason": "ready"}
@@ -9429,7 +9445,11 @@ async def _recompute_and_push_runtime_readiness(
     )
     spot_ready = bool(spot_status and spot_status.ready_for_evaluation)
     futures_ready = (
-        bool(futures_status and futures_status.ready_for_evaluation)
+        bool(
+            futures_status
+            and futures_status.ready_for_evaluation
+            and futures_status.live_tick_fresh
+        )
         if futures_symbol
         else True
     )
@@ -9475,7 +9495,22 @@ async def _recompute_and_push_runtime_readiness(
     if not spot_ready:
         missing.append("spot_history_missing")
     if not futures_ready:
-        missing.append("futures_history_missing")
+        futures_bar_count = min(
+            int(getattr(futures_status, "mdm_bars", 0) or 0),
+            int(getattr(futures_status, "runner_bars", 0) or 0),
+            int(getattr(futures_status, "indicator_bars", 0) or 0),
+        )
+        futures_required = int(
+            getattr(futures_status, "required_bars", context_execution_min_bars) or 0
+        )
+        if futures_bar_count < futures_required:
+            missing.append("futures_history_short")
+        elif not bool(getattr(futures_status, "latest_bar_fresh", False)):
+            missing.append("futures_latest_closed_bar_stale")
+        elif not bool(getattr(futures_status, "live_tick_fresh", False)):
+            missing.append("futures_live_tick_stale")
+        else:
+            missing.append("futures_history_gap")
     if not basket_hard_ready:
         missing.extend(basket_missing or ["active_basket_hydration_not_ready"])
     if not evaluation_ready:

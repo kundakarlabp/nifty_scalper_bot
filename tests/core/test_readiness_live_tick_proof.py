@@ -248,7 +248,12 @@ async def test_insufficient_futures_context_blocks_when_full_hydration_required(
         has_ws_tradable_quote=lambda symbols: True,
         _confirmed_subscriptions={1, 2},
         _symbol_to_token={"NFO:CE": 1, "NFO:PE": 2},
-        _last_tick_ts=_fresh_tick_ts(),
+        _last_tick_ts={
+            **_fresh_tick_ts(),
+            "NFO:NIFTY26JUNFUT": (datetime.now(UTC) - timedelta(seconds=999))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        },
     )
     ctx = make_ctx(mdm)
     ctx.active_trading_universe["futures_symbol"] = "NFO:NIFTY26JUNFUT"
@@ -257,4 +262,109 @@ async def test_insufficient_futures_context_blocks_when_full_hydration_required(
 
     assert ctx.context_exec_ready is False
     assert ctx.live_orders_armed is False
-    assert "futures_history_missing" in str(ctx.live_block_reason)
+    assert "futures_history_short" in str(ctx.live_block_reason)
+
+
+@pytest.mark.asyncio
+async def test_futures_readiness_blocker_names_live_stale_vs_history_short(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    statuses = {
+        "NSE:NIFTY": SimpleNamespace(
+            role="spot",
+            ready_for_evaluation=True,
+            ready_for_execution=True,
+            blocker_reasons=[],
+            live_tick_fresh=True,
+            tradable_quote=False,
+            depth_available=False,
+            mdm_bars=60,
+            runner_bars=60,
+            indicator_bars=60,
+            required_bars=20,
+            latest_bar_fresh=True,
+        ),
+        "NFO:NIFTY26JUNFUT": SimpleNamespace(
+            role="futures_context",
+            ready_for_evaluation=True,
+            ready_for_execution=False,
+            blocker_reasons=[],
+            live_tick_fresh=False,
+            tradable_quote=False,
+            depth_available=False,
+            mdm_bars=60,
+            runner_bars=60,
+            indicator_bars=60,
+            required_bars=20,
+            latest_bar_fresh=True,
+        ),
+        "NFO:CE": SimpleNamespace(
+            role="selected_ce",
+            ready_for_evaluation=True,
+            ready_for_execution=True,
+            blocker_reasons=[],
+            live_tick_fresh=True,
+            tradable_quote=True,
+            depth_available=True,
+            mdm_bars=60,
+            runner_bars=60,
+            indicator_bars=60,
+        ),
+        "NFO:PE": SimpleNamespace(
+            role="selected_pe",
+            ready_for_evaluation=True,
+            ready_for_execution=True,
+            blocker_reasons=[],
+            live_tick_fresh=True,
+            tradable_quote=True,
+            depth_available=True,
+            mdm_bars=60,
+            runner_bars=60,
+            indicator_bars=60,
+        ),
+    }
+    for status in statuses.values():
+        status.datahub_bars = getattr(status, "datahub_bars", status.mdm_bars)
+        status.bid = getattr(status, "bid", 1.0)
+        status.ask = getattr(status, "ask", 1.1)
+        status.spread_pct = getattr(status, "spread_pct", 0.1)
+    monkeypatch.setattr(app, "_hydration_status_map", lambda *_a, **_k: statuses)
+    monkeypatch.setattr(
+        app,
+        "_status_for_role",
+        lambda values, role: next(
+            (status for status in values.values() if status.role == role), None
+        ),
+    )
+    snaps = {
+        "NSE:NIFTY": Snap(25000, 2),
+        "NFO:NIFTY26JUNFUT": Snap(25100, 999),
+        "NFO:CE": Snap(100, 2, True, 99.95, 100.05, True),
+        "NFO:PE": Snap(110, 2, True, 109.95, 110.05, True),
+    }
+    mdm = SimpleNamespace(
+        get_symbol_snapshot=lambda s: snaps.get(s),
+        get_ohlc_bars=lambda s, **_k: _history_bars(),
+        has_ws_tradable_quote=lambda symbols: True,
+        _confirmed_subscriptions={1, 2, 4},
+        _symbol_to_token={
+            "NFO:CE": 1,
+            "NFO:PE": 2,
+            "NFO:NIFTY26JUNFUT": 4,
+        },
+        _last_tick_ts={
+            **_fresh_tick_ts(),
+            "NFO:NIFTY26JUNFUT": (datetime.now(UTC) - timedelta(seconds=999))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        },
+    )
+    ctx = make_ctx(mdm)
+    ctx.active_trading_universe["futures_symbol"] = "NFO:NIFTY26JUNFUT"
+    ctx.active_contract_basket = dict(ctx.active_trading_universe)
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason="futures-live-stale")
+
+    assert ctx.context_exec_ready is False
+    assert "futures_live_tick_stale" in str(ctx.live_block_reason)
