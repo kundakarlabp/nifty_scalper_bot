@@ -9,6 +9,7 @@ the package import does not eagerly load either runtime module.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import importlib
 import importlib.abc
 import importlib.machinery
@@ -32,6 +33,7 @@ _DATAHUB_MODULE_NAME = "nifty_scalper_bot.data.data_hub"
 _MDM_MODULE_NAME = "nifty_scalper_bot.data.market_data_manager"
 _DATAHUB_IMPORT_HOOK_ATTR = "_nifty_scalper_datahub_synthetic_guard_hook"
 _MDM_IMPORT_HOOK_ATTR = "_nifty_scalper_mdm_required_tick_backlog_hook"
+Installer = Callable[[ModuleType], None]
 
 
 def _install_datahub_guard(module: ModuleType) -> None:
@@ -57,11 +59,7 @@ def _install_mdm_guard(module: ModuleType) -> None:
 
 
 class _GuardLoader(importlib.abc.Loader):
-    def __init__(
-        self,
-        wrapped: importlib.abc.Loader,
-        installer,
-    ) -> None:
+    def __init__(self, wrapped: importlib.abc.Loader, installer: Installer) -> None:
         self._wrapped = wrapped
         self._installer = installer
 
@@ -85,7 +83,7 @@ class _GuardLoader(importlib.abc.Loader):
 
 
 class _GuardFinder(importlib.abc.MetaPathFinder):
-    def __init__(self, module_name: str, installer) -> None:
+    def __init__(self, module_name: str, installer: Installer) -> None:
         self._module_name = module_name
         self._installer = installer
 
@@ -105,10 +103,7 @@ class _GuardFinder(importlib.abc.MetaPathFinder):
 
 
 def _install_guard_import_hook(
-    *,
-    module_name: str,
-    marker_attr: str,
-    installer,
+    *, module_name: str, marker_attr: str, installer: Installer
 ) -> None:
     module = sys.modules.get(module_name)
     if isinstance(module, ModuleType):
