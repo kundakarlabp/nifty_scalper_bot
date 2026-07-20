@@ -360,15 +360,29 @@ def test_historical_bar_imports_through_candle_engine_projection_not_raw_ticks()
     assert mdm.is_tick_ready("NSE:NIFTY") is False
 
 
-def test_conflicting_rehydration_leaves_projection_unchanged() -> None:
+def test_conflicting_rehydration_reconciles_to_the_rest_historical_value() -> None:
+    """Contract corrected (2026-07-20 hydration-deadlock incident fix): a REST
+    historical re-fetch that disagrees with an already-stored bar for the same
+    minute (declared source="historical", the only source ingest_historical_ohlc
+    ever uses) is now RECONCILED - REST is the exchange-finalized aggregate -
+    instead of aborting the whole batch. This test previously asserted the old
+    batch-fatal behavior (accepted=0, storage unchanged, conflict counted);
+    that was the exact incident-causing defect (real REST/WS overlaps at
+    market open aborted the entire hydration batch, e.g. new_ingested_bars=0
+    for the 2026-07-20 09:19 IST candle)."""
     mdm = _storage_mdm()
     first = {"symbol": "NSE:NIFTY", "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10}
     conflict = {**first, "close": 1.5}
     assert mdm.ingest_historical_ohlc("NSE:NIFTY", [first]) == 1
-    before = mdm.get_ohlc_bars("NSE:NIFTY")
-    assert mdm.ingest_historical_ohlc("NSE:NIFTY", [conflict]) == 0
-    assert mdm.get_ohlc_bars("NSE:NIFTY") == before
-    assert mdm._candle_metrics["history_hydration_conflict_total"] == 1
+    # accepted_rows counts NEWLY added timestamps; a reconciled overlap
+    # updates an EXISTING timestamp's value, so accepted_rows is 0 here -
+    # the correctness signal is the stored value and the absence of a
+    # recorded conflict, asserted below.
+    mdm.ingest_historical_ohlc("NSE:NIFTY", [conflict])
+    after = mdm.get_ohlc_bars("NSE:NIFTY")
+    assert len(after) == 1
+    assert after[0]["close"] == 1.5
+    assert mdm._candle_metrics["history_hydration_conflict_total"] == 0
 
 
 def test_missing_readiness_requirements_fail_closed_even_with_ready_bars() -> None:
@@ -423,3 +437,111 @@ def test_live_tick_writes_raw_tick_history_without_implying_ohlc_ready() -> None
     assert mdm.is_tick_ready("NSE:NIFTY") is True
     assert mdm.is_ohlc_ready("NSE:NIFTY") is False
     assert mdm.is_market_data_ready("NSE:NIFTY") is False
+
+
+def _fetch_history_mdm(historical_data) -> MarketDataManager:
+    """Minimal MDM wired only for MarketDataManager.fetch_history's real
+    attempt-widening ladder (token/broker/lock plumbing), independent of the
+    lighter-weight `_mdm()` fake used by the ensure_history-level tests above.
+    """
+    mdm = MarketDataManager.__new__(MarketDataManager)
+    mdm._logger = SimpleNamespace(
+        info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None
+    )
+    mdm._canonical_symbol = lambda s: str(s)
+    mdm._token_by_symbol = {"NSE:NIFTY": 256265}
+    mdm._resolver = None
+    mdm._last_history_request_ts = 0.0
+
+    class _Broker:
+        pass
+
+    broker = _Broker()
+    broker.historical_data = historical_data
+    mdm._broker = broker
+    return mdm
+
+
+def _hist_row(minute_offset: int, base: datetime) -> dict:
+    ts = base + timedelta(minutes=minute_offset)
+    return {"timestamp": ts, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10}
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_widens_past_single_session_when_insufficient() -> None:
+    """2026-07-20 09:59 IST incident: a 2-calendar-day window from a Monday
+    morning does not reach Friday's session (2 days back from Monday is
+    Saturday). The first attempt returned only ~41 elapsed-session rows and
+    was accepted merely because it was non-empty. With min_rows declared,
+    fetch_history must keep widening until the target is met."""
+    now = datetime.now(timezone.utc)
+    session_open = now.replace(hour=3, minute=45, second=0, microsecond=0)  # ~09:15 IST in UTC
+    if session_open > now:
+        session_open -= timedelta(days=1)
+    calls: list[tuple] = []
+
+    def historical_data(instrument_key, from_date, to_date, interval):
+        calls.append((instrument_key, from_date, to_date, interval))
+        span_days = (to_date - from_date).days
+        if span_days <= 3:
+            # Narrow window: only today's elapsed 41 minutes (the incident).
+            return _rows(41)
+        # Wider window reaches the prior session: 60 eligible closed bars.
+        return _rows(60)
+
+    mdm = _fetch_history_mdm(historical_data)
+    rows = await mdm.fetch_history("NSE:NIFTY", "minute", days=2, min_rows=50)
+
+    assert len(rows) >= 50
+    assert len(calls) >= 2, "must have widened past the first insufficient attempt"
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_returns_first_attempt_when_already_sufficient() -> None:
+    """No unnecessary widening/broker load when the first attempt already
+    satisfies min_rows."""
+    calls: list[tuple] = []
+
+    def historical_data(instrument_key, from_date, to_date, interval):
+        calls.append(1)
+        return _rows(55)
+
+    mdm = _fetch_history_mdm(historical_data)
+    rows = await mdm.fetch_history("NSE:NIFTY", "minute", days=2, min_rows=50)
+
+    assert len(rows) == 55
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_returns_best_available_when_all_attempts_short() -> None:
+    """Even a broker that never has enough bars (e.g. a young contract) must
+    not come back as an empty list - the caller's own sufficiency check
+    (required_bars) reports the true shortfall using real, if short, data."""
+    def historical_data(instrument_key, from_date, to_date, interval):
+        span_days = (to_date - from_date).days
+        return _rows(min(30, span_days * 5))
+
+    mdm = _fetch_history_mdm(historical_data)
+    rows = await mdm.fetch_history("NSE:NIFTY", "minute", days=2, min_rows=50)
+
+    assert 0 < len(rows) <= 30
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_min_rows_zero_preserves_legacy_first_nonempty_behavior() -> (
+    None
+):
+    """Backward compatibility: existing callers that omit min_rows keep the
+    original "first non-empty attempt wins" behavior unchanged."""
+    calls: list[tuple] = []
+
+    def historical_data(instrument_key, from_date, to_date, interval):
+        calls.append(1)
+        return _rows(5)
+
+    mdm = _fetch_history_mdm(historical_data)
+    rows = await mdm.fetch_history("NSE:NIFTY", "minute", days=2)
+
+    assert len(rows) == 5
+    assert len(calls) == 1

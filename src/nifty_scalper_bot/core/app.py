@@ -10196,6 +10196,30 @@ async def _deferred_basket_hydration_retry(
     if max_attempts is None:
         max_attempts = int(os.getenv("DEFERRED_BASKET_MAX_ATTEMPTS", "160") or "160")
     policy = MarketDataPolicy.from_env()
+
+    def _hydration_fingerprint() -> tuple[int, ...]:
+        # Cheap progress evidence: total MDM closed-bar count across the
+        # currently committed basket's symbols. If this is unchanged between
+        # attempts, the previous attempt's hydration fetch made no progress
+        # and logging a second "FAILED" event for the SAME expected wait
+        # state is misleading noise, not a new failure (2026-07-20 incident:
+        # DEFERRED_BASKET_RETRY_WAITING immediately followed by
+        # DEFERRED_BASKET_RETRY_FAILED for the identical data_not_ready
+        # state, every 15s, 95 times).
+        mdm = getattr(ctx, "market_data_manager", None)
+        basket = getattr(ctx, "active_contract_basket", None) or {}
+        symbols = list(basket.get("symbols") or []) if isinstance(basket, dict) else []
+        if mdm is None or not symbols:
+            return (-1,)
+        counts = []
+        for sym in symbols:
+            try:
+                counts.append(len(mdm.get_ohlc_bars(sym) or []))
+            except Exception:  # noqa: BLE001 - diagnostic fingerprint only
+                counts.append(0)
+        return tuple(counts)
+
+    last_fingerprint: tuple[int, ...] | None = None
     for attempt in range(1, max_attempts + 1):
         market_state = get_market_state()
         if market_state != MarketState.OPEN and delay_seconds >= 15.0:
@@ -10279,17 +10303,23 @@ async def _deferred_basket_hydration_retry(
                         "reason": "data_not_ready",
                     },
                 )
-                LOGGER.info(
-                    "DEFERRED_BASKET_RETRY_FAILED attempt=%d/%d reason=data_not_ready",
-                    attempt,
-                    max_attempts,
-                    extra={
-                        "event": "DEFERRED_BASKET_RETRY_FAILED",
-                        "attempt": attempt,
-                        "max_attempts": max_attempts,
-                        "reason": "data_not_ready",
-                    },
-                )
+                fingerprint = _hydration_fingerprint()
+                if last_fingerprint is not None and fingerprint != last_fingerprint:
+                    LOGGER.info(
+                        "DEFERRED_BASKET_RETRY_PROGRESS attempt=%d/%d reason=data_not_ready",
+                        attempt,
+                        max_attempts,
+                        extra={
+                            "event": "DEFERRED_BASKET_RETRY_PROGRESS",
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "reason": "data_not_ready",
+                        },
+                    )
+                # No duplicate "FAILED" event for the same expected wait
+                # state: DEFERRED_BASKET_RETRY_WAITING above already
+                # reported it; data_not_ready is not a hydration failure.
+                last_fingerprint = fingerprint
                 continue
             LOGGER.info(
                 "DEFERRED_BASKET_RETRY_SUCCESS attempt=%d spot_ltp=%.2f",
@@ -11804,8 +11834,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                 if (
                     runner is not None
-                    and runner_history_count <= 0
-                    and mdm_ohlc_count > 0
+                    # Sync whenever the runner/indicator lags canonical MDM
+                    # history (not merely when it is empty) - a runner left
+                    # holding a STALE, larger count from before a restart or a
+                    # since-shrunk MDM fetch must not silently bypass the
+                    # canonical SSOT via a bigger old number (production
+                    # incident: mdm=41, stale runner/indicator=77, readiness
+                    # incorrectly satisfied by max()).
+                    and mdm_ohlc_count > runner_history_count
                     and callable(getattr(runner, "sync_history_from_mdm", None))
                 ):
                     sync_result = runner.sync_history_from_mdm(
@@ -11828,7 +11864,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                     and (str(sym).endswith("CE") or str(sym).endswith("PE"))
                     else default_required_bars
                 )
-                effective_bar_count = max(runner_history_count, mdm_ohlc_count)
+                # Canonical MDM closed-bar count is the readiness SSOT (see
+                # AGENTS.md: data/market_data_manager.py owns hydration
+                # state). A runner/indicator count is never allowed to
+                # satisfy readiness on its own via max() - it is synced FROM
+                # MDM above, never the other way around.
+                effective_bar_count = mdm_ohlc_count
                 if effective_bar_count >= min_required_bars:
                     ready_symbols.append(sym)
                 else:

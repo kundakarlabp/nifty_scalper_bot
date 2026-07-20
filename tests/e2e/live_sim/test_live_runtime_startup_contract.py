@@ -591,8 +591,15 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             basket.selected_pe: _bars(end, 60, 95.0, 0.05),
         }
 
-        async def fetch_history(symbol: str, interval: str, days: int = 3):
-            del interval, days
+        async def fetch_history(
+            symbol: str, interval: str, days: int = 3, *, min_rows: int = 0
+        ):
+            # min_rows: MDM's real fetch_history now accepts a sufficiency
+            # target so it can widen its lookback across prior sessions
+            # (2026-07-20 hydration-deadlock fix); this fake pre-generates a
+            # fixed 60-bar history per symbol regardless, so the parameter is
+            # accepted for signature compatibility and otherwise unused.
+            del interval, days, min_rows
             rows = histories.get(symbol) or histories.get(str(symbol).upper())
             assert rows, f"unexpected history request for {symbol}"
             return list(rows)

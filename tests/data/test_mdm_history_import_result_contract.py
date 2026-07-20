@@ -62,15 +62,26 @@ def test_invalid_historical_ohlc_failure_is_not_conflict_or_ready() -> None:
     assert mdm._last_history_import_result["status"] == "failed_validation"
 
 
-def test_same_minute_finalized_conflict_counts_failure_and_conflict() -> None:
+def test_same_minute_rest_overlap_reconciles_instead_of_failing() -> None:
+    """Contract corrected (2026-07-20 hydration-deadlock incident fix):
+    ingest_historical_ohlc always declares source="historical" to
+    CandleEngine.import_history, so a same-minute overlap against an already
+    finalized bar is now a deterministic RECONCILIATION (REST is the
+    exchange-finalized aggregate), not a batch-fatal conflict. This test
+    previously asserted the old behavior (failure_total=1, conflict_total=1,
+    status=finalized_candle_conflict) - that was the incident-causing defect
+    (a single REST/WS overlap aborted the whole hydration batch)."""
     mdm = _mdm()
 
     assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
-    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar(close=1.5)]) == 0
+    mdm.ingest_historical_ohlc(SYMBOL, [_bar(close=1.5)])
 
-    assert mdm._candle_metrics["history_hydration_failure_total"] == 1
-    assert mdm._candle_metrics["history_hydration_conflict_total"] == 1
-    assert mdm._last_history_import_result["status"] == "finalized_candle_conflict"
+    assert mdm._candle_metrics["history_hydration_failure_total"] == 0
+    assert mdm._candle_metrics["history_hydration_conflict_total"] == 0
+    assert mdm._last_history_import_result["status"] in {
+        "success_new_bars", "success_idempotent",
+    }
+    assert mdm.get_ohlc_bars(SYMBOL)[-1]["close"] == 1.5
 
 
 def test_idempotent_import_is_distinguishable_from_failure() -> None:
@@ -85,14 +96,17 @@ def test_idempotent_import_is_distinguishable_from_failure() -> None:
     assert mdm._candle_metrics["history_hydration_failure_total"] == 0
 
 
-def test_failed_history_import_leaves_projection_unchanged() -> None:
+def test_reconciled_history_import_updates_projection_to_rest_value() -> None:
+    """Contract corrected alongside the conflict test above: a reconciled
+    REST overlap DOES change the projection (to the REST/incoming value) -
+    it is no longer treated as a failed import that must leave storage
+    untouched."""
     mdm = _mdm()
 
     assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
-    before = mdm.get_ohlc_bars(SYMBOL)
-    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar(close=1.5)]) == 0
+    mdm.ingest_historical_ohlc(SYMBOL, [_bar(close=1.5)])
 
-    assert mdm.get_ohlc_bars(SYMBOL) == before
+    assert mdm.get_ohlc_bars(SYMBOL)[-1]["close"] == 1.5
 
 
 def test_projection_divergence_detects_equal_length_ohlcv_mismatch() -> None:
