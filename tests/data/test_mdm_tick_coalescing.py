@@ -971,6 +971,16 @@ def test_symbol_recovery_requires_new_expected_generation_tick(monkeypatch):
         source="ws",
     )
     assert mdm.verify_symbol_subscription_recovery(symbol)["ok"] is True
+    assert symbol not in mdm._symbol_recovery_attempt_state
+
+    second = mdm._attempt_symbol_subscription_recovery(
+        symbol,
+        reason="symbol_subscription_stale",
+        now_mono=time.monotonic() + mdm._ws_recovery_timeout_sec + 1.0,
+    )
+
+    assert second["attempted"] is True
+    assert second["attempts"] == 1
 
 
 def test_pipeline_overload_enters_recovers_with_hysteresis() -> None:

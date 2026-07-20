@@ -3495,20 +3495,22 @@ class MarketDataManager:
             tick_gen = self._symbol_first_tick_generation.get(canonical)
             tick_mono = self._last_valid_live_tick_mono.get(canonical)
             tick_ts = self._last_tick_ts.get(canonical)
-        if not state:
-            return {
-                "ok": False,
-                "reason": "recovery_not_attempted",
-                "symbol": canonical,
-            }
-        ok = bool(
-            canonical == state.get("expected_symbol")
-            and token == state.get("expected_token")
-            and tick_gen == state.get("expected_subscription_generation")
-            and tick_ts is not None
-            and tick_mono is not None
-            and tick_mono > float(state.get("attempt_started_mono") or 0.0)
-        )
+            if not state:
+                return {
+                    "ok": False,
+                    "reason": "recovery_not_attempted",
+                    "symbol": canonical,
+                }
+            ok = bool(
+                canonical == state.get("expected_symbol")
+                and token == state.get("expected_token")
+                and tick_gen == state.get("expected_subscription_generation")
+                and tick_ts is not None
+                and tick_mono is not None
+                and tick_mono > float(state.get("attempt_started_mono") or 0.0)
+            )
+            if ok:
+                self._symbol_recovery_attempt_state.pop(canonical, None)
         return {
             "ok": ok,
             "reason": "recovered" if ok else "waiting_for_current_generation_tick",
