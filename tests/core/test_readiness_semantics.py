@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,14 @@ class _MDM:
         return {"hard_ready": True, "missing": [], "symbols": {}}
 
     def get_symbol_snapshot(self, symbol):
-        return SimpleNamespace(ltp=100.0, tick_age_s=1.0, bid=99.0, ask=101.0, tradable_quote=True, depth_available=True)
+        return SimpleNamespace(
+            ltp=100.0,
+            tick_age_s=1.0,
+            bid=99.0,
+            ask=101.0,
+            tradable_quote=True,
+            depth_available=True,
+        )
 
     def has_ws_tradable_quote(self, symbols):
         return True
@@ -21,7 +29,11 @@ class _MDM:
         return [11, 12]
 
     def get_ohlc_bars(self, symbol):
-        return [{"close": 100.0}] * 30
+        end = datetime.now(UTC).replace(second=0, microsecond=0)
+        return [
+            {"timestamp": end - timedelta(minutes=30 - idx), "close": 100.0}
+            for idx in range(30)
+        ]
 
     def hydrate_symbol_history(self, symbol, **kwargs):
         return self.get_ohlc_bars(symbol)
@@ -38,13 +50,25 @@ async def test_off_market_data_ready_splits_execution_arming(monkeypatch) -> Non
     pe = "NFO:NIFTY26JUN25000PE"
     calls = []
     ctx = SimpleNamespace(
-        active_trading_universe={"selected_ce": ce, "selected_pe": pe, "atm_strike": 25000, "option_symbols": [ce, pe], "token_by_symbol": {ce: 11, pe: 12}},
+        active_trading_universe={
+            "selected_ce": ce,
+            "selected_pe": pe,
+            "atm_strike": 25000,
+            "option_symbols": [ce, pe],
+            "token_by_symbol": {ce: 11, pe: 12},
+        },
         active_symbol_tokens={ce: 11, pe: 12},
         selected_ce=ce,
         selected_pe=pe,
         market_data_manager=_MDM(),
         settings=SimpleNamespace(execution_mode="LIVE"),
-        strategy_runner=SimpleNamespace(get_status=lambda: {"running": True}, _indicator_engine=SimpleNamespace(get_history=lambda s: [1] * 30), set_runtime_readiness=lambda **kw: calls.append(kw)),
+        strategy_runner=SimpleNamespace(
+            get_status=lambda: {"running": True},
+            _indicator_engine=SimpleNamespace(
+                get_history=lambda s: ctx.market_data_manager.get_ohlc_bars(s)
+            ),
+            set_runtime_readiness=lambda **kw: calls.append(kw),
+        ),
         order_manager=object(),
         broker_client=object(),
     )

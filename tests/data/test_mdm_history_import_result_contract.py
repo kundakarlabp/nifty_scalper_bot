@@ -25,6 +25,8 @@ def _mdm() -> MarketDataManager:
     mdm._candle_metrics = defaultdict(float)
     mdm._candle_queue_watermarks = {}
     mdm._last_history_import_result = None
+    mdm._last_history_import_result_by_symbol = {}
+    mdm._last_hydration_result_by_symbol = {}
     mdm._last_historical_ts = {}
     mdm._tick_queue = asyncio.Queue(maxsize=100)
     mdm._bar_symbol_key = lambda s: str(s)
@@ -184,12 +186,8 @@ def test_concurrent_two_symbol_history_result_getter_remains_associated() -> Non
     assert bank is not None and bank.symbol == other and bank.success
 
 
-def test_concurrent_hydration_counters_and_lazy_maps_are_thread_safe() -> None:
+def test_concurrent_hydration_counters_and_result_maps_are_thread_safe() -> None:
     mdm = _mdm()
-    # Exercise the compatibility path where older constructed managers have not
-    # initialized the per-symbol result map yet.
-    if hasattr(mdm, "_last_history_import_result_by_symbol"):
-        del mdm._last_history_import_result_by_symbol
     symbols = [f"NSE:NIFTY{i}" for i in range(8)]
     barrier = __import__("threading").Barrier(len(symbols))
     errors: list[BaseException] = []
@@ -224,3 +222,62 @@ def test_concurrent_hydration_counters_and_lazy_maps_are_thread_safe() -> None:
         assert result.symbol == symbol
         assert result.success
         assert result.reason == "live_gap_fill"
+
+
+def test_import_result_counts_malformed_without_confusing_later_failure() -> None:
+    mdm = _mdm()
+    original_get = mdm.get_candle_engine
+
+    def boom(symbol):
+        engine = original_get(symbol)
+
+        def fail_import(*_a, **_k):
+            raise RuntimeError("broker secret payload should not leak")
+
+        engine.import_history = fail_import
+        return engine
+
+    mdm.get_candle_engine = boom
+    result = mdm.import_historical_ohlc(SYMBOL, [_bar()], reason="hydration")
+    assert result.status == "failed_validation"
+    assert result.error == "history_import_failed"
+    assert result.validation_rejected_rows == 0
+    assert result.conflicting_rows == 0
+    assert "secret" not in str(result.error)
+    assert result.imported_at.tzinfo is not None
+
+
+def test_conflict_reports_one_conflicting_row_not_validation_rejection() -> None:
+    mdm = _mdm()
+    assert mdm.import_historical_ohlc(SYMBOL, [_bar()]).success
+    conflict = mdm.import_historical_ohlc(SYMBOL, [_bar(close=1.25)])
+    assert conflict.status == "finalized_candle_conflict"
+    assert conflict.error == "finalized_candle_conflict"
+    assert conflict.conflicting_rows == 1
+    assert conflict.validation_rejected_rows == 0
+
+
+def test_malformed_rows_are_counted_on_validation_failure() -> None:
+    mdm = _mdm()
+    result = mdm.import_historical_ohlc(
+        SYMBOL, [{"symbol": SYMBOL, "timestamp": "bad"}]
+    )
+    assert result.status == "failed_validation"
+    assert result.validation_rejected_rows == 1
+    assert result.conflicting_rows == 0
+    assert result.final_cache_rows == 0
+
+
+def test_history_import_new_bar_counter_idempotent_and_rollover() -> None:
+    mdm = _mdm()
+    mdm._cache_len = 1
+    first = mdm.import_historical_ohlc(SYMBOL, [_bar()])
+    same = mdm.import_historical_ohlc(SYMBOL, [_bar()])
+    row2 = _bar(close=3.0)
+    row2["high"] = 3.0
+    row2["timestamp"] = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+    second = mdm.import_historical_ohlc(SYMBOL, [row2])
+    assert first.accepted_rows == 1
+    assert same.accepted_rows == 0 and same.idempotent_rows == 1
+    assert second.accepted_rows == 1
+    assert second.final_cache_rows == 1

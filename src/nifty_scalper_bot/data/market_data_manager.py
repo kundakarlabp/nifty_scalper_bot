@@ -39,7 +39,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from random import uniform
 from typing import (
@@ -96,7 +96,11 @@ from nifty_scalper_bot.utils.market_hours import (
 )
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.serialization import to_json_safe
-from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
+from nifty_scalper_bot.utils.symbols import (
+    canonical as shared_canonical_symbol,
+    enforce_canonical,
+    normalize_symbol,
+)
 
 HistoryImportReason = Literal[
     "startup_bootstrap",
@@ -130,6 +134,11 @@ class HistoryImportResult:
     accepted_rows: int
     returned_rows: int
     stored_rows: int
+    idempotent_rows: int = 0
+    validation_rejected_rows: int = 0
+    conflicting_rows: int = 0
+    imported_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    final_cache_rows: int = 0
     error: str | None = None
     reason: HistoryImportReason = "hydration"
 
@@ -443,6 +452,7 @@ class MarketDataManager:
         ] = {}
         self._last_history_import_result: HistoryImportResult | None = None
         self._last_history_import_result_by_symbol: dict[str, HistoryImportResult] = {}
+        self._last_hydration_result_by_symbol: dict[str, HydrationResult] = {}
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._last_cumulative_volume_by_symbol: dict[str, float] = {}
@@ -956,11 +966,10 @@ class MarketDataManager:
         validates, reconciles, conflicts, and commits completed candles. The
         MDM ``_ohlc`` cache is refreshed only after CandleEngine acceptance.
         """
-        normalized_symbol = (
-            self._canonical_symbol(symbol)
-            if hasattr(self, "_canonical_symbol")
-            else str(symbol)
-        )
+        normalized_symbol = shared_canonical_symbol(symbol)
+        raw_row_count = len(bars or ())
+        normalized_row_count = 0
+        malformed_row_count = raw_row_count
         if not hasattr(self, "_lock"):
             self._lock = threading.RLock()
         with self._lock:
@@ -996,6 +1005,8 @@ class MarketDataManager:
                     )
                 normalized["symbol"] = normalized_symbol
                 normalized_rows.append(normalized)
+            normalized_row_count = len(normalized_rows)
+            malformed_row_count = max(0, raw_row_count - normalized_row_count)
             if not normalized_rows and bars:
                 raise DataIntegrityError("no valid historical OHLC rows to import")
             if normalized_rows:
@@ -1005,7 +1016,9 @@ class MarketDataManager:
                     columns=["timestamp", "open", "high", "low", "close", "volume"]
                 )
             engine = self.get_candle_engine(normalized_symbol)
+            diag_before = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
             engine.import_history(frame, mode="incremental", source="historical")
+            diag_after = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
             after = self._refresh_candle_projection(normalized_symbol)
             self.update_hydration_status(normalized_symbol, after)
             latest = engine.latest_finalized_minute()
@@ -1015,17 +1028,16 @@ class MarketDataManager:
                     self._candle_metrics["history_hydration_last_success_timestamp"] = (
                         latest.timestamp()
                     )
-            before_ts: set[datetime] = set()
-            for row in before:
-                normalized_ts = self._normalize_bar_timestamp(row)
-                if normalized_ts is not None:
-                    before_ts.add(normalized_ts[0])
-            after_ts: set[datetime] = set()
-            for row in after:
-                normalized_ts = self._normalize_bar_timestamp(row)
-                if normalized_ts is not None:
-                    after_ts.add(normalized_ts[0])
-            accepted = len(after_ts - before_ts)
+            accepted = max(
+                0,
+                int(diag_after.get("history_import_new_bar_total", 0) or 0)
+                - int(diag_before.get("history_import_new_bar_total", 0) or 0),
+            )
+            idempotent_rows = max(
+                0,
+                int(diag_after.get("history_import_idempotent_total", 0) or 0)
+                - int(diag_before.get("history_import_idempotent_total", 0) or 0),
+            )
             status: Literal["success_new_bars", "success_idempotent"] = (
                 "success_new_bars" if accepted > 0 else "success_idempotent"
             )
@@ -1037,8 +1049,12 @@ class MarketDataManager:
                 symbol=normalized_symbol,
                 status=status,
                 accepted_rows=accepted,
-                returned_rows=len(bars or ()),
+                returned_rows=raw_row_count,
                 stored_rows=len(after),
+                idempotent_rows=idempotent_rows,
+                validation_rejected_rows=malformed_row_count,
+                imported_at=datetime.now(timezone.utc),
+                final_cache_rows=len(after),
                 reason=reason,
             )
             with self._lock:
@@ -1076,13 +1092,21 @@ class MarketDataManager:
             if isinstance(exc, CandleHistoryConflictError):
                 with self._lock:
                     self._candle_metrics["history_hydration_conflict_total"] += 1
+            conflict = isinstance(exc, CandleHistoryConflictError)
             result = HistoryImportResult(
                 symbol=normalized_symbol,
                 status=status,
                 accepted_rows=0,
-                returned_rows=len(bars or ()),
+                returned_rows=raw_row_count,
                 stored_rows=len(before),
-                error=str(exc),
+                idempotent_rows=0,
+                validation_rejected_rows=malformed_row_count,
+                conflicting_rows=1 if conflict else 0,
+                imported_at=datetime.now(timezone.utc),
+                final_cache_rows=len(before),
+                error=(
+                    "finalized_candle_conflict" if conflict else "history_import_failed"
+                ),
                 reason=reason,
             )
             with self._lock:
@@ -1103,11 +1127,7 @@ class MarketDataManager:
         with self._lock:
             if symbol is None:
                 return self._last_history_import_result
-            normalized = (
-                self._canonical_symbol(symbol)
-                if hasattr(self, "_canonical_symbol")
-                else str(symbol)
-            )
+            normalized = shared_canonical_symbol(symbol)
             return self._last_history_import_result_by_symbol.get(normalized)
 
     def _refresh_candle_projection(
@@ -12713,6 +12733,12 @@ class MarketDataManager:
     # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
     # -------------------------------------------------------------------------
 
+    def get_last_hydration_result(self, symbol: str) -> HydrationResult | None:
+        """Return the latest canonical ensure_history result for one symbol."""
+        normalized = shared_canonical_symbol(symbol)
+        with self._lock:
+            return self._last_hydration_result_by_symbol.get(normalized)
+
     def history_capacity_for(self, symbol: str, interval: str = "minute") -> int:
         """Args: symbol, interval. Returns: max bars the canonical OHLC cache can
         retain for this symbol (deque maxlen). Used to clamp hydration targets so
@@ -12765,7 +12791,7 @@ class MarketDataManager:
             accepted_rows: int,
             failure_reason: str | None = None,
         ) -> HydrationResult:
-            return HydrationResult(
+            result = HydrationResult(
                 symbol=normalized,
                 interval=normalized_interval,
                 role=role,
@@ -12784,6 +12810,9 @@ class MarketDataManager:
                 target_ready=cached_after >= target and failure_reason is None,
                 failure_reason=failure_reason,
             )
+            with self._lock:
+                self._last_hydration_result_by_symbol[normalized] = result
+            return result
 
         cached_before = _cached_count()
         skip_reason: str | None = None

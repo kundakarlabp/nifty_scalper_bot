@@ -9,7 +9,9 @@ SYMBOL = "NFO:NIFTY26MAY23300CE"
 
 
 def _bars(count: int) -> list[dict[str, object]]:
-    start = datetime(2026, 5, 1, 9, 15, tzinfo=timezone.utc)
+    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(
+        minutes=count
+    )
     return [
         {
             "symbol": SYMBOL,

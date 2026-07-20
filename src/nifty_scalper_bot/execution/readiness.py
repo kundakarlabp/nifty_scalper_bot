@@ -357,8 +357,22 @@ class HydrationStatus:
     tradingsymbol: str | None = None
     exchange: str | None = None
     required_bars: int = 0
-    historical_rows_returned: int = 0
-    historical_rows_accepted: int = 0
+    historical_rows_returned: int = (
+        0  # Back-compat: latest broker fetch row count, not cache size.
+    )
+    historical_rows_accepted: int = (
+        0  # Back-compat: newly imported rows, not cache size.
+    )
+    fetch_returned_rows: int = 0
+    import_accepted_new_rows: int = 0
+    import_idempotent_rows: int = 0
+    validation_rejected_rows: int = 0
+    final_cache_rows: int = 0
+    latest_import_status: str | None = None
+    latest_import_reason: str | None = None
+    latest_import_error: str | None = None
+    latest_import_at: datetime | None = None
+    history_provider_error: str | None = None
     mdm_bars: int = 0
     datahub_bars: int = 0
     runner_bars: int = 0
@@ -376,6 +390,13 @@ class HydrationStatus:
     last_historical_fetch_at: datetime | None = None
     first_bar_ts: datetime | None = None
     last_bar_ts: datetime | None = None
+    expected_latest_closed_ts: datetime | None = None
+    latest_bar_age_seconds: float | None = None
+    latest_bar_fresh: bool = False
+    recent_window_contiguous: bool = False
+    missing_expected_minute_count: int = 0
+    largest_intraday_gap_minutes: int = 0
+    propagation_consistent: bool = False
     live_merge_applied: bool = False
 
     def __post_init__(self) -> None:
@@ -400,7 +421,13 @@ class HydrationStatus:
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-friendly hydration snapshot."""
         payload = asdict(self)
-        for key in ("last_historical_fetch_at", "first_bar_ts", "last_bar_ts"):
+        for key in (
+            "last_historical_fetch_at",
+            "latest_import_at",
+            "first_bar_ts",
+            "last_bar_ts",
+            "expected_latest_closed_ts",
+        ):
             value = payload.get(key)
             if isinstance(value, datetime):
                 payload[key] = value.astimezone(timezone.utc).isoformat()

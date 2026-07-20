@@ -13,13 +13,27 @@ from nifty_scalper_bot.core.app import build_symbol_hydration_status
 
 
 def _bars(n: int):
-    # minimal OHLC rows; only the count matters for gating
-    return [{"timestamp": i, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1} for i in range(n)]
+    # Minimal recent OHLC rows; readiness now validates timestamp quality too.
+    import pandas as pd
+
+    end = pd.Timestamp.utcnow().floor("min")
+    return [
+        {
+            "timestamp": (end - pd.Timedelta(minutes=n - i)).to_pydatetime(),
+            "open": 1,
+            "high": 1,
+            "low": 1,
+            "close": 1,
+            "volume": 1,
+        }
+        for i in range(n)
+    ]
 
 
 class _Provider:
     def __init__(self, n):
         self._n = n
+
     def get_ohlc_bars(self, symbol, limit=None):
         return _bars(self._n)
 
@@ -27,6 +41,7 @@ class _Provider:
 class _Indicator:
     def __init__(self, n):
         self._n = n
+
     def get_history(self, symbol):
         return _bars(self._n)
 
