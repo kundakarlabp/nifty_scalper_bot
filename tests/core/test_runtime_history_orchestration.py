@@ -673,6 +673,42 @@ async def test_active_basket_helper_uses_recovery_phase_for_stale_and_gap(
 
 
 @pytest.mark.asyncio
+async def test_active_basket_hydration_skips_symbol_subscription_outage(monkeypatch):
+    mdm = _ActiveMDM()
+    c = _active_ctx(mdm, _ActiveRunner())
+    mdm.classify_transport_backlog = lambda symbol: {
+        "transport_classification": (
+            "symbol_subscription_stale"
+            if symbol == "NFO:NIFTY26JUNFUT"
+            else "transport_healthy"
+        )
+    }
+
+    monkeypatch.setattr(
+        app,
+        "build_symbol_hydration_status",
+        lambda _ctx, symbol, _role, _required: _status(
+            bars=40,
+            runner_bars=40,
+            indicator_bars=40,
+            fresh=symbol != "NFO:NIFTY26JUNFUT",
+            contiguous=True,
+        ),
+    )
+
+    result = await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+
+    assert mdm.calls == []
+    assert result["NFO:NIFTY26JUNFUT"]["reason"] == "symbol_subscription_stale"
+
+
+@pytest.mark.asyncio
 async def test_active_basket_cooldown_bypassed_by_change_or_requirement(
     monkeypatch,
 ) -> None:

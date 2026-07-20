@@ -431,6 +431,8 @@ class MarketDataManager:
         )
         self._subscription_divergence_since_mono: float | None = None
         self._last_symbol_level_recovery_mono: float | None = None
+        self._symbol_recovery_attempt_state: dict[str, dict[str, Any]] = {}
+        self._global_restart_suppressed_last_mono: dict[str, float] = {}
         self._event_loop_lag_seconds: float = 0.0
         self._hydration_status: dict[str, str] = {}
         self._hydration_log_ts: dict[str, float] = {}
@@ -2247,17 +2249,35 @@ class MarketDataManager:
             return
 
         try:
+            desired_snapshot = set(self._desired_tokens)
+            dispatched_snapshot = set(
+                getattr(self, "_dispatched_subscriptions", set()) or set()
+            )
+            undispatched = sorted(desired_snapshot - dispatched_snapshot)
             changed = ws.set_tokens(sorted(self._desired_tokens))
-            self._dispatched_subscriptions.update(self._desired_tokens)
+            if not changed and undispatched:
+                resubscribe = getattr(ws, "resubscribe", None)
+                subscribe = getattr(ws, "subscribe", None)
+                if callable(resubscribe):
+                    resubscribe(undispatched)
+                elif callable(subscribe):
+                    result = subscribe(undispatched)
+                    if inspect.isawaitable(result):
+                        self._dispatch_awaitable_callback_result(
+                            result,
+                            symbol=",".join(str(t) for t in undispatched),
+                            callback=subscribe,
+                        )
+            self._dispatched_subscriptions.update(desired_snapshot)
             connected = self._is_ws_connected()
             self._logger.debug(
                 "ws_tokens_reconciled desired=%d changed=%s connected=%s",
-                len(self._desired_tokens),
+                len(desired_snapshot),
                 changed,
                 connected,
                 extra={
                     "event": "ws_tokens_reconciled",
-                    "desired_tokens": len(self._desired_tokens),
+                    "desired_tokens": len(desired_snapshot),
                     "changed": changed,
                     "connected": connected,
                 },
@@ -3380,6 +3400,127 @@ class MarketDataManager:
         if mono is None:
             return None
         return max(time.monotonic() - float(mono), 0.0)
+
+    def _attempt_symbol_subscription_recovery(
+        self, symbol: str, *, reason: str, now_mono: float | None = None
+    ) -> dict[str, Any]:
+        """Resubscribe one expected active symbol without mutating the basket."""
+        now_value = time.monotonic() if now_mono is None else float(now_mono)
+        canonical = self._canonical_symbol(symbol)
+        token = self.current_live_token(canonical)
+        active_future = self.get_active_nifty_future_symbol_cached()
+        if active_future and canonical != active_future and canonical.endswith("FUT"):
+            return {
+                "attempted": False,
+                "reason": "not_active_futures_symbol",
+                "symbol": canonical,
+                "expected_symbol": active_future,
+            }
+        if token is None:
+            return {
+                "attempted": False,
+                "reason": "symbol_token_missing",
+                "symbol": canonical,
+            }
+        with self._lock:
+            current_token = self._current_symbol_token_locked(canonical)
+            if current_token != int(token):
+                return {
+                    "attempted": False,
+                    "reason": "symbol_token_mismatch",
+                    "symbol": canonical,
+                    "expected_token": token,
+                    "actual_token": current_token,
+                }
+            previous_started = float(
+                self._symbol_recovery_attempt_state.get(canonical, {}).get(
+                    "attempt_started_mono", 0.0
+                )
+                or 0.0
+            )
+            previous_attempts = int(
+                self._symbol_recovery_attempt_state.get(canonical, {}).get(
+                    "attempts", 0
+                )
+                or 0
+            )
+            verification_timeout = float(
+                getattr(self, "_ws_recovery_timeout_sec", 15.0) or 15.0
+            )
+            if previous_started and now_value - previous_started < verification_timeout:
+                return {
+                    "attempted": False,
+                    "pending": True,
+                    "reason": "verification_pending",
+                    "symbol": canonical,
+                    "attempts": previous_attempts,
+                }
+            attempts = previous_attempts + 1
+            generation = self._begin_subscription_generation_locked(
+                canonical, int(token), reason=reason
+            )
+            self._desired_tokens.add(int(token))
+            self._pending_subscription_tokens.discard(int(token))
+            self._pending_subscriptions.discard(int(token))
+            self._dispatched_subscriptions.discard(int(token))
+            self._confirmed_subscriptions.discard(int(token))
+            self._symbol_recovery_attempt_state[canonical] = {
+                "expected_symbol": canonical,
+                "expected_token": int(token),
+                "expected_subscription_generation": generation,
+                "attempt_started_mono": now_value,
+                "last_valid_tick_monotonic": self._last_valid_live_tick_mono.get(
+                    canonical
+                ),
+                "attempts": attempts,
+            }
+        self._reconcile_ws_subscriptions()
+        self._last_symbol_level_recovery_mono = now_value
+        return {
+            "attempted": True,
+            "reason": reason,
+            "symbol": canonical,
+            "expected_token": int(token),
+            "expected_subscription_generation": generation,
+            "attempt_started_mono": now_value,
+            "attempts": attempts,
+        }
+
+    def verify_symbol_subscription_recovery(self, symbol: str) -> dict[str, Any]:
+        """Verify recovery only from a new expected-token, expected-generation tick."""
+        canonical = self._canonical_symbol(symbol)
+        with self._lock:
+            state = dict(self._symbol_recovery_attempt_state.get(canonical) or {})
+            token = self._current_symbol_token_locked(canonical)
+            tick_gen = self._symbol_first_tick_generation.get(canonical)
+            tick_mono = self._last_valid_live_tick_mono.get(canonical)
+            tick_ts = self._last_tick_ts.get(canonical)
+            if not state:
+                return {
+                    "ok": False,
+                    "reason": "recovery_not_attempted",
+                    "symbol": canonical,
+                }
+            ok = bool(
+                canonical == state.get("expected_symbol")
+                and token == state.get("expected_token")
+                and tick_gen == state.get("expected_subscription_generation")
+                and tick_ts is not None
+                and tick_mono is not None
+                and tick_mono > float(state.get("attempt_started_mono") or 0.0)
+            )
+            if ok:
+                self._symbol_recovery_attempt_state.pop(canonical, None)
+        return {
+            "ok": ok,
+            "reason": "recovered" if ok else "waiting_for_current_generation_tick",
+            "symbol": canonical,
+            **state,
+            "actual_token": token,
+            "tick_generation": tick_gen,
+            "tick_monotonic": tick_mono,
+            "tick_timestamp": tick_ts,
+        }
 
     def _begin_subscription_generation_locked(
         self, symbol: str, token: int, *, reason: str
@@ -6699,6 +6840,10 @@ class MarketDataManager:
         threshold = float(getattr(self, "_zombie_tick_threshold_sec", 30.0))
         raw_mono = getattr(self, "_last_raw_ws_receive_mono", None)
         raw_age = None if raw_mono is None else max(0.0, now - float(raw_mono))
+        heartbeat_age = (
+            None if self._last_hb_mono is None else max(0.0, now - self._last_hb_mono)
+        )
+        heartbeat_fresh = heartbeat_age is not None and heartbeat_age <= threshold
         raw_transport_fresh = raw_age is not None and raw_age <= threshold
         required_symbols = self._required_context_symbols_for_backlog(symbol)
         processed_ages: dict[str, float | None] = {}
@@ -6723,9 +6868,6 @@ class MarketDataManager:
         required_generation_raw_fresh = self._required_current_generation_raw_fresh(
             required_symbols, now, threshold
         )
-        heartbeat_age = (
-            None if self._last_hb_mono is None else max(0.0, now - self._last_hb_mono)
-        )
         stats = self.get_tick_pressure_stats()
         pending = int(
             stats.get("pending_tick_count", stats.get("pending_ticks", 0)) or 0
@@ -6739,17 +6881,30 @@ class MarketDataManager:
         backlog_explains_required = (
             required_generation_raw_fresh or pending_required_current_generation
         )
+        isolated_stale_with_fresh_peers = bool(
+            heartbeat_fresh
+            and stale_required
+            and len(stale_required) < len(required_symbols)
+            and any(
+                age is not None and age <= threshold for age in processed_ages.values()
+            )
+        )
         if backlog_proven and stale_required and backlog_explains_required:
             state = "processing_backlog"
+            restart_eligible = False
+        elif stale_required and (
+            required_generation_raw_fresh
+            or required_raw_receive_fresh
+            or raw_transport_fresh
+            or isolated_stale_with_fresh_peers
+        ):
+            state = "symbol_subscription_stale"
             restart_eligible = False
         elif not raw_transport_fresh or (
             heartbeat_age is not None and heartbeat_age > threshold
         ):
             state = "transport_silent"
             restart_eligible = True
-        elif stale_required:
-            state = "symbol_feed_stale"
-            restart_eligible = False
         else:
             state = "transport_healthy"
             restart_eligible = False
@@ -8883,7 +9038,7 @@ class MarketDataManager:
                 )
                 requires_token_bound_generation = canonical_symbol.startswith(
                     "NFO:"
-                ) and canonical_symbol.endswith(("CE", "PE"))
+                ) and canonical_symbol.endswith(("CE", "PE", "FUT"))
                 if requires_token_bound_generation and (
                     token_int is None
                     or token_int != current_token
@@ -9592,20 +9747,48 @@ class MarketDataManager:
             subscription_divergence
             and divergence_age >= self._required_symbol_missing_grace_sec
             and recovery_after_divergence
+            and (heartbeat_stale or not ws_healthy)
         )
         backlog_classification = self.classify_transport_backlog()
         processing_backlog = (
             backlog_classification.get("transport_classification")
             == "processing_backlog"
         )
+        symbol_subscription_stale = (
+            backlog_classification.get("transport_classification")
+            == "symbol_subscription_stale"
+        )
+        active_future = self.get_active_nifty_future_symbol_cached()
+        symbol_recovery_exceeded = False
+        if active_future in stale_or_missing_symbols:
+            recovery_state = self.verify_symbol_subscription_recovery(active_future)
+            attempt_started = float(
+                recovery_state.get("attempt_started_mono", 0.0) or 0.0
+            )
+            attempts = int(recovery_state.get("attempts", 0) or 0)
+            verification_timeout = float(
+                getattr(self, "_ws_recovery_timeout_sec", 15.0) or 15.0
+            )
+            symbol_recovery_exceeded = bool(
+                attempts >= 2
+                and not recovery_state.get("ok")
+                and attempt_started
+                and now_mono - attempt_started >= verification_timeout
+            )
         # A broad set of stale symbols is not, by itself, proof that the
         # WebSocket transport failed. A healthy socket can continue receiving
         # heartbeats while one subscription generation is incomplete. Global
         # reconnects are therefore reserved for explicit transport evidence.
-        transport_failure = (
-            bool(stale_or_missing_symbols)
+        transport_failure = bool(
+            stale_or_missing_symbols
             and not processing_backlog
-            and (heartbeat_stale or not ws_healthy or subscription_transport_failure)
+            and (
+                backlog_classification.get("global_restart_eligible")
+                or heartbeat_stale
+                or not ws_healthy
+                or subscription_transport_failure
+                or symbol_recovery_exceeded
+            )
         )
         if stale_or_missing_symbols and not transport_failure:
             recovery_last = getattr(self, "_symbol_recovery_last_attempt_mono", None)
@@ -9623,9 +9806,27 @@ class MarketDataManager:
                     continue
                 recovery_last[sym] = now_mono
                 age = self.time_since_last_live_ws_tick(sym)
-                dispatched = self.request_fallback_refresh(
-                    sym, reason="ws_symbol_stale_recovery"
-                )
+                if sym == self.get_active_nifty_future_symbol_cached():
+                    recovery = self._attempt_symbol_subscription_recovery(
+                        sym,
+                        reason="symbol_subscription_stale",
+                        now_mono=now_mono,
+                    )
+                    dispatched = bool(
+                        recovery.get("attempted") or recovery.get("pending")
+                    )
+                    recovery_reason = str(
+                        recovery.get("reason") or "symbol_subscription_stale"
+                    )
+                else:
+                    dispatched = self.request_fallback_refresh(
+                        sym, reason="ws_symbol_stale_recovery"
+                    )
+                    recovery_reason = (
+                        "missing_first_ws_tick"
+                        if sym in missing_symbols
+                        else "stale_ws_tick"
+                    )
                 if not dispatched:
                     continue
                 dispatched_symbols.append(sym)
@@ -9636,11 +9837,7 @@ class MarketDataManager:
                     sym in required,
                     age,
                     heartbeat_age,
-                    (
-                        "missing_first_ws_tick"
-                        if sym in missing_symbols
-                        else "stale_ws_tick"
-                    ),
+                    recovery_reason,
                     extra={
                         "event": "WS_SYMBOL_STALE_RECOVERY",
                         "symbol": sym,
@@ -9650,11 +9847,7 @@ class MarketDataManager:
                         "ws_healthy": ws_healthy,
                         "subscription_divergence": subscription_divergence,
                         "subscription_divergence_age_s": divergence_age,
-                        "reason": (
-                            "missing_first_ws_tick"
-                            if sym in missing_symbols
-                            else "stale_ws_tick"
-                        ),
+                        "reason": recovery_reason,
                     },
                 )
             log_throttled(
@@ -9700,6 +9893,11 @@ class MarketDataManager:
             )
             self._zombie_stale_logged = True
 
+        suppression = self._global_restart_suppression_reason(now_mono)
+        if suppression:
+            self._log_global_restart_suppressed(suppression, now_mono)
+            return
+
         self._logger.critical(
             "WS_GLOBAL_RESTART_TRIGGERED stale_symbols=%d heartbeat_age_s=%s reason=transport_failure",
             len(stale_or_missing_symbols),
@@ -9716,6 +9914,35 @@ class MarketDataManager:
             },
         )
         self._trigger_zombie_ws_restart()
+
+    def _global_restart_suppression_reason(self, now: float) -> str | None:
+        if getattr(self, "_ws_restart_inflight", False):
+            return "inflight"
+        deadline = getattr(self, "_ws_restart_deadline_mono", None)
+        if deadline is not None and now < float(deadline):
+            return "verification_window"
+        cooldown = max(
+            float(getattr(self, "_ws_recovery_timeout_sec", 15.0) or 15.0), 15.0
+        )
+        last = float(getattr(self, "_zombie_last_restart_attempt_at", 0.0) or 0.0)
+        if last and now - last < cooldown:
+            return "cooldown"
+        return None
+
+    def _log_global_restart_suppressed(self, reason: str, now: float) -> None:
+        last_by_reason = getattr(self, "_global_restart_suppressed_last_mono", None)
+        if not isinstance(last_by_reason, dict):
+            last_by_reason = {}
+            self._global_restart_suppressed_last_mono = last_by_reason
+        last = float(last_by_reason.get(reason, 0.0) or 0.0)
+        if last and now - last < 15.0:
+            return
+        last_by_reason[reason] = now
+        self._logger.warning(
+            "WS_GLOBAL_RESTART_SUPPRESSED reason=%s",
+            reason,
+            extra={"event": "WS_GLOBAL_RESTART_SUPPRESSED", "reason": reason},
+        )
 
     def _trigger_zombie_ws_restart(self) -> None:
         """Args: none; Returns: none; Raises: none."""
