@@ -2,9 +2,9 @@
 
 Hardening note: MarketDataManager hardening is installed explicitly in
 ``market_data_manager.py`` and the IST time adapter in ``source.py`` — at
-their definition sites. DataHub quote timestamp-quality guarding is installed
-by a narrow import hook for ``nifty_scalper_bot.data.data_hub`` so the package
-import does not eagerly load DataHub.
+their definition sites. DataHub quote timestamp-quality guarding and required
+MarketDataManager tick-backlog bounding are installed by narrow import hooks so
+the package import does not eagerly load either runtime module.
 """
 
 from __future__ import annotations
@@ -29,21 +29,41 @@ from nifty_scalper_bot.data.instrument_loader import (
 )
 
 _DATAHUB_MODULE_NAME = "nifty_scalper_bot.data.data_hub"
+_MDM_MODULE_NAME = "nifty_scalper_bot.data.market_data_manager"
 _DATAHUB_IMPORT_HOOK_ATTR = "_nifty_scalper_datahub_synthetic_guard_hook"
+_MDM_IMPORT_HOOK_ATTR = "_nifty_scalper_mdm_required_tick_backlog_hook"
 
 
 def _install_datahub_guard(module: ModuleType) -> None:
     datahub_cls = getattr(module, "DataHub", None)
     if datahub_cls is None:
         return
-    from nifty_scalper_bot.data.data_hub_synthetic_guard import install_datahub_synthetic_timestamp_guard
+    from nifty_scalper_bot.data.data_hub_synthetic_guard import (
+        install_datahub_synthetic_timestamp_guard,
+    )
 
     install_datahub_synthetic_timestamp_guard(datahub_cls)
 
 
-class _DataHubGuardLoader(importlib.abc.Loader):
-    def __init__(self, wrapped: importlib.abc.Loader) -> None:
+def _install_mdm_guard(module: ModuleType) -> None:
+    manager_cls = getattr(module, "MarketDataManager", None)
+    if manager_cls is None:
+        return
+    from nifty_scalper_bot.data.required_tick_backlog_hardening import (
+        install_required_tick_backlog_hardening,
+    )
+
+    install_required_tick_backlog_hardening(manager_cls)
+
+
+class _GuardLoader(importlib.abc.Loader):
+    def __init__(
+        self,
+        wrapped: importlib.abc.Loader,
+        installer,
+    ) -> None:
         self._wrapped = wrapped
+        self._installer = installer
 
     def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType | None:
         create = getattr(self._wrapped, "create_module", None)
@@ -61,38 +81,56 @@ class _DataHubGuardLoader(importlib.abc.Loader):
                 loaded = load_module(module.__name__)  # pragma: no cover - legacy loader path
                 if loaded is not module:
                     module.__dict__.update(getattr(loaded, "__dict__", {}))
-        _install_datahub_guard(module)
+        self._installer(module)
 
 
-class _DataHubGuardFinder(importlib.abc.MetaPathFinder):
+class _GuardFinder(importlib.abc.MetaPathFinder):
+    def __init__(self, module_name: str, installer) -> None:
+        self._module_name = module_name
+        self._installer = installer
+
     def find_spec(
         self,
         fullname: str,
         path: list[str] | None,
         target: ModuleType | None = None,
     ) -> importlib.machinery.ModuleSpec | None:
-        if fullname != _DATAHUB_MODULE_NAME:
+        if fullname != self._module_name:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is None or spec.loader is None or isinstance(spec.loader, _DataHubGuardLoader):
+        if spec is None or spec.loader is None or isinstance(spec.loader, _GuardLoader):
             return spec
-        spec.loader = _DataHubGuardLoader(spec.loader)
+        spec.loader = _GuardLoader(spec.loader, self._installer)
         return spec
 
 
-def _install_datahub_guard_import_hook() -> None:
-    module = sys.modules.get(_DATAHUB_MODULE_NAME)
+def _install_guard_import_hook(
+    *,
+    module_name: str,
+    marker_attr: str,
+    installer,
+) -> None:
+    module = sys.modules.get(module_name)
     if isinstance(module, ModuleType):
-        _install_datahub_guard(module)
+        installer(module)
         return
-    if any(getattr(finder, _DATAHUB_IMPORT_HOOK_ATTR, False) for finder in sys.meta_path):
+    if any(getattr(finder, marker_attr, False) for finder in sys.meta_path):
         return
-    finder = _DataHubGuardFinder()
-    setattr(finder, _DATAHUB_IMPORT_HOOK_ATTR, True)
+    finder = _GuardFinder(module_name, installer)
+    setattr(finder, marker_attr, True)
     sys.meta_path.insert(0, finder)
 
 
-_install_datahub_guard_import_hook()
+_install_guard_import_hook(
+    module_name=_DATAHUB_MODULE_NAME,
+    marker_attr=_DATAHUB_IMPORT_HOOK_ATTR,
+    installer=_install_datahub_guard,
+)
+_install_guard_import_hook(
+    module_name=_MDM_MODULE_NAME,
+    marker_attr=_MDM_IMPORT_HOOK_ATTR,
+    installer=_install_mdm_guard,
+)
 
 
 def __getattr__(name: str) -> ModuleType:
