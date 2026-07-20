@@ -9,9 +9,7 @@ and minute, and applies a real total-pending bound to non-position work.
 
 from __future__ import annotations
 
-from collections import deque
-from datetime import datetime, timezone
-import logging
+from datetime import timezone
 import time
 from typing import Any, Mapping
 
@@ -87,7 +85,9 @@ def _latest_cumulative_volume(payload: Mapping[str, Any]) -> Any:
     return None
 
 
-def _merge_same_minute(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+def _merge_same_minute(
+    existing: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> dict[str, Any]:
     """Merge same-symbol/same-minute ticks into one replayable payload."""
     merged = dict(incoming)
     existing_prices = list(existing.get("_mdm_compacted_prices") or [])
@@ -199,7 +199,9 @@ def _enqueue_bounded_required_tick(self: Any, tick: dict[str, Any], loop: Any) -
                 self._tick_queue_priority_coalesced[bucket] += 1
                 compacted = True
                 now = time.monotonic()
-                last_log = float(getattr(self, "_last_required_tick_compact_log", 0.0) or 0.0)
+                last_log = float(
+                    getattr(self, "_last_required_tick_compact_log", 0.0) or 0.0
+                )
                 if now - last_log >= 30.0:
                     self._last_required_tick_compact_log = now
                     self._logger.warning(
