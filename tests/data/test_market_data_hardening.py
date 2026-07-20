@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import queue
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -184,6 +184,73 @@ def test_compacted_future_replay_preserves_ohlc_and_latest_volume() -> None:
     latest = mdm.get_latest_tick(FUTURE)
     assert latest["volume_cumulative"] == 1120
     assert mdm.get_tick_pressure_stats()["unexplained_loss"] == 0
+
+
+def test_compaction_keeps_adjacent_minutes_distinct() -> None:
+    mdm = _future_manager()
+    mdm._tick_queue_maxsize = 8
+    loop = _NoopLoop()
+    first = datetime.now(timezone.utc).replace(second=10, microsecond=0)
+    second = first + timedelta(minutes=1)
+
+    for ts, price in (
+        (first, 24100.0),
+        (first, 24120.0),
+        (first, 24090.0),
+        (second, 24110.0),
+        (second, 24130.0),
+        (second, 24100.0),
+    ):
+        mdm._enqueue_latest_tick_for_drain(
+            {
+                "symbol": FUTURE,
+                "instrument_token": FUTURE_TOKEN,
+                "last_price": price,
+                "exchange_timestamp": ts,
+                "timestamp": ts,
+            },
+            loop,
+        )
+
+    queue_for_future = mdm._pending_tick_queues[FUTURE]
+    minute_keys = {
+        pd.Timestamp(item["exchange_timestamp"]).floor("1min")
+        for item in queue_for_future
+    }
+    assert len(minute_keys) == 2
+
+
+def test_selected_option_compaction_preserves_latest_depth() -> None:
+    mdm = _future_manager()
+    mdm._tick_queue_maxsize = 16
+    loop = _NoopLoop()
+    ts = datetime.now(timezone.utc).replace(second=10, microsecond=0)
+
+    for index in range(12):
+        bid = 100.0 + index
+        ask = bid + 0.5
+        mdm._enqueue_latest_tick_for_drain(
+            {
+                "symbol": SYMBOL,
+                "instrument_token": TOKEN,
+                "last_price": bid + 0.25,
+                "exchange_timestamp": ts,
+                "timestamp": ts,
+                "depth": {
+                    "buy": [{"price": bid, "quantity": 100}],
+                    "sell": [{"price": ask, "quantity": 100}],
+                },
+            },
+            loop,
+        )
+
+    for raw in mdm._pop_pending_tick_batch():
+        mdm._process_queued_tick(raw)
+        mdm._tick_processed_total += 1
+
+    latest = mdm.get_latest_tick(SYMBOL)
+    assert latest["bid"] == 111.0
+    assert latest["ask"] == 111.5
 
 
 def test_clock_flush_finalizes_idle_candle_without_next_tick() -> None:
