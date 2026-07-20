@@ -31,6 +31,14 @@ FetchHistoricalFn = Callable[[str], pd.DataFrame | None]
 FetchRecentFn = Callable[[str], pd.DataFrame | None]
 _OHLC_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
 
+# Sources representing an explicit REST historical/backfill fetch. A
+# conflicting overlap from one of these sources against an existing
+# locally-finalized candle (e.g. WS-built) is reconciled deterministically
+# (REST wins, since it is the exchange-finalized aggregate) rather than
+# aborting the whole import batch. Any other/undeclared source keeps the
+# strict fail-closed conflict behavior unchanged.
+_HISTORY_RECONCILABLE_SOURCES = frozenset({"historical", "historical_hydration"})
+
 
 class CandleHistoryConflictError(DataIntegrityError):
     """Historical import conflicts with a finalized candle identity."""
@@ -154,6 +162,7 @@ class CandleEngine:
     _history_import_bar_total: int = field(default=0, init=False)
     _history_import_idempotent_total: int = field(default=0, init=False)
     _history_import_conflict_total: int = field(default=0, init=False)
+    _history_import_reconciled_total: int = field(default=0, init=False)
     _history_import_failure_total: int = field(default=0, init=False)
     _finalized_minute_tick_reject_total: int = field(default=0, init=False)
     _history_current_reconcile_total: int = field(default=0, init=False)
@@ -189,6 +198,7 @@ class CandleEngine:
         self._history_import_bar_total = 0
         self._history_import_idempotent_total = 0
         self._history_import_conflict_total = 0
+        self._history_import_reconciled_total = 0
         self._history_import_failure_total = 0
         self._finalized_minute_tick_reject_total = 0
         self._history_current_reconcile_total = 0
@@ -253,6 +263,7 @@ class CandleEngine:
                     self._history_import_idempotent_total
                 ),
                 "history_import_conflict_total": self._history_import_conflict_total,
+                "history_import_reconciled_total": self._history_import_reconciled_total,
                 "history_import_failure_total": self._history_import_failure_total,
                 "finalized_minute_tick_reject_total": (
                     self._finalized_minute_tick_reject_total
@@ -431,6 +442,7 @@ class CandleEngine:
             incoming = _normalize_history_frame(frame, symbol=symbol)
             candidate = list(incoming)
             idempotent = 0
+            reconciled = 0
             current_after = (
                 dict(self.current_candle) if self.current_candle is not None else None
             )
@@ -445,6 +457,15 @@ class CandleEngine:
                     stored = merged_by_ts.get(ts)
                     if stored is not None:
                         if not _candles_equivalent(stored, row):
+                            if source in _HISTORY_RECONCILABLE_SOURCES:
+                                # REST historical is the exchange-finalized
+                                # aggregate; a locally-built (e.g. WS) candle
+                                # for the same minute may differ slightly on
+                                # early/late ticks. Reconcile deterministically
+                                # instead of aborting the whole batch.
+                                merged_by_ts[ts] = dict(row)
+                                reconciled += 1
+                                continue
                             raise _history_conflict(symbol, ts, stored, row)
                         idempotent += 1
                         continue
@@ -463,9 +484,11 @@ class CandleEngine:
                     if current_ts == latest_imported_ts:
                         imported = incoming[-1]
                         if not _candles_equivalent(normalized_current, imported):
-                            raise _history_conflict(
-                                symbol, current_ts, imported, normalized_current
-                            )
+                            if source not in _HISTORY_RECONCILABLE_SOURCES:
+                                raise _history_conflict(
+                                    symbol, current_ts, imported, normalized_current
+                                )
+                            reconciled += 1
                         current_after = None
                         history_reconciled_current = True
                         idempotent += 1
@@ -488,6 +511,18 @@ class CandleEngine:
                         history_reconciled_current = True
 
             bounded = candidate[-int(self.max_bars) :]
+            if reconciled:
+                self._history_import_reconciled_total += reconciled
+                LOGGER.info(
+                    "HISTORY_OVERLAP_RECONCILED",
+                    extra={
+                        "event": "HISTORY_OVERLAP_RECONCILED",
+                        "symbol": symbol,
+                        "reconciled_count": reconciled,
+                        "existing_source": "ws_or_local",
+                        "incoming_source": source,
+                    },
+                )
         except Exception as exc:
             self._history_import_failure_total += 1
             if isinstance(exc, CandleHistoryConflictError):

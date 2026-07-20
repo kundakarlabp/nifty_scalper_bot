@@ -127,3 +127,30 @@ async def test_shared_role_resolver_keeps_selected_option_exact() -> None:
         selected_pe="NFO:NIFTY26JUN24000PE",
         spot_symbol="NSE:NIFTY",
     ) == "option_context"
+
+
+def test_startup_sequence_never_uses_max_of_runner_and_mdm_for_readiness() -> None:
+    """Static architecture check (2026-07-20 hydration-deadlock incident):
+    core/app.py's startup readiness loop previously computed
+    `effective_bar_count = max(runner_history_count, mdm_ohlc_count)`, so a
+    STALE runner/indicator count from before a restart (or from before MDM's
+    cache shrank) could satisfy readiness on its own even though canonical
+    MDM history was short (production: mdm=41, stale runner/indicator=77,
+    required=50 -> incorrectly marked ready via max(77,41)=77>=50).
+
+    `startup_sequence` is a large top-level orchestration function unsuitable
+    for direct unit invocation here; this is a deliberate static check (the
+    class of check called for in the incident's own architecture-review
+    step), not a substitute for the full-cycle behavioral tests above.
+    """
+    import inspect
+
+    from nifty_scalper_bot.core import app as app_module
+
+    src = inspect.getsource(app_module.startup_sequence)
+    assert "max(runner_history_count, mdm_ohlc_count)" not in src
+    assert "effective_bar_count = mdm_ohlc_count" in src
+    # The sync-from-MDM trigger must fire whenever the runner LAGS canonical
+    # MDM history, not merely when it is exactly empty - otherwise a stale
+    # nonzero runner count never gets a chance to be corrected.
+    assert "mdm_ohlc_count > runner_history_count" in src

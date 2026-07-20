@@ -204,3 +204,88 @@ def test_history_import_normalizes_timezone_and_does_not_touch_trading_modules()
                 if isinstance(node, ast.Attribute) and node.attr == "import_history":
                     offenders.append(str(rel))
     assert offenders == []
+
+
+def test_rest_historical_overlap_with_ws_finalized_candle_is_reconciled_not_fatal() -> (
+    None
+):
+    """Production incident (2026-07-20 09:59 IST): a REST historical backfill
+    batch spanning the previous session contained the already-finalized WS
+    candle at 09:19 with a slightly different close/volume (normal — WS may
+    miss early/late ticks; REST is the exchange-finalized aggregate). The old
+    behavior aborted the ENTIRE batch (new_ingested_bars=0), leaving canonical
+    history stuck below the 50-bar requirement forever.
+
+    With source="historical" declared, one reconciled overlap must not abort
+    bars before/after it, and the reconciled bar must take the REST value.
+    """
+    engine = CandleEngine(symbol="NFO:T")
+    # WS-built candle already finalized locally at "09:19" (minute index 0).
+    engine.import_history(
+        pd.DataFrame([_row(0, close=100.5, volume=10.0)]),
+        mode="bootstrap",
+    )
+    before_reconciled = engine.diagnostics()["history_import_reconciled_total"]
+
+    # REST batch: bars before, the SAME minute with a legitimately different
+    # OHLC/volume (exchange-finalized), and valid bars after.
+    rest_batch = pd.DataFrame(
+        [
+            _row(-2), _row(-1),
+            _row(0, close=100.65, volume=11.0),  # overlap: reconciled, not fatal
+            _row(1), _row(2),
+        ]
+    )
+    engine.import_history(rest_batch, source="historical")
+
+    bars = engine.get_completed_bars()
+    timestamps = [b["timestamp"] for b in bars]
+    assert timestamps == sorted(timestamps)
+    assert len(set(timestamps)) == len(timestamps)  # strictly unique
+    # Batch continued: bars before AND after the overlap were both accepted.
+    assert len(bars) == 5
+    # The overlapping minute now holds the REST (incoming) value.
+    reconciled_row = next(b for b in bars if b["timestamp"] == _ts(0))
+    assert reconciled_row["close"] == 100.65
+    assert reconciled_row["volume"] == 11.0
+    assert (
+        engine.diagnostics()["history_import_reconciled_total"]
+        == before_reconciled + 1
+    )
+    # No fatal batch failure was recorded for this reconciled overlap.
+    assert engine.diagnostics()["history_import_conflict_total"] == 0
+
+
+def test_undeclared_source_overlap_still_fails_closed() -> None:
+    """Reconciliation is scoped strictly to declared REST-historical sources.
+    An incremental import with no declared provenance keeps the original
+    strict fail-closed contract (unchanged; see the conflict tests above)."""
+    engine = CandleEngine(symbol="NFO:T")
+    engine.import_history(pd.DataFrame([_row(0, close=100.5)]), mode="bootstrap")
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(pd.DataFrame([_row(0, close=100.75)]))  # source=None
+    assert engine.diagnostics()["history_import_reconciled_total"] == 0
+
+
+def test_malformed_and_future_rows_still_rejected_during_reconcilable_import() -> None:
+    """Reconciliation never weakens the existing integrity/future-candle
+    guards — only the same-timestamp-conflict-vs-existing-store path changes."""
+    engine = CandleEngine(symbol="NFO:T")
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(
+            pd.DataFrame([{**_row(0), "high": 99.0}]), source="historical"
+        )
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(
+            pd.DataFrame([_row(0, volume=-1.0)]), source="historical"
+        )
+    future_row = {**_row(0), "timestamp": pd.Timestamp.now(tz=IST) + pd.Timedelta(days=1)}
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(pd.DataFrame([future_row]), source="historical")
+    # Contradictory duplicate timestamps WITHIN the same incoming REST batch
+    # remain a genuine source-integrity error, not a reconcilable overlap.
+    with pytest.raises(DataIntegrityError):
+        engine.import_history(
+            pd.DataFrame([_row(0, close=100.5), _row(0, close=100.9)]),
+            source="historical",
+        )

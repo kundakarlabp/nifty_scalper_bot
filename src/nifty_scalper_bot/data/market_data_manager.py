@@ -12842,7 +12842,10 @@ class MarketDataManager:
             failure_reason: str | None = None
             try:
                 rows = await self.fetch_history(
-                    normalized, normalized_interval, lookback_days
+                    normalized,
+                    normalized_interval,
+                    lookback_days,
+                    min_rows=requested_bars,
                 )
                 fetched_rows = len(rows or [])
                 rows = list(rows or [])[-requested_bars:]
@@ -13102,9 +13105,19 @@ class MarketDataManager:
         return rows[-target:]
 
     async def fetch_history(
-        self, symbol: str, interval: str, days: int = 3
+        self, symbol: str, interval: str, days: int = 3, *, min_rows: int = 0
     ) -> list[dict]:
-        """Fetch historical data with token, tradingsymbol, wider-window, and spot fallbacks."""
+        """Fetch historical data with token, tradingsymbol, wider-window, and spot fallbacks.
+
+        ``min_rows`` is the caller's required closed-bar count (e.g. 50). The
+        attempt ladder below only accepts the FIRST non-empty response
+        regardless of size unless min_rows is supplied - at 09:59 IST Monday
+        the 2-calendar-day window never reaches Friday's session (2 days back
+        from Monday is Saturday), so the "token" attempt returned ~41
+        elapsed-session rows and the wider "token_wide" attempt was never
+        tried (production: mdm_after=41, required_bars=50). With min_rows
+        set, a short-but-nonempty response keeps trying wider windows.
+        """
         symbol = (
             self._canonical_symbol(symbol.strip().upper())
             if hasattr(self, "_canonical_symbol")
@@ -13256,8 +13269,17 @@ class MarketDataManager:
         wide_days = max(int(days), 5)
         if wide_days != int(days):
             attempt_specs.append(("token_wide", token_int, wide_days))
+        # Walk further back only when the caller declared a row target that a
+        # single prior session may not satisfy (e.g. a holiday-adjacent long
+        # weekend). Bounded to a modest ceiling to avoid unbounded broker load.
+        if min_rows > 0:
+            widest_days = max(wide_days, 10)
+            if widest_days != wide_days:
+                attempt_specs.append(("token_widest", token_int, widest_days))
 
         last_error: str | None = None
+        best_so_far: list[dict[str, Any]] = []
+        best_attempt_meta: tuple[str, datetime, datetime, int] | None = None
         for attempt_name, instrument_key, lookback_days in attempt_specs:
             to_date = now
             from_date = to_date - timedelta(days=max(1, int(lookback_days)))
@@ -13343,6 +13365,24 @@ class MarketDataManager:
                     }.values()
                 )
                 deduped.sort(key=lambda item: item["timestamp"])
+                if min_rows > 0 and len(deduped) < min_rows and attempt_name != attempt_specs[-1][0]:
+                    if len(deduped) > len(best_so_far):
+                        best_so_far = deduped
+                        best_attempt_meta = (
+                            attempt_name, from_date, to_date, len(rows)
+                        )
+                    self._logger.info(
+                        "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING symbol=%s attempt=%s returned_rows=%s min_rows=%s",
+                        symbol, attempt_name, len(deduped), min_rows,
+                        extra={
+                            "event": "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING",
+                            "symbol": symbol,
+                            "attempt": attempt_name,
+                            "returned_rows": len(deduped),
+                            "min_rows": min_rows,
+                        },
+                    )
+                    continue
                 self._logger.info(
                     "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=%s accepted_rows=%s first_ts=%s last_ts=%s exception_type=%s exception_message=%s",
                     symbol,
@@ -13374,7 +13414,10 @@ class MarketDataManager:
                     },
                 )
                 if deduped:
-                    return deduped
+                    if min_rows <= 0 or len(deduped) >= min_rows:
+                        return deduped
+                    if len(deduped) > len(best_so_far):
+                        best_so_far = deduped
             except BrokerAuthenticationError:
                 self._logger.error(
                     "HYDRATION_FETCH_RESULT symbol=%s instrument_token=%s tradingsymbol=%s exchange=%s interval=%s attempt=%s returned_rows=0 accepted_rows=0 failure_category=history_authentication_failed",
@@ -13440,6 +13483,34 @@ class MarketDataManager:
                         "failure_category": failure_category,
                     },
                 )
+        if best_so_far:
+            # Every attempt (including the widest tried) was individually
+            # insufficient for min_rows, but the widest attempt's rows are
+            # still the best available closed-bar evidence - return them so
+            # the caller's sufficiency check (required_bars) reports the true
+            # shortfall instead of a false "returned_rows=0".
+            self._logger.warning(
+                "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s returned_rows=%s accepted_rows=%s failure_category=history_insufficient_after_widening",
+                symbol,
+                token_int,
+                tradingsymbol,
+                exchange,
+                interval,
+                len(best_so_far),
+                len(best_so_far),
+                extra={
+                    "event": "HYDRATION_FETCH_RESULT",
+                    "symbol": symbol,
+                    "instrument_token": token_int,
+                    "tradingsymbol": tradingsymbol,
+                    "exchange": exchange,
+                    "interval": interval,
+                    "returned_rows": len(best_so_far),
+                    "accepted_rows": len(best_so_far),
+                    "failure_category": "history_insufficient_after_widening",
+                },
+            )
+            return best_so_far
         self._logger.error(
             "HYDRATION_FETCH_RESULT symbol=%s token=%s tradingsymbol=%s exchange=%s interval=%s returned_rows=0 accepted_rows=0 exception_message=%s",
             symbol,
