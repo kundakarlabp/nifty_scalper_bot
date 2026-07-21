@@ -112,6 +112,28 @@ async def test_selected_ticks_span_multiple_budget_batches_without_loss(monkeypa
     await _stop_mdm(mdm)
 
 
+@pytest.mark.parametrize("token", [1, 3, 4])
+def test_required_tick_backlog_is_bounded_and_keeps_latest_tick(token: int) -> None:
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    mdm._tick_queue_maxsize = 5
+    loop = asyncio.new_event_loop()
+    try:
+        for second in range(20):
+            mdm._enqueue_latest_tick_for_drain(
+                _ws_tick(token, 100 + second, second), loop
+            )
+
+        stats = mdm.get_tick_pressure_stats()
+        pending = mdm._pop_pending_tick_batch()
+
+        assert stats["pending_tick_count"] <= mdm._tick_queue_maxsize
+        assert pending[-1]["last_price"] == 119
+        assert stats["unexplained_loss"] == 0
+    finally:
+        loop.close()
+
+
 @pytest.mark.asyncio
 async def test_direct_push_tick_uses_bounded_drain(monkeypatch):
     mdm = _make_mdm()

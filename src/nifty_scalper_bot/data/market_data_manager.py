@@ -2942,6 +2942,7 @@ class MarketDataManager:
             return False
         active_future = self.get_active_nifty_future_symbol_cached()
         normalized_symbol: str | None = None
+        previous_token: int | None = None
         if symbol:
             normalized_symbol = self._canonical_symbol(symbol)
             if self._is_stale_nifty_future_subscription(
@@ -2963,6 +2964,8 @@ class MarketDataManager:
                     active_future, reason="stale_future_subscription_rejected"
                 )
                 return False
+            with self._lock:
+                previous_token = self._symbol_to_token.get(normalized_symbol)
             self.register_symbol(normalized_symbol, token_int)
             if normalized_symbol.endswith(("CE", "PE")):
                 self._logger.info(
@@ -2977,11 +2980,6 @@ class MarketDataManager:
             )
         with self._lock:
             was_desired = token_int in self._desired_tokens
-            previous_token = (
-                self._symbol_to_token.get(normalized_symbol)
-                if normalized_symbol
-                else None
-            )
             self._desired_tokens.add(token_int)
             if normalized_symbol:
                 missing_generation = (
@@ -7120,6 +7118,24 @@ class MarketDataManager:
                     str(dropped.get("_mdm_priority_bucket") or "context_or_far"),
                     "pending_limit_far",
                 )
+                pending = self._pending_count_locked()
+            while pending > self._tick_queue_maxsize:
+                candidates = [
+                    (int(queue[-1].get("_mdm_priority", 99)), queue)
+                    for queue in self._pending_tick_queues.values()
+                    if len(queue) > 1 and int(queue[-1].get("_mdm_priority", 99)) > 0
+                ]
+                if not candidates:
+                    break
+                _priority, queue = max(candidates, key=lambda item: item[0])
+                latest = queue.pop()
+                dropped = queue.pop()
+                queue.append(latest)
+                self._pending_decrement_locked(1)
+                bucket = str(dropped.get("_mdm_priority_bucket") or "protected")
+                self._tick_coalesced_total += 1
+                self._tick_coalesced_by_priority[bucket] += 1
+                self._tick_queue_priority_coalesced[bucket] += 1
                 pending = self._pending_count_locked()
             self._update_pipeline_overload_locked()
             self._schedule_tick_drain_locked(loop)

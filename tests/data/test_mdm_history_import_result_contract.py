@@ -81,7 +81,8 @@ def test_same_minute_rest_overlap_reconciles_instead_of_failing() -> None:
     assert mdm._candle_metrics["history_hydration_failure_total"] == 0
     assert mdm._candle_metrics["history_hydration_conflict_total"] == 0
     assert mdm._last_history_import_result["status"] in {
-        "success_new_bars", "success_idempotent",
+        "success_new_bars",
+        "success_idempotent",
     }
     assert mdm.get_ohlc_bars(SYMBOL)[-1]["close"] == 1.5
 
@@ -247,14 +248,14 @@ def test_import_result_counts_malformed_without_confusing_later_failure() -> Non
     assert result.imported_at.tzinfo is not None
 
 
-def test_conflict_reports_one_conflicting_row_not_validation_rejection() -> None:
+def test_reconciled_rest_overlap_reports_idempotent_success() -> None:
     mdm = _mdm()
     assert mdm.import_historical_ohlc(SYMBOL, [_bar()]).success
-    conflict = mdm.import_historical_ohlc(SYMBOL, [_bar(close=1.25)])
-    assert conflict.status == "finalized_candle_conflict"
-    assert conflict.error == "finalized_candle_conflict"
-    assert conflict.conflicting_rows == 1
-    assert conflict.validation_rejected_rows == 0
+    reconciled = mdm.import_historical_ohlc(SYMBOL, [_bar(close=1.25)])
+    assert reconciled.status == "success_idempotent"
+    assert reconciled.conflicting_rows == 0
+    assert reconciled.validation_rejected_rows == 0
+    assert mdm.get_ohlc_bars(SYMBOL)[-1]["close"] == 1.25
 
 
 def test_malformed_rows_are_counted_on_validation_failure() -> None:
