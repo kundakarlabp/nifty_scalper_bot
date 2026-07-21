@@ -297,21 +297,20 @@ def _evaluate_recent_history_quality(
         and expected is not None
         and last >= expected - timedelta(minutes=max_lag_minutes)
     )
-    window_size = max(required_bars, continuity_window_bars)
-    window = ordered[-window_size:] if window_size > 0 else ordered
+    latest_session_date = ordered[-1].astimezone(IST).date() if ordered else None
+    session_bars = [
+        ts
+        for ts in ordered
+        if latest_session_date is not None
+        and ts.astimezone(IST).date() == latest_session_date
+        and time(9, 15) <= ts.astimezone(IST).time() <= time(15, 29)
+    ]
+    window_size = max(int(continuity_window_bars), 2)
+    window = session_bars[-window_size:]
     missing = 0
     largest_gap = 0
     for left, right in zip(window, window[1:]):
-        l_ist = left.astimezone(IST)
-        r_ist = right.astimezone(IST)
-        if l_ist.date() != r_ist.date() or not is_nse_trading_day(l_ist.date()):
-            continue
-        if not (
-            time(9, 15) <= l_ist.time() <= time(15, 29)
-            and time(9, 15) <= r_ist.time() <= time(15, 29)
-        ):
-            continue
-        gap = int((r_ist - l_ist).total_seconds() // 60)
+        gap = int((right - left).total_seconds() // 60)
         if gap > 1:
             missing += gap - 1
             largest_gap = max(largest_gap, gap)
