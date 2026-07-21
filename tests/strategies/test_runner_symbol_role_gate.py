@@ -50,11 +50,21 @@ def test_futures_context_updates_context_but_does_not_enter_phase9_entry():
     order_manager.submit.assert_not_called()
 
 
-def test_spot_context_routes_as_context_only_snapshot_update():
+def test_plain_spot_context_routes_as_context_only_snapshot_update():
     assert (
         runner()._entry_evaluation_route("NSE:NIFTY")
         == EntryEvaluationRoute.CONTEXT_ONLY
     )
+
+
+def test_spot_with_underlying_role_routes_as_underlying_trigger():
+    r = runner()
+    def roles_with_context_and_underlying(_symbol):
+        return {"spot_context", "underlying"}
+
+    r._roles_for_symbol = roles_with_context_and_underlying  # type: ignore[method-assign]
+
+    assert r._entry_evaluation_route("NSE:NIFTY") == EntryEvaluationRoute.UNDERLYING
 
 
 def test_non_selected_option_context_cannot_trigger_entry():
@@ -313,10 +323,14 @@ def _build_phase9_runner(
     return runner_obj, strategy_manager, risk_manager, order_manager, selected_ce
 
 
-def test_nifty_spot_context_skips_option_entry_strategy_manager(monkeypatch):
-    runner_obj, strategy_manager, risk_manager, order_manager, _selected_ce = (
+def test_nifty_underlying_reaches_strategy_manager(monkeypatch):
+    runner_obj, strategy_manager, risk_manager, order_manager, selected_ce = (
         _build_phase9_runner(monkeypatch)
     )
+    def roles_with_context_and_underlying(_symbol):
+        return {"spot_context", "underlying"}
+
+    runner_obj._roles_for_symbol = roles_with_context_and_underlying  # type: ignore[method-assign]
 
     runner_obj._on_tick(
         "NSE:NIFTY",
@@ -324,26 +338,31 @@ def test_nifty_spot_context_skips_option_entry_strategy_manager(monkeypatch):
             "symbol": "NSE:NIFTY",
             "last_price": 24000.0,
             "timestamp": time.time(),
-            "trace_id": "spot-context-e2e",
+            "trace_id": "underlying-e2e",
             "source": "ws",
         },
     )
 
     assert (
         runner_obj._entry_evaluation_route("NSE:NIFTY")
-        == EntryEvaluationRoute.CONTEXT_ONLY
+        == EntryEvaluationRoute.UNDERLYING
     )
-    strategy_manager.generate_signal.assert_not_called()
-    risk_manager.validate.assert_not_called()
-    order_manager.submit.assert_not_called()
+    strategy_manager.generate_signal.assert_called_once()
+    risk_manager.validate.assert_called_once()
+    order_manager.submit.assert_called_once()
+    assert order_manager.submit.call_args.args[0].symbol == selected_ce
 
 
-def test_spot_context_does_not_generate_candidate_activation_failure(
+def test_underlying_generated_candidate_activation_failure_blocks_after_signal(
     monkeypatch,
 ):
     runner_obj, strategy_manager, risk_manager, order_manager, _selected_ce = (
         _build_phase9_runner(monkeypatch, current_generation_ready=False)
     )
+    def roles_with_context_and_underlying(_symbol):
+        return {"spot_context", "underlying"}
+
+    runner_obj._roles_for_symbol = roles_with_context_and_underlying  # type: ignore[method-assign]
 
     runner_obj._on_tick(
         "NSE:NIFTY",
@@ -356,11 +375,11 @@ def test_spot_context_does_not_generate_candidate_activation_failure(
         },
     )
 
-    strategy_manager.generate_signal.assert_not_called()
+    strategy_manager.generate_signal.assert_called_once()
     risk_manager.validate.assert_not_called()
     order_manager.submit.assert_not_called()
     assert any(
-        call.kwargs.get("reason") == "symbol_role_context_only"
+        call.kwargs.get("reason") == "candidate_activation_pending"
         for call in runner_obj._emit_runner_eval_decision.call_args_list
     )
 

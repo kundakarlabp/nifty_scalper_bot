@@ -12038,12 +12038,12 @@ class StrategyRunner:
             return EntryEvaluationRoute.POSITION_MANAGEMENT
         if roles & {"selected_option", "trigger_candidate"}:
             return EntryEvaluationRoute.OPTION_CANDIDATE
-        if roles & {"spot_context", "futures_context"}:
-            return EntryEvaluationRoute.CONTEXT_ONLY
-        if "underlying" in roles:
-            return EntryEvaluationRoute.UNDERLYING
         if "futures_trigger_candidate" in roles:
             return EntryEvaluationRoute.UNDERLYING
+        if "underlying" in roles:
+            return EntryEvaluationRoute.UNDERLYING
+        if roles & {"spot_context", "futures_context"}:
+            return EntryEvaluationRoute.CONTEXT_ONLY
         return EntryEvaluationRoute.CONTEXT_ONLY
 
     def _symbol_may_trigger_entry(self, symbol: str) -> bool:
