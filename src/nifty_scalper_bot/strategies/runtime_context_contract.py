@@ -7,7 +7,6 @@ import os
 import time
 from typing import Any, Mapping
 
-
 _LIVE_DIRECTION_CONTEXT_KEYS = frozenset(
     {
         "direction_bias",
@@ -60,7 +59,12 @@ _TRUTHY = {"1", "true", "yes", "y", "on"}
 
 def _runtime_context_max_age_seconds(default: float = 5.0) -> float:
     try:
-        return max(float(os.getenv("ORDERFLOW_MAX_CONTEXT_AGE_SECONDS", str(default)) or default), 0.0)
+        return max(
+            float(
+                os.getenv("ORDERFLOW_MAX_CONTEXT_AGE_SECONDS", str(default)) or default
+            ),
+            0.0,
+        )
     except (TypeError, ValueError):
         return default
 
@@ -95,9 +99,15 @@ def _coerce_age_seconds(value: Any) -> float | None:
     return age
 
 
-def resolve_context_age_seconds(context: Mapping[str, Any], default: float = 999.0) -> float:
+def resolve_context_age_seconds(
+    context: Mapping[str, Any], default: float = 999.0
+) -> float:
     """Return normalized context age, failing closed for missing/invalid values."""
-    age = _coerce_age_seconds(context.get("context_age_seconds")) if isinstance(context, Mapping) else None
+    age = (
+        _coerce_age_seconds(context.get("context_age_seconds"))
+        if isinstance(context, Mapping)
+        else None
+    )
     return age if age is not None else float(default)
 
 
@@ -109,7 +119,9 @@ def _coerce_timestamp(value: Any) -> datetime | None:
     elif isinstance(value, (int, float)):
         try:
             raw = float(value)
-            ts = datetime.fromtimestamp(raw / 1000.0 if raw > 1e12 else raw, tz=timezone.utc)
+            ts = datetime.fromtimestamp(
+                raw / 1000.0 if raw > 1e12 else raw, tz=timezone.utc
+            )
         except (OSError, OverflowError, ValueError):
             return None
     elif isinstance(value, str):
@@ -124,7 +136,9 @@ def _coerce_timestamp(value: Any) -> datetime | None:
     return ts.astimezone(timezone.utc)
 
 
-def _derive_freshness_from_age(context: Mapping[str, Any], *keys: str, max_age_seconds: float) -> bool | None:
+def _derive_freshness_from_age(
+    context: Mapping[str, Any], *keys: str, max_age_seconds: float
+) -> bool | None:
     for key in keys:
         age = _coerce_age_seconds(context.get(key))
         if age is not None:
@@ -132,7 +146,9 @@ def _derive_freshness_from_age(context: Mapping[str, Any], *keys: str, max_age_s
     return None
 
 
-def live_direction_context_has_proof(context: Mapping[str, Any], *, max_age_seconds: float | None = None) -> bool:
+def live_direction_context_has_proof(
+    context: Mapping[str, Any], *, max_age_seconds: float | None = None
+) -> bool:
     """Return True if live spot/futures context has explicit fresh proof.
 
     This does not invent a CE/PE direction. It only confirms that the missing
@@ -142,14 +158,22 @@ def live_direction_context_has_proof(context: Mapping[str, Any], *, max_age_seco
 
     if not isinstance(context, Mapping):
         return False
-    max_age = _runtime_context_max_age_seconds() if max_age_seconds is None else max(float(max_age_seconds), 0.0)
+    max_age = (
+        _runtime_context_max_age_seconds()
+        if max_age_seconds is None
+        else max(float(max_age_seconds), 0.0)
+    )
     spot_fresh = _coerce_bool(context.get("spot_fresh"))
     fut_fresh = _coerce_bool(context.get("fut_fresh"))
     futures_fresh = _coerce_bool(context.get("futures_fresh"))
     if fut_fresh is None:
         fut_fresh = futures_fresh
-    derived_spot = _derive_freshness_from_age(context, "spot_age_seconds", "spot_tick_age_s", max_age_seconds=max_age)
-    derived_fut = _derive_freshness_from_age(context, "futures_age_seconds", "futures_tick_age_s", max_age_seconds=max_age)
+    derived_spot = _derive_freshness_from_age(
+        context, "spot_age_seconds", "spot_tick_age_s", max_age_seconds=max_age
+    )
+    derived_fut = _derive_freshness_from_age(
+        context, "futures_age_seconds", "futures_tick_age_s", max_age_seconds=max_age
+    )
     if spot_fresh is None:
         spot_fresh = derived_spot
     if fut_fresh is None:
@@ -163,7 +187,9 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
     if not isinstance(context, Mapping):
         return {}
 
-    preserved = {key: context[key] for key in _LIVE_DIRECTION_CONTEXT_KEYS if key in context}
+    preserved = {
+        key: context[key] for key in _LIVE_DIRECTION_CONTEXT_KEYS if key in context
+    }
     max_age = _runtime_context_max_age_seconds()
 
     if "direction_bias" not in preserved:
@@ -177,12 +203,20 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
         if direction is not None:
             preserved["direction_bias"] = direction
 
-    derived_spot = _derive_freshness_from_age(context, "spot_age_seconds", "spot_tick_age_s", max_age_seconds=max_age)
-    derived_fut = _derive_freshness_from_age(context, "futures_age_seconds", "futures_tick_age_s", max_age_seconds=max_age)
-    if "spot_fresh" not in preserved and derived_spot is not None:
+    derived_spot = _derive_freshness_from_age(
+        context, "spot_age_seconds", "spot_tick_age_s", max_age_seconds=max_age
+    )
+    derived_fut = _derive_freshness_from_age(
+        context, "futures_age_seconds", "futures_tick_age_s", max_age_seconds=max_age
+    )
+    # Tick ages are objective freshness proof from the current canonical
+    # snapshot. When present, replace cached boolean freshness as the matching
+    # age/boolean group so stale merge=False values cannot outlive fresh ticks.
+    if derived_spot is not None:
         preserved["spot_fresh"] = derived_spot
-    if "fut_fresh" not in preserved and derived_fut is not None:
+    if derived_fut is not None:
         preserved["fut_fresh"] = derived_fut
+        preserved["futures_fresh"] = derived_fut
     if "futures_fresh" in preserved and "fut_fresh" not in preserved:
         preserved["fut_fresh"] = bool(preserved["futures_fresh"])
     if "fut_fresh" in preserved and "futures_fresh" not in preserved:
@@ -192,12 +226,20 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
     if age is not None:
         preserved["context_age_seconds"] = age
     else:
-        for key in ("context_timestamp", "direction_context_timestamp", "direction_updated_at"):
+        for key in (
+            "context_timestamp",
+            "direction_context_timestamp",
+            "direction_updated_at",
+        ):
             ts = _coerce_timestamp(context.get(key))
             if ts is not None:
-                preserved["context_age_seconds"] = max(0.0, time.time() - ts.timestamp())
+                preserved["context_age_seconds"] = max(
+                    0.0, time.time() - ts.timestamp()
+                )
                 break
-    preserved["live_direction_context_proof"] = live_direction_context_has_proof(preserved, max_age_seconds=max_age)
+    preserved["live_direction_context_proof"] = live_direction_context_has_proof(
+        preserved, max_age_seconds=max_age
+    )
 
     return preserved
 
@@ -214,21 +256,36 @@ def install_indicator_runtime_context_contract() -> bool:
 
     original = current
 
-    def set_runtime_context(self: Any, symbol: str, context: Mapping[str, Any], *, merge: bool = True) -> None:
+    def set_runtime_context(
+        self: Any, symbol: str, context: Mapping[str, Any], *, merge: bool = True
+    ) -> None:
         original(self, symbol, context, merge=merge)
         extras = normalise_live_direction_context(context or {})
         if not symbol or not extras:
             return
         try:
             with self._lock:
-                existing = self._runtime_context.setdefault(symbol, {}) if merge else dict(self._runtime_context.get(symbol, {}) or {})
+                existing = (
+                    self._runtime_context.setdefault(symbol, {})
+                    if merge
+                    else dict(self._runtime_context.get(symbol, {}) or {})
+                )
                 existing.update(extras)
                 self._runtime_context[symbol] = existing
                 self._cache.pop(symbol, None)
         except Exception as exc:
             logger = getattr(self, "_logger", None)
             if logger is not None:
-                logger.error("LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED symbol=%s error=%s", symbol, exc, extra={"event": "LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED", "symbol": symbol, "error": str(exc)})
+                logger.error(
+                    "LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED symbol=%s error=%s",
+                    symbol,
+                    exc,
+                    extra={
+                        "event": "LIVE_DIRECTION_CONTEXT_PRESERVE_FAILED",
+                        "symbol": symbol,
+                        "error": str(exc),
+                    },
+                )
             raise
 
     set_runtime_context.__name__ = getattr(original, "__name__", "set_runtime_context")

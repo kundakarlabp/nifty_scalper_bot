@@ -1975,6 +1975,54 @@ class StrategyRunner:
             },
         )
 
+    @staticmethod
+    def _history_row_timestamp(row: Any) -> datetime | None:
+        """Return a comparable UTC timestamp for a cached history row."""
+        value = None
+        if isinstance(row, Mapping):
+            value = (
+                row.get("timestamp")
+                or row.get("start")
+                or row.get("date")
+                or row.get("time")
+            )
+        else:
+            value = getattr(row, "start", None) or getattr(row, "timestamp", None)
+        if value is None:
+            return None
+        try:
+            if isinstance(value, datetime):
+                ts = value
+            elif isinstance(value, (int, float)):
+                raw = float(value)
+                ts = datetime.fromtimestamp(
+                    raw / 1000.0 if raw > 1e12 else raw, tz=timezone.utc
+                )
+            elif isinstance(value, str):
+                ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            else:
+                return None
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc).replace(microsecond=0)
+
+    def _runner_history_last_timestamp(self, symbol: str) -> datetime | None:
+        rows = getattr(self, "_symbol_history", {}).get(symbol, []) or []
+        return self._history_row_timestamp(rows[-1]) if rows else None
+
+    def _indicator_history_last_timestamp(self, symbol: str) -> datetime | None:
+        engine = getattr(self, "_indicator_engine", None)
+        getter = getattr(engine, "get_history", None)
+        if not callable(getter):
+            return None
+        try:
+            rows = getter(symbol, count=1, field="bars")
+        except Exception:
+            return None
+        return self._history_row_timestamp(rows[-1]) if rows else None
+
     def sync_history_from_mdm(
         self,
         symbol: str,
@@ -2011,9 +2059,24 @@ class StrategyRunner:
         source_ready = source_count >= required_count
         indicator_ready = indicator_count >= required_count
         runner_ready = runner_before >= required_count
+        mdm_last_ts = self._history_row_timestamp(rows[-1]) if rows else None
+        runner_last_ts = self._runner_history_last_timestamp(normalized)
+        indicator_last_ts = self._indicator_history_last_timestamp(normalized)
+        runner_current = (
+            runner_ready
+            and runner_last_ts is not None
+            and mdm_last_ts is not None
+            and runner_last_ts >= mdm_last_ts
+        )
+        indicator_current = (
+            indicator_ready
+            and indicator_last_ts is not None
+            and mdm_last_ts is not None
+            and indicator_last_ts >= mdm_last_ts
+        )
         needs_seed = bool(
             rows
-            and (not indicator_ready or not runner_ready)
+            and (not indicator_current or not runner_current)
             and (source_count > min(indicator_count, runner_before) or source_ready)
         )
         if needs_seed:

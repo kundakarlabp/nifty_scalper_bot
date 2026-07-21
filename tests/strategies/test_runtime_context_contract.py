@@ -23,7 +23,9 @@ def test_runtime_context_preserves_live_direction_contract_keys() -> None:
         },
     )
 
-    indicators = engine.get_indicators(symbol, names={"direction_bias", "context_age_seconds"})
+    indicators = engine.get_indicators(
+        symbol, names={"direction_bias", "context_age_seconds"}
+    )
     assert indicators["direction_bias"] == "CE"
     assert indicators["context_age_seconds"] == 0.42
     assert indicators["spot_fresh"] is True
@@ -48,7 +50,9 @@ def test_runtime_context_preserves_live_quote_age_contract_keys() -> None:
         },
     )
 
-    indicators = engine.get_indicators(symbol, names={"quote_age_s", "tick_age_ms", "quote_update_version"})
+    indicators = engine.get_indicators(
+        symbol, names={"quote_age_s", "tick_age_ms", "quote_update_version"}
+    )
     assert indicators["quote_age_s"] == 0.12
     assert indicators["tick_age_ms"] == 120
     assert indicators["quote_update_version"] == 42
@@ -73,7 +77,9 @@ def test_runtime_context_derives_direction_bias_from_alias() -> None:
     assert preserved["live_direction_context_proof"] is True
 
 
-def test_live_direction_context_proof_derives_freshness_from_spot_or_futures_age() -> None:
+def test_live_direction_context_proof_derives_freshness_from_spot_or_futures_age() -> (
+    None
+):
     spot = normalise_live_direction_context(
         {
             "spot_tick_age_s": 0.25,
@@ -108,3 +114,68 @@ def test_resolve_context_age_seconds_uses_canonical_safe_default() -> None:
     assert resolve_context_age_seconds({"context_age_seconds": "1.5"}) == 1.5
     assert resolve_context_age_seconds({"context_age_seconds": "invalid"}) == 999.0
     assert resolve_context_age_seconds({}) == 999.0
+
+
+def test_normalise_current_age_overrides_stale_cached_false_freshness() -> None:
+    preserved = normalise_live_direction_context(
+        {
+            "spot_fresh": False,
+            "fut_fresh": False,
+            "futures_fresh": False,
+            "spot_tick_age_s": 0.25,
+            "futures_tick_age_s": 0.5,
+            "context_age_seconds": 0.5,
+        }
+    )
+
+    assert preserved["spot_fresh"] is True
+    assert preserved["fut_fresh"] is True
+    assert preserved["futures_fresh"] is True
+    assert preserved["live_direction_context_proof"] is True
+
+
+def test_normalise_missing_current_age_keeps_explicit_stale_false_fail_closed() -> None:
+    preserved = normalise_live_direction_context(
+        {
+            "spot_fresh": False,
+            "fut_fresh": False,
+            "futures_fresh": False,
+            "context_age_seconds": 0.5,
+        }
+    )
+
+    assert preserved["spot_fresh"] is False
+    assert preserved["fut_fresh"] is False
+    assert preserved["futures_fresh"] is False
+    assert preserved["live_direction_context_proof"] is False
+
+
+def test_runtime_context_current_age_replaces_cached_false_atomically() -> None:
+    engine = IndicatorEngine()
+    symbol = "NFO:NIFTY2670724400CE"
+
+    engine.set_runtime_context(
+        symbol,
+        {
+            "spot_fresh": False,
+            "fut_fresh": False,
+            "futures_fresh": False,
+            "context_age_seconds": 0.5,
+        },
+    )
+    engine.set_runtime_context(
+        symbol,
+        {
+            "spot_tick_age_s": 0.25,
+            "futures_tick_age_s": 0.5,
+            "context_age_seconds": 0.5,
+        },
+    )
+
+    indicators = engine.get_indicators(
+        symbol, names={"spot_fresh", "fut_fresh", "futures_fresh"}
+    )
+    assert indicators["spot_fresh"] is True
+    assert indicators["fut_fresh"] is True
+    assert indicators["futures_fresh"] is True
+    assert indicators["live_direction_context_proof"] is True

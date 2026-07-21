@@ -9,7 +9,17 @@ from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 def _bars(count: int) -> list[dict]:
     base = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
-    return [{"timestamp": base + timedelta(minutes=i), "open": 1+i, "high": 2+i, "low": 1+i, "close": 2+i, "volume": i} for i in range(count)]
+    return [
+        {
+            "timestamp": base + timedelta(minutes=i),
+            "open": 1 + i,
+            "high": 2 + i,
+            "low": 1 + i,
+            "close": 2 + i,
+            "volume": i,
+        }
+        for i in range(count)
+    ]
 
 
 def _runner(rows: list[dict] | None = None) -> StrategyRunner:
@@ -22,14 +32,20 @@ def _runner(rows: list[dict] | None = None) -> StrategyRunner:
     r._set_symbol_hydration_state = lambda *_a, **_k: None
     r._seed_pipeline_store = lambda *_a, **_k: None
     r._seed_candle_engine_from_history = lambda *_a, **_k: None
-    r._active_symbols = set(); r._tracked_symbols = set(); r._data_phase = {}; r._last_bar_ts = {}
+    r._active_symbols = set()
+    r._tracked_symbols = set()
+    r._data_phase = {}
+    r._last_bar_ts = {}
     r._runtime_history_ensure_inflight = {}
     r._runtime_history_ensure_roles = {}
     r._hydration_attempted_symbols = set()
     r._last_hydration_reason_by_symbol = {}
     r._history_role_for_symbol = lambda _s: "spot_context"
     # sync must not start a broker fetch when request_if_short=False
-    r._schedule_runtime_history_ensure = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no scheduling from sync when request_if_short=False"))
+    r._schedule_runtime_history_ensure = lambda *_a, **_k: (_ for _ in ()).throw(
+        AssertionError("no scheduling from sync when request_if_short=False")
+    )
+
     def _reseed(symbol, bars, *, source="", min_bars=0):
         rows_list = list(bars or [])
         r._symbol_history[symbol] = list(rows_list)
@@ -39,13 +55,20 @@ def _runner(rows: list[dict] | None = None) -> StrategyRunner:
             except Exception:
                 pass
         return len(rows_list)
+
     r.reseed_history_from_bars = _reseed
     return r
 
 
 async def test_mdm_warm_runner_and_indicator_cold_sync_only() -> None:
     r = _runner(_bars(30))
-    result = r.sync_history_from_mdm("NSE:NIFTY", required_bars=30, reason="test", role="spot_context", request_if_short=False)
+    result = r.sync_history_from_mdm(
+        "NSE:NIFTY",
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
     assert result.success
     assert result.runner_bars >= 30
     assert result.indicator_bars >= 30
@@ -54,30 +77,52 @@ async def test_mdm_warm_runner_and_indicator_cold_sync_only() -> None:
 async def test_mdm_warm_indicator_cold_reseeds_without_fetch() -> None:
     r = _runner(_bars(30))
     r._symbol_history["NSE:NIFTY"] = [object()] * 30
-    result = r.sync_history_from_mdm("NSE:NIFTY", required_bars=30, reason="test", role="spot_context", request_if_short=False)
+    result = r.sync_history_from_mdm(
+        "NSE:NIFTY",
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
     assert result.success
     assert result.failure_reason is None
 
 
 async def test_reseed_failure_returns_failed_result() -> None:
     r = _runner(_bars(30))
+
     def bad_reseed(*_a, **_k):
         raise ValueError("bad rows")
+
     r.reseed_history_from_bars = bad_reseed  # type: ignore[method-assign]
-    result = r.sync_history_from_mdm("NSE:NIFTY", required_bars=30, reason="test", role="spot_context", request_if_short=False)
+    result = r.sync_history_from_mdm(
+        "NSE:NIFTY",
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
     assert not result.success
-    assert result.failure_reason and result.failure_reason.startswith("runner_reseed_failed")
+    assert result.failure_reason and result.failure_reason.startswith(
+        "runner_reseed_failed"
+    )
 
 
 async def test_selected_option_classification_exact_and_unknown_false() -> None:
     r = _runner([])
     r._active_selected_ce = "NFO:NIFTY26JUN23600CE"
     r._active_selected_pe = "NFO:NIFTY26JUN23600PE"
-    r._selected_ce_symbol = None; r._selected_pe_symbol = None; r._pending_selected_ce = None; r._pending_selected_pe = None
-    r._active_contract_basket = None; r._data_hub = None; r._market_data = None
+    r._selected_ce_symbol = None
+    r._selected_pe_symbol = None
+    r._pending_selected_ce = None
+    r._pending_selected_pe = None
+    r._active_contract_basket = None
+    r._data_hub = None
+    r._market_data = None
     assert r._is_selected_option_symbol("NFO:NIFTY26JUN23600CE")
     assert not r._is_selected_option_symbol("NFO:NIFTY26JUN23500CE")
-    r._active_selected_ce = None; r._active_selected_pe = None
+    r._active_selected_ce = None
+    r._active_selected_pe = None
     assert not r._is_selected_option_symbol("NFO:NIFTY26JUN23600CE")
 
 
@@ -85,14 +130,24 @@ async def test_compat_wrapper_delegates_to_canonical_sync() -> None:
     r = _runner(_bars(5))
     r._required_bars_for_symbol = lambda _s: 5
     r._symbol_role_for_runner = lambda _s: "spot_context"
-    assert r._sync_history_from_mdm_cache("NSE:NIFTY", required_bars=5, request_if_short=False) >= 5
+    assert (
+        r._sync_history_from_mdm_cache(
+            "NSE:NIFTY", required_bars=5, request_if_short=False
+        )
+        >= 5
+    )
 
 
 # ---- Canonical scheduling on short history (spec §1/§9) ----
 
+
 def _runner_for_scheduling():
     r = StrategyRunner.__new__(StrategyRunner)
-    r._logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None)
+    r._logger = SimpleNamespace(
+        info=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+        debug=lambda *a, **k: None,
+    )
     r._normalize_symbol = lambda s: str(s)
     r._symbol_history = {}
     r._indicator_engine = IndicatorEngine()
@@ -106,18 +161,39 @@ def _runner_for_scheduling():
     return r
 
 
-async def test_short_history_schedules_canonical_ensurer_not_request_hydration() -> None:
+async def test_short_history_schedules_canonical_ensurer_not_request_hydration() -> (
+    None
+):
     r = _runner_for_scheduling()
     calls = []
-    async def _ensurer(symbol, *, role, phase, reason, required_bars=None, target_bars=None):
+
+    async def _ensurer(
+        symbol, *, role, phase, reason, required_bars=None, target_bars=None
+    ):
         calls.append((symbol, role, phase, reason, required_bars))
+
     r.set_runtime_history_ensurer(_ensurer)
     # DataHub/MDM request_hydration must never be touched.
-    r._data_hub = SimpleNamespace(request_hydration=lambda *a, **k: (_ for _ in ()).throw(AssertionError("DataHub request_hydration must not be called")))
-    r._market_data = SimpleNamespace(request_hydration=lambda *a, **k: (_ for _ in ()).throw(AssertionError("MDM request_hydration must not be called")))
-    result = r.sync_history_from_mdm("NFO:NIFTY26JUN24000CE", required_bars=30, reason="t", role="selected_option", request_if_short=True)
+    r._data_hub = SimpleNamespace(
+        request_hydration=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("DataHub request_hydration must not be called")
+        )
+    )
+    r._market_data = SimpleNamespace(
+        request_hydration=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("MDM request_hydration must not be called")
+        )
+    )
+    result = r.sync_history_from_mdm(
+        "NFO:NIFTY26JUN24000CE",
+        required_bars=30,
+        reason="t",
+        role="selected_option",
+        request_if_short=True,
+    )
     assert result.success is False
     import asyncio as _asyncio
+
     for _ in range(5):
         await _asyncio.sleep(0)
         if calls:
@@ -133,23 +209,45 @@ async def test_short_history_schedules_canonical_ensurer_not_request_hydration()
 async def test_missing_ensurer_fails_safe_no_request_hydration() -> None:
     r = _runner_for_scheduling()
     r._runtime_history_ensurer = None
-    r._data_hub = SimpleNamespace(request_hydration=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fall back")))
-    r._market_data = SimpleNamespace(request_hydration=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fall back")))
+    r._data_hub = SimpleNamespace(
+        request_hydration=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not fall back")
+        )
+    )
+    r._market_data = SimpleNamespace(
+        request_hydration=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not fall back")
+        )
+    )
     # must not raise
-    result = r.sync_history_from_mdm("NFO:NIFTY26JUN24000CE", required_bars=30, reason="t", role="selected_option", request_if_short=True)
+    result = r.sync_history_from_mdm(
+        "NFO:NIFTY26JUN24000CE",
+        required_bars=30,
+        reason="t",
+        role="selected_option",
+        request_if_short=True,
+    )
     assert result.success is False
 
 
 async def test_duplicate_scheduling_suppressed() -> None:
     r = _runner_for_scheduling()
     n = {"count": 0}
+
     async def _ensurer(symbol, **kw):
         n["count"] += 1
+
     r.set_runtime_history_ensurer(_ensurer)
     # pre-mark inflight to simulate an active request
     r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
     r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "selected_option"
-    scheduled = r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="t", required_bars=30)
+    scheduled = r._schedule_runtime_history_ensure(
+        "NFO:NIFTY26JUN24000CE",
+        role="selected_option",
+        phase="runner_sync",
+        reason="t",
+        required_bars=30,
+    )
     assert scheduled is True  # already inflight counts as scheduled
     assert n["count"] == 0  # callback not invoked again
 
@@ -157,11 +255,19 @@ async def test_duplicate_scheduling_suppressed() -> None:
 async def test_reseed_runtime_error_returns_structured_failure() -> None:
     r = _runner_for_scheduling()
     r._get_mdm_bars = lambda _s, limit: _bars(30)
+
     def _boom(*_a, **_k):
         raise RuntimeError("kaboom")
+
     r.reseed_history_from_bars = _boom
     r._schedule_runtime_history_ensure = lambda *a, **k: True
-    result = r.sync_history_from_mdm("NSE:NIFTY", required_bars=30, reason="t", role="spot_context", request_if_short=False)
+    result = r.sync_history_from_mdm(
+        "NSE:NIFTY",
+        required_bars=30,
+        reason="t",
+        role="spot_context",
+        request_if_short=False,
+    )
     assert result.success is False
     assert "runner_reseed_failed:RuntimeError" in (result.failure_reason or "")
 
@@ -169,15 +275,24 @@ async def test_reseed_runtime_error_returns_structured_failure() -> None:
 async def test_same_target_stronger_role_schedules_upgrade_selected_option() -> None:
     r = _runner_for_scheduling()
     calls = []
+
     async def _ensurer(symbol, **kw):
         calls.append((symbol, kw))
+
     r.set_runtime_history_ensurer(_ensurer)
     r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
     r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
 
-    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="upgrade", required_bars=30)
+    assert r._schedule_runtime_history_ensure(
+        "NFO:NIFTY26JUN24000CE",
+        role="selected_option",
+        phase="runner_sync",
+        reason="upgrade",
+        required_bars=30,
+    )
 
     import asyncio as _asyncio
+
     for _ in range(5):
         await _asyncio.sleep(0)
         if calls:
@@ -189,14 +304,23 @@ async def test_same_target_stronger_role_schedules_upgrade_selected_option() -> 
 async def test_same_target_weaker_role_suppresses_existing_selected_option() -> None:
     r = _runner_for_scheduling()
     calls = []
+
     async def _ensurer(symbol, **kw):
         calls.append((symbol, kw))
+
     r.set_runtime_history_ensurer(_ensurer)
     r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
     r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "selected_option"
 
-    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="option_context", phase="runner_sync", reason="weaker", required_bars=30)
+    assert r._schedule_runtime_history_ensure(
+        "NFO:NIFTY26JUN24000CE",
+        role="option_context",
+        phase="runner_sync",
+        reason="weaker",
+        required_bars=30,
+    )
     import asyncio as _asyncio
+
     await _asyncio.sleep(0)
     assert calls == []
 
@@ -204,14 +328,23 @@ async def test_same_target_weaker_role_suppresses_existing_selected_option() -> 
 async def test_same_target_recovery_role_schedules_upgrade() -> None:
     r = _runner_for_scheduling()
     calls = []
+
     async def _ensurer(symbol, **kw):
         calls.append((symbol, kw))
+
     r.set_runtime_history_ensurer(_ensurer)
     r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
     r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
 
-    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="recovery_or_open_position", phase="runner_sync", reason="recovery", required_bars=30)
+    assert r._schedule_runtime_history_ensure(
+        "NFO:NIFTY26JUN24000CE",
+        role="recovery_or_open_position",
+        phase="runner_sync",
+        reason="recovery",
+        required_bars=30,
+    )
     import asyncio as _asyncio
+
     for _ in range(5):
         await _asyncio.sleep(0)
         if calls:
@@ -222,14 +355,23 @@ async def test_same_target_recovery_role_schedules_upgrade() -> None:
 async def test_smaller_target_weaker_role_suppresses_larger_selected_option() -> None:
     r = _runner_for_scheduling()
     calls = []
+
     async def _ensurer(symbol, **kw):
         calls.append((symbol, kw))
+
     r.set_runtime_history_ensurer(_ensurer)
     r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 75
     r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "selected_option"
 
-    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="option_context", phase="runner_sync", reason="smaller", required_bars=30)
+    assert r._schedule_runtime_history_ensure(
+        "NFO:NIFTY26JUN24000CE",
+        role="option_context",
+        phase="runner_sync",
+        reason="smaller",
+        required_bars=30,
+    )
     import asyncio as _asyncio
+
     await _asyncio.sleep(0)
     assert calls == []
 
@@ -237,14 +379,24 @@ async def test_smaller_target_weaker_role_suppresses_larger_selected_option() ->
 async def test_larger_target_and_stronger_role_preserves_both_upgrades() -> None:
     r = _runner_for_scheduling()
     calls = []
+
     async def _ensurer(symbol, **kw):
         calls.append((symbol, kw))
+
     r.set_runtime_history_ensurer(_ensurer)
     r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
     r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
 
-    assert r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="both", required_bars=30, target_bars=75)
+    assert r._schedule_runtime_history_ensure(
+        "NFO:NIFTY26JUN24000CE",
+        role="selected_option",
+        phase="runner_sync",
+        reason="both",
+        required_bars=30,
+        target_bars=75,
+    )
     import asyncio as _asyncio
+
     for _ in range(5):
         await _asyncio.sleep(0)
         if calls:
@@ -253,10 +405,14 @@ async def test_larger_target_and_stronger_role_preserves_both_upgrades() -> None
     assert calls[0][1]["target_bars"] == 75
 
 
-async def test_create_task_failure_closes_coroutine_and_does_not_overwrite_newer_upgrade(monkeypatch, recwarn) -> None:
+async def test_create_task_failure_closes_coroutine_and_does_not_overwrite_newer_upgrade(
+    monkeypatch, recwarn
+) -> None:
     r = _runner_for_scheduling()
+
     async def _ensurer(symbol, **kw):
         raise AssertionError("callback must not run when scheduling fails")
+
     r.set_runtime_history_ensurer(_ensurer)
     r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
     r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "option_context"
@@ -266,18 +422,34 @@ async def test_create_task_failure_closes_coroutine_and_does_not_overwrite_newer
             # Simulate a concurrent stronger same-target upgrade that wins before
             # rollback executes; rollback must not overwrite this role marker.
             r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] = 30
-            r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = "recovery_or_open_position"
+            r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] = (
+                "recovery_or_open_position"
+            )
             raise RuntimeError("create_task boom")
 
-    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.asyncio.get_running_loop", lambda: _Loop())
-    scheduled = r._schedule_runtime_history_ensure("NFO:NIFTY26JUN24000CE", role="selected_option", phase="runner_sync", reason="fail", required_bars=30)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.asyncio.get_running_loop", lambda: _Loop()
+    )
+    scheduled = r._schedule_runtime_history_ensure(
+        "NFO:NIFTY26JUN24000CE",
+        role="selected_option",
+        phase="runner_sync",
+        reason="fail",
+        required_bars=30,
+    )
 
     assert scheduled is False
     assert r._runtime_history_ensure_inflight["NFO:NIFTY26JUN24000CE"] == 30
-    assert r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"] == "recovery_or_open_position"
+    assert (
+        r._runtime_history_ensure_roles["NFO:NIFTY26JUN24000CE"]
+        == "recovery_or_open_position"
+    )
     assert [w for w in recwarn if "was never awaited" in str(w.message)] == []
 
-async def test_selected_option_with_canonical_source_warm_indicator_short_reseeds_immediately() -> None:
+
+async def test_selected_option_with_canonical_source_warm_indicator_short_reseeds_immediately() -> (
+    None
+):
     r = _runner(_bars(50))
     symbol = "NFO:NIFTY26JUN24000CE"
     r._symbol_history[symbol] = _bars(15)
@@ -298,7 +470,9 @@ async def test_selected_option_with_canonical_source_warm_indicator_short_reseed
     assert result.indicator_bars >= 30
 
 
-async def test_indicator_equal_to_short_source_remains_not_ready_without_false_success() -> None:
+async def test_indicator_equal_to_short_source_remains_not_ready_without_false_success() -> (
+    None
+):
     r = _runner(_bars(15))
     symbol = "NFO:NIFTY26JUN24000CE"
     r._symbol_history[symbol] = _bars(15)
@@ -319,7 +493,9 @@ async def test_indicator_equal_to_short_source_remains_not_ready_without_false_s
     assert result.failure_reason == "source_history_short"
 
 
-async def test_partial_source_availability_seeds_useful_bars_but_remains_fail_closed() -> None:
+async def test_partial_source_availability_seeds_useful_bars_but_remains_fail_closed() -> (
+    None
+):
     r = _runner(_bars(20))
     symbol = "NFO:NIFTY26JUN24000CE"
     for bar in _bars(15):
@@ -425,3 +601,69 @@ async def test_short_source_repairs_short_runner_but_remains_fail_closed() -> No
     assert result.mdm_bars == 20
     assert result.runner_bars == 20
     assert result.failure_reason == "source_history_short"
+
+
+async def test_repeated_sync_skips_reseed_when_runner_and_indicator_match_mdm_latest_timestamp() -> (
+    None
+):
+    r = _runner(_bars(50))
+    symbol = "NFO:NIFTY26JUN24000CE"
+    calls = []
+    original = r.reseed_history_from_bars
+
+    def _counting_reseed(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    r.reseed_history_from_bars = _counting_reseed
+    first = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+    second = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert calls == [symbol]
+
+
+async def test_equal_counts_with_newer_mdm_timestamp_reseeds() -> None:
+    initial = _bars(30)
+    newer = _bars(31)[1:]
+    r = _runner(initial)
+    symbol = "NFO:NIFTY26JUN24000CE"
+    r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+    r._get_mdm_bars = lambda _s, limit: list(newer)[-limit:]
+    calls = []
+    original = r.reseed_history_from_bars
+
+    def _counting_reseed(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    r.reseed_history_from_bars = _counting_reseed
+    result = r.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="selected_option_hydration",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is True
+    assert calls == [symbol]
