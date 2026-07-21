@@ -528,9 +528,7 @@ def build_symbol_hydration_status(
     evaluated_at_utc = evaluated_at_utc.astimezone(timezone.utc)
     grace = float(_clamped_int_env("HISTORY_PUBLICATION_GRACE_SECONDS", 90, 0, 300))
     max_lag = _clamped_int_env("HISTORY_LATEST_BAR_MAX_LAG_MINUTES", 2, 0, 5)
-    continuity_window = _clamped_int_env(
-        "HISTORY_CONTINUITY_WINDOW_BARS", 50, required, 500
-    )
+    continuity_window = _clamped_int_env("HISTORY_CONTINUITY_WINDOW_BARS", 5, 2, 500)
     allowed_missing = _clamped_int_env(
         "HISTORY_ALLOWED_RECENT_MISSING_MINUTES", 0, 0, 5
     )

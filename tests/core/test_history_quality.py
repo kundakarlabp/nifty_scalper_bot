@@ -329,3 +329,49 @@ def test_required_historical_depth_does_not_enlarge_continuity_window() -> None:
     assert quality.recent_window_contiguous is True
     assert quality.missing_minute_count == 0
     assert "selected_ce_history_gap_detected" not in quality.blockers
+
+
+def test_build_symbol_hydration_status_defaults_to_five_bar_continuity_window(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("HISTORY_CONTINUITY_WINDOW_BARS", raising=False)
+    monkeypatch.setenv("HISTORY_PUBLICATION_GRACE_SECONDS", "0")
+    current = date(2026, 1, 2)
+
+    def make_bars_without(missing_idx: int) -> list[dict[str, datetime]]:
+        return [
+            bar(current, 9 + (idx // 60), 15 + (idx % 60))
+            for idx in range(52)
+            if idx != missing_idx
+        ]
+
+    ctx = SimpleNamespace(
+        market_data_manager=SimpleNamespace(
+            get_ohlc_bars=lambda *_a, **_k: make_bars_without(10)
+        ),
+        data_hub=None,
+        strategy_runner=None,
+    )
+
+    quality = build_symbol_hydration_status(
+        ctx,
+        "NSE:NIFTY",
+        "spot",
+        50,
+        now_utc=datetime(2026, 1, 2, 10, 7, tzinfo=IST).astimezone(timezone.utc),
+    )
+
+    assert quality.recent_window_contiguous is True
+    assert "spot_history_gap_detected" not in quality.blocker_reasons
+
+    ctx.market_data_manager.get_ohlc_bars = lambda *_a, **_k: make_bars_without(49)
+    quality = build_symbol_hydration_status(
+        ctx,
+        "NSE:NIFTY",
+        "spot",
+        50,
+        now_utc=datetime(2026, 1, 2, 10, 7, tzinfo=IST).astimezone(timezone.utc),
+    )
+
+    assert quality.recent_window_contiguous is False
+    assert "spot_history_gap_detected" in quality.blocker_reasons

@@ -753,3 +753,107 @@ async def test_active_basket_cooldown_bypassed_by_change_or_requirement(
         phase="runtime",
     )
     assert len(mdm.calls) > first * 2
+
+
+@pytest.mark.asyncio
+async def test_non_gating_option_context_gap_does_not_fetch_or_sync(
+    monkeypatch,
+) -> None:
+    mdm = _ActiveMDM()
+    runner = _ActiveRunner()
+    c = _active_ctx(mdm, runner)
+    context_symbol = "NFO:NIFTY2661623100CE"
+
+    def fake_status(_ctx, symbol, _role, _required):
+        if symbol == context_symbol:
+            return _status(
+                bars=40,
+                runner_bars=40,
+                indicator_bars=40,
+                fresh=False,
+                contiguous=False,
+            )
+        return _status(bars=40, runner_bars=40, indicator_bars=40)
+
+    monkeypatch.setattr(app, "build_symbol_hydration_status", fake_status)
+
+    result = await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+
+    assert [call for call in mdm.calls if call[0] == context_symbol] == []
+    assert [call for call in runner.calls if call[0] == context_symbol] == []
+    assert result[context_symbol]["reason"] in {"ready", "skipped", "non_gating"}
+
+
+@pytest.mark.asyncio
+async def test_selected_option_gap_still_fetches_recovery_gap_fill(monkeypatch) -> None:
+    mdm = _ActiveMDM()
+    runner = _ActiveRunner()
+    c = _active_ctx(mdm, runner)
+    selected_symbol = "NFO:NIFTY2661623000CE"
+
+    def fake_status(_ctx, symbol, _role, _required):
+        if symbol == selected_symbol:
+            return _status(
+                bars=40,
+                runner_bars=40,
+                indicator_bars=40,
+                fresh=True,
+                contiguous=False,
+            )
+        return _status(bars=40, runner_bars=40, indicator_bars=40)
+
+    monkeypatch.setattr(app, "build_symbol_hydration_status", fake_status)
+
+    result = await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+
+    selected_calls = [call for call in mdm.calls if call[0] == selected_symbol]
+    assert selected_calls
+    assert selected_calls[0][1]["reason"] == "recovery_gap_fill"
+    assert result[selected_symbol].symbol == selected_symbol
+
+
+@pytest.mark.asyncio
+async def test_non_gating_option_context_short_history_still_hydrates(
+    monkeypatch,
+) -> None:
+    mdm = _ActiveMDM()
+    runner = _ActiveRunner()
+    c = _active_ctx(mdm, runner)
+    context_symbol = "NFO:NIFTY2661623100CE"
+
+    def fake_status(_ctx, symbol, _role, _required):
+        if symbol == context_symbol:
+            return _status(
+                bars=10,
+                runner_bars=40,
+                indicator_bars=40,
+                fresh=True,
+                contiguous=True,
+            )
+        return _status(bars=40, runner_bars=40, indicator_bars=40)
+
+    monkeypatch.setattr(app, "build_symbol_hydration_status", fake_status)
+
+    await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+
+    context_calls = [call for call in mdm.calls if call[0] == context_symbol]
+    assert context_calls
+    assert context_calls[0][1]["reason"] == "history_short"
