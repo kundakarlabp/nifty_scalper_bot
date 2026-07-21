@@ -111,6 +111,8 @@ def test_token_change_resets_generation_and_requires_new_matching_tick() -> None
 
     assert mdm.request_token_subscription(new_token, symbol=symbol)
 
+    assert mdm.desired_tokens_snapshot() == [new_token]
+    assert mdm._ws.tokens == [new_token]
     assert mdm._symbol_subscription_generation[symbol] > old_generation
     assert (
         mdm.classify_live_tick_readiness(symbol, new_token, max_age_s=60.0)["ready"]
