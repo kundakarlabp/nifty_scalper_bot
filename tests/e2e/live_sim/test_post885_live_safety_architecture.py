@@ -62,22 +62,22 @@ def _bootstrap(system):
     _mark_activation(system, system.scenario.pe_symbol)
 
 
-def test_underlying_evaluation_not_blocked_by_option_readiness(live_sim_system):
+def test_spot_context_evaluation_not_blocked_by_option_readiness(live_sim_system):
     system = live_sim_system
     _bootstrap(system)
     assert (
         system.runner._entry_evaluation_route(
             system.scenario.spot_symbol
         )  # noqa: SLF001
-        == EntryEvaluationRoute.UNDERLYING
+        == EntryEvaluationRoute.CONTEXT_ONLY
     )
-    # Underlying stage must not require the option activation proof.
+    # Context-only stage must not require the option activation proof.
     system.runner._live_symbol_activation = pytest.fail  # type: ignore[method-assign]  # noqa: SLF001
     assert (
         system.runner._entry_evaluation_route(
             system.scenario.spot_symbol
         )  # noqa: SLF001
-        == EntryEvaluationRoute.UNDERLYING
+        == EntryEvaluationRoute.CONTEXT_ONLY
     )
 
 
