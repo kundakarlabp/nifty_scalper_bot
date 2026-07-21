@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -14,6 +14,11 @@ from nifty_scalper_bot.core.history_readiness import (
 )
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def bar(day: date, hour: int, minute: int) -> dict[str, datetime]:
+    start = datetime(day.year, day.month, day.day, hour, 0, tzinfo=IST)
+    return {"timestamp": start + timedelta(minutes=minute)}
 
 
 def trading(day: date) -> bool:
@@ -237,3 +242,90 @@ def test_option_context_gap_is_diagnostic_not_role_specific_execution_blocker() 
     assert result.recent_window_contiguous is False
     assert "selected_ce_history_gap_detected" not in result.blockers
     assert "option_context_history_gap_detected" in result.blockers
+
+
+def test_previous_session_gap_does_not_block_current_session_history() -> None:
+    previous = date(2026, 1, 1)
+    current = date(2026, 1, 2)
+    bars = [
+        bar(previous, 9, 15),
+        bar(previous, 9, 17),
+        bar(current, 9, 15),
+        bar(current, 9, 16),
+        bar(current, 9, 17),
+        bar(current, 9, 18),
+    ]
+
+    quality = _evaluate_recent_history_quality(
+        bars,
+        role="selected_ce",
+        required_bars=3,
+        now_utc=datetime(2026, 1, 2, 9, 19, tzinfo=IST).astimezone(timezone.utc),
+        max_lag_minutes=2,
+        publication_grace_seconds=0,
+        allowed_missing_minutes=0,
+        continuity_window_bars=10,
+        provider_error=None,
+    )
+
+    assert quality.recent_window_contiguous is True
+    assert quality.missing_minute_count == 0
+    assert "selected_ce_history_gap_detected" not in quality.blockers
+
+
+def test_current_session_gap_still_blocks_history() -> None:
+    current = date(2026, 1, 2)
+    bars = [
+        bar(current, 9, 15),
+        bar(current, 9, 16),
+        bar(current, 9, 18),
+    ]
+
+    quality = _evaluate_recent_history_quality(
+        bars,
+        role="selected_ce",
+        required_bars=3,
+        now_utc=datetime(2026, 1, 2, 9, 19, tzinfo=IST).astimezone(timezone.utc),
+        max_lag_minutes=2,
+        publication_grace_seconds=0,
+        allowed_missing_minutes=0,
+        continuity_window_bars=10,
+        provider_error=None,
+    )
+
+    assert quality.recent_window_contiguous is False
+    assert quality.missing_minute_count == 1
+    assert "selected_ce_history_gap_detected" in quality.blockers
+
+
+def test_required_historical_depth_does_not_enlarge_continuity_window() -> None:
+    previous = date(2026, 1, 1)
+    current = date(2026, 1, 2)
+    previous_bars = [
+        bar(previous, 9 + (idx // 60), 15 + (idx % 60))
+        for idx in range(50)
+        if idx != 12
+    ]
+    current_bars = [
+        bar(current, 9, 15),
+        bar(current, 9, 16),
+        bar(current, 9, 17),
+        bar(current, 9, 18),
+        bar(current, 9, 19),
+    ]
+
+    quality = _evaluate_recent_history_quality(
+        [*previous_bars, *current_bars],
+        role="selected_ce",
+        required_bars=50,
+        now_utc=datetime(2026, 1, 2, 9, 20, tzinfo=IST).astimezone(timezone.utc),
+        max_lag_minutes=2,
+        publication_grace_seconds=0,
+        allowed_missing_minutes=0,
+        continuity_window_bars=5,
+        provider_error=None,
+    )
+
+    assert quality.recent_window_contiguous is True
+    assert quality.missing_minute_count == 0
+    assert "selected_ce_history_gap_detected" not in quality.blockers
