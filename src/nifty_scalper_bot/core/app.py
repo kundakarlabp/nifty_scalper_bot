@@ -8927,8 +8927,13 @@ async def _ensure_active_basket_history(
         mdm_short = int(status.mdm_bars or 0) < required
         runner_short = int(status.runner_bars or 0) < required
         indicator_short = int(status.indicator_bars or 0) < required
-        stale = required > 0 and not bool(status.latest_bar_fresh)
-        gap = required > 0 and not bool(status.recent_window_contiguous)
+        quality_gating = bool(spec["gating"])
+        stale = quality_gating and required > 0 and not bool(status.latest_bar_fresh)
+        gap = (
+            quality_gating
+            and required > 0
+            and not bool(status.recent_window_contiguous)
+        )
         ensure_reason = (
             "history_short"
             if mdm_short
