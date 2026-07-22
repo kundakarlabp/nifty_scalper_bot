@@ -12029,7 +12029,12 @@ class StrategyRunner:
         except Exception:
             pass
         if normalized in getattr(self, "_trigger_candidate_symbols", set()):
-            roles.add("trigger_candidate")
+            if role == "spot_context":
+                roles.add("underlying")
+            elif role == "futures_context":
+                roles.add("futures_trigger_candidate")
+            else:
+                roles.add("trigger_candidate")
         return roles
 
     def _entry_evaluation_route(self, symbol: str) -> EntryEvaluationRoute:

@@ -59,10 +59,7 @@ def test_plain_spot_context_routes_as_context_only_snapshot_update():
 
 def test_spot_with_underlying_role_routes_as_underlying_trigger():
     r = runner()
-    def roles_with_context_and_underlying(_symbol):
-        return {"spot_context", "underlying"}
-
-    r._roles_for_symbol = roles_with_context_and_underlying  # type: ignore[method-assign]
+    r._trigger_candidate_symbols = {"NSE:NIFTY"}
 
     assert r._entry_evaluation_route("NSE:NIFTY") == EntryEvaluationRoute.UNDERLYING
 
@@ -327,10 +324,7 @@ def test_nifty_underlying_reaches_strategy_manager(monkeypatch):
     runner_obj, strategy_manager, risk_manager, order_manager, selected_ce = (
         _build_phase9_runner(monkeypatch)
     )
-    def roles_with_context_and_underlying(_symbol):
-        return {"spot_context", "underlying"}
-
-    runner_obj._roles_for_symbol = roles_with_context_and_underlying  # type: ignore[method-assign]
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
 
     runner_obj._on_tick(
         "NSE:NIFTY",
@@ -359,10 +353,7 @@ def test_underlying_generated_candidate_activation_failure_blocks_after_signal(
     runner_obj, strategy_manager, risk_manager, order_manager, _selected_ce = (
         _build_phase9_runner(monkeypatch, current_generation_ready=False)
     )
-    def roles_with_context_and_underlying(_symbol):
-        return {"spot_context", "underlying"}
-
-    runner_obj._roles_for_symbol = roles_with_context_and_underlying  # type: ignore[method-assign]
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
 
     runner_obj._on_tick(
         "NSE:NIFTY",
