@@ -12029,7 +12029,12 @@ class StrategyRunner:
         except Exception:
             pass
         if normalized in getattr(self, "_trigger_candidate_symbols", set()):
-            roles.add("trigger_candidate")
+            if role == "spot_context":
+                roles.add("underlying")
+            elif role == "futures_context":
+                roles.add("futures_trigger_candidate")
+            else:
+                roles.add("trigger_candidate")
         return roles
 
     def _entry_evaluation_route(self, symbol: str) -> EntryEvaluationRoute:
@@ -12038,11 +12043,11 @@ class StrategyRunner:
             return EntryEvaluationRoute.POSITION_MANAGEMENT
         if roles & {"selected_option", "trigger_candidate"}:
             return EntryEvaluationRoute.OPTION_CANDIDATE
-        if roles & {"underlying", "spot_context"}:
-            return EntryEvaluationRoute.UNDERLYING
         if "futures_trigger_candidate" in roles:
             return EntryEvaluationRoute.UNDERLYING
-        if "futures_context" in roles:
+        if "underlying" in roles:
+            return EntryEvaluationRoute.UNDERLYING
+        if roles & {"spot_context", "futures_context"}:
             return EntryEvaluationRoute.CONTEXT_ONLY
         return EntryEvaluationRoute.CONTEXT_ONLY
 

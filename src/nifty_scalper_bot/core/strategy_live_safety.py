@@ -658,6 +658,20 @@ def apply_patches() -> None:
         trace_id: str | None = None,
     ) -> Signal | None:
         symbol_norm = normalize_symbol(symbol)
+        # Pure spot/futures context symbols (role classification is the
+        # existing, real production classify_symbol_role -- not a per-symbol
+        # hardcode) are the source of the context snapshots that
+        # _context_fresh_block checks. Requiring them to prove their own
+        # freshness before original() can even run the update that creates
+        # that freshness is circular: it never resolves and repeatedly blocks
+        # Phase 9 (STRATEGY_LIVE_SAFETY_BLOCK reason=
+        # live_underlying_context_freshness_unknown for NSE:NIFTY / active
+        # futures) even when runtime is otherwise ready. Tradable option
+        # candidates are unaffected and retain the existing fail-closed
+        # readiness proof below.
+        symbol_role = strategy_module.classify_symbol_role(symbol_norm)
+        if symbol_role in {"spot_context", "futures_context"}:
+            return original(self, symbol, current_price, trace_id=trace_id)
         block = _evaluation_readiness_block(self, symbol_norm)
         if block is not None:
             _record(

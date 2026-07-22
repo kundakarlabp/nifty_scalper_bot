@@ -50,10 +50,18 @@ def test_futures_context_updates_context_but_does_not_enter_phase9_entry():
     order_manager.submit.assert_not_called()
 
 
-def test_spot_context_routes_as_underlying_context():
+def test_plain_spot_context_routes_as_context_only_snapshot_update():
     assert (
-        runner()._entry_evaluation_route("NSE:NIFTY") == EntryEvaluationRoute.UNDERLYING
+        runner()._entry_evaluation_route("NSE:NIFTY")
+        == EntryEvaluationRoute.CONTEXT_ONLY
     )
+
+
+def test_spot_with_underlying_role_routes_as_underlying_trigger():
+    r = runner()
+    r._trigger_candidate_symbols = {"NSE:NIFTY"}
+
+    assert r._entry_evaluation_route("NSE:NIFTY") == EntryEvaluationRoute.UNDERLYING
 
 
 def test_non_selected_option_context_cannot_trigger_entry():
@@ -316,6 +324,7 @@ def test_nifty_underlying_reaches_strategy_manager(monkeypatch):
     runner_obj, strategy_manager, risk_manager, order_manager, selected_ce = (
         _build_phase9_runner(monkeypatch)
     )
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
 
     runner_obj._on_tick(
         "NSE:NIFTY",
@@ -344,6 +353,7 @@ def test_underlying_generated_candidate_activation_failure_blocks_after_signal(
     runner_obj, strategy_manager, risk_manager, order_manager, _selected_ce = (
         _build_phase9_runner(monkeypatch, current_generation_ready=False)
     )
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
 
     runner_obj._on_tick(
         "NSE:NIFTY",
@@ -386,13 +396,13 @@ def test_underlying_does_not_evaluate_during_boot_grace(monkeypatch):
     order_manager.submit.assert_not_called()
 
 
-def test_underlying_does_not_require_option_subscription_activation():
+def test_spot_context_does_not_require_option_subscription_activation():
     r = runner()
     r._live_symbol_activation = Mock(
-        side_effect=AssertionError("underlying must not be activation gated")
+        side_effect=AssertionError("context symbol must not be activation gated")
     )
 
-    assert r._entry_evaluation_route("NSE:NIFTY") == EntryEvaluationRoute.UNDERLYING
+    assert r._entry_evaluation_route("NSE:NIFTY") == EntryEvaluationRoute.CONTEXT_ONLY
     r._live_symbol_activation.assert_not_called()
 
 

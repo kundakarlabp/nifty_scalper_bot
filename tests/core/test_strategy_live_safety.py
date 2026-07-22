@@ -333,6 +333,80 @@ def test_live_strategy_manager_blocks_stale_option_tick_and_requests_recovery(
     )
 
 
+def test_spot_context_tick_updates_snapshot_without_freshness_gate(
+    monkeypatch,
+) -> None:
+    """Regression: a plain NSE:NIFTY (spot_context) tick must be able to
+    populate its own context snapshot even when no context snapshot exists
+    yet. Requiring proof of its own freshness before letting it run is
+    circular and previously produced a permanent
+    STRATEGY_LIVE_SAFETY_BLOCK reason=live_underlying_context_freshness_unknown
+    for NSE:NIFTY in production.
+    """
+    _live_env(monkeypatch)
+    manager, strategy = _manager_with_strategy(_Engine(0))
+    manager._latest_context_snapshots = {}
+
+    result = manager.generate_signal("NSE:NIFTY", 24000.0, trace_id="context-spot")
+
+    assert result is None
+    assert strategy.calls == 0
+    decision = manager.get_last_no_signal_decision("NSE:NIFTY")
+    assert (
+        decision is None
+        or decision.reason != "live_underlying_context_freshness_unknown"
+    )
+    assert "spot_context" in manager._latest_context_snapshots
+
+
+def test_futures_context_tick_updates_snapshot_without_freshness_gate(
+    monkeypatch,
+) -> None:
+    """Regression: same as above for the active futures context symbol --
+    matches the production log's second repeating STRATEGY_LIVE_SAFETY_BLOCK
+    symbol.
+    """
+    _live_env(monkeypatch)
+    manager, strategy = _manager_with_strategy(_Engine(0))
+    manager._latest_context_snapshots = {}
+
+    result = manager.generate_signal(
+        "NFO:NIFTY26JUNFUT", 24010.0, trace_id="context-futures"
+    )
+
+    assert result is None
+    assert strategy.calls == 0
+    decision = manager.get_last_no_signal_decision("NFO:NIFTY26JUNFUT")
+    assert (
+        decision is None
+        or decision.reason != "live_underlying_context_freshness_unknown"
+    )
+    assert "futures_context" in manager._latest_context_snapshots
+
+
+def test_option_candidate_still_blocked_without_fresh_context_proof(
+    monkeypatch,
+) -> None:
+    """Regression guard: the bypass must be scoped to spot/futures context
+    roles only. A tradable option candidate with no context snapshots at all
+    must remain fail-closed, exactly as before this fix.
+    """
+    _live_env(monkeypatch)
+    manager, strategy = _manager_with_strategy(_Engine(5))
+    manager._latest_context_snapshots = {}
+
+    result = manager.generate_signal(
+        "NFO:NIFTY2662324050CE", 100.0, trace_id="option-no-context"
+    )
+
+    assert result is None
+    assert strategy.calls == 0
+    assert (
+        manager.get_last_no_signal_decision("NFO:NIFTY2662324050CE").reason
+        == "live_spot_context_missing"
+    )
+
+
 def test_live_strategy_manager_fails_closed_on_stale_underlying_context(
     monkeypatch,
 ) -> None:

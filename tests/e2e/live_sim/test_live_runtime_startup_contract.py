@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -244,7 +245,7 @@ class _NoNetworkRobustProvider:
 
 
 def _instrument_dump() -> list[dict[str, Any]]:
-    expiry = date.today() + timedelta(days=30)
+    expiry = date(2026, 8, 26)
     rows: list[dict[str, Any]] = [
         {
             "instrument_token": 900001,
@@ -276,6 +277,29 @@ def _instrument_dump() -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+_FIXED_RUNTIME_NOW_IST = datetime(
+    2026, 7, 22, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata")
+)
+
+
+def _patch_runtime_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    now_ist: datetime = _FIXED_RUNTIME_NOW_IST,
+) -> None:
+    import nifty_scalper_bot.strategies.runner as runner_mod
+    from nifty_scalper_bot.risk import expiry_gate
+
+    monkeypatch.setattr(
+        runner_mod,
+        "expiry_theta_block",
+        lambda: expiry_gate.expiry_theta_block(now_ist),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "midday_pause_block",
+        lambda: expiry_gate.midday_pause_block(now_ist),
+    )
 
 
 def _runtime_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -545,6 +569,26 @@ def test_live_runtime_starts_from_production_composition_with_simulated_adapters
 
 
 @pytest.mark.live_runtime_e2e
+def test_live_runtime_expiry_day_after_cutoff_clock_remains_blocked(monkeypatch):
+    import nifty_scalper_bot.strategies.runner as runner_mod
+    from nifty_scalper_bot.risk import expiry_gate
+
+    expiry_after_cutoff = datetime(
+        2026, 7, 21, 13, 31, 0, tzinfo=ZoneInfo("Asia/Kolkata")
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "expiry_theta_block",
+        lambda: expiry_gate.expiry_theta_block(expiry_after_cutoff),
+    )
+
+    blocked, reason = runner_mod.expiry_theta_block()
+
+    assert blocked is True
+    assert reason == "expiry_day_after_13:30_ist"
+
+
+@pytest.mark.live_runtime_e2e
 def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
     monkeypatch, tmp_path
 ):
@@ -556,6 +600,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
     """
     _runtime_env(monkeypatch, tmp_path)
     _patch_no_network_runtime(monkeypatch)
+    _patch_runtime_clock(monkeypatch)
 
     loop = asyncio.new_event_loop()
     try:
@@ -658,14 +703,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             ctx.order_manager.apply_broker_order_update
         )
 
-        fixed_base_tick_time = pd.Timestamp(
-            "2026-07-16 10:00:00",
-            tz="Asia/Kolkata",
-        ).tz_convert("UTC")
-        fresh_base_tick_time = pd.Timestamp.now(tz="UTC").floor("s") - pd.Timedelta(
-            seconds=31
-        )
-        base_tick_time = max(fixed_base_tick_time, fresh_base_tick_time)
+        base_tick_time = pd.Timestamp(_FIXED_RUNTIME_NOW_IST).tz_convert("UTC")
         startup_ticks = (
             ("NSE:NIFTY", basket.spot_token, 25000.0, 1),
             (basket.futures_symbol, basket.futures_token, 25020.0, 2),
