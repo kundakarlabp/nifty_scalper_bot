@@ -529,8 +529,12 @@ def build_symbol_hydration_status(
     grace = float(_clamped_int_env("HISTORY_PUBLICATION_GRACE_SECONDS", 90, 0, 300))
     max_lag = _clamped_int_env("HISTORY_LATEST_BAR_MAX_LAG_MINUTES", 2, 0, 5)
     continuity_window = _clamped_int_env("HISTORY_CONTINUITY_WINDOW_BARS", 5, 2, 500)
+    # Default 2 (was 0): Kite minute candles legitimately omit minutes with
+    # zero trades (common for options), so a zero-tolerance continuity check
+    # permanently raised *_history_gap_detected blockers on healthy data.
+    # Staleness of the latest bar is still enforced separately above.
     allowed_missing = _clamped_int_env(
-        "HISTORY_ALLOWED_RECENT_MISSING_MINUTES", 0, 0, 5
+        "HISTORY_ALLOWED_RECENT_MISSING_MINUTES", 2, 0, 5
     )
     quality = _evaluate_recent_history_quality(
         mdm_read.bars,

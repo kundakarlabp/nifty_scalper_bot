@@ -9914,6 +9914,13 @@ class MarketDataManager:
             self._log_global_restart_suppressed(suppression, now_mono)
             return
 
+        # Dispatch first; the trigger has its own backoff/coalesce gates.
+        # Logging TRIGGERED only when a restart actually dispatched prevents
+        # duplicate TRIGGERED log storms when the trigger early-returns.
+        dispatched = self._trigger_zombie_ws_restart()
+        if not dispatched:
+            self._log_global_restart_suppressed("trigger_backoff", now_mono)
+            return
         self._logger.critical(
             "WS_GLOBAL_RESTART_TRIGGERED stale_symbols=%d heartbeat_age_s=%s reason=transport_failure",
             len(stale_or_missing_symbols),
@@ -9929,7 +9936,6 @@ class MarketDataManager:
                 "reason": "transport_failure",
             },
         )
-        self._trigger_zombie_ws_restart()
 
     def _global_restart_suppression_reason(self, now: float) -> str | None:
         if getattr(self, "_ws_restart_inflight", False):
@@ -9960,12 +9966,12 @@ class MarketDataManager:
             extra={"event": "WS_GLOBAL_RESTART_SUPPRESSED", "reason": reason},
         )
 
-    def _trigger_zombie_ws_restart(self) -> None:
-        """Args: none; Returns: none; Raises: none."""
+    def _trigger_zombie_ws_restart(self) -> bool:
+        """Args: none; Returns: True when a restart was dispatched; Raises: none."""
 
         now = time.monotonic()
         if now < self._zombie_breaker_open_until:
-            return
+            return False
         recovery = self.verify_websocket_recovery(now_mono=now)
         if recovery.get("state") in {
             "reconnect_requested",
@@ -9982,7 +9988,7 @@ class MarketDataManager:
                     **recovery,
                 },
             )
-            return
+            return False
 
         # Exponential backoff between consecutive zombie restart
         # triggers.  WebSocketManager itself already does full-jitter
@@ -9998,12 +10004,12 @@ class MarketDataManager:
 
         since_last = now - self._zombie_last_restart_attempt_at
         if since_last < cooldown:
-            return
+            return False
         self._zombie_last_restart_attempt_at = now
 
         ws = self._ws
         if ws is None:
-            return
+            return False
         with self._ws_restart_lock:
             if self._ws_restart_inflight:
                 self._logger.info(
@@ -10015,7 +10021,7 @@ class MarketDataManager:
                         "state": "inflight",
                     },
                 )
-                return
+                return False
             with self._lock:
                 desired_snapshot = set(self._desired_tokens)
                 affected: dict[str, int] = {}
@@ -10061,13 +10067,25 @@ class MarketDataManager:
         if not callable(reconnect):
             self._fail_ws_recovery("force_reconnect_unavailable")
             self._zombie_restart_failures += 1
-            return
+            return False
+        dispatched = False
         try:
             reconnect()
+            dispatched = True
             with self._ws_restart_lock:
                 if self._ws_restart_inflight:
                     self._ws_restart_state = "waiting_for_subscriptions"
             self._reconcile_ws_subscriptions()
+            # Re-prime quotes for affected symbols via the canonical fallback
+            # path so tradable quotes recover even before the first post-restart
+            # WS tick arrives (restart intentionally clears last-tick state).
+            for _sym in sorted(affected):
+                try:
+                    self.request_fallback_refresh(
+                        _sym, reason="ws_restart_quote_reprime"
+                    )
+                except Exception:  # noqa: BLE001 - best-effort re-prime
+                    pass
             recovery = self.verify_websocket_recovery(now_mono=time.monotonic())
             self._zombie_restart_consecutive += 1
             self._zombie_restart_attempts.append(now)
@@ -10116,6 +10134,7 @@ class MarketDataManager:
                     "open_seconds": self._zombie_restart_window,
                 },
             )
+        return dispatched
 
     def _fail_ws_recovery(self, reason: str) -> None:
         with self._ws_restart_lock:
