@@ -422,3 +422,24 @@ def test_runner_live_tick_classifier_uses_canonical_freshness_policy(
         "token": "24000",
         "max_age_s": 3.25,
     }
+
+
+def test_trigger_zombie_ws_restart_returns_dispatch_flag_and_backoff() -> None:
+    """Regression: TRIGGERED must only be logged when a restart dispatches.
+
+    First call dispatches (returns True); an immediate second call is gated
+    by the coalesce/backoff paths (returns False) so the caller does not emit
+    a duplicate WS_GLOBAL_RESTART_TRIGGERED log storm.
+    """
+    ws = _FakeWebSocket(connected=True)
+    mdm = MarketDataManager(kite=None, websocket=ws)
+    symbol = "NFO:NIFTY26JUN24000CE"
+    token = 24000
+    _subscribe(mdm, symbol, token)
+    _ws_tick(mdm, symbol, token)
+
+    assert mdm._trigger_zombie_ws_restart() is True
+    assert ws.calls == 1
+    # Immediate re-trigger: inflight/backoff must gate it.
+    assert mdm._trigger_zombie_ws_restart() is False
+    assert ws.calls == 1

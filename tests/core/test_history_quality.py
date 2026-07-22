@@ -336,6 +336,10 @@ def test_build_symbol_hydration_status_defaults_to_five_bar_continuity_window(
 ) -> None:
     monkeypatch.delenv("HISTORY_CONTINUITY_WINDOW_BARS", raising=False)
     monkeypatch.setenv("HISTORY_PUBLICATION_GRACE_SECONDS", "0")
+    # This test exercises the window size; pin tolerance to zero because the
+    # default HISTORY_ALLOWED_RECENT_MISSING_MINUTES is now 2 (zero-trade
+    # minute candles are legitimately absent from Kite history).
+    monkeypatch.setenv("HISTORY_ALLOWED_RECENT_MISSING_MINUTES", "0")
     current = date(2026, 1, 2)
 
     def make_bars_without(missing_idx: int) -> list[dict[str, datetime]]:
