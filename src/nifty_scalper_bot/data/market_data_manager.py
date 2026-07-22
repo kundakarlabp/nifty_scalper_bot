@@ -9794,7 +9794,14 @@ class MarketDataManager:
         # A broad set of stale symbols is not, by itself, proof that the
         # WebSocket transport failed. A healthy socket can continue receiving
         # heartbeats while one subscription generation is incomplete. Global
-        # reconnects are therefore reserved for explicit transport evidence.
+        # reconnects are therefore reserved for explicit transport evidence:
+        # heartbeat/socket unhealthy, or classify_transport_backlog's genuine
+        # transport_silent signal (no raw packets at all, distinct from an
+        # isolated stale symbol subscription). subscription_transport_failure
+        # and symbol_recovery_exceeded are dropped from this gate: both can
+        # fire for a single stuck symbol subscription (e.g. one illiquid
+        # option strike) while the transport is demonstrably healthy,
+        # invalidating quotes for the whole restart+re-verification window.
         transport_failure = bool(
             stale_or_missing_symbols
             and not processing_backlog
@@ -9802,8 +9809,6 @@ class MarketDataManager:
                 backlog_classification.get("global_restart_eligible")
                 or heartbeat_stale
                 or not ws_healthy
-                or subscription_transport_failure
-                or symbol_recovery_exceeded
             )
         )
         if stale_or_missing_symbols and not transport_failure:
