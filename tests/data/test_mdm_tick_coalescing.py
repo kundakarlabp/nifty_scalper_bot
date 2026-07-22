@@ -647,6 +647,50 @@ def test_required_symbol_without_first_ws_tick_gets_symbol_recovery(monkeypatch)
     assert rest_requests == [(missing, "ws_symbol_stale_recovery")]
 
 
+def test_symbol_recovery_exceeded_alone_does_not_force_global_restart(monkeypatch):
+    """Regression: a single stuck symbol subscription (e.g. the active
+    future repeatedly failing verification) must not escalate to a global
+    WS restart while the transport itself is healthy and heartbeat fresh.
+    Only genuine transport evidence (heartbeat stale / socket unhealthy /
+    classify_transport_backlog transport_silent) may trigger a restart.
+    """
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    future = mdm.get_active_nifty_future_symbol_cached()
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono[future] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "request_fallback_refresh", lambda symbol, reason: True)
+    monkeypatch.setattr(
+        mdm,
+        "verify_symbol_subscription_recovery",
+        lambda symbol: {
+            "ok": False,
+            "attempts": 5,
+            "attempt_started_mono": now - 120.0,
+        },
+    )
+    monkeypatch.setattr(mdm, "_ws_recovery_timeout_sec", 5.0)
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail(
+            "isolated symbol_recovery_exceeded must not force a global restart"
+            " while transport is healthy"
+        ),
+    )
+
+    mdm._check_zombie_ticks()
+
+
 def test_two_stale_options_with_fresh_context_do_not_restart_full_ws(monkeypatch):
     from nifty_scalper_bot.utils import market_hours
 
