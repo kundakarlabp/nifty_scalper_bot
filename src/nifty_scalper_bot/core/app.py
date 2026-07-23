@@ -10593,7 +10593,6 @@ async def _build_and_hydrate_live_basket_from_spot(
                     "symbol_count": len(list(dict.fromkeys(basket.get("symbols", [])))),
                     "hydrated": bool(hydrate),
                     "duration_ms": duration_ms,
-                    "active_run_count": len(active_run_ids),
                 },
             )
             LOGGER.info(
