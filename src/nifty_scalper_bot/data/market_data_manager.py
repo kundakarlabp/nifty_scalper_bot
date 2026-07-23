@@ -9717,6 +9717,7 @@ class MarketDataManager:
             return
         self._monitor_spot_ws_health()
         ws_healthy = self._is_ws_healthy()
+        connected = self._is_ws_connected()
 
         with self._lock:
             required = self._required_live_symbols()
@@ -9733,12 +9734,19 @@ class MarketDataManager:
         stale_symbols: list[str] = []
         missing_symbols: list[str] = []
         fresh_symbols: list[str] = []
+        required_grace_symbols: list[str] = []
         for sym in candidate_symbols:
+            required_since = since_by_symbol.get(sym)
+            within_required_grace = (
+                required_since is not None
+                and now_mono - required_since < self._required_symbol_missing_grace_sec
+            )
+            if within_required_grace:
+                required_grace_symbols.append(sym)
+                continue
             age = self.time_since_last_live_ws_tick(sym)
             if age is None:
-                required_since = since_by_symbol.get(sym) or now_mono
-                if now_mono - required_since >= self._required_symbol_missing_grace_sec:
-                    missing_symbols.append(sym)
+                missing_symbols.append(sym)
                 continue
             if age > self._zombie_tick_threshold_sec:
                 stale_symbols.append(sym)
@@ -9763,6 +9771,7 @@ class MarketDataManager:
                 "threshold_seconds": self._zombie_tick_threshold_sec,
                 "required_symbols": len(required),
                 "heartbeat_age_s": heartbeat_age,
+                "required_grace_symbols": required_grace_symbols,
             },
         )
         spot_stale = "NSE:NIFTY" in stale_or_missing_symbols
@@ -9805,13 +9814,13 @@ class MarketDataManager:
             and (heartbeat_stale or not ws_healthy)
         )
         backlog_classification = self.classify_transport_backlog()
-        processing_backlog = (
-            backlog_classification.get("transport_classification")
-            == "processing_backlog"
+        transport_classification = backlog_classification.get(
+            "transport_classification"
         )
+        processing_backlog = transport_classification == "processing_backlog"
+        raw_transport_silent = transport_classification == "transport_silent"
         symbol_subscription_stale = (
-            backlog_classification.get("transport_classification")
-            == "symbol_subscription_stale"
+            transport_classification == "symbol_subscription_stale"
         )
         active_future = self.get_active_nifty_future_symbol_cached()
         symbol_recovery_exceeded = False
@@ -9841,15 +9850,34 @@ class MarketDataManager:
         # fire for a single stuck symbol subscription (e.g. one illiquid
         # option strike) while the transport is demonstrably healthy,
         # invalidating quotes for the whole restart+re-verification window.
+        global_restart_eligible = bool(
+            backlog_classification.get("global_restart_eligible")
+            and raw_transport_silent
+        )
         transport_failure = bool(
             stale_or_missing_symbols
             and not processing_backlog
-            and (
-                backlog_classification.get("global_restart_eligible")
-                or heartbeat_stale
-                or not ws_healthy
-            )
+            and (not connected or heartbeat_stale or raw_transport_silent)
         )
+        restart_diagnostics = {
+            "connected": connected,
+            "ws_healthy": ws_healthy,
+            "heartbeat_stale": heartbeat_stale,
+            "heartbeat_age_s": heartbeat_age,
+            "last_raw_ws_packet_age_s": backlog_classification.get("raw_receive_age_s"),
+            "last_accepted_ws_tick_age_s": backlog_classification.get(
+                "processed_tick_age_s"
+            ),
+            "event_loop_lag_s": max(
+                0.0, float(getattr(self, "_event_loop_lag_seconds", 0.0) or 0.0)
+            ),
+            "processing_backlog": processing_backlog,
+            "transport_classification": transport_classification,
+            "global_restart_eligible": global_restart_eligible,
+            "subscription_divergence": subscription_divergence,
+            "stale_ratio": round(stale_ratio, 3),
+            "required_grace_symbols": required_grace_symbols,
+        }
         if stale_or_missing_symbols and not transport_failure:
             recovery_last = getattr(self, "_symbol_recovery_last_attempt_mono", None)
             if not isinstance(recovery_last, dict):
@@ -9905,6 +9933,18 @@ class MarketDataManager:
                         "stale_age_s": age,
                         "heartbeat_age_s": heartbeat_age,
                         "ws_healthy": ws_healthy,
+                        "connected": connected,
+                        "heartbeat_stale": heartbeat_stale,
+                        "last_raw_ws_packet_age_s": restart_diagnostics[
+                            "last_raw_ws_packet_age_s"
+                        ],
+                        "last_accepted_ws_tick_age_s": restart_diagnostics[
+                            "last_accepted_ws_tick_age_s"
+                        ],
+                        "event_loop_lag_s": restart_diagnostics["event_loop_lag_s"],
+                        "processing_backlog": processing_backlog,
+                        "transport_classification": transport_classification,
+                        "global_restart_eligible": global_restart_eligible,
                         "subscription_divergence": subscription_divergence,
                         "subscription_divergence_age_s": divergence_age,
                         "reason": recovery_reason,
@@ -9922,6 +9962,7 @@ class MarketDataManager:
                     "stale_symbols": stale_symbols,
                     "missing_symbols": missing_symbols,
                     "recovery_dispatched_symbols": dispatched_symbols,
+                    **restart_diagnostics,
                     "heartbeat_age_s": heartbeat_age,
                     "ws_healthy": ws_healthy,
                     "subscription_divergence": subscription_divergence,
@@ -9973,6 +10014,7 @@ class MarketDataManager:
                 "event": "WS_GLOBAL_RESTART_TRIGGERED",
                 "symbols": stale_symbols,
                 "missing_symbols": missing_symbols,
+                **restart_diagnostics,
                 "heartbeat_age_s": heartbeat_age,
                 "ws_healthy": ws_healthy,
                 "subscription_divergence": subscription_divergence,

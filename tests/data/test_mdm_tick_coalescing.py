@@ -328,11 +328,13 @@ def test_one_stale_noncritical_option_does_not_restart_full_ws(monkeypatch):
     for sym in mdm._required_live_symbols():
         mdm._last_valid_live_tick_mono[sym] = now
     mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
     rest_requests = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm,
@@ -362,12 +364,15 @@ def test_spot_and_futures_stale_use_symbol_recovery_when_transport_healthy(monke
         mdm._last_valid_live_tick_mono[sym] = now
     mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 120.0
     mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now - 120.0
+    mdm._required_symbol_since_mono["NSE:NIFTY"] = now - 120.0
+    mdm._required_symbol_since_mono["NFO:NIFTY26JUNFUT"] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
     rest_requests: list[tuple[str, str]] = []
     resubscribed: list[bool] = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm,
@@ -399,11 +404,13 @@ def test_heartbeat_stale_triggers_single_global_restart(monkeypatch):
     mdm._symbols_with_tick.update(required)
     for sym in required:
         mdm._last_valid_live_tick_mono[sym] = now - 120.0
+        mdm._required_symbol_since_mono[sym] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now - 120.0
     restarted: list[bool] = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: False)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
@@ -469,6 +476,7 @@ def test_required_symbol_without_current_generation_tick_is_not_fresh(monkeypatc
     rest_requests = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm,
@@ -630,6 +638,7 @@ def test_required_symbol_without_first_ws_tick_gets_symbol_recovery(monkeypatch)
     rest_requests = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm,
@@ -663,10 +672,12 @@ def test_symbol_recovery_exceeded_alone_does_not_force_global_restart(monkeypatc
     for sym in mdm._required_live_symbols():
         mdm._last_valid_live_tick_mono[sym] = now
     mdm._last_valid_live_tick_mono[future] = now - 120.0
+    mdm._required_symbol_since_mono[future] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(mdm, "request_fallback_refresh", lambda symbol, reason: True)
     monkeypatch.setattr(
@@ -701,12 +712,15 @@ def test_two_stale_options_with_fresh_context_do_not_restart_full_ws(monkeypatch
     for sym in required:
         mdm._last_valid_live_tick_mono[sym] = now
     mdm._last_valid_live_tick_mono["NFO:NIFTY26JUN24000CE"] = now - 120.0
+    mdm._required_symbol_since_mono["NFO:NIFTY26JUN24000CE"] = now - 120.0
     mdm._last_valid_live_tick_mono["NFO:NIFTY26JUN24000PE"] = now - 120.0
+    mdm._required_symbol_since_mono["NFO:NIFTY26JUN24000PE"] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
     rest_requests = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm,
@@ -753,7 +767,7 @@ def test_active_bracket_symbol_remains_required_before_position_reconcile():
     assert bracket_symbol in mdm._required_live_symbols()
 
 
-def test_unhealthy_ws_still_diagnoses_and_restarts_for_stale_context(monkeypatch):
+def test_disconnected_ws_still_diagnoses_and_restarts_for_stale_context(monkeypatch):
     from nifty_scalper_bot.utils import market_hours
 
     mdm = MarketDataManager(kite=None)
@@ -764,11 +778,14 @@ def test_unhealthy_ws_still_diagnoses_and_restarts_for_stale_context(monkeypatch
         mdm._last_valid_live_tick_mono[sym] = now
     mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now - 120.0
     mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now - 120.0
+    mdm._required_symbol_since_mono["NSE:NIFTY"] = now - 120.0
+    mdm._required_symbol_since_mono["NFO:NIFTY26JUNFUT"] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
     restarted = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: False)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: False)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
@@ -790,6 +807,7 @@ def test_subscription_divergence_needs_grace_and_symbol_recovery(monkeypatch):
         mdm._last_valid_live_tick_mono[sym] = now
     stale = "NFO:NIFTY26JUN24000CE"
     mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 120.0
     mdm._desired_tokens = {1, 2, 3, 4}
     mdm._confirmed_subscriptions = {2, 3, 4}
     mdm._subscription_divergence_since_mono = now - 120.0
@@ -800,6 +818,7 @@ def test_subscription_divergence_needs_grace_and_symbol_recovery(monkeypatch):
     restarted = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm,
@@ -816,6 +835,7 @@ def test_subscription_divergence_needs_grace_and_symbol_recovery(monkeypatch):
     assert restarted == []
 
     mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 120.0
     mdm._last_symbol_level_recovery_mono = now
     mdm._check_zombie_ticks()
 
@@ -852,6 +872,7 @@ def test_one_stale_active_future_uses_symbol_recovery_not_global_restart(monkeyp
         mdm._last_valid_live_tick_mono[sym] = now
     stale_future = "NFO:NIFTY26JUNFUT"
     mdm._last_valid_live_tick_mono[stale_future] = now - 120.0
+    mdm._required_symbol_since_mono[stale_future] = now - 120.0
     mdm._desired_tokens = set(mapping)
     mdm._dispatched_subscriptions = set(mapping)
     mdm._confirmed_subscriptions = set(mapping)
@@ -868,6 +889,7 @@ def test_one_stale_active_future_uses_symbol_recovery_not_global_restart(monkeyp
     restarted = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
@@ -930,11 +952,13 @@ def test_stale_entire_universe_triggers_global_recovery(monkeypatch):
     now = time.monotonic()
     for sym in mdm._required_live_symbols():
         mdm._last_valid_live_tick_mono[sym] = now - 120.0
+        mdm._required_symbol_since_mono[sym] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now - 120.0
     restarted = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: False)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm, "_trigger_zombie_ws_restart", lambda: restarted.append(True)
@@ -955,6 +979,7 @@ def test_fresh_heartbeat_does_not_mask_complete_market_data_silence(monkeypatch)
     now = time.monotonic()
     for sym in mdm._required_live_symbols():
         mdm._last_valid_live_tick_mono[sym] = now - 120.0
+        mdm._required_symbol_since_mono[sym] = now - 120.0
     mdm._desired_tokens = {1, 2, 3, 4}
     mdm._dispatched_subscriptions = {1, 2, 3, 4}
     mdm._confirmed_subscriptions = {1, 2, 3, 4}
@@ -964,6 +989,7 @@ def test_fresh_heartbeat_does_not_mask_complete_market_data_silence(monkeypatch)
     restart_calls = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm, "_trigger_zombie_ws_restart", lambda: restart_calls.append(True)
@@ -1499,12 +1525,14 @@ def test_symbol_recovery_attempts_are_cooldown_bounded(monkeypatch):
     for sym in required:
         mdm._last_valid_live_tick_mono[sym] = now
     mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 120.0
     mdm._zombie_tick_threshold_sec = 60.0
     mdm._last_hb_mono = now
     mdm._symbol_recovery_cooldown_s = 30.0
     requests: list[str] = []
     monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
     monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
     monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
     monkeypatch.setattr(
         mdm,
@@ -1542,3 +1570,289 @@ def test_trading_feed_health_exposes_required_symbol_recovery():
     assert health["required_symbol_recovery_active"] is True
     assert set(health["stale_required_symbols"]) == mdm._required_live_symbols()
     assert health["trading_feed_healthy"] is False
+
+
+def test_fresh_heartbeat_with_event_loop_lag_uses_symbol_recovery(monkeypatch, caplog):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    stale = "NFO:NIFTY26JUN24000CE"
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_ws_tick_mono = now
+    mdm._event_loop_lag_seconds = 0.75
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)) or True,
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("event-loop lag alone must not restart WS globally"),
+    )
+
+    with caplog.at_level("WARNING"):
+        mdm._check_zombie_ticks()
+
+    assert rest_requests == [(stale, "ws_symbol_stale_recovery")]
+    recoveries = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "WS_SYMBOL_STALE_RECOVERY"
+    ]
+    assert recoveries
+    assert recoveries[-1].connected is True
+    assert recoveries[-1].ws_healthy is False
+    assert recoveries[-1].heartbeat_stale is False
+    assert recoveries[-1].processing_backlog is False
+
+
+def test_fresh_heartbeat_with_accepted_tick_gap_uses_symbol_recovery(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    stale = "NFO:NIFTY26JUN24000CE"
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_ws_tick_mono = now - 3.0
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)) or True,
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("accepted tick gap alone must not restart globally"),
+    )
+
+    assert mdm._is_ws_healthy() is False
+    mdm._check_zombie_ticks()
+
+    assert rest_requests == [(stale, "ws_symbol_stale_recovery")]
+
+
+def test_newly_required_old_generation_tick_receives_activation_grace(
+    monkeypatch, caplog
+):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    stale = "NFO:NIFTY26JUN24000CE"
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now
+        mdm._required_symbol_since_mono[sym] = now - 120.0
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now
+    mdm._required_symbol_missing_grace_sec = 5.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._last_raw_ws_receive_mono = now
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append(symbol) or True,
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("activation grace must not globally restart"),
+    )
+
+    with caplog.at_level("CRITICAL"):
+        mdm._check_zombie_ticks()
+
+    assert rest_requests == []
+    assert stale not in [
+        sym
+        for record in caplog.records
+        if getattr(record, "event", None) == "mdm_zombie_tick_detected"
+        for sym in getattr(record, "symbols", [])
+    ]
+
+
+def test_newly_required_old_generation_tick_recovers_after_grace(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    stale = "NFO:NIFTY26JUN24000CE"
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now
+        mdm._required_symbol_since_mono[sym] = now - 120.0
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 2.0
+    mdm._required_symbol_missing_grace_sec = 1.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._last_raw_ws_receive_mono = now
+    rest_requests = []
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: rest_requests.append((symbol, reason)) or True,
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("healthy transport should recover symbol after grace"),
+    )
+
+    mdm._check_zombie_ticks()
+
+    assert rest_requests == [(stale, "ws_symbol_stale_recovery")]
+
+
+def test_processing_backlog_classification_never_global_restarts(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    stale = "NFO:NIFTY26JUN24000CE"
+    for sym in mdm._required_live_symbols():
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono[stale] = now - 120.0
+    mdm._required_symbol_since_mono[stale] = now - 120.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(
+        mdm,
+        "classify_transport_backlog",
+        lambda: {
+            "transport_classification": "processing_backlog",
+            "global_restart_eligible": False,
+            "raw_receive_age_s": 0.01,
+            "processed_tick_age_s": 120.0,
+        },
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("processing backlog must not restart globally"),
+    )
+
+    mdm._check_zombie_ticks()
+
+
+def test_dynamic_basket_old_ticks_do_not_churn_generation_during_grace(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    option_symbols = [f"NFO:NIFTY26JUN{24000 + i * 50}CE" for i in range(8)]
+    token_by_symbol = {symbol: 100 + i for i, symbol in enumerate(option_symbols)}
+    token_by_symbol.update({"NSE:NIFTY": 3, "NFO:NIFTY26JUNFUT": 4})
+    for symbol, token in token_by_symbol.items():
+        mdm._symbol_by_token[token] = symbol
+        mdm._token_to_symbol[token] = symbol
+        mdm._symbol_to_token[symbol] = token
+        mdm._token_by_symbol[symbol] = token
+    now = time.monotonic()
+    mdm.set_active_contract_basket(
+        {
+            "all_tokens": list(token_by_symbol.values()),
+            "token_by_symbol": token_by_symbol,
+            "spot_symbol": "NSE:NIFTY",
+            "spot_token": 3,
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "selected_ce": option_symbols[0],
+            "selected_pe": option_symbols[1],
+            "option_symbols": option_symbols,
+        }
+    )
+    for symbol in option_symbols:
+        token = token_by_symbol[symbol]
+        mdm._symbol_to_token[symbol] = token
+        mdm._token_by_symbol[symbol] = token
+        mdm._begin_subscription_generation_locked(
+            symbol, token, reason="test_dynamic_basket_activation"
+        )
+        mdm._desired_tokens.add(token)
+        mdm._dispatched_subscriptions.add(token)
+        mdm._last_valid_live_tick_mono[symbol] = now - 120.0
+        mdm._required_symbol_since_mono[symbol] = now
+    mdm._last_valid_live_tick_mono["NSE:NIFTY"] = now
+    mdm._last_valid_live_tick_mono["NFO:NIFTY26JUNFUT"] = now
+    mdm._required_symbol_missing_grace_sec = 5.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._last_raw_ws_receive_mono = now
+    generation_before = mdm._subscription_generation
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: pytest.fail(
+            "new basket should remain in activation grace"
+        ),
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("dynamic activation grace must not restart globally"),
+    )
+
+    mdm._check_zombie_ticks()
+    for symbol in option_symbols[:3]:
+        mdm._ingest_normalized_tick(
+            {
+                "symbol": symbol,
+                "instrument_token": token_by_symbol[symbol],
+                "ltp": 10.0,
+                "timestamp": time.time(),
+                "source": "ws",
+            }
+        )
+
+    assert mdm._subscription_generation == generation_before
+    assert (
+        mdm.classify_live_tick_readiness(
+            option_symbols[0], token_by_symbol[option_symbols[0]], max_age_s=60.0
+        )["ready"]
+        is True
+    )
+    assert (
+        mdm.classify_live_tick_readiness(
+            option_symbols[-1], token_by_symbol[option_symbols[-1]], max_age_s=60.0
+        )["ready"]
+        is False
+    )
