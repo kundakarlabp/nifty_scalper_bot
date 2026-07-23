@@ -162,6 +162,11 @@ from nifty_scalper_bot.utils.market_hours import (
     stale_threshold_for_symbol,
 )
 from nifty_scalper_bot.utils.metrics import Counter, signals_generated_total
+from nifty_scalper_bot.execution.ownership import (
+    SymbolLifecycleClassification,
+    classify_symbol_lifecycle,
+)
+from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.utils.symbols import (
     canonical,
     enforce_canonical,
@@ -16280,40 +16285,16 @@ class StrategyRunner:
 
 
     def _broker_reports_symbol_flat(self, symbol: str) -> bool:
-        """Return True when broker positions explicitly report no exposure."""
+        """Return True only when the validated PositionManager snapshot proves flat."""
 
-        broker = getattr(getattr(self._bracket_manager, "order_manager", None), "_broker", None)
-        fetcher = getattr(broker, "get_positions", None) or getattr(broker, "positions", None)
-        if not callable(fetcher):
+        exposure_getter = getattr(self._position_manager, "broker_exposure_state", None)
+        if not callable(exposure_getter):
             return False
         try:
-            rows = fetcher()
+            exposure = exposure_getter(symbol)
         except Exception:
             return False
-        wanted = str(symbol or "").upper()
-        saw_symbol = False
-        for row in rows or []:
-            raw_symbol = str(
-                getattr(row, "symbol", "")
-                or getattr(row, "tradingsymbol", "")
-                or (row.get("symbol") if isinstance(row, dict) else "")
-                or (row.get("tradingsymbol") if isinstance(row, dict) else "")
-                or ""
-            ).upper()
-            if raw_symbol != wanted and not wanted.endswith(raw_symbol):
-                continue
-            saw_symbol = True
-            raw_qty = (
-                getattr(row, "quantity", None)
-                if not isinstance(row, dict)
-                else row.get("quantity")
-            )
-            try:
-                if abs(int(float(raw_qty or 0))) > 0:
-                    return False
-            except Exception:
-                return False
-        return saw_symbol
+        return exposure in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT)
 
     def _adopt_orphan_positions(self) -> None:
         """
@@ -16367,19 +16348,30 @@ class StrategyRunner:
                 if qty <= 0 or entry <= 0:
                     continue
 
-                exit_converging = getattr(
-                    self._bracket_manager, "is_exit_converging", None
+                exposure_getter = getattr(self._position_manager, "broker_exposure_state", None)
+                try:
+                    exposure = (
+                        exposure_getter(symbol)
+                        if callable(exposure_getter)
+                        else BrokerExposureState.UNKNOWN
+                    )
+                except Exception:
+                    exposure = BrokerExposureState.UNKNOWN
+                lifecycle = classify_symbol_lifecycle(
+                    symbol,
+                    bracket_manager=self._bracket_manager,
+                    local_position_present=True,
+                    broker_exposure_state=exposure,
                 )
-                if callable(exit_converging) and exit_converging(symbol):
+                if lifecycle in (
+                    SymbolLifecycleClassification.EXIT_CONVERGING,
+                    SymbolLifecycleClassification.PENDING_ENTRY,
+                    SymbolLifecycleClassification.PROTECTED_OPEN,
+                    SymbolLifecycleClassification.GHOST_FLAT,
+                ):
                     continue
-
-                broker_flat = getattr(self, "_broker_reports_symbol_flat", None)
-                if callable(broker_flat) and broker_flat(symbol):
+                if exposure in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT):
                     continue
-
-                # ═══════════════════════════════════════════════════════════════
-                # ✅ FIX #1: Use is_symbol_managed() instead of get_bracket()
-                # ═══════════════════════════════════════════════════════════════
                 if self._bracket_manager.is_symbol_managed(symbol):
                     continue  # Existing pending/active lifecycle owns the position.
 

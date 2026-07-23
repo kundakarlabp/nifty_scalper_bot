@@ -219,3 +219,68 @@ class BoundBracketManager(RuntimeBracketManager):
 
 
 __all__ = ["BoundBracketManager"]
+from enum import Enum
+from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+
+class SymbolLifecycleClassification(str, Enum):
+    """Read-only symbol lifecycle classification for reconciliation callers."""
+
+    PROTECTED_OPEN = "protected_open"
+    PENDING_ENTRY = "pending_entry"
+    EXIT_CONVERGING = "exit_converging"
+    TRUE_ORPHAN = "true_orphan"
+    GHOST_FLAT = "ghost_flat"
+    UNRESOLVED = "unresolved"
+
+
+def classify_symbol_lifecycle(
+    symbol: str,
+    *,
+    bracket_manager: Any,
+    local_position_present: bool,
+    broker_exposure_state: BrokerExposureState,
+) -> SymbolLifecycleClassification:
+    """Classify current symbol ownership without mutating brackets or orders.
+
+    This centralizes the narrow orphan/ghost questions used by app and runner so
+    future execution corrections do not add another broker-position parser.
+    """
+
+    pending_entry = False
+    exit_converging = False
+    managed = False
+    try:
+        managed = bool(bracket_manager.is_symbol_managed(symbol))
+    except Exception:
+        return SymbolLifecycleClassification.UNRESOLVED
+    checker = getattr(bracket_manager, "is_exit_converging", None)
+    if callable(checker):
+        try:
+            exit_converging = bool(checker(symbol))
+        except Exception:
+            return SymbolLifecycleClassification.UNRESOLVED
+    if exit_converging:
+        return SymbolLifecycleClassification.EXIT_CONVERGING
+    for bracket_id in list((getattr(bracket_manager, "_symbol_map", {}) or {}).get(symbol) or []):
+        bracket = (getattr(bracket_manager, "_brackets", {}) or {}).get(bracket_id)
+        if bracket is not None and not getattr(bracket, "entry_confirmed", False):
+            entry_order_id = str(getattr(bracket, "entry_order_id", "") or "")
+            tag = str(getattr(bracket, "tag", "") or "")
+            if not entry_order_id.startswith("orphan_") and tag != "orphan_recovery":
+                pending_entry = True
+                break
+    if pending_entry:
+        return SymbolLifecycleClassification.PENDING_ENTRY
+    if managed and local_position_present:
+        return SymbolLifecycleClassification.PROTECTED_OPEN
+    if managed and not local_position_present:
+        if broker_exposure_state in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT):
+            return SymbolLifecycleClassification.GHOST_FLAT
+        return SymbolLifecycleClassification.UNRESOLVED
+    if local_position_present and broker_exposure_state == BrokerExposureState.NONZERO:
+        return SymbolLifecycleClassification.TRUE_ORPHAN
+    return SymbolLifecycleClassification.UNRESOLVED
+
+
+__all__ = ["BoundBracketManager", "SymbolLifecycleClassification", "classify_symbol_lifecycle"]

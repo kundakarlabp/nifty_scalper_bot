@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum
 import math
 import time
 from typing import Any, Mapping
@@ -25,6 +26,20 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 class PositionSnapshotError(ValueError):
     """Raised when broker exposure cannot be interpreted authoritatively."""
+
+
+class BrokerExposureState(str, Enum):
+    """Authoritative broker exposure state for one symbol.
+
+    UNKNOWN is fail-closed: it means no complete validated broker snapshot is
+    currently available and must not be interpreted as flat. ABSENT means a
+    complete broker net snapshot was valid and did not include the symbol.
+    """
+
+    FLAT = "flat"
+    NONZERO = "nonzero"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,12 +60,25 @@ class PositionSnapshot:
     fetched_at: float
 
     def quantity_for(self, symbol: str) -> int:
-        """Return signed net quantity for ``symbol``."""
+        """Return signed net quantity for ``symbol``; absent complete rows are zero."""
         target = normalize_symbol(symbol)
         for row in self.rows:
             if row.symbol == target:
                 return row.quantity
         return 0
+
+    def exposure_state_for(self, symbol: str) -> BrokerExposureState:
+        """Return symbol exposure while distinguishing explicit flat from absent."""
+        target = normalize_symbol(symbol)
+        for row in self.rows:
+            if row.symbol != target:
+                continue
+            return (
+                BrokerExposureState.FLAT
+                if row.quantity == 0
+                else BrokerExposureState.NONZERO
+            )
+        return BrokerExposureState.ABSENT
 
     @property
     def all_flat(self) -> bool:
@@ -154,6 +182,7 @@ def decode_position_snapshot(payload: object) -> PositionSnapshot:
 
 
 __all__ = [
+    "BrokerExposureState",
     "PositionSnapshot",
     "PositionSnapshotError",
     "PositionSnapshotRow",

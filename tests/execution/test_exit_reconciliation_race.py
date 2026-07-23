@@ -686,3 +686,35 @@ def test_registration_failure_can_retry_without_duplicate_broker_exit(tmp_path) 
 
     assert len(om.calls) == 1
     assert bracket.exit_order_id == "exit-final-1"
+
+class _ExplodingBroker:
+    def get_positions(self):
+        raise AssertionError("runner must not call broker positions")
+
+    def positions(self):
+        raise AssertionError("runner must not call broker positions")
+
+
+def test_runner_orphan_scan_uses_position_manager_snapshot_not_broker_io(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="manual")
+    pm.synchronize_with_broker([_broker_row(0)])
+    bm = BracketManager(order_manager=_OrderManager(_ExplodingBroker()))
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+
+    _runner_for(pm, bm)._adopt_orphan_positions()
+
+    assert adopt_calls == []
+
+
+def test_runner_unknown_broker_exposure_does_not_claim_flat(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="manual")
+    bm = BracketManager(order_manager=_OrderManager(_ExplodingBroker()))
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+
+    _runner_for(pm, bm)._adopt_orphan_positions()
+
+    assert adopt_calls == [{"symbol": SYMBOL, "side": "LONG", "qty": QTY, "entry_price": 100.0}]

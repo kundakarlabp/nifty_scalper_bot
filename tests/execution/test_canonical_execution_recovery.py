@@ -257,3 +257,34 @@ def test_restart_with_already_protected_position_no_duplicate_bracket(
     assert len(brackets) == 1
     assert brackets[0].remaining_quantity == 65
     assert brackets[0].active and brackets[0].entry_confirmed
+
+
+def test_broker_exposure_states_distinguish_flat_absent_nonzero_and_unknown(tmp_path):
+    from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.UNKNOWN
+
+    pm.synchronize_with_broker({"net": [{"tradingsymbol": SYMBOL.replace("NFO:", ""), "quantity": 0, "product": "MIS"}], "day": []})
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.FLAT
+    assert pm.broker_exposure_state(OTHER) is BrokerExposureState.ABSENT
+
+    pm.synchronize_with_broker([{"symbol": SYMBOL, "quantity": 65, "average_price": 100.0, "last_price": 100.0, "product": "MIS"}])
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.NONZERO
+
+    with pytest.raises(PositionSnapshotError):
+        pm.synchronize_with_broker([{"symbol": SYMBOL, "product": "MIS"}])
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.NONZERO
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"symbol": SYMBOL, "quantity": "bad"}],
+        [{"symbol": SYMBOL}],
+        [{"symbol": SYMBOL, "quantity": 1}, {"tradingsymbol": SYMBOL.replace("NFO:", ""), "quantity": 0}],
+    ],
+)
+def test_malformed_broker_exposure_never_decodes_as_flat(payload):
+    with pytest.raises(PositionSnapshotError):
+        decode_position_snapshot(payload)

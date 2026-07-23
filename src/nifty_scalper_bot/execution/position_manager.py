@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.execution.position_snapshot import (
+    BrokerExposureState,
     PositionSnapshotError,
     decode_position_snapshot,
 )
@@ -34,7 +35,7 @@ from nifty_scalper_bot.options.strike_selector import SelectedContract
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical
-from nifty_scalper_bot.utils.symbols import is_strategy_instrument
+from nifty_scalper_bot.utils.symbols import is_strategy_instrument, normalize_symbol
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.persistent_state import PersistentStateManager
@@ -909,6 +910,12 @@ class PositionManager:
             []
         )
         self._last_reconciled_state: Dict[str, Position] = {}
+        self._last_broker_position_snapshot_at: float | None = None
+        self._last_broker_position_snapshot_valid: bool = False
+        self._last_broker_quantities_by_symbol: dict[str, int] = {}
+        self._last_broker_position_snapshot_source: str | None = None
+        self._last_broker_position_snapshot_failure_at: float | None = None
+        self._last_broker_position_snapshot_failure_reason: str | None = None
         self._recently_flat_exit_until_monotonic: dict[str, float] = {}
         self._recently_flat_exit_metadata: dict[str, ExitSettlementGuard] = {}
         self._recently_flat_exit_grace_seconds: float = (
@@ -1539,16 +1546,10 @@ class PositionManager:
             )
 
     def is_flat(self, symbol: str) -> bool:
-        """Return ``True`` when *symbol* has no open position.
+        """Return ``True`` when local state proves no open position.
 
-        Args:
-            symbol: Option contract identifier.
-
-        Returns:
-            ``True`` if quantity is zero or position missing.
-
-        Raises:
-            None.
+        Unexpected lookup failures are unknown state and therefore fail closed.
+        Broker-authoritative callers must use ``broker_exposure_state`` instead.
         """
 
         lookup = symbol.strip().upper()
@@ -1556,11 +1557,54 @@ class PositionManager:
             "Entered is_flat", extra={"event": "is_flat", "symbol": lookup}
         )
         try:
-            position = self._positions.get(lookup)
+            with self._lock:
+                position = self._positions.get(lookup)
         except Exception as exc:  # noqa: BLE001 - defensive guard
-            self._logger.error("Failure in is_flat: %s", exc)
-            return True
+            self._logger.error(
+                "POSITION_FLAT_CHECK_FAILED symbol=%s error=%s",
+                lookup,
+                exc,
+                extra={
+                    "event": "POSITION_FLAT_CHECK_FAILED",
+                    "symbol": lookup,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            return False
         return position is None or position.quantity <= 0
+
+    def broker_exposure_snapshot(self) -> dict[str, object]:
+        """Return a detached copy of the last validated complete broker snapshot."""
+
+        with self._lock:
+            return {
+                "valid": self._last_broker_position_snapshot_valid,
+                "fetched_at": self._last_broker_position_snapshot_at,
+                "source": self._last_broker_position_snapshot_source,
+                "quantities_by_symbol": dict(self._last_broker_quantities_by_symbol),
+                "failure_at": self._last_broker_position_snapshot_failure_at,
+                "failure_reason": self._last_broker_position_snapshot_failure_reason,
+            }
+
+    def broker_exposure_state(self, symbol: str) -> BrokerExposureState:
+        """Return broker-authoritative exposure state for ``symbol``.
+
+        UNKNOWN means no complete validated snapshot has been committed and must
+        not be treated as flat. ABSENT means the latest complete net snapshot was
+        valid but had no row for the symbol, which is broker-flat for Zerodha net
+        snapshots.
+        """
+
+        lookup = normalize_symbol(symbol) or symbol.strip().upper()
+        with self._lock:
+            if not self._last_broker_position_snapshot_valid:
+                return BrokerExposureState.UNKNOWN
+            if lookup not in self._last_broker_quantities_by_symbol:
+                return BrokerExposureState.ABSENT
+            qty = self._last_broker_quantities_by_symbol[lookup]
+        return BrokerExposureState.FLAT if qty == 0 else BrokerExposureState.NONZERO
 
     def open_position(
         self,
@@ -1662,22 +1706,26 @@ class PositionManager:
     def get_position(self, symbol: str) -> Position | None:
         """Return the :class:`Position` for ``symbol`` if it exists."""
 
-        return self._positions.get(symbol.upper())
+        with self._lock:
+            return self._positions.get(symbol.upper())
 
     def get_all_positions(self) -> list[Position]:
         """Return all currently open positions."""
 
-        return list(self._positions.values())
+        with self._lock:
+            return list(self._positions.values())
 
     def get_open_positions(self) -> list[Position]:
         """Alias for :meth:`get_all_positions` for compatibility with protocols."""
 
-        return list(self._positions.values())
+        with self._lock:
+            return list(self._positions.values())
 
     def has_position(self, symbol: str) -> bool:
         """Return ``True`` if a position exists for ``symbol``."""
 
-        return symbol.upper() in self._positions
+        with self._lock:
+            return symbol.upper() in self._positions
 
     def has_open_position(self, symbol: str) -> bool:
         """Return whether an open position exists. Args: symbol. Returns: bool. Raises: None."""
@@ -2694,7 +2742,13 @@ class PositionManager:
         self, broker_positions: Sequence[Mapping[str, object]]
     ) -> None:
         """Validate and atomically replace managed positions from broker truth."""
-        snapshot = decode_position_snapshot(broker_positions)
+        try:
+            snapshot = decode_position_snapshot(broker_positions)
+        except Exception as exc:
+            with self._lock:
+                self._last_broker_position_snapshot_failure_at = time.time()
+                self._last_broker_position_snapshot_failure_reason = str(exc)
+            raise
 
         def get_float(
             record: Mapping[str, object],
@@ -2818,6 +2872,13 @@ class PositionManager:
                     lifecycle.state = "BROKER_FLAT_AWAITING_FILL"
                     lifecycle.broker_flat_at = now
             self._positions = reconciled
+            self._last_broker_quantities_by_symbol = {
+                row.symbol: int(row.quantity) for row in snapshot.rows
+            }
+            self._last_broker_position_snapshot_at = snapshot.fetched_at
+            self._last_broker_position_snapshot_valid = True
+            self._last_broker_position_snapshot_source = snapshot.source
+            self._last_broker_position_snapshot_failure_reason = None
             if snapshot_realized_seen:
                 self._broker_realized_pnl = float(snapshot_realized_pnl)
                 self._refresh_realized_pnl_locked()
