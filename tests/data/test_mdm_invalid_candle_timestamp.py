@@ -93,7 +93,7 @@ def test_valid_rest_poll_timestamp_accepted_and_marked() -> None:
         _tick(source="rest_poll", timestamp="2026-01-01T00:00:00Z")
     )
     assert normalized is not None
-    assert normalized["timestamp_source"] == "rest_poll"
+    assert normalized["timestamp_source"] == "timestamp"
     assert normalized["source_timestamp_valid"] is True
 
 
@@ -199,3 +199,97 @@ def test_nifty_spot_naive_broker_fallback_is_ist_not_utc_shifted() -> None:
     assert normalized["timestamp_source"] == "timestamp"
     assert normalized["timestamp"] == "2026-07-23T09:30:00+05:30"
     assert normalized["source_timestamp_valid"] is True
+
+
+def test_poll_timestamp_with_invalid_broker_timestamp_uses_received_at() -> None:
+    mdm = _mdm()
+    normalized = mdm._normalize_ws_tick(
+        _tick(source="poll", timestamp="bad", received_at=1784788200.0)
+    )
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "received_at"
+    assert normalized["timestamp"] == "2026-07-23T12:00:00+05:30"
+    assert mdm._candle_metrics["invalid_candle_timestamp_total"] == 0
+
+
+def test_poll_timestamp_missing_broker_timestamp_uses_received_at() -> None:
+    mdm = _mdm()
+    normalized = mdm._normalize_ws_tick(_tick(source="poll", received_at=1784788200.0))
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "received_at"
+    assert normalized["timestamp"] == "2026-07-23T12:00:00+05:30"
+
+
+def test_poll_numeric_epoch_seconds_and_milliseconds_are_not_double_shifted() -> None:
+    mdm = _mdm()
+    seconds = mdm._normalize_ws_tick(_tick(source="poll", timestamp=1784788200.0))
+    millis = mdm._normalize_ws_tick(_tick(source="poll", timestamp=1784788200000.0))
+    assert seconds is not None
+    assert millis is not None
+    assert seconds["timestamp_source"] == "timestamp"
+    assert millis["timestamp_source"] == "timestamp"
+    assert seconds["timestamp"] == "2026-07-23T12:00:00+05:30"
+    assert millis["timestamp"] == "2026-07-23T12:00:00+05:30"
+
+
+def test_prepare_rest_tick_continues_to_valid_last_trade_time() -> None:
+    mdm = _mdm()
+    valid_last_trade = datetime(2026, 7, 23, 9, 30, tzinfo=timezone.utc)
+
+    prepared = mdm._prepare_rest_tick(
+        {
+            "timestamp": "bad",
+            "last_trade_time": valid_last_trade,
+            "last_price": 10.0,
+        },
+        source="poll",
+    )
+    normalized = mdm._normalize_ws_tick({**prepared, "instrument_token": 1})
+
+    assert prepared["timestamp"] is valid_last_trade
+    assert isinstance(prepared["received_at"], float)
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "last_trade_time"
+
+
+def test_prepare_rest_tick_continues_to_valid_broker_timestamp() -> None:
+    valid_broker = datetime(2026, 7, 23, 9, 31, tzinfo=timezone.utc)
+
+    prepared = MarketDataManager._prepare_rest_tick(
+        {
+            "timestamp": "bad",
+            "last_trade_time": "also-bad",
+            "broker_timestamp": valid_broker,
+            "last_price": 10.0,
+        },
+        source="poll",
+    )
+
+    normalized = _mdm()._normalize_ws_tick({**prepared, "instrument_token": 1})
+
+    assert prepared["timestamp"] is valid_broker
+    assert isinstance(prepared["received_at"], float)
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "timestamp"
+
+
+def test_prepare_rest_tick_omits_all_invalid_broker_fields_for_received_at_fallback() -> None:
+    mdm = _mdm()
+    prepared = mdm._prepare_rest_tick(
+        {
+            "timestamp": "bad",
+            "last_trade_time": "also-bad",
+            "broker_timestamp": "still-bad",
+            "ts": "bad-ts",
+            "ts_ms": "bad-ts-ms",
+            "last_price": 10.0,
+            "_local_timestamp": 1784788200.0,
+        },
+        source="poll",
+    )
+    normalized = mdm._normalize_ws_tick({**prepared, "instrument_token": 1})
+
+    assert "timestamp" not in prepared
+    assert prepared["received_at"] == 1784788200.0
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "received_at"

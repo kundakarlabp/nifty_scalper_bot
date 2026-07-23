@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable, Iterable, Sequence
 
 # [FIX] Use centralized logging utilities
+from nifty_scalper_bot.data.time_contract import coerce_market_timestamp
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
@@ -21,6 +22,17 @@ _STARVATION_CANDIDATE_STATUSES = {
     "websocket_silent",
     "combined_starvation",
 }
+
+
+def _valid_poll_timestamp(value: Any) -> Any | None:
+    """Return broker timestamp only when the canonical parser accepts it."""
+    if value in (None, ""):
+        return None
+    try:
+        coerce_market_timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value
 
 
 class PollingStreamer:
@@ -714,20 +726,23 @@ class PollingStreamer:
                             interval_sec=300.0,  # Only log every 5 minutes
                         )
 
-                    # Handle timestamp
-                    q_ts = quote.get("timestamp")
-                    if q_ts and hasattr(q_ts, "timestamp"):
-                        ts = int(q_ts.timestamp() * 1000)
-                    elif q_ts and isinstance(q_ts, (int, float)):
-                        ts = int(q_ts * 1000) if q_ts < 10000000000 else int(q_ts)
-                    else:
-                        ts = int(time.time() * 1000)
+                    valid_broker_ts = None
+                    for candidate in (
+                        quote.get("timestamp"),
+                        quote.get("last_trade_time"),
+                    ):
+                        valid_broker_ts = _valid_poll_timestamp(candidate)
+                        if valid_broker_ts is not None:
+                            break
+                    received_at = time.time()
 
-                    # Build tick with ALL available data
+                    # Build tick with ALL available data. Keep broker event time
+                    # provenance separate from local poll receipt time: never
+                    # fabricate an exchange/broker timestamp from wall-clock time.
                     tick = {
                         "instrument_token": token_int,
                         "last_price": lp,
-                        "timestamp": ts,
+                        "received_at": received_at,
                         "volume": volume_int,
                         "average_price": avg_price_float,  # ✅ VWAP
                         "oi": oi_int,
@@ -739,6 +754,8 @@ class PollingStreamer:
                         ),
                         "source": "rest",
                     }
+                    if valid_broker_ts is not None:
+                        tick["timestamp"] = valid_broker_ts
 
                     # ✅ LOG SUCCESS when we have VWAP (throttled)
                     if avg_price_float > 0:
