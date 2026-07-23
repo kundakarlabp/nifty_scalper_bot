@@ -53,9 +53,27 @@ class _Broker:
         return True
 
 
+class _Positions:
+    def __init__(self) -> None:
+        self.orders: dict[str, dict[str, Any]] = {}
+
+    def add_pending_order(self, order_id: str, symbol: str, side: str, qty: int, price: float, order_type: str, **kwargs: Any) -> None:
+        self.orders[str(order_id)] = {"symbol": symbol, "side": side, "qty": qty, **kwargs}
+
+    def bind_pending_order_id(self, provisional_order_id: str, final_order_id: str) -> None:
+        self.orders[str(final_order_id)] = self.orders.pop(str(provisional_order_id))
+
+    def remove_pending_order(self, order_id: str) -> None:
+        self.orders.pop(str(order_id), None)
+
+    def is_exit_converging(self, _symbol: str) -> bool:
+        return False
+
+
 class _OrderManager:
     def __init__(self, broker: _Broker) -> None:
         self._broker = broker
+        self._positions = _Positions()
         self._last_order_decision: dict[str, Any] = {}
         self.place_calls: list[dict[str, Any]] = []
         self.submit_plan_calls = 0
@@ -381,6 +399,18 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
             return om.get_order_status(oid)
 
     om._broker = _BrokerStub()
+    class _Positions:
+        def __init__(self):
+            self.orders = {}
+        def add_pending_order(self, order_id, symbol, side, qty, price, order_type, **kwargs):
+            self.orders[str(order_id)] = dict(symbol=symbol, side=side, qty=qty, **kwargs)
+        def bind_pending_order_id(self, provisional_order_id, final_order_id):
+            self.orders[str(final_order_id)] = self.orders.pop(str(provisional_order_id))
+        def remove_pending_order(self, order_id):
+            self.orders.pop(str(order_id), None)
+        def is_exit_converging(self, _symbol):
+            return False
+    om._positions = _Positions()
     bm = BracketManager(order_manager=om)
     bm._running = False
     bm._exit_reconcile_interval_seconds = 0.0

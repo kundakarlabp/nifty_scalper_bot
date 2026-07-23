@@ -407,6 +407,24 @@ class LedgerBracketManager(CanonicalBracketManager):
             bracket.exit_state = _legacy.BracketExitLifecycle.CLOSED.value
             bracket.entry_status = "CLOSED"
             bracket.pending_exit_order_id = None
+            positions = getattr(self.order_manager, "_positions", None)
+            position_zero = True
+            unresolved_exit = False
+            if positions is not None:
+                getter = getattr(positions, "get_position", None)
+                if callable(getter):
+                    with suppress(Exception):
+                        position_zero = getter(bracket.symbol) is None
+                checker = getattr(positions, "is_exit_converging", None)
+                if callable(checker):
+                    with suppress(Exception):
+                        unresolved_exit = bool(checker(bracket.symbol))
+            if position_zero and not unresolved_exit:
+                bracket.exit_submission_inflight = False
+                bracket.exit_intent = None
+                bracket.expected_exit_side = None
+                bracket.expected_exit_qty = 0
+                bracket.exit_correlation_id = None
             bracket.close_source = close_source
             bracket.closed_at = time.time()
             if resolved_price is not None:

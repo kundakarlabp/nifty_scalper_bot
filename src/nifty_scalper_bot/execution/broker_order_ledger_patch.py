@@ -436,8 +436,17 @@ def apply_patches() -> None:
         managed = isinstance(orders, dict) and oid in orders
         tag = str(payload.get("tag") or "").strip()
         if not managed and tag and isinstance(orders, dict) and tag in orders:
-            oid = tag
-            payload["order_id"] = oid
+            final_oid = oid
+            binder = getattr(self, "bind_pending_order_id", None)
+            if final_oid and final_oid != tag and callable(binder):
+                with suppress(Exception):
+                    binder(tag, final_oid)
+            orders = getattr(self, "_orders", {})
+            if isinstance(orders, dict) and final_oid in orders:
+                oid = final_oid
+            else:
+                oid = tag
+                payload["order_id"] = oid
             managed = True
         client_order_id = str(
             payload.get("client_order_id") or payload.get("clientOrderId") or ""
