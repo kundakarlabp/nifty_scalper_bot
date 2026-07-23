@@ -28,7 +28,7 @@ def test_ingest_rest_quote_without_token_enters_candle_engine_once() -> None:
     assert engine.current_candle["close"] == 100.0
     latest_tick = mdm.get_latest_tick(SYMBOL)
     assert latest_tick is not None
-    assert latest_tick["timestamp_source"] == "rest_poll"
+    assert latest_tick["timestamp_source"] == "timestamp"
     assert engine.get_completed_bars() == []
     assert mdm._candle_metrics["fallback_quote_tick_total"] == 1
 

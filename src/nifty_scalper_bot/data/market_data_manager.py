@@ -7857,6 +7857,8 @@ class MarketDataManager:
             timestamp_reason = (
                 "missing_all" if not present_timestamp_fields else "all_present_invalid"
             )
+            raw_timestamp = raw.get("timestamp")
+            timestamp_preview = repr(raw_timestamp)[:80]
             if not hasattr(self, "_candle_metrics"):
                 self._candle_metrics = defaultdict(float)
             self._candle_metrics["invalid_candle_timestamp_total"] += 1
@@ -7865,7 +7867,8 @@ class MarketDataManager:
                 f"mdm_invalid_candle_timestamp_{token or symbol}",
                 (
                     "MDM_TICK_DROPPED reason=invalid_candle_timestamp "
-                    "timestamp_reason=%s token=%s symbol=%s source=%s present_timestamp_fields=%s"
+                    "timestamp_reason=%s token=%s symbol=%s source=%s "
+                    "present_timestamp_fields=%s timestamp_type=%s timestamp_preview=%s"
                 )
                 % (
                     timestamp_reason,
@@ -7874,6 +7877,8 @@ class MarketDataManager:
                     raw.get("source")
                     or ("rest_poll" if approved_rest_fallback else "ws"),
                     present_timestamp_fields,
+                    type(raw_timestamp).__name__,
+                    timestamp_preview,
                 ),
                 interval_sec=30.0,
                 level=logging.WARNING,
@@ -7937,38 +7942,14 @@ class MarketDataManager:
     def _resolve_candle_tick_timestamp(
         self, raw: Mapping[str, Any], *, rest_fallback: bool
     ) -> tuple[str | None, pd.Timestamp | None]:
-        if not rest_fallback:
-            try:
-                normalized = normalize_market_tick_timestamp(raw)
-            except (TypeError, ValueError, OverflowError):
-                return None, None
-            ts = pd.Timestamp(normalized.timestamp)
-            if ts.year >= 2020:
-                return normalized.source, ts
+        try:
+            normalized = normalize_market_tick_timestamp(raw)
+        except (TypeError, ValueError, OverflowError):
             return None, None
-
-        if rest_fallback:
-            candidates = (
-                ("rest_poll", raw.get("timestamp")),
-                ("rest_poll", raw.get("broker_timestamp")),
-                ("last_trade_time", raw.get("last_trade_time")),
-            )
-        else:
-            candidates = (
-                ("exchange_timestamp", raw.get("exchange_timestamp")),
-                ("timestamp", raw.get("timestamp")),
-                ("last_trade_time", raw.get("last_trade_time")),
-            )
-        for source, value in candidates:
-            if value is None:
-                continue
-            ts = pd.to_datetime(value, utc=True, errors="coerce")
-            if pd.isna(ts):
-                continue
-            ts = pd.Timestamp(ts)
-            if ts.year >= 2020:
-                return source, ts
-        return None, None
+        ts = pd.Timestamp(normalized.timestamp)
+        if ts.year < 2020:
+            return None, None
+        return normalized.source, ts
 
     def _extract_depth_quote_fields(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         """Extract quote/depth fields. Args: raw. Returns: normalized quote fields. Raises: none."""
@@ -12374,14 +12355,9 @@ class MarketDataManager:
             ltp = float(ltp_raw)
             if ltp <= 0:
                 return None
-            ts = pd.to_datetime(
-                raw.get("timestamp")
-                or raw.get("exchange_timestamp")
-                or raw.get("last_trade_time"),
-                utc=True,
-                errors="coerce",
-            )
-            if pd.isna(ts):
+            try:
+                normalized_ts = normalize_market_tick_timestamp(raw)
+            except (TypeError, ValueError, OverflowError):
                 if str(source).lower() in {
                     "poll",
                     "rest",
@@ -12392,6 +12368,12 @@ class MarketDataManager:
                 }:
                     return None
                 ts = pd.Timestamp.now(tz="UTC")
+                timestamp_source = raw.get("timestamp_source")
+                source_timestamp_valid = raw.get("source_timestamp_valid")
+            else:
+                ts = pd.Timestamp(normalized_ts.timestamp)
+                timestamp_source = normalized_ts.source
+                source_timestamp_valid = True
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
             bid = _coerce_float(
                 raw.get("bid")
@@ -12478,8 +12460,8 @@ class MarketDataManager:
                 "bid_ask_source": bid_ask_source,
                 "tradable_quote": tradable_quote,
                 "timestamp": ts_py,
-                "timestamp_source": raw.get("timestamp_source"),
-                "source_timestamp_valid": raw.get("source_timestamp_valid"),
+                "timestamp_source": timestamp_source,
+                "source_timestamp_valid": source_timestamp_valid,
                 "source": (
                     "poll"
                     if str(source).lower() == "poll"
@@ -12925,13 +12907,13 @@ class MarketDataManager:
     @staticmethod
     def _coerce_timestamp(tick: dict[str, Any]) -> float:
         value = (
-            tick.get("received_at")
-            or tick.get("wallclock")
-            or tick.get("exchange_timestamp")
+            tick.get("exchange_timestamp")
             or tick.get("last_trade_time")
             or tick.get("timestamp")
             or tick.get("ts")
             or tick.get("ts_ms")
+            or tick.get("received_at")
+            or tick.get("wallclock")
         )
         parsed = MarketDataManager._parse_wallclock(value)
         return parsed if parsed is not None else time.time()
@@ -12971,21 +12953,30 @@ class MarketDataManager:
     @staticmethod
     def _prepare_rest_tick(tick: Mapping[str, Any], *, source: str) -> dict[str, Any]:
         payload = dict(tick)
-        broker_timestamp = payload.get("broker_timestamp")
-        if broker_timestamp is None:
-            broker_timestamp = (
-                payload.get("timestamp") or payload.get("ts") or payload.get("ts_ms")
-            )
-        if broker_timestamp is not None:
-            payload["broker_timestamp"] = broker_timestamp
+        broker_timestamp = (
+            payload.get("timestamp")
+            or payload.get("last_trade_time")
+            or payload.get("broker_timestamp")
+            or payload.get("ts")
+            or payload.get("ts_ms")
+        )
         observed_at = payload.pop("_local_timestamp", None)
+        received_at = (
+            float(observed_at)
+            if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool)
+            else time.time()
+        )
         payload["source"] = source
-        if isinstance(observed_at, (int, float)):
-            payload["timestamp"] = float(observed_at)
-            payload["received_at"] = float(observed_at)
-        else:
-            payload["timestamp"] = time.time()
-            payload["received_at"] = time.time()
+        payload["received_at"] = received_at
+        if broker_timestamp in (None, ""):
+            payload.pop("timestamp", None)
+            return payload
+        try:
+            coerce_market_timestamp(broker_timestamp)
+        except (TypeError, ValueError, OverflowError):
+            payload.pop("timestamp", None)
+            return payload
+        payload["timestamp"] = broker_timestamp
         return payload
 
     def _is_duplicate(

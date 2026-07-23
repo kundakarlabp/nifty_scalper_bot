@@ -93,7 +93,7 @@ def test_valid_rest_poll_timestamp_accepted_and_marked() -> None:
         _tick(source="rest_poll", timestamp="2026-01-01T00:00:00Z")
     )
     assert normalized is not None
-    assert normalized["timestamp_source"] == "rest_poll"
+    assert normalized["timestamp_source"] == "timestamp"
     assert normalized["source_timestamp_valid"] is True
 
 
@@ -199,3 +199,34 @@ def test_nifty_spot_naive_broker_fallback_is_ist_not_utc_shifted() -> None:
     assert normalized["timestamp_source"] == "timestamp"
     assert normalized["timestamp"] == "2026-07-23T09:30:00+05:30"
     assert normalized["source_timestamp_valid"] is True
+
+
+def test_poll_timestamp_with_invalid_broker_timestamp_uses_received_at() -> None:
+    mdm = _mdm()
+    normalized = mdm._normalize_ws_tick(
+        _tick(source="poll", timestamp="bad", received_at=1784788200.0)
+    )
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "received_at"
+    assert normalized["timestamp"] == "2026-07-23T12:00:00+05:30"
+    assert mdm._candle_metrics["invalid_candle_timestamp_total"] == 0
+
+
+def test_poll_timestamp_missing_broker_timestamp_uses_received_at() -> None:
+    mdm = _mdm()
+    normalized = mdm._normalize_ws_tick(_tick(source="poll", received_at=1784788200.0))
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "received_at"
+    assert normalized["timestamp"] == "2026-07-23T12:00:00+05:30"
+
+
+def test_poll_numeric_epoch_seconds_and_milliseconds_are_not_double_shifted() -> None:
+    mdm = _mdm()
+    seconds = mdm._normalize_ws_tick(_tick(source="poll", timestamp=1784788200.0))
+    millis = mdm._normalize_ws_tick(_tick(source="poll", timestamp=1784788200000.0))
+    assert seconds is not None
+    assert millis is not None
+    assert seconds["timestamp_source"] == "timestamp"
+    assert millis["timestamp_source"] == "timestamp"
+    assert seconds["timestamp"] == "2026-07-23T12:00:00+05:30"
+    assert millis["timestamp"] == "2026-07-23T12:00:00+05:30"
