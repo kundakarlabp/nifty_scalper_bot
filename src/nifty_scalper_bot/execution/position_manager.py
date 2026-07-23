@@ -1905,7 +1905,6 @@ class PositionManager:
         bracket_id: str | None = None,
         signal_id: str | None = None,
         signal_fingerprint: str | None = None,
-        client_order_id: str | None = None,
     ) -> None:
         """Track a newly submitted order.
 
@@ -1988,6 +1987,37 @@ class PositionManager:
             )
         self._persist_order_state(order)
         self.save_state()
+
+
+    def remove_pending_order(self, order_id: str) -> None:
+        """Remove a provisional order that never reached broker submission."""
+
+        order_key = str(order_id or "").strip()
+        if not order_key:
+            return
+        with self._lock:
+            order = self._orders.get(order_key)
+            if order is not None and order.status not in self.FINAL_STATUSES:
+                self._orders.pop(order_key, None)
+            self._exit_lifecycles.pop(order_key, None)
+        self.save_state()
+
+    def is_exit_converging(self, symbol: str) -> bool:
+        """Return True while a managed exit for ``symbol`` is still converging."""
+
+        symbol_key = symbol.upper()
+        with self._lock:
+            for order in self._orders.values():
+                if order.symbol != symbol_key:
+                    continue
+                if order.intent in ("EXIT", "REDUCE") and order.status not in self.FINAL_STATUSES:
+                    return True
+            for metadata in self._unresolved_terminal_orders.values():
+                if metadata.symbol == symbol_key and metadata.intent in ("EXIT", "REDUCE"):
+                    return True
+            if symbol_key in getattr(self, "_recently_flat_exit_until_monotonic", {}):
+                return True
+        return False
 
     def bind_pending_order_id(
         self, provisional_order_id: str, final_order_id: str

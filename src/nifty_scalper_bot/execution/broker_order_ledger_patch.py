@@ -13,9 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import (
-    position_identity_extension as _position_identity,
-)
+from nifty_scalper_bot.execution import position_identity_extension as _position_identity
 from nifty_scalper_bot.execution import position_manager as _position_manager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -78,9 +76,7 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 def _status(row: Any) -> str:
     raw = str(_get(row, "status", "order_status", "state") or "UNKNOWN").strip().upper()
-    normalized = getattr(
-        _position_manager, "normalize_broker_order_status", lambda value: value
-    )(raw)
+    normalized = getattr(_position_manager, "normalize_broker_order_status", lambda value: value)(raw)
     token = str(normalized or raw or "UNKNOWN").strip().upper()
     return _STATUS_MAP.get(token, token)
 
@@ -92,9 +88,7 @@ def _order_id(row: Any) -> str:
 
 
 def _symbol(row: Any) -> str:
-    return _canonical(
-        _get(row, "symbol", "tradingsymbol", "trading_symbol", "instrument")
-    )
+    return _canonical(_get(row, "symbol", "tradingsymbol", "trading_symbol", "instrument"))
 
 
 def _side(row: Any) -> str:
@@ -107,17 +101,11 @@ def _side(row: Any) -> str:
 
 
 def _quantity(row: Any) -> int:
-    return abs(
-        _to_int(
-            _get(row, "quantity", "qty", "order_quantity", "filled_quantity", "filled")
-        )
-    )
+    return abs(_to_int(_get(row, "quantity", "qty", "order_quantity", "filled_quantity", "filled")))
 
 
 def _filled_quantity(row: Any) -> int:
-    return abs(
-        _to_int(_get(row, "filled_quantity", "filled", "filled_qty", "filledQuantity"))
-    )
+    return abs(_to_int(_get(row, "filled_quantity", "filled", "filled_qty", "filledQuantity")))
 
 
 def _average_price(row: Any) -> float:
@@ -130,14 +118,7 @@ def _product(row: Any) -> str:
 
 def _timestamp_key(row: Any) -> tuple[str, str]:
     ts = str(
-        _get(
-            row,
-            "exchange_timestamp",
-            "order_timestamp",
-            "timestamp",
-            "created_at",
-            "updated_at",
-        )
+        _get(row, "exchange_timestamp", "order_timestamp", "timestamp", "created_at", "updated_at")
         or ""
     )
     return ts, _order_id(row)
@@ -211,9 +192,7 @@ def _ledger_row(
 ) -> dict[str, Any]:
     previous = dict(existing or {})
     order_id = str(broker_payload.get("order_id") or "").strip()
-    symbol = _canonical(
-        broker_payload.get("symbol") or broker_payload.get("tradingsymbol")
-    )
+    symbol = _canonical(broker_payload.get("symbol") or broker_payload.get("tradingsymbol"))
     now = _now_iso()
     return {
         **previous,
@@ -238,18 +217,10 @@ def _ledger_row(
     }
 
 
-def _classification_changed(
-    previous: Mapping[str, Any] | None, current: Mapping[str, Any]
-) -> bool:
+def _classification_changed(previous: Mapping[str, Any] | None, current: Mapping[str, Any]) -> bool:
     if not previous:
         return True
-    keys = (
-        "broker_status",
-        "classification",
-        "broker_position_state",
-        "broker_position_qty",
-        "reason",
-    )
+    keys = ("broker_status", "classification", "broker_position_state", "broker_position_qty", "reason")
     return any(previous.get(key) != current.get(key) for key in keys)
 
 
@@ -263,9 +234,7 @@ def _active_external_exposure(row: Mapping[str, Any], reason: str) -> dict[str, 
     return {
         "symbol": row["symbol"],
         "tradingsymbol": row["symbol"],
-        "quantity": abs(
-            _to_int(row.get("filled_quantity")) or _to_int(row.get("quantity"))
-        ),
+        "quantity": abs(_to_int(row.get("filled_quantity")) or _to_int(row.get("quantity"))),
         "side": str(row.get("side") or "").strip().upper(),
         "product": str(row.get("product") or "MIS").strip().upper(),
         "average_price": _to_float(row.get("average_price")),
@@ -283,11 +252,7 @@ def _active_external_exposure(row: Mapping[str, Any], reason: str) -> dict[str, 
 
 
 def _resolve_broker_order_fetcher(manager: Any) -> Any | None:
-    broker = (
-        getattr(manager, "_broker_client", None)
-        or getattr(manager, "broker_client", None)
-        or getattr(manager, "broker", None)
-    )
+    broker = getattr(manager, "_broker_client", None) or getattr(manager, "broker_client", None) or getattr(manager, "broker", None)
     if broker is None:
         return None
     for name in ("get_orders", "list_orders", "orders", "fetch_orders"):
@@ -321,9 +286,7 @@ def _set_exposure(self: Any, row: Mapping[str, Any], reason: str) -> None:
     self._quarantined_broker_exposures = exposures
 
 
-def _classify_unknown(
-    self: Any, payload: Mapping[str, Any]
-) -> tuple[str, str | None, int | None, str | None]:
+def _classify_unknown(self: Any, payload: Mapping[str, Any]) -> tuple[str, str | None, int | None, str | None]:
     status = str(payload.get("status") or "UNKNOWN").upper()
     symbol = str(payload.get("symbol") or "")
     filled_qty = _to_int(payload.get("filled_quantity"))
@@ -336,12 +299,7 @@ def _classify_unknown(
         if state == "flat":
             return "resolved_external_flat", state, qty, None
         if state == "open":
-            return (
-                "broker_position_quarantined",
-                state,
-                qty,
-                "broker_position_unowned_or_cost_basis_unresolved",
-            )
+            return "broker_position_quarantined", state, qty, "broker_position_unowned_or_cost_basis_unresolved"
         return "broker_state_unverified", state, qty, "broker_state_unverified"
     return "active_external_order", None, None, "active_external_order"
 
@@ -365,11 +323,7 @@ def _persist_extra_state(self: Any) -> None:
         {
             "broker_order_ledger": dict(ledger) if isinstance(ledger, Mapping) else {},
             "quarantined_broker_exposures": (
-                {
-                    key: dict(value)
-                    for key, value in exposures.items()
-                    if isinstance(value, Mapping)
-                }
+                {key: dict(value) for key, value in exposures.items() if isinstance(value, Mapping)}
                 if isinstance(exposures, Mapping)
                 else {}
             ),
@@ -434,15 +388,10 @@ def apply_patches() -> None:
                 log(
                     "BROKER_ORDER_LEDGER_SAVE_FAILED error=%s",
                     exc,
-                    extra={
-                        "event": "BROKER_ORDER_LEDGER_SAVE_FAILED",
-                        "error": str(exc),
-                    },
+                    extra={"event": "BROKER_ORDER_LEDGER_SAVE_FAILED", "error": str(exc)},
                 )
 
-    def add_pending_order(
-        self: Any, order_id: str, symbol: str, *args: Any, **kwargs: Any
-    ) -> Any:
+    def add_pending_order(self: Any, order_id: str, symbol: str, *args: Any, **kwargs: Any) -> Any:
         result = _ORIGINALS["PositionManager.add_pending_order"](
             self,
             order_id,
@@ -459,15 +408,12 @@ def apply_patches() -> None:
                 "side": getattr(order, "side", None),
                 "quantity": getattr(order, "quantity", 0),
                 "filled_quantity": getattr(order, "filled_quantity", 0),
-                "average_price": getattr(order, "fill_price", None)
-                or getattr(order, "price", 0.0),
+                "average_price": getattr(order, "fill_price", None) or getattr(order, "price", 0.0),
                 "product": "MIS",
                 "status": getattr(order, "status", "PENDING"),
             }
             row = _ledger_row(
-                existing=(getattr(self, "_broker_order_ledger", {}) or {}).get(
-                    str(order_id).strip()
-                ),
+                existing=(getattr(self, "_broker_order_ledger", {}) or {}).get(str(order_id).strip()),
                 broker_payload=broker_payload,
                 classification="managed_order",
                 broker_position_state=None,
@@ -480,23 +426,21 @@ def apply_patches() -> None:
                 save_state(self)
         return result
 
-    def apply_broker_order_update(
-        self: Any, order_id: str, broker_payload: Mapping[str, Any]
-    ) -> Any:
-        payload = _row_to_payload(
-            dict(broker_payload or {}, order_id=str(order_id).strip())
-        )
+    def apply_broker_order_update(self: Any, order_id: str, broker_payload: Mapping[str, Any]) -> Any:
+        payload = _row_to_payload(dict(broker_payload or {}, order_id=str(order_id).strip()))
         oid = str(payload.get("order_id") or order_id or "").strip()
         if not oid:
             return None
         payload["order_id"] = oid
         orders = getattr(self, "_orders", {})
         managed = isinstance(orders, dict) and oid in orders
+        tag = str(payload.get("tag") or "").strip()
+        if not managed and tag and isinstance(orders, dict) and tag in orders:
+            oid = tag
+            payload["order_id"] = oid
+            managed = True
         client_order_id = str(
-            payload.get("client_order_id")
-            or payload.get("clientOrderId")
-            or payload.get("tag")
-            or ""
+            payload.get("client_order_id") or payload.get("clientOrderId") or ""
         ).strip()
         if (
             not managed
@@ -521,16 +465,12 @@ def apply_patches() -> None:
                 managed=True,
             )
             _record_ledger(self, row)
-            result = _ORIGINALS["PositionManager.apply_broker_order_update"](
-                self, oid, payload
-            )
+            result = _ORIGINALS["PositionManager.apply_broker_order_update"](self, oid, payload)
             with suppress(Exception):
                 save_state(self)
             return result
 
-        classification, broker_state, broker_qty, reason = _classify_unknown(
-            self, payload
-        )
+        classification, broker_state, broker_qty, reason = _classify_unknown(self, payload)
         row = _ledger_row(
             existing=previous,
             broker_payload=payload,
@@ -589,9 +529,7 @@ def apply_patches() -> None:
         save_state(self)
         return None
 
-    def reconcile_broker_orders(
-        self: Any, broker_orders: Any | None = None
-    ) -> dict[str, int]:
+    def reconcile_broker_orders(self: Any, broker_orders: Any | None = None) -> dict[str, int]:
         if broker_orders is None:
             fetcher = _resolve_broker_order_fetcher(self)
             if fetcher is None:
@@ -642,9 +580,7 @@ def apply_patches() -> None:
                 )
         return result
 
-    def current_entry_protection_blocker(
-        self: Any, symbol: str | None = None
-    ) -> str | None:
+    def current_entry_protection_blocker(self: Any, symbol: str | None = None) -> str | None:
         ledger = getattr(self, "_broker_order_ledger", {}) or {}
         wanted = _canonical(symbol) if symbol else None
         if isinstance(ledger, Mapping):
@@ -664,9 +600,7 @@ def apply_patches() -> None:
             return original(self, _canonical(symbol) if symbol else None)
         return None
 
-    def get_broker_order_ledger(
-        self: Any, symbol: str | None = None
-    ) -> dict[str, dict[str, Any]]:
+    def get_broker_order_ledger(self: Any, symbol: str | None = None) -> dict[str, dict[str, Any]]:
         ledger = getattr(self, "_broker_order_ledger", {}) or {}
         wanted = _canonical(symbol) if symbol else None
         out: dict[str, dict[str, Any]] = {}

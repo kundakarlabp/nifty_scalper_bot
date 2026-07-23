@@ -24,6 +24,7 @@ Safe-edit notes:
 from __future__ import annotations
 
 from collections import deque
+import hashlib
 from contextlib import suppress
 import threading
 from threading import RLock
@@ -96,6 +97,15 @@ METRICS_AVAILABLE = False
 METRICS = None
 
 LOGGER = get_logger(__name__)
+
+
+def _build_exit_correlation_id(*, bracket_id: str, attempt: int) -> str:
+    """Return a broker-safe Zerodha tag for correlating exit callbacks."""
+
+    digest = hashlib.blake2s(str(bracket_id).encode("utf-8"), digest_size=4).hexdigest()
+    raw = f"exit_{digest}_{int(attempt)}"
+    safe = "".join(ch for ch in raw if ch.isalnum() or ch in {"_", "-"})
+    return (safe or "ex")[:20]
 
 
 def _round_to_tick(price: float, tick_size: float = 0.05) -> float:
@@ -283,8 +293,7 @@ class BracketState:
     exit_intent: str | None = None
     expected_exit_side: str | None = None
     expected_exit_qty: int = 0
-    exit_client_order_id: str | None = None
-    early_exit_fill_payload: dict[str, Any] | None = None
+    exit_correlation_id: str | None = None
     entry_fill_price: float | None = None
     # Wall-clock time the entry fill was confirmed (bracket activation).
     # Used to reject pre-fill/replayed ticks against a freshly activated bracket.
@@ -406,6 +415,7 @@ class BracketState:
             "entry_status": self.entry_status,
             "exit_state": self.exit_state,
             "exit_order_id": self.exit_order_id or self.pending_exit_order_id,
+            "exit_correlation_id": self.exit_correlation_id,
             "entry_fill_price": self.entry_fill_price,
             "exit_reason": self.exit_reason,
             "exit_triggered_at": self.exit_triggered_at,
@@ -2118,17 +2128,21 @@ class BracketManager:
                 self._escalate_exit_locked(bracket, "max_attempts_exceeded")
                 return
 
-            client_order_id = f"exit_{bracket.bracket_id}_{int(now * 1000)}_{bracket.exit_attempt_count + 1}"
+            next_attempt = bracket.exit_attempt_count + 1
+            correlation_id = _build_exit_correlation_id(
+                bracket_id=bracket.bracket_id,
+                attempt=next_attempt,
+            )
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
             bracket.exit_in_progress = True
             bracket.exit_submission_inflight = True
             bracket.exit_intent = "EXIT"
             bracket.expected_exit_side = exit_side
             bracket.expected_exit_qty = qty
-            bracket.exit_client_order_id = client_order_id
+            bracket.exit_correlation_id = correlation_id
             bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_PENDING.value
             bracket.entry_status = BracketExitLifecycle.EXIT_ORDER_PENDING.value
-            bracket.exit_attempt_count += 1
+            bracket.exit_attempt_count = next_attempt
             bracket.last_exit_attempt_at = now
             attempt = bracket.exit_attempt_count
             self._exit_cooldowns[bracket.entry_order_id] = now
@@ -2138,7 +2152,7 @@ class BracketManager:
         if callable(registrar):
             with suppress(Exception):
                 registrar(
-                    client_order_id,
+                    correlation_id,
                     symbol,
                     bracket.expected_exit_side
                     or ("SELL" if bracket.side == "BUY" else "BUY"),
@@ -2147,7 +2161,6 @@ class BracketManager:
                     "LIMIT",
                     intent="EXIT",
                     bracket_id=bracket.bracket_id,
-                    client_order_id=client_order_id,
                 )
 
         LOGGER.warning(
@@ -2165,7 +2178,7 @@ class BracketManager:
             reason=reason,
             bracket_id=bracket.bracket_id,
             preferred_order_type="LIMIT",
-            client_order_id=client_order_id,
+            correlation_tag=correlation_id,
         )
 
         with self._lock:
@@ -2179,9 +2192,9 @@ class BracketManager:
                     "bind_pending_order_id",
                     None,
                 )
-                if callable(binder) and bracket.exit_client_order_id:
+                if callable(binder) and bracket.exit_correlation_id:
                     with suppress(Exception):
-                        binder(bracket.exit_client_order_id, returned_order_id)
+                        binder(bracket.exit_correlation_id, returned_order_id)
                 bracket.exit_order_id = returned_order_id
                 bracket.pending_exit_order_id = returned_order_id
                 bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
@@ -2203,7 +2216,15 @@ class BracketManager:
                 bracket.exit_intent = None
                 bracket.expected_exit_side = None
                 bracket.expected_exit_qty = 0
-                bracket.exit_client_order_id = None
+                remover = getattr(
+                    getattr(self.order_manager, "_positions", None),
+                    "remove_pending_order",
+                    None,
+                )
+                if callable(remover) and bracket.exit_correlation_id:
+                    with suppress(Exception):
+                        remover(bracket.exit_correlation_id)
+                bracket.exit_correlation_id = None
                 raw_decision = (
                     getattr(self.order_manager, "_last_order_decision", {}) or {}
                 )
@@ -3156,7 +3177,7 @@ class BracketManager:
         reason: str,
         bracket_id: str,
         preferred_order_type: str = "LIMIT",
-        client_order_id: str | None = None,
+        correlation_tag: str | None = None,
     ) -> SubmitExitOrderResult:
         """Submit one broker exit order and return a sanitized structured result."""
         normalized_symbol = normalize_symbol(symbol)
@@ -3237,12 +3258,11 @@ class BracketManager:
                 "side": side,
                 "quantity": int(qty),
                 "order_type": order_type,
-                "tag": f"exit_{reason[:3]}_{bracket_id[:8]}",
+                "tag": correlation_tag or f"exit_{reason[:3]}_{bracket_id[:8]}",
                 "check_risk": False,
                 "product": "MIS",
                 "intent": "EXIT",
                 "bracket_id": bracket_id,
-                "client_order_id": client_order_id,
             }
             if price is not None:
                 kwargs["price"] = price
@@ -3897,6 +3917,40 @@ class BracketManager:
                 return True
         return False
 
+
+    def is_exit_converging(self, symbol: str) -> bool:
+        """Return True while a managed exit for ``symbol`` is not fully converged."""
+
+        symbol_key = normalize_symbol(symbol)
+        converging_states = {
+            BracketExitLifecycle.EXIT_TRIGGERED.value,
+            BracketExitLifecycle.EXIT_ORDER_PENDING.value,
+            BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value,
+            BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value,
+            BracketExitLifecycle.EXIT_FILLED.value,
+            BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
+            BracketExitLifecycle.EXIT_FAILED_ESCALATED.value,
+        }
+        with self._lock:
+            for entry_id in self._symbol_map.get(symbol_key, []):
+                bracket = self._brackets.get(entry_id)
+                if bracket is None:
+                    continue
+                if getattr(bracket, "exit_submission_inflight", False):
+                    return True
+                if getattr(bracket, "exit_correlation_id", None):
+                    return True
+                if bracket.exit_order_id or bracket.pending_exit_order_id:
+                    return True
+                if str(bracket.exit_state or "").upper() in converging_states:
+                    return True
+        positions = getattr(self.order_manager, "_positions", None)
+        checker = getattr(positions, "is_exit_converging", None)
+        if callable(checker):
+            with suppress(Exception):
+                return bool(checker(symbol_key))
+        return False
+
     def get_bracket(self, entry_id: str) -> Optional[BracketState]:
         with self._lock:
             return self._brackets.get(entry_id)
@@ -4186,6 +4240,7 @@ class BracketManager:
             ),
             exit_order_id=payload.get("exit_order_id")
             or payload.get("pending_exit_order_id"),
+            exit_correlation_id=payload.get("exit_correlation_id"),
             entry_fill_price=payload.get("entry_fill_price"),
             exit_reason=payload.get("exit_reason"),
             exit_triggered_at=payload.get("exit_triggered_at"),

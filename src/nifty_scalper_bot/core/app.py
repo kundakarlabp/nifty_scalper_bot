@@ -14838,9 +14838,16 @@ async def _reconcile_state(ctx: BotContext) -> None:
                                 _b = (getattr(bm, "_brackets", {}) or {}).get(_bid)
                                 if _b is None:
                                     continue
+                                _is_orphan_origin = str(
+                                    getattr(_b, "entry_order_id", "") or ""
+                                ).startswith("orphan_") or str(
+                                    getattr(_b, "tag", "") or ""
+                                ) == "orphan_recovery"
                                 if not getattr(_b, "entry_confirmed", False):
-                                    _in_fill_window = True
-                                    break
+                                    if not _is_orphan_origin:
+                                        _in_fill_window = True
+                                        break
+                                    continue
                                 _fill_ts = getattr(_b, "entry_fill_ts", None)
                                 if _fill_ts and _ghost_now - float(_fill_ts) < 120.0:
                                     _in_fill_window = True

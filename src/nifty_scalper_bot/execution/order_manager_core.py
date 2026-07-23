@@ -3167,8 +3167,11 @@ class OrderManager:
         safe_base = "".join(ch for ch in base_tag if ch.isalnum() or ch in {"_", "-"})
         if not safe_base:
             safe_base = "bot"
-        safe_base = safe_base[: max(1, 19 - len(suffix))]
-        broker_tag = f"{safe_base}_{suffix}"[:20]
+        if normalized_intent == "EXIT" and safe_base:
+            broker_tag = safe_base[:20]
+        else:
+            safe_base = safe_base[: max(1, 19 - len(suffix))]
+            broker_tag = f"{safe_base}_{suffix}"[:20]
 
         pending_signal_marked = False
         if signal_id:
@@ -3311,8 +3314,9 @@ class OrderManager:
             "trigger_price": trigger_price,
             "tag": broker_tag,
             "variety": variety,
-            "client_order_id": unique_client_id,
         }
+        if normalized_intent != "EXIT":
+            call_args["client_order_id"] = unique_client_id
 
         def _find_existing_order_after_uncertain_submit() -> dict[str, Any] | None:
             try:
