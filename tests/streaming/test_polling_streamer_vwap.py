@@ -127,3 +127,34 @@ def test_fetch_ticks_uses_last_trade_time_when_timestamp_missing() -> None:
 
     assert tick["timestamp"] is broker_ts
     assert isinstance(tick["received_at"], float)
+
+
+def test_fetch_ticks_continues_to_last_trade_time_after_bad_timestamp() -> None:
+    """Malformed timestamp must not block valid last_trade_time."""
+    from datetime import datetime
+
+    valid_last_trade = datetime(2026, 7, 23, 9, 22)
+
+    class QuoteBroker:
+        def quote(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+            return {
+                symbols[0]: {
+                    "last_price": 123.45,
+                    "instrument_token": 101,
+                    "timestamp": "bad",
+                    "last_trade_time": valid_last_trade,
+                    "average_price": 120.0,
+                    "volume": 1,
+                }
+            }
+
+    streamer = PollingStreamer(
+        broker_client=QuoteBroker(),
+        on_tick=lambda t: None,
+        instrument_resolver=FakeResolver(),
+    )
+
+    tick = streamer._fetch_ticks([101])[0]
+
+    assert tick["timestamp"] is valid_last_trade
+    assert isinstance(tick["received_at"], float)

@@ -726,8 +726,14 @@ class PollingStreamer:
                             interval_sec=300.0,  # Only log every 5 minutes
                         )
 
-                    broker_ts = quote.get("timestamp") or quote.get("last_trade_time")
-                    valid_broker_ts = _valid_poll_timestamp(broker_ts)
+                    valid_broker_ts = None
+                    for candidate in (
+                        quote.get("timestamp"),
+                        quote.get("last_trade_time"),
+                    ):
+                        valid_broker_ts = _valid_poll_timestamp(candidate)
+                        if valid_broker_ts is not None:
+                            break
                     received_at = time.time()
 
                     # Build tick with ALL available data. Keep broker event time

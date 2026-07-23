@@ -12953,13 +12953,22 @@ class MarketDataManager:
     @staticmethod
     def _prepare_rest_tick(tick: Mapping[str, Any], *, source: str) -> dict[str, Any]:
         payload = dict(tick)
-        broker_timestamp = (
-            payload.get("timestamp")
-            or payload.get("last_trade_time")
-            or payload.get("broker_timestamp")
-            or payload.get("ts")
-            or payload.get("ts_ms")
-        )
+        broker_timestamp = None
+        for candidate in (
+            payload.get("timestamp"),
+            payload.get("last_trade_time"),
+            payload.get("broker_timestamp"),
+            payload.get("ts"),
+            payload.get("ts_ms"),
+        ):
+            if candidate in (None, ""):
+                continue
+            try:
+                coerce_market_timestamp(candidate)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            broker_timestamp = candidate
+            break
         observed_at = payload.pop("_local_timestamp", None)
         received_at = (
             float(observed_at)
@@ -12968,12 +12977,7 @@ class MarketDataManager:
         )
         payload["source"] = source
         payload["received_at"] = received_at
-        if broker_timestamp in (None, ""):
-            payload.pop("timestamp", None)
-            return payload
-        try:
-            coerce_market_timestamp(broker_timestamp)
-        except (TypeError, ValueError, OverflowError):
+        if broker_timestamp is None:
             payload.pop("timestamp", None)
             return payload
         payload["timestamp"] = broker_timestamp
