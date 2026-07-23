@@ -64,6 +64,25 @@ _MIN_RECONCILE_DELAY_S = 0.5
 _EXIT_RECONCILIATION_GRACE_DEFAULT_S = 2.0
 _EXIT_RECONCILIATION_GRACE_MIN_S = 0.25
 _EXIT_RECONCILIATION_GRACE_MAX_S = 5.0
+_BROKER_POSITION_SNAPSHOT_MAX_AGE_DEFAULT_S = 20.0
+_BROKER_POSITION_SNAPSHOT_MAX_AGE_MIN_S = 1.0
+_BROKER_POSITION_SNAPSHOT_MAX_AGE_MAX_S = 300.0
+
+
+def _resolve_broker_position_snapshot_max_age_seconds() -> float:
+    raw = os.getenv("BROKER_POSITION_SNAPSHOT_MAX_AGE_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        return _BROKER_POSITION_SNAPSHOT_MAX_AGE_DEFAULT_S
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return _BROKER_POSITION_SNAPSHOT_MAX_AGE_DEFAULT_S
+    if not math.isfinite(value):
+        return _BROKER_POSITION_SNAPSHOT_MAX_AGE_DEFAULT_S
+    return min(
+        _BROKER_POSITION_SNAPSHOT_MAX_AGE_MAX_S,
+        max(_BROKER_POSITION_SNAPSHOT_MAX_AGE_MIN_S, value),
+    )
 
 
 def _resolve_exit_reconciliation_grace_seconds() -> float:
@@ -911,11 +930,17 @@ class PositionManager:
         )
         self._last_reconciled_state: Dict[str, Position] = {}
         self._last_broker_position_snapshot_at: float | None = None
+        self._last_broker_position_snapshot_mono: float | None = None
         self._last_broker_position_snapshot_valid: bool = False
         self._last_broker_quantities_by_symbol: dict[str, int] = {}
         self._last_broker_position_snapshot_source: str | None = None
         self._last_broker_position_snapshot_failure_at: float | None = None
         self._last_broker_position_snapshot_failure_reason: str | None = None
+        self._broker_position_snapshot_max_age_seconds = (
+            _resolve_broker_position_snapshot_max_age_seconds()
+        )
+        self._local_position_generation: int = 0
+        self._broker_snapshot_local_generation: int = -1
         self._recently_flat_exit_until_monotonic: dict[str, float] = {}
         self._recently_flat_exit_metadata: dict[str, ExitSettlementGuard] = {}
         self._recently_flat_exit_grace_seconds: float = (
@@ -1545,6 +1570,25 @@ class PositionManager:
                 exc,
             )
 
+    def _mark_local_position_mutation_locked(self) -> None:
+        """Invalidate broker snapshot authority after local exposure changes."""
+
+        self._local_position_generation += 1
+
+    def _broker_snapshot_age_locked(self) -> float | None:
+        if self._last_broker_position_snapshot_mono is None:
+            return None
+        return time.monotonic() - self._last_broker_position_snapshot_mono
+
+    def _broker_snapshot_fresh_locked(self) -> tuple[bool, float | None]:
+        age = self._broker_snapshot_age_locked()
+        max_age = float(self._broker_position_snapshot_max_age_seconds)
+        if age is None or age < 0 or age > max_age:
+            return False, age
+        if self._broker_snapshot_local_generation != self._local_position_generation:
+            return False, age
+        return True, age
+
     def is_flat(self, symbol: str) -> bool:
         """Return ``True`` when local state proves no open position.
 
@@ -1579,27 +1623,35 @@ class PositionManager:
         """Return a detached copy of the last validated complete broker snapshot."""
 
         with self._lock:
+            fresh, age = self._broker_snapshot_fresh_locked()
             return {
                 "valid": self._last_broker_position_snapshot_valid,
+                "fresh": bool(self._last_broker_position_snapshot_valid and fresh),
+                "age_seconds": age,
+                "max_age_seconds": self._broker_position_snapshot_max_age_seconds,
                 "fetched_at": self._last_broker_position_snapshot_at,
                 "source": self._last_broker_position_snapshot_source,
                 "quantities_by_symbol": dict(self._last_broker_quantities_by_symbol),
                 "failure_at": self._last_broker_position_snapshot_failure_at,
                 "failure_reason": self._last_broker_position_snapshot_failure_reason,
+                "local_position_generation": self._local_position_generation,
+                "snapshot_local_generation": self._broker_snapshot_local_generation,
             }
 
     def broker_exposure_state(self, symbol: str) -> BrokerExposureState:
         """Return broker-authoritative exposure state for ``symbol``.
 
-        UNKNOWN means no complete validated snapshot has been committed and must
-        not be treated as flat. ABSENT means the latest complete net snapshot was
-        valid but had no row for the symbol, which is broker-flat for Zerodha net
-        snapshots.
+        UNKNOWN means the latest complete snapshot is missing, stale, invalid, or
+        predates a local exposure mutation. UNKNOWN is never flat and never a
+        true orphan. ABSENT means a fresh complete net snapshot had no symbol row.
         """
 
         lookup = normalize_symbol(symbol) or symbol.strip().upper()
         with self._lock:
             if not self._last_broker_position_snapshot_valid:
+                return BrokerExposureState.UNKNOWN
+            fresh, _age = self._broker_snapshot_fresh_locked()
+            if not fresh:
                 return BrokerExposureState.UNKNOWN
             if lookup not in self._last_broker_quantities_by_symbol:
                 return BrokerExposureState.ABSENT
@@ -1636,6 +1688,7 @@ class PositionManager:
                 raise ValueError(f"Position already exists for {symbol_key}")
             self._clear_recent_exit_guard_locked(symbol_key)
             self._positions[symbol_key] = position
+            self._mark_local_position_mutation_locked()
         self._logger.info("Opened %s position for %s", position.side, symbol_key)
         self.save_state()
         return position
@@ -1663,6 +1716,7 @@ class PositionManager:
             position.current_price = float(exit_price)
             position.quantity = 0
             del self._positions[symbol_key]
+            self._mark_local_position_mutation_locked()
             self._mark_recent_exit_flat_locked(symbol_key)
         closed_at = close_time or _now()
         self._logger.info(
@@ -2871,12 +2925,20 @@ class PositionManager:
                         self._exit_lifecycles[order.order_id] = lifecycle
                     lifecycle.state = "BROKER_FLAT_AWAITING_FILL"
                     lifecycle.broker_flat_at = now
+            if set(self._positions) != set(reconciled) or any(
+                int(getattr(self._positions.get(symbol), "quantity", 0) or 0)
+                != int(getattr(position, "quantity", 0) or 0)
+                for symbol, position in reconciled.items()
+            ):
+                self._mark_local_position_mutation_locked()
             self._positions = reconciled
             self._last_broker_quantities_by_symbol = {
                 row.symbol: int(row.quantity) for row in snapshot.rows
             }
             self._last_broker_position_snapshot_at = snapshot.fetched_at
+            self._last_broker_position_snapshot_mono = time.monotonic()
             self._last_broker_position_snapshot_valid = True
+            self._broker_snapshot_local_generation = self._local_position_generation
             self._last_broker_position_snapshot_source = snapshot.source
             self._last_broker_position_snapshot_failure_reason = None
             if snapshot_realized_seen:
@@ -3745,6 +3807,8 @@ class PositionManager:
         ) / new_qty
         position.quantity = new_qty
         position.current_price = fill_price
+        with self._lock:
+            self._mark_local_position_mutation_locked()
         self._logger.info(
             "Scaled position %s to quantity %s", position.symbol, position.quantity
         )
@@ -3762,6 +3826,8 @@ class PositionManager:
         with self._lock:
             self._refresh_realized_pnl_locked()
         position.current_price = fill_price
+        with self._lock:
+            self._mark_local_position_mutation_locked()
         if position.quantity == 0:
             self._logger.info("Position %s fully closed via order", position.symbol)
             del self._positions[position.symbol]

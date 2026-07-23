@@ -20,6 +20,7 @@ import os
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _TRUTHY = {"1", "true", "yes", "y", "on", "live"}
 
@@ -241,41 +242,40 @@ def classify_symbol_lifecycle(
     local_position_present: bool,
     broker_exposure_state: BrokerExposureState,
 ) -> SymbolLifecycleClassification:
-    """Classify current symbol ownership without mutating brackets or orders.
+    """Classify current symbol ownership without mutating brackets or orders."""
 
-    This centralizes the narrow orphan/ghost questions used by app and runner so
-    future execution corrections do not add another broker-position parser.
-    """
-
-    pending_entry = False
-    exit_converging = False
-    managed = False
-    try:
-        managed = bool(bracket_manager.is_symbol_managed(symbol))
-    except Exception:
-        return SymbolLifecycleClassification.UNRESOLVED
-    checker = getattr(bracket_manager, "is_exit_converging", None)
-    if callable(checker):
+    normalized = normalize_symbol(symbol) or str(symbol or "").strip().upper()
+    snapshot_getter = getattr(bracket_manager, "get_symbol_lifecycle_snapshot", None)
+    if callable(snapshot_getter):
         try:
-            exit_converging = bool(checker(symbol))
+            snapshot = snapshot_getter(normalized)
         except Exception:
             return SymbolLifecycleClassification.UNRESOLVED
-    if exit_converging:
-        return SymbolLifecycleClassification.EXIT_CONVERGING
-    for bracket_id in list((getattr(bracket_manager, "_symbol_map", {}) or {}).get(symbol) or []):
-        bracket = (getattr(bracket_manager, "_brackets", {}) or {}).get(bracket_id)
-        if bracket is not None and not getattr(bracket, "entry_confirmed", False):
-            entry_order_id = str(getattr(bracket, "entry_order_id", "") or "")
-            tag = str(getattr(bracket, "tag", "") or "")
-            if not entry_order_id.startswith("orphan_") and tag != "orphan_recovery":
-                pending_entry = True
-                break
-    if pending_entry:
-        return SymbolLifecycleClassification.PENDING_ENTRY
+        if bool(snapshot.get("exit_converging")):
+            return SymbolLifecycleClassification.EXIT_CONVERGING
+        if bool(snapshot.get("pending_entry")):
+            return SymbolLifecycleClassification.PENDING_ENTRY
+        managed = bool(snapshot.get("managed"))
+    else:
+        try:
+            managed = bool(bracket_manager.is_symbol_managed(normalized))
+        except Exception:
+            return SymbolLifecycleClassification.UNRESOLVED
+        checker = getattr(bracket_manager, "is_exit_converging", None)
+        if callable(checker):
+            try:
+                if bool(checker(normalized)):
+                    return SymbolLifecycleClassification.EXIT_CONVERGING
+            except Exception:
+                return SymbolLifecycleClassification.UNRESOLVED
+
     if managed and local_position_present:
         return SymbolLifecycleClassification.PROTECTED_OPEN
     if managed and not local_position_present:
-        if broker_exposure_state in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT):
+        if broker_exposure_state in (
+            BrokerExposureState.FLAT,
+            BrokerExposureState.ABSENT,
+        ):
             return SymbolLifecycleClassification.GHOST_FLAT
         return SymbolLifecycleClassification.UNRESOLVED
     if local_position_present and broker_exposure_state == BrokerExposureState.NONZERO:

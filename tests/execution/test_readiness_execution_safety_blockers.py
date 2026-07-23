@@ -217,3 +217,162 @@ async def test_reconcile_clears_only_verified_orphan_protection(caplog):
     assert "POSITION_ADOPTED_TO_BRACKET" in caplog.text
     assert ctx.position_reconciliation_last_run["source"] == "test"
     assert ctx.position_reconciliation_last_run["reconcile_run_id"]
+
+class _SideEffectGuardOrderManager(_GuardOrderManager):
+    def guard_orphan_position(self, **kwargs):
+        self.calls.append(kwargs)
+        self._bracket_manager.manage(kwargs["symbol"])
+        return None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_clears_when_guard_returns_none_but_bracket_is_managed():
+    symbol = "NFO:NIFTY2660923100CE"
+    bm = _BracketManagerFake()
+    ctx = SimpleNamespace(
+        broker_client=SimpleNamespace(client=_BrokerWithPositions([{"symbol": symbol, "quantity": 65, "average_price": 100.0, "last_price": 100.0, "product": "MIS"}])),
+        order_manager=_SideEffectGuardOrderManager(bm),
+        position_manager=_BrokerSyncedPositionManager(),
+        data_hub=None,
+        unprotected_broker_position=False,
+        unprotected_broker_positions=set(),
+        position_reconciliation_failed=False,
+        live_orders_armed=False,
+    )
+
+    await _reconcile_state(ctx, source="test")
+
+    assert ctx.unprotected_broker_position is False
+    assert ctx.unprotected_broker_positions == set()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_retains_blocker_when_guard_returns_invalid_bracket_id():
+    symbol = "NFO:NIFTY2660923100CE"
+    bm = _BracketManagerFake()
+    ctx = SimpleNamespace(
+        broker_client=SimpleNamespace(client=_BrokerWithPositions([{"symbol": symbol, "quantity": 65, "average_price": 100.0, "last_price": 100.0, "product": "MIS"}])),
+        order_manager=_GuardOrderManager(bm, result="missing-bracket"),
+        position_manager=_BrokerSyncedPositionManager(),
+        data_hub=None,
+        unprotected_broker_position=False,
+        unprotected_broker_positions=set(),
+        position_reconciliation_failed=False,
+        live_orders_armed=False,
+    )
+
+    await _reconcile_state(ctx, source="test")
+
+    assert ctx.unprotected_broker_position is True
+    assert symbol in ctx.unprotected_broker_positions
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mixed_orphan_success_and_failure_keeps_failed_symbol_blocked():
+    ok = "NFO:NIFTY2660923100CE"
+    bad = "NFO:NIFTY2660923200CE"
+    bm = _BracketManagerFake()
+
+    class MixedGuard(_GuardOrderManager):
+        def guard_orphan_position(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["symbol"] == ok:
+                return self._bracket_manager.manage(ok, "ok-bracket")
+            return None
+
+    ctx = SimpleNamespace(
+        broker_client=SimpleNamespace(client=_BrokerWithPositions([
+            {"symbol": ok, "quantity": 65, "average_price": 100.0, "last_price": 100.0, "product": "MIS"},
+            {"symbol": bad, "quantity": 65, "average_price": 100.0, "last_price": 100.0, "product": "MIS"},
+        ])),
+        order_manager=MixedGuard(bm),
+        position_manager=_BrokerSyncedPositionManager(),
+        data_hub=None,
+        unprotected_broker_position=False,
+        unprotected_broker_positions=set(),
+        position_reconciliation_failed=False,
+        live_orders_armed=False,
+    )
+
+    await _reconcile_state(ctx, source="test")
+
+    assert ctx.unprotected_broker_position is True
+    assert ctx.unprotected_broker_positions == {bad}
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_telemetry_records_are_run_local():
+    ctx = SimpleNamespace(
+        broker_client=SimpleNamespace(client=_FlatBroker()),
+        order_manager=_OrderManager(),
+        position_manager=_PositionManager(),
+        data_hub=None,
+        unprotected_broker_position=False,
+        unprotected_broker_positions=set(),
+        position_reconciliation_failed=False,
+        live_orders_armed=False,
+    )
+
+    await _reconcile_state(ctx, source="one")
+    first_record = ctx.position_reconciliation_last_run
+    await _reconcile_state(ctx, source="two")
+    second_record = ctx.position_reconciliation_last_run
+
+    assert first_record is not second_record
+    assert first_record["source"] == "one"
+    assert second_record["source"] == "two"
+    assert first_record["reconcile_run_id"] != second_record["reconcile_run_id"]
+    assert "completed_at" in first_record
+    assert "completed_at" in second_record
+
+@pytest.mark.asyncio
+async def test_ghost_cleanup_retains_bracket_when_broker_snapshot_stale():
+    symbol = "NFO:NIFTY2660923100CE"
+
+    class StaleFlatPositionManager(_PositionManager):
+        def broker_exposure_state(self, _symbol):
+            from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+            return BrokerExposureState.UNKNOWN
+
+        def broker_exposure_snapshot(self):
+            return {"fresh": False, "age_seconds": 21.0}
+
+    class GhostBracketManager(_BracketManagerFake):
+        def __init__(self):
+            super().__init__()
+            self.manage(symbol)
+            self.closed = []
+
+        def get_symbol_lifecycle_snapshot(self, _symbol):
+            return {
+                "normalized_symbol": symbol,
+                "managed": True,
+                "active_bracket_ids": ("guard-1",),
+                "pending_entry": False,
+                "exit_converging": False,
+                "orphan_origin": True,
+                "protected_quantity": 65,
+                "has_valid_stop": True,
+                "all_closed": False,
+            }
+
+        def manual_override_close(self, ghost_sym, reason):
+            self.closed.append((ghost_sym, reason))
+
+    bm = GhostBracketManager()
+    ctx = SimpleNamespace(
+        broker_client=SimpleNamespace(client=_FlatBroker()),
+        order_manager=_OrderManager(),
+        position_manager=StaleFlatPositionManager(),
+        data_hub=None,
+        unprotected_broker_position=False,
+        unprotected_broker_positions=set(),
+        position_reconciliation_failed=False,
+        live_orders_armed=False,
+    )
+    ctx.order_manager._bracket_manager = bm
+
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.closed == []

@@ -288,3 +288,63 @@ def test_broker_exposure_states_distinguish_flat_absent_nonzero_and_unknown(tmp_
 def test_malformed_broker_exposure_never_decodes_as_flat(payload):
     with pytest.raises(PositionSnapshotError):
         decode_position_snapshot(payload)
+
+
+def test_broker_exposure_snapshot_expires_to_unknown(tmp_path, monkeypatch):
+    from nifty_scalper_bot.execution import position_manager as pm_module
+    from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+    now = {"value": 100.0}
+    monkeypatch.setattr(pm_module.time, "monotonic", lambda: now["value"])
+    monkeypatch.setenv("BROKER_POSITION_SNAPSHOT_MAX_AGE_SECONDS", "20")
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.synchronize_with_broker([{"symbol": SYMBOL, "quantity": 0, "product": "MIS"}])
+
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.FLAT
+    snapshot = pm.broker_exposure_snapshot()
+    assert snapshot["fresh"] is True
+    assert snapshot["max_age_seconds"] == 20.0
+
+    now["value"] = 121.0
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.UNKNOWN
+    assert pm.broker_exposure_snapshot()["fresh"] is False
+
+
+def test_absent_snapshot_expires_and_local_generation_invalidates(tmp_path, monkeypatch):
+    from nifty_scalper_bot.execution import position_manager as pm_module
+    from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+    now = {"value": 200.0}
+    monkeypatch.setattr(pm_module.time, "monotonic", lambda: now["value"])
+    monkeypatch.setenv("BROKER_POSITION_SNAPSHOT_MAX_AGE_SECONDS", "20")
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.synchronize_with_broker([])
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.ABSENT
+
+    pm.open_position(SYMBOL, "LONG", 65, 100.0, order_id="manual")
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.UNKNOWN
+
+    pm.synchronize_with_broker([{"symbol": SYMBOL, "quantity": 65, "average_price": 100.0, "last_price": 100.0, "product": "MIS"}])
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.NONZERO
+    pm.update_position_price(SYMBOL, 101.0)
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.NONZERO
+
+    now["value"] = 221.0
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.UNKNOWN
+
+
+def test_position_manager_is_flat_fails_closed_on_lookup_exception(tmp_path, caplog):
+    class RaisingPositions(dict):
+        def get(self, _key, _default=None):
+            raise RuntimeError("lookup failed")
+
+    errors = []
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm._positions = RaisingPositions()
+    pm._logger = SimpleNamespace(
+        debug=lambda *a, **k: None,
+        error=lambda *args, **kwargs: errors.append((args, kwargs)),
+    )
+
+    assert pm.is_flat(SYMBOL) is False
+    assert any("POSITION_FLAT_CHECK_FAILED" in str(args[0]) for args, _kwargs in errors)

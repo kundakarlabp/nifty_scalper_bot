@@ -16372,6 +16372,37 @@ class StrategyRunner:
                     continue
                 if exposure in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT):
                     continue
+                if (
+                    exposure == BrokerExposureState.UNKNOWN
+                    or lifecycle == SymbolLifecycleClassification.UNRESOLVED
+                ):
+                    snapshot_getter = getattr(
+                        self._position_manager, "broker_exposure_snapshot", None
+                    )
+                    snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+                    self._logger.warning(
+                        "ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN symbol=%s exposure_state=%s lifecycle=%s snapshot_age_seconds=%s snapshot_fresh=%s",
+                        symbol,
+                        getattr(exposure, "value", str(exposure)),
+                        getattr(lifecycle, "value", str(lifecycle)),
+                        snapshot.get("age_seconds") if isinstance(snapshot, dict) else None,
+                        snapshot.get("fresh") if isinstance(snapshot, dict) else None,
+                        extra={
+                            "event": "ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN",
+                            "symbol": symbol,
+                            "exposure_state": getattr(exposure, "value", str(exposure)),
+                            "lifecycle": getattr(lifecycle, "value", str(lifecycle)),
+                            "snapshot_age_seconds": (
+                                snapshot.get("age_seconds")
+                                if isinstance(snapshot, dict)
+                                else None
+                            ),
+                            "snapshot_fresh": (
+                                snapshot.get("fresh") if isinstance(snapshot, dict) else None
+                            ),
+                        },
+                    )
+                    continue
                 if self._bracket_manager.is_symbol_managed(symbol):
                     continue  # Existing pending/active lifecycle owns the position.
 
