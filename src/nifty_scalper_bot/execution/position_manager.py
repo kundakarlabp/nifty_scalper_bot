@@ -1905,6 +1905,7 @@ class PositionManager:
         bracket_id: str | None = None,
         signal_id: str | None = None,
         signal_fingerprint: str | None = None,
+        client_order_id: str | None = None,
     ) -> None:
         """Track a newly submitted order.
 
@@ -1986,6 +1987,42 @@ class PositionManager:
                 expected_exit_quantity=order.quantity,
             )
         self._persist_order_state(order)
+        self.save_state()
+
+    def bind_pending_order_id(
+        self, provisional_order_id: str, final_order_id: str
+    ) -> None:
+        """Atomically re-key an in-flight locally registered order to broker ID."""
+        provisional_key = str(provisional_order_id or "").strip()
+        final_key = str(final_order_id or "").strip()
+        if not provisional_key or not final_key or provisional_key == final_key:
+            return
+        with self._lock:
+            order = self._orders.pop(provisional_key, None)
+            if order is not None:
+                existing = self._orders.get(final_key)
+                if existing is None:
+                    order.order_id = final_key
+                    self._orders[final_key] = order
+                else:
+                    order = existing
+                lifecycle = self._exit_lifecycles.pop(provisional_key, None)
+                if lifecycle is not None:
+                    lifecycle.exit_order_id = final_key
+                    self._exit_lifecycles[final_key] = lifecycle
+                self._persist_order_state(order)
+            metadata = self._terminal_orders.pop(provisional_key, None)
+            if metadata is not None:
+                metadata.order_id = final_key
+                self._terminal_orders[final_key] = metadata
+                unresolved = self._unresolved_terminal_orders.pop(provisional_key, None)
+                if unresolved is not None:
+                    unresolved.order_id = final_key
+                    self._unresolved_terminal_orders[final_key] = unresolved
+            lifecycle = self._exit_lifecycles.pop(provisional_key, None)
+            if lifecycle is not None:
+                lifecycle.exit_order_id = final_key
+                self._exit_lifecycles[final_key] = lifecycle
         self.save_state()
 
     def update_order_status(

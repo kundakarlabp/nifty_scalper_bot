@@ -28,18 +28,16 @@ def _safe_trade_lifecycle_id(bracket: Any) -> str | None:
     return str(entry_order_id) if entry_order_id else None
 
 
-def _exit_identity_kwargs(bracket: Any | None, bracket_id: str | None) -> dict[str, Any]:
+def _exit_identity_kwargs(
+    bracket: Any | None, bracket_id: str | None
+) -> dict[str, Any]:
     return {
         "intent": "EXIT",
         "linked_entry_order_id": (
             str(getattr(bracket, "entry_order_id", "") or "") or None
         ),
         "trade_lifecycle_id": _safe_trade_lifecycle_id(bracket),
-        "bracket_id": str(
-            getattr(bracket, "bracket_id", "")
-            or bracket_id
-            or ""
-        )
+        "bracket_id": str(getattr(bracket, "bracket_id", "") or bracket_id or "")
         or None,
     }
 
@@ -109,6 +107,7 @@ def _patch_bracket_manager() -> None:
         reason: str,
         bracket_id: str,
         preferred_order_type: str = "LIMIT",
+        client_order_id: str | None = None,
     ) -> Any:
         """Submit an EXIT order with immutable lifecycle metadata."""
         normalized_symbol = normalize_symbol(symbol)
@@ -194,6 +193,8 @@ def _patch_bracket_manager() -> None:
                 "product": "MIS",
                 **_exit_identity_kwargs(bracket, bracket_id),
             }
+            if client_order_id:
+                kwargs["client_order_id"] = client_order_id
             if price is not None:
                 kwargs["price"] = price
             order_id = self.order_manager.place_order(**kwargs)
@@ -211,9 +212,12 @@ def _patch_bracket_manager() -> None:
                         "linked_entry_order_id": kwargs.get("linked_entry_order_id"),
                         "trade_lifecycle_id": kwargs.get("trade_lifecycle_id"),
                         "bracket_id": kwargs.get("bracket_id"),
+                        "client_order_id": kwargs.get("client_order_id"),
                     },
                 )
-            decision = dict(getattr(self.order_manager, "_last_order_decision", {}) or {})
+            decision = dict(
+                getattr(self.order_manager, "_last_order_decision", {}) or {}
+            )
             details = dict(decision.get("details") or {})
             broker_payload = dict(details.get("broker_payload") or details)
             error_type = str(
@@ -250,7 +254,9 @@ def _patch_bracket_manager() -> None:
                     ),
                 },
             )
-        except Exception as exc:  # noqa: BLE001 - process boundary; result is structured and safe
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - process boundary; result is structured and safe
             message = str(exc)
             retryable = not self._is_fatal_exit_error(message)
             return _bracket_core.SubmitExitOrderResult(
@@ -264,11 +270,18 @@ def _patch_bracket_manager() -> None:
             )
 
     def _escalate_exit_locked(self: Any, bracket: Any, reason: str) -> None:
-        if bracket.exit_state == _bracket_core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value:
+        if (
+            bracket.exit_state
+            == _bracket_core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+        ):
             return
         bracket.exit_pending = True
-        bracket.exit_state = _bracket_core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
-        bracket.entry_status = _bracket_core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+        bracket.exit_state = (
+            _bracket_core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+        )
+        bracket.entry_status = (
+            _bracket_core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+        )
         bracket.escalated_at = time.time()
         _bracket_core.LOGGER.critical(
             "EXIT_ESCALATED bracket_id=%s symbol=%s remaining_qty=%s attempts=%s last_error=%s reason=%s",
@@ -309,7 +322,9 @@ def _patch_bracket_manager() -> None:
                         bracket.bracket_id,
                         stuck_order_id,
                     )
-                except Exception as exc:  # noqa: BLE001 - cancel best-effort; still try market
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001 - cancel best-effort; still try market
                     _bracket_core.LOGGER.warning(
                         "EXIT_ESCALATION_CANCEL_FAILED bracket_id=%s order_id=%s error=%s",
                         bracket.bracket_id,
@@ -387,11 +402,13 @@ def _patch_position_manager() -> None:
     _ORIGINALS["PositionManager.get_position"] = cls.get_position
     _ORIGINALS["PositionManager.has_position"] = cls.has_position
     _ORIGINALS["PositionManager.is_flat"] = cls.is_flat
-    _ORIGINALS["PositionManager.clear_active_contract_by_symbol"] = cls.clear_active_contract_by_symbol
+    _ORIGINALS["PositionManager.clear_active_contract_by_symbol"] = (
+        cls.clear_active_contract_by_symbol
+    )
     if hasattr(cls, "current_entry_protection_blocker"):
-        _ORIGINALS[
-            "PositionManager.current_entry_protection_blocker"
-        ] = cls.current_entry_protection_blocker
+        _ORIGINALS["PositionManager.current_entry_protection_blocker"] = (
+            cls.current_entry_protection_blocker
+        )
 
     def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
         _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
@@ -435,7 +452,9 @@ def _patch_position_manager() -> None:
         return _ORIGINALS["PositionManager.get_position"](self, _canonical_key(symbol))
 
     def has_position(self: Any, symbol: str) -> bool:
-        return bool(_ORIGINALS["PositionManager.has_position"](self, _canonical_key(symbol)))
+        return bool(
+            _ORIGINALS["PositionManager.has_position"](self, _canonical_key(symbol))
+        )
 
     def is_flat(self: Any, symbol: str) -> bool:
         return bool(_ORIGINALS["PositionManager.is_flat"](self, _canonical_key(symbol)))

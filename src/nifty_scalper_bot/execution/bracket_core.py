@@ -279,6 +279,12 @@ class BracketState:
     entry_status: str = "PENDING_ENTRY"
     exit_state: str = BracketExitLifecycle.OPEN_PENDING_FILL.value
     exit_order_id: str | None = None
+    exit_submission_inflight: bool = False
+    exit_intent: str | None = None
+    expected_exit_side: str | None = None
+    expected_exit_qty: int = 0
+    exit_client_order_id: str | None = None
+    early_exit_fill_payload: dict[str, Any] | None = None
     entry_fill_price: float | None = None
     # Wall-clock time the entry fill was confirmed (bracket activation).
     # Used to reject pre-fill/replayed ticks against a freshly activated bracket.
@@ -2112,7 +2118,14 @@ class BracketManager:
                 self._escalate_exit_locked(bracket, "max_attempts_exceeded")
                 return
 
+            client_order_id = f"exit_{bracket.bracket_id}_{int(now * 1000)}_{bracket.exit_attempt_count + 1}"
+            exit_side = "SELL" if bracket.side == "BUY" else "BUY"
             bracket.exit_in_progress = True
+            bracket.exit_submission_inflight = True
+            bracket.exit_intent = "EXIT"
+            bracket.expected_exit_side = exit_side
+            bracket.expected_exit_qty = qty
+            bracket.exit_client_order_id = client_order_id
             bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_PENDING.value
             bracket.entry_status = BracketExitLifecycle.EXIT_ORDER_PENDING.value
             bracket.exit_attempt_count += 1
@@ -2120,12 +2133,29 @@ class BracketManager:
             attempt = bracket.exit_attempt_count
             self._exit_cooldowns[bracket.entry_order_id] = now
 
+        positions = getattr(self.order_manager, "_positions", None)
+        registrar = getattr(positions, "add_pending_order", None)
+        if callable(registrar):
+            with suppress(Exception):
+                registrar(
+                    client_order_id,
+                    symbol,
+                    bracket.expected_exit_side
+                    or ("SELL" if bracket.side == "BUY" else "BUY"),
+                    qty,
+                    float(bracket.last_ltp or bracket.entry_price or 0.0),
+                    "LIMIT",
+                    intent="EXIT",
+                    bracket_id=bracket.bracket_id,
+                    client_order_id=client_order_id,
+                )
+
         LOGGER.warning(
             "EXIT_ORDER_SUBMIT_ATTEMPT bracket_id=%s symbol=%s attempt=%s side=%s qty=%s reason=%s",
             bracket.bracket_id,
             symbol,
             attempt,
-            "SELL" if bracket.side == "BUY" else "BUY",
+            bracket.expected_exit_side or ("SELL" if bracket.side == "BUY" else "BUY"),
             qty,
             reason,
         )
@@ -2135,14 +2165,25 @@ class BracketManager:
             reason=reason,
             bracket_id=bracket.bracket_id,
             preferred_order_type="LIMIT",
+            client_order_id=client_order_id,
         )
 
         with self._lock:
             bracket.exit_in_progress = False
+            bracket.exit_submission_inflight = False
             bracket.updated_at = time.time()
             if submit.accepted and submit.order_id:
-                bracket.exit_order_id = str(submit.order_id)
-                bracket.pending_exit_order_id = str(submit.order_id)
+                returned_order_id = str(submit.order_id)
+                binder = getattr(
+                    getattr(self.order_manager, "_positions", None),
+                    "bind_pending_order_id",
+                    None,
+                )
+                if callable(binder) and bracket.exit_client_order_id:
+                    with suppress(Exception):
+                        binder(bracket.exit_client_order_id, returned_order_id)
+                bracket.exit_order_id = returned_order_id
+                bracket.pending_exit_order_id = returned_order_id
                 bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
                 bracket.entry_status = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
                 bracket.last_exit_error = None
@@ -2158,6 +2199,11 @@ class BracketManager:
                 bracket.last_exit_error = submit.error_message or submit.status
                 bracket.pending_exit_order_id = None
                 bracket.exit_order_id = None
+                bracket.exit_submission_inflight = False
+                bracket.exit_intent = None
+                bracket.expected_exit_side = None
+                bracket.expected_exit_qty = 0
+                bracket.exit_client_order_id = None
                 raw_decision = (
                     getattr(self.order_manager, "_last_order_decision", {}) or {}
                 )
@@ -3110,6 +3156,7 @@ class BracketManager:
         reason: str,
         bracket_id: str,
         preferred_order_type: str = "LIMIT",
+        client_order_id: str | None = None,
     ) -> SubmitExitOrderResult:
         """Submit one broker exit order and return a sanitized structured result."""
         normalized_symbol = normalize_symbol(symbol)
@@ -3193,6 +3240,9 @@ class BracketManager:
                 "tag": f"exit_{reason[:3]}_{bracket_id[:8]}",
                 "check_risk": False,
                 "product": "MIS",
+                "intent": "EXIT",
+                "bracket_id": bracket_id,
+                "client_order_id": client_order_id,
             }
             if price is not None:
                 kwargs["price"] = price

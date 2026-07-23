@@ -327,3 +327,67 @@ def test_persistent_position_after_grace_gets_orphan_protection(tmp_path) -> Non
 
     assert bm.is_symbol_managed(SYMBOL) is True
     assert bm.get_bracket(f"orphan_{SYMBOL}") is not None
+
+
+def test_synchronous_exit_fill_callback_is_registered_as_exit_before_submit_returns(
+    tmp_path,
+) -> None:
+    """Exit intent exists before broker submission, so an immediate fill is not unknown."""
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-sync")
+
+    class SyncFillOrderManager:
+        def __init__(self) -> None:
+            self._positions = pm
+            self._broker = _Broker(status="COMPLETE", positions=[_broker_row()])
+            self.kwargs: dict[str, Any] | None = None
+
+        def place_order(self, **kwargs: Any) -> str:
+            self.kwargs = dict(kwargs)
+            pm.apply_broker_order_update(
+                "exit-sync-final",
+                {
+                    "order_id": "exit-sync-final",
+                    "client_order_id": kwargs.get("client_order_id"),
+                    "symbol": SYMBOL,
+                    "side": "SELL",
+                    "quantity": QTY,
+                    "filled_quantity": QTY,
+                    "average_price": 120.0,
+                    "status": "COMPLETE",
+                },
+            )
+            return "exit-sync-final"
+
+    om = SyncFillOrderManager()
+    bm = BracketManager(order_manager=om)
+    bm.register_virtual_bracket(
+        order_id="entry-sync",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=QTY,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+    )
+    bm.confirm_entry_fill("entry-sync", 100.0)
+    bracket = bm.get_bracket("entry-sync")
+    assert bracket is not None
+    bracket.last_ltp = 120.0
+
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=123.0)
+
+    assert om.kwargs is not None
+    assert om.kwargs["intent"] == "EXIT"
+    assert om.kwargs["bracket_id"] == "entry-sync"
+    assert om.kwargs["client_order_id"].startswith("exit_entry-sync_")
+    assert pm.get_position(SYMBOL) is None
+    assert not pm.get_pending_orders(SYMBOL)
+    assert pm.unresolved_terminal_summary()["count"] == 0
+    assert all(
+        row.get("classification") != "BROKER_UNKNOWN_ORDER_RESOLVED"
+        for row in getattr(pm, "_broker_order_ledger", {}).values()
+    )
+    assert bracket.exit_order_id == "exit-sync-final"
+    assert bracket.pending_exit_order_id == "exit-sync-final"
+    assert bracket.exit_submission_inflight is False
