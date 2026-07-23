@@ -46,6 +46,15 @@ def _canonicalize_broker_positions(broker_positions: Any) -> Any:
     if broker_positions is None:
         return None
     if isinstance(broker_positions, dict):
+        # Preserve canonical complete broker snapshot mappings such as Zerodha
+        # {"net": [...], "day": [...]} instead of wrapping them as one row.
+        if "net" in broker_positions or "positions" in broker_positions:
+            cloned = dict(broker_positions)
+            for key in ("net", "positions"):
+                value = cloned.get(key)
+                if isinstance(value, list):
+                    cloned[key] = [_canonicalize_payload_symbol(row) for row in value]
+            return cloned
         return [_canonicalize_payload_symbol(broker_positions)]
     try:
         return [_canonicalize_payload_symbol(position) for position in broker_positions]
@@ -79,6 +88,12 @@ def _prepared_row_symbol(row: Any) -> str:
 
 def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any, set[str]]:
     canonicalized = _canonicalize_broker_positions(broker_positions)
+    if isinstance(canonicalized, dict):
+        try:
+            snapshot = decode_position_snapshot(canonicalized)
+        except PositionSnapshotError:
+            return canonicalized, set()
+        canonicalized = snapshot.raw_rows()
     if not isinstance(canonicalized, list):
         return canonicalized, set()
     positions = getattr(manager, "_positions", {})

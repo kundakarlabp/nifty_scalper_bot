@@ -4043,6 +4043,75 @@ class BracketManager:
                 return True
         return False
 
+    def get_symbol_lifecycle_snapshot(self, symbol: str) -> dict[str, object]:
+        """Return read-only bracket lifecycle facts for reconciliation callers."""
+
+        symbol_key = normalize_symbol(symbol)
+        terminal_states = {
+            BracketExitLifecycle.CLOSED.value,
+            BracketExitLifecycle.EXIT_FILLED.value,
+            BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
+        }
+        bracket_ids: list[str] = []
+        active_bracket_ids: list[str] = []
+        pending_entry = False
+        orphan_origin = False
+        protected_quantity = 0
+        has_valid_stop = False
+        all_closed = True
+        with self._lock:
+            for entry_id in list(self._symbol_map.get(symbol_key, [])):
+                bracket = self._brackets.get(entry_id)
+                if bracket is None:
+                    continue
+                bracket_ids.append(entry_id)
+                bracket_symbol = normalize_symbol(getattr(bracket, "symbol", ""))
+                if bracket_symbol != symbol_key:
+                    continue
+                remaining = int(getattr(bracket, "remaining_quantity", 0) or 0)
+                quantity = int(getattr(bracket, "quantity", 0) or 0)
+                qty = remaining if remaining > 0 else quantity
+                status = str(getattr(bracket, "status", "") or "").upper()
+                exit_state = str(getattr(bracket, "exit_state", "") or "").upper()
+                closed = (
+                    status == "CLOSED"
+                    or exit_state in terminal_states
+                    or bool(getattr(bracket, "position_flat_confirmed", False))
+                    or qty <= 0
+                )
+                if not closed:
+                    all_closed = False
+                    active_bracket_ids.append(entry_id)
+                    protected_quantity += max(qty, 0)
+                entry_order_id = str(getattr(bracket, "entry_order_id", "") or "")
+                tag = str(getattr(bracket, "tag", "") or "")
+                is_orphan = entry_order_id.startswith("orphan_") or tag == "orphan_recovery"
+                orphan_origin = orphan_origin or is_orphan
+                if not bool(getattr(bracket, "entry_confirmed", False)) and not is_orphan:
+                    pending_entry = True
+                stop_value = getattr(bracket, "stop_loss", None)
+                if stop_value is None:
+                    stop_value = getattr(bracket, "sl", None)
+                if stop_value is None:
+                    stop_value = getattr(bracket, "sl_trigger_price", None)
+                try:
+                    has_valid_stop = has_valid_stop or float(stop_value) > 0.0
+                except (TypeError, ValueError):
+                    pass
+        managed = bool(active_bracket_ids)
+        return {
+            "normalized_symbol": symbol_key,
+            "managed": managed,
+            "bracket_ids": tuple(bracket_ids),
+            "active_bracket_ids": tuple(active_bracket_ids),
+            "pending_entry": pending_entry,
+            "exit_converging": self.is_exit_converging(symbol_key),
+            "orphan_origin": orphan_origin,
+            "protected_quantity": protected_quantity,
+            "has_valid_stop": has_valid_stop,
+            "all_closed": all_closed,
+        }
+
 
     def is_exit_converging(self, symbol: str) -> bool:
         """Return True while a managed exit for ``symbol`` is not fully converged."""

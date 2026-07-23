@@ -54,6 +54,7 @@ import random
 import sqlite3
 import threading
 import time as time_module
+import uuid
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -1521,6 +1522,14 @@ from nifty_scalper_bot.utils.market_hours import (
     get_market_state,
     is_market_open_session,
     is_market_open_now,
+)
+from nifty_scalper_bot.execution.ownership import (
+    SymbolLifecycleClassification,
+    classify_symbol_lifecycle,
+)
+from nifty_scalper_bot.execution.position_snapshot import (
+    BrokerExposureState,
+    decode_position_snapshot,
 )
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
@@ -3032,6 +3041,8 @@ class BotContext:
     position_reconciliation_error: str | None = None
     position_reconciliation_started_at: datetime | None = None
     position_reconciliation_completed_at: datetime | None = None
+    position_reconciliation_last_run: dict[str, Any] = field(default_factory=dict)
+    position_reconciliation_active_run_ids: set[str] = field(default_factory=set)
     unresolved_reconciliation_symbols: set[str] = field(default_factory=set)
     unprotected_broker_positions: set[str] = field(default_factory=set)
     unprotected_broker_position: bool = False
@@ -11221,7 +11232,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             if guard:
                 guard.mark_session_valid()
             try:
-                await _reconcile_state(ctx)
+                await _reconcile_state(ctx, source="startup")
                 LOGGER.info("startup_position_reconciliation_complete")
             except Exception as reconcile_exc:
                 LOGGER.error(
@@ -14229,7 +14240,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 while True:
                     try:
                         if is_market_open():
-                            await _reconcile_state(ctx)
+                            await _reconcile_state(ctx, source="periodic_health")
                         else:
                             _inner = getattr(
                                 ctx.broker_client,
@@ -14647,7 +14658,7 @@ def _should_reconcile_now(ctx: BotContext) -> bool:
         return True
 
 
-async def _reconcile_state(ctx: BotContext) -> None:
+async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
     """
     Syncs local state with Broker (Orders & Positions).
     Features: Non-Blocking Execution, Position Sync, and Auto-Guarding of Orphans.
@@ -14698,15 +14709,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
                 raise RuntimeError(
                     f"broker_position_fetch_failed:{_pos_err}"
                 ) from _pos_err
-            broker_positions: list[Mapping[str, Any]] = []
-            if isinstance(raw, list):
-                broker_positions = [p for p in raw if isinstance(p, Mapping)]
-            elif isinstance(raw, Mapping):
-                src = raw.get("net", raw)
-                if isinstance(src, list):
-                    broker_positions = [p for p in src if isinstance(p, Mapping)]
-                elif isinstance(src, Mapping):
-                    broker_positions = [src]
+            snapshot = decode_position_snapshot(raw)
+            broker_positions = snapshot.raw_rows()
             if ctx.position_manager:
                 ctx.position_manager.synchronize_with_broker(broker_positions)
             return broker_positions
@@ -14714,17 +14718,47 @@ async def _reconcile_state(ctx: BotContext) -> None:
         return cast(list[Mapping[str, Any]], _run_sync_locked(_sync_operation))
 
     # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
+    reconcile_run_id = uuid.uuid4().hex
+    requested_at = datetime.now(timezone.utc)
+    started_at = requested_at
+    run_record = {
+        "reconcile_run_id": reconcile_run_id,
+        "source": source,
+        "requested_at": requested_at.isoformat(),
+        "started_at": started_at.isoformat(),
+    }
+    active_run_ids = getattr(ctx, "position_reconciliation_active_run_ids", None)
+    if not isinstance(active_run_ids, set):
+        active_run_ids = set()
+        ctx.position_reconciliation_active_run_ids = active_run_ids
+    active_run_ids.add(reconcile_run_id)
+    run_record["active_run_count"] = len(active_run_ids)
+    ctx.position_reconciliation_last_run = run_record
     LOGGER.info(
-        "POSITION_RECONCILE_STARTED", extra={"event": "POSITION_RECONCILE_STARTED"}
+        "POSITION_RECONCILE_STARTED run_id=%s source=%s",
+        reconcile_run_id,
+        source,
+        extra={
+            "event": "POSITION_RECONCILE_STARTED",
+            "reconcile_run_id": reconcile_run_id,
+            "source": source,
+            "requested_at": requested_at.isoformat(),
+            "started_at": started_at.isoformat(),
+            "active_run_count": len(active_run_ids),
+        },
     )
     ctx.position_reconciliation_started = True
-    ctx.position_reconciliation_started_at = datetime.now(timezone.utc)
+    ctx.position_reconciliation_started_at = started_at
     ctx.position_reconciliation_completed = False
     ctx.position_reconciliation_failed = False
     ctx.position_reconciliation_error = None
     if ctx.position_manager:
         try:
+            sync_started_at = datetime.now(timezone.utc)
+            run_record["sync_started_at"] = sync_started_at.isoformat()
             broker_positions = await asyncio.to_thread(safe_sync_fetch)
+            sync_completed_at = datetime.now(timezone.utc)
+            run_record["sync_completed_at"] = sync_completed_at.isoformat()
             if hasattr(ctx, "unresolved_reconciliation_symbols"):
                 ctx.unresolved_reconciliation_symbols.clear()
             if hasattr(ctx, "unprotected_broker_positions"):
@@ -14777,25 +14811,120 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         signed_qty = (
                             pos.quantity if pos.side == "LONG" else -pos.quantity
                         )
-                        om.guard_orphan_position(
-                            symbol=norm_symbol,
-                            quantity=signed_qty,  # ✅ Now negative for SHORT
-                            average_price=avg_price,
-                            position_side=pos.side,
+                        guard_result = None
+                        guard_failed_reason = None
+                        try:
+                            guard_result = om.guard_orphan_position(
+                                symbol=norm_symbol,
+                                quantity=signed_qty,  # ✅ Now negative for SHORT
+                                average_price=avg_price,
+                                position_side=pos.side,
+                            )
+                        except Exception as guard_exc:  # noqa: BLE001 - keep other symbols blocked independently
+                            guard_failed_reason = f"{type(guard_exc).__name__}: {guard_exc}"
+                            LOGGER.exception(
+                                "POSITION_ORPHAN_GUARD_FAILED symbol=%s quantity=%s position_side=%s guard_result=%r bracket_managed=%s reason=%s",
+                                norm_symbol,
+                                pos.quantity,
+                                pos.side,
+                                guard_result,
+                                bm.is_symbol_managed(norm_symbol),
+                                guard_failed_reason,
+                                extra={
+                                    "event": "POSITION_ORPHAN_GUARD_FAILED",
+                                    "symbol": norm_symbol,
+                                    "quantity": pos.quantity,
+                                    "position_side": pos.side,
+                                    "guard_result": guard_result,
+                                    "bracket_managed": bm.is_symbol_managed(norm_symbol),
+                                    "reason": guard_failed_reason,
+                                },
+                            )
+                            continue
+
+                        bracket_id = guard_result if isinstance(guard_result, str) else None
+                        lifecycle_getter = getattr(bm, "get_symbol_lifecycle_snapshot", None)
+                        lifecycle_snapshot = (
+                            lifecycle_getter(norm_symbol)
+                            if callable(lifecycle_getter)
+                            else {}
                         )
-                        ctx.unprotected_broker_position = False
-                        if hasattr(ctx, "unprotected_broker_positions"):
-                            ctx.unprotected_broker_positions.discard(str(norm_symbol))
-                        LOGGER.info(
-                            "POSITION_ADOPTED_TO_BRACKET symbol=%s quantity=%s",
-                            norm_symbol,
-                            pos.quantity,
-                            extra={
-                                "event": "POSITION_ADOPTED_TO_BRACKET",
-                                "symbol": norm_symbol,
-                                "quantity": pos.quantity,
-                            },
+                        bracket_managed = bool(
+                            lifecycle_snapshot.get("managed")
+                            if isinstance(lifecycle_snapshot, Mapping) and lifecycle_snapshot
+                            else bm.is_symbol_managed(norm_symbol)
                         )
+                        verification_reason = None
+                        if not bracket_managed:
+                            verification_reason = "symbol_not_managed"
+                        elif isinstance(lifecycle_snapshot, Mapping) and lifecycle_snapshot:
+                            active_ids = set(lifecycle_snapshot.get("active_bracket_ids") or ())
+                            if not active_ids:
+                                verification_reason = "no_active_bracket"
+                            elif bracket_id and bracket_id not in active_ids:
+                                verification_reason = "returned_bracket_not_active"
+                            elif int(lifecycle_snapshot.get("protected_quantity") or 0) <= 0:
+                                verification_reason = "bracket_quantity_not_positive"
+                            elif not bool(lifecycle_snapshot.get("has_valid_stop")):
+                                verification_reason = "bracket_stop_missing"
+                            elif bool(lifecycle_snapshot.get("pending_entry")) and not bool(
+                                lifecycle_snapshot.get("orphan_origin")
+                            ):
+                                verification_reason = "pending_entry_not_orphan_protection"
+                        elif bracket_id:
+                            bracket = bm.get_bracket(bracket_id) if hasattr(bm, "get_bracket") else None
+                            if bracket is None:
+                                verification_reason = "returned_bracket_missing"
+                            else:
+                                bracket_symbol = normalize_symbol(getattr(bracket, "symbol", "")) or getattr(bracket, "symbol", "")
+                                bracket_status = str(getattr(bracket, "status", "") or "").upper()
+                                bracket_qty = int(getattr(bracket, "quantity", getattr(bracket, "qty", 0)) or 0)
+                                stop_value = getattr(bracket, "stop_loss", getattr(bracket, "sl", None))
+                                if bracket_symbol != norm_symbol:
+                                    verification_reason = "bracket_symbol_mismatch"
+                                elif bracket_status == "CLOSED":
+                                    verification_reason = "bracket_closed"
+                                elif bracket_qty <= 0:
+                                    verification_reason = "bracket_quantity_not_positive"
+                                elif stop_value is None:
+                                    verification_reason = "bracket_stop_missing"
+
+                        if verification_reason is None:
+                            if hasattr(ctx, "unprotected_broker_positions"):
+                                ctx.unprotected_broker_positions.discard(str(norm_symbol))
+                            LOGGER.info(
+                                "POSITION_ADOPTED_TO_BRACKET symbol=%s quantity=%s",
+                                norm_symbol,
+                                pos.quantity,
+                                extra={
+                                    "event": "POSITION_ADOPTED_TO_BRACKET",
+                                    "symbol": norm_symbol,
+                                    "quantity": pos.quantity,
+                                    "guard_result": guard_result,
+                                },
+                            )
+                        else:
+                            LOGGER.error(
+                                "POSITION_ORPHAN_GUARD_FAILED symbol=%s quantity=%s position_side=%s guard_result=%r bracket_managed=%s reason=%s",
+                                norm_symbol,
+                                pos.quantity,
+                                pos.side,
+                                guard_result,
+                                bracket_managed,
+                                verification_reason,
+                                extra={
+                                    "event": "POSITION_ORPHAN_GUARD_FAILED",
+                                    "symbol": norm_symbol,
+                                    "quantity": pos.quantity,
+                                    "position_side": pos.side,
+                                    "guard_result": guard_result,
+                                    "bracket_managed": bracket_managed,
+                                    "reason": verification_reason,
+                                },
+                            )
+
+                if hasattr(ctx, "unprotected_broker_positions"):
+                    ctx.unprotected_broker_position = bool(ctx.unprotected_broker_positions)
 
             # =================================================================
             # ✅ D. CLEANUP GHOST BRACKETS (Safety Cleanup)
@@ -14862,6 +14991,46 @@ async def _reconcile_state(ctx: BotContext) -> None:
                                     },
                                 )
                                 continue
+                            exposure_getter = getattr(ctx.position_manager, "broker_exposure_state", None)
+                            exposure = (
+                                exposure_getter(ghost_sym)
+                                if callable(exposure_getter)
+                                else BrokerExposureState.UNKNOWN
+                            )
+                            snapshot_getter = getattr(
+                                ctx.position_manager, "broker_exposure_snapshot", None
+                            )
+                            exposure_snapshot = (
+                                snapshot_getter() if callable(snapshot_getter) else {}
+                            )
+                            lifecycle = classify_symbol_lifecycle(
+                                ghost_sym,
+                                bracket_manager=bm,
+                                local_position_present=False,
+                                broker_exposure_state=exposure,
+                            )
+                            if (
+                                exposure not in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT)
+                                or lifecycle != SymbolLifecycleClassification.GHOST_FLAT
+                                or not bool(exposure_snapshot.get("fresh", False))
+                            ):
+                                LOGGER.warning(
+                                    "GHOST_SWEEP_DEFERRED_BROKER_UNKNOWN symbol=%s exposure_state=%s snapshot_age_seconds=%s snapshot_fresh=%s lifecycle=%s",
+                                    ghost_sym,
+                                    getattr(exposure, "value", str(exposure)),
+                                    exposure_snapshot.get("age_seconds"),
+                                    exposure_snapshot.get("fresh"),
+                                    getattr(lifecycle, "value", str(lifecycle)),
+                                    extra={
+                                        "event": "GHOST_SWEEP_DEFERRED_BROKER_UNKNOWN",
+                                        "symbol": ghost_sym,
+                                        "exposure_state": getattr(exposure, "value", str(exposure)),
+                                        "snapshot_age_seconds": exposure_snapshot.get("age_seconds"),
+                                        "snapshot_fresh": exposure_snapshot.get("fresh"),
+                                        "lifecycle": getattr(lifecycle, "value", str(lifecycle)),
+                                    },
+                                )
+                                continue
                             LOGGER.warning(
                                 f"👻 GHOST BRACKET DETECTED: {ghost_sym} has protection but no Open Position. "
                                 "Performing Safety Cleanup..."
@@ -14882,12 +15051,29 @@ async def _reconcile_state(ctx: BotContext) -> None:
             ctx.position_reconciliation_error = None
             ctx.position_reconciliation_completed = True
             ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
+            duration_ms = (ctx.position_reconciliation_completed_at - started_at).total_seconds() * 1000.0
+            active_run_ids.discard(reconcile_run_id)
+            run_record.update({
+                "completed_at": ctx.position_reconciliation_completed_at.isoformat(),
+                "duration_ms": duration_ms,
+                "active_run_count": len(active_run_ids),
+            })
             LOGGER.info(
-                "POSITION_RECONCILE_SUCCESS",
-                extra={"event": "POSITION_RECONCILE_SUCCESS"},
+                "POSITION_RECONCILE_SUCCESS run_id=%s source=%s duration_ms=%.3f",
+                reconcile_run_id,
+                source,
+                duration_ms,
+                extra={
+                    "event": "POSITION_RECONCILE_SUCCESS",
+                    "reconcile_run_id": reconcile_run_id,
+                    "source": source,
+                    "duration_ms": duration_ms,
+                },
             )
 
         except Exception as exc:
+            active_run_ids.discard(reconcile_run_id)
+            run_record["active_run_count"] = len(active_run_ids)
             ctx.position_reconciliation_completed = False
             ctx.position_reconciliation_failed = True
             ctx.position_reconciliation_error = str(exc)
@@ -15585,7 +15771,7 @@ class NiftyScalperApp:
                         await asyncio.sleep(5.0)
                     try:
                         if _should_reconcile_now(self._ctx):
-                            await _reconcile_state(self._ctx)
+                            await _reconcile_state(self._ctx, source="manual")
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
                             "Periodic state reconciliation failed",

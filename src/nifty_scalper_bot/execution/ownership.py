@@ -20,6 +20,7 @@ import os
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _TRUTHY = {"1", "true", "yes", "y", "on", "live"}
 
@@ -219,3 +220,67 @@ class BoundBracketManager(RuntimeBracketManager):
 
 
 __all__ = ["BoundBracketManager"]
+from enum import Enum
+from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+
+class SymbolLifecycleClassification(str, Enum):
+    """Read-only symbol lifecycle classification for reconciliation callers."""
+
+    PROTECTED_OPEN = "protected_open"
+    PENDING_ENTRY = "pending_entry"
+    EXIT_CONVERGING = "exit_converging"
+    TRUE_ORPHAN = "true_orphan"
+    GHOST_FLAT = "ghost_flat"
+    UNRESOLVED = "unresolved"
+
+
+def classify_symbol_lifecycle(
+    symbol: str,
+    *,
+    bracket_manager: Any,
+    local_position_present: bool,
+    broker_exposure_state: BrokerExposureState,
+) -> SymbolLifecycleClassification:
+    """Classify current symbol ownership without mutating brackets or orders."""
+
+    normalized = normalize_symbol(symbol) or str(symbol or "").strip().upper()
+    snapshot_getter = getattr(bracket_manager, "get_symbol_lifecycle_snapshot", None)
+    if callable(snapshot_getter):
+        try:
+            snapshot = snapshot_getter(normalized)
+        except Exception:
+            return SymbolLifecycleClassification.UNRESOLVED
+        if bool(snapshot.get("exit_converging")):
+            return SymbolLifecycleClassification.EXIT_CONVERGING
+        if bool(snapshot.get("pending_entry")):
+            return SymbolLifecycleClassification.PENDING_ENTRY
+        managed = bool(snapshot.get("managed"))
+    else:
+        try:
+            managed = bool(bracket_manager.is_symbol_managed(normalized))
+        except Exception:
+            return SymbolLifecycleClassification.UNRESOLVED
+        checker = getattr(bracket_manager, "is_exit_converging", None)
+        if callable(checker):
+            try:
+                if bool(checker(normalized)):
+                    return SymbolLifecycleClassification.EXIT_CONVERGING
+            except Exception:
+                return SymbolLifecycleClassification.UNRESOLVED
+
+    if managed and local_position_present:
+        return SymbolLifecycleClassification.PROTECTED_OPEN
+    if managed and not local_position_present:
+        if broker_exposure_state in (
+            BrokerExposureState.FLAT,
+            BrokerExposureState.ABSENT,
+        ):
+            return SymbolLifecycleClassification.GHOST_FLAT
+        return SymbolLifecycleClassification.UNRESOLVED
+    if local_position_present and broker_exposure_state == BrokerExposureState.NONZERO:
+        return SymbolLifecycleClassification.TRUE_ORPHAN
+    return SymbolLifecycleClassification.UNRESOLVED
+
+
+__all__ = ["BoundBracketManager", "SymbolLifecycleClassification", "classify_symbol_lifecycle"]

@@ -77,6 +77,15 @@ def _bracket_manager() -> BracketManager:
     return bm
 
 
+def _stop_bracket_manager(bm: BracketManager) -> None:
+    shutdown = getattr(bm, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
+    watchdog = getattr(bm, "_watchdog_thread", None)
+    if watchdog is not None:
+        watchdog.join(timeout=1.0)
+
+
 def test_exit_fill_reconciliation_flat_does_not_leave_orphan_bracket(tmp_path) -> None:
     """Terminal SELL fill makes broker, PM and bracket ownership flat immediately."""
     pm = _position_manager(tmp_path)
@@ -434,9 +443,12 @@ def test_orphan_scan_skips_stale_positive_position_during_exit_convergence(tmp_p
         order_id="stale-local",
     )
 
-    _runner_for(pm, bm)._adopt_orphan_positions()
+    try:
+        _runner_for(pm, bm)._adopt_orphan_positions()
 
-    assert adopt_calls == []
+        assert adopt_calls == []
+    finally:
+        _stop_bracket_manager(bm)
     assert bm.get_bracket(f"orphan_{SYMBOL}") is None
 
 
@@ -686,3 +698,106 @@ def test_registration_failure_can_retry_without_duplicate_broker_exit(tmp_path) 
 
     assert len(om.calls) == 1
     assert bracket.exit_order_id == "exit-final-1"
+
+class _ExplodingBroker:
+    def get_positions(self):
+        raise AssertionError("runner must not call broker positions")
+
+    def positions(self):
+        raise AssertionError("runner must not call broker positions")
+
+
+def test_runner_orphan_scan_uses_position_manager_snapshot_not_broker_io(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="manual")
+    pm.synchronize_with_broker([_broker_row(0)])
+    bm = BracketManager(order_manager=_OrderManager(_ExplodingBroker()))
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+
+    _runner_for(pm, bm)._adopt_orphan_positions()
+
+    assert adopt_calls == []
+
+
+def test_runner_unknown_broker_exposure_defers_without_adoption(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="manual")
+    bm = BracketManager(order_manager=_OrderManager(_ExplodingBroker()))
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+
+    warnings = []
+    runner = _runner_for(pm, bm)
+    runner._logger.warning = lambda *args, **kwargs: warnings.append((args, kwargs))
+
+    try:
+        runner._adopt_orphan_positions()
+
+        assert adopt_calls == []
+        assert any("ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN" in str(args[0]) for args, _kwargs in warnings)
+    finally:
+        _stop_bracket_manager(bm)
+
+
+def test_runner_stale_flat_snapshot_defers_without_orphan_adoption(tmp_path, monkeypatch) -> None:
+    from nifty_scalper_bot.execution import position_manager as pm_module
+    from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+    now = {"value": 100.0}
+    monkeypatch.setattr(pm_module.time, "monotonic", lambda: now["value"])
+    monkeypatch.setenv("BROKER_POSITION_SNAPSHOT_MAX_AGE_SECONDS", "20")
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.synchronize_with_broker([_broker_row(0)])
+    now["value"] = 121.0
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.UNKNOWN
+
+    pm._positions[SYMBOL] = Position(
+        symbol=SYMBOL,
+        side="LONG",
+        quantity=QTY,
+        entry_price=100.0,
+        entry_time=datetime.now(timezone.utc),
+        current_price=100.0,
+        order_id="manual",
+    )
+    bm = BracketManager(order_manager=_OrderManager(_ExplodingBroker()))
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+    warnings = []
+    runner = _runner_for(pm, bm)
+    runner._logger.warning = lambda *args, **kwargs: warnings.append((args, kwargs))
+
+    try:
+        runner._adopt_orphan_positions()
+
+        assert adopt_calls == []
+        assert any("ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN" in str(args[0]) for args, _kwargs in warnings)
+    finally:
+        _stop_bracket_manager(bm)
+
+
+def test_runner_local_generation_invalidates_absent_snapshot_before_adoption(tmp_path, monkeypatch) -> None:
+    from nifty_scalper_bot.execution import position_manager as pm_module
+    from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+    monkeypatch.setattr(pm_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setenv("BROKER_POSITION_SNAPSHOT_MAX_AGE_SECONDS", "20")
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.synchronize_with_broker([])
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.ABSENT
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="manual")
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.UNKNOWN
+
+    bm = BracketManager(order_manager=_OrderManager(_ExplodingBroker()))
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+    try:
+        _runner_for(pm, bm)._adopt_orphan_positions()
+
+        assert adopt_calls == []
+    finally:
+        _stop_bracket_manager(bm)
+
+    pm.synchronize_with_broker([_broker_row()])
+    assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.NONZERO
