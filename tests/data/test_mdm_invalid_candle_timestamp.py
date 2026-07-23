@@ -177,3 +177,25 @@ def test_nifty_spot_invalid_exchange_timestamp_uses_valid_received_at_fallback()
     assert normalized is not None
     assert normalized["symbol"] == "NSE:NIFTY"
     assert normalized["timestamp_source"] == "received_at"
+
+
+def test_nifty_spot_naive_broker_fallback_is_ist_not_utc_shifted() -> None:
+    mdm = MarketDataManager(kite=None)
+    mdm._symbol_by_token[256265] = "NSE:NIFTY"
+    mdm._token_to_symbol[256265] = "NSE:NIFTY"
+    mdm._symbol_to_token["NSE:NIFTY"] = 256265
+    mdm._token_by_symbol["NSE:NIFTY"] = 256265
+
+    normalized = mdm._normalize_ws_tick(
+        {
+            "instrument_token": 256265,
+            "last_price": 24500.0,
+            "exchange_timestamp": "bad",
+            "timestamp": "2026-07-23 09:30:00",
+        }
+    )
+
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "timestamp"
+    assert normalized["timestamp"] == "2026-07-23T09:30:00+05:30"
+    assert normalized["source_timestamp_valid"] is True

@@ -7942,10 +7942,7 @@ class MarketDataManager:
                 normalized = normalize_market_tick_timestamp(raw)
             except (TypeError, ValueError, OverflowError):
                 return None, None
-            ts = pd.to_datetime(normalized.raw_value, utc=True, errors="coerce")
-            if pd.isna(ts):
-                return None, None
-            ts = pd.Timestamp(ts)
+            ts = pd.Timestamp(normalized.timestamp)
             if ts.year >= 2020:
                 return normalized.source, ts
             return None, None
@@ -13722,25 +13719,15 @@ class MarketDataManager:
                     }.values()
                 )
                 deduped.sort(key=lambda item: item["timestamp"])
-                if (
-                    min_rows > 0
-                    and len(deduped) < min_rows
-                    and attempt_name != attempt_specs[-1][0]
-                ):
+                if min_rows > 0 and len(deduped) < min_rows and attempt_name != attempt_specs[-1][0]:
                     if len(deduped) > len(best_so_far):
                         best_so_far = deduped
                         best_attempt_meta = (
-                            attempt_name,
-                            from_date,
-                            to_date,
-                            len(rows),
+                            attempt_name, from_date, to_date, len(rows)
                         )
                     self._logger.info(
                         "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING symbol=%s attempt=%s returned_rows=%s min_rows=%s",
-                        symbol,
-                        attempt_name,
-                        len(deduped),
-                        min_rows,
+                        symbol, attempt_name, len(deduped), min_rows,
                         extra={
                             "event": "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING",
                             "symbol": symbol,

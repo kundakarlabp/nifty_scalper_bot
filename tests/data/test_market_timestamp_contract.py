@@ -16,6 +16,17 @@ from nifty_scalper_bot.data.validator import validate_tick
 IST = ZoneInfo("Asia/Kolkata")
 
 
+def test_numeric_epoch_seconds_converts_utc_to_ist() -> None:
+    raw = pd.Timestamp("2026-07-23T04:00:00Z").timestamp()
+
+    normalized = normalize_market_tick_timestamp(
+        {"symbol": "NFO:TEST", "timestamp": raw}
+    )
+
+    assert normalized.timestamp.isoformat() == "2026-07-23T09:30:00+05:30"
+    assert normalized.source == "timestamp"
+
+
 def test_numeric_epoch_ms_converts_utc_to_ist() -> None:
     raw = int(pd.Timestamp("2026-01-02T09:15:00Z").timestamp() * 1000)
 

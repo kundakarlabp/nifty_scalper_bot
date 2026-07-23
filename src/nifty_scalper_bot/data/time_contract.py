@@ -76,16 +76,6 @@ def coerce_market_timestamp(value: Any, *, naive_policy: str = "ist") -> pd.Time
     return ts.tz_convert(IST)
 
 
-def _first_present(
-    payload: Mapping[str, Any], fields: tuple[str, ...]
-) -> tuple[str, Any] | None:
-    for field in fields:
-        value = payload.get(field)
-        if value is not None and value != "":
-            return field, value
-    return None
-
-
 def normalize_market_tick_timestamp(payload: Mapping[str, Any]) -> MarketTimestamp:
     """Normalize a live market tick timestamp with explicit source priority.
 

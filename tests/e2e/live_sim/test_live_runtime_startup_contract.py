@@ -278,9 +278,7 @@ def _instrument_dump() -> list[dict[str, Any]]:
             )
     return rows
 
-_FIXED_RUNTIME_NOW_IST = datetime(
-    2026, 7, 22, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata")
-)
+_FIXED_RUNTIME_NOW_IST = pd.Timestamp.now(tz="Asia/Kolkata").floor("s").to_pydatetime()
 
 
 def _patch_runtime_clock(
