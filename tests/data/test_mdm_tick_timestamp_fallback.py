@@ -46,4 +46,4 @@ def test_valid_exchange_timestamp_kept() -> None:
             "exchange_timestamp": "2026-04-30T09:15:00Z",
         }
     )
-    assert tick["timestamp"].startswith("2026-04-30T09:15:00")
+    assert tick["timestamp"] == "2026-04-30T14:45:00+05:30"

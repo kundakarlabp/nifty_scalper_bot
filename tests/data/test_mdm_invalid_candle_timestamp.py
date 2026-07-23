@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -122,3 +123,79 @@ def test_invalid_timestamp_does_not_mutate_candle_engine() -> None:
     mdm._process_queued_tick(_tick(exchange_timestamp="bad"))
     assert engine.current_candle is None
     assert engine.get_completed_bars() == []
+
+
+def test_missing_timestamp_logs_missing_all_reason(caplog) -> None:
+    mdm = _mdm()
+    mdm._logger = logging.getLogger("test_mdm_timestamp_reason")
+    mdm._symbol_by_token[2] = "NFO:Y"
+    mdm._token_to_symbol[2] = "NFO:Y"
+    with caplog.at_level("WARNING", logger="test_mdm_timestamp_reason"):
+        assert (
+            mdm._normalize_ws_tick({"instrument_token": 2, "last_price": 10.0}) is None
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("timestamp_reason=missing_all" in message for message in messages)
+
+
+def test_invalid_tick_does_not_stop_later_valid_tick_processing() -> None:
+    mdm = MarketDataManager(kite=None)
+    mdm._symbol_by_token[1] = "NFO:X"
+    mdm._token_to_symbol[1] = "NFO:X"
+    mdm._symbol_to_token["NFO:X"] = 1
+    mdm._token_by_symbol["NFO:X"] = 1
+
+    mdm._process_queued_tick(_tick(exchange_timestamp="bad"))
+    mdm._process_queued_tick(
+        _tick(exchange_timestamp="2026-07-23T09:30:04+05:30", last_price=11.0)
+    )
+
+    assert "NFO:X" in mdm._latest_ticks
+    assert mdm._latest_ticks["NFO:X"]["last_price"] == 11.0
+    assert mdm.get_candle_engine("NFO:X").current_candle is not None
+
+
+def test_nifty_spot_invalid_exchange_timestamp_uses_valid_received_at_fallback() -> (
+    None
+):
+    mdm = MarketDataManager(kite=None)
+    mdm._symbol_by_token[256265] = "NSE:NIFTY"
+    mdm._token_to_symbol[256265] = "NSE:NIFTY"
+    mdm._symbol_to_token["NSE:NIFTY"] = 256265
+    mdm._token_by_symbol["NSE:NIFTY"] = 256265
+
+    normalized = mdm._normalize_ws_tick(
+        {
+            "instrument_token": 256265,
+            "last_price": 24500.0,
+            "exchange_timestamp": "bad",
+            "received_at": "2026-07-23T09:30:05+05:30",
+        }
+    )
+
+    assert normalized is not None
+    assert normalized["symbol"] == "NSE:NIFTY"
+    assert normalized["timestamp_source"] == "received_at"
+
+
+def test_nifty_spot_naive_broker_fallback_is_ist_not_utc_shifted() -> None:
+    mdm = MarketDataManager(kite=None)
+    mdm._symbol_by_token[256265] = "NSE:NIFTY"
+    mdm._token_to_symbol[256265] = "NSE:NIFTY"
+    mdm._symbol_to_token["NSE:NIFTY"] = 256265
+    mdm._token_by_symbol["NSE:NIFTY"] = 256265
+
+    normalized = mdm._normalize_ws_tick(
+        {
+            "instrument_token": 256265,
+            "last_price": 24500.0,
+            "exchange_timestamp": "bad",
+            "timestamp": "2026-07-23 09:30:00",
+        }
+    )
+
+    assert normalized is not None
+    assert normalized["timestamp_source"] == "timestamp"
+    assert normalized["timestamp"] == "2026-07-23T09:30:00+05:30"
+    assert normalized["source_timestamp_valid"] is True
