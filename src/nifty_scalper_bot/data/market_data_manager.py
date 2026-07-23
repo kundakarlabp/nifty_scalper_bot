@@ -64,7 +64,10 @@ from nifty_scalper_bot.data.candle_engine import (
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.data.source import DataIntegrityError
-from nifty_scalper_bot.data.time_contract import coerce_market_timestamp
+from nifty_scalper_bot.data.time_contract import (
+    coerce_market_timestamp,
+    normalize_market_tick_timestamp,
+)
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
@@ -7850,13 +7853,28 @@ class MarketDataManager:
         )
         source_timestamp_valid = timestamp_source is not None and ts is not None
         if not source_timestamp_valid:
+            present_timestamp_fields = self._present_market_timestamp_fields(raw)
+            timestamp_reason = (
+                "missing_all" if not present_timestamp_fields else "all_present_invalid"
+            )
             if not hasattr(self, "_candle_metrics"):
                 self._candle_metrics = defaultdict(float)
             self._candle_metrics["invalid_candle_timestamp_total"] += 1
             log_throttled(
                 self._logger,
                 f"mdm_invalid_candle_timestamp_{token or symbol}",
-                "MDM_TICK_DROPPED reason=invalid_candle_timestamp token=%s" % token,
+                (
+                    "MDM_TICK_DROPPED reason=invalid_candle_timestamp "
+                    "timestamp_reason=%s token=%s symbol=%s source=%s present_timestamp_fields=%s"
+                )
+                % (
+                    timestamp_reason,
+                    token,
+                    symbol,
+                    raw.get("source")
+                    or ("rest_poll" if approved_rest_fallback else "ws"),
+                    present_timestamp_fields,
+                ),
                 interval_sec=30.0,
                 level=logging.WARNING,
             )
@@ -7883,12 +7901,55 @@ class MarketDataManager:
                 and not approved_rest_fallback
                 else (raw.get("source") or "ws")
             ),
-            "received_at": float(raw.get("received_at") or time.time()),
+            "received_at": self._tick_received_at_epoch(raw),
         }
+
+    @staticmethod
+    def _tick_received_at_epoch(raw: Mapping[str, Any]) -> float:
+        value = raw.get("received_at")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return time.time()
+
+    @staticmethod
+    def _present_market_timestamp_fields(raw: Mapping[str, Any]) -> list[str]:
+        timestamp_fields = (
+            "exchange_timestamp",
+            "last_trade_time",
+            "last_traded_time",
+            "last_trade_timestamp",
+            "exchange_update_time",
+            "last_price_time",
+            "timestamp",
+            "ts",
+            "date",
+            "datetime",
+            "received_at",
+            "received_ts",
+            "received_time",
+        )
+        return [
+            field
+            for field in timestamp_fields
+            if raw.get(field) is not None and raw.get(field) != ""
+        ]
 
     def _resolve_candle_tick_timestamp(
         self, raw: Mapping[str, Any], *, rest_fallback: bool
     ) -> tuple[str | None, pd.Timestamp | None]:
+        if not rest_fallback:
+            try:
+                normalized = normalize_market_tick_timestamp(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None, None
+            ts = pd.to_datetime(normalized.raw_value, utc=True, errors="coerce")
+            if pd.isna(ts):
+                return None, None
+            ts = pd.Timestamp(ts)
+            if ts.year >= 2020:
+                return normalized.source, ts
+            return None, None
+
         if rest_fallback:
             candidates = (
                 ("rest_poll", raw.get("timestamp")),
@@ -13661,15 +13722,25 @@ class MarketDataManager:
                     }.values()
                 )
                 deduped.sort(key=lambda item: item["timestamp"])
-                if min_rows > 0 and len(deduped) < min_rows and attempt_name != attempt_specs[-1][0]:
+                if (
+                    min_rows > 0
+                    and len(deduped) < min_rows
+                    and attempt_name != attempt_specs[-1][0]
+                ):
                     if len(deduped) > len(best_so_far):
                         best_so_far = deduped
                         best_attempt_meta = (
-                            attempt_name, from_date, to_date, len(rows)
+                            attempt_name,
+                            from_date,
+                            to_date,
+                            len(rows),
                         )
                     self._logger.info(
                         "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING symbol=%s attempt=%s returned_rows=%s min_rows=%s",
-                        symbol, attempt_name, len(deduped), min_rows,
+                        symbol,
+                        attempt_name,
+                        len(deduped),
+                        min_rows,
                         extra={
                             "event": "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING",
                             "symbol": symbol,

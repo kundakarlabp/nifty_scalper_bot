@@ -76,7 +76,9 @@ def coerce_market_timestamp(value: Any, *, naive_policy: str = "ist") -> pd.Time
     return ts.tz_convert(IST)
 
 
-def _first_present(payload: Mapping[str, Any], fields: tuple[str, ...]) -> tuple[str, Any] | None:
+def _first_present(
+    payload: Mapping[str, Any], fields: tuple[str, ...]
+) -> tuple[str, Any] | None:
     for field in fields:
         value = payload.get(field)
         if value is not None and value != "":
@@ -90,23 +92,31 @@ def normalize_market_tick_timestamp(payload: Mapping[str, Any]) -> MarketTimesta
     Priority is exchange/broker event time first. ``received_at`` is allowed
     only as an explicit fallback and is labelled as such; this prevents a
     generated wall-clock timestamp from silently masquerading as exchange time.
+    A malformed higher-priority field does not hide a later valid timestamp.
     """
 
-    for fields, label in (
-        (_EXCHANGE_TIMESTAMP_FIELDS, "exchange_timestamp"),
-        (_BROKER_TIMESTAMP_FIELDS, "broker_timestamp"),
-        (_RECEIVED_AT_FIELDS, "received_at_fallback"),
+    present = False
+    last_error: Exception | None = None
+    for fields in (
+        _EXCHANGE_TIMESTAMP_FIELDS,
+        _BROKER_TIMESTAMP_FIELDS,
+        _RECEIVED_AT_FIELDS,
     ):
-        candidate = _first_present(payload, fields)
-        if candidate is None:
-            continue
-        field, value = candidate
-        return MarketTimestamp(
-            timestamp=coerce_market_timestamp(value),
-            source=field if label != "exchange_timestamp" else field,
-            raw_value=value,
-        )
-    raise ValueError("missing market timestamp")
+        for field in fields:
+            value = payload.get(field)
+            if value is None or value == "":
+                continue
+            present = True
+            try:
+                timestamp = coerce_market_timestamp(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                last_error = exc
+                continue
+            return MarketTimestamp(timestamp=timestamp, source=field, raw_value=value)
+
+    if not present:
+        raise ValueError("missing market timestamp")
+    raise ValueError("all present market timestamps are invalid") from last_error
 
 
 def future_delta_seconds(ts: pd.Timestamp, *, now: pd.Timestamp) -> float:
@@ -115,7 +125,9 @@ def future_delta_seconds(ts: pd.Timestamp, *, now: pd.Timestamp) -> float:
     return max((ts - now).total_seconds(), 0.0)
 
 
-def is_future_market_timestamp(ts: pd.Timestamp, *, now: pd.Timestamp, grace_seconds: float) -> bool:
+def is_future_market_timestamp(
+    ts: pd.Timestamp, *, now: pd.Timestamp, grace_seconds: float
+) -> bool:
     return bool(ts > now + pd.Timedelta(seconds=max(float(grace_seconds), 0.0)))
 
 
