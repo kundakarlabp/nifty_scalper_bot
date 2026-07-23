@@ -109,6 +109,7 @@ def _patch_bracket_manager() -> None:
         reason: str,
         bracket_id: str,
         preferred_order_type: str = "LIMIT",
+        correlation_tag: str | None = None,
     ) -> Any:
         """Submit an EXIT order with immutable lifecycle metadata."""
         normalized_symbol = normalize_symbol(symbol)
@@ -189,7 +190,7 @@ def _patch_bracket_manager() -> None:
                 "side": side,
                 "quantity": int(qty),
                 "order_type": order_type,
-                "tag": f"exit_{reason[:3]}_{bracket_id[:8]}",
+                "tag": correlation_tag or f"exit_{reason[:3]}_{bracket_id[:8]}",
                 "check_risk": False,
                 "product": "MIS",
                 **_exit_identity_kwargs(bracket, bracket_id),

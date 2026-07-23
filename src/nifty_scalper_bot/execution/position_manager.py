@@ -1988,6 +1988,73 @@ class PositionManager:
         self._persist_order_state(order)
         self.save_state()
 
+
+    def remove_pending_order(self, order_id: str) -> None:
+        """Remove a provisional order that never reached broker submission."""
+
+        order_key = str(order_id or "").strip()
+        if not order_key:
+            return
+        with self._lock:
+            order = self._orders.get(order_key)
+            if order is not None and order.status not in self.FINAL_STATUSES:
+                self._orders.pop(order_key, None)
+            self._exit_lifecycles.pop(order_key, None)
+        self.save_state()
+
+    def is_exit_converging(self, symbol: str) -> bool:
+        """Return True while a managed exit for ``symbol`` is still converging."""
+
+        symbol_key = symbol.upper()
+        with self._lock:
+            for order in self._orders.values():
+                if order.symbol != symbol_key:
+                    continue
+                if order.intent in ("EXIT", "REDUCE") and order.status not in self.FINAL_STATUSES:
+                    return True
+            for metadata in self._unresolved_terminal_orders.values():
+                if metadata.symbol == symbol_key and metadata.intent in ("EXIT", "REDUCE"):
+                    return True
+            if symbol_key in getattr(self, "_recently_flat_exit_until_monotonic", {}):
+                return True
+        return False
+
+    def bind_pending_order_id(
+        self, provisional_order_id: str, final_order_id: str
+    ) -> None:
+        """Atomically re-key an in-flight locally registered order to broker ID."""
+        provisional_key = str(provisional_order_id or "").strip()
+        final_key = str(final_order_id or "").strip()
+        if not provisional_key or not final_key or provisional_key == final_key:
+            return
+        with self._lock:
+            order = self._orders.pop(provisional_key, None)
+            if order is not None:
+                existing = self._orders.get(final_key)
+                if existing is None:
+                    order.order_id = final_key
+                    self._orders[final_key] = order
+                else:
+                    order = existing
+                lifecycle = self._exit_lifecycles.pop(provisional_key, None)
+                if lifecycle is not None:
+                    lifecycle.exit_order_id = final_key
+                    self._exit_lifecycles[final_key] = lifecycle
+                self._persist_order_state(order)
+            metadata = self._terminal_orders.pop(provisional_key, None)
+            if metadata is not None:
+                metadata.order_id = final_key
+                self._terminal_orders[final_key] = metadata
+                unresolved = self._unresolved_terminal_orders.pop(provisional_key, None)
+                if unresolved is not None:
+                    unresolved.order_id = final_key
+                    self._unresolved_terminal_orders[final_key] = unresolved
+            lifecycle = self._exit_lifecycles.pop(provisional_key, None)
+            if lifecycle is not None:
+                lifecycle.exit_order_id = final_key
+                self._exit_lifecycles[final_key] = lifecycle
+        self.save_state()
+
     def update_order_status(
         self,
         order_id: str,

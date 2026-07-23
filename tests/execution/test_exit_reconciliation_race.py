@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
-from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.execution.position_manager import Position, PositionManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 SYMBOL = "NFO:NIFTY2660923100CE"
@@ -115,6 +118,7 @@ def test_stale_snapshot_after_exit_fill_is_not_orphan_adopted_then_zero_clears(
     """A stale non-zero broker snapshot after a terminal exit cannot re-open/adopt."""
     pm = _position_manager(tmp_path)
     bm = _bracket_manager()
+    bm.order_manager._positions = pm
     adopt_calls: list[dict[str, Any]] = []
     bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
 
@@ -327,3 +331,358 @@ def test_persistent_position_after_grace_gets_orphan_protection(tmp_path) -> Non
 
     assert bm.is_symbol_managed(SYMBOL) is True
     assert bm.get_bracket(f"orphan_{SYMBOL}") is not None
+
+
+def test_synchronous_exit_fill_callback_is_registered_as_exit_before_submit_returns(
+    tmp_path,
+) -> None:
+    """Exit intent exists before broker submission, so an immediate fill is not unknown."""
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-sync")
+
+    class SyncFillOrderManager:
+        def __init__(self) -> None:
+            self._positions = pm
+            self._broker = _Broker(status="COMPLETE", positions=[_broker_row()])
+            self.kwargs: dict[str, Any] | None = None
+
+        def place_order(self, **kwargs: Any) -> str:
+            self.kwargs = dict(kwargs)
+            pm.apply_broker_order_update(
+                "exit-sync-final",
+                {
+                    "order_id": "exit-sync-final",
+                    "tag": kwargs.get("tag"),
+                    "symbol": SYMBOL,
+                    "side": "SELL",
+                    "quantity": QTY,
+                    "filled_quantity": QTY,
+                    "average_price": 120.0,
+                    "status": "COMPLETE",
+                },
+            )
+            return "exit-sync-final"
+
+    om = SyncFillOrderManager()
+    bm = BracketManager(order_manager=om)
+    bm.register_virtual_bracket(
+        order_id="entry-sync",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=QTY,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+    )
+    bm.confirm_entry_fill("entry-sync", 100.0)
+    bracket = bm.get_bracket("entry-sync")
+    assert bracket is not None
+    bracket.last_ltp = 120.0
+
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=123.0)
+
+    assert om.kwargs is not None
+    assert om.kwargs["intent"] == "EXIT"
+    assert om.kwargs["bracket_id"] == "entry-sync"
+    assert om.kwargs["tag"].startswith("exit_")
+    assert "client_order_id" not in om.kwargs
+    assert pm.get_position(SYMBOL) is None
+    assert not pm.get_pending_orders(SYMBOL)
+    assert pm.unresolved_terminal_summary()["count"] == 0
+    assert all(
+        row.get("classification") != "BROKER_UNKNOWN_ORDER_RESOLVED"
+        for row in getattr(pm, "_broker_order_ledger", {}).values()
+    )
+    assert bracket.exit_order_id == "exit-sync-final"
+    assert bracket.pending_exit_order_id == "exit-sync-final"
+    assert bracket.exit_submission_inflight is False
+
+
+def _runner_for(pm: PositionManager, bm: BracketManager) -> StrategyRunner:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._position_manager = pm
+    runner._bracket_manager = bm
+    runner._active_orphan_guards = set()
+    runner._orphan_retry_count = {}
+    runner._orphan_retry_last_attempt = {}
+    runner._logger = SimpleNamespace(
+        debug=lambda *a, **k: None,
+        info=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+        exception=lambda *a, **k: None,
+    )
+    return runner
+
+
+def test_orphan_scan_skips_stale_positive_position_during_exit_convergence(tmp_path) -> None:
+    pm = _position_manager(tmp_path)
+    bm = _bracket_manager()
+    bm.order_manager._positions = pm
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+
+    pm.update_order_status("exit-1", "FILLED", 120.0)
+    bm.reconcile_symbol_flat(SYMBOL)
+    pm._positions[SYMBOL] = Position(
+        symbol=SYMBOL,
+        side="LONG",
+        quantity=QTY,
+        entry_price=100.0,
+        entry_time=datetime.now(timezone.utc),
+        current_price=120.0,
+        order_id="stale-local",
+    )
+
+    _runner_for(pm, bm)._adopt_orphan_positions()
+
+    assert adopt_calls == []
+    assert bm.get_bracket(f"orphan_{SYMBOL}") is None
+
+
+class _FailingExitOrderManager:
+    def __init__(self, pm: PositionManager, *, raises: bool = False) -> None:
+        self._positions = pm
+        self._broker = _Broker(status="OPEN", positions=[_broker_row()])
+        self.raises = raises
+
+    def place_order(self, **_kwargs: Any) -> str | None:
+        if self.raises:
+            raise RuntimeError("broker down")
+        return None
+
+
+def _bracket_with_pm(pm: PositionManager, om: Any) -> BracketManager:
+    bm = BracketManager(order_manager=om)
+    bm.register_virtual_bracket(
+        order_id="entry-fail",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=QTY,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+    )
+    bm.confirm_entry_fill("entry-fail", 100.0)
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+    bracket.last_ltp = 120.0
+    return bm
+
+
+def test_exit_submission_rejection_removes_provisional_order(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-fail")
+    bm = _bracket_with_pm(pm, _FailingExitOrderManager(pm))
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=125.0)
+
+    assert not pm.get_pending_orders(SYMBOL)
+    assert pm.unresolved_terminal_summary()["count"] == 0
+    assert pm.get_position(SYMBOL) is not None
+
+
+def test_exit_submission_exception_removes_provisional_order(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-fail")
+    bm = _bracket_with_pm(pm, _FailingExitOrderManager(pm, raises=True))
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=126.0)
+
+    assert not pm.get_pending_orders(SYMBOL)
+    assert pm.unresolved_terminal_summary()["count"] == 0
+    assert pm.get_position(SYMBOL) is not None
+
+
+class _RegistrationFailingPositionManager(PositionManager):
+    def add_pending_order(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        raise RuntimeError("registration unavailable")
+
+
+class _RecordingExitOrderManager:
+    def __init__(self, pm: Any | None) -> None:
+        if pm is not None:
+            self._positions = pm
+        self._broker = _Broker(status="OPEN", positions=[_broker_row()])
+        self.calls: list[dict[str, Any]] = []
+
+    def place_order(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        return f"exit-final-{len(self.calls)}"
+
+
+class _BindFailPositionManager(PositionManager):
+    def bind_pending_order_id(self, provisional_order_id: str, final_order_id: str) -> None:  # type: ignore[override]
+        raise RuntimeError("bind store unavailable")
+
+
+def test_provisional_registration_failure_prevents_broker_submission(
+    tmp_path, caplog
+) -> None:
+    pm = _RegistrationFailingPositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-regfail")
+    om = _RecordingExitOrderManager(pm)
+    bm = _bracket_with_pm(pm, om)
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+
+    caplog.set_level(logging.ERROR)
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=130.0)
+
+    assert om.calls == []
+    assert pm.get_position(SYMBOL) is not None
+    assert not pm.get_pending_orders(SYMBOL)
+    assert bracket.exit_submission_inflight is False
+    assert bracket.exit_correlation_id is None
+    assert bracket.last_exit_error == "registration unavailable"
+    assert "EXIT_PROVISIONAL_REGISTRATION_FAILED" in caplog.text
+
+
+def test_missing_provisional_registrar_prevents_broker_submission(tmp_path, caplog) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-missing")
+    om = _RecordingExitOrderManager(None)
+    bm = _bracket_with_pm(pm, om)
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+
+    caplog.set_level(logging.ERROR)
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=131.0)
+
+    assert om.calls == []
+    assert pm.get_position(SYMBOL) is not None
+    assert bracket.exit_submission_inflight is False
+    assert bracket.exit_correlation_id is None
+    assert bracket.last_exit_error == "PositionManager.add_pending_order unavailable"
+    assert "EXIT_PROVISIONAL_REGISTRATION_FAILED" in caplog.text
+
+
+def test_final_id_binding_failure_stays_converging_and_blocks_orphan(
+    tmp_path, caplog
+) -> None:
+    pm = _BindFailPositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-bindfail")
+    om = _RecordingExitOrderManager(pm)
+    bm = _bracket_with_pm(pm, om)
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+    adopt_calls: list[dict[str, Any]] = []
+    bm.attach_orphan_position = lambda **kwargs: adopt_calls.append(kwargs) or "orphan"  # type: ignore[method-assign]
+
+    caplog.set_level(logging.ERROR)
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=132.0)
+
+    assert len(om.calls) == 1
+    assert bracket.exit_order_id == "exit-final-1"
+    assert bracket.pending_exit_order_id == "exit-final-1"
+    assert bracket.exit_correlation_id is not None
+    assert bracket.exit_intent == "EXIT"
+    assert bracket.last_exit_error and "exit_order_id_bind_failed" in bracket.last_exit_error
+    assert bm.is_exit_converging(SYMBOL) is True
+    _runner_for(pm, bm)._adopt_orphan_positions()
+    assert adopt_calls == []
+    assert "EXIT_ORDER_ID_BIND_FAILED" in caplog.text
+
+
+def test_binding_failure_recovers_when_tagged_terminal_update_reconciles(tmp_path) -> None:
+    pm = _BindFailPositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-bindrecover")
+    om = _RecordingExitOrderManager(pm)
+    bm = _bracket_with_pm(pm, om)
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=133.0)
+    correlation_id = bracket.exit_correlation_id
+    assert correlation_id
+
+    PositionManager.bind_pending_order_id(pm, correlation_id, "exit-final-1")
+    pm.apply_broker_order_update(
+        "exit-final-1",
+        {
+            "order_id": "exit-final-1",
+            "tag": correlation_id,
+            "symbol": SYMBOL,
+            "side": "SELL",
+            "quantity": QTY,
+            "filled_quantity": QTY,
+            "average_price": 120.0,
+            "status": "COMPLETE",
+        },
+    )
+    bm.order_manager._broker.status = "COMPLETE"
+    bm.order_manager._broker.positions = []
+    pm.synchronize_with_broker([])
+    bm._close_bracket(bracket, close_source="test_recovery", exit_price=120.0)
+
+    assert pm.get_position(SYMBOL) is None
+    assert bm.is_symbol_managed(SYMBOL) is False
+    assert bm.is_exit_converging(SYMBOL) is False
+    assert bracket.exit_correlation_id is None
+    assert bracket.exit_intent is None
+    assert bracket.expected_exit_side is None
+    assert bracket.expected_exit_qty == 0
+    assert bm.get_bracket(f"orphan_{SYMBOL}") is None
+    assert pm.unresolved_terminal_summary()["count"] == 0
+
+
+def test_successful_exit_reconciliation_clears_convergence_metadata(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-success-clear")
+    om = _RecordingExitOrderManager(pm)
+    bm = _bracket_with_pm(pm, om)
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+
+    def place_order(**kwargs: Any) -> str:
+        om.calls.append(dict(kwargs))
+        pm.apply_broker_order_update(
+            "exit-final-1",
+            {
+                "order_id": "exit-final-1",
+                "tag": kwargs.get("tag"),
+                "symbol": SYMBOL,
+                "side": "SELL",
+                "quantity": QTY,
+                "filled_quantity": QTY,
+                "average_price": 120.0,
+                "status": "COMPLETE",
+            },
+        )
+        return "exit-final-1"
+
+    om.place_order = place_order  # type: ignore[method-assign]
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=time.time())
+    bm.order_manager._broker.positions = []
+    pm.synchronize_with_broker([])
+    bm._close_bracket(bracket, close_source="test_success", exit_price=120.0)
+
+    assert bracket.exit_submission_inflight is False
+    assert bracket.exit_intent is None
+    assert bracket.expected_exit_side is None
+    assert bracket.expected_exit_qty == 0
+    assert bracket.exit_correlation_id is None
+    assert bm.is_exit_converging(SYMBOL) is False
+
+
+def test_registration_failure_can_retry_without_duplicate_broker_exit(tmp_path) -> None:
+    pm = _RegistrationFailingPositionManager(str(tmp_path / "positions.json"))
+    pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-retry")
+    om = _RecordingExitOrderManager(pm)
+    bm = _bracket_with_pm(pm, om)
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=135.0)
+    assert om.calls == []
+
+    pm.add_pending_order = PositionManager.add_pending_order.__get__(pm, PositionManager)  # type: ignore[method-assign]
+    bracket.next_exit_attempt_at = None
+    bm._process_exit_state(bracket, {"reason": "TARGET", "qty": QTY}, now=136.0)
+
+    assert len(om.calls) == 1
+    assert bracket.exit_order_id == "exit-final-1"

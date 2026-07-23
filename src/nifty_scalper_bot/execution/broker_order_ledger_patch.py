@@ -434,6 +434,32 @@ def apply_patches() -> None:
         payload["order_id"] = oid
         orders = getattr(self, "_orders", {})
         managed = isinstance(orders, dict) and oid in orders
+        tag = str(payload.get("tag") or "").strip()
+        if not managed and tag and isinstance(orders, dict) and tag in orders:
+            final_oid = oid
+            binder = getattr(self, "bind_pending_order_id", None)
+            if final_oid and final_oid != tag and callable(binder):
+                with suppress(Exception):
+                    binder(tag, final_oid)
+            orders = getattr(self, "_orders", {})
+            if isinstance(orders, dict) and final_oid in orders:
+                oid = final_oid
+            else:
+                oid = tag
+                payload["order_id"] = oid
+            managed = True
+        client_order_id = str(
+            payload.get("client_order_id") or payload.get("clientOrderId") or ""
+        ).strip()
+        if (
+            not managed
+            and client_order_id
+            and isinstance(orders, dict)
+            and client_order_id in orders
+        ):
+            oid = client_order_id
+            payload["order_id"] = oid
+            managed = True
         ledger = getattr(self, "_broker_order_ledger", {}) or {}
         previous = ledger.get(oid) if isinstance(ledger, Mapping) else None
 

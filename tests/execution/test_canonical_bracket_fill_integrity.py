@@ -40,9 +40,27 @@ class _Broker:
         return True
 
 
+class _Positions:
+    def __init__(self) -> None:
+        self.orders: dict[str, dict[str, Any]] = {}
+
+    def add_pending_order(self, order_id: str, symbol: str, side: str, qty: int, price: float, order_type: str, **kwargs: Any) -> None:
+        self.orders[str(order_id)] = {"symbol": symbol, "side": side, "qty": qty, **kwargs}
+
+    def bind_pending_order_id(self, provisional_order_id: str, final_order_id: str) -> None:
+        self.orders[str(final_order_id)] = self.orders.pop(str(provisional_order_id))
+
+    def remove_pending_order(self, order_id: str) -> None:
+        self.orders.pop(str(order_id), None)
+
+    def is_exit_converging(self, _symbol: str) -> bool:
+        return False
+
+
 class _OrderManager:
     def __init__(self, broker: _Broker) -> None:
         self._broker = broker
+        self._positions = _Positions()
         self._last_order_decision: dict[str, Any] = {}
         self.place_calls: list[dict[str, Any]] = []
 

@@ -535,3 +535,67 @@ def test_non_nifty_option_uses_its_exact_metadata_lot_size(monkeypatch, tmp_path
     monkeypatch.setattr(manager, "is_live_mode", lambda: True)
 
     assert manager._lot_size_for_symbol("NFO:BANKNIFTY2671452000CE") == 35
+
+
+def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class StrictBroker:
+        is_simulated_adapter = True
+
+        def __init__(self) -> None:
+            self.payload = None
+
+        def place_order(
+            self,
+            *,
+            symbol,
+            side,
+            quantity,
+            product,
+            order_type,
+            price=None,
+            trigger_price=None,
+            tag=None,
+            variety="regular",
+        ):
+            self.payload = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "product": product,
+                "order_type": order_type,
+                "price": price,
+                "trigger_price": trigger_price,
+                "tag": tag,
+                "variety": variety,
+            }
+            return {"order_id": "strict-exit-1", "status": "SUBMITTED", "tag": tag}
+
+    broker = StrictBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 95.0, order_id="entry-1"
+    )
+    manager._order_live_execution_enabled = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.LIMIT,
+        price=100.0,
+        check_risk=False,
+        intent="EXIT",
+        bracket_id="entry-1",
+        tag="EXIT_abcd1234_1",
+    )
+
+    assert order_id == "strict-exit-1"
+    assert broker.payload is not None
+    assert broker.payload["tag"] == "EXIT_abcd1234_1"

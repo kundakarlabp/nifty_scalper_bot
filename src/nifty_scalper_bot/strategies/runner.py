@@ -16278,6 +16278,43 @@ class StrategyRunner:
                 details={"trace_id": trace_id, "error": str(exc)},
             )
 
+
+    def _broker_reports_symbol_flat(self, symbol: str) -> bool:
+        """Return True when broker positions explicitly report no exposure."""
+
+        broker = getattr(getattr(self._bracket_manager, "order_manager", None), "_broker", None)
+        fetcher = getattr(broker, "get_positions", None) or getattr(broker, "positions", None)
+        if not callable(fetcher):
+            return False
+        try:
+            rows = fetcher()
+        except Exception:
+            return False
+        wanted = str(symbol or "").upper()
+        saw_symbol = False
+        for row in rows or []:
+            raw_symbol = str(
+                getattr(row, "symbol", "")
+                or getattr(row, "tradingsymbol", "")
+                or (row.get("symbol") if isinstance(row, dict) else "")
+                or (row.get("tradingsymbol") if isinstance(row, dict) else "")
+                or ""
+            ).upper()
+            if raw_symbol != wanted and not wanted.endswith(raw_symbol):
+                continue
+            saw_symbol = True
+            raw_qty = (
+                getattr(row, "quantity", None)
+                if not isinstance(row, dict)
+                else row.get("quantity")
+            )
+            try:
+                if abs(int(float(raw_qty or 0))) > 0:
+                    return False
+            except Exception:
+                return False
+        return saw_symbol
+
     def _adopt_orphan_positions(self) -> None:
         """
         Auto-adopt orphan positions with default risk management.
@@ -16328,6 +16365,16 @@ class StrategyRunner:
                 )
 
                 if qty <= 0 or entry <= 0:
+                    continue
+
+                exit_converging = getattr(
+                    self._bracket_manager, "is_exit_converging", None
+                )
+                if callable(exit_converging) and exit_converging(symbol):
+                    continue
+
+                broker_flat = getattr(self, "_broker_reports_symbol_flat", None)
+                if callable(broker_flat) and broker_flat(symbol):
                     continue
 
                 # ═══════════════════════════════════════════════════════════════

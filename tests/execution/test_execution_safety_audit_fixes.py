@@ -1049,6 +1049,18 @@ def test_bracket_lifecycle_trailing_and_exits_on_live_class(
 
     sym = "NFO:NIFTYLIFECYCLE24050CE"
     bm = BracketManager(order_manager=_OM())
+    class _Positions:
+        def __init__(self):
+            self.orders = {}
+        def add_pending_order(self, order_id, symbol, side, qty, price, order_type, **kwargs):
+            self.orders[str(order_id)] = dict(symbol=symbol, side=side, qty=qty, **kwargs)
+        def bind_pending_order_id(self, provisional_order_id, final_order_id):
+            self.orders[str(final_order_id)] = self.orders.pop(str(provisional_order_id))
+        def remove_pending_order(self, order_id):
+            self.orders.pop(str(order_id), None)
+        def is_exit_converging(self, _symbol):
+            return False
+    bm.order_manager._positions = _Positions()
     bm._running = False
     try:
         bm.register_virtual_bracket(
