@@ -8,7 +8,8 @@ from typing import Any
 
 import pytest
 
-from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.bracket_manager import BracketExitLifecycle, BracketManager
+from nifty_scalper_bot.execution.ownership import BoundBracketManager
 from nifty_scalper_bot.execution.position_manager import Position, PositionManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -801,3 +802,265 @@ def test_runner_local_generation_invalidates_absent_snapshot_before_adoption(tmp
 
     pm.synchronize_with_broker([_broker_row()])
     assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.NONZERO
+
+class _ReconBroker:
+    def __init__(self, positions: list[dict[str, Any]]) -> None:
+        self.positions = positions
+        self.get_positions_calls = 0
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        self.get_positions_calls += 1
+        return list(self.positions)
+
+
+class _ReconOrderManager:
+    def __init__(self, bracket_manager: Any, broker: _ReconBroker) -> None:
+        self._bracket_manager = bracket_manager
+        self._broker = broker
+        self.reconcile_calls = 0
+        self.guard_calls: list[dict[str, Any]] = []
+
+    def reconcile_open_orders_with_broker(self) -> None:
+        self.reconcile_calls += 1
+
+    def guard_orphan_position(self, **kwargs: Any) -> str:
+        self.guard_calls.append(kwargs)
+        return "guarded"
+
+    def _log_status_report(self) -> None:
+        return None
+
+
+class _ReconBrokerClient:
+    def __init__(self, broker: _ReconBroker) -> None:
+        self.client = broker
+
+
+class _ExitConvergingBracket:
+    def __init__(self, symbol: str, *, converging: bool = True) -> None:
+        self.symbol = symbol
+        self.converging = converging
+        self.reconcile_calls: list[str] = []
+        self._managed = True
+
+    def managed_symbols(self) -> tuple[str, ...]:
+        return (self.symbol,) if self._managed else ()
+
+    def is_exit_converging(self, symbol: str) -> bool:
+        return self.converging and self._managed and symbol == self.symbol
+
+    def reconcile_symbol_flat(self, symbol: str) -> int:
+        self.reconcile_calls.append(symbol)
+        if self._managed:
+            self._managed = False
+            return 1
+        return 0
+
+    def has_unresolved_exit(self) -> bool:
+        return bool(self._managed and self.converging)
+
+    def get_first_unresolved_exit_bracket_id(self) -> str | None:
+        return "entry-1" if self.has_unresolved_exit() else None
+
+    def is_symbol_managed(self, symbol: str) -> bool:
+        return self._managed and symbol == self.symbol
+
+    def manual_override_close(self, *_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("generic ghost cleanup must remain the owner for non-exit brackets")
+
+
+def _entry_blocker_for(bm: Any) -> dict[str, Any] | None:
+    manager = BoundBracketManager.__new__(BoundBracketManager)
+    manager.order_manager = SimpleNamespace(_position_manager=None)
+    manager.has_unresolved_exit = bm.has_unresolved_exit
+    manager.get_first_unresolved_exit_bracket_id = bm.get_first_unresolved_exit_bracket_id
+    return manager.current_entry_blocker()
+
+
+def _reconcile_ctx(tmp_path, broker_positions: list[dict[str, Any]], bm: Any) -> tuple[Any, PositionManager, _ReconBroker]:
+    broker = _ReconBroker(broker_positions)
+    pm = PositionManager(str(tmp_path / "reconcile_positions.json"))
+    om = _ReconOrderManager(bm, broker)
+    ctx = SimpleNamespace()
+    ctx.position_manager = pm
+    ctx.order_manager = om
+    ctx.broker_client = _ReconBrokerClient(broker)
+    ctx.unresolved_reconciliation_symbols = set()
+    ctx.unprotected_broker_positions = set()
+    ctx.unprotected_broker_position = False
+    return ctx, pm, broker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("broker_rows", "expected_exposure"),
+    [
+        ([_broker_row(0)], "FLAT"),
+        ([], "ABSENT"),
+    ],
+)
+async def test_real_bracket_manager_flat_reconcile_clears_unresolved_entry_blocker(
+    tmp_path,
+    broker_rows: list[dict[str, Any]],
+    expected_exposure: str,
+) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+    from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+    broker = _ReconBroker(broker_rows)
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    order_manager = _ReconOrderManager(None, broker)
+    order_manager._position_manager = pm
+    order_manager._positions = pm
+    bm = BracketManager(order_manager=order_manager)
+    order_manager._bracket_manager = bm
+
+    try:
+        bm.register_virtual_bracket(
+            order_id="entry-stale-exit",
+            symbol=SYMBOL,
+            side="BUY",
+            qty=QTY,
+            price=100.0,
+            sl=90.0,
+            tp=120.0,
+        )
+        bm.confirm_entry_fill("entry-stale-exit", 100.0)
+        bracket = bm.get_bracket("entry-stale-exit")
+        assert bracket is not None
+        bracket.exit_pending = True
+        bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+        bracket.pending_exit_order_id = "exit-stale"
+
+        assert bm.is_exit_converging(SYMBOL) is True
+        blocker_before = bm.current_entry_blocker()
+        assert blocker_before is not None
+        assert blocker_before["block_reason"] == "unresolved_exit_position"
+
+        ctx = SimpleNamespace()
+        ctx.position_manager = pm
+        ctx.order_manager = order_manager
+        ctx.broker_client = _ReconBrokerClient(broker)
+        ctx.unresolved_reconciliation_symbols = set()
+        ctx.unprotected_broker_positions = set()
+        ctx.unprotected_broker_position = False
+
+        await _reconcile_state(ctx, source="test")
+
+        assert pm.broker_exposure_state(SYMBOL) is getattr(
+            BrokerExposureState, expected_exposure
+        )
+        assert bm.is_exit_converging(SYMBOL) is False
+        assert bm.current_entry_blocker() is None
+        assert (
+            bm.get_bracket("entry-stale-exit") is None
+            or SYMBOL not in bm.managed_symbols()
+        )
+
+        await _reconcile_state(ctx, source="test")
+
+        assert bm.is_exit_converging(SYMBOL) is False
+        assert bm.current_entry_blocker() is None
+        assert bm.get_bracket("orphan_" + SYMBOL) is None
+        assert list(bm.managed_symbols()).count(SYMBOL) <= 1
+        assert broker.get_positions_calls == 2
+    finally:
+        _stop_bracket_manager(bm)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_state_clears_stale_exit_when_broker_flat(tmp_path) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+
+    bm = _ExitConvergingBracket(SYMBOL)
+    ctx, _pm, broker = _reconcile_ctx(tmp_path, [_broker_row(0)], bm)
+
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.reconcile_calls == [SYMBOL]
+    assert _entry_blocker_for(bm) is None
+    assert broker.get_positions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_state_clears_stale_exit_when_symbol_absent_from_broker_snapshot(tmp_path) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+
+    bm = _ExitConvergingBracket(SYMBOL)
+    ctx, _pm, _broker = _reconcile_ctx(tmp_path, [], bm)
+
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.reconcile_calls == [SYMBOL]
+    assert _entry_blocker_for(bm) is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_state_does_not_clear_when_broker_exposure_unknown(tmp_path, monkeypatch) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+    from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+    bm = _ExitConvergingBracket(SYMBOL)
+    ctx, pm, _broker = _reconcile_ctx(tmp_path, [_broker_row(0)], bm)
+    monkeypatch.setattr(pm, "broker_exposure_state", lambda _symbol: BrokerExposureState.UNKNOWN)
+
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.reconcile_calls == []
+    assert _entry_blocker_for(bm)["block_reason"] == "unresolved_exit_position"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_state_does_not_clear_when_broker_position_nonzero(tmp_path) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+
+    bm = _ExitConvergingBracket(SYMBOL)
+    ctx, _pm, _broker = _reconcile_ctx(tmp_path, [_broker_row(QTY)], bm)
+
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.reconcile_calls == []
+    assert _entry_blocker_for(bm)["block_reason"] == "unresolved_exit_position"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_state_does_not_clear_on_local_position_disagreement(tmp_path, monkeypatch) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+
+    bm = _ExitConvergingBracket(SYMBOL)
+    ctx, pm, _broker = _reconcile_ctx(tmp_path, [_broker_row(0)], bm)
+    disagreement = SimpleNamespace(quantity=QTY)
+    monkeypatch.setattr(pm, "get_position", lambda _symbol: disagreement)
+
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.reconcile_calls == []
+    assert _entry_blocker_for(bm)["block_reason"] == "unresolved_exit_position"
+
+
+@pytest.mark.asyncio
+async def test_flat_exit_reconciliation_is_idempotent_across_reconcile_runs(tmp_path) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+
+    bm = _ExitConvergingBracket(SYMBOL)
+    ctx, _pm, _broker = _reconcile_ctx(tmp_path, [_broker_row(0)], bm)
+
+    await _reconcile_state(ctx, source="test")
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.reconcile_calls == [SYMBOL]
+    assert bm.managed_symbols() == ()
+    assert _entry_blocker_for(bm) is None
+
+
+@pytest.mark.asyncio
+async def test_non_exit_ghost_bracket_not_changed_by_flat_exit_helper(tmp_path) -> None:
+    from nifty_scalper_bot.core.app import _reconcile_state
+
+    bm = _ExitConvergingBracket(SYMBOL, converging=False)
+    ctx, _pm, _broker = _reconcile_ctx(tmp_path, [_broker_row(0)], bm)
+
+    await _reconcile_state(ctx, source="test")
+
+    assert bm.reconcile_calls == []
+    assert bm.managed_symbols() == (SYMBOL,)

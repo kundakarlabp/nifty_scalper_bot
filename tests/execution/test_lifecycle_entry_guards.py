@@ -192,3 +192,32 @@ def test_bound_bracket_manager_keeps_unresolved_bracket_priority() -> None:
     assert blocker is not None
     assert blocker["block_reason"] == "unresolved_exit_position"
     assert blocker["bracket_id"] == "bracket-1"
+
+
+def test_current_entry_blocker_is_read_only() -> None:
+    broker = SimpleNamespace(get_positions=lambda: (_ for _ in ()).throw(AssertionError("broker called")))
+    order_manager = SimpleNamespace(_position_manager=None, _broker=broker)
+    manager = BoundBracketManager.__new__(BoundBracketManager)
+    manager.order_manager = order_manager
+    state = {"managed": True, "unresolved": True}
+    manager.has_unresolved_exit = lambda: state["unresolved"]
+    manager.get_first_unresolved_exit_bracket_id = lambda: "entry-1"
+    reconcile_calls = 0
+
+    def forbidden_reconcile(_symbol: str) -> None:
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        raise AssertionError("reconcile called")
+
+    manager.reconcile_symbol_flat = forbidden_reconcile
+
+    before = {
+        "unresolved": state["unresolved"],
+        "managed": state["managed"],
+    }
+    blocker = manager.current_entry_blocker()
+
+    assert blocker is not None
+    assert blocker["block_reason"] == "unresolved_exit_position"
+    assert reconcile_calls == 0
+    assert state == before
