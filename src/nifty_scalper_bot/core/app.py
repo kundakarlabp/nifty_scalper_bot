@@ -10771,6 +10771,16 @@ async def startup_sequence(ctx: BotContext) -> None:
     ):
         ctx.market_data_manager.set_event_loop(loop)
 
+    # Hand the Runner the authoritative running application loop. Ticks are
+    # delivered on background websocket/drain threads that have no loop of
+    # their own, so entry-evaluation drains can only be scheduled onto a loop
+    # explicitly attached here. This MUST happen before market data starts,
+    # otherwise early ticks would be marked pending with no scheduler.
+    if ctx.strategy_runner is not None and hasattr(
+        ctx.strategy_runner, "attach_runtime_loop"
+    ):
+        ctx.strategy_runner.attach_runtime_loop(loop)
+
     _set_startup_phase(ctx, "create_strategy_layer")
     _set_startup_phase(ctx, "wire_message_bus")
     _wire_and_start_message_bus(ctx)
