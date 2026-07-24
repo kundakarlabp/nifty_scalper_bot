@@ -14658,6 +14658,58 @@ def _should_reconcile_now(ctx: BotContext) -> bool:
         return True
 
 
+def _reconcile_flat_exit_brackets(ctx: BotContext) -> int:
+    """Clear exit-converging bracket lifecycles only after PM proves flat/absent."""
+
+    pm = getattr(ctx, "position_manager", None)
+    om = getattr(ctx, "order_manager", None)
+    bm = getattr(om, "_bracket_manager", None)
+    if pm is None or bm is None:
+        return 0
+
+    symbol_getter = getattr(bm, "managed_symbols", None)
+    if not callable(symbol_getter):
+        return 0
+
+    try:
+        symbols = tuple(symbol_getter())
+    except Exception:  # noqa: BLE001 - reconciliation must not fail the run
+        return 0
+
+    reconciled = 0
+    flat_states = {BrokerExposureState.FLAT, BrokerExposureState.ABSENT}
+    for symbol in symbols:
+        try:
+            exposure = pm.broker_exposure_state(symbol)
+        except Exception:  # noqa: BLE001 - keep other symbols fail-closed
+            continue
+        if exposure not in flat_states:
+            continue
+
+        try:
+            position = pm.get_position(symbol)
+            local_qty = int(getattr(position, "quantity", 0) or 0)
+        except Exception:  # noqa: BLE001 - disagreement/unknown stays blocked
+            continue
+        if local_qty != 0:
+            continue
+
+        try:
+            if not bm.is_exit_converging(symbol):
+                continue
+            reconciled += int(bm.reconcile_symbol_flat(symbol) or 0)
+        except Exception:
+            LOGGER.exception(
+                "FLAT_EXIT_BRACKET_RECONCILE_FAILED symbol=%s",
+                symbol,
+                extra={
+                    "event": "FLAT_EXIT_BRACKET_RECONCILE_FAILED",
+                    "symbol": symbol,
+                },
+            )
+    return reconciled
+
+
 async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
     """
     Syncs local state with Broker (Orders & Positions).
@@ -14757,6 +14809,20 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
             sync_started_at = datetime.now(timezone.utc)
             run_record["sync_started_at"] = sync_started_at.isoformat()
             broker_positions = await asyncio.to_thread(safe_sync_fetch)
+            reconciled_flat_exits = _reconcile_flat_exit_brackets(ctx)
+            if reconciled_flat_exits > 0:
+                LOGGER.info(
+                    "FLAT_EXIT_BRACKETS_RECONCILED count=%s run_id=%s source=%s",
+                    reconciled_flat_exits,
+                    reconcile_run_id,
+                    source,
+                    extra={
+                        "event": "FLAT_EXIT_BRACKETS_RECONCILED",
+                        "count": reconciled_flat_exits,
+                        "reconcile_run_id": reconcile_run_id,
+                        "source": source,
+                    },
+                )
             sync_completed_at = datetime.now(timezone.utc)
             run_record["sync_completed_at"] = sync_completed_at.isoformat()
             if hasattr(ctx, "unresolved_reconciliation_symbols"):

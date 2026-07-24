@@ -667,6 +667,11 @@ class BracketManager:
                         return bracket.bracket_id
         return None
 
+    def managed_symbols(self) -> tuple[str, ...]:
+        """Return normalized symbols currently indexed by BracketManager."""
+        with self._lock:
+            return tuple(self._symbol_map.keys())
+
     def attach_exit_executor(self, executor: Callable[[str, int], Any] | None) -> None:
         """Attach an external market-exit executor. Args: executor; Returns: None; Raises: None."""
         self._exit_executor = executor
