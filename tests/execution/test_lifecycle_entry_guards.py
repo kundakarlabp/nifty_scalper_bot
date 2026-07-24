@@ -202,11 +202,22 @@ def test_current_entry_blocker_is_read_only() -> None:
     state = {"managed": True, "unresolved": True}
     manager.has_unresolved_exit = lambda: state["unresolved"]
     manager.get_first_unresolved_exit_bracket_id = lambda: "entry-1"
-    manager.reconcile_symbol_flat = lambda _symbol: (_ for _ in ()).throw(AssertionError("reconcile called"))
+    reconcile_calls = 0
 
-    before = dict(state)
+    def forbidden_reconcile(_symbol: str) -> None:
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        raise AssertionError("reconcile called")
+
+    manager.reconcile_symbol_flat = forbidden_reconcile
+
+    before = {
+        "unresolved": state["unresolved"],
+        "managed": state["managed"],
+    }
     blocker = manager.current_entry_blocker()
 
     assert blocker is not None
     assert blocker["block_reason"] == "unresolved_exit_position"
+    assert reconcile_calls == 0
     assert state == before
