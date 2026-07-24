@@ -1856,3 +1856,79 @@ def test_dynamic_basket_old_ticks_do_not_churn_generation_during_grace(monkeypat
         )["ready"]
         is False
     )
+
+
+def test_slow_tick_subscriber_is_identified_without_tick_accounting_loss(caplog):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._desired_tokens.add(1)
+    mdm._active_subscribed_symbols.add(symbol)
+    mdm._symbol_subscription_generation[symbol] = mdm._subscription_generation
+    mdm._event_loop_thread_id = threading.get_ident()
+    calls: list[dict] = []
+
+    class SlowSubscriber:
+        def on_tick(self, tick: dict) -> None:
+            time.sleep(0.15)
+            calls.append(tick)
+
+    subscriber = SlowSubscriber()
+    mdm.subscribe(symbol, subscriber.on_tick)
+
+    with caplog.at_level("WARNING"):
+        mdm._process_queued_tick(_ws_tick(1, 100.0, 1, volume=10, bid=99.5, ask=100.5))
+
+    assert len(calls) == 1
+    assert mdm.get_tick_pressure_stats()["max_active_drains"] == 0
+    records = [
+        r for r in caplog.records if getattr(r, "event", "") == "TICK_STAGE_SLOW"
+    ]
+    assert any(
+        getattr(r, "stage", None) == "tick_subscriber_callback"
+        and getattr(r, "callback", "").endswith("SlowSubscriber.on_tick")
+        and getattr(r, "duration_ms", 0.0) >= 100.0
+        for r in records
+    )
+    assert any(getattr(r, "stage", None) == "one_tick" for r in records)
+
+
+@pytest.mark.asyncio
+async def test_slow_subscriber_exception_isolated_and_drain_continues(caplog):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._desired_tokens.add(1)
+    mdm._active_subscribed_symbols.add(symbol)
+    mdm._symbol_subscription_generation[symbol] = mdm._subscription_generation
+    mdm._cached_selected_option_symbols = {symbol}
+    mdm._priority_context_cached_at = time.monotonic()
+    mdm.set_event_loop(asyncio.get_running_loop())
+    seen: list[float] = []
+
+    def delayed_failure(_tick: dict) -> None:
+        time.sleep(0.06)
+        raise RuntimeError("subscriber boom")
+
+    def observer(tick: dict) -> None:
+        seen.append(float(tick["last_price"]))
+
+    mdm.subscribe(symbol, delayed_failure)
+    mdm.subscribe(symbol, observer)
+
+    with caplog.at_level("WARNING"):
+        mdm._enqueue_latest_tick_for_drain(
+            _ws_tick(1, 100.0, 1, volume=10, bid=99.5, ask=100.5),
+            asyncio.get_running_loop(),
+        )
+        mdm._enqueue_latest_tick_for_drain(
+            _ws_tick(1, 101.0, 2, volume=11, bid=100.5, ask=101.5),
+            asyncio.get_running_loop(),
+        )
+        await mdm.drain_pending_ticks(timeout=2.0)
+
+    assert seen == [100.0, 101.0]
+    stats = mdm.get_tick_pressure_stats()
+    assert stats["pending_tick_count"] == 0
+    assert stats["max_active_drains"] == 1
+    assert any("Tick callback failed" in r.getMessage() for r in caplog.records)
+    assert any(getattr(r, "event", "") == "TICK_STAGE_SLOW" for r in caplog.records)
+    await _stop_mdm(mdm)

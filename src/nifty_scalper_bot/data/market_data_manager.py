@@ -1438,12 +1438,31 @@ class MarketDataManager:
 
     def _publish_closed_bar(self, bar: dict[str, Any]) -> None:
         """Args: bar. Returns: None. Raises: None."""
+        symbol = str(bar.get("symbol") or "")
+        stage_started = time.perf_counter()
         self._push_bar_to_pipeline(bar)
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="closed_bar_pipeline_push",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=str(bar.get("source") or "ws_candle"),
+            )
         for cb in list(self._bar_subscribers):
             try:
+                stage_started = time.perf_counter()
                 cb(dict(bar))
+                duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                if duration_ms >= 50.0:
+                    self._log_slow_tick_stage(
+                        stage="closed_bar_subscriber_callback",
+                        symbol=symbol,
+                        duration_ms=duration_ms,
+                        source=str(bar.get("source") or "ws_candle"),
+                        callback=cb,
+                    )
             except Exception as exc:
-                symbol = str(bar.get("symbol") or "")
                 callback_name = getattr(cb, "__qualname__", repr(cb))
                 log_throttled(
                     self._logger,
@@ -7196,6 +7215,84 @@ class MarketDataManager:
                     self._pending_far_ticks[key] = raw
                     self._pending_increment_locked(raw, key)
 
+    @staticmethod
+    def _tick_callback_identity(callback: Callable[..., Any]) -> str:
+        bound_self = getattr(callback, "__self__", None)
+        module = getattr(callback, "__module__", type(callback).__module__)
+        name = getattr(
+            callback,
+            "__qualname__",
+            getattr(callback, "__name__", type(callback).__name__),
+        )
+        if bound_self is not None and not isinstance(bound_self, type):
+            cls_name = type(bound_self).__name__
+            leaf = getattr(callback, "__name__", name.rsplit(".", 1)[-1])
+            return f"{module}.{cls_name}.{leaf}"
+        return f"{module}.{name}"
+
+    def _log_slow_tick_stage(
+        self,
+        *,
+        stage: str,
+        symbol: str | None,
+        duration_ms: float,
+        source: str | None = None,
+        callback: Callable[..., Any] | str | None = None,
+    ) -> None:
+        callback_name = (
+            self._tick_callback_identity(callback)
+            if callable(callback)
+            else (str(callback) if callback else None)
+        )
+        pending_ticks = 0
+        oldest_pending_age_ms = None
+        drain_active = 0
+        with self._pending_tick_lock:
+            pending_ticks = self._pending_count_locked()
+            oldest_pending_age_ms = (
+                self._oldest_pending_age_ms_locked() if pending_ticks else None
+            )
+            drain_active = int(self._tick_active_drains)
+        thread_id = threading.get_ident()
+        event_loop_thread = thread_id == getattr(self, "_event_loop_thread_id", None)
+        key = f"tick_stage_slow:{stage}:{callback_name or ''}:{symbol or ''}"
+        log_throttled(
+            self._logger,
+            key,
+            "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s duration_ms=%.3f pending_ticks=%d oldest_pending_age_ms=%s drain_active=%d source=%s thread_id=%s event_loop_thread=%s"
+            % (
+                stage,
+                callback_name,
+                symbol,
+                duration_ms,
+                pending_ticks,
+                (
+                    None
+                    if oldest_pending_age_ms is None
+                    else round(oldest_pending_age_ms, 3)
+                ),
+                drain_active,
+                source,
+                thread_id,
+                event_loop_thread,
+            ),
+            interval_sec=10.0,
+            level=logging.WARNING,
+            extra={
+                "event": "TICK_STAGE_SLOW",
+                "stage": stage,
+                "callback": callback_name,
+                "symbol": symbol,
+                "duration_ms": duration_ms,
+                "pending_ticks": pending_ticks,
+                "oldest_pending_age_ms": oldest_pending_age_ms,
+                "drain_active": drain_active,
+                "source": source,
+                "thread_id": thread_id,
+                "event_loop_thread": event_loop_thread,
+            },
+        )
+
     async def _drain_latest_ticks(self) -> None:
         drain_started = time.monotonic()
         with self._pending_tick_lock:
@@ -7237,6 +7334,7 @@ class MarketDataManager:
                 self._last_drain_duration_ms = max(
                     0.0, (time.monotonic() - drain_started) * 1000.0
                 )
+                drain_duration_ms = self._last_drain_duration_ms
                 self._tick_active_drains = max(0, self._tick_active_drains - 1)
                 self._update_pipeline_overload_locked()
                 has_more = self._pending_count_locked() > 0
@@ -7250,6 +7348,13 @@ class MarketDataManager:
                     and loop.is_running()
                 ):
                     self._schedule_tick_drain_locked(loop)
+            if drain_duration_ms >= 100.0:
+                self._log_slow_tick_stage(
+                    stage="drain_invocation",
+                    symbol=None,
+                    duration_ms=drain_duration_ms,
+                    source=None,
+                )
 
     async def drain_pending_ticks(self, *, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.0, timeout)
@@ -8309,7 +8414,19 @@ class MarketDataManager:
         return payload
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
+        tick_started = time.perf_counter()
+        symbol_for_timing = str(raw.get("symbol") or "") or None
+        source_for_timing = str(raw.get("source") or "ws")
+        stage_started = time.perf_counter()
         raw = self._normalize_ws_tick(raw)
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="normalize",
+                symbol=symbol_for_timing,
+                duration_ms=duration_ms,
+                source=source_for_timing,
+            )
         if raw is None:
             return
         volume_delta_normalized = False
@@ -8384,13 +8501,31 @@ class MarketDataManager:
                     )
                     return
 
+        stage_started = time.perf_counter()
         self._last_tick_snapshot[symbol] = {
             "ltp": tick.ltp,
             "volume": raw.get("volume_traded_today") or raw.get("volume_traded"),
         }
         self._last_tick_ts[symbol] = tick_ts
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="cache_update",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source_for_timing,
+            )
         engine = self.get_candle_engine(symbol)
+        stage_started = time.perf_counter()
         candle = engine.on_tick(tick)
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="candle_engine_on_tick",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source_for_timing,
+            )
         # ── EMIT TICK: replaces bare _store_tick call ─────────────────────────
         # _emit_tick calls _store_tick internally AND dispatches to _subscribers.
         # Before this fix: DataHub.subscribe_ticks() callbacks (including
@@ -8459,7 +8594,16 @@ class MarketDataManager:
         )
         if normalized_live is None:
             return
+        stage_started = time.perf_counter()
         self._ingest_normalized_tick(normalized_live)
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="tick_publication",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=str(normalized_live.get("source") or source_for_timing),
+            )
         if bool(normalized_live.get("tradable_quote")):
             # Log only on first quote, state transitions, or periodic debug interval.
             # Routine per-tick proof logs are suppressed to avoid high-frequency spam.
@@ -8546,7 +8690,16 @@ class MarketDataManager:
                 "source": "ws_candle",
             }
             self._refresh_candle_projection(symbol)
+            stage_started = time.perf_counter()
             self._publish_closed_bar(bar)
+            duration_ms = (time.perf_counter() - stage_started) * 1000.0
+            if duration_ms >= 50.0:
+                self._log_slow_tick_stage(
+                    stage="closed_bar_publication",
+                    symbol=symbol,
+                    duration_ms=duration_ms,
+                    source=source_for_timing,
+                )
             verbose_candles = str(
                 os.getenv("LOG_VERBOSE_CANDLES", "false")
             ).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -8555,6 +8708,15 @@ class MarketDataManager:
                 "LIVE_CANDLE_CLOSED symbol=%s source=ws_candle close=%s",
                 symbol,
                 bar["close"],
+            )
+
+        tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
+        if tick_duration_ms >= 100.0:
+            self._log_slow_tick_stage(
+                stage="one_tick",
+                symbol=symbol,
+                duration_ms=tick_duration_ms,
+                source=source_for_timing,
             )
 
         # ── PIPELINE SYNC (closed bars only) ─────────────────────────────────
@@ -9554,7 +9716,17 @@ class MarketDataManager:
                             },
                         )
                 else:
+                    stage_started = time.perf_counter()
                     result = callback(dict(tick_payload))
+                    duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                    if duration_ms >= 50.0:
+                        self._log_slow_tick_stage(
+                            stage="tick_subscriber_callback",
+                            symbol=symbol,
+                            duration_ms=duration_ms,
+                            source=source,
+                            callback=callback,
+                        )
                     self._dispatch_awaitable_callback_result(
                         result,
                         symbol=symbol,
@@ -13014,7 +13186,8 @@ class MarketDataManager:
         observed_at = payload.pop("_local_timestamp", None)
         received_at = (
             float(observed_at)
-            if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool)
+            if isinstance(observed_at, (int, float))
+            and not isinstance(observed_at, bool)
             else time.time()
         )
         payload["source"] = source
@@ -13756,15 +13929,25 @@ class MarketDataManager:
                     }.values()
                 )
                 deduped.sort(key=lambda item: item["timestamp"])
-                if min_rows > 0 and len(deduped) < min_rows and attempt_name != attempt_specs[-1][0]:
+                if (
+                    min_rows > 0
+                    and len(deduped) < min_rows
+                    and attempt_name != attempt_specs[-1][0]
+                ):
                     if len(deduped) > len(best_so_far):
                         best_so_far = deduped
                         best_attempt_meta = (
-                            attempt_name, from_date, to_date, len(rows)
+                            attempt_name,
+                            from_date,
+                            to_date,
+                            len(rows),
                         )
                     self._logger.info(
                         "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING symbol=%s attempt=%s returned_rows=%s min_rows=%s",
-                        symbol, attempt_name, len(deduped), min_rows,
+                        symbol,
+                        attempt_name,
+                        len(deduped),
+                        min_rows,
                         extra={
                             "event": "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING",
                             "symbol": symbol,
