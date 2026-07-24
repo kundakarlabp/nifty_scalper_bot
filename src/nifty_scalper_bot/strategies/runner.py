@@ -143,6 +143,7 @@ from nifty_scalper_bot.strategies.signal_quality import (
 )
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.utils import metrics
+from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.log_throttle import (
     log_on_change,
@@ -1155,6 +1156,20 @@ class StrategyRunner:
         self._eval_queue_peak = 0
         self._eval_queue_lock = threading.Lock()
         self._eval_in_progress_symbols: set[str] = set()
+        # Bounded new-entry evaluation coalescing (protected by
+        # _eval_gate_lock, reused rather than a new lock). Ticks routed to
+        # OPTION_CANDIDATE/UNDERLYING mark the symbol pending here and
+        # schedule at most one drain task instead of running the heavy
+        # phase9 body inline on the MDM/DataHub tick-ingestion call stack.
+        # POSITION_MANAGEMENT and CONTEXT_ONLY routes are unaffected and
+        # continue to call _on_tick synchronously exactly as before.
+        self._pending_entry_eval_symbols: set[str] = set()
+        self._entry_eval_generation_by_symbol: dict[str, int] = defaultdict(int)
+        self._entry_eval_drained_generation: dict[str, int] = {}
+        self._entry_eval_drain_scheduled: bool = False
+        self._entry_eval_active: bool = False
+        self._entry_eval_drain_count: int = 0
+        self._entry_eval_reschedule_count: int = 0
         self._eval_counter = 0
         self._signal_counter = 0
         self._regime_block_counter = 0
@@ -7755,6 +7770,22 @@ class StrategyRunner:
             # backfills. Ticks will now flow directly into Phase 0/1/4 so the
             # OneMinuteBarBuilder can construct live candles autonomously.
 
+            # Category-1 tick/strategy separation: new-entry candidate routes
+            # (a selected/trigger-candidate option, or an underlying trigger)
+            # are coalesced into a bounded async drain instead of running the
+            # heavy phase9 body inline here. POSITION_MANAGEMENT (open
+            # positions -- protective/bracket handling already ran above at
+            # PHASE -1 inside _on_tick for the synchronous routes) and
+            # CONTEXT_ONLY both keep calling _on_tick synchronously,
+            # unchanged, exactly as before this fix.
+            route = self._entry_evaluation_route(normalized_symbol)
+            if route in (
+                EntryEvaluationRoute.OPTION_CANDIDATE,
+                EntryEvaluationRoute.UNDERLYING,
+            ):
+                self._notify_entry_eval_pending(normalized_symbol, trace_id=trace_id)
+                return
+
             with self._eval_gate_lock:
                 if normalized_symbol in self._eval_in_progress_symbols:
                     return
@@ -7825,6 +7856,197 @@ class StrategyRunner:
                 self._regime_block_counter = 0
                 self._capital_block_counter = 0
                 self._last_summary_log = now
+
+    # ==================== ENTRY-EVAL COALESCING (Category 1) ====================
+    # Applies only to new-entry strategy evaluation (OPTION_CANDIDATE/
+    # UNDERLYING routes). MDM/DataHub tick ingestion, CandleEngine updates,
+    # and protective/bracket handling (POSITION_MANAGEMENT route, and Phase -1
+    # bracket forwarding inside _on_tick for whichever route runs) are
+    # entirely unaffected -- this only changes *when* the existing heavy
+    # phase9 body runs for new-entry candidates, never *what* it does.
+
+    def _notify_entry_eval_pending(
+        self, symbol: str, *, trace_id: str | None = None
+    ) -> None:
+        """Mark a new-entry candidate pending and schedule at most one bounded
+        drain. Must stay cheap: no strategy evaluation happens here.
+        Args: symbol, trace_id. Returns: none. Raises: none (fails closed by
+        logging and leaving the symbol pending on any scheduling error).
+        """
+        try:
+            loop = self._main_loop
+            with self._eval_gate_lock:
+                self._entry_eval_generation_by_symbol[symbol] += 1
+                generation = self._entry_eval_generation_by_symbol[symbol]
+                already_pending = symbol in self._pending_entry_eval_symbols
+                self._pending_entry_eval_symbols.add(symbol)
+                should_schedule = (
+                    not self._entry_eval_drain_scheduled
+                    and not self._entry_eval_active
+                )
+                if should_schedule:
+                    self._entry_eval_drain_scheduled = True
+            self._logger.debug(
+                "ENTRY_EVAL_COALESCED symbol=%s generation=%d already_pending=%s",
+                symbol,
+                generation,
+                already_pending,
+                extra={
+                    "event": "ENTRY_EVAL_COALESCED",
+                    "symbol": symbol,
+                    "generation": generation,
+                    "already_pending": already_pending,
+                    "trace_id": trace_id,
+                },
+            )
+            if should_schedule:
+                if loop is not None and loop.is_running():
+                    loop.call_soon_threadsafe(
+                        lambda: safe_task(self._drain_pending_entry_evaluations())
+                    )
+                else:
+                    # No running loop reachable from this thread (e.g. a
+                    # focused unit test invoking the callback directly).
+                    # Run the drain inline rather than dropping the pending
+                    # evaluation -- still bounded to the pending set, never
+                    # replays intermediate ticks.
+                    with self._eval_gate_lock:
+                        self._entry_eval_drain_scheduled = False
+                    asyncio.run(self._drain_pending_entry_evaluations())
+        except Exception as exc:  # noqa: BLE001 - must never crash MDM ingestion
+            with self._eval_gate_lock:
+                self._entry_eval_drain_scheduled = False
+            self._logger.error(
+                "ENTRY_EVAL_SCHEDULE_FAILED symbol=%s error_type=%s",
+                symbol,
+                type(exc).__name__,
+                extra={
+                    "event": "ENTRY_EVAL_SCHEDULE_FAILED",
+                    "symbol": symbol,
+                    "error_type": type(exc).__name__,
+                    "trace_id": trace_id,
+                },
+            )
+
+    async def _drain_pending_entry_evaluations(self) -> None:
+        """Single-flight bounded drain of pending new-entry candidates.
+        Reads the latest canonical tick per symbol (never the stale payload
+        captured at notification time). Args: none. Returns: none.
+        Raises: none (isolates one symbol's failure from the rest).
+        """
+        with self._eval_gate_lock:
+            if self._entry_eval_active:
+                return
+            self._entry_eval_active = True
+            self._entry_eval_drain_scheduled = False
+        drain_started = time.monotonic()
+        processed = 0
+        rescheduled = 0
+        try:
+            while True:
+                with self._eval_gate_lock:
+                    pending = sorted(self._pending_entry_eval_symbols)
+                    self._pending_entry_eval_symbols.clear()
+                    captured_generations = {
+                        sym: self._entry_eval_generation_by_symbol[sym]
+                        for sym in pending
+                    }
+                if not pending:
+                    break
+                for symbol in pending:
+                    try:
+                        self._evaluate_entry_from_latest_state(symbol)
+                    except Exception as exc:  # noqa: BLE001 - isolate one symbol
+                        self._logger.error(
+                            "SIGNAL_EVALUATION_FAILURE symbol=%s error_type=%s",
+                            symbol,
+                            type(exc).__name__,
+                            extra={
+                                "event": "SIGNAL_EVALUATION_FAILURE",
+                                "symbol": symbol,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                    finally:
+                        with self._eval_gate_lock:
+                            self._entry_eval_drained_generation[symbol] = (
+                                captured_generations[symbol]
+                            )
+                    processed += 1
+                    await asyncio.sleep(0)
+                with self._eval_gate_lock:
+                    newer = {
+                        sym
+                        for sym in pending
+                        if self._entry_eval_generation_by_symbol[sym]
+                        != self._entry_eval_drained_generation.get(sym)
+                    }
+                    if newer:
+                        self._pending_entry_eval_symbols.update(newer)
+                        rescheduled += len(newer)
+                    else:
+                        break
+        finally:
+            with self._eval_gate_lock:
+                self._entry_eval_active = False
+                pending_remaining = bool(self._pending_entry_eval_symbols)
+                if pending_remaining and not self._entry_eval_drain_scheduled:
+                    self._entry_eval_drain_scheduled = True
+                    reschedule_needed = True
+                else:
+                    reschedule_needed = False
+                self._entry_eval_drain_count += 1
+                self._entry_eval_reschedule_count += rescheduled
+            duration_ms = (time.monotonic() - drain_started) * 1000.0
+            self._logger.debug(
+                "ENTRY_EVAL_DRAIN pending_count=%d processed_count=%d "
+                "rescheduled_count=%d duration_ms=%.1f",
+                len(pending),
+                processed,
+                rescheduled,
+                duration_ms,
+                extra={
+                    "event": "ENTRY_EVAL_DRAIN",
+                    "pending_count": len(pending),
+                    "processed_count": processed,
+                    "rescheduled_count": rescheduled,
+                    "duration_ms": round(duration_ms, 1),
+                    "active_basket_size": len(getattr(self, "_active_symbols", ())),
+                },
+            )
+            if reschedule_needed:
+                loop = self._main_loop
+                if loop is not None and loop.is_running():
+                    loop.call_soon_threadsafe(
+                        lambda: safe_task(self._drain_pending_entry_evaluations())
+                    )
+                else:
+                    with self._eval_gate_lock:
+                        self._entry_eval_drain_scheduled = False
+
+    def _evaluate_entry_from_latest_state(
+        self,
+        symbol: str,
+        *,
+        trace_id: str | None = None,
+    ) -> None:
+        """Evaluate one coalesced new-entry candidate using the latest
+        canonical tick (not a stale payload captured at notification time).
+        Delegates to the existing, unmodified heavy _on_tick body -- no
+        strategy/risk/order behaviour changes here. Args: symbol, trace_id.
+        Returns: none. Raises: propagates to the drain's per-symbol isolation.
+        """
+        latest_tick = self._last_tick.get(symbol)
+        if not latest_tick:
+            # No canonical tick observed yet for this symbol; nothing to
+            # evaluate against. Same "missing state" outcome _on_tick already
+            # produces when it cannot resolve a price.
+            return
+        tick_payload = dict(latest_tick)
+        tick_payload["trace_id"] = (
+            trace_id or tick_payload.get("trace_id") or f"{symbol}-drain"
+        )
+        self._on_tick(symbol, tick_payload)
 
     def _health_watchdog(self) -> None:
         """Args: none; Returns: none; Raises: none."""
