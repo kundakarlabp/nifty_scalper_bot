@@ -7,8 +7,156 @@ from nifty_scalper_bot.execution import native_entry_gate
 from nifty_scalper_bot.execution.ownership import BoundBracketManager
 
 
+import pytest
+
+from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+
+_SYMBOL = "NFO:NIFTY2662324050PE"
+_QTY = 65
+
+
+class _NoBrokerCalls:
+    def get_positions(self):
+        raise AssertionError("entry blocker must not call broker positions")
+
+    def positions(self):
+        raise AssertionError("entry blocker must not call broker positions")
+
+
+class _OrderManagerForEntryGuard:
+    def __init__(self, pm: PositionManager) -> None:
+        self._position_manager = pm
+        self._positions = pm
+        self._broker = _NoBrokerCalls()
+
+
+def _broker_row(quantity: int) -> dict[str, Any]:
+    return {
+        "symbol": _SYMBOL,
+        "quantity": quantity,
+        "average_price": 100.0,
+        "product": "MIS",
+    }
+
+
+def _real_bound_bracket_manager(pm: PositionManager) -> BracketManager:
+    bm = BracketManager(order_manager=_OrderManagerForEntryGuard(pm))
+    bm.register_virtual_bracket(
+        order_id="entry-stale-exit",
+        symbol=_SYMBOL,
+        side="BUY",
+        qty=_QTY,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+    )
+    bm.confirm_entry_fill("entry-stale-exit", 100.0)
+    bracket = bm.get_bracket("entry-stale-exit")
+    assert bracket is not None
+    bracket.remaining_quantity = 0
+    bracket.position_flat_confirmed = True
+    bracket.exit_submission_inflight = False
+    bracket.pending_exit_order_id = None
+    bracket.exit_order_id = "historical-exit-1"
+    return bm
+
+
+@pytest.mark.parametrize(
+    "exposure", [BrokerExposureState.FLAT, BrokerExposureState.ABSENT]
+)
+def test_fresh_broker_flat_clears_false_unresolved_exit_blocker(
+    tmp_path, exposure
+) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    if exposure is BrokerExposureState.FLAT:
+        pm.synchronize_with_broker([_broker_row(0)])
+    else:
+        pm.synchronize_with_broker([])
+    bm = _real_bound_bracket_manager(pm)
+
+    assert pm.get_position(_SYMBOL) is None
+    assert pm.broker_exposure_state(_SYMBOL) is exposure
+    assert bm.is_exit_converging(_SYMBOL) is True
+
+    blocker = bm.current_entry_blocker()
+
+    assert blocker is None
+    assert bm.is_exit_converging(_SYMBOL) is False
+    assert bm.get_bracket("orphan_" + _SYMBOL) is None
+
+
+def test_unknown_broker_exposure_keeps_unresolved_exit_blocker(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    bm = _real_bound_bracket_manager(pm)
+
+    blocker = bm.current_entry_blocker()
+
+    assert blocker is not None
+    assert blocker["block_reason"] == "unresolved_exit_position"
+    assert blocker["broker_exposure_state"] == BrokerExposureState.UNKNOWN.value
+    assert bm.is_exit_converging(_SYMBOL) is True
+
+
+def test_nonzero_broker_exposure_keeps_unresolved_exit_blocker(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    pm.synchronize_with_broker([_broker_row(_QTY)])
+    bm = _real_bound_bracket_manager(pm)
+
+    blocker = bm.current_entry_blocker()
+
+    assert blocker is not None
+    assert blocker["block_reason"] == "unresolved_exit_position"
+    assert blocker["broker_exposure_state"] == BrokerExposureState.NONZERO.value
+    assert bm.is_exit_converging(_SYMBOL) is True
+
+
+@pytest.mark.parametrize(
+    "exposure", [BrokerExposureState.FLAT, BrokerExposureState.ABSENT]
+)
+def test_broker_flat_with_local_position_keeps_unresolved_exit_blocker(
+    tmp_path, exposure
+) -> None:
+    real_pm = PositionManager(str(tmp_path / "positions.json"))
+
+    class _DisagreeingPositionManager:
+        def broker_exposure_state(self, _symbol: str) -> BrokerExposureState:
+            return exposure
+
+        def broker_exposure_snapshot(self) -> dict[str, Any]:
+            return {"fresh": True, "age_seconds": 0.1}
+
+        def get_position(self, _symbol: str) -> Any:
+            return SimpleNamespace(quantity=_QTY)
+
+        def get_open_positions(self) -> list[Any]:
+            return []
+
+        def unresolved_terminal_summary(self) -> dict[str, Any]:
+            return {"count": 0}
+
+    bm = _real_bound_bracket_manager(real_pm)
+    bm.order_manager._position_manager = _DisagreeingPositionManager()
+    bm.order_manager._positions = bm.order_manager._position_manager
+
+    blocker = bm.current_entry_blocker()
+
+    assert blocker is not None
+    assert blocker["block_reason"] == "unresolved_exit_position"
+    assert bm.is_exit_converging(_SYMBOL) is True
+
+
 class _Result:
-    def __init__(self, *, accepted: bool, order_id: str | None, reason: str, details: dict[str, Any], broker_attempted: bool) -> None:
+    def __init__(
+        self,
+        *,
+        accepted: bool,
+        order_id: str | None,
+        reason: str,
+        details: dict[str, Any],
+        broker_attempted: bool,
+    ) -> None:
         self.accepted = accepted
         self.order_id = order_id
         self.reason = reason
@@ -35,7 +183,9 @@ class _Manager:
         return True
 
 
-def _base_place_order(_manager: Any, *, intent: str | None = None, tag: str | None = None) -> None:
+def _base_place_order(
+    _manager: Any, *, intent: str | None = None, tag: str | None = None
+) -> None:
     return None
 
 
@@ -48,7 +198,9 @@ def _bound_manager(position_manager: Any) -> BoundBracketManager:
 
 
 def test_native_entry_gate_blocks_generic_provider_reason() -> None:
-    provider = SimpleNamespace(current_entry_blocker=lambda: "pnl_reconciliation_mismatch")
+    provider = SimpleNamespace(
+        current_entry_blocker=lambda: "pnl_reconciliation_mismatch"
+    )
     manager = _Manager(provider)
 
     result = native_entry_gate.block_result(
@@ -90,7 +242,9 @@ def test_native_entry_gate_fails_closed_when_provider_raises() -> None:
 
 
 def test_protective_order_is_not_stopped_by_entry_blocker() -> None:
-    provider = SimpleNamespace(current_entry_blocker=lambda: "unresolved_terminal_order")
+    provider = SimpleNamespace(
+        current_entry_blocker=lambda: "unresolved_terminal_order"
+    )
     manager = _Manager(provider)
 
     result = native_entry_gate.block_result(
@@ -149,7 +303,9 @@ def test_bound_bracket_manager_blocks_unmanaged_broker_synced_positions() -> Non
         current_orphan_position_blocker=lambda: None,
         current_exit_lifecycle_blocker=lambda: None,
         unresolved_terminal_summary=lambda: {"count": 0},
-        get_open_positions=lambda: [SimpleNamespace(symbol="NFO:NIFTY2662324050PE", order_id=None)],
+        get_open_positions=lambda: [
+            SimpleNamespace(symbol="NFO:NIFTY2662324050PE", order_id=None)
+        ],
     )
     manager = _bound_manager(position_manager)
 
@@ -180,7 +336,9 @@ def test_bound_bracket_manager_blocks_unhealthy_reconciliation_state() -> None:
 
 
 def test_bound_bracket_manager_keeps_unresolved_bracket_priority() -> None:
-    position_manager = SimpleNamespace(current_pnl_reconciliation_blocker=lambda: "pnl_reconciliation_mismatch")
+    position_manager = SimpleNamespace(
+        current_pnl_reconciliation_blocker=lambda: "pnl_reconciliation_mismatch"
+    )
     order_manager = SimpleNamespace(_position_manager=position_manager)
     manager = BoundBracketManager.__new__(BoundBracketManager)
     manager.order_manager = order_manager

@@ -2161,8 +2161,12 @@ class BracketManager:
                 bracket.exit_correlation_id = None
                 bracket.last_exit_error = exc_message
                 bracket.exit_state = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
-                bracket.entry_status = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
-                bracket.next_exit_attempt_at = time.time() + self._retry_delay_for_attempt(attempt)
+                bracket.entry_status = (
+                    BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
+                )
+                bracket.next_exit_attempt_at = (
+                    time.time() + self._retry_delay_for_attempt(attempt)
+                )
             LOGGER.error(
                 "EXIT_PROVISIONAL_REGISTRATION_FAILED bracket_id=%s symbol=%s correlation_id=%s attempt=%s exception_type=%s exception_message=%s",
                 bracket.bracket_id,
@@ -2186,7 +2190,8 @@ class BracketManager:
             registrar(
                 correlation_id,
                 symbol,
-                bracket.expected_exit_side or ("SELL" if bracket.side == "BUY" else "BUY"),
+                bracket.expected_exit_side
+                or ("SELL" if bracket.side == "BUY" else "BUY"),
                 qty,
                 float(bracket.last_ltp or bracket.entry_price or 0.0),
                 "LIMIT",
@@ -2203,8 +2208,12 @@ class BracketManager:
                 bracket.exit_correlation_id = None
                 bracket.last_exit_error = str(exc)
                 bracket.exit_state = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
-                bracket.entry_status = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
-                bracket.next_exit_attempt_at = time.time() + self._retry_delay_for_attempt(attempt)
+                bracket.entry_status = (
+                    BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
+                )
+                bracket.next_exit_attempt_at = (
+                    time.time() + self._retry_delay_for_attempt(attempt)
+                )
             LOGGER.error(
                 "EXIT_PROVISIONAL_REGISTRATION_FAILED bracket_id=%s symbol=%s correlation_id=%s attempt=%s exception_type=%s exception_message=%s",
                 bracket.bracket_id,
@@ -2258,7 +2267,9 @@ class BracketManager:
                 if callable(binder) and bracket.exit_correlation_id:
                     try:
                         binder(bracket.exit_correlation_id, returned_order_id)
-                    except Exception as exc:  # noqa: BLE001 - broker order exists; fail closed
+                    except (
+                        Exception
+                    ) as exc:  # noqa: BLE001 - broker order exists; fail closed
                         bind_failed = True
                         bracket.last_exit_attempt_at = time.time()
                         bracket.last_exit_error = f"exit_order_id_bind_failed: {exc}"
@@ -2283,7 +2294,9 @@ class BracketManager:
                 elif bracket.exit_correlation_id:
                     bind_failed = True
                     bracket.last_exit_attempt_at = time.time()
-                    bracket.last_exit_error = "exit_order_id_bind_failed: binder_unavailable"
+                    bracket.last_exit_error = (
+                        "exit_order_id_bind_failed: binder_unavailable"
+                    )
                     LOGGER.error(
                         "EXIT_ORDER_ID_BIND_FAILED bracket_id=%s symbol=%s correlation_id=%s returned_order_id=%s exception_type=%s exception_message=%s",
                         bracket.bracket_id,
@@ -4085,9 +4098,14 @@ class BracketManager:
                     protected_quantity += max(qty, 0)
                 entry_order_id = str(getattr(bracket, "entry_order_id", "") or "")
                 tag = str(getattr(bracket, "tag", "") or "")
-                is_orphan = entry_order_id.startswith("orphan_") or tag == "orphan_recovery"
+                is_orphan = (
+                    entry_order_id.startswith("orphan_") or tag == "orphan_recovery"
+                )
                 orphan_origin = orphan_origin or is_orphan
-                if not bool(getattr(bracket, "entry_confirmed", False)) and not is_orphan:
+                if (
+                    not bool(getattr(bracket, "entry_confirmed", False))
+                    and not is_orphan
+                ):
                     pending_entry = True
                 stop_value = getattr(bracket, "stop_loss", None)
                 if stop_value is None:
@@ -4112,7 +4130,6 @@ class BracketManager:
             "all_closed": all_closed,
         }
 
-
     def is_exit_converging(self, symbol: str) -> bool:
         """Return True while a managed exit for ``symbol`` is not fully converged."""
 
@@ -4131,11 +4148,19 @@ class BracketManager:
                 bracket = self._brackets.get(entry_id)
                 if bracket is None:
                     continue
-                if (
-                    bracket.exit_state == BracketExitLifecycle.CLOSED.value
-                    and bracket.remaining_quantity <= 0
-                    and bracket.position_flat_confirmed
-                ):
+                terminal_flat = (
+                    str(bracket.exit_state or "").upper()
+                    in {
+                        BracketExitLifecycle.CLOSED.value,
+                        BracketExitLifecycle.EXIT_FILLED.value,
+                        BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
+                    }
+                    and bool(bracket.position_flat_confirmed)
+                    and int(bracket.remaining_quantity or 0) <= 0
+                    and not bool(getattr(bracket, "exit_submission_inflight", False))
+                    and getattr(bracket, "pending_exit_order_id", None) is None
+                )
+                if terminal_flat:
                     continue
                 if getattr(bracket, "exit_submission_inflight", False):
                     return True
@@ -4166,22 +4191,53 @@ class BracketManager:
         23950CE orphan re-adopted thousands of times). Returns count removed.
         """
         symbol = normalize_symbol(symbol)
+        reconciled = 0
         with self._lock:
             entry_ids = list(self._symbol_map.get(symbol, []))
-        removed = 0
-        for eid in entry_ids:
-            try:
-                self.unregister_bracket(eid)
-                removed += 1
-            except Exception:  # noqa: BLE001
-                continue
-        if removed:
+            for eid in entry_ids:
+                bracket = self._brackets.get(eid)
+                if bracket is None:
+                    continue
+                already_terminal_flat = (
+                    bool(getattr(bracket, "position_flat_confirmed", False))
+                    and int(getattr(bracket, "remaining_quantity", 0) or 0) <= 0
+                )
+                if not already_terminal_flat:
+                    self._brackets.pop(eid, None)
+                    ids = self._symbol_map.get(symbol)
+                    if ids and eid in ids:
+                        ids.remove(eid)
+                        if not ids:
+                            self._symbol_map.pop(symbol, None)
+                    reconciled += 1
+                    continue
+                bracket.remaining_quantity = 0
+                bracket.exit_executed = True
+                bracket.exit_pending = False
+                bracket.exit_in_progress = False
+                bracket.active = False
+                bracket.position_flat_confirmed = True
+                bracket.flat_nonterminal_since_monotonic = None
+                bracket.flat_nonterminal_since_utc = None
+                bracket.exit_submission_inflight = False
+                bracket.exit_intent = None
+                bracket.expected_exit_side = None
+                bracket.expected_exit_qty = 0
+                bracket.exit_correlation_id = None
+                bracket.pending_exit_order_id = None
+                bracket.exit_state = BracketExitLifecycle.CLOSED.value
+                bracket.entry_status = "CLOSED"
+                bracket.close_source = bracket.close_source or "broker_position_closed"
+                bracket.closed_at = bracket.closed_at or time.time()
+                bracket.updated_at = time.time()
+                reconciled += 1
+        if reconciled:
             LOGGER.info(
-                "BRACKET_RECONCILED_FLAT symbol=%s removed=%s reason=broker_position_closed",
+                "BRACKET_RECONCILED_FLAT symbol=%s reconciled=%s reason=broker_position_closed",
                 symbol,
-                removed,
+                reconciled,
             )
-        return removed
+        return reconciled
 
     def unregister_bracket(self, entry_id: str) -> None:
         """Remove a bracket from memory and indices."""

@@ -424,7 +424,9 @@ def _runner_for(pm: PositionManager, bm: BracketManager) -> StrategyRunner:
     return runner
 
 
-def test_orphan_scan_skips_stale_positive_position_during_exit_convergence(tmp_path) -> None:
+def test_orphan_scan_skips_stale_positive_position_during_exit_convergence(
+    tmp_path,
+) -> None:
     pm = _position_manager(tmp_path)
     bm = _bracket_manager()
     bm.order_manager._positions = pm
@@ -554,7 +556,9 @@ def test_provisional_registration_failure_prevents_broker_submission(
     assert "EXIT_PROVISIONAL_REGISTRATION_FAILED" in caplog.text
 
 
-def test_missing_provisional_registrar_prevents_broker_submission(tmp_path, caplog) -> None:
+def test_missing_provisional_registrar_prevents_broker_submission(
+    tmp_path, caplog
+) -> None:
     pm = PositionManager(str(tmp_path / "positions.json"))
     pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-missing")
     om = _RecordingExitOrderManager(None)
@@ -593,14 +597,19 @@ def test_final_id_binding_failure_stays_converging_and_blocks_orphan(
     assert bracket.pending_exit_order_id == "exit-final-1"
     assert bracket.exit_correlation_id is not None
     assert bracket.exit_intent == "EXIT"
-    assert bracket.last_exit_error and "exit_order_id_bind_failed" in bracket.last_exit_error
+    assert (
+        bracket.last_exit_error
+        and "exit_order_id_bind_failed" in bracket.last_exit_error
+    )
     assert bm.is_exit_converging(SYMBOL) is True
     _runner_for(pm, bm)._adopt_orphan_positions()
     assert adopt_calls == []
     assert "EXIT_ORDER_ID_BIND_FAILED" in caplog.text
 
 
-def test_binding_failure_recovers_when_tagged_terminal_update_reconciles(tmp_path) -> None:
+def test_binding_failure_recovers_when_tagged_terminal_update_reconciles(
+    tmp_path,
+) -> None:
     pm = _BindFailPositionManager(str(tmp_path / "positions.json"))
     pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="entry-bindrecover")
     om = _RecordingExitOrderManager(pm)
@@ -699,6 +708,7 @@ def test_registration_failure_can_retry_without_duplicate_broker_exit(tmp_path) 
     assert len(om.calls) == 1
     assert bracket.exit_order_id == "exit-final-1"
 
+
 class _ExplodingBroker:
     def get_positions(self):
         raise AssertionError("runner must not call broker positions")
@@ -707,7 +717,9 @@ class _ExplodingBroker:
         raise AssertionError("runner must not call broker positions")
 
 
-def test_runner_orphan_scan_uses_position_manager_snapshot_not_broker_io(tmp_path) -> None:
+def test_runner_orphan_scan_uses_position_manager_snapshot_not_broker_io(
+    tmp_path,
+) -> None:
     pm = PositionManager(str(tmp_path / "positions.json"))
     pm.open_position(SYMBOL, "LONG", QTY, 100.0, order_id="manual")
     pm.synchronize_with_broker([_broker_row(0)])
@@ -735,12 +747,17 @@ def test_runner_unknown_broker_exposure_defers_without_adoption(tmp_path) -> Non
         runner._adopt_orphan_positions()
 
         assert adopt_calls == []
-        assert any("ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN" in str(args[0]) for args, _kwargs in warnings)
+        assert any(
+            "ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN" in str(args[0])
+            for args, _kwargs in warnings
+        )
     finally:
         _stop_bracket_manager(bm)
 
 
-def test_runner_stale_flat_snapshot_defers_without_orphan_adoption(tmp_path, monkeypatch) -> None:
+def test_runner_stale_flat_snapshot_defers_without_orphan_adoption(
+    tmp_path, monkeypatch
+) -> None:
     from nifty_scalper_bot.execution import position_manager as pm_module
     from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 
@@ -772,12 +789,17 @@ def test_runner_stale_flat_snapshot_defers_without_orphan_adoption(tmp_path, mon
         runner._adopt_orphan_positions()
 
         assert adopt_calls == []
-        assert any("ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN" in str(args[0]) for args, _kwargs in warnings)
+        assert any(
+            "ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN" in str(args[0])
+            for args, _kwargs in warnings
+        )
     finally:
         _stop_bracket_manager(bm)
 
 
-def test_runner_local_generation_invalidates_absent_snapshot_before_adoption(tmp_path, monkeypatch) -> None:
+def test_runner_local_generation_invalidates_absent_snapshot_before_adoption(
+    tmp_path, monkeypatch
+) -> None:
     from nifty_scalper_bot.execution import position_manager as pm_module
     from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 
@@ -801,3 +823,52 @@ def test_runner_local_generation_invalidates_absent_snapshot_before_adoption(tmp
 
     pm.synchronize_with_broker([_broker_row()])
     assert pm.broker_exposure_state(SYMBOL) is BrokerExposureState.NONZERO
+
+
+def test_terminal_flat_bracket_with_historical_exit_id_is_not_converging(
+    tmp_path,
+) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    bm = _bracket_with_pm(pm, _RecordingExitOrderManager(pm))
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+    bracket.exit_state = "CLOSED"
+    bracket.entry_status = "CLOSED"
+    bracket.position_flat_confirmed = True
+    bracket.remaining_quantity = 0
+    bracket.exit_submission_inflight = False
+    bracket.pending_exit_order_id = None
+    bracket.exit_order_id = "historical-exit-1"
+
+    assert bm.is_exit_converging(SYMBOL) is False
+
+
+def test_reconcile_symbol_flat_is_idempotent_and_terminal(tmp_path) -> None:
+    pm = PositionManager(str(tmp_path / "positions.json"))
+    bm = _bracket_with_pm(pm, _RecordingExitOrderManager(pm))
+    bracket = bm.get_bracket("entry-fail")
+    assert bracket is not None
+    bracket.exit_state = "EXIT_RECONCILED_FLAT"
+    bracket.position_flat_confirmed = True
+    bracket.remaining_quantity = 0
+    bracket.exit_submission_inflight = True
+    bracket.pending_exit_order_id = "exit-pending"
+    bracket.exit_order_id = "historical-exit-1"
+    before_ids = set(bm._brackets)
+
+    bm.reconcile_symbol_flat(SYMBOL)
+    first_state = (bracket.exit_state, bracket.entry_status, bracket.close_source)
+    bm.reconcile_symbol_flat(SYMBOL)
+
+    assert set(bm._brackets) == before_ids
+    assert bm.get_bracket("orphan_" + SYMBOL) is None
+    assert (
+        bracket.exit_state,
+        bracket.entry_status,
+        bracket.close_source,
+    ) == first_state
+    assert bracket.position_flat_confirmed is True
+    assert bracket.remaining_quantity == 0
+    assert bracket.exit_submission_inflight is False
+    assert bracket.pending_exit_order_id is None
+    assert bm.is_exit_converging(SYMBOL) is False

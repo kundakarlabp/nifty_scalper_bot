@@ -19,6 +19,7 @@ from contextlib import suppress
 import os
 from typing import Any, Mapping, Sequence
 
+from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -159,6 +160,111 @@ class BoundBracketManager(RuntimeBracketManager):
             return
         super()._install_unresolved_exit_entry_guard()
 
+    def _unresolved_exit_entry_blocker(
+        self, position_manager: Any | None
+    ) -> Mapping[str, Any] | None:
+        bracket_id = None
+        getter = getattr(self, "get_first_unresolved_exit_bracket_id", None)
+        if callable(getter):
+            with suppress(Exception):
+                bracket_id = getter()
+        symbol = None
+        if bracket_id:
+            bracket_getter = getattr(self, "get_bracket", None)
+            if callable(bracket_getter):
+                with suppress(Exception):
+                    bracket = bracket_getter(bracket_id)
+                    symbol = getattr(bracket, "symbol", None)
+        if not symbol:
+            return _block(
+                "unresolved_exit_position",
+                source="bracket_manager",
+                bracket_id=bracket_id,
+            )
+        return self._unresolved_exit_entry_blocker_for_symbol(
+            position_manager, str(symbol), bracket_id=bracket_id
+        )
+
+    def _unresolved_exit_entry_blocker_for_symbol(
+        self,
+        position_manager: Any | None,
+        symbol: str,
+        *,
+        bracket_id: str | None = None,
+    ) -> Mapping[str, Any] | None:
+        symbol = normalize_symbol(str(symbol))
+        unresolved = lambda **details: _block(
+            "unresolved_exit_position",
+            source="bracket_manager",
+            bracket_id=bracket_id,
+            symbol=symbol,
+            **details,
+        )
+        if position_manager is None:
+            return unresolved(broker_exposure_state=BrokerExposureState.UNKNOWN.value)
+        exposure_getter = getattr(position_manager, "broker_exposure_state", None)
+        if not callable(exposure_getter):
+            return unresolved(broker_exposure_state=BrokerExposureState.UNKNOWN.value)
+        try:
+            exposure = exposure_getter(symbol)
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - fail closed on broker truth uncertainty
+            return unresolved(
+                broker_exposure_state=BrokerExposureState.UNKNOWN.value,
+                broker_exposure_error=f"{type(exc).__name__}: {exc}",
+            )
+        snapshot_details: dict[str, Any] = {
+            "broker_exposure_state": getattr(exposure, "value", str(exposure))
+        }
+        snapshot_getter = getattr(position_manager, "broker_exposure_snapshot", None)
+        if callable(snapshot_getter):
+            with suppress(Exception):
+                snapshot = snapshot_getter()
+                if isinstance(snapshot, Mapping):
+                    snapshot_details.update(
+                        broker_snapshot_fresh=snapshot.get("fresh"),
+                        broker_snapshot_age_seconds=snapshot.get("age_seconds"),
+                    )
+        if exposure in (BrokerExposureState.NONZERO, BrokerExposureState.UNKNOWN):
+            return unresolved(**snapshot_details)
+        if exposure not in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT):
+            return unresolved(**snapshot_details)
+        local_getter = getattr(position_manager, "get_position", None)
+        if not callable(local_getter):
+            return unresolved(**snapshot_details)
+        try:
+            local_position = local_getter(symbol)
+            local_qty = (
+                int(getattr(local_position, "quantity", 0) or 0)
+                if local_position is not None
+                else 0
+            )
+        except Exception as exc:  # noqa: BLE001 - local truth uncertainty fails closed
+            return unresolved(
+                local_position_error=f"{type(exc).__name__}: {exc}", **snapshot_details
+            )
+        if local_qty != 0:
+            return unresolved(local_position_quantity=local_qty, **snapshot_details)
+        reconcile_flat = getattr(self, "reconcile_symbol_flat", None)
+        if callable(reconcile_flat):
+            try:
+                reconcile_flat(symbol)
+            except Exception as exc:  # noqa: BLE001 - cleanup failure fails closed
+                return unresolved(
+                    reconcile_error=f"{type(exc).__name__}: {exc}", **snapshot_details
+                )
+        converging = getattr(self, "is_exit_converging", None)
+        if callable(converging):
+            try:
+                if not bool(converging(symbol)):
+                    return None
+            except Exception as exc:  # noqa: BLE001
+                return unresolved(
+                    recheck_error=f"{type(exc).__name__}: {exc}", **snapshot_details
+                )
+        return unresolved(**snapshot_details)
+
     def current_entry_blocker(self) -> Mapping[str, Any] | None:
         """Return the first live-safety blocker for new entries.
 
@@ -169,19 +275,14 @@ class BoundBracketManager(RuntimeBracketManager):
         broker-synced positions that do not yet have local order ownership.
         """
 
+        position_manager = _order_manager_position_manager(
+            getattr(self, "order_manager", None)
+        )
+
         checker = getattr(self, "has_unresolved_exit", None)
         try:
             if callable(checker) and bool(checker()):
-                bracket_id = None
-                getter = getattr(self, "get_first_unresolved_exit_bracket_id", None)
-                if callable(getter):
-                    with suppress(Exception):
-                        bracket_id = getter()
-                return _block(
-                    "unresolved_exit_position",
-                    source="bracket_manager",
-                    bracket_id=bracket_id,
-                )
+                return self._unresolved_exit_entry_blocker(position_manager)
         except Exception as exc:  # noqa: BLE001 - fail closed
             return _block(
                 "entry_blocker_provider_error",
@@ -189,9 +290,32 @@ class BoundBracketManager(RuntimeBracketManager):
                 provider_error=f"{type(exc).__name__}: {exc}",
             )
 
-        position_manager = _order_manager_position_manager(getattr(self, "order_manager", None))
         if position_manager is None:
             return None
+
+        converging = getattr(self, "is_exit_converging", None)
+        if callable(converging):
+            symbol_map = getattr(self, "_symbol_map", {})
+            try:
+                symbols = list(symbol_map.keys())
+            except Exception:
+                symbols = []
+            for candidate_symbol in symbols:
+                try:
+                    if bool(converging(candidate_symbol)):
+                        blocker = self._unresolved_exit_entry_blocker_for_symbol(
+                            position_manager,
+                            candidate_symbol,
+                        )
+                        if blocker is not None:
+                            return blocker
+                except Exception as exc:  # noqa: BLE001 - fail closed
+                    return _block(
+                        "unresolved_exit_position",
+                        source="bracket_manager",
+                        symbol=normalize_symbol(str(candidate_symbol)),
+                        convergence_error=f"{type(exc).__name__}: {exc}",
+                    )
 
         for method_name in (
             "current_entry_protection_blocker",
@@ -221,7 +345,6 @@ class BoundBracketManager(RuntimeBracketManager):
 
 __all__ = ["BoundBracketManager"]
 from enum import Enum
-from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 
 
 class SymbolLifecycleClassification(str, Enum):
@@ -283,4 +406,8 @@ def classify_symbol_lifecycle(
     return SymbolLifecycleClassification.UNRESOLVED
 
 
-__all__ = ["BoundBracketManager", "SymbolLifecycleClassification", "classify_symbol_lifecycle"]
+__all__ = [
+    "BoundBracketManager",
+    "SymbolLifecycleClassification",
+    "classify_symbol_lifecycle",
+]
