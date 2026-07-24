@@ -1856,3 +1856,149 @@ def test_dynamic_basket_old_ticks_do_not_churn_generation_during_grace(monkeypat
         )["ready"]
         is False
     )
+
+
+def test_slow_tick_subscriber_is_identified_without_tick_accounting_loss(caplog):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._desired_tokens.add(1)
+    mdm._active_subscribed_symbols.add(symbol)
+    mdm._symbol_subscription_generation[symbol] = mdm._subscription_generation
+    mdm._event_loop_thread_id = threading.get_ident()
+    calls: list[dict] = []
+
+    class SlowSubscriber:
+        def on_tick(self, tick: dict) -> None:
+            time.sleep(0.15)
+            calls.append(tick)
+
+    subscriber = SlowSubscriber()
+    mdm.subscribe(symbol, subscriber.on_tick)
+
+    with caplog.at_level("WARNING"):
+        mdm._process_queued_tick(_ws_tick(1, 100.0, 1, volume=10, bid=99.5, ask=100.5))
+
+    assert len(calls) == 1
+    assert mdm.get_tick_pressure_stats()["max_active_drains"] == 0
+    records = [
+        r for r in caplog.records if getattr(r, "event", "") == "TICK_STAGE_SLOW"
+    ]
+    assert any(
+        getattr(r, "stage", None) == "tick_subscriber_callback"
+        and getattr(r, "callback", "").endswith("SlowSubscriber.on_tick")
+        and getattr(r, "duration_ms", 0.0) >= 100.0
+        for r in records
+    )
+    assert any(getattr(r, "stage", None) == "one_tick" for r in records)
+
+
+@pytest.mark.asyncio
+async def test_slow_subscriber_exception_isolated_and_drain_continues(caplog):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._desired_tokens.add(1)
+    mdm._active_subscribed_symbols.add(symbol)
+    mdm._symbol_subscription_generation[symbol] = mdm._subscription_generation
+    mdm._cached_selected_option_symbols = {symbol}
+    mdm._priority_context_cached_at = time.monotonic()
+    mdm.set_event_loop(asyncio.get_running_loop())
+    seen: list[float] = []
+
+    def delayed_failure(_tick: dict) -> None:
+        time.sleep(0.06)
+        raise RuntimeError("subscriber boom")
+
+    def observer(tick: dict) -> None:
+        seen.append(float(tick["last_price"]))
+
+    mdm.subscribe(symbol, delayed_failure)
+    mdm.subscribe(symbol, observer)
+
+    with caplog.at_level("WARNING"):
+        mdm._enqueue_latest_tick_for_drain(
+            _ws_tick(1, 100.0, 1, volume=10, bid=99.5, ask=100.5),
+            asyncio.get_running_loop(),
+        )
+        mdm._enqueue_latest_tick_for_drain(
+            _ws_tick(1, 101.0, 2, volume=11, bid=100.5, ask=101.5),
+            asyncio.get_running_loop(),
+        )
+        await mdm.drain_pending_ticks(timeout=2.0)
+
+    assert seen == [100.0, 101.0]
+    stats = mdm.get_tick_pressure_stats()
+    assert stats["pending_tick_count"] == 0
+    assert stats["max_active_drains"] == 1
+    assert any("Tick callback failed" in r.getMessage() for r in caplog.records)
+    slow_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(record, "stage", None) == "tick_subscriber_callback"
+    ]
+    assert any(
+        getattr(record, "callback", "").endswith("delayed_failure")
+        and getattr(record, "duration_ms", 0.0) >= 50.0
+        for record in slow_records
+    )
+    await _stop_mdm(mdm)
+
+
+def test_full_one_tick_timing_covers_early_normalization_return(monkeypatch, caplog):
+    mdm = _make_mdm()
+    mdm._event_loop_thread_id = threading.get_ident()
+
+    def slow_drop(_raw: dict):
+        time.sleep(0.11)
+        return None
+
+    monkeypatch.setattr(mdm, "_normalize_ws_tick", slow_drop)
+
+    symbol = "NFO:NIFTY26JUN24100PE"
+
+    with caplog.at_level("WARNING"):
+        mdm._process_queued_tick({"symbol": symbol, "source": "ws"})
+
+    assert any(
+        getattr(r, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(r, "stage", None) == "one_tick"
+        and getattr(r, "symbol", None) == symbol
+        for r in caplog.records
+    )
+
+
+def test_slow_closed_bar_subscriber_that_raises_is_identified(caplog):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+
+    def delayed_bar_failure(_bar: dict) -> None:
+        time.sleep(0.06)
+        raise RuntimeError("bar subscriber boom")
+
+    mdm.subscribe_bars(delayed_bar_failure)
+    bar = {
+        "symbol": symbol,
+        "timestamp": "2026-06-30T09:16:00+00:00",
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 10,
+        "source": "ws_candle",
+    }
+
+    with caplog.at_level("WARNING"):
+        mdm._publish_closed_bar(bar)
+
+    assert any("BAR_SUBSCRIBER_FAILED" in r.getMessage() for r in caplog.records)
+    slow_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(record, "stage", None) == "closed_bar_subscriber_callback"
+    ]
+    assert any(
+        getattr(record, "callback", "").endswith("delayed_bar_failure")
+        and getattr(record, "duration_ms", 0.0) >= 50.0
+        for record in slow_records
+    )
