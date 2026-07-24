@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from nifty_scalper_bot.strategies.runner import EntryEvaluationRoute
@@ -262,11 +263,11 @@ def test_new_generation_during_evaluation_reschedules_once(monkeypatch):
         _stop_loop(loop, thread)
 
 
-def test_protective_exit_not_blocked_by_busy_entry_evaluation(monkeypatch):
+def test_position_management_route_runs_only_protection_inline(monkeypatch):
     """Test F: a POSITION_MANAGEMENT-routed symbol (open position) must run
-    synchronously via _on_tick_safe even while an UNDERLYING evaluation is
-    busy in the coalesced drain -- exits are never routed through the
-    entry-eval queue."""
+    ONLY the extracted protection helper, synchronously and immediately, even
+    while an entry evaluation is busy on the worker. The full heavy _on_tick
+    must not be invoked, and no entry-eval work may be scheduled for it."""
     runner_obj, strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
         monkeypatch
     )
@@ -287,14 +288,12 @@ def test_protective_exit_not_blocked_by_busy_entry_evaluation(monkeypatch):
         == EntryEvaluationRoute.POSITION_MANAGEMENT
     )
 
-    on_tick_calls: list[str] = []
-    original_on_tick = runner_obj._on_tick
+    protection_calls: list[str] = []
 
-    def _spy_on_tick(symbol, tick):
-        on_tick_calls.append(symbol)
-        return original_on_tick(symbol, tick)
-
-    runner_obj._on_tick = _spy_on_tick
+    def _must_not_run(symbol, tick):
+        raise AssertionError(
+            f"heavy _on_tick must not run inline for position route: {symbol}"
+        )
 
     loop, thread = _run_loop_in_thread()
     runner_obj._main_loop = loop
@@ -308,19 +307,323 @@ def test_protective_exit_not_blocked_by_busy_entry_evaluation(monkeypatch):
         )
         assert _wait_until(lambda: busy.is_set())
 
+        # Only now forbid the heavy body and start recording protection, so
+        # the underlying evaluation above (already on the worker) is
+        # unaffected and we isolate the position-route call.
+        runner_obj._on_tick = _must_not_run
+        runner_obj._handle_position_tick_protection = (
+            lambda symbol, tick: protection_calls.append(symbol)
+        )
+        pending_before = set(runner_obj._pending_entry_eval_symbols)
+
         exit_start = time.perf_counter()
         runner_obj._on_tick_safe(
             {"symbol": open_symbol, "last_price": 50.0, "timestamp": time.time()}
         )
         exit_duration_ms = (time.perf_counter() - exit_start) * 1000.0
 
-        # The protective/position-management route must have run inline,
-        # immediately, regardless of the busy entry-eval drain.
+        # Protection ran inline, immediately, despite the busy worker.
+        assert protection_calls == [open_symbol]
         assert exit_duration_ms < 100.0
-        assert open_symbol in on_tick_calls
+        # The position route must not enqueue any entry-evaluation work.
+        with runner_obj._eval_gate_lock:
+            assert open_symbol not in runner_obj._pending_entry_eval_symbols
+            assert set(runner_obj._pending_entry_eval_symbols) == pending_before
         release_busy.set()
     finally:
+        release_busy.set()
         _stop_loop(loop, thread)
+
+
+def test_position_tick_protection_not_executed_twice(monkeypatch):
+    """Test G: one tick must produce exactly one protective lifecycle update,
+    even though protection runs at ingestion and the heavy body later runs on
+    the worker for the same tick."""
+    runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    bracket_ticks: list[tuple[str, float]] = []
+    runner_obj._bracket_manager = SimpleNamespace(
+        on_tick=lambda sym, ltp, ts: bracket_ticks.append((sym, ltp))
+    )
+
+    loop, thread = _run_loop_in_thread()
+    runner_obj._main_loop = loop
+    try:
+        runner_obj._on_tick_safe(
+            {
+                "symbol": UNDERLYING_SYMBOL,
+                "last_price": 24000.0,
+                "timestamp": time.time(),
+            }
+        )
+        # Let the deferred heavy evaluation complete on the worker.
+        assert _wait_until(
+            lambda: not runner_obj._pending_entry_eval_symbols
+            and not runner_obj._entry_eval_active,
+            timeout=3.0,
+        )
+        time.sleep(0.05)
+        assert len(bracket_ticks) == 1
+        assert bracket_ticks[0][0] == UNDERLYING_SYMBOL
+    finally:
+        _stop_loop(loop, thread)
+
+
+def test_slow_entry_evaluation_does_not_block_main_event_loop(monkeypatch):
+    """Test A (decisive): while the heavy evaluation is running, the main
+    event loop must keep making progress, and the evaluation must execute on
+    a dedicated worker thread -- not the loop thread."""
+    runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    eval_thread_names: list[str] = []
+    eval_started = threading.Event()
+    eval_done = threading.Event()
+
+    def _slow_eval(symbol, *, trace_id=None):
+        eval_thread_names.append(threading.current_thread().name)
+        eval_started.set()
+        time.sleep(0.2)
+        eval_done.set()
+
+    runner_obj._evaluate_entry_from_latest_state = _slow_eval
+
+    loop, thread = _run_loop_in_thread()
+    runner_obj._main_loop = loop
+    loop_thread_name = None
+    heartbeat = {"n": 0}
+
+    async def _heartbeat():
+        nonlocal loop_thread_name
+        loop_thread_name = threading.current_thread().name
+        while not eval_done.is_set():
+            heartbeat["n"] += 1
+            await asyncio.sleep(0.01)
+
+    try:
+        asyncio.run_coroutine_threadsafe(_heartbeat(), loop)
+        runner_obj._on_tick_safe(
+            {
+                "symbol": UNDERLYING_SYMBOL,
+                "last_price": 24000.0,
+                "timestamp": time.time(),
+            }
+        )
+        assert _wait_until(lambda: eval_started.is_set(), timeout=2.0)
+        beats_at_start = heartbeat["n"]
+        assert _wait_until(lambda: eval_done.is_set(), timeout=3.0)
+
+        # The loop kept running throughout the 200 ms evaluation.
+        assert heartbeat["n"] - beats_at_start >= 5
+
+        # And the evaluation ran on the dedicated worker, not the loop thread.
+        assert eval_thread_names
+        assert all(n.startswith("nifty-entry-eval") for n in eval_thread_names)
+        assert loop_thread_name not in eval_thread_names
+        # Exactly one worker thread was used.
+        assert len(set(eval_thread_names)) == 1
+    finally:
+        eval_done.set()
+        _stop_loop(loop, thread)
+
+
+def test_entry_eval_drain_processes_one_snapshot_per_invocation(monkeypatch):
+    """Test C: each drain invocation handles exactly one captured batch. A
+    newer generation arriving mid-batch is handled by a second drain, not by
+    an unbounded `while True` inside the first."""
+    runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    in_first = threading.Event()
+    release_first = threading.Event()
+    calls = {"n": 0}
+
+    def _capture(symbol, *, trace_id=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            in_first.set()
+            release_first.wait(timeout=2.0)
+
+    runner_obj._evaluate_entry_from_latest_state = _capture
+
+    loop, thread = _run_loop_in_thread()
+    runner_obj._main_loop = loop
+    try:
+        drains_before = runner_obj._entry_eval_drain_count
+        runner_obj._on_tick_safe(
+            {
+                "symbol": UNDERLYING_SYMBOL,
+                "last_price": 24000.0,
+                "timestamp": time.time(),
+            }
+        )
+        assert _wait_until(lambda: in_first.is_set(), timeout=2.0)
+        runner_obj._last_eval_ts[UNDERLYING_SYMBOL] = 0.0
+        runner_obj._on_tick_safe(
+            {
+                "symbol": UNDERLYING_SYMBOL,
+                "last_price": 24001.0,
+                "timestamp": time.time(),
+            }
+        )
+        release_first.set()
+        assert _wait_until(lambda: calls["n"] >= 2, timeout=3.0)
+        assert _wait_until(
+            lambda: not runner_obj._pending_entry_eval_symbols
+            and not runner_obj._entry_eval_active,
+            timeout=3.0,
+        )
+        # Exactly two bounded drain invocations, not one monopolising loop.
+        assert runner_obj._entry_eval_drain_count - drains_before == 2
+        assert calls["n"] == 2
+    finally:
+        release_first.set()
+        _stop_loop(loop, thread)
+
+
+def test_continuous_busy_symbol_does_not_starve_other_pending_symbol(monkeypatch):
+    """Test D: a continuously-ticking symbol must not starve another pending
+    symbol -- B is evaluated within a bounded number of drain batches."""
+    runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    busy_symbol = UNDERLYING_SYMBOL
+    other_symbol = "NFO:NIFTY26JUNFUT"
+    runner_obj._trigger_candidate_symbols.add(other_symbol)
+    runner_obj._last_tick[other_symbol] = {
+        "symbol": other_symbol,
+        "last_price": 24010.0,
+        "timestamp": time.time(),
+    }
+    seen: list[str] = []
+    stop_feeding = threading.Event()
+
+    def _capture(symbol, *, trace_id=None):
+        seen.append(symbol)
+        time.sleep(0.002)
+
+    runner_obj._evaluate_entry_from_latest_state = _capture
+
+    loop, thread = _run_loop_in_thread()
+    runner_obj._main_loop = loop
+    try:
+        runner_obj._on_tick_safe(
+            {"symbol": other_symbol, "last_price": 24010.0, "timestamp": time.time()}
+        )
+        deadline = time.time() + 1.5
+        while time.time() < deadline and not stop_feeding.is_set():
+            runner_obj._last_eval_ts[busy_symbol] = 0.0
+            runner_obj._on_tick_safe(
+                {
+                    "symbol": busy_symbol,
+                    "last_price": 24000.0,
+                    "timestamp": time.time(),
+                }
+            )
+            if other_symbol in seen:
+                stop_feeding.set()
+            time.sleep(0.002)
+
+        assert other_symbol in seen, "continuously busy symbol starved the other"
+        # The busy symbol stayed coalesced: far fewer evaluations than ticks.
+        assert seen.count(busy_symbol) < 200
+    finally:
+        _stop_loop(loop, thread)
+
+
+def test_context_only_tick_does_not_run_heavy_on_tick_inline(monkeypatch):
+    """Test E: a CONTEXT_ONLY symbol must not run the heavy _on_tick body
+    inline on the ingestion path -- it is coalesced onto the worker."""
+    runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    context_symbol = "NFO:NIFTY26JUN24100CE"
+    assert (
+        runner_obj._entry_evaluation_route(context_symbol)
+        == EntryEvaluationRoute.CONTEXT_ONLY
+    )
+    runner_obj._last_tick[context_symbol] = {
+        "symbol": context_symbol,
+        "last_price": 55.0,
+        "timestamp": time.time(),
+    }
+    ingress_thread = threading.current_thread().name
+    eval_threads: list[str] = []
+
+    def _capture(symbol, *, trace_id=None):
+        eval_threads.append(threading.current_thread().name)
+
+    runner_obj._evaluate_entry_from_latest_state = _capture
+
+    def _must_not_run_inline(symbol, tick):
+        raise AssertionError("heavy _on_tick ran inline for CONTEXT_ONLY")
+
+    runner_obj._on_tick = _must_not_run_inline
+
+    loop, thread = _run_loop_in_thread()
+    runner_obj._main_loop = loop
+    try:
+        start = time.perf_counter()
+        runner_obj._on_tick_safe(
+            {"symbol": context_symbol, "last_price": 55.0, "timestamp": time.time()}
+        )
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        assert duration_ms < 40.0
+        assert _wait_until(lambda: bool(eval_threads), timeout=2.0)
+        assert all(n.startswith("nifty-entry-eval") for n in eval_threads)
+        assert ingress_thread not in eval_threads
+    finally:
+        _stop_loop(loop, thread)
+
+
+def test_runner_shutdown_stops_entry_eval_executor(monkeypatch):
+    """Test I: shutdown terminates the worker, clears pending work, and no
+    evaluation runs afterwards. No leaked nifty-entry-eval thread."""
+    runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    calls: list[str] = []
+    runner_obj._evaluate_entry_from_latest_state = lambda symbol, **_kw: calls.append(
+        symbol
+    )
+
+    loop, thread = _run_loop_in_thread()
+    runner_obj._main_loop = loop
+    try:
+        runner_obj._on_tick_safe(
+            {
+                "symbol": UNDERLYING_SYMBOL,
+                "last_price": 24000.0,
+                "timestamp": time.time(),
+            }
+        )
+        assert _wait_until(lambda: bool(calls), timeout=2.0)
+
+        runner_obj._shutdown_entry_eval_worker()
+        calls.clear()
+
+        # No new work may be accepted or evaluated after shutdown.
+        runner_obj._last_eval_ts[UNDERLYING_SYMBOL] = 0.0
+        runner_obj._on_tick_safe(
+            {
+                "symbol": UNDERLYING_SYMBOL,
+                "last_price": 24002.0,
+                "timestamp": time.time(),
+            }
+        )
+        time.sleep(0.15)
+        assert calls == []
+        with runner_obj._eval_gate_lock:
+            assert not runner_obj._pending_entry_eval_symbols
+            assert not runner_obj._entry_eval_active
+    finally:
+        _stop_loop(loop, thread)
+
+    # This runner's own worker thread(s) terminated -- no leak from shutdown.
+    for worker in getattr(runner_obj._entry_eval_executor, "_threads", ()):
+        worker.join(timeout=2.0)
+        assert not worker.is_alive()
 
 
 def test_entry_evaluation_exception_does_not_stop_future_drains(monkeypatch):
@@ -474,24 +777,67 @@ def test_subscribe_symbol_registers_single_lightweight_callback(monkeypatch):
     assert registered_callback != runner_obj._on_tick
 
 
-def test_entry_eval_schedule_failure_falls_back_inline(monkeypatch):
-    """A scheduling error (e.g. no running loop reachable) must not crash
-    ingestion and must not silently drop the pending evaluation -- it runs
-    inline as a bounded fallback instead."""
+def test_entry_eval_scheduler_unavailable_never_runs_inline(monkeypatch):
+    """With no running loop the callback must still return immediately, must
+    NOT run the evaluation inline (no asyncio.run fallback), and must keep the
+    symbol pending so a later tick retries scheduling."""
     runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
         monkeypatch
     )
-    seen: list[str] = []
-    runner_obj._evaluate_entry_from_latest_state = lambda symbol, **_kw: seen.append(
-        symbol
+
+    def _must_not_run(symbol, **_kw):
+        raise AssertionError("evaluation must not run inline without a loop")
+
+    runner_obj._evaluate_entry_from_latest_state = _must_not_run
+    runner_obj._on_tick = lambda symbol, tick: (_ for _ in ()).throw(
+        AssertionError("heavy _on_tick must not run inline without a loop")
     )
     runner_obj._main_loop = None
+    # Also block loop discovery, so this genuinely exercises the
+    # "no scheduler reachable at all" path.
+    runner_obj._discover_runtime_loop = staticmethod(lambda: None)
+    with runner_obj._eval_gate_lock:
+        runner_obj._entry_eval_active = False
+        runner_obj._entry_eval_drain_scheduled = False
+        runner_obj._pending_entry_eval_symbols.clear()
 
+    start = time.perf_counter()
     runner_obj._on_tick_safe(
         {"symbol": UNDERLYING_SYMBOL, "last_price": 24000.0, "timestamp": time.time()}
     )
+    duration_ms = (time.perf_counter() - start) * 1000.0
 
-    assert UNDERLYING_SYMBOL in seen
+    assert duration_ms < 40.0
     with runner_obj._eval_gate_lock:
+        # Pending state preserved for a later retry; nothing left active.
+        assert UNDERLYING_SYMBOL in runner_obj._pending_entry_eval_symbols
         assert not runner_obj._entry_eval_active
         assert not runner_obj._entry_eval_drain_scheduled
+
+
+def test_entry_eval_worker_skips_symbol_that_became_position_managed(monkeypatch):
+    """1H: if a symbol acquires an open position between being marked pending
+    and the worker reaching it, entry evaluation must be skipped -- protection
+    owns that symbol, and an entry must never race an open position."""
+    runner_obj, _strategy_manager, _risk, _order, selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    runner_obj._last_tick[selected_ce] = {
+        "symbol": selected_ce,
+        "last_price": 100.0,
+        "timestamp": time.time(),
+    }
+    on_tick_calls: list[str] = []
+    runner_obj._on_tick = lambda symbol, tick: on_tick_calls.append(symbol)
+
+    # Sanity: it would normally be evaluated as an entry candidate.
+    assert (
+        runner_obj._entry_evaluation_route(selected_ce)
+        == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
+
+    # A position opens before the worker gets to it.
+    runner_obj._position_manager.has_open_position = lambda s: s == selected_ce
+    runner_obj._evaluate_entry_from_latest_state(selected_ce)
+
+    assert on_tick_calls == []
