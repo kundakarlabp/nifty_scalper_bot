@@ -604,6 +604,16 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
     try:
         asyncio.set_event_loop(loop)
         ctx = loop.run_until_complete(_initialize_runtime())
+
+        async def _attach_runtime_loop() -> None:
+            running = asyncio.get_running_loop()
+            ctx.strategy_runner.attach_runtime_loop(running)
+            # The Runner must hold the authoritative *running* application
+            # loop before any background tick thread can deliver ticks.
+            assert ctx.strategy_runner._main_loop is running  # noqa: SLF001
+            assert ctx.strategy_runner._main_loop.is_running()  # noqa: SLF001
+
+        loop.run_until_complete(_attach_runtime_loop())
         ctx.instrument_manager.load()
         basket = ctx.instrument_manager.get_active_nifty_contracts(25000.0)
         basket_dict = {

@@ -24,6 +24,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from nifty_scalper_bot.strategies.runner import EntryEvaluationRoute
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from tests.strategies.test_runner_symbol_role_gate import _build_phase9_runner
@@ -793,9 +795,6 @@ def test_entry_eval_scheduler_unavailable_never_runs_inline(monkeypatch):
         AssertionError("heavy _on_tick must not run inline without a loop")
     )
     runner_obj._main_loop = None
-    # Also block loop discovery, so this genuinely exercises the
-    # "no scheduler reachable at all" path.
-    runner_obj._discover_runtime_loop = staticmethod(lambda: None)
     with runner_obj._eval_gate_lock:
         runner_obj._entry_eval_active = False
         runner_obj._entry_eval_drain_scheduled = False
@@ -841,3 +840,149 @@ def test_entry_eval_worker_skips_symbol_that_became_position_managed(monkeypatch
     runner_obj._evaluate_entry_from_latest_state(selected_ce)
 
     assert on_tick_calls == []
+
+
+# ==================== EXPLICIT RUNTIME-LOOP ATTACHMENT ====================
+
+
+def test_background_tick_uses_explicit_runtime_loop(monkeypatch):
+    """Test 1: a tick delivered from a background thread must be drained on
+    the explicitly attached live loop B, never on a dormant loop A."""
+    runner_obj, _sm, _r, _o, _ce = _underlying_runner(monkeypatch)
+
+    dormant_loop = asyncio.new_event_loop()
+    dormant_calls: list[object] = []
+    dormant_loop.call_soon_threadsafe = lambda cb, *a: dormant_calls.append(cb)
+    runner_obj._main_loop = dormant_loop
+
+    loop_b, thread_b = _run_loop_in_thread()
+    drain_loops: list[object] = []
+    eval_threads: list[str] = []
+
+    def _capture(symbol, *, trace_id=None):
+        drain_loops.append(asyncio.get_event_loop_policy())
+        eval_threads.append(threading.current_thread().name)
+
+    runner_obj._evaluate_entry_from_latest_state = _capture
+
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _attach_from_loop(runner_obj), loop_b
+        )
+        fut.result(timeout=2.0)
+        assert runner_obj._main_loop is loop_b
+
+        # Deliver the tick from a separate background thread.
+        feeder = threading.Thread(
+            target=runner_obj._on_tick_safe,
+            args=(
+                {
+                    "symbol": UNDERLYING_SYMBOL,
+                    "last_price": 24000.0,
+                    "timestamp": time.time(),
+                },
+            ),
+        )
+        feeder.start()
+        feeder.join(timeout=2.0)
+
+        assert _wait_until(lambda: len(eval_threads) >= 1, timeout=3.0)
+        assert _wait_until(
+            lambda: not runner_obj._pending_entry_eval_symbols, timeout=3.0
+        )
+        assert len(eval_threads) == 1
+        assert eval_threads[0].startswith("nifty-entry-eval")
+        assert dormant_calls == []
+        assert runner_obj._main_loop is loop_b
+    finally:
+        _stop_loop(loop_b, thread_b)
+        dormant_loop.close()
+
+
+async def _attach_from_loop(runner_obj) -> None:
+    runner_obj.attach_runtime_loop(asyncio.get_running_loop())
+
+
+def test_nonrunning_runtime_loop_cannot_be_attached(monkeypatch):
+    """Test 2: an open but dormant loop must be rejected."""
+    runner_obj, _sm, _r, _o, _ce = _underlying_runner(monkeypatch)
+    previous = runner_obj._main_loop
+    dormant = asyncio.new_event_loop()
+    try:
+        with pytest.raises(RuntimeError, match="running"):
+            runner_obj.attach_runtime_loop(dormant)
+        assert runner_obj._main_loop is previous
+        assert not runner_obj._runtime_loop_attached
+    finally:
+        dormant.close()
+
+
+def test_closed_runtime_loop_cannot_be_attached(monkeypatch):
+    """Test 3: a closed loop must be rejected."""
+    runner_obj, _sm, _r, _o, _ce = _underlying_runner(monkeypatch)
+    previous = runner_obj._main_loop
+    closed = asyncio.new_event_loop()
+    closed.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        runner_obj.attach_runtime_loop(closed)
+    assert runner_obj._main_loop is previous
+    assert not runner_obj._runtime_loop_attached
+
+
+def test_schedule_entry_eval_drain_returns_false_for_nonrunning_loop(monkeypatch):
+    """Test 4: a directly-assigned (never attached) dormant loop must not be
+    scheduled onto, and pending work must survive."""
+    runner_obj, _sm, _r, _o, _ce = _underlying_runner(monkeypatch)
+
+    def _must_not_run(symbol, **_kw):
+        raise AssertionError("evaluator must not run for a dormant loop")
+
+    runner_obj._evaluate_entry_from_latest_state = _must_not_run
+
+    dormant = asyncio.new_event_loop()
+    queued: list[object] = []
+    dormant.call_soon_threadsafe = lambda cb, *a: queued.append(cb)
+    runner_obj._main_loop = dormant
+    runner_obj._runtime_loop_attached = False
+    with runner_obj._eval_gate_lock:
+        runner_obj._pending_entry_eval_symbols.add(UNDERLYING_SYMBOL)
+    try:
+        assert runner_obj._schedule_entry_eval_drain() is False
+        assert queued == []
+        with runner_obj._eval_gate_lock:
+            assert UNDERLYING_SYMBOL in runner_obj._pending_entry_eval_symbols
+    finally:
+        dormant.close()
+
+
+def test_attach_runtime_loop_recovers_existing_pending_entry_eval(monkeypatch):
+    """Test 5: work marked pending before any loop existed must be recovered
+    exactly once when the authoritative loop is attached."""
+    runner_obj, _sm, _r, _o, _ce = _underlying_runner(monkeypatch)
+    seen: list[str] = []
+    runner_obj._evaluate_entry_from_latest_state = lambda symbol, **_kw: seen.append(
+        symbol
+    )
+    runner_obj._main_loop = None
+    runner_obj._runtime_loop_attached = False
+
+    runner_obj._on_tick_safe(
+        {"symbol": UNDERLYING_SYMBOL, "last_price": 24000.0, "timestamp": time.time()}
+    )
+    with runner_obj._eval_gate_lock:
+        assert UNDERLYING_SYMBOL in runner_obj._pending_entry_eval_symbols
+    assert seen == []
+
+    loop_b, thread_b = _run_loop_in_thread()
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _attach_from_loop(runner_obj), loop_b
+        )
+        fut.result(timeout=2.0)
+        assert _wait_until(lambda: seen == [UNDERLYING_SYMBOL], timeout=3.0)
+        assert _wait_until(
+            lambda: not runner_obj._pending_entry_eval_symbols, timeout=3.0
+        )
+        assert seen == [UNDERLYING_SYMBOL]
+    finally:
+        _stop_loop(loop_b, thread_b)

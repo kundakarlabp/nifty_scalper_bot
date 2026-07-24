@@ -1189,6 +1189,9 @@ class StrategyRunner:
         self._entry_eval_drain_count: int = 0
         self._entry_eval_reschedule_count: int = 0
         self._entry_eval_shutdown: bool = False
+        # True only once canonical startup has handed over the authoritative
+        # running application loop via attach_runtime_loop().
+        self._runtime_loop_attached: bool = False
         # Exactly one dedicated worker. The heavy phase9 _on_tick body runs
         # here instead of on the MDM/main event loop, so tick draining,
         # candle construction, heartbeat and context freshness keep running
@@ -1200,14 +1203,6 @@ class StrategyRunner:
             max_workers=1,
             thread_name_prefix="nifty-entry-eval",
         )
-        # Latch the runtime loop early. Ticks are delivered on background
-        # (websocket/drain) threads that have no event loop of their own, so
-        # the drain can only ever be scheduled onto a loop captured from a
-        # thread that has one. Runner construction happens on the runtime
-        # thread that owns the loop, making this the reliable capture point.
-        # Later attachments (start paths) still overwrite this.
-        if getattr(self, "_main_loop", None) is None:
-            self._main_loop = self._discover_runtime_loop()
         self._eval_counter = 0
         self._signal_counter = 0
         self._regime_block_counter = 0
@@ -7937,12 +7932,16 @@ class StrategyRunner:
                 self._last_summary_log = now
 
     # ==================== ENTRY-EVAL COALESCING (Category 1) ====================
-    # Applies only to new-entry strategy evaluation (OPTION_CANDIDATE/
-    # UNDERLYING routes). MDM/DataHub tick ingestion, CandleEngine updates,
-    # and protective/bracket handling (POSITION_MANAGEMENT route, and Phase -1
-    # bracket forwarding inside _on_tick for whichever route runs) are
-    # entirely unaffected -- this only changes *when* the existing heavy
-    # phase9 body runs for new-entry candidates, never *what* it does.
+    # Routing:
+    #   POSITION_MANAGEMENT
+    #       -> protection-only, synchronous on the ingestion path. Never runs
+    #          the heavy _on_tick body and never enters the coalescer.
+    #   OPTION_CANDIDATE / UNDERLYING / CONTEXT_ONLY
+    #       -> heavy evaluation coalesced to latest state and executed on the
+    #          dedicated single-worker executor, off the MDM/main event loop.
+    # MDM/DataHub tick ingestion, CandleEngine updates and protective/bracket
+    # handling all remain synchronous and ordered -- this changes *when* and
+    # *on which thread* the heavy phase9 body runs, never *what* it does.
 
     def _handle_position_tick_protection(
         self, symbol: str, tick: Mapping[str, Any]
@@ -7992,29 +7991,57 @@ class StrategyRunner:
                     if isinstance(tick_err_map, dict):
                         tick_err_map[symbol] = True
 
-    def _schedule_entry_eval_drain(self) -> bool:
-        """Schedule exactly one entry-eval drain on the main loop.
+    def attach_runtime_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Attach the authoritative application event loop used for entry drains.
 
-        Returns True when a drain was scheduled, False when no running loop
-        is reachable. NEVER runs evaluation inline and never raises.
+        Called once by canonical async startup, on the running application
+        loop, before live tick subscriptions can deliver ticks. Ticks arrive
+        on background websocket/drain threads that have no loop of their own,
+        so the drain can only be scheduled onto a loop explicitly handed over
+        here -- the Runner never infers or creates one.
+        Args: loop. Returns: none. Raises: RuntimeError on a closed or
+        non-running loop.
+        """
+        if loop.is_closed():
+            raise RuntimeError("cannot attach closed runtime loop")
+        if not loop.is_running():
+            raise RuntimeError("runtime loop must be running")
+        self._main_loop = loop
+        self._runtime_loop_attached = True
+        # Recover any work that was marked pending before the loop existed.
+        with self._eval_gate_lock:
+            should_recover = (
+                bool(self._pending_entry_eval_symbols)
+                and not self._entry_eval_active
+                and not self._entry_eval_drain_scheduled
+                and not self._entry_eval_shutdown
+            )
+            if should_recover:
+                self._entry_eval_drain_scheduled = True
+        if should_recover and not self._schedule_entry_eval_drain():
+            with self._eval_gate_lock:
+                self._entry_eval_drain_scheduled = False
+
+    def _schedule_entry_eval_drain(self) -> bool:
+        """Schedule exactly one entry-eval drain on the attached runtime loop.
+
+        Only ever schedules onto the explicitly attached live loop: it does
+        not discover, create or replace a loop, and never runs evaluation
+        inline. Returns True when a drain was scheduled.
         Args: none. Returns: bool. Raises: none.
         """
         loop = self._main_loop
         if loop is None or loop.is_closed():
-            # _main_loop may never have been attached (some runtimes drive the
-            # loop in slices and never start the Runner under it). Latch the
-            # thread's current loop once so pending work is scheduled rather
-            # than stranded. This never runs evaluation inline.
-            loop = self._discover_runtime_loop()
-            if loop is None:
-                return False
-            self._main_loop = loop
+            return False
+        if not loop.is_running() and not self._runtime_loop_attached:
+            # A loop that was never handed over by attach_runtime_loop() and
+            # is not currently running may be a dormant/inferred loop -- never
+            # schedule onto it. The attached loop is authoritative (attach
+            # itself requires a running loop), so it may be queued onto with
+            # call_soon_threadsafe even between pump slices; the callback runs
+            # the next time the loop is driven. Evaluation is never inline.
+            return False
         try:
-            # call_soon_threadsafe is valid on an open loop that is not
-            # currently running: the callback is queued and executes the next
-            # time the loop is driven. This keeps entry evaluation off the
-            # ingestion path (never inline) while ensuring pending work is
-            # not stranded in runtimes that pump the loop in slices.
             loop.call_soon_threadsafe(
                 lambda: safe_task(self._drain_pending_entry_evaluations())
             )
@@ -8022,23 +8049,6 @@ class StrategyRunner:
         except RuntimeError:
             # Loop closed between the check and the submission.
             return False
-
-    @staticmethod
-    def _discover_runtime_loop() -> asyncio.AbstractEventLoop | None:
-        """Best-effort lookup of this thread's event loop. Args: none.
-        Returns: an open loop or None. Raises: none.
-        """
-        try:
-            return asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        try:
-            loop = asyncio.get_event_loop_policy().get_event_loop()
-        except Exception:  # noqa: BLE001 - no usable loop on this thread
-            return None
-        if loop is None or loop.is_closed():
-            return None
-        return loop
 
     def _notify_entry_eval_pending(
         self, symbol: str, *, trace_id: str | None = None
@@ -8096,7 +8106,13 @@ class StrategyRunner:
                         "symbol": symbol,
                         "generation": generation,
                         "loop_present": loop is not None,
-                        "loop_running": bool(loop is not None and loop.is_running()),
+                        "loop_closed": bool(loop is not None and loop.is_closed()),
+                        "loop_running": bool(
+                            loop is not None
+                            and not loop.is_closed()
+                            and loop.is_running()
+                        ),
+                        "runtime_loop_attached": loop is not None,
                         "shutdown_state": self._entry_eval_shutdown,
                         "trace_id": trace_id,
                     },
