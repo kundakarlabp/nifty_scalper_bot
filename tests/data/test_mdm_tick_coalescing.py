@@ -1930,7 +1930,17 @@ async def test_slow_subscriber_exception_isolated_and_drain_continues(caplog):
     assert stats["pending_tick_count"] == 0
     assert stats["max_active_drains"] == 1
     assert any("Tick callback failed" in r.getMessage() for r in caplog.records)
-    assert any(getattr(r, "event", "") == "TICK_STAGE_SLOW" for r in caplog.records)
+    slow_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(record, "stage", None) == "tick_subscriber_callback"
+    ]
+    assert any(
+        getattr(record, "callback", "").endswith("delayed_failure")
+        and getattr(record, "duration_ms", 0.0) >= 50.0
+        for record in slow_records
+    )
     await _stop_mdm(mdm)
 
 
@@ -1954,4 +1964,41 @@ def test_full_one_tick_timing_covers_early_normalization_return(monkeypatch, cap
         and getattr(r, "stage", None) == "one_tick"
         and getattr(r, "symbol", None) == symbol
         for r in caplog.records
+    )
+
+
+def test_slow_closed_bar_subscriber_that_raises_is_identified(caplog):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+
+    def delayed_bar_failure(_bar: dict) -> None:
+        time.sleep(0.06)
+        raise RuntimeError("bar subscriber boom")
+
+    mdm.subscribe_bars(delayed_bar_failure)
+    bar = {
+        "symbol": symbol,
+        "timestamp": "2026-06-30T09:16:00+00:00",
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 10,
+        "source": "ws_candle",
+    }
+
+    with caplog.at_level("WARNING"):
+        mdm._publish_closed_bar(bar)
+
+    assert any("BAR_SUBSCRIBER_FAILED" in r.getMessage() for r in caplog.records)
+    slow_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(record, "stage", None) == "closed_bar_subscriber_callback"
+    ]
+    assert any(
+        getattr(record, "callback", "").endswith("delayed_bar_failure")
+        and getattr(record, "duration_ms", 0.0) >= 50.0
+        for record in slow_records
     )

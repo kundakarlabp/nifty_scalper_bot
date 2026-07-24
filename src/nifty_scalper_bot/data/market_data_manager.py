@@ -1452,16 +1452,18 @@ class MarketDataManager:
         for cb in list(self._bar_subscribers):
             try:
                 stage_started = time.perf_counter()
-                cb(dict(bar))
-                duration_ms = (time.perf_counter() - stage_started) * 1000.0
-                if duration_ms >= 50.0:
-                    self._log_slow_tick_stage(
-                        stage="closed_bar_subscriber_callback",
-                        symbol=symbol,
-                        duration_ms=duration_ms,
-                        source=str(bar.get("source") or "ws_candle"),
-                        callback=cb,
-                    )
+                try:
+                    cb(dict(bar))
+                finally:
+                    duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                    if duration_ms >= 50.0:
+                        self._log_slow_tick_stage(
+                            stage="closed_bar_subscriber_callback",
+                            symbol=symbol,
+                            duration_ms=duration_ms,
+                            source=str(bar.get("source") or "ws_candle"),
+                            callback=cb,
+                        )
             except Exception as exc:
                 callback_name = getattr(cb, "__qualname__", repr(cb))
                 log_throttled(
@@ -9713,16 +9715,18 @@ class MarketDataManager:
                         )
                 else:
                     stage_started = time.perf_counter()
-                    result = callback(dict(tick_payload))
-                    duration_ms = (time.perf_counter() - stage_started) * 1000.0
-                    if duration_ms >= 50.0:
-                        self._log_slow_tick_stage(
-                            stage="tick_subscriber_callback",
-                            symbol=symbol,
-                            duration_ms=duration_ms,
-                            source=source,
-                            callback=callback,
-                        )
+                    try:
+                        result = callback(dict(tick_payload))
+                    finally:
+                        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                        if duration_ms >= 50.0:
+                            self._log_slow_tick_stage(
+                                stage="tick_subscriber_callback",
+                                symbol=symbol,
+                                duration_ms=duration_ms,
+                                source=source,
+                                callback=callback,
+                            )
                     self._dispatch_awaitable_callback_result(
                         result,
                         symbol=symbol,
