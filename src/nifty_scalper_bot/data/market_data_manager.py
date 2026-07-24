@@ -8417,316 +8417,312 @@ class MarketDataManager:
         tick_started = time.perf_counter()
         symbol_for_timing = str(raw.get("symbol") or "") or None
         source_for_timing = str(raw.get("source") or "ws")
-        stage_started = time.perf_counter()
-        raw = self._normalize_ws_tick(raw)
-        duration_ms = (time.perf_counter() - stage_started) * 1000.0
-        if duration_ms >= 50.0:
-            self._log_slow_tick_stage(
-                stage="normalize",
-                symbol=symbol_for_timing,
-                duration_ms=duration_ms,
-                source=source_for_timing,
-            )
-        if raw is None:
-            return
-        volume_delta_normalized = False
-        enqueued_mono = raw.get("_enqueued_monotonic")
-        if isinstance(enqueued_mono, (int, float)):
-            self._event_loop_lag_seconds = max(
-                0.0, time.monotonic() - float(enqueued_mono)
-            )
-        if not raw.get("symbol"):
-            token = raw.get("instrument_token")
-            if token is None:
-                return
-
-            token_int = int(token)
-            with self._lock:
-                symbol_from_map = self._symbol_by_token.get(token_int)
-
-            if not symbol_from_map:
-                log_throttled(
-                    self._logger,
-                    f"unmapped_token_{token_int}",
-                    "Unmapped token %s — tick dropped" % token_int,
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                )
-                return
-            raw = {**raw, "symbol": symbol_from_map}
-            raw = self._normalise_tick_volume_delta(
-                symbol_from_map or raw.get("symbol", ""), raw
-            )
-            volume_delta_normalized = True
-
-        symbol = str(raw.get("symbol") or "")
-        if symbol and not volume_delta_normalized:
-            raw = self._normalise_tick_volume_delta(symbol, raw)
-
         try:
-            tick = validate_tick(raw)
-        except DataIntegrityError as exc:
-            self._logger.debug("Tick validation failed: %s — dropped", exc)
-            return
-
-        symbol = tick.symbol
-        tick_ts = pd.to_datetime(tick.timestamp, utc=True, errors="coerce")
-        if pd.isna(tick_ts):
-            return
-
-        last_ts = self._last_tick_ts.get(symbol)
-        if last_ts is not None:
-            last_ts = pd.to_datetime(last_ts, utc=True, errors="coerce")
-            if not pd.isna(last_ts) and tick_ts < last_ts:
-                self._logger.debug(
-                    "MDM_TICK_DROPPED reason=older_timestamp symbol=%s ts=%s last=%s",
-                    symbol,
-                    tick_ts,
-                    last_ts,
-                )
-                return
-
-            if not pd.isna(last_ts) and tick_ts == last_ts:
-                last_snapshot = self._last_tick_snapshot.get(symbol, {})
-                same_price = float(last_snapshot.get("ltp", -1)) == float(tick.ltp)
-                same_volume = last_snapshot.get("volume") == raw.get(
-                    "volume_traded_today"
-                )
-
-                if same_price and same_volume:
-                    self._logger.debug(
-                        "MDM_TICK_DROPPED reason=duplicate_tick symbol=%s ts=%s",
-                        symbol,
-                        tick_ts,
-                    )
-                    return
-
-        stage_started = time.perf_counter()
-        self._last_tick_snapshot[symbol] = {
-            "ltp": tick.ltp,
-            "volume": raw.get("volume_traded_today") or raw.get("volume_traded"),
-        }
-        self._last_tick_ts[symbol] = tick_ts
-        duration_ms = (time.perf_counter() - stage_started) * 1000.0
-        if duration_ms >= 50.0:
-            self._log_slow_tick_stage(
-                stage="cache_update",
-                symbol=symbol,
-                duration_ms=duration_ms,
-                source=source_for_timing,
-            )
-        engine = self.get_candle_engine(symbol)
-        stage_started = time.perf_counter()
-        candle = engine.on_tick(tick)
-        duration_ms = (time.perf_counter() - stage_started) * 1000.0
-        if duration_ms >= 50.0:
-            self._log_slow_tick_stage(
-                stage="candle_engine_on_tick",
-                symbol=symbol,
-                duration_ms=duration_ms,
-                source=source_for_timing,
-            )
-        # ── EMIT TICK: replaces bare _store_tick call ─────────────────────────
-        # _emit_tick calls _store_tick internally AND dispatches to _subscribers.
-        # Before this fix: DataHub.subscribe_ticks() callbacks (including
-        # StrategyRunner's per-symbol callbacks) were registered in _subscribers
-        # but NEVER called from the WS path — _store_tick only cached the tick.
-        # _emit_tick is the correct call; it was defined but never invoked.
-        quote_fields = self._extract_depth_quote_fields(raw)
-        raw_safe = to_json_safe(dict(raw))
-        tick_safe = tick.to_dict()
-        tick_dict = {**raw_safe, **tick_safe, **quote_fields}
-        if "volume_delta" in raw_safe:
-            tick_dict["volume_delta"] = raw_safe.get("volume_delta")
-            tick_dict["volume"] = raw_safe.get("volume_delta")
-        elif "volume" in raw_safe:
-            tick_dict["volume"] = raw_safe.get("volume")
-            tick_dict["volume_delta"] = raw_safe.get("volume")
-        else:
-            tick_dict["volume"] = tick_safe.get("volume", 0)
-            tick_dict["volume_delta"] = tick_safe.get("volume", 0)
-        if "volume_cumulative" in raw_safe:
-            tick_dict["volume_cumulative"] = raw_safe.get("volume_cumulative")
-        elif "volume_traded_today" in raw_safe:
-            tick_dict["volume_cumulative"] = raw_safe.get("volume_traded_today")
-        elif "volume_traded" in raw_safe:
-            tick_dict["volume_cumulative"] = raw_safe.get("volume_traded")
-        tick_dict["symbol"] = symbol
-        tick_dict["timestamp"] = pd.to_datetime(
-            tick_dict["timestamp"], utc=True, errors="coerce"
-        ).isoformat()
-        token_value = raw.get("instrument_token") or raw.get("token")
-        if token_value is not None:
-            tick_dict["instrument_token"] = token_value
-        price_value = raw.get("last_price") or raw.get("ltp") or tick.ltp
-        tick_dict["last_price"] = price_value
-        tick_dict["ltp"] = tick.ltp
-        tick_dict["source"] = raw.get("source") or "ws"
-        tick_dict["timestamp_source"] = raw.get(
-            "timestamp_source", tick_dict.get("timestamp_source")
-        )
-        tick_dict["source_timestamp_valid"] = raw.get(
-            "source_timestamp_valid", tick_dict.get("source_timestamp_valid")
-        )
-        tick_dict["received_at"] = raw.get("received_at", time.time())
-        if raw.get("exchange_timestamp") is not None:
-            tick_dict["exchange_timestamp"] = raw.get("exchange_timestamp")
-        if raw.get("depth") is not None:
-            tick_dict["depth"] = raw.get("depth")
-
-        # Structured Logging for tick received (Objective 6)
-        try:
-            self._logger.debug(
-                "TICK_RECEIVED",
-                extra={
-                    "event": "tick_received",
-                    "symbol": symbol,
-                    "price": tick.ltp,
-                    "source": "ws",
-                    "token": token_value,
-                },
-            )
-        except Exception:
-            pass
-
-        normalized_live = self.normalize_live_tick(
-            tick_dict, source=str(tick_dict.get("source") or "ws")
-        )
-        if normalized_live is None:
-            return
-        stage_started = time.perf_counter()
-        self._ingest_normalized_tick(normalized_live)
-        duration_ms = (time.perf_counter() - stage_started) * 1000.0
-        if duration_ms >= 50.0:
-            self._log_slow_tick_stage(
-                stage="tick_publication",
-                symbol=symbol,
-                duration_ms=duration_ms,
-                source=str(normalized_live.get("source") or source_for_timing),
-            )
-        if bool(normalized_live.get("tradable_quote")):
-            # Log only on first quote, state transitions, or periodic debug interval.
-            # Routine per-tick proof logs are suppressed to avoid high-frequency spam.
-            _proof_state = getattr(self, "_ws_quote_proof_state", None)
-            if _proof_state is None:
-                self._ws_quote_proof_state: dict[str, dict] = {}
-                _proof_state = self._ws_quote_proof_state
-            _prev = _proof_state.get(symbol, {})
-            _cur_tradable = bool(normalized_live.get("tradable_quote"))
-            _cur_depth = bool(normalized_live.get("depth_available"))
-            _is_first = not _prev
-            _tradable_transition = _cur_tradable and not _prev.get(
-                "tradable_quote", False
-            )
-            _depth_transition = _cur_depth and not _prev.get("depth_available", False)
-            _proof_state[symbol] = {
-                "tradable_quote": _cur_tradable,
-                "depth_available": _cur_depth,
-            }
-            _should_emit_proof = _is_first or _tradable_transition or _depth_transition
-            if not _should_emit_proof and str(
-                os.getenv("LOG_QUOTE_PROOF_DEBUG", "false")
-            ).lower() in {"1", "true", "yes"}:
-                _proof_interval = float(
-                    os.getenv("LOG_QUOTE_PROOF_EVERY_SECONDS", "60") or "60"
-                )
-                _proof_throttle = getattr(self, "_ws_proof_throttle", None)
-                if _proof_throttle is None:
-                    self._ws_proof_throttle: dict[str, float] = {}
-                    _proof_throttle = self._ws_proof_throttle
-                import time as _t
-
-                _now_mono = _t.monotonic()
-                _last_proof = float(_proof_throttle.get(symbol, 0.0))
-                if _now_mono - _last_proof >= _proof_interval:
-                    _proof_throttle[symbol] = _now_mono
-                    _should_emit_proof = True
-            if _should_emit_proof:
-                log_throttled_live(
-                    self._logger,
-                    logging.INFO,
-                    "WS_FULL_QUOTE_PROOF",
-                    f"WS_FULL_QUOTE_PROOF:{symbol}",
-                    float(os.getenv("LOG_THROTTLE_WS_PROOF_SECONDS", "60") or "60"),
-                    "WS_FULL_QUOTE_PROOF symbol=%s token=%s ltp=%s bid=%s ask=%s spread=%s depth_available=%s tradable_quote=%s",
-                    symbol,
-                    token_value,
-                    normalized_live.get("ltp"),
-                    normalized_live.get("bid"),
-                    normalized_live.get("ask"),
-                    normalized_live.get("spread"),
-                    normalized_live.get("depth_available"),
-                    normalized_live.get("tradable_quote"),
-                    extra={"event": "WS_FULL_QUOTE_PROOF", "symbol": symbol},
-                )
-        if candle:
-            bar = {
-                "symbol": symbol,
-                "timestamp": (
-                    candle["timestamp"]
-                    if isinstance(candle, dict)
-                    else candle.timestamp
-                ),
-                "open": float(
-                    candle["open"] if isinstance(candle, dict) else candle.open
-                ),
-                "high": float(
-                    candle["high"] if isinstance(candle, dict) else candle.high
-                ),
-                "low": float(candle["low"] if isinstance(candle, dict) else candle.low),
-                "close": float(
-                    candle["close"] if isinstance(candle, dict) else candle.close
-                ),
-                "volume": int(
-                    float(
-                        (
-                            candle.get("volume", 0)
-                            if isinstance(candle, dict)
-                            else getattr(candle, "volume", 0)
-                        )
-                        or 0
-                    )
-                ),
-                "source": "ws_candle",
-            }
-            self._refresh_candle_projection(symbol)
             stage_started = time.perf_counter()
-            self._publish_closed_bar(bar)
+            raw = self._normalize_ws_tick(raw)
             duration_ms = (time.perf_counter() - stage_started) * 1000.0
             if duration_ms >= 50.0:
                 self._log_slow_tick_stage(
-                    stage="closed_bar_publication",
+                    stage="normalize",
+                    symbol=symbol_for_timing,
+                    duration_ms=duration_ms,
+                    source=source_for_timing,
+                )
+            if raw is None:
+                return
+            volume_delta_normalized = False
+            enqueued_mono = raw.get("_enqueued_monotonic")
+            if isinstance(enqueued_mono, (int, float)):
+                self._event_loop_lag_seconds = max(
+                    0.0, time.monotonic() - float(enqueued_mono)
+                )
+            if not raw.get("symbol"):
+                token = raw.get("instrument_token")
+                if token is None:
+                    return
+
+                token_int = int(token)
+                with self._lock:
+                    symbol_from_map = self._symbol_by_token.get(token_int)
+
+                if not symbol_from_map:
+                    log_throttled(
+                        self._logger,
+                        f"unmapped_token_{token_int}",
+                        "Unmapped token %s — tick dropped" % token_int,
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                    )
+                    return
+                raw = {**raw, "symbol": symbol_from_map}
+                raw = self._normalise_tick_volume_delta(
+                    symbol_from_map or raw.get("symbol", ""), raw
+                )
+                volume_delta_normalized = True
+
+            symbol = str(raw.get("symbol") or "")
+            if symbol:
+                symbol_for_timing = symbol
+            if symbol and not volume_delta_normalized:
+                raw = self._normalise_tick_volume_delta(symbol, raw)
+
+            try:
+                tick = validate_tick(raw)
+            except DataIntegrityError as exc:
+                self._logger.debug("Tick validation failed: %s — dropped", exc)
+                return
+
+            symbol = tick.symbol
+            symbol_for_timing = symbol
+            tick_ts = pd.to_datetime(tick.timestamp, utc=True, errors="coerce")
+            if pd.isna(tick_ts):
+                return
+
+            last_ts = self._last_tick_ts.get(symbol)
+            if last_ts is not None:
+                last_ts = pd.to_datetime(last_ts, utc=True, errors="coerce")
+                if not pd.isna(last_ts) and tick_ts < last_ts:
+                    self._logger.debug(
+                        "MDM_TICK_DROPPED reason=older_timestamp symbol=%s ts=%s last=%s",
+                        symbol,
+                        tick_ts,
+                        last_ts,
+                    )
+                    return
+
+                if not pd.isna(last_ts) and tick_ts == last_ts:
+                    last_snapshot = self._last_tick_snapshot.get(symbol, {})
+                    same_price = float(last_snapshot.get("ltp", -1)) == float(tick.ltp)
+                    same_volume = last_snapshot.get("volume") == raw.get(
+                        "volume_traded_today"
+                    )
+
+                    if same_price and same_volume:
+                        self._logger.debug(
+                            "MDM_TICK_DROPPED reason=duplicate_tick symbol=%s ts=%s",
+                            symbol,
+                            tick_ts,
+                        )
+                        return
+
+            stage_started = time.perf_counter()
+            self._last_tick_snapshot[symbol] = {
+                "ltp": tick.ltp,
+                "volume": raw.get("volume_traded_today") or raw.get("volume_traded"),
+            }
+            self._last_tick_ts[symbol] = tick_ts
+            duration_ms = (time.perf_counter() - stage_started) * 1000.0
+            if duration_ms >= 50.0:
+                self._log_slow_tick_stage(
+                    stage="cache_update",
                     symbol=symbol,
                     duration_ms=duration_ms,
                     source=source_for_timing,
                 )
-            verbose_candles = str(
-                os.getenv("LOG_VERBOSE_CANDLES", "false")
-            ).strip().lower() in {"1", "true", "yes", "y", "on"}
-            self._logger.log(
-                logging.INFO if verbose_candles else logging.DEBUG,
-                "LIVE_CANDLE_CLOSED symbol=%s source=ws_candle close=%s",
-                symbol,
-                bar["close"],
+            engine = self.get_candle_engine(symbol)
+            stage_started = time.perf_counter()
+            candle = engine.on_tick(tick)
+            duration_ms = (time.perf_counter() - stage_started) * 1000.0
+            if duration_ms >= 50.0:
+                self._log_slow_tick_stage(
+                    stage="candle_engine_on_tick",
+                    symbol=symbol,
+                    duration_ms=duration_ms,
+                    source=source_for_timing,
+                )
+            # ── EMIT TICK: replaces bare _store_tick call ─────────────────────────
+            # _emit_tick calls _store_tick internally AND dispatches to _subscribers.
+            # Before this fix: DataHub.subscribe_ticks() callbacks (including
+            # StrategyRunner's per-symbol callbacks) were registered in _subscribers
+            # but NEVER called from the WS path — _store_tick only cached the tick.
+            # _emit_tick is the correct call; it was defined but never invoked.
+            quote_fields = self._extract_depth_quote_fields(raw)
+            raw_safe = to_json_safe(dict(raw))
+            tick_safe = tick.to_dict()
+            tick_dict = {**raw_safe, **tick_safe, **quote_fields}
+            if "volume_delta" in raw_safe:
+                tick_dict["volume_delta"] = raw_safe.get("volume_delta")
+                tick_dict["volume"] = raw_safe.get("volume_delta")
+            elif "volume" in raw_safe:
+                tick_dict["volume"] = raw_safe.get("volume")
+                tick_dict["volume_delta"] = raw_safe.get("volume")
+            else:
+                tick_dict["volume"] = tick_safe.get("volume", 0)
+                tick_dict["volume_delta"] = tick_safe.get("volume", 0)
+            if "volume_cumulative" in raw_safe:
+                tick_dict["volume_cumulative"] = raw_safe.get("volume_cumulative")
+            elif "volume_traded_today" in raw_safe:
+                tick_dict["volume_cumulative"] = raw_safe.get("volume_traded_today")
+            elif "volume_traded" in raw_safe:
+                tick_dict["volume_cumulative"] = raw_safe.get("volume_traded")
+            tick_dict["symbol"] = symbol
+            tick_dict["timestamp"] = pd.to_datetime(
+                tick_dict["timestamp"], utc=True, errors="coerce"
+            ).isoformat()
+            token_value = raw.get("instrument_token") or raw.get("token")
+            if token_value is not None:
+                tick_dict["instrument_token"] = token_value
+            price_value = raw.get("last_price") or raw.get("ltp") or tick.ltp
+            tick_dict["last_price"] = price_value
+            tick_dict["ltp"] = tick.ltp
+            tick_dict["source"] = raw.get("source") or "ws"
+            tick_dict["timestamp_source"] = raw.get(
+                "timestamp_source", tick_dict.get("timestamp_source")
             )
-
-        tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
-        if tick_duration_ms >= 100.0:
-            self._log_slow_tick_stage(
-                stage="one_tick",
-                symbol=symbol,
-                duration_ms=tick_duration_ms,
-                source=source_for_timing,
+            tick_dict["source_timestamp_valid"] = raw.get(
+                "source_timestamp_valid", tick_dict.get("source_timestamp_valid")
             )
+            tick_dict["received_at"] = raw.get("received_at", time.time())
+            if raw.get("exchange_timestamp") is not None:
+                tick_dict["exchange_timestamp"] = raw.get("exchange_timestamp")
+            if raw.get("depth") is not None:
+                tick_dict["depth"] = raw.get("depth")
 
-        # ── PIPELINE SYNC (closed bars only) ─────────────────────────────────
-        # MDM is the single runtime candle builder. The deterministic pipeline
-        # store is populated from MDM's CLOSED bars via _publish_closed_bar →
-        # _push_bar_to_pipeline, so pipeline.candles_ready()/get_candles()
-        # reflect exactly the same candles as MDM. The former per-tick feed
-        # here made the pipeline a second live candle builder fed from two
-        # racing paths (MDM consumer + runner), causing out-of-order drops
-        # and readiness flapping.
+            # Structured Logging for tick received (Objective 6)
+            try:
+                self._logger.debug(
+                    "TICK_RECEIVED",
+                    extra={
+                        "event": "tick_received",
+                        "symbol": symbol,
+                        "price": tick.ltp,
+                        "source": "ws",
+                        "token": token_value,
+                    },
+                )
+            except Exception:
+                pass
+
+            normalized_live = self.normalize_live_tick(
+                tick_dict, source=str(tick_dict.get("source") or "ws")
+            )
+            if normalized_live is None:
+                return
+            stage_started = time.perf_counter()
+            self._ingest_normalized_tick(normalized_live)
+            duration_ms = (time.perf_counter() - stage_started) * 1000.0
+            if duration_ms >= 50.0:
+                self._log_slow_tick_stage(
+                    stage="tick_publication",
+                    symbol=symbol,
+                    duration_ms=duration_ms,
+                    source=str(normalized_live.get("source") or source_for_timing),
+                )
+            if bool(normalized_live.get("tradable_quote")):
+                # Log only on first quote, state transitions, or periodic debug interval.
+                # Routine per-tick proof logs are suppressed to avoid high-frequency spam.
+                _proof_state = getattr(self, "_ws_quote_proof_state", None)
+                if _proof_state is None:
+                    self._ws_quote_proof_state: dict[str, dict] = {}
+                    _proof_state = self._ws_quote_proof_state
+                _prev = _proof_state.get(symbol, {})
+                _cur_tradable = bool(normalized_live.get("tradable_quote"))
+                _cur_depth = bool(normalized_live.get("depth_available"))
+                _is_first = not _prev
+                _tradable_transition = _cur_tradable and not _prev.get(
+                    "tradable_quote", False
+                )
+                _depth_transition = _cur_depth and not _prev.get("depth_available", False)
+                _proof_state[symbol] = {
+                    "tradable_quote": _cur_tradable,
+                    "depth_available": _cur_depth,
+                }
+                _should_emit_proof = _is_first or _tradable_transition or _depth_transition
+                if not _should_emit_proof and str(
+                    os.getenv("LOG_QUOTE_PROOF_DEBUG", "false")
+                ).lower() in {"1", "true", "yes"}:
+                    _proof_interval = float(
+                        os.getenv("LOG_QUOTE_PROOF_EVERY_SECONDS", "60") or "60"
+                    )
+                    _proof_throttle = getattr(self, "_ws_proof_throttle", None)
+                    if _proof_throttle is None:
+                        self._ws_proof_throttle: dict[str, float] = {}
+                        _proof_throttle = self._ws_proof_throttle
+                    import time as _t
+
+                    _now_mono = _t.monotonic()
+                    _last_proof = float(_proof_throttle.get(symbol, 0.0))
+                    if _now_mono - _last_proof >= _proof_interval:
+                        _proof_throttle[symbol] = _now_mono
+                        _should_emit_proof = True
+                if _should_emit_proof:
+                    log_throttled_live(
+                        self._logger,
+                        logging.INFO,
+                        "WS_FULL_QUOTE_PROOF",
+                        f"WS_FULL_QUOTE_PROOF:{symbol}",
+                        float(os.getenv("LOG_THROTTLE_WS_PROOF_SECONDS", "60") or "60"),
+                        "WS_FULL_QUOTE_PROOF symbol=%s token=%s ltp=%s bid=%s ask=%s spread=%s depth_available=%s tradable_quote=%s",
+                        symbol,
+                        token_value,
+                        normalized_live.get("ltp"),
+                        normalized_live.get("bid"),
+                        normalized_live.get("ask"),
+                        normalized_live.get("spread"),
+                        normalized_live.get("depth_available"),
+                        normalized_live.get("tradable_quote"),
+                        extra={"event": "WS_FULL_QUOTE_PROOF", "symbol": symbol},
+                    )
+            if candle:
+                bar = {
+                    "symbol": symbol,
+                    "timestamp": (
+                        candle["timestamp"]
+                        if isinstance(candle, dict)
+                        else candle.timestamp
+                    ),
+                    "open": float(
+                        candle["open"] if isinstance(candle, dict) else candle.open
+                    ),
+                    "high": float(
+                        candle["high"] if isinstance(candle, dict) else candle.high
+                    ),
+                    "low": float(candle["low"] if isinstance(candle, dict) else candle.low),
+                    "close": float(
+                        candle["close"] if isinstance(candle, dict) else candle.close
+                    ),
+                    "volume": int(
+                        float(
+                            (
+                                candle.get("volume", 0)
+                                if isinstance(candle, dict)
+                                else getattr(candle, "volume", 0)
+                            )
+                            or 0
+                        )
+                    ),
+                    "source": "ws_candle",
+                }
+                self._refresh_candle_projection(symbol)
+                self._publish_closed_bar(bar)
+                verbose_candles = str(
+                    os.getenv("LOG_VERBOSE_CANDLES", "false")
+                ).strip().lower() in {"1", "true", "yes", "y", "on"}
+                self._logger.log(
+                    logging.INFO if verbose_candles else logging.DEBUG,
+                    "LIVE_CANDLE_CLOSED symbol=%s source=ws_candle close=%s",
+                    symbol,
+                    bar["close"],
+                )
+
+            # ── PIPELINE SYNC (closed bars only) ─────────────────────────────────
+            # MDM is the single runtime candle builder. The deterministic pipeline
+            # store is populated from MDM's CLOSED bars via _publish_closed_bar →
+            # _push_bar_to_pipeline, so pipeline.candles_ready()/get_candles()
+            # reflect exactly the same candles as MDM. The former per-tick feed
+            # here made the pipeline a second live candle builder fed from two
+            # racing paths (MDM consumer + runner), causing out-of-order drops
+            # and readiness flapping.
+
+        finally:
+            tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
+            if tick_duration_ms >= 100.0:
+                self._log_slow_tick_stage(
+                    stage="one_tick",
+                    symbol=symbol_for_timing,
+                    duration_ms=tick_duration_ms,
+                    source=source_for_timing,
+                )
 
     def get_candle_engine(self, symbol: str) -> CandleEngine:
         """Return the authoritative CandleEngine for a canonicalized symbol."""
@@ -13186,8 +13182,7 @@ class MarketDataManager:
         observed_at = payload.pop("_local_timestamp", None)
         received_at = (
             float(observed_at)
-            if isinstance(observed_at, (int, float))
-            and not isinstance(observed_at, bool)
+            if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool)
             else time.time()
         )
         payload["source"] = source
@@ -13929,25 +13924,15 @@ class MarketDataManager:
                     }.values()
                 )
                 deduped.sort(key=lambda item: item["timestamp"])
-                if (
-                    min_rows > 0
-                    and len(deduped) < min_rows
-                    and attempt_name != attempt_specs[-1][0]
-                ):
+                if min_rows > 0 and len(deduped) < min_rows and attempt_name != attempt_specs[-1][0]:
                     if len(deduped) > len(best_so_far):
                         best_so_far = deduped
                         best_attempt_meta = (
-                            attempt_name,
-                            from_date,
-                            to_date,
-                            len(rows),
+                            attempt_name, from_date, to_date, len(rows)
                         )
                     self._logger.info(
                         "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING symbol=%s attempt=%s returned_rows=%s min_rows=%s",
-                        symbol,
-                        attempt_name,
-                        len(deduped),
-                        min_rows,
+                        symbol, attempt_name, len(deduped), min_rows,
                         extra={
                             "event": "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING",
                             "symbol": symbol,

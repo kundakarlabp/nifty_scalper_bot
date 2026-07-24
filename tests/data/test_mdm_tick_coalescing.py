@@ -1932,3 +1932,26 @@ async def test_slow_subscriber_exception_isolated_and_drain_continues(caplog):
     assert any("Tick callback failed" in r.getMessage() for r in caplog.records)
     assert any(getattr(r, "event", "") == "TICK_STAGE_SLOW" for r in caplog.records)
     await _stop_mdm(mdm)
+
+
+def test_full_one_tick_timing_covers_early_normalization_return(monkeypatch, caplog):
+    mdm = _make_mdm()
+    mdm._event_loop_thread_id = threading.get_ident()
+
+    def slow_drop(_raw: dict):
+        time.sleep(0.11)
+        return None
+
+    monkeypatch.setattr(mdm, "_normalize_ws_tick", slow_drop)
+
+    symbol = "NFO:NIFTY26JUN24100PE"
+
+    with caplog.at_level("WARNING"):
+        mdm._process_queued_tick({"symbol": symbol, "source": "ws"})
+
+    assert any(
+        getattr(r, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(r, "stage", None) == "one_tick"
+        and getattr(r, "symbol", None) == symbol
+        for r in caplog.records
+    )
