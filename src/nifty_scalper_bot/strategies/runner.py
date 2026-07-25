@@ -19563,33 +19563,38 @@ class StrategyRunner:
             _client_order_id = f"nfo:{_identity_digest}"
             _trade_lifecycle_id = f"tl:{_identity_digest}"
             _broker_tag = f"r{_identity_digest[:12]}"
-            # 1E: one lot-sizing trace, for the FINAL selected contract only.
-            # `qty` is broker units; requested/final lots are whole lots.
+            # Request-normalization telemetry: strategy lots -> dynamic
+            # lot-size resolution -> REQUESTED broker units. Nothing here is
+            # final by name or by value.
+            #
+            # NOTE ON SCOPE: there is currently no live entry-sizing boundary
+            # downstream of this point. MarginEngine.plan() is reached only via
+            # _execute_market_order (emergency-exit path); _precheck_margin is
+            # dead code and discards decision.quantity; and
+            # submit_trade_plan_result forwards plan.quantity unchanged to
+            # place_managed_order*/place_order. So for live entries today this
+            # requested quantity is also what is submitted. Deliberately not
+            # labelled "final" here: if entry-side margin gating is wired in
+            # later, the authoritative event belongs at that boundary, not here.
             self._logger.info(
-                "OPTION_LOT_SIZING_DECISION symbol=%s requested_lots=%s "
-                "final_lots=%s resolved_lot_size=%s broker_quantity=%s "
+                "OPTION_LOT_REQUEST_NORMALIZED symbol=%s requested_lots=%s "
+                "resolved_lot_size=%s requested_broker_quantity=%s "
                 "option_entry_price=%s option_stop_loss=%s trace_id=%s",
                 order_symbol,
                 requested_lots,
-                _requested_lots,
                 _resolved_lot_size,
                 qty,
                 price,
                 stop_loss,
                 trace_id,
                 extra={
-                    "event": "OPTION_LOT_SIZING_DECISION",
+                    "event": "OPTION_LOT_REQUEST_NORMALIZED",
                     "symbol": order_symbol,
                     "requested_lots": requested_lots,
-                    "final_lots": _requested_lots,
-                    "configured_max_lots": getattr(
-                        getattr(self, "_settings", None), "MAX_LOTS_PER_TRADE", None
-                    ),
                     "resolved_lot_size": _resolved_lot_size,
-                    "broker_quantity": qty,
+                    "requested_broker_quantity": qty,
                     "option_entry_price": price,
                     "option_stop_loss": stop_loss,
-                    "sizing_reason": "runner_lot_conversion",
                     "trace_id": trace_id,
                 },
             )

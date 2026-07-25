@@ -633,12 +633,21 @@ class MarginEngine:
         margin_estimator = getattr(self._broker, "estimate_margin", None)
         if callable(margin_estimator) and price > 0:
             try:
-                # Broker margin is quoted per unit; scale to a per-lot cost so
-                # it is comparable with the lot counts above.
-                margin_per_unit = float(margin_estimator(inputs.symbol, 1, price))
-                margin_per_lot = margin_per_unit * lot_size
-                if margin_per_lot > 0:
-                    lots_by_margin = int(balance // margin_per_lot)
+                # QUANTITY CONTRACT: `estimate_margin(symbol, quantity, price)`
+                # is an OPTIONAL broker capability -- no adapter in this repo
+                # implements it today (it is probed via getattr), so its
+                # quantity convention is not established by any concrete
+                # implementation. We therefore ask for the margin of ONE WHOLE
+                # LOT directly by passing `lot_size` as the quantity, rather
+                # than estimating one unit and scaling by lot_size. If the
+                # broker interprets quantity as broker units this is exactly
+                # one lot; the result is used as-is and never multiplied by
+                # lot_size again, so no convention mismatch can inflate it.
+                margin_for_one_lot = float(
+                    margin_estimator(inputs.symbol, lot_size, price)
+                )
+                if margin_for_one_lot > 0:
+                    lots_by_margin = int(balance // margin_for_one_lot)
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug(
                     "margin_plan_estimate_margin_error",
