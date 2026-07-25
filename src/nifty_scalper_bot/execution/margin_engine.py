@@ -629,33 +629,17 @@ class MarginEngine:
         lots_by_risk = int((balance * risk_pct) // one_lot_risk)
         one_lot_cost = price * lot_size
         lots_by_cap = int(cap_from_pct // one_lot_cost) if one_lot_cost > 0 else 0
-        lots_by_margin = 0
-        margin_estimator = getattr(self._broker, "estimate_margin", None)
-        if callable(margin_estimator) and price > 0:
-            try:
-                # QUANTITY CONTRACT: `estimate_margin(symbol, quantity, price)`
-                # is an OPTIONAL broker capability -- no adapter in this repo
-                # implements it today (it is probed via getattr), so its
-                # quantity convention is not established by any concrete
-                # implementation. We therefore ask for the margin of ONE WHOLE
-                # LOT directly by passing `lot_size` as the quantity, rather
-                # than estimating one unit and scaling by lot_size. If the
-                # broker interprets quantity as broker units this is exactly
-                # one lot; the result is used as-is and never multiplied by
-                # lot_size again, so no convention mismatch can inflate it.
-                margin_for_one_lot = float(
-                    margin_estimator(inputs.symbol, lot_size, price)
-                )
-                if margin_for_one_lot > 0:
-                    lots_by_margin = int(balance // margin_for_one_lot)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug(
-                    "margin_plan_estimate_margin_error",
-                    extra={"event": "margin_plan_estimate_margin_error", "error": str(exc)},
-                )
-        max_lots = max(
-            0, min(lots_by_risk, lots_by_cap, lots_by_margin or lots_by_cap)
-        )
+        # NOTE: an optional broker `estimate_margin(symbol, quantity, price)`
+        # probe previously ran here. It has no concrete implementation
+        # anywhere in this repo (no adapter defines it), so its quantity
+        # convention cannot be verified: passing `lot_size` as quantity is
+        # only correct if a future adapter treats quantity as broker units --
+        # if one instead treated it as lots, this would silently request
+        # margin for `lot_size` lots. Removed rather than guessed. Sizing
+        # here relies only on the two deterministic sources below; broker
+        # required-margin validation still happens in _estimate_required()
+        # via get_required_margin when the broker supports it.
+        max_lots = max(0, min(lots_by_risk, lots_by_cap))
         configured_max_lots = max(int(inputs.max_lots_per_trade), 0)
         if configured_max_lots > 0:
             max_lots = min(max_lots, configured_max_lots)
@@ -668,7 +652,6 @@ class MarginEngine:
                 "symbol": inputs.symbol,
                 "lots_by_risk": lots_by_risk,
                 "lots_by_cap": lots_by_cap,
-                "lots_by_margin": lots_by_margin,
                 "max_lots": max_lots,
                 "lot_size": lot_size,
                 "max_units": max_units,
