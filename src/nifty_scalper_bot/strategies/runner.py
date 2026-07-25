@@ -19216,13 +19216,45 @@ class StrategyRunner:
             lot_size = 1
             final_qty = qty
             try:
-                qty_lots = max(int(signal.quantity or 1), 1)
+                # One lot is the MINIMUM VALID TRADE, never a fallback for
+                # invalid input. None/0/negative requested lots is a strategy
+                # contract violation and must fail closed rather than silently
+                # becoming a live one-lot order.
+                requested_lots = int(signal.quantity or 0)
+                if requested_lots <= 0:
+                    self._logger.warning(
+                        "ORDER_BLOCKED: invalid_requested_lots symbol=%s "
+                        "requested_lots=%s trace_id=%s",
+                        trade_symbol or base_symbol,
+                        signal.quantity,
+                        trace_id,
+                        extra={
+                            "event": "ORDER_BLOCKED",
+                            "reason": "invalid_requested_lots",
+                            "symbol": trade_symbol or base_symbol,
+                            "requested_lots": signal.quantity,
+                            "trace_id": trace_id,
+                        },
+                    )
+                    self._mark_directional_dedup_failed(
+                        underlying=underlying,
+                        option_side=option_side,
+                        reason=reason_key,
+                    )
+                    self._reset_execution_state(base_symbol)
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="invalid_requested_lots",
+                    )
+                qty_lots = requested_lots
                 if hasattr(self._order_manager, "resolve_lot_size"):
                     lot_size = int(
                         self._order_manager.resolve_lot_size(
                             trade_symbol or base_symbol
                         )
                     )
+                # Single conversion point: complete lots -> broker units.
                 final_qty = qty_lots * lot_size
                 self._logger.info(
                     "ORDER_QTY_NORMALIZED symbol=%s input_qty_lots=%s lot_size=%s final_qty=%s trace_id=%s",
@@ -19468,11 +19500,13 @@ class StrategyRunner:
                 _resolved_lot_size = int(
                     self._order_manager._lot_size_for_symbol(order_symbol) or 0
                 )
-                _requested_lots = (
-                    1
-                    if _resolved_lot_size > 0 and int(qty) == _resolved_lot_size
-                    else 0
-                )
+                # Derive lots by exact division. The previous form only ever
+                # produced 1 (when qty == lot_size) or 0, so every multi-lot
+                # trade recorded requested_lots=0 in the TradePlan.
+                if _resolved_lot_size > 0 and int(qty) % _resolved_lot_size == 0:
+                    _requested_lots = int(qty) // _resolved_lot_size
+                else:
+                    _requested_lots = 0
             except Exception:
                 _resolved_lot_size = 0
             _basket = getattr(self, "_active_contract_basket", None) or {}
@@ -19529,6 +19563,36 @@ class StrategyRunner:
             _client_order_id = f"nfo:{_identity_digest}"
             _trade_lifecycle_id = f"tl:{_identity_digest}"
             _broker_tag = f"r{_identity_digest[:12]}"
+            # 1E: one lot-sizing trace, for the FINAL selected contract only.
+            # `qty` is broker units; requested/final lots are whole lots.
+            self._logger.info(
+                "OPTION_LOT_SIZING_DECISION symbol=%s requested_lots=%s "
+                "final_lots=%s resolved_lot_size=%s broker_quantity=%s "
+                "option_entry_price=%s option_stop_loss=%s trace_id=%s",
+                order_symbol,
+                requested_lots,
+                _requested_lots,
+                _resolved_lot_size,
+                qty,
+                price,
+                stop_loss,
+                trace_id,
+                extra={
+                    "event": "OPTION_LOT_SIZING_DECISION",
+                    "symbol": order_symbol,
+                    "requested_lots": requested_lots,
+                    "final_lots": _requested_lots,
+                    "configured_max_lots": getattr(
+                        getattr(self, "_settings", None), "MAX_LOTS_PER_TRADE", None
+                    ),
+                    "resolved_lot_size": _resolved_lot_size,
+                    "broker_quantity": qty,
+                    "option_entry_price": price,
+                    "option_stop_loss": stop_loss,
+                    "sizing_reason": "runner_lot_conversion",
+                    "trace_id": trace_id,
+                },
+            )
             plan = TradePlan(
                 symbol=order_symbol,
                 side=signal.action,

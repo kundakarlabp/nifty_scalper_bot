@@ -617,39 +617,51 @@ class MarginEngine:
             )
             risk_per_unit = price * fallback_move_pct
 
-        unit_risk_value = risk_per_unit * max(inputs.contract_multiplier, 1.0)
-        if unit_risk_value <= 0:
+        lot_size = max(1, int(inputs.lot_size))
+        # Per-lot economics derived from lot_size ALONE. contract_multiplier is
+        # deliberately not applied here: production sets it to the lot size, so
+        # using both would count contract size twice. Contract size is counted
+        # exactly once, via lot_size, and converted to broker units once at the
+        # end of this method.
+        one_lot_risk = risk_per_unit * lot_size
+        if one_lot_risk <= 0:
             return 0
-        qty_by_risk = int((balance * risk_pct) // unit_risk_value)
-        price_denominator = price * max(inputs.contract_multiplier, 1.0)
-        qty_by_cap = (
-            int(cap_from_pct // price_denominator) if price_denominator > 0 else 0
-        )
-        qty_by_margin = 0
+        lots_by_risk = int((balance * risk_pct) // one_lot_risk)
+        one_lot_cost = price * lot_size
+        lots_by_cap = int(cap_from_pct // one_lot_cost) if one_lot_cost > 0 else 0
+        lots_by_margin = 0
         margin_estimator = getattr(self._broker, "estimate_margin", None)
         if callable(margin_estimator) and price > 0:
             try:
+                # Broker margin is quoted per unit; scale to a per-lot cost so
+                # it is comparable with the lot counts above.
                 margin_per_unit = float(margin_estimator(inputs.symbol, 1, price))
-                if margin_per_unit > 0:
-                    qty_by_margin = int(balance // margin_per_unit)
+                margin_per_lot = margin_per_unit * lot_size
+                if margin_per_lot > 0:
+                    lots_by_margin = int(balance // margin_per_lot)
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug(
                     "margin_plan_estimate_margin_error",
                     extra={"event": "margin_plan_estimate_margin_error", "error": str(exc)},
                 )
-        max_units = max(0, min(qty_by_risk, qty_by_cap, qty_by_margin or qty_by_cap))
-        lot_size = max(1, int(inputs.lot_size))
-        max_lot_units = lot_size * max(int(inputs.max_lots_per_trade), 0)
-        if max_lot_units > 0:
-            max_units = min(max_units, max_lot_units)
+        max_lots = max(
+            0, min(lots_by_risk, lots_by_cap, lots_by_margin or lots_by_cap)
+        )
+        configured_max_lots = max(int(inputs.max_lots_per_trade), 0)
+        if configured_max_lots > 0:
+            max_lots = min(max_lots, configured_max_lots)
+        # Single conversion point: complete lots -> broker units.
+        max_units = max_lots * lot_size
         self._logger.debug(
             "margin_plan_qty",
             extra={
                 "event": "margin_plan_qty",
                 "symbol": inputs.symbol,
-                "qty_by_risk": qty_by_risk,
-                "qty_by_cap": qty_by_cap,
-                "max_lot_units": max_lot_units,
+                "lots_by_risk": lots_by_risk,
+                "lots_by_cap": lots_by_cap,
+                "lots_by_margin": lots_by_margin,
+                "max_lots": max_lots,
+                "lot_size": lot_size,
                 "max_units": max_units,
             },
         )
@@ -728,11 +740,12 @@ class MarginEngine:
                     extra={"event": "margin_plan_required_fallback", "error": str(exc)},
                 )
         premium = max(inputs.price, 0.0)
+        # `quantity` is already broker units (lots x lot_size), and
+        # `contract_multiplier` IS the lot size, so applying it here would
+        # square the contract size (e.g. 100 x 65 x 65 = 422500 instead of
+        # 6500). Contract size is counted exactly once, inside `quantity`.
         estimate = (
-            premium
-            * max(quantity, 0)
-            * max(inputs.contract_multiplier, 1.0)
-            * max(inputs.margin_factor, 1.0)
+            premium * max(quantity, 0) * max(inputs.margin_factor, 1.0)
         )
         return estimate
 
