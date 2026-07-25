@@ -146,3 +146,110 @@ def test_plan_clamps_zero_requested_with_atr_margin() -> None:
     assert decision.quantity == 75
     assert decision.sizing is not None
     assert decision.sizing.reason == "clamped_min_lot"
+
+
+# ===================== OPTION LOT-SIZING REGRESSION =====================
+# NIFTY option sizing must reason in COMPLETE LOTS and convert to broker
+# units exactly once. Regression for the unit/lot mixing that rejected every
+# affordable trade with `no_qty_after_risk`, and for the contract-size double
+# count that inflated est_required by lot_size.
+
+
+def _opt_inputs(**overrides):
+    lot = overrides.pop("lot_size", 65)
+    base = {
+        "symbol": "NFO:NIFTY26AUG25000CE",
+        "side": "BUY",
+        "price": 100.0,
+        "stop_loss": 80.0,
+        "atr": None,
+        "requested_qty": lot,
+        "product": "NRML",
+        "lot_size": lot,
+        "balance": 200_000.0,
+        "per_trade_risk_pct": 1.0,
+        "per_trade_cap_pct": 100.0,
+        "margin_factor": 1.0,
+        "margin_buffer": 1.0,
+        # Production sets this to the lot size; sizing must NOT count it again.
+        "contract_multiplier": float(lot),
+        "ist_now": datetime(2024, 1, 1, 9, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+        "min_lots_per_trade": 1,
+        "max_lots_per_trade": 10,
+        "atr_multiple": 1.5,
+    }
+    base.update(overrides)
+    return MarginInputs(**base)  # type: ignore[arg-type]
+
+
+def _opt_engine() -> MarginEngine:
+    return MarginEngine(
+        broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
+    )
+
+
+def test_option_one_lot_accepted_as_broker_units() -> None:
+    """Test A: one lot with lot_size=65 becomes broker quantity 65."""
+    decision = _opt_engine().plan(_opt_inputs())
+    assert decision.ok
+    assert decision.quantity == 65
+
+
+def test_option_two_lots_accepted() -> None:
+    """Test B: two affordable lots become broker quantity 130."""
+    decision = _opt_engine().plan(
+        _opt_inputs(requested_qty=130, balance=2_000_000.0)
+    )
+    assert decision.ok
+    assert decision.quantity == 130
+
+
+def test_option_partial_lot_capacity_is_rejected_not_rounded_up() -> None:
+    """Test C: capacity below one complete lot rejects; never rounds up."""
+    decision = _opt_engine().plan(_opt_inputs(balance=1_000.0))
+    assert not decision.ok
+    assert decision.quantity == 0
+
+
+def test_option_capital_permits_one_of_two_requested_lots() -> None:
+    """Test D: request 2, capital/risk supports 1 -> exactly one lot."""
+    decision = _opt_engine().plan(_opt_inputs(requested_qty=130))
+    assert decision.ok
+    assert decision.quantity == 65
+
+
+def test_option_stop_risk_permits_one_of_two_lots() -> None:
+    """Test E: capital allows two lots, stop-risk budget allows one."""
+    decision = _opt_engine().plan(
+        _opt_inputs(
+            requested_qty=130, balance=2_000_000.0, per_trade_risk_pct=0.1
+        )
+    )
+    assert decision.ok
+    assert decision.quantity == 65
+
+
+@pytest.mark.parametrize("lot_size", [50, 65, 75])
+def test_option_broker_quantity_uses_resolved_lot_size(lot_size: int) -> None:
+    """Test G: lot size is taken from the contract, never hard-coded."""
+    decision = _opt_engine().plan(_opt_inputs(lot_size=lot_size))
+    assert decision.ok
+    assert decision.quantity == lot_size
+    assert decision.quantity % lot_size == 0
+
+
+def test_option_premium_cost_is_not_double_counted_by_contract_size() -> None:
+    """Test H: one lot at premium 100, lot_size 65 costs ~6500, not 422500."""
+    decision = _opt_engine().plan(_opt_inputs())
+    assert decision.quantity == 65
+    assert decision.est_required == pytest.approx(6_500.0)
+    assert decision.est_required != pytest.approx(422_500.0)
+
+
+def test_option_affordability_uses_selected_premium_not_underlying() -> None:
+    """Test I: affordability uses the option premium (120), not spot (25000)."""
+    decision = _opt_engine().plan(_opt_inputs(price=120.0, stop_loss=100.0))
+    assert decision.ok
+    assert decision.quantity == 65
+    # 120 * 65 = 7800, nowhere near a spot-driven 25000 * 65.
+    assert decision.est_required == pytest.approx(7_800.0)
