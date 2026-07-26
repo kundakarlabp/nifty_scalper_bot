@@ -259,6 +259,9 @@ def test_recovery_retry_cannot_exceed_first_gate_approved_quantity(
         "entry_sizing_requested_quantity": 130,
         "entry_sizing_effective_quantity": 65,
         "entry_sizing_lot_size": 65,
+        "entry_sizing_symbol": "NFO:NIFTY2662324050PE",
+        "entry_sizing_trace_id": "trace-hardening",
+        "entry_sizing_signal_id": "signal-hardening",
     }
     # Plenty of margin at retry time: an ungated resize would ask for 130.
     manager = _Manager(
@@ -389,3 +392,137 @@ def test_partial_fill_lifecycle_lot_aligned_fill_tracks_protected_quantity(
     assert state["requested_lots"] == 1
     assert state["broker_filled_quantity"] == 65
     assert int(state.get("protected_quantity") or 0) <= 65
+
+
+def _sized_reject(
+    message: str, *, symbol: str, requested: int, effective: int, lot: int,
+    trace: str, signal: str,
+) -> TradePlanSubmitResult:
+    result = _reject(message)
+    result.details = {
+        **(result.details or {}),
+        "entry_sizing_requested_quantity": requested,
+        "entry_sizing_effective_quantity": effective,
+        "entry_sizing_lot_size": lot,
+        "entry_sizing_symbol": symbol,
+        "entry_sizing_trace_id": trace,
+        "entry_sizing_signal_id": signal,
+    }
+    return result
+
+
+def _plan_for(symbol: str, quantity: int, trace: str, signal: str) -> TradePlan:
+    return TradePlan(
+        symbol=symbol,
+        side="BUY",  # type: ignore[arg-type]
+        quantity=quantity,
+        entry_price=100.0,
+        stop_loss=90.0,
+        take_profit=120.0,
+        signal_id=signal,
+        trace_id=trace,
+        tag="runner-entry",
+    )
+
+
+def test_recovery_sizing_records_do_not_cross_contaminate(monkeypatch) -> None:
+    """Two trades on ONE manager must each freeze to their own record.
+
+    Against e73e0461 the fallback read manager._last_entry_sizing_details --
+    the most recent submission -- so trade A's retry could consume trade B's
+    sizing. Provenance is now owned by each individual result.
+    """
+    monkeypatch.delenv("DEFAULT_OPTION_LOT_SIZE", raising=False)
+    a_reject = _sized_reject(
+        "margin required 20000 available 5000",
+        symbol="NFO:NIFTYA", requested=130, effective=65, lot=65,
+        trace="trace-A", signal="signal-A",
+    )
+    b_reject = _sized_reject(
+        "margin required 30000 available 5000",
+        symbol="NFO:NIFTYB", requested=200, effective=100, lot=50,
+        trace="trace-B", signal="signal-B",
+    )
+    manager = _Manager(
+        [a_reject, _accept("A-retry"), b_reject, _accept("B-retry")],
+        resolver=_Resolver(lot=65),
+        margin=10_000_000.0,
+    )
+    # A stale manager-global cache from some OTHER trade. Against e73e0461
+    # _first_effective_quantity() fell back to this whenever the result's own
+    # details lacked the key, letting one trade consume another's sizing.
+    # It must never be consulted now.
+    manager._last_entry_sizing_details = {
+        "entry_sizing_requested_quantity": 200,
+        "entry_sizing_effective_quantity": 100,
+        "entry_sizing_lot_size": 50,
+    }
+
+    manager.submit_trade_plan_result(
+        _plan_for("NFO:NIFTYA", 130, "trace-A", "signal-A")
+    )
+    a_retry = manager.plans[1]
+    assert a_retry.quantity <= 65
+
+    manager._instrument_resolver = _Resolver(lot=50)
+    manager.submit_trade_plan_result(
+        _plan_for("NFO:NIFTYB", 200, "trace-B", "signal-B")
+    )
+    b_retry = manager.plans[3]
+    assert b_retry.quantity <= 100
+    # B must not have been squeezed down to A's 65-unit record.
+    assert b_retry.quantity > 65
+
+
+def test_recovery_rejects_mismatched_sizing_provenance(monkeypatch) -> None:
+    """A record belonging to another trade must be refused, with no retry."""
+    monkeypatch.delenv("DEFAULT_OPTION_LOT_SIZE", raising=False)
+    # Plan is A; the result carries B's sizing record.
+    wrong = _sized_reject(
+        "margin required 20000 available 5000",
+        symbol="NFO:NIFTYB", requested=200, effective=100, lot=50,
+        trace="trace-B", signal="signal-B",
+    )
+    manager = _Manager(
+        [wrong, _accept("should-not-happen")],
+        resolver=_Resolver(lot=65),
+        margin=10_000_000.0,
+    )
+
+    result = manager.submit_trade_plan_result(
+        _plan_for("NFO:NIFTYA", 130, "trace-A", "signal-A")
+    )
+
+    # Exactly one submission: the retry was refused on provenance grounds.
+    assert len(manager.plans) == 1
+    assert result.accepted is False
+    recovery = (result.details or {}).get("entry_recovery") or {}
+    assert recovery.get("outcome") == "entry_sizing_provenance_invalid"
+
+
+def test_recovery_ignores_manager_global_sizing_cache(monkeypatch) -> None:
+    """A legacy result with no sizing record must not borrow manager state.
+
+    Against e73e0461 the manager-global cache supplied a cap here, so the
+    retry was silently sized from an unrelated trade's record.
+    """
+    monkeypatch.delenv("DEFAULT_OPTION_LOT_SIZE", raising=False)
+    legacy = _reject("margin required 20000 available 5000")  # no sizing details
+    manager = _Manager(
+        [legacy, _accept("retry")],
+        resolver=_Resolver(lot=65),
+        margin=10_000_000.0,
+    )
+    manager._last_entry_sizing_details = {
+        "entry_sizing_requested_quantity": 130,
+        "entry_sizing_effective_quantity": 65,
+        "entry_sizing_lot_size": 65,
+    }
+
+    manager.submit_trade_plan_result(_plan_for("NFO:NIFTYA", 130, "t", "s"))
+
+    retry = manager.plans[1]
+    # Legacy behaviour (resolver lot 65, normal resize) -- NOT a cap borrowed
+    # from the manager cache. The affordable resize exceeds 65 here.
+    assert retry.quantity > 65
+    assert retry.quantity % 65 == 0

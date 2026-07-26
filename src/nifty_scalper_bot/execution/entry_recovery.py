@@ -587,28 +587,54 @@ def _annotate(result: Any, decision: RecoveryDecision, **extra: Any) -> Any:
         )
 
 
-def _first_effective_quantity(manager: Any, result: Any, plan: Any) -> int | None:
-    """First gate-approved quantity, or None when it cannot be trusted.
+def _first_effective_quantity(result: Any, plan: Any) -> int | None:
+    """First gate-approved quantity for THIS submission, or None.
 
-    A retry may reduce further but must never restore quantity that the first
-    entry margin gate removed. Never inferred from broker error text.
+    Provenance is read only from the result the caller was given -- never
+    from manager attributes, globals, thread-local state, latest-submission
+    caches or broker error text -- so one trade can never consume another
+    trade's sizing record. A retry may reduce further but must never restore
+    quantity the first entry gate removed.
+    Returns None when no record exists (legacy path) and raises
+    _ProvenanceMismatch when a record exists but does not match this plan.
     """
-    record = getattr(result, "details", None) or {}
+    record = getattr(result, "details", None)
     if not isinstance(record, dict) or "entry_sizing_effective_quantity" not in record:
-        record = getattr(manager, "_last_entry_sizing_details", None) or {}
-    if not isinstance(record, dict):
         return None
     try:
         effective = int(record.get("entry_sizing_effective_quantity", 0) or 0)
+        recorded_original = int(record.get("entry_sizing_requested_quantity", 0) or 0)
         lot = int(record.get("entry_sizing_lot_size", 0) or 0)
     except (TypeError, ValueError):
-        return None
-    original_qty = int(getattr(plan, "quantity", 0) or 0)
-    if effective <= 0 or original_qty <= 0 or effective > original_qty:
-        return None
-    if lot > 0 and effective % lot != 0:
-        return None
+        raise _ProvenanceMismatch("entry_sizing_provenance_invalid") from None
+
+    plan_qty = int(getattr(plan, "quantity", 0) or 0)
+    if (
+        recorded_original != plan_qty
+        or str(record.get("entry_sizing_symbol") or "") != str(
+            getattr(plan, "symbol", "") or ""
+        )
+        or effective <= 0
+        or lot <= 0
+        or effective > recorded_original
+        or effective % lot != 0
+    ):
+        raise _ProvenanceMismatch("entry_sizing_provenance_invalid")
+
+    for record_key, plan_attr in (
+        ("entry_sizing_trace_id", "trace_id"),
+        ("entry_sizing_signal_id", "signal_id"),
+        ("entry_sizing_trade_lifecycle_id", "trade_lifecycle_id"),
+    ):
+        recorded = record.get(record_key)
+        actual = getattr(plan, plan_attr, None)
+        if recorded is not None and actual is not None and recorded != actual:
+            raise _ProvenanceMismatch("entry_sizing_provenance_invalid")
     return effective
+
+
+class _ProvenanceMismatch(Exception):
+    """Entry-sizing record does not belong to this plan."""
 
 
 def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> Any:
@@ -685,7 +711,12 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
 
         rebuilt = _rebuild_plan(manager, plan, quote, decision, quantity=quantity)
         if rebuilt is not None:
-            frozen = _first_effective_quantity(manager, result, plan)
+            try:
+                frozen = _first_effective_quantity(result, plan)
+            except _ProvenanceMismatch:
+                return _annotate(
+                    result, decision, outcome="entry_sizing_provenance_invalid"
+                )
             if frozen is not None:
                 lot = _lot_size(manager, str(plan.symbol)) or 0
                 capped = min(int(getattr(rebuilt, "quantity", 0) or 0), frozen)

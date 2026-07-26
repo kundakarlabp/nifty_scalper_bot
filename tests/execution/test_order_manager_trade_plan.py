@@ -663,13 +663,11 @@ def test_entry_gate_skips_exposure_reducing_intents(monkeypatch) -> None:
         assert captured.get("quantity") == 65, intent
 
 
-def test_entry_gate_defers_session_only_reason_and_preserves_sizing(
-    monkeypatch,
-) -> None:
-    """MIS_WINDOW_CLOSED is owned by the session guard, not this gate.
+def test_entry_gate_session_reason_rejects_with_zero_broker_calls(monkeypatch) -> None:
+    """MIS_WINDOW_CLOSED must reject before placement, not be deferred.
 
-    The safely sized quantity is preserved and the entry continues through the
-    canonical path; the gate claims sizing permission only.
+    An out-of-window entry is never allowed on the assumption that some other
+    guard will catch it later.
     """
     decision = types.SimpleNamespace(
         ok=False,
@@ -677,15 +675,14 @@ def test_entry_gate_defers_session_only_reason_and_preserves_sizing(
         reason="MIS_WINDOW_CLOSED",
         est_required=6955.0,
     )
-    mgr, broker, captured, _ = _gate_manager(monkeypatch, decision=decision)
+    mgr, broker, _captured, _ = _gate_manager(monkeypatch, decision=decision)
 
     result = mgr.submit_trade_plan_result(_gate_plan(quantity=130))
 
-    assert result.accepted
-    assert len(broker.orders) == 1
-    # Sizing decision still applied: 130 requested, 65 permitted.
-    assert broker.orders[0]["quantity"] == 65
-    assert captured["quantity"] == 65
+    assert result.accepted is False
+    assert result.reason == "MIS_WINDOW_CLOSED"
+    assert result.broker_attempted is False
+    assert len(broker.orders) == 0
 
 
 def test_entry_gate_unknown_failure_reason_is_fail_closed(monkeypatch) -> None:
@@ -820,18 +817,35 @@ def test_entry_gate_uses_canonical_lowercase_risk_settings(monkeypatch) -> None:
 
 
 def test_entry_gate_result_carries_frozen_sizing_details(monkeypatch) -> None:
-    """3A: the first gate-approved sizing is exposed for recovery to freeze."""
+    """3A: the first gate-approved sizing is stamped on THIS result."""
     decision = types.SimpleNamespace(
         ok=True, quantity=65, reason=None, est_required=6955.0
     )
     mgr, _broker, _captured, _ = _gate_manager(monkeypatch, decision=decision)
+    plan = TradePlan(
+        symbol="NFO:NIFTY26AUG25000CE",
+        side="BUY",
+        quantity=130,
+        entry_price=100.0,
+        stop_loss=80.0,
+        take_profit=140.0,
+        intent="ENTRY",  # type: ignore[arg-type]
+        requested_lots=2,
+        resolved_lot_size=65,
+        trace_id="trace-A",
+        signal_id="signal-A",
+        trade_lifecycle_id="tl-A",
+    )
 
-    mgr.submit_trade_plan_result(_gate_plan(quantity=130))
+    result = mgr.submit_trade_plan_result(plan)
 
-    record = mgr._last_entry_sizing_details
-    assert record["entry_sizing_requested_quantity"] == 130
-    assert record["entry_sizing_effective_quantity"] == 65
-    assert record["entry_sizing_lot_size"] == 65
+    assert result.details["entry_sizing_requested_quantity"] == 130
+    assert result.details["entry_sizing_effective_quantity"] == 65
+    assert result.details["entry_sizing_lot_size"] == 65
+    assert result.details["entry_sizing_symbol"] == "NFO:NIFTY26AUG25000CE"
+    assert result.details["entry_sizing_trace_id"] == "trace-A"
+    assert result.details["entry_sizing_signal_id"] == "signal-A"
+    assert result.details["entry_sizing_trade_lifecycle_id"] == "tl-A"
 
 
 def test_entry_gate_pre_broker_telemetry_does_not_claim_attempt(monkeypatch) -> None:
