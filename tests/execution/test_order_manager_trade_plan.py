@@ -1,4 +1,7 @@
+import pytest
+import types
 from types import SimpleNamespace
+from typing import Any
 
 from nifty_scalper_bot.execution.order_manager_core import (
     OrderManager,
@@ -447,3 +450,329 @@ def test_risk_fallback_records_margin_success_clears_stale() -> None:
     assert snap["balance_stale"] is False
     assert snap["last_margin_success_age_s"] is not None
     assert snap["trading_allowed_effect"] != "live_orders_blocked"
+
+
+# ==================== FINAL LIVE-ENTRY MARGIN GATE ====================
+# The gate runs in submit_trade_plan_result AFTER protected price + bracket
+# re-anchoring and BEFORE any managed order, lifecycle, recovery or bracket
+# state exists. It consumes the full MarginDecision including decision.quantity.
+
+
+class _GateBroker:
+    """Records every broker placement so call count/quantity are assertable."""
+
+    def __init__(self) -> None:
+        self.orders: list[dict[str, Any]] = []
+
+    def place_order(self, **kwargs: Any) -> dict[str, Any]:
+        self.orders.append(dict(kwargs))
+        return {"order_id": f"ORD-{len(self.orders)}", "status": "success"}
+
+
+def _gate_manager(monkeypatch, *, decision, balance=(1_000_000.0, "mdm"), lot_size=65):
+    """Real OrderManager with only external boundaries faked."""
+    from nifty_scalper_bot.execution.order_manager import OrderPreflightResult
+    from nifty_scalper_bot.execution.position_manager import PositionManager
+    from nifty_scalper_bot.utils.rate_limiter import RateLimiter
+
+    broker = _GateBroker()
+    mgr = OrderManager(broker, PositionManager(), RateLimiter())
+    captured: dict[str, Any] = {}
+    margin_inputs: list[Any] = []
+
+    def _fake_managed(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        qty = int(kwargs.get("quantity") or 0)
+        broker.place_order(symbol=kwargs.get("symbol"), quantity=qty)
+        return types.SimpleNamespace(
+            accepted=True,
+            order_id="ORD-1",
+            reason="accepted",
+            details={},
+            broker_attempted=True,
+        )
+
+    def _plan_capture(inputs):
+        margin_inputs.append(inputs)
+        return decision
+
+    monkeypatch.setattr(mgr, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        mgr, "_validate_trade_plan", lambda plan: OrderPreflightResult(True, "ok", {})
+    )
+    monkeypatch.setattr(mgr, "_protected_limit_price", lambda plan: 107.0)
+    monkeypatch.setattr(mgr, "place_managed_order_result", _fake_managed)
+    monkeypatch.setattr(mgr, "_lot_size_for_symbol", lambda symbol: lot_size)
+    monkeypatch.setattr(mgr, "_resolve_available_margin", lambda **kw: balance)
+    monkeypatch.setattr(
+        mgr, "_margin_engine", types.SimpleNamespace(plan=_plan_capture)
+    )
+    return mgr, broker, captured, margin_inputs
+
+
+def _gate_plan(quantity=130, lot_size=65, intent="ENTRY"):
+    return TradePlan(
+        symbol="NFO:NIFTY26AUG25000CE",
+        side="BUY",
+        quantity=quantity,
+        entry_price=100.0,
+        stop_loss=80.0,
+        take_profit=140.0,
+        intent=intent,  # type: ignore[arg-type]
+        requested_lots=quantity // lot_size,
+        resolved_lot_size=lot_size,
+    )
+
+
+def test_entry_gate_two_lots_requested_one_allowed(monkeypatch) -> None:
+    """Test 1: 130 requested, 65 allowed -> broker receives exactly 65."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, broker, captured, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=130))
+
+    assert result.accepted
+    assert len(broker.orders) == 1
+    assert broker.orders[0]["quantity"] == 65
+    assert captured["quantity"] == 65
+    assert all(o["quantity"] != 130 for o in broker.orders)
+
+
+def test_entry_gate_blocks_when_less_than_one_lot_affordable(monkeypatch) -> None:
+    """Test 2: zero allowed -> rejected, no broker call at all."""
+    decision = types.SimpleNamespace(
+        ok=False, quantity=0, reason="MARGIN no_qty_after_risk", est_required=0.0
+    )
+    mgr, broker, _, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert result.accepted is False
+    assert result.broker_attempted is False
+    assert result.reason == "MARGIN no_qty_after_risk"
+    assert broker.orders == []
+
+
+def test_entry_gate_blocks_when_balance_unavailable(monkeypatch) -> None:
+    """Test 3: no trusted balance -> reject; no synthetic fallback accepted."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, broker, _, margin_inputs = _gate_manager(
+        monkeypatch, decision=decision, balance=(None, "margin_unavailable_stale")
+    )
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert result.accepted is False
+    assert result.broker_attempted is False
+    assert result.reason == "available_balance_unavailable"
+    assert broker.orders == []
+    # Sizing must not even be attempted without a trusted balance.
+    assert margin_inputs == []
+
+
+def test_entry_gate_uses_protected_price_and_reanchored_stop(monkeypatch) -> None:
+    """Test 6: sizing uses protected price + re-anchored stop, not signal price."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, _broker, _captured, margin_inputs = _gate_manager(
+        monkeypatch, decision=decision
+    )
+
+    mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert len(margin_inputs) == 1
+    inputs = margin_inputs[0]
+    assert inputs.price == 107.0
+    assert inputs.price != 100.0
+    assert inputs.symbol == "NFO:NIFTY26AUG25000CE"
+    assert inputs.lot_size == 65
+    # Sizing sees the plan's FINAL stop, i.e. whatever survived
+    # _reanchor_bracket_to_price (here the bracket stayed valid at the
+    # protected price, so it is unchanged). Re-anchoring itself is covered by
+    # tests/test_bracket_reanchor.py; what matters here is that the gate runs
+    # after that step and never sizes off the stale signal price.
+    assert inputs.stop_loss == 80.0
+
+
+def test_entry_gate_passes_no_atr_when_option_stop_available(monkeypatch) -> None:
+    """Test 12: never mix underlying ATR points with option-premium prices."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, _broker, _captured, margin_inputs = _gate_manager(
+        monkeypatch, decision=decision
+    )
+
+    mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert margin_inputs[0].atr is None
+
+
+def test_entry_gate_rejects_non_lot_multiple_decision(monkeypatch) -> None:
+    """A malformed engine result must fail closed, never round upward."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=70, reason=None, est_required=7000.0
+    )
+    mgr, broker, _, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=130))
+
+    assert result.accepted is False
+    assert result.broker_attempted is False
+    assert result.reason == "invalid_lot_quantity"
+    assert broker.orders == []
+
+
+def test_entry_gate_unchanged_quantity_is_unaffected(monkeypatch) -> None:
+    """Test 10: main non-regression -- allowed == requested passes through."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, broker, captured, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert result.accepted
+    assert len(broker.orders) == 1
+    assert broker.orders[0]["quantity"] == 65
+    assert captured["quantity"] == 65
+
+
+def test_entry_gate_skips_exposure_reducing_intents(monkeypatch) -> None:
+    """Test 5: protective exits bypass the affordability gate entirely."""
+    decision = types.SimpleNamespace(
+        ok=False, quantity=0, reason="MARGIN no_qty_after_risk", est_required=0.0
+    )
+    for intent in ("EXIT", "REDUCE", "FLATTEN"):
+        mgr, broker, captured, margin_inputs = _gate_manager(
+            monkeypatch,
+            decision=decision,
+            balance=(None, "margin_unavailable_stale"),
+        )
+        result = mgr.submit_trade_plan_result(
+            _gate_plan(quantity=65, intent=intent)
+        )
+        # Balance gate must not reject an exposure-reducing action.
+        assert result.reason != "available_balance_unavailable", intent
+        assert margin_inputs == [], intent
+        assert captured.get("quantity") == 65, intent
+
+
+def test_entry_gate_defers_session_only_reason_and_preserves_sizing(
+    monkeypatch,
+) -> None:
+    """MIS_WINDOW_CLOSED is owned by the session guard, not this gate.
+
+    The safely sized quantity is preserved and the entry continues through the
+    canonical path; the gate claims sizing permission only.
+    """
+    decision = types.SimpleNamespace(
+        ok=False,
+        quantity=65,
+        reason="MIS_WINDOW_CLOSED",
+        est_required=6955.0,
+    )
+    mgr, broker, captured, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=130))
+
+    assert result.accepted
+    assert len(broker.orders) == 1
+    # Sizing decision still applied: 130 requested, 65 permitted.
+    assert broker.orders[0]["quantity"] == 65
+    assert captured["quantity"] == 65
+
+
+def test_entry_gate_unknown_failure_reason_is_fail_closed(monkeypatch) -> None:
+    """Only allowlisted session reasons defer; unknown ok=False blocks."""
+    decision = types.SimpleNamespace(
+        ok=False,
+        quantity=65,
+        reason="SOME_UNKNOWN_BROKER_STATE",
+        est_required=6955.0,
+    )
+    mgr, broker, _, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert result.accepted is False
+    assert result.broker_attempted is False
+    assert result.reason == "SOME_UNKNOWN_BROKER_STATE"
+    assert broker.orders == []
+
+
+def test_entry_gate_session_reason_with_zero_quantity_still_blocks(
+    monkeypatch,
+) -> None:
+    """Deferral requires a safely sized positive quantity."""
+    decision = types.SimpleNamespace(
+        ok=False, quantity=0, reason="MIS_WINDOW_CLOSED", est_required=0.0
+    )
+    mgr, broker, _, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert result.accepted is False
+    assert result.broker_attempted is False
+    assert broker.orders == []
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "MARGIN no_qty_after_risk",
+        "margin_no_qty",
+        "insufficient_risk_capacity",
+        "invalid_requested_quantity",
+    ],
+)
+def test_entry_gate_sizing_failures_block_with_zero_broker_calls(
+    monkeypatch, reason: str
+) -> None:
+    """Every sizing/affordability failure blocks with no broker call."""
+    decision = types.SimpleNamespace(
+        ok=False, quantity=0, reason=reason, est_required=0.0
+    )
+    mgr, broker, _, _ = _gate_manager(monkeypatch, decision=decision)
+
+    result = mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert result.accepted is False
+    assert result.broker_attempted is False
+    assert result.reason == reason
+    assert broker.orders == []
+
+
+def test_entry_gate_uses_final_candidate_contract(monkeypatch) -> None:
+    """Test 9: sizing uses the FINAL submitted contract, not an earlier one."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=50, reason=None, est_required=5350.0
+    )
+    mgr, broker, captured, margin_inputs = _gate_manager(
+        monkeypatch, decision=decision, lot_size=50
+    )
+    final_plan = TradePlan(
+        symbol="NFO:NIFTY26AUG25200PE",  # candidate B, not the original
+        side="BUY",
+        quantity=100,
+        entry_price=104.0,
+        stop_loss=70.0,
+        take_profit=140.0,
+        intent="ENTRY",
+        requested_lots=2,
+        resolved_lot_size=50,
+    )
+
+    mgr.submit_trade_plan_result(final_plan)
+
+    inputs = margin_inputs[0]
+    assert inputs.symbol == "NFO:NIFTY26AUG25200PE"
+    assert inputs.lot_size == 50
+    assert inputs.price == 107.0  # protected price, not the 104.0 signal price
+    assert captured["symbol"] == "NFO:NIFTY26AUG25200PE"
+    assert broker.orders[0]["quantity"] == 50

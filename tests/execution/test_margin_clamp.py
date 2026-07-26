@@ -48,7 +48,13 @@ def _build_inputs(
     )
 
 
-def test_margin_clamp_promotes_minimum_lot_when_affordable() -> None:
+def test_margin_clamp_rejects_zero_request_instead_of_promoting_minimum_lot() -> None:
+    """Zero requested quantity must fail closed, not be clamped up.
+
+    Minimum-lot clamping remains valid for a POSITIVE request (covered by
+    test_margin_clamp_promotes_minimum_lot_for_positive_request below); it
+    must never manufacture live exposure from an empty request.
+    """
     engine = MarginEngine(
         broker=DummyBroker(),
         data_hub=DummyDataHub(),
@@ -57,23 +63,36 @@ def test_margin_clamp_promotes_minimum_lot_when_affordable() -> None:
     )
     inputs = _build_inputs(balance=50_000.0, requested_qty=0, lot_size=25)
     decision = engine.plan(inputs)
-    min_qty = max(1, app_settings.MIN_LOTS_PER_TRADE) * inputs.lot_size
-    assert decision.ok is True
-    assert decision.quantity == min_qty
-    assert decision.sizing is not None
-    assert decision.sizing.qty == min_qty
+    assert decision.ok is False
+    assert decision.quantity == 0
+    assert decision.reason == "invalid_requested_quantity"
 
 
-def test_margin_clamp_returns_margin_no_qty_when_insufficient() -> None:
+def test_margin_clamp_promotes_minimum_lot_for_positive_request() -> None:
+    """Minimum-lot capacity handling is preserved for a positive request."""
     engine = MarginEngine(
         broker=DummyBroker(),
         data_hub=DummyDataHub(),
         lot_size_resolver=DummyLotResolver(),
         clock=None,
     )
-    inputs = _build_inputs(balance=500.0, requested_qty=0, lot_size=25)
+    inputs = _build_inputs(balance=50_000.0, requested_qty=25, lot_size=25)
+    decision = engine.plan(inputs)
+    assert decision.ok is True
+    assert decision.quantity == 25
+
+
+def test_margin_clamp_rejects_with_specific_reason_when_insufficient() -> None:
+    engine = MarginEngine(
+        broker=DummyBroker(),
+        data_hub=DummyDataHub(),
+        lot_size_resolver=DummyLotResolver(),
+        clock=None,
+    )
+    inputs = _build_inputs(balance=100.0, requested_qty=25, lot_size=25)
     decision = engine.plan(inputs)
     assert decision.ok is False
-    assert decision.reason == "margin_no_qty"
+    assert decision.reason == "MARGIN no_qty_after_risk"
+    assert decision.quantity == 0
     assert decision.sizing is not None
-    assert decision.sizing.reason == "margin_no_qty"
+    assert decision.sizing.reason == "insufficient_risk_capacity"

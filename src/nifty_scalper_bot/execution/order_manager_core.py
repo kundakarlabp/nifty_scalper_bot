@@ -4390,6 +4390,250 @@ class OrderManager:
             True, "allowed", {"quote": qd, "lot_size": lot_size}
         )
 
+    _ENTRY_SIZING_INTENTS = ("ENTRY", "SCALE_IN")
+    # Reasons owned by the existing session/order guard, not by this
+    # risk/affordability gate. Strictly an allowlist: any other ok=False
+    # reason stays fail-closed.
+    _SESSION_ONLY_DEFERRABLE_REASONS = frozenset({"MIS_WINDOW_CLOSED"})
+
+    def _apply_entry_margin_gate(
+        self, plan: TradePlan, price: float
+    ) -> tuple[TradePlan | None, TradePlanSubmitResult | None]:
+        """Final entry-only risk/affordability gate.
+
+        Runs after the protected price and re-anchored bracket are final and
+        before any managed order, lifecycle, recovery or bracket state exists.
+        Returns (effective_plan, None) to proceed, or (None, rejection).
+        Exposure-reducing intents are never gated here.
+        """
+        intent = str(plan.intent or "").upper()
+        if intent not in self._ENTRY_SIZING_INTENTS:
+            return plan, None
+
+        requested_qty = int(plan.quantity or 0)
+        if requested_qty <= 0:
+            return None, self._reject_entry_sizing(
+                plan, "invalid_requested_quantity", {"requested_quantity": requested_qty}
+            )
+
+        lot_size = int(plan.resolved_lot_size or 0)
+        if lot_size <= 0:
+            try:
+                lot_size = int(self._lot_size_for_symbol(plan.symbol) or 0)
+            except Exception:  # noqa: BLE001 - fail closed below
+                lot_size = 0
+        if lot_size <= 0:
+            return None, self._reject_entry_sizing(
+                plan, "lot_size_unresolved", {"symbol": plan.symbol}
+            )
+
+        # Trusted balance only. _resolve_available_margin(for_entry=True)
+        # applies the canonical staleness policy and reports provenance; the
+        # synthetic fallback used elsewhere must never authorise a live entry.
+        balance, balance_source = self._resolve_available_margin(for_entry=True)
+        if balance is None or float(balance) <= 0:
+            return None, self._reject_entry_sizing(
+                plan,
+                "available_balance_unavailable",
+                {"balance_source": balance_source, "available_balance": balance},
+            )
+        available_balance = float(balance)
+
+        try:
+            decision = self._plan_entry_margin(
+                plan=plan,
+                price=price,
+                lot_size=lot_size,
+                available_balance=available_balance,
+            )
+        except Exception as exc:  # noqa: BLE001 - never place on a failed gate
+            self._logger.error(
+                "ENTRY_MARGIN_DECISION_FAILED symbol=%s error=%s",
+                plan.symbol,
+                type(exc).__name__,
+                extra={
+                    "event": "ENTRY_MARGIN_DECISION_FAILED",
+                    "symbol": plan.symbol,
+                    "error_type": type(exc).__name__,
+                    "trace_id": plan.trace_id,
+                },
+            )
+            return None, self._reject_entry_sizing(
+                plan, "entry_sizing_failed", {"error_type": type(exc).__name__}
+            )
+
+        allowed_qty = int(getattr(decision, "quantity", 0) or 0)
+        decision_ok = bool(getattr(decision, "ok", False))
+        decision_reason = str(getattr(decision, "reason", "") or "")
+        base = {
+            "symbol": plan.symbol,
+            "intent": intent,
+            "original_requested_quantity": requested_qty,
+            "original_requested_lots": requested_qty // lot_size,
+            "resolved_lot_size": lot_size,
+            "protected_entry_price": price,
+            "final_stop_loss": plan.stop_loss,
+            "final_take_profit": plan.take_profit,
+            "available_balance": available_balance,
+            "balance_source": balance_source,
+            "estimated_required": getattr(decision, "est_required", None),
+            "decision_ok": decision_ok,
+            "decision_reason": decision_reason or None,
+            "trace_id": plan.trace_id,
+            "signal_id": plan.signal_id,
+            "trade_lifecycle_id": plan.trade_lifecycle_id,
+        }
+
+        # This gate is a whole-lot risk/affordability authority ONLY. It is
+        # deliberately not a second session authority: MarginEngine.plan()
+        # also carries legacy session policy, and re-enforcing it here would
+        # add a competing window guard on the entry path. Session-only
+        # reasons are allowlisted and deferred to the existing session/order
+        # guard, preserving the safely sized quantity. Everything else --
+        # including any unknown reason -- remains fail-closed.
+        session_deferred = (
+            not decision_ok
+            and decision_reason in self._SESSION_ONLY_DEFERRABLE_REASONS
+            and allowed_qty > 0
+        )
+        if session_deferred:
+            self._logger.info(
+                "ENTRY_MARGIN_SESSION_REASON_DEFERRED symbol=%s reason=%s qty=%s",
+                plan.symbol,
+                decision_reason,
+                allowed_qty,
+                extra={
+                    "event": "ENTRY_MARGIN_SESSION_REASON_DEFERRED",
+                    **base,
+                    "allowed_quantity": allowed_qty,
+                    "sizing_permitted_only": True,
+                },
+            )
+        elif not decision_ok or allowed_qty <= 0:
+            reason = decision_reason or "margin_no_qty"
+            self._logger.warning(
+                "ENTRY_MARGIN_DECISION symbol=%s blocked reason=%s",
+                plan.symbol,
+                reason,
+                extra={
+                    "event": "ENTRY_MARGIN_DECISION",
+                    **base,
+                    "allowed_quantity": 0,
+                    "allowed_lots": 0,
+                    "quantity_reduced": False,
+                    "broker_attempted": False,
+                },
+            )
+            return None, TradePlanSubmitResult(
+                False, reason=reason, details=dict(base), broker_attempted=False
+            )
+
+        if allowed_qty % lot_size != 0:
+            return None, self._reject_entry_sizing(
+                plan,
+                "invalid_lot_quantity",
+                {"allowed_quantity": allowed_qty, "resolved_lot_size": lot_size},
+            )
+        if allowed_qty > requested_qty:
+            # Never round up or expand a request.
+            allowed_qty = requested_qty
+
+        effective_plan = plan
+        if allowed_qty != requested_qty:
+            effective_plan = replace(
+                plan,
+                quantity=allowed_qty,
+                requested_lots=allowed_qty // lot_size,
+                resolved_lot_size=lot_size,
+            )
+        self._logger.info(
+            "ENTRY_MARGIN_DECISION symbol=%s allowed_quantity=%s reduced=%s",
+            plan.symbol,
+            allowed_qty,
+            allowed_qty != requested_qty,
+            extra={
+                "event": "ENTRY_MARGIN_DECISION",
+                **base,
+                "allowed_quantity": allowed_qty,
+                "allowed_lots": allowed_qty // lot_size,
+                "quantity_reduced": allowed_qty != requested_qty,
+                "sizing_permitted_only": session_deferred,
+                "broker_attempted": True,
+            },
+        )
+        return effective_plan, None
+
+    def _reject_entry_sizing(
+        self, plan: TradePlan, reason: str, details: dict[str, object]
+    ) -> TradePlanSubmitResult:
+        """Reject an entry at the sizing gate with no broker call."""
+        payload = {"symbol": plan.symbol, "trace_id": plan.trace_id, **details}
+        self._logger.warning(
+            "ENTRY_MARGIN_DECISION symbol=%s blocked reason=%s",
+            plan.symbol,
+            reason,
+            extra={
+                "event": "ENTRY_MARGIN_DECISION",
+                "decision_reason": reason,
+                "decision_ok": False,
+                "allowed_quantity": 0,
+                "quantity_reduced": False,
+                "broker_attempted": False,
+                **payload,
+            },
+        )
+        return TradePlanSubmitResult(
+            False, reason=reason, details=payload, broker_attempted=False
+        )
+
+    def _plan_entry_margin(
+        self,
+        *,
+        plan: TradePlan,
+        price: float,
+        lot_size: int,
+        available_balance: float,
+    ) -> Any:
+        """Build MarginInputs from final option economics and size once."""
+        settings = getattr(self._risk_manager, "settings", None)
+
+        def _cfg(name: str, default: float) -> float:
+            value = getattr(settings, name, None) if settings is not None else None
+            try:
+                return float(value) if value is not None else float(default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        # ATR is only safe when metadata proves it belongs to this exact
+        # option symbol; underlying ATR points must never be mixed with
+        # option-premium prices. The final re-anchored option stop is the
+        # preferred risk source.
+        atr = None
+        return self._margin_engine.plan(
+            MarginInputs(
+                symbol=plan.symbol,
+                side=plan.side,
+                price=float(price),
+                stop_loss=(
+                    float(plan.stop_loss) if plan.stop_loss is not None else None
+                ),
+                atr=atr,
+                requested_qty=int(plan.quantity or 0),
+                product=plan.product,
+                lot_size=int(lot_size),
+                balance=float(available_balance),
+                per_trade_risk_pct=_cfg("RISK_PER_TRADE_PCT", 1.0),
+                per_trade_cap_pct=_cfg("PER_TRADE_CAP_PCT", 100.0),
+                margin_factor=_cfg("MARGIN_FACTOR", 1.0),
+                margin_buffer=_cfg("MARGIN_BUFFER", 1.0),
+                contract_multiplier=float(max(int(lot_size), 1)),
+                ist_now=datetime.now(ZoneInfo("Asia/Kolkata")),
+                min_lots_per_trade=int(_cfg("MIN_LOTS_PER_TRADE", 1)),
+                max_lots_per_trade=int(_cfg("MAX_LOTS_PER_TRADE", 10)),
+                atr_multiple=_cfg("ATR_SL_MULTIPLIER", 1.5),
+            )
+        )
+
     def _reanchor_bracket_to_price(self, plan: TradePlan, price: float) -> TradePlan:
         """Re-anchor a stale SL/TP bracket to the live protected ``price``.
 
@@ -4683,6 +4927,15 @@ class OrderManager:
                     details=details,
                     broker_attempted=False,
                 )
+        # Attribute lookup (not a direct call) so synthetic test doubles that
+        # invoke this method unbound still work; a real OrderManager always
+        # provides it, so a live entry can never bypass the gate here.
+        _entry_gate = getattr(self, "_apply_entry_margin_gate", None)
+        if _entry_gate is not None:
+            effective_plan, sizing_rejection = _entry_gate(plan, price)
+            if sizing_rejection is not None:
+                return sizing_rejection
+            plan = effective_plan if effective_plan is not None else plan
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
                 try:
