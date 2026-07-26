@@ -2384,6 +2384,8 @@ class OrderManager:
         basket_version: int | str | None = None,
         instrument_token: int | None = None,
         contract_expiry: str | None = None,
+        requested_lots: int = 0,
+        resolved_lot_size: int = 0,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -3527,6 +3529,8 @@ class OrderManager:
                         basket_version=basket_version,
                         instrument_token=instrument_token,
                         contract_expiry=contract_expiry,
+                        requested_lots=requested_lots,
+                        resolved_lot_size=resolved_lot_size,
                     )
                     self._register_order(details)
                     # Sync PositionManager's pending-order registry so the
@@ -4999,6 +5003,8 @@ class OrderManager:
                         basket_version=plan.basket_version,
                         instrument_token=plan.instrument_token,
                         contract_expiry=plan.contract_expiry,
+                        requested_lots=int(plan.requested_lots or 0),
+                        resolved_lot_size=int(plan.resolved_lot_size or 0),
                     )
                 except Exception as exc:  # noqa: BLE001
                     err = self._sanitize_broker_error(exc)
@@ -5199,6 +5205,8 @@ class OrderManager:
         basket_version: int | str | None = None,
         instrument_token: int | None = None,
         contract_expiry: str | None = None,
+        requested_lots: int = 0,
+        resolved_lot_size: int = 0,
     ) -> ManagedOrderResult:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
@@ -5267,6 +5275,8 @@ class OrderManager:
             basket_version=basket_version,
             instrument_token=instrument_token,
             contract_expiry=contract_expiry,
+            requested_lots=requested_lots,
+            resolved_lot_size=resolved_lot_size,
         )
 
         if order_id:

@@ -5,6 +5,7 @@ from typing import Any
 
 from nifty_scalper_bot.execution.order_manager_core import (
     OrderManager,
+    OrderType,
     OrderPreflightResult,
     TradePlan,
 )
@@ -879,3 +880,156 @@ def test_entry_gate_pre_broker_telemetry_does_not_claim_attempt(monkeypatch) -> 
     assert events, "expected an ENTRY_MARGIN_DECISION event"
     assert events[-1]["broker_attempted"] is False
     assert events[-1]["broker_attempt_pending"] is True
+
+
+def test_gate_to_created_order_to_partial_fill_uses_effective_quantity(
+    monkeypatch,
+) -> None:
+    """END-TO-END PR1 PROOF: 130 requested -> gate approves 65 -> the REAL
+    managed-order path creates the operative OrderDetails with 65 -> the REAL
+    partial-fill reconciliation persists 65.
+
+    Only external boundaries are faked (broker transport, balance, protected
+    price, margin engine decision). The entry gate, place_managed_order_result,
+    place_order, the OrderDetails constructor and the lifecycle handoff all
+    run for real.
+    """
+    from nifty_scalper_bot.execution.order_manager import OrderPreflightResult
+    from nifty_scalper_bot.execution.position_manager import PositionManager
+    from nifty_scalper_bot.utils.rate_limiter import RateLimiter
+
+    broker_calls: list[dict[str, Any]] = []
+
+    class _Broker:
+        """Transport double honouring the real adapter contract: place_order
+        must return a response dict (see _submit_broker_order)."""
+
+        def place_order(self, **kwargs: Any) -> dict[str, Any]:
+            broker_calls.append(dict(kwargs))
+            return {"order_id": "BROKER-ORD-1", "status": "OPEN"}
+
+    # Canonical runtime wiring: entry recovery / partial-fill reconciliation
+    # is installed onto the order-manager class (same pattern as
+    # tests/execution/test_canonical_entry_recovery.py). The production
+    # functions themselves are NOT mocked.
+    from nifty_scalper_bot.execution.entry_recovery import install_entry_recovery
+
+    class _IntegrationOrderManager(OrderManager):
+        pass
+
+    install_entry_recovery(_IntegrationOrderManager)
+
+    mgr = _IntegrationOrderManager(_Broker(), PositionManager(), RateLimiter())
+    monkeypatch.setattr(mgr, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        mgr, "_validate_trade_plan", lambda plan: OrderPreflightResult(True, "ok", {})
+    )
+    monkeypatch.setattr(mgr, "_protected_limit_price", lambda plan: 107.0)
+    monkeypatch.setattr(mgr, "_lot_size_for_symbol", lambda symbol: 65)
+    monkeypatch.setattr(
+        mgr, "_resolve_available_margin", lambda **kw: (1_000_000.0, "mdm")
+    )
+    # External boundary: the sizing engine's verdict.
+    monkeypatch.setattr(
+        mgr,
+        "_margin_engine",
+        types.SimpleNamespace(
+            plan=lambda inputs: types.SimpleNamespace(
+                ok=True, quantity=65, reason=None, est_required=6955.0
+            )
+        ),
+    )
+
+    plan = TradePlan(
+        symbol="NFO:NIFTY26AUG25000CE",
+        side="BUY",
+        quantity=130,
+        entry_price=105.0,
+        stop_loss=80.0,
+        take_profit=140.0,
+        intent="ENTRY",  # type: ignore[arg-type]
+        requested_lots=2,
+        resolved_lot_size=65,
+        trace_id="trace-INT",
+        signal_id="signal-INT",
+        trade_lifecycle_id="tl-INT",
+    )
+
+    result = mgr.submit_trade_plan_result(plan)
+    assert result.accepted, result.reason
+
+    # --- the genuinely created operative order ---
+    created = mgr._orders["BROKER-ORD-1"]
+    assert created.quantity == 65
+    assert created.requested_lots == 1
+    assert created.resolved_lot_size == 65
+    assert broker_calls and int(broker_calls[0]["quantity"]) == 65
+
+    # --- audit provenance keeps 130, operative state does not ---
+    assert result.details["entry_sizing_requested_quantity"] == 130
+    assert result.details["entry_sizing_effective_quantity"] == 65
+    assert result.details["entry_sizing_lot_size"] == 65
+
+    # --- real partial-fill reconciliation ---
+    mgr._update_from_response(
+        created,
+        {
+            "status": "PARTIALLY FILLED",
+            "filled_quantity": 20,
+            "pending_quantity": 45,
+        },
+    )
+    state = created.entry_lifecycle_state
+    assert state["requested_quantity"] == 65
+    assert state["requested_lots"] == 1
+    assert state["resolved_lot_size"] == 65
+    assert state["broker_filled_quantity"] == 20
+    assert state["broker_pending_quantity"] == 45
+    assert state["broker_filled_quantity"] + state["broker_pending_quantity"] == 65
+    assert int(state.get("protected_quantity") or 0) <= 65
+
+    # No operative numeric quantity anywhere equals the pre-gate 130.
+    operative = [v for k, v in state.items() if isinstance(v, int) and "original" not in k]
+    assert 130 not in operative
+    assert created.quantity != 130
+
+
+def test_legacy_place_order_without_lot_metadata_keeps_safe_defaults(
+    monkeypatch,
+) -> None:
+    """Signature compatibility: a direct legacy/protective place_order() call
+    that omits the new keyword arguments must still work and default the lot
+    metadata to 0. Exits must never be required to resolve entry lot data."""
+    from nifty_scalper_bot.execution.position_manager import PositionManager
+    from nifty_scalper_bot.utils.rate_limiter import RateLimiter
+
+    class _Broker:
+        def place_order(self, **kwargs: Any) -> dict[str, Any]:
+            return {"order_id": "LEGACY-1", "status": "OPEN"}
+
+    mgr = OrderManager(_Broker(), PositionManager(), RateLimiter())
+    monkeypatch.setattr(mgr, "is_kill_switch_active", lambda: False)
+
+    # Must not raise TypeError: the new lot-metadata parameters are optional
+    # keyword-only additions with safe defaults, so exposure-reducing callers
+    # that never resolve entry lot data keep working unchanged.
+    mgr.place_order(
+        symbol="NFO:NIFTY26AUG25000CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        intent="EXIT",
+        check_risk=False,
+    )
+
+    # Whatever the surrounding guards decide, any order this legacy path does
+    # register carries the safe defaults rather than inheriting entry sizing.
+    for created in mgr._orders.values():
+        assert created.requested_lots == 0
+        assert created.resolved_lot_size == 0
+
+    import inspect
+
+    sig = inspect.signature(OrderManager.place_order)
+    assert sig.parameters["requested_lots"].default == 0
+    assert sig.parameters["resolved_lot_size"].default == 0
