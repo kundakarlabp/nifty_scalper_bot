@@ -587,6 +587,30 @@ def _annotate(result: Any, decision: RecoveryDecision, **extra: Any) -> Any:
         )
 
 
+def _first_effective_quantity(manager: Any, result: Any, plan: Any) -> int | None:
+    """First gate-approved quantity, or None when it cannot be trusted.
+
+    A retry may reduce further but must never restore quantity that the first
+    entry margin gate removed. Never inferred from broker error text.
+    """
+    record = getattr(result, "details", None) or {}
+    if not isinstance(record, dict) or "entry_sizing_effective_quantity" not in record:
+        record = getattr(manager, "_last_entry_sizing_details", None) or {}
+    if not isinstance(record, dict):
+        return None
+    try:
+        effective = int(record.get("entry_sizing_effective_quantity", 0) or 0)
+        lot = int(record.get("entry_sizing_lot_size", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    original_qty = int(getattr(plan, "quantity", 0) or 0)
+    if effective <= 0 or original_qty <= 0 or effective > original_qty:
+        return None
+    if lot > 0 and effective % lot != 0:
+        return None
+    return effective
+
+
 def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> Any:
     result = original(manager, plan)
     if (
@@ -660,6 +684,23 @@ def _recover_submit(original: Callable[..., Any], manager: Any, plan: Any) -> An
                 time.sleep(delay)
 
         rebuilt = _rebuild_plan(manager, plan, quote, decision, quantity=quantity)
+        if rebuilt is not None:
+            frozen = _first_effective_quantity(manager, result, plan)
+            if frozen is not None:
+                lot = _lot_size(manager, str(plan.symbol)) or 0
+                capped = min(int(getattr(rebuilt, "quantity", 0) or 0), frozen)
+                if capped <= 0 or (lot > 0 and capped % lot != 0):
+                    return _annotate(
+                        result, decision, outcome="frozen_quantity_invalid"
+                    )
+                if capped != int(getattr(rebuilt, "quantity", 0) or 0):
+                    rebuilt = replace(rebuilt, quantity=capped)
+                if lot > 0 and hasattr(rebuilt, "requested_lots"):
+                    rebuilt = replace(
+                        rebuilt,
+                        requested_lots=capped // lot,
+                        resolved_lot_size=lot,
+                    )
         if rebuilt is None:
             details = {"fresh_price": fresh}
             deviation = _reprice_deviation_pct(plan, fresh)

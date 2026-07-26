@@ -240,3 +240,61 @@ def test_shadow_price_recovery_can_still_use_ltp_fallback() -> None:
     assert len(manager.plans) == 2
     assert manager.plans[1].entry_price == 101.0
     assert result.details["entry_recovery"]["retry_entry"] == 101.0
+
+
+def test_recovery_retry_cannot_exceed_first_gate_approved_quantity(
+    monkeypatch,
+) -> None:
+    """A retry may reduce further but must never restore gated-away quantity.
+
+    Original request 130 (2 lots). The entry margin gate approved 65 on the
+    first submission. Even when a later margin/price refresh would permit 130
+    again, recovery must rebuild at most the first approved 65.
+    """
+    monkeypatch.delenv("DEFAULT_OPTION_LOT_SIZE", raising=False)
+    first = _reject("margin required 20000 available 5000")
+    # The first submission carries the frozen sizing record.
+    first.details = {
+        **(first.details or {}),
+        "entry_sizing_requested_quantity": 130,
+        "entry_sizing_effective_quantity": 65,
+        "entry_sizing_lot_size": 65,
+    }
+    # Plenty of margin at retry time: an ungated resize would ask for 130.
+    manager = _Manager(
+        [first, _accept()],
+        resolver=_Resolver(lot=65),
+        margin=10_000_000.0,
+    )
+
+    result = manager.submit_trade_plan_result(_plan(quantity=130))
+
+    assert result.accepted
+    # Exactly two submissions: the original and one retry.
+    assert len(manager.plans) == 2
+    assert manager.plans[0].quantity == 130
+    retry_plan = manager.plans[1]
+    assert retry_plan.quantity <= 65
+    assert retry_plan.quantity != 130
+    assert retry_plan.quantity % 65 == 0
+    assert retry_plan.requested_lots == retry_plan.quantity // 65
+    assert retry_plan.resolved_lot_size == 65
+    assert result.details.get("entry_recovery") is not None
+
+
+def test_recovery_without_sizing_record_does_not_invent_a_cap(monkeypatch) -> None:
+    """Missing/untrusted sizing record must not silently raise the quantity."""
+    monkeypatch.delenv("DEFAULT_OPTION_LOT_SIZE", raising=False)
+    manager = _Manager(
+        [_reject("margin required 20000 available 5000"), _accept()],
+        resolver=_Resolver(lot=65),
+        margin=10_000_000.0,
+    )
+
+    manager.submit_trade_plan_result(_plan(quantity=130))
+
+    retry_plan = manager.plans[1]
+    # No frozen record exists, so the normal resize path applies; it must
+    # still never exceed the caller's original request.
+    assert retry_plan.quantity <= 130
+    assert retry_plan.quantity % 65 == 0

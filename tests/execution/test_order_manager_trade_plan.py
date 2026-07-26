@@ -776,3 +776,92 @@ def test_entry_gate_uses_final_candidate_contract(monkeypatch) -> None:
     assert inputs.price == 107.0  # protected price, not the 104.0 signal price
     assert captured["symbol"] == "NFO:NIFTY26AUG25200PE"
     assert broker.orders[0]["quantity"] == 50
+
+
+def test_entry_gate_uses_canonical_lowercase_risk_settings(monkeypatch) -> None:
+    """The gate must consume the SAME risk policy as _pre_trade_decision().
+
+    Regression: it previously read uppercase names (RISK_PER_TRADE_PCT etc.)
+    which never matched the lowercase settings fields, so every lookup missed
+    and the gate silently applied its own wider defaults.
+    """
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, _broker, _captured, margin_inputs = _gate_manager(
+        monkeypatch, decision=decision
+    )
+    mgr._risk_manager = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            per_trade_risk_pct=0.5,
+            per_trade_cap_pct=25.0,
+            min_lots_per_trade=1,
+            max_lots_per_trade=2,
+            atr_stop_multiple=2.25,
+        )
+    )
+    mgr._margin_factor = 1.15
+    mgr._margin_buffer = 0.90
+
+    mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    inputs = margin_inputs[0]
+    assert inputs.per_trade_risk_pct == 0.5
+    assert inputs.per_trade_cap_pct == 25.0
+    assert inputs.min_lots_per_trade == 1
+    assert inputs.max_lots_per_trade == 2
+    assert inputs.atr_multiple == 2.25
+    assert inputs.margin_factor == 1.15
+    assert inputs.margin_buffer == 0.90
+    assert inputs.atr is None
+    assert inputs.symbol == "NFO:NIFTY26AUG25000CE"
+    assert inputs.price == 107.0
+    assert inputs.stop_loss == 80.0
+
+
+def test_entry_gate_result_carries_frozen_sizing_details(monkeypatch) -> None:
+    """3A: the first gate-approved sizing is exposed for recovery to freeze."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, _broker, _captured, _ = _gate_manager(monkeypatch, decision=decision)
+
+    mgr.submit_trade_plan_result(_gate_plan(quantity=130))
+
+    record = mgr._last_entry_sizing_details
+    assert record["entry_sizing_requested_quantity"] == 130
+    assert record["entry_sizing_effective_quantity"] == 65
+    assert record["entry_sizing_lot_size"] == 65
+
+
+def test_entry_gate_pre_broker_telemetry_does_not_claim_attempt(monkeypatch) -> None:
+    """6: the pre-broker event must not report broker_attempted=True."""
+    decision = types.SimpleNamespace(
+        ok=True, quantity=65, reason=None, est_required=6955.0
+    )
+    mgr, _broker, _captured, _ = _gate_manager(monkeypatch, decision=decision)
+    events: list[dict] = []
+
+    class _Rec:
+        def info(self, *a, **k):
+            extra = k.get("extra") or {}
+            if extra.get("event") == "ENTRY_MARGIN_DECISION":
+                events.append(extra)
+
+        def warning(self, *a, **k):
+            extra = k.get("extra") or {}
+            if extra.get("event") == "ENTRY_MARGIN_DECISION":
+                events.append(extra)
+
+        def error(self, *a, **k):
+            pass
+
+        def debug(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(mgr, "_logger", _Rec())
+    mgr.submit_trade_plan_result(_gate_plan(quantity=65))
+
+    assert events, "expected an ENTRY_MARGIN_DECISION event"
+    assert events[-1]["broker_attempted"] is False
+    assert events[-1]["broker_attempt_pending"] is True

@@ -4522,6 +4522,7 @@ class OrderManager:
                     "allowed_lots": 0,
                     "quantity_reduced": False,
                     "broker_attempted": False,
+                    "broker_attempt_pending": False,
                 },
             )
             return None, TradePlanSubmitResult(
@@ -4558,7 +4559,10 @@ class OrderManager:
                 "allowed_lots": allowed_qty // lot_size,
                 "quantity_reduced": allowed_qty != requested_qty,
                 "sizing_permitted_only": session_deferred,
-                "broker_attempted": True,
+                # Pre-broker event: no broker method has been called yet.
+                # The placement result remains the source of truth.
+                "broker_attempted": False,
+                "broker_attempt_pending": True,
             },
         )
         return effective_plan, None
@@ -4579,6 +4583,7 @@ class OrderManager:
                 "allowed_quantity": 0,
                 "quantity_reduced": False,
                 "broker_attempted": False,
+                "broker_attempt_pending": False,
                 **payload,
             },
         )
@@ -4595,14 +4600,29 @@ class OrderManager:
         available_balance: float,
     ) -> Any:
         """Build MarginInputs from final option economics and size once."""
+        # Same risk policy source and same canonical defaults as the existing
+        # _pre_trade_decision() margin-planning path: risk_manager.settings
+        # when present, otherwise app_settings.get_settings().risk.
         settings = getattr(self._risk_manager, "settings", None)
+        if settings is None:
+            try:
+                settings = getattr(app_settings.get_settings(), "risk", None)
+            except Exception:  # noqa: BLE001 - defaults below stay canonical
+                settings = None
 
-        def _cfg(name: str, default: float) -> float:
+        def _f(name: str, default: float) -> float:
             value = getattr(settings, name, None) if settings is not None else None
             try:
-                return float(value) if value is not None else float(default)
+                parsed = float(value) if value is not None else float(default)
             except (TypeError, ValueError):
                 return float(default)
+            return parsed if parsed > 0 else float(default)
+
+        per_trade_risk_pct = _f("per_trade_risk_pct", 0.5)
+        per_trade_cap_pct = _f("per_trade_cap_pct", per_trade_risk_pct)
+        min_lots = max(1, int(_f("min_lots_per_trade", 1)))
+        max_lots = max(min_lots, int(_f("max_lots_per_trade", 1)))
+        atr_multiple = _f("atr_stop_multiple", 1.0)
 
         # ATR is only safe when metadata proves it belongs to this exact
         # option symbol; underlying ATR points must never be mixed with
@@ -4622,15 +4642,15 @@ class OrderManager:
                 product=plan.product,
                 lot_size=int(lot_size),
                 balance=float(available_balance),
-                per_trade_risk_pct=_cfg("RISK_PER_TRADE_PCT", 1.0),
-                per_trade_cap_pct=_cfg("PER_TRADE_CAP_PCT", 100.0),
-                margin_factor=_cfg("MARGIN_FACTOR", 1.0),
-                margin_buffer=_cfg("MARGIN_BUFFER", 1.0),
+                per_trade_risk_pct=per_trade_risk_pct,
+                per_trade_cap_pct=per_trade_cap_pct,
+                margin_factor=float(self._margin_factor),
+                margin_buffer=float(self._margin_buffer),
                 contract_multiplier=float(max(int(lot_size), 1)),
                 ist_now=datetime.now(ZoneInfo("Asia/Kolkata")),
-                min_lots_per_trade=int(_cfg("MIN_LOTS_PER_TRADE", 1)),
-                max_lots_per_trade=int(_cfg("MAX_LOTS_PER_TRADE", 10)),
-                atr_multiple=_cfg("ATR_SL_MULTIPLIER", 1.5),
+                min_lots_per_trade=min_lots,
+                max_lots_per_trade=max_lots,
+                atr_multiple=atr_multiple,
             )
         )
 
@@ -4931,11 +4951,28 @@ class OrderManager:
         # invoke this method unbound still work; a real OrderManager always
         # provides it, so a live entry can never bypass the gate here.
         _entry_gate = getattr(self, "_apply_entry_margin_gate", None)
+        _entry_sizing_details: dict[str, int] | None = None
         if _entry_gate is not None:
+            _requested_before_gate = int(plan.quantity or 0)
             effective_plan, sizing_rejection = _entry_gate(plan, price)
             if sizing_rejection is not None:
                 return sizing_rejection
             plan = effective_plan if effective_plan is not None else plan
+            _effective_lot = int(getattr(plan, "resolved_lot_size", 0) or 0)
+            if _effective_lot <= 0:
+                try:
+                    _effective_lot = int(self._lot_size_for_symbol(plan.symbol) or 0)
+                except Exception:  # noqa: BLE001
+                    _effective_lot = 0
+            # Frozen sizing record: recovery must never restore quantity the
+            # first gate removed. Stamped onto every post-gate result so a
+            # retryable broker rejection still carries it.
+            _entry_sizing_details = {
+                "entry_sizing_requested_quantity": _requested_before_gate,
+                "entry_sizing_effective_quantity": int(plan.quantity or 0),
+                "entry_sizing_lot_size": _effective_lot,
+            }
+            self._last_entry_sizing_details = dict(_entry_sizing_details)
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
                 try:
