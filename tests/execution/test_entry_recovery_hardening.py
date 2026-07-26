@@ -298,3 +298,94 @@ def test_recovery_without_sizing_record_does_not_invent_a_cap(monkeypatch) -> No
     # still never exceed the caller's original request.
     assert retry_plan.quantity <= 130
     assert retry_plan.quantity % 65 == 0
+
+
+class _PartialFillManager:
+    """Manager exposing the real _update_from_response reconciliation path."""
+
+    def __init__(self, *, resolver: Any | None = None) -> None:
+        self._logger = _Logger()
+        self._instrument_resolver = resolver
+        self._broker = _Broker()
+        self.blockers: list[str] = []
+
+    def _update_from_response(self, order: Any, payload: dict[str, Any]) -> Any:
+        return order
+
+    def _latch_entry_blocker(self, *_a: Any, **_k: Any) -> None:
+        return None
+
+
+install_entry_recovery(_PartialFillManager)
+
+
+class _EntryOrder:
+    """Minimal OrderDetails-like entry order built from the EFFECTIVE plan."""
+
+    def __init__(self, quantity: int, lot_size: int, requested_lots: int) -> None:
+        self.order_id = "ORD-PARTIAL-1"
+        self.symbol = "NFO:NIFTY2662324050PE"
+        self.intent = "ENTRY"
+        self.tag = "runner-entry"
+        self.status = "PARTIALLY FILLED"
+        self.quantity = quantity
+        self.resolved_lot_size = lot_size
+        self.requested_lots = requested_lots
+        self.filled_quantity = 0
+
+
+def test_partial_fill_lifecycle_uses_gate_reduced_quantity(monkeypatch) -> None:
+    """Partial-fill reconciliation must use the EFFECTIVE 65, never the 130.
+
+    Original request 130 (2 lots); the entry margin gate approved 65, so the
+    broker order and therefore the OrderDetails carry 65. The stored lifecycle
+    state must reflect 65 -- reconciliation must never wait on, or protect,
+    a phantom remainder from the original 130.
+    """
+    monkeypatch.delenv("DEFAULT_OPTION_LOT_SIZE", raising=False)
+    manager = _PartialFillManager(resolver=_Resolver(lot=65))
+    order = _EntryOrder(quantity=65, lot_size=65, requested_lots=1)
+
+    manager._update_from_response(
+        order,
+        {
+            "status": "PARTIALLY FILLED",
+            "filled_quantity": 20,
+            "pending_quantity": 45,
+        },
+    )
+
+    state = order.entry_lifecycle_state
+    assert state["requested_quantity"] == 65
+    assert state["requested_lots"] == 1
+    assert state["resolved_lot_size"] == 65
+    assert state["broker_filled_quantity"] == 20
+    assert state["broker_pending_quantity"] == 45
+    # The original oversized request must never appear anywhere in state.
+    assert 130 not in [v for v in state.values() if isinstance(v, int)]
+    # Any protective quantity derived from this state stays within 65.
+    assert int(state.get("protected_quantity") or 0) <= 65
+
+
+def test_partial_fill_lifecycle_lot_aligned_fill_tracks_protected_quantity(
+    monkeypatch,
+) -> None:
+    """A lot-aligned partial fill records protected quantity within 65."""
+    monkeypatch.delenv("DEFAULT_OPTION_LOT_SIZE", raising=False)
+    manager = _PartialFillManager(resolver=_Resolver(lot=65))
+    order = _EntryOrder(quantity=65, lot_size=65, requested_lots=1)
+
+    manager._update_from_response(
+        order,
+        {
+            "status": "COMPLETE",
+            "filled_quantity": 65,
+            "pending_quantity": 0,
+        },
+    )
+
+    state = order.entry_lifecycle_state
+    assert state["requested_quantity"] == 65
+    assert state["requested_lots"] == 1
+    assert state["broker_filled_quantity"] == 65
+    assert int(state.get("protected_quantity") or 0) <= 65
