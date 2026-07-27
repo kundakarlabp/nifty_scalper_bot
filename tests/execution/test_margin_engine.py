@@ -60,37 +60,58 @@ def test_plan_steps_down_fallback_margin_to_affordable_quantity() -> None:
     assert decision.est_required == pytest.approx(500.0)
 
 
-def test_plan_downgrades_mis_after_cutoff() -> None:
+def test_plan_rejects_mis_after_cutoff_without_product_rewrite() -> None:
     engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
     )
-    late_inputs = _inputs(
-        ist_now=datetime(2024, 1, 1, 15, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
-        product="MIS",
-        balance=10_000.0,
+    decision = engine.plan(
+        _inputs(
+            ist_now=datetime(2024, 1, 1, 15, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+            product="MIS",
+            balance=10_000.0,
+        )
     )
-    decision = engine.plan(late_inputs)
     assert not decision.ok
-    assert decision.order_type == "NRML"
+    assert decision.order_type == "MIS"
     assert decision.reason == "MIS_WINDOW_CLOSED"
 
 
-def test_plan_honours_tighter_cap_independently() -> None:
+def test_one_lot_is_not_zeroed_only_by_percentage_cap() -> None:
     engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
     )
-    inputs = _inputs(
-        price=200.0,
-        stop_loss=150.0,
-        requested_qty=100,
-        lot_size=5,
-        balance=100_000.0,
-        per_trade_risk_pct=1.0,
-        per_trade_cap_pct=0.5,
+    decision = engine.plan(
+        _inputs(
+            price=200.0,
+            stop_loss=150.0,
+            requested_qty=5,
+            lot_size=5,
+            balance=100_000.0,
+            per_trade_risk_pct=1.0,
+            per_trade_cap_pct=0.5,
+        )
     )
-    decision = engine.plan(inputs)
-    assert not decision.ok
-    assert decision.quantity == 0
+    assert decision.ok
+    assert decision.quantity == 5
+
+
+def test_cap_still_limits_additional_lots() -> None:
+    engine = MarginEngine(
+        broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
+    )
+    decision = engine.plan(
+        _inputs(
+            price=200.0,
+            stop_loss=150.0,
+            requested_qty=10,
+            lot_size=5,
+            balance=100_000.0,
+            per_trade_risk_pct=10.0,
+            per_trade_cap_pct=1.5,
+        )
+    )
+    assert decision.ok
+    assert decision.quantity == 5
 
 
 def test_plan_uses_broker_margin_when_available() -> None:
@@ -100,11 +121,35 @@ def test_plan_uses_broker_margin_when_available() -> None:
         lot_size_resolver=None,
         clock=lambda: 0.0,
     )
-    inputs = _inputs(balance=1_000.0, margin_buffer=0.5)
-    decision = engine.plan(inputs)
+    decision = engine.plan(_inputs(balance=1_000.0, margin_buffer=0.5))
     assert decision.ok
     assert decision.est_required == pytest.approx(250.0)
     assert decision.available == pytest.approx(1_000.0)
+
+
+def test_plan_fails_closed_when_concrete_broker_margin_call_fails() -> None:
+    decision = MarginEngine(
+        broker=DummyBroker(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
+    ).plan(_inputs())
+    assert not decision.ok
+    assert decision.reason == "broker_margin_unavailable"
+    assert decision.quantity == 0
+
+
+def test_plan_fails_closed_on_malformed_broker_margin_payload() -> None:
+    class MalformedBroker:
+        def get_required_margin(self, **_kwargs):
+            return {"required": 0}
+
+    decision = MarginEngine(
+        broker=MalformedBroker(),
+        data_hub=None,
+        lot_size_resolver=None,
+        clock=lambda: 0.0,
+    ).plan(_inputs())
+    assert not decision.ok
+    assert decision.reason == "broker_margin_unavailable"
+    assert decision.quantity == 0
 
 
 def test_plan_steps_down_by_whole_lots_until_broker_margin_fits() -> None:
@@ -140,22 +185,22 @@ def test_plan_rejects_positive_non_lot_request() -> None:
 
 
 def test_plan_rejects_zero_requested_quantity_without_min_lot_promotion() -> None:
-    """A zero request must never become live exposure."""
     engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
     )
-    inputs = _inputs(
-        requested_qty=0,
-        lot_size=75,
-        balance=100_000.0,
-        per_trade_risk_pct=5.0,
-        per_trade_cap_pct=10.0,
-        atr=40.0,
-        contract_multiplier=1.0,
-        min_lots_per_trade=1,
-        max_lots_per_trade=1,
+    decision = engine.plan(
+        _inputs(
+            requested_qty=0,
+            lot_size=75,
+            balance=100_000.0,
+            per_trade_risk_pct=5.0,
+            per_trade_cap_pct=10.0,
+            atr=40.0,
+            contract_multiplier=1.0,
+            min_lots_per_trade=1,
+            max_lots_per_trade=1,
+        )
     )
-    decision = engine.plan(inputs)
     assert not decision.ok
     assert decision.quantity == 0
     assert decision.reason == "invalid_requested_quantity"
@@ -170,11 +215,6 @@ def test_plan_rejects_non_positive_requested_quantity(requested_qty: int) -> Non
     assert not decision.ok
     assert decision.quantity == 0
     assert decision.reason == "invalid_requested_quantity"
-
-
-# ===================== OPTION LOT-SIZING REGRESSION =====================
-# NIFTY option sizing must reason in COMPLETE LOTS and convert to broker
-# units exactly once.
 
 
 def _opt_inputs(**overrides):
