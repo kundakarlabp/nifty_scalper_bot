@@ -59,11 +59,15 @@ class SizingResult:
     available: float | None = None
 
 
+class _BrokerMarginUnavailable(RuntimeError):
+    """Concrete broker margin operation exists but did not return usable data."""
+
+
 MIS_CUTOFF = time(15, 25)
 
 
 class MarginEngine:
-    """Evaluate margin availability and sizing prior to broker submission."""
+    """Evaluate margin availability and sizing before broker submission."""
 
     def __init__(
         self,
@@ -73,15 +77,6 @@ class MarginEngine:
         lot_size_resolver: Any,
         clock: Any,
     ) -> None:
-        """Create a margin engine with the dependencies required for planning.
-
-        Args:
-            broker: Broker client used for required margin lookups.
-            data_hub: Shared data hub instance for market data access.
-            lot_size_resolver: Resolver able to provide lot-size context.
-            clock: Callable returning monotonic timestamps (unused hook).
-        """
-
         self._broker = broker
         self._lots = lot_size_resolver
         self._clock = clock
@@ -90,67 +85,23 @@ class MarginEngine:
         self.set_data_hub(data_hub)
 
     def set_data_hub(self, hub: Any | None) -> None:
-        """Attach the shared Data Hub for balance hydration.
-
-        Args:
-            hub: Data hub instance exposing ``get_available_balance``.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered MarginEngine.set_data_hub",
-            extra={"event": "margin_engine_set_data_hub_start"},
-        )
-        try:
-            self._data_hub = hub
-            self._logger.info(
-                "Condition met: margin_engine_data_hub_attached",
-                extra={
-                    "event": "margin_engine_data_hub_attached",
-                    "attached": hub is not None,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarginEngine.set_data_hub: %s",
-                exc,
-                extra={"event": "margin_engine_set_data_hub_failed"},
-                exc_info=exc,
-            )
-            raise
-
-    def plan(self, inputs: MarginInputs) -> MarginDecision:
-        """Compute whether an order should proceed given risk and margin.
-
-        Args:
-            inputs: Structured information describing the intended trade.
-
-        Returns:
-            MarginDecision describing feasibility, size, and order type.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "margin_plan_start",
+        self._data_hub = hub
+        self._logger.info(
+            "Condition met: margin_engine_data_hub_attached",
             extra={
-                "event": "margin_plan_start",
-                "symbol": inputs.symbol,
-                "side": inputs.side,
-                "requested_qty": inputs.requested_qty,
-                "product": inputs.product,
+                "event": "margin_engine_data_hub_attached",
+                "attached": hub is not None,
             },
         )
+
+    def plan(self, inputs: MarginInputs) -> MarginDecision:
+        """Return the largest safe whole-lot quantity not exceeding the request."""
         fallback_balance = max(0.0, float(inputs.balance))
         requested_qty = int(inputs.requested_qty)
-        raw_lot = max(1, int(inputs.lot_size))
-        if requested_qty <= 0 or requested_qty % raw_lot != 0:
+        lot_size = max(1, int(inputs.lot_size))
+        order_type = self._resolve_order_type(inputs.ist_now, inputs.product)
+
+        if requested_qty <= 0 or requested_qty % lot_size:
             return MarginDecision(
                 ok=False,
                 reason=(
@@ -158,197 +109,53 @@ class MarginEngine:
                     if requested_qty <= 0
                     else "invalid_lot_quantity"
                 ),
-                order_type=(inputs.product or "NRML") or "NRML",
+                order_type=order_type,
                 quantity=0,
                 est_required=0.0,
                 available=fallback_balance,
-                sizing=None,
             )
-        available_margin = self._resolve_available_margin(fallback_balance)
-        effective_balance = (
-            available_margin if available_margin > 0 else fallback_balance
-        )
-        effective_inputs = replace(inputs, balance=effective_balance)
-        order_type = self._resolve_order_type(
-            effective_inputs.ist_now, effective_inputs.product
+
+        session_reason = self._session_reason(inputs.ist_now, order_type)
+        if session_reason:
+            return MarginDecision(
+                ok=False,
+                reason=session_reason,
+                order_type=order_type,
+                quantity=0,
+                est_required=0.0,
+                available=fallback_balance,
+            )
+
+        available = self._resolve_available_margin(fallback_balance)
+        effective_inputs = replace(
+            inputs,
+            balance=available if available > 0 else fallback_balance,
         )
         max_units = self._max_qty_from_risk(effective_inputs)
-        min_lot_qty = raw_lot * max(1, int(inputs.min_lots_per_trade))
-        max_lot_qty = raw_lot * max(int(inputs.max_lots_per_trade), 0)
-        if 0 < max_lot_qty < min_lot_qty:
-            min_lot_qty = max_lot_qty
+        max_lot_qty = lot_size * max(int(inputs.max_lots_per_trade), 0)
         if max_lot_qty > 0:
             max_units = min(max_units, max_lot_qty)
-        qty = max(0, min(requested_qty, max_units))
-        qty = self._snap_lot(qty, raw_lot)
-        if max_lot_qty > 0:
-            qty = min(qty, max_lot_qty)
-        if qty <= 0:
-            self._logger.warning(
-                "Risk/margin block: order sizing reduced to zero",
-                extra={
-                    "event": "margin_sizing_zero_qty",
-                    "symbol": inputs.symbol,
-                    "side": inputs.side,
-                    "requested_qty": requested_qty,
-                    "max_units": max_units,
-                    "available_margin": round(float(available_margin), 2),
-                    "effective_balance": round(float(effective_balance), 2),
-                    "per_trade_risk_pct": inputs.per_trade_risk_pct,
-                    "per_trade_cap_pct": inputs.per_trade_cap_pct,
-                    "max_lots_per_trade": inputs.max_lots_per_trade,
-                },
-            )
-        sizing = SizingResult(qty=qty)
-        if qty <= 0:
-            min_lots = max(1, int(app_settings.MIN_LOTS_PER_TRADE))
-            min_lots = max(min_lots, int(inputs.min_lots_per_trade))
-            lot_units = raw_lot
-            min_qty = min_lots * lot_units
-            if max_units < min_qty:
-                sizing = SizingResult(
-                    qty=0,
-                    reason="insufficient_risk_capacity",
-                    needed=None,
-                    available=available_margin,
-                )
-                self._logger.debug(
-                    "margin_plan_skip insufficient_risk_capacity",
-                    extra={
-                        "event": "margin_plan_skip",
-                        "reason": "insufficient_risk_capacity",
-                        "symbol": inputs.symbol,
-                        "side": inputs.side,
-                        "max_units": max_units,
-                        "min_qty": min_qty,
-                    },
-                )
-                return MarginDecision(
-                    ok=False,
-                    reason="MARGIN no_qty_after_risk",
-                    order_type=order_type,
-                    quantity=0,
-                    est_required=0.0,
-                    available=available_margin,
-                    sizing=sizing,
-                )
-            needed_min_qty = self._estimate_required(
-                symbol=inputs.symbol,
-                side=inputs.side,
-                quantity=min_qty,
-                order_type=order_type,
-                inputs=inputs,
-            )
-            sizing = SizingResult(
-                qty=min_qty,
-                reason="clamped_min_lot",
-                needed=needed_min_qty,
-                available=available_margin,
-            )
-            buffer = (
-                inputs.margin_buffer
-                if inputs.margin_buffer and inputs.margin_buffer > 0
-                else 1.0
-            )
-            if available_margin * buffer >= needed_min_qty > 0:
-                qty = min_qty
-                self._logger.info(
-                    "margin_plan_clamp_min_lot",
-                    extra={
-                        "event": "margin_plan_clamp_min_lot",
-                        "symbol": inputs.symbol,
-                        "side": inputs.side,
-                        "quantity": min_qty,
-                        "needed": needed_min_qty,
-                        "available": available_margin,
-                    },
-                )
-            else:
-                self._logger.debug(
-                    "margin_plan_skip margin_no_qty",
-                    extra={
-                        "event": "margin_plan_skip",
-                        "reason": "margin_no_qty",
-                        "symbol": inputs.symbol,
-                        "side": inputs.side,
-                        "quantity": min_qty,
-                        "needed": needed_min_qty,
-                        "available": available_margin,
-                    },
-                )
-                return MarginDecision(
-                    ok=False,
-                    reason="margin_no_qty",
-                    order_type=order_type,
-                    quantity=0,
-                    est_required=needed_min_qty,
-                    available=available_margin,
-                    sizing=SizingResult(
-                        qty=0,
-                        reason="margin_no_qty",
-                        needed=needed_min_qty,
-                        available=available_margin,
-                    ),
-                )
 
-        needed = self._estimate_required(
-            symbol=inputs.symbol,
-            side=inputs.side,
-            quantity=qty,
-            order_type=order_type,
-            inputs=inputs,
-        )
-        sizing.needed = needed
-        sizing.available = available_margin
-        if inputs.product and inputs.product.upper() == "MIS" and order_type != "MIS":
-            self._logger.info(
-                "margin_plan_block_session",
-                extra={
-                    "event": "margin_plan_block",
-                    "reason": "MIS_WINDOW_CLOSED",
-                    "symbol": inputs.symbol,
-                    "side": inputs.side,
-                    "quantity": qty,
-                    "needed": needed,
-                    "available": available_margin,
-                },
+        qty = self._snap_lot(min(requested_qty, max_units), lot_size)
+        min_qty = lot_size * max(1, int(inputs.min_lots_per_trade))
+        if qty < min_qty:
+            sizing = SizingResult(
+                qty=0,
+                reason="insufficient_risk_capacity",
+                available=available,
             )
             return MarginDecision(
                 ok=False,
-                reason="MIS_WINDOW_CLOSED",
+                reason="MARGIN no_qty_after_risk",
                 order_type=order_type,
-                quantity=qty,
-                est_required=needed,
-                available=available_margin,
-                sizing=sizing,
-            )
-        reason = self._session_reason(inputs.ist_now, order_type)
-        if reason:
-            self._logger.info(
-                "margin_plan_block_session",
-                extra={
-                    "event": "margin_plan_block",
-                    "reason": reason,
-                    "symbol": inputs.symbol,
-                    "side": inputs.side,
-                    "quantity": qty,
-                    "needed": needed,
-                    "available": available_margin,
-                },
-            )
-            return MarginDecision(
-                ok=False,
-                reason=reason,
-                order_type=order_type,
-                quantity=qty,
-                est_required=needed,
-                available=available_margin,
+                quantity=0,
+                est_required=0.0,
+                available=available,
                 sizing=sizing,
             )
 
         buffer = inputs.margin_buffer if inputs.margin_buffer > 0 else 1.0
-        while qty > min_lot_qty and available_margin * buffer < needed:
-            qty -= raw_lot
+        try:
             needed = self._estimate_required(
                 symbol=inputs.symbol,
                 side=inputs.side,
@@ -356,362 +163,157 @@ class MarginEngine:
                 order_type=order_type,
                 inputs=inputs,
             )
-        sizing.qty = qty
-        sizing.needed = needed
-        if available_margin * buffer < needed:
-            reason_text = f"MARGIN needed={needed:.2f}"
-            self._logger.info(
-                "margin_plan_block_balance",
-                extra={
-                    "event": "margin_plan_block",
-                    "reason": reason_text,
-                    "symbol": inputs.symbol,
-                    "side": inputs.side,
-                    "quantity": qty,
-                    "needed": needed,
-                    "available": available_margin,
-                    "buffer": buffer,
-                },
+            while qty > min_qty and available * buffer < needed:
+                qty -= lot_size
+                needed = self._estimate_required(
+                    symbol=inputs.symbol,
+                    side=inputs.side,
+                    quantity=qty,
+                    order_type=order_type,
+                    inputs=inputs,
+                )
+        except _BrokerMarginUnavailable as exc:
+            self._logger.error(
+                "margin_plan_required_unavailable",
+                extra={"event": "margin_plan_required_unavailable", "error": str(exc)},
             )
             return MarginDecision(
                 ok=False,
-                reason=reason_text,
+                reason="broker_margin_unavailable",
                 order_type=order_type,
-                quantity=qty,
-                est_required=needed,
-                available=available_margin,
+                quantity=0,
+                est_required=0.0,
+                available=available,
                 sizing=SizingResult(
-                    qty=qty,
-                    reason="insufficient_margin",
-                    needed=needed,
-                    available=available_margin,
+                    qty=0,
+                    reason="broker_margin_unavailable",
+                    available=available,
                 ),
             )
 
-        decision = MarginDecision(
+        sizing = SizingResult(qty=qty, needed=needed, available=available)
+        if needed <= 0 or available * buffer < needed:
+            reason = "margin_no_qty" if needed <= 0 else f"MARGIN needed={needed:.2f}"
+            sizing.reason = "margin_no_qty" if needed <= 0 else "insufficient_margin"
+            return MarginDecision(
+                ok=False,
+                reason=reason,
+                order_type=order_type,
+                quantity=0 if needed <= 0 else qty,
+                est_required=max(needed, 0.0),
+                available=available,
+                sizing=sizing,
+            )
+
+        return MarginDecision(
             ok=True,
             reason=None,
             order_type=order_type,
             quantity=qty,
             est_required=needed,
-            available=available_margin,
+            available=available,
             sizing=sizing,
         )
-        self._logger.debug(
-            "margin_plan_ok",
-            extra={
-                "event": "margin_plan_ok",
-                "symbol": inputs.symbol,
-                "side": inputs.side,
-                "quantity": qty,
-                "needed": needed,
-                "available": available_margin,
-                "order_type": order_type,
-            },
-        )
-        return decision
 
-    def _resolve_available_margin(
-        self, fallback: float, *, force: bool = False
-    ) -> float:
-        """Resolve available margin using the data hub when attached.
-
-        Args:
-            fallback: Local fallback balance supplied by the caller.
-            force: Force data hub refresh when ``True``.
-
-        Returns:
-            float: Non-negative available margin for sizing decisions.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered MarginEngine._resolve_available_margin",
-            extra={
-                "event": "margin_resolve_available_start",
-                "force": force,
-                "fallback": round(max(fallback, 0.0), 2),
-            },
-        )
-        available: float | None = None
-        hub = getattr(self, "_data_hub", None)
-        if hub is None or not hasattr(hub, "get_available_balance"):
-            self._logger.debug(
-                "Condition met: margin_resolve_available_no_hub",
-                extra={"event": "margin_resolve_available_no_hub"},
-            )
-        else:
-            raw_available: float | None = None
+    def _resolve_available_margin(self, fallback: float, *, force: bool = False) -> float:
+        """Prefer a positive DataHub balance, otherwise use the supplied balance."""
+        hub = self._data_hub
+        if hub is not None and hasattr(hub, "get_available_balance"):
             try:
-                raw_available = hub.get_available_balance(force=force)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in MarginEngine._resolve_available_margin: %s",
-                    exc,
-                    extra={"event": "margin_resolve_available_error"},
-                    exc_info=exc,
+                raw = hub.get_available_balance(force=force)
+                available = float(raw) if raw is not None else 0.0
+                if available > 0:
+                    return available
+            except (TypeError, ValueError, Exception):  # noqa: BLE001
+                pass
+            try:
+                extracted = self._extract_balance_from_snapshot(
+                    hub.get_account_snapshot(force=force)
                 )
-            if raw_available is not None:
-                try:
-                    available = float(raw_available)
-                except (TypeError, ValueError) as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in MarginEngine._resolve_available_margin: %s",
-                        exc,
-                        extra={
-                            "event": "margin_resolve_available_invalid",
-                            "raw_value": raw_available,
-                        },
-                        exc_info=exc,
-                    )
-                    available = None
-                else:
-                    self._logger.info(
-                        "Condition met: margin_resolve_available_broker_payload",
-                        extra={
-                            "event": "margin_resolve_available_broker_payload",
-                            "balance": round(available, 2),
-                        },
-                    )
-            if available is None:
-                try:
-                    snapshot = hub.get_account_snapshot(force=force)
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in MarginEngine._resolve_available_margin: %s",
-                        exc,
-                        extra={"event": "margin_resolve_available_snapshot_error"},
-                        exc_info=exc,
-                    )
-                else:
-                    extracted = self._extract_balance_from_snapshot(snapshot)
-                    if extracted is not None:
-                        available = extracted
-                        self._logger.info(
-                            "Condition met: margin_resolve_available_snapshot_payload",
-                            extra={
-                                "event": "margin_resolve_available_snapshot_payload",
-                                "balance": round(extracted, 2),
-                            },
-                        )
-
-        if available is not None and available > 0:
-            resolved = float(available)
-            self._logger.info(
-                "Condition met: margin_resolve_available_data_hub",
-                extra={
-                    "event": "margin_resolve_available_data_hub",
-                    "balance": round(resolved, 2),
-                },
-            )
-            return resolved
-
-        if available is not None:
-            self._logger.warning(
-                "margin_resolve_available_non_positive",
-                extra={
-                    "event": "margin_resolve_available_non_positive",
-                    "balance": round(float(available), 2),
-                },
-            )
-
-        if fallback > 0:
-            self._logger.info(
-                "Condition met: margin_resolve_available_fallback",
-                extra={
-                    "event": "margin_resolve_available_fallback",
-                    "balance": round(float(fallback), 2),
-                },
-            )
-            return float(fallback)
-
-        self._logger.warning(
-            "margin_resolve_available_unavailable",
-            extra={"event": "margin_resolve_available_unavailable"},
-        )
-        return 0.0
+                if extracted is not None:
+                    return extracted
+            except Exception:  # noqa: BLE001
+                pass
+        return max(float(fallback), 0.0)
 
     def _extract_balance_from_snapshot(self, snapshot: object) -> float | None:
-        """Extract a usable balance value from a margin snapshot payload.
-
-        Args:
-            snapshot: Raw snapshot payload returned by the data hub.
-
-        Returns:
-            float | None: Positive balance when discovered, otherwise ``None``.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered MarginEngine._extract_balance_from_snapshot",
-            extra={"event": "margin_resolve_extract_start"},
+        if not isinstance(snapshot, Mapping):
+            return None
+        paths = (
+            ("equity", "available", "live_balance"),
+            ("equity", "available", "available_cash"),
+            ("equity", "available", "cash"),
+            ("available", "live_balance"),
+            ("available", "available_cash"),
+            ("available", "cash"),
+            ("available", "opening_balance"),
+            ("net", "available"),
+            ("available_cash",),
+            ("available",),
+            ("balance",),
         )
-        try:
-            if not isinstance(snapshot, Mapping):
-                return None
-            candidates: tuple[tuple[str, ...], ...] = (
-                ("equity", "available", "live_balance"),
-                ("equity", "available", "available_cash"),
-                ("equity", "available", "cash"),
-                ("available", "live_balance"),
-                ("available", "available_cash"),
-                ("available", "cash"),
-                ("available", "opening_balance"),
-                ("net", "available"),
-                ("available_cash",),
-                ("available",),
-                ("balance",),
-            )
-            for path in candidates:
-                cursor: object = snapshot
-                for key in path:
-                    if isinstance(cursor, Mapping) and key in cursor:
-                        cursor = cursor[key]
-                    else:
-                        break
-                else:
-                    try:
-                        value = float(cursor)  # type: ignore[arg-type]
-                    except (TypeError, ValueError):
-                        continue
-                    if value > 0:
-                        return value
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarginEngine._extract_balance_from_snapshot: %s",
-                exc,
-                extra={"event": "margin_resolve_extract_error"},
-                exc_info=exc,
-            )
+        for path in paths:
+            value: object = snapshot
+            for key in path:
+                if not isinstance(value, Mapping) or key not in value:
+                    break
+                value = value[key]
+            else:
+                try:
+                    parsed = float(value)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    return parsed
         return None
 
     def _resolve_order_type(self, now_ist: datetime, preferred: str | None) -> str:
-        """Determine the effective order product based on time and preference.
-
-        Args:
-            now_ist: Current timestamp in IST.
-            preferred: Requested product, typically 'MIS' or 'NRML'.
-
-        Returns:
-            Canonical product string acceptable to the broker.
-
-        Raises:
-            None.
-        """
-
-        product = (preferred or "").upper()
-        if product == "MIS" and now_ist.timetz() >= MIS_CUTOFF:
-            self._logger.info(
-                "margin_plan_downgrade_mis",
-                extra={"event": "margin_plan_downgrade", "target": "NRML"},
-            )
-            return "NRML"
-        if product in {"MIS", "NRML"}:
-            return product
-        return "NRML"
+        del now_ist
+        product = (preferred or "NRML").upper()
+        return product if product in {"MIS", "NRML"} else "NRML"
 
     def _max_qty_from_risk(self, inputs: MarginInputs) -> int:
-        """Derive the maximum quantity allowed by risk and capital caps.
-
-        Args:
-            inputs: Structured trade description including risk context.
-
-        Returns:
-            Maximum whole-unit quantity before lot snapping.
-
-        Raises:
-            None.
-        """
-
-        balance = max(0.0, float(inputs.balance))
-        price = max(inputs.price, 0.0)
-        cap_pct = max(inputs.per_trade_cap_pct, 0.0)
-        cap_from_pct = balance * (cap_pct / 100.0)
-        risk_pct = max(inputs.per_trade_risk_pct, 0.0) / 100.0
+        """Size in complete lots and convert to broker units exactly once."""
+        balance = max(float(inputs.balance), 0.0)
+        price = max(float(inputs.price), 0.0)
+        lot_size = max(1, int(inputs.lot_size))
 
         risk_per_unit = 0.0
         if inputs.stop_loss and inputs.stop_loss > 0 and price > 0:
-            risk_per_unit = abs(price - inputs.stop_loss)
+            risk_per_unit = abs(price - float(inputs.stop_loss))
         elif inputs.atr and inputs.atr > 0 and inputs.atr_multiple > 0:
-            risk_per_unit = inputs.atr * inputs.atr_multiple
+            risk_per_unit = float(inputs.atr) * float(inputs.atr_multiple)
         if risk_per_unit <= 0 and price > 0:
-            fallback_move_pct = (
+            risk_per_unit = price * (
                 max(app_settings.RISK_FALLBACK_PRICE_MOVE_PCT, 0.0) / 100.0
             )
-            risk_per_unit = price * fallback_move_pct
-
-        lot_size = max(1, int(inputs.lot_size))
-        # Per-lot economics derived from lot_size ALONE. contract_multiplier is
-        # deliberately not applied here: production sets it to the lot size, so
-        # using both would count contract size twice. Contract size is counted
-        # exactly once, via lot_size, and converted to broker units once at the
-        # end of this method.
-        one_lot_risk = risk_per_unit * lot_size
-        if one_lot_risk <= 0:
+        if risk_per_unit <= 0 or price <= 0 or balance <= 0:
             return 0
-        lots_by_risk = int((balance * risk_pct) // one_lot_risk)
-        one_lot_cost = price * lot_size
-        lots_by_cap = int(cap_from_pct // one_lot_cost) if one_lot_cost > 0 else 0
-        # NOTE: an optional broker `estimate_margin(symbol, quantity, price)`
-        # probe previously ran here. It has no concrete implementation
-        # anywhere in this repo (no adapter defines it), so its quantity
-        # convention cannot be verified: passing `lot_size` as quantity is
-        # only correct if a future adapter treats quantity as broker units --
-        # if one instead treated quantity as lots, this would silently request
-        # margin for `lot_size` lots. Removed rather than guessed. Sizing
-        # here relies only on the two deterministic sources below; broker
-        # required-margin validation still happens in _estimate_required()
-        # via get_required_margin when the broker supports it.
-        max_lots = max(0, min(lots_by_risk, lots_by_cap))
-        configured_max_lots = max(int(inputs.max_lots_per_trade), 0)
-        if configured_max_lots > 0:
-            max_lots = min(max_lots, configured_max_lots)
-        # Single conversion point: complete lots -> broker units.
-        max_units = max_lots * lot_size
-        self._logger.debug(
-            "margin_plan_qty",
-            extra={
-                "event": "margin_plan_qty",
-                "symbol": inputs.symbol,
-                "lots_by_risk": lots_by_risk,
-                "lots_by_cap": lots_by_cap,
-                "max_lots": max_lots,
-                "lot_size": lot_size,
-                "max_units": max_units,
-            },
+
+        lots_by_risk = int(
+            (balance * max(float(inputs.per_trade_risk_pct), 0.0) / 100.0)
+            // (risk_per_unit * lot_size)
         )
-        return max_units
+        lots_by_cap = int(
+            (balance * max(float(inputs.per_trade_cap_pct), 0.0) / 100.0)
+            // (price * lot_size)
+        )
+
+        # A valid one-lot request must not be reduced to zero only because a
+        # percentage capital cap is smaller than one indivisible option lot.
+        # Stop-risk and the final available-margin check still must permit it.
+        if inputs.requested_qty >= lot_size and lots_by_risk >= 1:
+            lots_by_cap = max(lots_by_cap, 1)
+
+        max_lots = min(lots_by_risk, lots_by_cap)
+        configured_max = max(int(inputs.max_lots_per_trade), 0)
+        if configured_max:
+            max_lots = min(max_lots, configured_max)
+        return max(max_lots, 0) * lot_size
 
     def _snap_lot(self, quantity: int, lot_size: int) -> int:
-        """Snap a quantity down to the nearest valid lot multiple.
-
-        Args:
-            quantity: Raw unit quantity derived from sizing.
-            lot_size: Instrument lot size (minimum tradable chunk).
-
-        Returns:
-            Quantity respecting lot-size constraints.
-
-        Raises:
-            None.
-        """
-
         lot = max(1, int(lot_size))
-        snapped = (max(0, int(quantity)) // lot) * lot
-        self._logger.debug(
-            "margin_plan_snap",
-            extra={
-                "event": "margin_plan_snap",
-                "quantity": quantity,
-                "lot": lot,
-                "snapped": snapped,
-            },
-        )
-        return snapped
+        return (max(0, int(quantity)) // lot) * lot
 
     def _estimate_required(
         self,
@@ -722,22 +324,7 @@ class MarginEngine:
         order_type: str,
         inputs: MarginInputs,
     ) -> float:
-        """Estimate margin required using broker API or fall back model.
-
-        Args:
-            symbol: Tradable instrument identifier.
-            side: Trade direction.
-            quantity: Planned lot-adjusted quantity.
-            order_type: Selected product for the order.
-            inputs: Complete margin context for fallback calculations.
-
-        Returns:
-            Estimated required capital for broker submission.
-
-        Raises:
-            None.
-        """
-
+        """Use concrete broker margin data when implemented; otherwise premium cost."""
         client = getattr(self._broker, "_client", None) or self._broker
         fetcher = getattr(client, "get_required_margin", None)
         if callable(fetcher):
@@ -748,38 +335,24 @@ class MarginEngine:
                     quantity=quantity,
                     product=order_type,
                 )
-                if isinstance(response, Mapping):
-                    required_raw = response.get("required")
-                    required = float(required_raw) if required_raw is not None else 0.0
-                    if required > 0:
-                        return required
+                if not isinstance(response, Mapping):
+                    raise _BrokerMarginUnavailable("invalid_broker_margin_payload")
+                required = float(response.get("required", 0.0))
+                if required <= 0:
+                    raise _BrokerMarginUnavailable("invalid_broker_margin_value")
+                return required
+            except _BrokerMarginUnavailable:
+                raise
             except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "margin_plan_required_fetch_failed",
-                    extra={"event": "margin_plan_required_fallback", "error": str(exc)},
-                )
-        premium = max(inputs.price, 0.0)
-        # `quantity` is already broker units (lots x lot_size), and
-        # `contract_multiplier` IS the lot size, so applying it here would
-        # square the contract size (e.g. 100 x 65 x 65 = 422500 instead of
-        # 6500). Contract size is counted exactly once, inside `quantity`.
-        estimate = premium * max(quantity, 0) * max(inputs.margin_factor, 1.0)
-        return estimate
+                raise _BrokerMarginUnavailable(type(exc).__name__) from exc
+
+        return (
+            max(float(inputs.price), 0.0)
+            * max(int(quantity), 0)
+            * max(float(inputs.margin_factor), 1.0)
+        )
 
     def _session_reason(self, now_ist: datetime, order_type: str) -> str | None:
-        """Resolve session-derived block reasons for the chosen order type.
-
-        Args:
-            now_ist: Current IST timestamp.
-            order_type: Product selected for the order.
-
-        Returns:
-            Canonical soft-block reason if session disallows the order, else None.
-
-        Raises:
-            None.
-        """
-
         if order_type == "MIS" and now_ist.timetz() >= MIS_CUTOFF:
             return "MIS_WINDOW_CLOSED"
         return None
