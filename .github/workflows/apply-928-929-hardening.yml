@@ -1,0 +1,333 @@
+name: Apply 928 and 929 hardening
+
+on:
+  push:
+    branches:
+      - fix/harden-928-929-edge-cases
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply minimal production and regression patches
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # PR #928 hardening: stopped loops are unusable, cancelled
+          # concurrent futures must not escape callbacks, and a failed
+          # thread-safe submission must close its coroutine.
+          notifier = Path('src/nifty_scalper_bot/notifications/telegram_webhook_enhanced.py')
+          text = notifier.read_text()
+          old = 'import asyncio\nimport hashlib\n'
+          new = 'import asyncio\nfrom concurrent.futures import CancelledError as FutureCancelledError\nimport hashlib\n'
+          assert old in text
+          text = text.replace(old, new, 1)
+          old = '            with suppress(asyncio.CancelledError):\n                exc = done.exception()\n'
+          new = '            with suppress(asyncio.CancelledError, FutureCancelledError):\n                exc = done.exception()\n'
+          assert old in text
+          text = text.replace(old, new, 1)
+          old = '''            runtime_loop = self._runtime_loop
+            if runtime_loop is not None and not runtime_loop.is_closed():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        _dispatch(), runtime_loop
+                    )
+                except RuntimeError:
+                    runtime_loop = None
+                else:
+'''
+          new = '''            runtime_loop = self._runtime_loop
+            if (
+                runtime_loop is not None
+                and runtime_loop.is_running()
+                and not runtime_loop.is_closed()
+            ):
+                dispatch_coro = _dispatch()
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        dispatch_coro, runtime_loop
+                    )
+                except RuntimeError:
+                    dispatch_coro.close()
+                else:
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          notifier.write_text(text)
+
+          notif_tests = Path('tests/notifications/test_telegram_non_blocking_dispatch.py')
+          tests = notif_tests.read_text()
+          addition = '''
+
+
+def test_send_alert_with_stopped_open_loop_drops_without_blocking() -> None:
+    """An open but stopped loop is unusable and must not retain a coroutine."""
+    n = _notifier(None, dispatch_seconds=1.0)
+    loop = asyncio.new_event_loop()
+    n.attach_runtime_loop(loop)
+    try:
+        started = time.perf_counter()
+        n.send_alert("order filled")
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.2, f"send_alert blocked caller for {elapsed:.3f}s"
+    finally:
+        loop.close()
+'''
+          if 'test_send_alert_with_stopped_open_loop_drops_without_blocking' not in tests:
+              notif_tests.write_text(tests + addition)
+
+          # PR #929 hardening: make single-flight registration atomic, allow a
+          # duplicate caller to await the authoritative in-flight task, and
+          # clean state if reconciliation is invoked without a position manager.
+          app = Path('src/nifty_scalper_bot/core/app.py')
+          text = app.read_text()
+          old = '''    position_reconciliation_in_progress: bool = False
+    position_reconciliation_failed: bool = False
+'''
+          new = '''    position_reconciliation_in_progress: bool = False
+    position_reconciliation_task: asyncio.Task[None] | None = field(
+        default=None, repr=False
+    )
+    position_reconciliation_guard: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
+    )
+    position_reconciliation_failed: bool = False
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    active_run_ids = getattr(ctx, "position_reconciliation_active_run_ids", None)
+    if not isinstance(active_run_ids, set):
+        active_run_ids = set()
+        ctx.position_reconciliation_active_run_ids = active_run_ids
+    if active_run_ids:
+        # Single-flight: periodic_health and manual triggers were overlapping,
+        # each taking seconds against the broker. A concurrent refresh yields
+        # the same broker truth, so coalesce onto the in-flight run instead of
+        # stacking duplicate reconciliations.
+        LOGGER.info(
+            "POSITION_RECONCILE_COALESCED source=%s active_runs=%d",
+            source,
+            len(active_run_ids),
+            extra={
+                "event": "POSITION_RECONCILE_COALESCED",
+                "source": source,
+                "active_run_count": len(active_run_ids),
+            },
+        )
+        return
+    active_run_ids.add(reconcile_run_id)
+'''
+          new = '''    active_run_ids = getattr(ctx, "position_reconciliation_active_run_ids", None)
+    if not isinstance(active_run_ids, set):
+        active_run_ids = set()
+        ctx.position_reconciliation_active_run_ids = active_run_ids
+    reconcile_guard = getattr(ctx, "position_reconciliation_guard", None)
+    if reconcile_guard is None:
+        reconcile_guard = threading.Lock()
+        try:
+            ctx.position_reconciliation_guard = reconcile_guard
+        except (AttributeError, TypeError):
+            pass
+    current_task = asyncio.current_task()
+    with reconcile_guard:
+        in_flight_task = getattr(ctx, "position_reconciliation_task", None)
+        if (
+            in_flight_task is not None
+            and in_flight_task is not current_task
+            and not in_flight_task.done()
+        ):
+            should_wait = True
+        elif active_run_ids:
+            should_wait = False
+        else:
+            should_wait = False
+            active_run_ids.add(reconcile_run_id)
+            try:
+                ctx.position_reconciliation_task = current_task
+            except (AttributeError, TypeError):
+                pass
+            in_flight_task = None
+    if in_flight_task is not None and should_wait:
+        LOGGER.info(
+            "POSITION_RECONCILE_COALESCED source=%s active_runs=%d",
+            source,
+            len(active_run_ids),
+            extra={
+                "event": "POSITION_RECONCILE_COALESCED",
+                "source": source,
+                "active_run_count": len(active_run_ids),
+            },
+        )
+        await asyncio.shield(in_flight_task)
+        return
+    if active_run_ids and reconcile_run_id not in active_run_ids:
+        LOGGER.info(
+            "POSITION_RECONCILE_SKIPPED_IN_FLIGHT source=%s active_runs=%d",
+            source,
+            len(active_run_ids),
+            extra={
+                "event": "POSITION_RECONCILE_SKIPPED_IN_FLIGHT",
+                "source": source,
+                "active_run_count": len(active_run_ids),
+            },
+        )
+        return
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''            active_run_ids.discard(reconcile_run_id)
+            run_record.update({
+'''
+          new = '''            with reconcile_guard:
+                active_run_ids.discard(reconcile_run_id)
+                if getattr(ctx, "position_reconciliation_task", None) is current_task:
+                    ctx.position_reconciliation_task = None
+            run_record.update({
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        except Exception as exc:
+            active_run_ids.discard(reconcile_run_id)
+            run_record["active_run_count"] = len(active_run_ids)
+'''
+          new = '''        except Exception as exc:
+            with reconcile_guard:
+                active_run_ids.discard(reconcile_run_id)
+                if getattr(ctx, "position_reconciliation_task", None) is current_task:
+                    ctx.position_reconciliation_task = None
+            run_record["active_run_count"] = len(active_run_ids)
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          marker = '''            LOGGER.error(
+                "POSITION_RECONCILE_FAILED error_type=%s error_message=%s",
+                type(exc).__name__,
+                str(exc),
+                extra={
+                    "event": "POSITION_RECONCILE_FAILED",
+                    "blocker": "position_reconciliation_failed",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+
+    _sync_data_hub_positions(getattr(ctx, "data_hub", None), ctx.position_manager)
+'''
+          replacement = '''            LOGGER.error(
+                "POSITION_RECONCILE_FAILED error_type=%s error_message=%s",
+                type(exc).__name__,
+                str(exc),
+                extra={
+                    "event": "POSITION_RECONCILE_FAILED",
+                    "blocker": "position_reconciliation_failed",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+    else:
+        with reconcile_guard:
+            active_run_ids.discard(reconcile_run_id)
+            if getattr(ctx, "position_reconciliation_task", None) is current_task:
+                ctx.position_reconciliation_task = None
+        ctx.position_reconciliation_in_progress = False
+        ctx.position_reconciliation_failed = True
+        ctx.position_reconciliation_error = "position_manager_unavailable"
+        ctx.live_orders_armed = False
+        ctx.execution_armed = False
+        ctx.trading_ready = False
+        ctx.live_block_reason = "position_reconciliation_failed"
+        ctx.execution_block_reason = "position_reconciliation_failed"
+        LOGGER.error(
+            "POSITION_RECONCILE_FAILED error_type=RuntimeError error_message=position_manager_unavailable",
+            extra={
+                "event": "POSITION_RECONCILE_FAILED",
+                "blocker": "position_reconciliation_failed",
+                "error_type": "RuntimeError",
+                "error_message": "position_manager_unavailable",
+            },
+        )
+
+    _sync_data_hub_positions(getattr(ctx, "data_hub", None), ctx.position_manager)
+'''
+          assert marker in text
+          text = text.replace(marker, replacement, 1)
+          app.write_text(text)
+
+          reconcile_tests = Path('tests/core/test_reconcile_readiness_lifecycle.py')
+          tests = reconcile_tests.read_text()
+          addition = '''
+
+
+def test_reconcile_without_position_manager_cleans_single_flight_state() -> None:
+    """Missing runtime dependency must fail closed without a stuck active run."""
+    import asyncio
+    import threading
+
+    from nifty_scalper_bot.core import app as app_module
+
+    class _Ctx3:
+        position_reconciliation_active_run_ids = set()
+        position_reconciliation_guard = threading.Lock()
+        position_reconciliation_task = None
+        position_reconciliation_in_progress = False
+        position_reconciliation_failed = False
+        position_reconciliation_error = None
+        position_manager = None
+        order_manager = None
+        broker = None
+        data_hub = None
+        live_orders_armed = True
+        execution_armed = True
+        trading_ready = True
+        live_block_reason = None
+        execution_block_reason = None
+
+    ctx = _Ctx3()
+    asyncio.run(app_module._reconcile_state(ctx, source="manual"))
+
+    assert ctx.position_reconciliation_active_run_ids == set()
+    assert ctx.position_reconciliation_task is None
+    assert ctx.position_reconciliation_in_progress is False
+    assert ctx.position_reconciliation_failed is True
+    assert ctx.position_reconciliation_error == "position_manager_unavailable"
+    assert ctx.live_orders_armed is False
+'''
+          if 'test_reconcile_without_position_manager_cleans_single_flight_state' not in tests:
+              reconcile_tests.write_text(tests + addition)
+          PY
+
+      - name: Validate focused changes
+        shell: bash
+        run: |
+          python -m compileall -q src tests
+          pytest -q tests/notifications/test_telegram_non_blocking_dispatch.py tests/core/test_reconcile_readiness_lifecycle.py
+
+      - name: Commit patched files and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-928-929-hardening.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/nifty_scalper_bot/notifications/telegram_webhook_enhanced.py \
+                  src/nifty_scalper_bot/core/app.py \
+                  tests/notifications/test_telegram_non_blocking_dispatch.py \
+                  tests/core/test_reconcile_readiness_lifecycle.py \
+                  .github/workflows/apply-928-929-hardening.yml
+          git commit -m "fix: harden Telegram loop and reconciliation lifecycle"
+          git push origin HEAD:fix/harden-928-929-edge-cases
