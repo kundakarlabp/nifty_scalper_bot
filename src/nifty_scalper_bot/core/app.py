@@ -2585,6 +2585,22 @@ def _telegram_requires_http_controller(settings: Settings) -> bool:
     return _telegram_transport_mode(settings) == "webhook"
 
 
+
+def _reconciliation_max_age_seconds() -> float:
+    """Max age of a successful reconciliation before it is treated as stale.
+
+    0 disables the age check. Args: none. Returns: seconds. Raises: none.
+    """
+    raw = os.getenv("POSITION_RECONCILE_MAX_AGE_SECONDS")
+    if raw is None:
+        return 120.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 120.0
+    return max(0.0, value)
+
+
 def get_http_app() -> FastAPI:
     """Return the FastAPI application exposing inbound Telegram webhook."""
     global _HTTP_APP, _HTTP_NOTIFIER, _HTTP_CONTROLLER
@@ -2756,6 +2772,24 @@ def get_http_app() -> FastAPI:
             blockers.append("position_reconciliation_failed")
         if not bool(getattr(ctx, "position_reconciliation_completed", False)):
             blockers.append("position_reconciliation_incomplete")
+        else:
+            # `completed` now survives an in-flight refresh (last-known-good),
+            # so it must be age-bounded: a permanently stuck or failing
+            # reconciler must not leave execution armed indefinitely.
+            _completed_at = getattr(ctx, "position_reconciliation_completed_at", None)
+            _max_age_s = _reconciliation_max_age_seconds()
+            if _max_age_s > 0:
+                if _completed_at is None:
+                    blockers.append("position_reconciliation_stale")
+                else:
+                    try:
+                        _age = (
+                            datetime.now(timezone.utc) - _completed_at
+                        ).total_seconds()
+                    except Exception:  # noqa: BLE001 - fail closed on bad state
+                        _age = None
+                    if _age is None or _age > _max_age_s:
+                        blockers.append("position_reconciliation_stale")
         if bool(getattr(ctx, "unprotected_broker_positions", set())) or bool(
             getattr(ctx, "unprotected_broker_position", False)
         ):
@@ -3037,6 +3071,9 @@ class BotContext:
     broker_session_invalid: bool = False
     position_reconciliation_started: bool = False
     position_reconciliation_completed: bool = False
+    # True only while a refresh is executing. Distinct from `completed`, which
+    # means "a valid broker reconciliation has previously succeeded".
+    position_reconciliation_in_progress: bool = False
     position_reconciliation_failed: bool = False
     position_reconciliation_error: str | None = None
     position_reconciliation_started_at: datetime | None = None
@@ -14805,6 +14842,22 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
     if not isinstance(active_run_ids, set):
         active_run_ids = set()
         ctx.position_reconciliation_active_run_ids = active_run_ids
+    if active_run_ids:
+        # Single-flight: periodic_health and manual triggers were overlapping,
+        # each taking seconds against the broker. A concurrent refresh yields
+        # the same broker truth, so coalesce onto the in-flight run instead of
+        # stacking duplicate reconciliations.
+        LOGGER.info(
+            "POSITION_RECONCILE_COALESCED source=%s active_runs=%d",
+            source,
+            len(active_run_ids),
+            extra={
+                "event": "POSITION_RECONCILE_COALESCED",
+                "source": source,
+                "active_run_count": len(active_run_ids),
+            },
+        )
+        return
     active_run_ids.add(reconcile_run_id)
     run_record["active_run_count"] = len(active_run_ids)
     ctx.position_reconciliation_last_run = run_record
@@ -14823,7 +14876,15 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
     )
     ctx.position_reconciliation_started = True
     ctx.position_reconciliation_started_at = started_at
-    ctx.position_reconciliation_completed = False
+    ctx.position_reconciliation_in_progress = True
+    # Do NOT clear position_reconciliation_completed here. That flag means
+    # "a valid broker reconciliation has previously succeeded", not "no refresh
+    # is running". Clearing it on every routine refresh invalidated the last
+    # known-good state for the whole run duration (2.5-7.2s, every ~15-20s),
+    # so the 30s readiness check repeatedly saw
+    # position_reconciliation_incomplete and flapped live_orders_armed
+    # False/True, blocking entries roughly half the time. Fail-closed startup
+    # is preserved: the flag is still False until the FIRST success.
     ctx.position_reconciliation_failed = False
     ctx.position_reconciliation_error = None
     if ctx.position_manager:
@@ -15138,6 +15199,7 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
             ctx.position_reconciliation_failed = False
             ctx.position_reconciliation_error = None
             ctx.position_reconciliation_completed = True
+            ctx.position_reconciliation_in_progress = False
             ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
             duration_ms = (ctx.position_reconciliation_completed_at - started_at).total_seconds() * 1000.0
             active_run_ids.discard(reconcile_run_id)
@@ -15162,7 +15224,10 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
         except Exception as exc:
             active_run_ids.discard(reconcile_run_id)
             run_record["active_run_count"] = len(active_run_ids)
-            ctx.position_reconciliation_completed = False
+            # Leave position_reconciliation_completed untouched: the explicit
+            # `failed` flag below is what blocks execution, and it is checked
+            # separately by the readiness blockers.
+            ctx.position_reconciliation_in_progress = False
             ctx.position_reconciliation_failed = True
             ctx.position_reconciliation_error = str(exc)
             ctx.live_orders_armed = False
