@@ -158,6 +158,12 @@ class TelegramEnhancedNotifier:
     _telegram_backoff_until: float = field(init=False, repr=False, default=0.0)
     _consecutive_failures: int = field(init=False, repr=False, default=0)
     _last_success_ts: float = field(init=False, repr=False, default=0.0)
+    # Authoritative application loop, latched by attach_runtime_loop(). Alerts
+    # raised from non-loop threads (market-data / order paths) are submitted
+    # here instead of being run synchronously on the calling thread.
+    _runtime_loop: "asyncio.AbstractEventLoop | None" = field(
+        init=False, repr=False, default=None
+    )
     _last_error_type: str | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
@@ -230,6 +236,16 @@ class TelegramEnhancedNotifier:
             )
         return results
 
+    def attach_runtime_loop(self, loop: "asyncio.AbstractEventLoop") -> None:
+        """Latch the authoritative application loop for off-thread alerts.
+
+        Called once by canonical startup while the loop is running. Alerts
+        raised from market-data / order threads are submitted here with
+        run_coroutine_threadsafe instead of blocking the caller.
+        Args: loop. Returns: none. Raises: none.
+        """
+        self._runtime_loop = loop
+
     def send_alert(self, message: str) -> None:
         """Send alert synchronously with proper event loop handling.
 
@@ -276,22 +292,65 @@ class TelegramEnhancedNotifier:
                 )
             return results
 
+        def _report_failure(done: Any) -> None:
+            with suppress(asyncio.CancelledError):
+                exc = done.exception()
+                if exc is not None:
+                    self._logger.error(
+                        "NOTIFICATION_DISPATCH_FAILED",
+                        extra={
+                            "alert_id": alert_id,
+                            "provider": "telegram",
+                            "event_type": "alert",
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    )
+
         try:
-            # Check if we're already in an event loop
+            # NEVER run dispatch synchronously. _dispatch() performs rate-limit
+            # waits, network I/O and a retry chain whose backoff is
+            # min(2**attempt, 30) -- up to ~35s. send_alert() is called from
+            # the order/bracket path, which executes on the market-data tick
+            # thread, so a synchronous asyncio.run() here froze tick ingestion
+            # for the whole retry window (observed: one tick callback blocked
+            # 34.3s, 548 pending ticks, event-loop lag 34s).
             try:
-                loop = asyncio.get_running_loop()
-                # We're in a running loop - schedule as task
+                asyncio.get_running_loop()
+                on_loop = True
+            except RuntimeError:
+                on_loop = False
+
+            if on_loop:
                 task = safe_task(_dispatch())
                 self._logger.info("NOTIFICATION_DISPATCH_QUEUED", extra={"status": "queued", "alert_id": alert_id, "provider": "telegram", "event_type": "alert"})
-                def _on_done(done_task: asyncio.Task[list[NotificationDispatchResult]]) -> None:
-                    with suppress(asyncio.CancelledError):
-                        exc = done_task.exception()
-                        if exc is not None:
-                            self._logger.error("NOTIFICATION_DISPATCH_FAILED", extra={"alert_id": alert_id, "provider": "telegram", "event_type": "alert", "error_type": type(exc).__name__, "error": str(exc)})
-                task.add_done_callback(_on_done)
-            except RuntimeError:
-                # No running loop - create one
-                asyncio.run(_dispatch())
+                task.add_done_callback(_report_failure)
+                return
+
+            runtime_loop = self._runtime_loop
+            if runtime_loop is not None and not runtime_loop.is_closed():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        _dispatch(), runtime_loop
+                    )
+                except RuntimeError:
+                    runtime_loop = None
+                else:
+                    self._logger.info("NOTIFICATION_DISPATCH_QUEUED", extra={"status": "queued_threadsafe", "alert_id": alert_id, "provider": "telegram", "event_type": "alert"})
+                    future.add_done_callback(_report_failure)
+                    return
+
+            # No usable runtime loop (not yet attached, or shutting down).
+            # Drop the alert rather than block a trading thread.
+            self._logger.warning(
+                "NOTIFICATION_DISPATCH_DROPPED_NO_LOOP",
+                extra={
+                    "event": "NOTIFICATION_DISPATCH_DROPPED_NO_LOOP",
+                    "alert_id": alert_id,
+                    "provider": "telegram",
+                    "event_type": "alert",
+                },
+            )
         except Exception as exc:
             self._logger.error(
                 f"Alert send failed: {exc}",
