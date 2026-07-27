@@ -22,6 +22,7 @@ class ExecutionState(str, Enum):
 class OrderStateMachine:
     """Track and validate order lifecycle transitions per symbol."""
 
+    _STALE_ORDER_PENDING_SECONDS = 120.0
     _VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
         ExecutionState.IDLE: {ExecutionState.READY, ExecutionState.SIGNAL_RECEIVED},
         ExecutionState.READY: {ExecutionState.SIGNAL_RECEIVED, ExecutionState.IDLE},
@@ -74,18 +75,37 @@ class OrderStateMachine:
         """Apply validated transition. Args: new_state and optional order_id/
         reason/trace_id metadata. Returns: bool. Raises: none."""
         with self._lock:
+            now = datetime.now(timezone.utc)
+            state_age = max(0.0, (now - self._entered_at).total_seconds())
+            stale_pending_retry = (
+                self._state is ExecutionState.ORDER_PENDING
+                and new_state is ExecutionState.ORDER_PENDING
+                and bool(trace_id)
+                and trace_id != self._trace_id
+                and state_age >= self._STALE_ORDER_PENDING_SECONDS
+            )
+            if stale_pending_retry:
+                self._state = ExecutionState.ORDER_PENDING
+                self._last_transition_ts = now.isoformat()
+                self._entered_at = now
+                self._order_id = order_id
+                self._reason = reason
+                self._trace_id = trace_id
+                self._last_reject = None
+                return True
+
             allowed = self._VALID_TRANSITIONS.get(self._state, set())
             if new_state not in allowed:
                 self._last_reject = {
                     "from": self._state.value,
                     "to": new_state.value,
                     "allowed_next": sorted(state.value for state in allowed),
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": now.isoformat(),
                 }
                 return False
             self._state = new_state
-            self._last_transition_ts = datetime.now(timezone.utc).isoformat()
-            self._entered_at = datetime.now(timezone.utc)
+            self._last_transition_ts = now.isoformat()
+            self._entered_at = now
             if order_id is not None:
                 self._order_id = order_id
             if reason is not None:

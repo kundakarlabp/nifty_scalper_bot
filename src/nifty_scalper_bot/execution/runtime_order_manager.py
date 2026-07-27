@@ -102,7 +102,15 @@ class RuntimeOrderManager(_core.OrderManager):
         blocked = self._blocked("place_managed_order_result", args, kwargs)
         if blocked is not NO_BLOCK:
             return blocked
-        return super().place_managed_order_result(*args, **kwargs)
+        previous = getattr(self, "_managed_strategy_name", None)
+        self._managed_strategy_name = str(kwargs.get("strategy_name") or "runner")
+        try:
+            return super().place_managed_order_result(*args, **kwargs)
+        finally:
+            if previous is None:
+                self.__dict__.pop("_managed_strategy_name", None)
+            else:
+                self._managed_strategy_name = previous
 
     def place_managed_order(self, *args: Any, **kwargs: Any) -> Any:
         blocked = self._blocked("place_managed_order", args, kwargs)
@@ -111,10 +119,15 @@ class RuntimeOrderManager(_core.OrderManager):
         return super().place_managed_order(*args, **kwargs)
 
     def place_order(self, *args: Any, **kwargs: Any) -> Any:
-        blocked = self._blocked("place_order", args, kwargs)
+        effective_kwargs = dict(kwargs)
+        managed_strategy = getattr(self, "_managed_strategy_name", None)
+        current_strategy = str(effective_kwargs.get("strategy_name") or "").strip().lower()
+        if managed_strategy and current_strategy in {"", "manual"}:
+            effective_kwargs["strategy_name"] = managed_strategy
+        blocked = self._blocked("place_order", args, effective_kwargs)
         if blocked is not NO_BLOCK:
             return blocked
-        cleaned_kwargs, identity = _strip_exit_identity_kwargs(kwargs)
+        cleaned_kwargs, identity = _strip_exit_identity_kwargs(effective_kwargs)
         if identity:
             self._last_exit_identity_kwargs = dict(identity)
         return super().place_order(*args, **cleaned_kwargs)

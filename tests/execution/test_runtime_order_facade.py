@@ -103,6 +103,63 @@ def test_native_gate_allows_protective_exit_but_blocks_normal_order() -> None:
     assert normal is None
 
 
+def test_managed_order_preserves_approved_strategy_name(monkeypatch) -> None:
+    manager = _manager(None)
+    captured: dict[str, Any] = {}
+
+    def core_place_order(self: Any, *args: Any, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "OID-1"
+
+    def core_managed(self: Any, *args: Any, **kwargs: Any) -> Any:
+        order_id = self.place_order(
+            symbol=kwargs["symbol"],
+            side=kwargs["side"],
+            quantity=kwargs["quantity"],
+            signal_id=kwargs.get("signal_id"),
+            intent="ENTRY",
+        )
+        return SimpleNamespace(
+            accepted=bool(order_id),
+            order_id=order_id,
+            reason="accepted",
+            details={},
+            broker_attempted=True,
+        )
+
+    monkeypatch.setattr(order_manager_core.OrderManager, "place_order", core_place_order)
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "place_managed_order_result",
+        core_managed,
+    )
+
+    result = manager.place_managed_order_result(
+        symbol="NFO:NIFTY26JUL23950PE",
+        side="BUY",
+        quantity=65,
+        strategy_name="OrderFlow",
+        signal_id="sig-1",
+    )
+
+    assert result.accepted is True
+    assert captured["strategy_name"] == "OrderFlow"
+
+
+def test_live_env_normalizes_per_trade_risk_to_seven_percent(monkeypatch) -> None:
+    from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
+
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("RISK__PER_TRADE_RISK_PCT", "4.0")
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", "4.0")
+
+    normalise_live_env_defaults()
+
+    assert os.environ["RISK__PER_TRADE_RISK_PCT"] == "7.0"
+    assert os.environ["RISK_PER_TRADE_PCT"] == "7.0"
+
+
 def test_order_module_is_safe_when_imported_before_package() -> None:
     code = r'''
 import importlib
