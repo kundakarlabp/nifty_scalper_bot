@@ -224,7 +224,7 @@ class MarginEngine:
                 available = float(raw) if raw is not None else 0.0
                 if available > 0:
                     return available
-            except (TypeError, ValueError, Exception):  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 pass
             try:
                 extracted = self._extract_balance_from_snapshot(
@@ -290,19 +290,23 @@ class MarginEngine:
         if risk_per_unit <= 0 or price <= 0 or balance <= 0:
             return 0
 
+        one_lot_cost = price * lot_size
         lots_by_risk = int(
             (balance * max(float(inputs.per_trade_risk_pct), 0.0) / 100.0)
             // (risk_per_unit * lot_size)
         )
         lots_by_cap = int(
             (balance * max(float(inputs.per_trade_cap_pct), 0.0) / 100.0)
-            // (price * lot_size)
+            // one_lot_cost
         )
 
-        # A valid one-lot request must not be reduced to zero only because a
-        # percentage capital cap is smaller than one indivisible option lot.
-        # Stop-risk and the final available-margin check still must permit it.
-        if inputs.requested_qty >= lot_size and lots_by_risk >= 1:
+        # Do not let a percentage cap alone suppress one indivisible lot when
+        # stop-risk and actual cash both permit that requested lot.
+        if (
+            inputs.requested_qty >= lot_size
+            and lots_by_risk >= 1
+            and balance >= one_lot_cost
+        ):
             lots_by_cap = max(lots_by_cap, 1)
 
         max_lots = min(lots_by_risk, lots_by_cap)
