@@ -103,6 +103,21 @@ def test_native_gate_allows_protective_exit_but_blocks_normal_order() -> None:
     assert normal is None
 
 
+def test_unresolved_exit_provider_is_canonical_reconciliation_owner() -> None:
+    manager = _manager(None)
+    provider = _Provider(True)
+
+    manager.set_unresolved_exit_provider(provider)
+
+    assert manager._unresolved_exit_provider is provider
+    assert manager._bracket_manager is provider
+
+    manager.set_unresolved_exit_provider(None)
+
+    assert manager._unresolved_exit_provider is None
+    assert manager._bracket_manager is None
+
+
 def test_managed_order_preserves_approved_strategy_name(monkeypatch) -> None:
     manager = _manager(None)
     captured: dict[str, Any] = {}
