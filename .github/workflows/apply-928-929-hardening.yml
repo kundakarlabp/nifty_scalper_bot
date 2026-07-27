@@ -1,3 +1,4 @@
+# Temporary self-removing workflow used to apply a reviewed minimal patch.
 name: Apply 928 and 929 hardening
 
 on:
@@ -23,9 +24,6 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          # PR #928 hardening: stopped loops are unusable, cancelled
-          # concurrent futures must not escape callbacks, and a failed
-          # thread-safe submission must close its coroutine.
           notifier = Path('src/nifty_scalper_bot/notifications/telegram_webhook_enhanced.py')
           text = notifier.read_text()
           old = 'import asyncio\nimport hashlib\n'
@@ -86,9 +84,6 @@ def test_send_alert_with_stopped_open_loop_drops_without_blocking() -> None:
           if 'test_send_alert_with_stopped_open_loop_drops_without_blocking' not in tests:
               notif_tests.write_text(tests + addition)
 
-          # PR #929 hardening: make single-flight registration atomic, allow a
-          # duplicate caller to await the authoritative in-flight task, and
-          # clean state if reconciliation is invoked without a position manager.
           app = Path('src/nifty_scalper_bot/core/app.py')
           text = app.read_text()
           old = '''    position_reconciliation_in_progress: bool = False
