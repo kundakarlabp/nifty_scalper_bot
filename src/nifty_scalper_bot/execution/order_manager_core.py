@@ -241,6 +241,26 @@ class OrderPreflightResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+def _stamp_entry_sizing(details: dict | None, result: Any) -> Any:
+    """Merge entry-sizing provenance into this exact result's details.
+
+    Each submission owns its own sizing record: recovery reads provenance
+    only from the result it was given, never from manager/global state.
+    Supports the real TradePlanSubmitResult and SimpleNamespace test doubles.
+    Args: details, result. Returns: the same result. Raises: none.
+    """
+    if not details:
+        return result
+    try:
+        existing = getattr(result, "details", None)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(details)
+        setattr(result, "details", merged)
+    except Exception:  # noqa: BLE001 - provenance must not break submission
+        pass
+    return result
+
+
 @dataclass(slots=True)
 class TradePlan:
     """Strategy-to-execution trade intent contract."""
@@ -2364,6 +2384,8 @@ class OrderManager:
         basket_version: int | str | None = None,
         instrument_token: int | None = None,
         contract_expiry: str | None = None,
+        requested_lots: int = 0,
+        resolved_lot_size: int = 0,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -3507,6 +3529,8 @@ class OrderManager:
                         basket_version=basket_version,
                         instrument_token=instrument_token,
                         contract_expiry=contract_expiry,
+                        requested_lots=requested_lots,
+                        resolved_lot_size=resolved_lot_size,
                     )
                     self._register_order(details)
                     # Sync PositionManager's pending-order registry so the
@@ -4390,6 +4414,245 @@ class OrderManager:
             True, "allowed", {"quote": qd, "lot_size": lot_size}
         )
 
+    _ENTRY_SIZING_INTENTS = ("ENTRY", "SCALE_IN")
+
+    def _apply_entry_margin_gate(
+        self, plan: TradePlan, price: float
+    ) -> tuple[TradePlan | None, TradePlanSubmitResult | None]:
+        """Final entry-only risk/affordability gate.
+
+        Runs after the protected price and re-anchored bracket are final and
+        before any managed order, lifecycle, recovery or bracket state exists.
+        Returns (effective_plan, None) to proceed, or (None, rejection).
+        Exposure-reducing intents are never gated here.
+        """
+        intent = str(plan.intent or "").upper()
+        if intent not in self._ENTRY_SIZING_INTENTS:
+            return plan, None
+
+        requested_qty = int(plan.quantity or 0)
+        if requested_qty <= 0:
+            return None, self._reject_entry_sizing(
+                plan, "invalid_requested_quantity", {"requested_quantity": requested_qty}
+            )
+
+        lot_size = int(plan.resolved_lot_size or 0)
+        if lot_size <= 0:
+            try:
+                lot_size = int(self._lot_size_for_symbol(plan.symbol) or 0)
+            except Exception:  # noqa: BLE001 - fail closed below
+                lot_size = 0
+        if lot_size <= 0:
+            return None, self._reject_entry_sizing(
+                plan, "lot_size_unresolved", {"symbol": plan.symbol}
+            )
+
+        # Trusted balance only. _resolve_available_margin(for_entry=True)
+        # applies the canonical staleness policy and reports provenance; the
+        # synthetic fallback used elsewhere must never authorise a live entry.
+        balance, balance_source = self._resolve_available_margin(for_entry=True)
+        if balance is None or float(balance) <= 0:
+            return None, self._reject_entry_sizing(
+                plan,
+                "available_balance_unavailable",
+                {"balance_source": balance_source, "available_balance": balance},
+            )
+        available_balance = float(balance)
+
+        try:
+            decision = self._plan_entry_margin(
+                plan=plan,
+                price=price,
+                lot_size=lot_size,
+                available_balance=available_balance,
+            )
+        except Exception as exc:  # noqa: BLE001 - never place on a failed gate
+            self._logger.error(
+                "ENTRY_MARGIN_DECISION_FAILED symbol=%s error=%s",
+                plan.symbol,
+                type(exc).__name__,
+                extra={
+                    "event": "ENTRY_MARGIN_DECISION_FAILED",
+                    "symbol": plan.symbol,
+                    "error_type": type(exc).__name__,
+                    "trace_id": plan.trace_id,
+                },
+            )
+            return None, self._reject_entry_sizing(
+                plan, "entry_sizing_failed", {"error_type": type(exc).__name__}
+            )
+
+        allowed_qty = int(getattr(decision, "quantity", 0) or 0)
+        decision_ok = bool(getattr(decision, "ok", False))
+        decision_reason = str(getattr(decision, "reason", "") or "")
+        base = {
+            "symbol": plan.symbol,
+            "intent": intent,
+            "original_requested_quantity": requested_qty,
+            "original_requested_lots": requested_qty // lot_size,
+            "resolved_lot_size": lot_size,
+            "protected_entry_price": price,
+            "final_stop_loss": plan.stop_loss,
+            "final_take_profit": plan.take_profit,
+            "available_balance": available_balance,
+            "balance_source": balance_source,
+            "estimated_required": getattr(decision, "est_required", None),
+            "decision_ok": decision_ok,
+            "decision_reason": decision_reason or None,
+            "trace_id": plan.trace_id,
+            "signal_id": plan.signal_id,
+            "trade_lifecycle_id": plan.trade_lifecycle_id,
+        }
+
+        # Fail closed on ANY ok=False decision, including MIS_WINDOW_CLOSED.
+        # An out-of-window entry is never allowed on the assumption that some
+        # other guard will catch it later.
+        session_deferred = False
+        if not decision_ok or allowed_qty <= 0:
+            reason = decision_reason or "margin_no_qty"
+            self._logger.warning(
+                "ENTRY_MARGIN_DECISION symbol=%s blocked reason=%s",
+                plan.symbol,
+                reason,
+                extra={
+                    "event": "ENTRY_MARGIN_DECISION",
+                    **base,
+                    "allowed_quantity": 0,
+                    "allowed_lots": 0,
+                    "quantity_reduced": False,
+                    "broker_attempted": False,
+                    "broker_attempt_pending": False,
+                },
+            )
+            return None, TradePlanSubmitResult(
+                False, reason=reason, details=dict(base), broker_attempted=False
+            )
+
+        if allowed_qty % lot_size != 0:
+            return None, self._reject_entry_sizing(
+                plan,
+                "invalid_lot_quantity",
+                {"allowed_quantity": allowed_qty, "resolved_lot_size": lot_size},
+            )
+        if allowed_qty > requested_qty:
+            # Never round up or expand a request.
+            allowed_qty = requested_qty
+
+        effective_plan = plan
+        if allowed_qty != requested_qty:
+            effective_plan = replace(
+                plan,
+                quantity=allowed_qty,
+                requested_lots=allowed_qty // lot_size,
+                resolved_lot_size=lot_size,
+            )
+        self._logger.info(
+            "ENTRY_MARGIN_DECISION symbol=%s allowed_quantity=%s reduced=%s",
+            plan.symbol,
+            allowed_qty,
+            allowed_qty != requested_qty,
+            extra={
+                "event": "ENTRY_MARGIN_DECISION",
+                **base,
+                "allowed_quantity": allowed_qty,
+                "allowed_lots": allowed_qty // lot_size,
+                "quantity_reduced": allowed_qty != requested_qty,
+                "sizing_permitted_only": session_deferred,
+                # Pre-broker event: no broker method has been called yet.
+                # The placement result remains the source of truth.
+                "broker_attempted": False,
+                "broker_attempt_pending": True,
+            },
+        )
+        return effective_plan, None
+
+    def _reject_entry_sizing(
+        self, plan: TradePlan, reason: str, details: dict[str, object]
+    ) -> TradePlanSubmitResult:
+        """Reject an entry at the sizing gate with no broker call."""
+        payload = {"symbol": plan.symbol, "trace_id": plan.trace_id, **details}
+        self._logger.warning(
+            "ENTRY_MARGIN_DECISION symbol=%s blocked reason=%s",
+            plan.symbol,
+            reason,
+            extra={
+                "event": "ENTRY_MARGIN_DECISION",
+                "decision_reason": reason,
+                "decision_ok": False,
+                "allowed_quantity": 0,
+                "quantity_reduced": False,
+                "broker_attempted": False,
+                "broker_attempt_pending": False,
+                **payload,
+            },
+        )
+        return TradePlanSubmitResult(
+            False, reason=reason, details=payload, broker_attempted=False
+        )
+
+    def _plan_entry_margin(
+        self,
+        *,
+        plan: TradePlan,
+        price: float,
+        lot_size: int,
+        available_balance: float,
+    ) -> Any:
+        """Build MarginInputs from final option economics and size once."""
+        # Same risk policy source and same canonical defaults as the existing
+        # _pre_trade_decision() margin-planning path: risk_manager.settings
+        # when present, otherwise app_settings.get_settings().risk.
+        settings = getattr(self._risk_manager, "settings", None)
+        if settings is None:
+            try:
+                settings = getattr(app_settings.get_settings(), "risk", None)
+            except Exception:  # noqa: BLE001 - defaults below stay canonical
+                settings = None
+
+        def _f(name: str, default: float) -> float:
+            value = getattr(settings, name, None) if settings is not None else None
+            try:
+                parsed = float(value) if value is not None else float(default)
+            except (TypeError, ValueError):
+                return float(default)
+            return parsed if parsed > 0 else float(default)
+
+        per_trade_risk_pct = _f("per_trade_risk_pct", 0.5)
+        per_trade_cap_pct = _f("per_trade_cap_pct", per_trade_risk_pct)
+        min_lots = max(1, int(_f("min_lots_per_trade", 1)))
+        max_lots = max(min_lots, int(_f("max_lots_per_trade", 1)))
+        atr_multiple = _f("atr_stop_multiple", 1.0)
+
+        # ATR is only safe when metadata proves it belongs to this exact
+        # option symbol; underlying ATR points must never be mixed with
+        # option-premium prices. The final re-anchored option stop is the
+        # preferred risk source.
+        atr = None
+        return self._margin_engine.plan(
+            MarginInputs(
+                symbol=plan.symbol,
+                side=plan.side,
+                price=float(price),
+                stop_loss=(
+                    float(plan.stop_loss) if plan.stop_loss is not None else None
+                ),
+                atr=atr,
+                requested_qty=int(plan.quantity or 0),
+                product=plan.product,
+                lot_size=int(lot_size),
+                balance=float(available_balance),
+                per_trade_risk_pct=per_trade_risk_pct,
+                per_trade_cap_pct=per_trade_cap_pct,
+                margin_factor=float(self._margin_factor),
+                margin_buffer=float(self._margin_buffer),
+                contract_multiplier=float(max(int(lot_size), 1)),
+                ist_now=datetime.now(ZoneInfo("Asia/Kolkata")),
+                min_lots_per_trade=min_lots,
+                max_lots_per_trade=max_lots,
+                atr_multiple=atr_multiple,
+            )
+        )
+
     def _reanchor_bracket_to_price(self, plan: TradePlan, price: float) -> TradePlan:
         """Re-anchor a stale SL/TP bracket to the live protected ``price``.
 
@@ -4683,6 +4946,39 @@ class OrderManager:
                     details=details,
                     broker_attempted=False,
                 )
+        # Attribute lookup (not a direct call) so synthetic test doubles that
+        # invoke this method unbound still work; a real OrderManager always
+        # provides it, so a live entry can never bypass the gate here.
+        _entry_gate = getattr(self, "_apply_entry_margin_gate", None)
+        _entry_sizing_details: dict[str, Any] | None = None
+        if _entry_gate is not None:
+            _requested_before_gate = int(plan.quantity or 0)
+            effective_plan, sizing_rejection = _entry_gate(plan, price)
+            if sizing_rejection is not None:
+                return sizing_rejection
+            plan = effective_plan if effective_plan is not None else plan
+            _effective_lot = int(getattr(plan, "resolved_lot_size", 0) or 0)
+            if _effective_lot <= 0:
+                try:
+                    _effective_lot = int(self._lot_size_for_symbol(plan.symbol) or 0)
+                except Exception:  # noqa: BLE001
+                    _effective_lot = 0
+            # Frozen sizing record: recovery must never restore quantity the
+            # first gate removed. Stamped onto every post-gate result so a
+            # retryable broker rejection still carries it.
+            _entry_sizing_details = {
+                "entry_sizing_requested_quantity": _requested_before_gate,
+                "entry_sizing_effective_quantity": int(plan.quantity or 0),
+                "entry_sizing_lot_size": _effective_lot,
+                "entry_sizing_symbol": plan.symbol,
+                "entry_sizing_trace_id": plan.trace_id,
+                "entry_sizing_signal_id": plan.signal_id,
+                "entry_sizing_trade_lifecycle_id": plan.trade_lifecycle_id,
+            }
+            # Diagnostics only. Recovery must NEVER read this: it is a
+            # most-recent-submission cache and would leak sizing across
+            # concurrent trades.
+            self._last_entry_sizing_details_diagnostic = dict(_entry_sizing_details)
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
                 try:
@@ -4707,30 +5003,38 @@ class OrderManager:
                         basket_version=plan.basket_version,
                         instrument_token=plan.instrument_token,
                         contract_expiry=plan.contract_expiry,
+                        requested_lots=int(plan.requested_lots or 0),
+                        resolved_lot_size=int(plan.resolved_lot_size or 0),
                     )
                 except Exception as exc:  # noqa: BLE001
                     err = self._sanitize_broker_error(exc)
                     self._last_order_api_error_type = type(exc).__name__
                     self._last_order_api_error = err
                     self._emit_broker_health_status(force=True)
-                    return TradePlanSubmitResult(
-                        False,
-                        reason="broker_placement_exception",
-                        details={
-                            "error_type": type(exc).__name__,
-                            "error": err,
-                            "symbol": symbol,
-                            "trace_id": plan.trace_id,
-                            "protected_price": price,
-                        },
-                        broker_attempted=True,
+                    return _stamp_entry_sizing(
+                        _entry_sizing_details,
+                        TradePlanSubmitResult(
+                            False,
+                            reason="broker_placement_exception",
+                            details={
+                                "error_type": type(exc).__name__,
+                                "error": err,
+                                "symbol": symbol,
+                                "trace_id": plan.trace_id,
+                                "protected_price": price,
+                            },
+                            broker_attempted=True,
+                        ),
                     )
-                return TradePlanSubmitResult(
-                    managed.accepted,
-                    order_id=managed.order_id,
-                    reason=managed.reason,
-                    details=managed.details or {"protected_price": price},
-                    broker_attempted=managed.broker_attempted,
+                return _stamp_entry_sizing(
+                    _entry_sizing_details,
+                    TradePlanSubmitResult(
+                        managed.accepted,
+                        order_id=managed.order_id,
+                        reason=managed.reason,
+                        details=managed.details or {"protected_price": price},
+                        broker_attempted=managed.broker_attempted,
+                    ),
                 )
             try:
                 oid = self.place_managed_order(
@@ -4755,27 +5059,33 @@ class OrderManager:
                 self._last_order_api_error_type = type(exc).__name__
                 self._last_order_api_error = err
                 self._emit_broker_health_status(force=True)
-                return TradePlanSubmitResult(
-                    False,
-                    reason="broker_placement_exception",
-                    details={
-                        "error_type": type(exc).__name__,
-                        "error": err,
-                        "symbol": symbol,
-                        "trace_id": plan.trace_id,
-                        "protected_price": price,
-                    },
-                    broker_attempted=True,
+                return _stamp_entry_sizing(
+                    _entry_sizing_details,
+                    TradePlanSubmitResult(
+                        False,
+                        reason="broker_placement_exception",
+                        details={
+                            "error_type": type(exc).__name__,
+                            "error": err,
+                            "symbol": symbol,
+                            "trace_id": plan.trace_id,
+                            "protected_price": price,
+                        },
+                        broker_attempted=True,
+                    ),
                 )
             if oid:
                 self._last_order_api_error_type = None
                 self._last_order_api_error = None
-            return TradePlanSubmitResult(
-                bool(oid),
-                order_id=oid,
-                reason="accepted" if oid else "place_order_rejected",
-                details={"protected_price": price},
-                broker_attempted=bool(oid),
+            return _stamp_entry_sizing(
+                _entry_sizing_details,
+                TradePlanSubmitResult(
+                    bool(oid),
+                    order_id=oid,
+                    reason="accepted" if oid else "place_order_rejected",
+                    details={"protected_price": price},
+                    broker_attempted=bool(oid),
+                ),
             )
         try:
             oid = self.place_order(
@@ -4797,27 +5107,33 @@ class OrderManager:
             self._last_order_api_error_type = type(exc).__name__
             self._last_order_api_error = err
             self._emit_broker_health_status(force=True)
-            return TradePlanSubmitResult(
-                False,
-                reason="broker_placement_exception",
-                details={
-                    "error_type": type(exc).__name__,
-                    "error": err,
-                    "symbol": symbol,
-                    "trace_id": plan.trace_id,
-                    "protected_price": price,
-                },
-                broker_attempted=True,
+            return _stamp_entry_sizing(
+                _entry_sizing_details,
+                TradePlanSubmitResult(
+                    False,
+                    reason="broker_placement_exception",
+                    details={
+                        "error_type": type(exc).__name__,
+                        "error": err,
+                        "symbol": symbol,
+                        "trace_id": plan.trace_id,
+                        "protected_price": price,
+                    },
+                    broker_attempted=True,
+                ),
             )
         if oid:
             self._last_order_api_error_type = None
             self._last_order_api_error = None
-        return TradePlanSubmitResult(
-            bool(oid),
-            order_id=oid,
-            reason="accepted" if oid else "order_rejected",
-            details={"protected_price": price},
-            broker_attempted=True,
+        return _stamp_entry_sizing(
+            _entry_sizing_details,
+            TradePlanSubmitResult(
+                bool(oid),
+                order_id=oid,
+                reason="accepted" if oid else "order_rejected",
+                details={"protected_price": price},
+                broker_attempted=True,
+            ),
         )
 
     def place_managed_order(
@@ -4889,6 +5205,8 @@ class OrderManager:
         basket_version: int | str | None = None,
         instrument_token: int | None = None,
         contract_expiry: str | None = None,
+        requested_lots: int = 0,
+        resolved_lot_size: int = 0,
     ) -> ManagedOrderResult:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
@@ -4957,6 +5275,8 @@ class OrderManager:
             basket_version=basket_version,
             instrument_token=instrument_token,
             contract_expiry=contract_expiry,
+            requested_lots=requested_lots,
+            resolved_lot_size=resolved_lot_size,
         )
 
         if order_id:

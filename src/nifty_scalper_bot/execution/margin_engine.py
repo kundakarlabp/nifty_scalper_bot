@@ -148,6 +148,18 @@ class MarginEngine:
             },
         )
         fallback_balance = max(0.0, float(inputs.balance))
+        if int(inputs.requested_qty) <= 0:
+            # Fail closed before any minimum-lot clamping: a zero/negative
+            # request must never be promoted into live exposure.
+            return MarginDecision(
+                ok=False,
+                reason="invalid_requested_quantity",
+                order_type=(inputs.product or "NRML") or "NRML",
+                quantity=0,
+                est_required=0.0,
+                available=fallback_balance,
+                sizing=None,
+            )
         available_margin = self._resolve_available_margin(fallback_balance)
         effective_balance = (
             available_margin if available_margin > 0 else fallback_balance

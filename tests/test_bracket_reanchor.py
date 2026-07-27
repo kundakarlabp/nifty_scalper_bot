@@ -108,6 +108,24 @@ async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(mgr, "_protected_limit_price", lambda plan: 119.00)
     monkeypatch.setattr(mgr, "place_managed_order_result", _fake_managed)
+    # Entry margin gate needs a resolvable lot size and a trusted balance;
+    # a runner-built plan always carries resolved_lot_size in production.
+    monkeypatch.setattr(mgr, "_lot_size_for_symbol", lambda symbol: 65)
+    monkeypatch.setattr(
+        mgr, "_resolve_available_margin", lambda **kw: (1_000_000.0, "mdm")
+    )
+    # Stub the sizing engine (an external collaborator of the method under
+    # test) so this re-anchoring test stays deterministic and does not depend
+    # on wall-clock trading-session windows.
+    monkeypatch.setattr(
+        mgr,
+        "_margin_engine",
+        types.SimpleNamespace(
+            plan=lambda inputs: types.SimpleNamespace(
+                ok=True, quantity=65, reason=None, est_required=7735.0
+            )
+        ),
+    )
 
     plan = _plan("BUY", entry=112.70, sl=108.56, tp=116.93)
     result = mgr.submit_trade_plan_result(plan)

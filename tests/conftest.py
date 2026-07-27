@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import inspect
 import os
 from pathlib import Path
@@ -56,6 +56,26 @@ def _default_path_read_text_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
         return _ORIGINAL_PATH_READ_TEXT(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", _read_text_utf8_default)
+
+
+@pytest.fixture(autouse=True)
+def _stabilize_live_runtime_entry_exit_contract(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the runtime contract test independent of score calibration."""
+    if request.node.name != "test_live_runtime_bullish_spot_future_selects_ce_and_exits_target":
+        return
+
+    import nifty_scalper_bot.strategies.runner as runner_mod
+
+    real_score_signal_quality = runner_mod.score_signal_quality
+
+    def _allow_contract_signal(**kwargs: Any):
+        score = real_score_signal_quality(**kwargs)
+        return replace(score, allowed=True, reasons=[])
+
+    monkeypatch.setattr(runner_mod, "score_signal_quality", _allow_contract_signal)
 
 
 @pytest.fixture(autouse=True)

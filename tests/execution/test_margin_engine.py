@@ -126,7 +126,15 @@ def test_plan_reports_insufficient_margin_for_min_lot() -> None:
     assert decision.sizing.needed is not None and decision.sizing.needed > 0
 
 
-def test_plan_clamps_zero_requested_with_atr_margin() -> None:
+def test_plan_rejects_zero_requested_quantity_without_min_lot_promotion() -> None:
+    """A zero request must never become live exposure.
+
+    Previously this asserted zero was clamped UP to one minimum lot
+    (`clamped_min_lot`). That is unsafe for a live entry-sizing authority:
+    minimum-lot logic may decide whether a POSITIVE request has at least one
+    tradable lot of capacity, but it must never manufacture a position from a
+    zero or negative request.
+    """
     engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
     )
@@ -142,10 +150,21 @@ def test_plan_clamps_zero_requested_with_atr_margin() -> None:
         max_lots_per_trade=1,
     )
     decision = engine.plan(inputs)
-    assert decision.ok
-    assert decision.quantity == 75
-    assert decision.sizing is not None
-    assert decision.sizing.reason == "clamped_min_lot"
+    assert not decision.ok
+    assert decision.quantity == 0
+    assert decision.reason == "invalid_requested_quantity"
+
+
+@pytest.mark.parametrize("requested_qty", [0, -1, -65])
+def test_plan_rejects_non_positive_requested_quantity(requested_qty: int) -> None:
+    """Test 4: zero and negative requests fail closed with a specific reason."""
+    engine = MarginEngine(
+        broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
+    )
+    decision = engine.plan(_inputs(requested_qty=requested_qty, lot_size=65))
+    assert not decision.ok
+    assert decision.quantity == 0
+    assert decision.reason == "invalid_requested_quantity"
 
 
 # ===================== OPTION LOT-SIZING REGRESSION =====================

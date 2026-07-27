@@ -596,6 +596,18 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
     ``build_elite_strategies`` seam.  The selected CE history is below the
     test-only oversold threshold while spot/future history and fresh ticks are bullish.
     """
+    # The entry margin gate consults MarginEngine's live trading-session
+    # window using wall-clock IST. This simulation is not clock-driven, so
+    # pin the MIS cutoff late enough that the simulated run is in-session.
+    # Production session semantics are unchanged.
+    import datetime as _dt
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.margin_engine.MIS_CUTOFF",
+        _dt.time(23, 59),
+        raising=False,
+    )
+
     _runtime_env(monkeypatch, tmp_path)
     _patch_no_network_runtime(monkeypatch)
     _patch_runtime_clock(monkeypatch)
