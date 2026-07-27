@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import importlib
 import json
 import os
@@ -114,3 +115,37 @@ def test_runtime_bracket_reconciliation_comes_from_canonical_without_patch(
     assert BoundBracketManager._reconcile_exit_state is reconcile_before
     assert BoundBracketManager._rescue_stale_exit_order is rescue_before
     assert "CanonicalBracketManager" in rescue_before.__qualname__
+
+
+def test_identical_entry_fill_callback_does_not_reactivate_bracket(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "idempotent.db"))
+    manager = bracket_manager.BracketManager(order_manager=_OrderManager())
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-1",
+        symbol="NFO:NIFTY26JUL23950CE",
+        side="BUY",
+        qty=65,
+        price=90.05,
+        sl=87.35,
+        tp=95.20,
+        activate_immediately=False,
+    )
+
+    manager.confirm_entry_fill("entry-1", 88.65)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    activated_at = bracket.entry_fill_ts
+    bracket.trail_revision = 7
+
+    assert manager.confirm_entry_fill("entry-1", 88.65) is True
+    assert bracket.entry_fill_ts == activated_at
+    assert bracket.trail_revision == 7
+
+
+def test_tick_epoch_uses_explicit_receipt_time_when_exchange_time_missing() -> None:
+    received_at = datetime(2026, 7, 27, 7, 49, tzinfo=timezone.utc)
+    assert bracket_core.tick_exchange_epoch({"received_at": received_at}) == received_at.timestamp()
