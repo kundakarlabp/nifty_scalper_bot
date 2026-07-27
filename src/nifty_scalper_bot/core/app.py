@@ -10781,6 +10781,18 @@ async def startup_sequence(ctx: BotContext) -> None:
     ):
         ctx.strategy_runner.attach_runtime_loop(loop)
 
+    # Same authoritative loop for the notifier: send_alert() is reached from
+    # the order/bracket path on the tick thread, and must never run its retry
+    # chain synchronously there.
+    _notifier = getattr(ctx, "telegram_notifier", None) or getattr(
+        ctx, "notifier", None
+    )
+    if _notifier is not None and hasattr(_notifier, "attach_runtime_loop"):
+        try:
+            _notifier.attach_runtime_loop(loop)
+        except Exception:  # noqa: BLE001 - notifications must not break startup
+            pass
+
     _set_startup_phase(ctx, "create_strategy_layer")
     _set_startup_phase(ctx, "wire_message_bus")
     _wire_and_start_message_bus(ctx)
