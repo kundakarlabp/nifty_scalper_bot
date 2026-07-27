@@ -534,6 +534,18 @@ class MarketDataManager:
         self._tick_drain_budget_s = self._parse_float_env(
             "MDM_TICK_DRAIN_BUDGET_SECONDS", default=0.008, minimum=0.001
         )
+        # Total wall-clock budget for ONE drain invocation. The per-batch
+        # budget above only yields with `await asyncio.sleep(0)`, which
+        # re-queues this task immediately; under continuous tick inflow the
+        # batch is never empty, so the task would never return and would
+        # monopolise the event-loop ready queue, starving timers (observed as
+        # EVENT_LOOP_LAG_HIGH up to ~2.3s with a drain active). Returning lets
+        # the loop take a clean pass; the `finally` block below reschedules
+        # immediately when ticks remain, so no tick is lost or delayed beyond
+        # one loop iteration.
+        self._tick_drain_invocation_budget_s = self._parse_float_env(
+            "MDM_TICK_DRAIN_INVOCATION_BUDGET_SECONDS", default=0.05, minimum=0.005
+        )
         self._tick_drain_callbacks_scheduled = 0
         self._tick_drain_callbacks_completed = 0
         self._tick_drain_callbacks_cancelled = 0
@@ -7326,6 +7338,13 @@ class MarketDataManager:
                     if time.monotonic() - start >= self._tick_drain_budget_s:
                         self._requeue_unprocessed_ticks(batch[index + 1 :])
                         break
+                if (
+                    time.monotonic() - drain_started
+                    >= self._tick_drain_invocation_budget_s
+                ):
+                    # Yield the loop entirely; `finally` reschedules when work
+                    # remains, so draining continues on the next iteration.
+                    return
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
             with self._pending_tick_lock:
