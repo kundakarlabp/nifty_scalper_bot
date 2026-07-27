@@ -148,12 +148,16 @@ class MarginEngine:
             },
         )
         fallback_balance = max(0.0, float(inputs.balance))
-        if int(inputs.requested_qty) <= 0:
-            # Fail closed before any minimum-lot clamping: a zero/negative
-            # request must never be promoted into live exposure.
+        requested_qty = int(inputs.requested_qty)
+        raw_lot = max(1, int(inputs.lot_size))
+        if requested_qty <= 0 or requested_qty % raw_lot != 0:
             return MarginDecision(
                 ok=False,
-                reason="invalid_requested_quantity",
+                reason=(
+                    "invalid_requested_quantity"
+                    if requested_qty <= 0
+                    else "invalid_lot_quantity"
+                ),
                 order_type=(inputs.product or "NRML") or "NRML",
                 quantity=0,
                 est_required=0.0,
@@ -169,15 +173,14 @@ class MarginEngine:
             effective_inputs.ist_now, effective_inputs.product
         )
         max_units = self._max_qty_from_risk(effective_inputs)
-        raw_lot = max(1, int(inputs.lot_size))
         min_lot_qty = raw_lot * max(1, int(inputs.min_lots_per_trade))
         max_lot_qty = raw_lot * max(int(inputs.max_lots_per_trade), 0)
         if 0 < max_lot_qty < min_lot_qty:
             min_lot_qty = max_lot_qty
         if max_lot_qty > 0:
             max_units = min(max_units, max_lot_qty)
-        qty = max(0, min(inputs.requested_qty, max_units))
-        qty = self._snap_lot(qty, inputs.lot_size)
+        qty = max(0, min(requested_qty, max_units))
+        qty = self._snap_lot(qty, raw_lot)
         if max_lot_qty > 0:
             qty = min(qty, max_lot_qty)
         if qty <= 0:
@@ -187,7 +190,7 @@ class MarginEngine:
                     "event": "margin_sizing_zero_qty",
                     "symbol": inputs.symbol,
                     "side": inputs.side,
-                    "requested_qty": inputs.requested_qty,
+                    "requested_qty": requested_qty,
                     "max_units": max_units,
                     "available_margin": round(float(available_margin), 2),
                     "effective_balance": round(float(effective_balance), 2),
@@ -200,7 +203,7 @@ class MarginEngine:
         if qty <= 0:
             min_lots = max(1, int(app_settings.MIN_LOTS_PER_TRADE))
             min_lots = max(min_lots, int(inputs.min_lots_per_trade))
-            lot_units = max(1, int(inputs.lot_size))
+            lot_units = raw_lot
             min_qty = min_lots * lot_units
             if max_units < min_qty:
                 sizing = SizingResult(
@@ -343,7 +346,19 @@ class MarginEngine:
                 sizing=sizing,
             )
 
-        if available_margin * inputs.margin_buffer < needed:
+        buffer = inputs.margin_buffer if inputs.margin_buffer > 0 else 1.0
+        while qty > min_lot_qty and available_margin * buffer < needed:
+            qty -= raw_lot
+            needed = self._estimate_required(
+                symbol=inputs.symbol,
+                side=inputs.side,
+                quantity=qty,
+                order_type=order_type,
+                inputs=inputs,
+            )
+        sizing.qty = qty
+        sizing.needed = needed
+        if available_margin * buffer < needed:
             reason_text = f"MARGIN needed={needed:.2f}"
             self._logger.info(
                 "margin_plan_block_balance",
@@ -355,7 +370,7 @@ class MarginEngine:
                     "quantity": qty,
                     "needed": needed,
                     "available": available_margin,
-                    "buffer": inputs.margin_buffer,
+                    "buffer": buffer,
                 },
             )
             return MarginDecision(
@@ -614,7 +629,7 @@ class MarginEngine:
 
         balance = max(0.0, float(inputs.balance))
         price = max(inputs.price, 0.0)
-        cap_pct = max(inputs.per_trade_cap_pct, inputs.per_trade_risk_pct)
+        cap_pct = max(inputs.per_trade_cap_pct, 0.0)
         cap_from_pct = balance * (cap_pct / 100.0)
         risk_pct = max(inputs.per_trade_risk_pct, 0.0) / 100.0
 
@@ -646,7 +661,7 @@ class MarginEngine:
         # anywhere in this repo (no adapter defines it), so its quantity
         # convention cannot be verified: passing `lot_size` as quantity is
         # only correct if a future adapter treats quantity as broker units --
-        # if one instead treated it as lots, this would silently request
+        # if one instead treated quantity as lots, this would silently request
         # margin for `lot_size` lots. Removed rather than guessed. Sizing
         # here relies only on the two deterministic sources below; broker
         # required-margin validation still happens in _estimate_required()
@@ -748,9 +763,7 @@ class MarginEngine:
         # `contract_multiplier` IS the lot size, so applying it here would
         # square the contract size (e.g. 100 x 65 x 65 = 422500 instead of
         # 6500). Contract size is counted exactly once, inside `quantity`.
-        estimate = (
-            premium * max(quantity, 0) * max(inputs.margin_factor, 1.0)
-        )
+        estimate = premium * max(quantity, 0) * max(inputs.margin_factor, 1.0)
         return estimate
 
     def _session_reason(self, now_ist: datetime, order_type: str) -> str | None:
