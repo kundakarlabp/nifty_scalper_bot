@@ -63,6 +63,10 @@ class RuntimeOrderManager(_core.OrderManager):
 
     def set_unresolved_exit_provider(self, provider: Any | None) -> None:
         configure_provider(self, provider)
+        # The provider is the canonical runtime bracket owner. Reconciliation
+        # already reads ``order_manager._bracket_manager``; keep both references
+        # aligned so a broker-flat snapshot can clear a completed exit lifecycle.
+        self._bracket_manager = provider
 
     def current_entry_blocker(self) -> Mapping[str, Any] | None:
         return _current_entry_blocker(self)
