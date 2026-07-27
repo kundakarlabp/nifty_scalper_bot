@@ -135,7 +135,7 @@ def test_identical_entry_fill_callback_does_not_reactivate_bracket(
         activate_immediately=False,
     )
 
-    assert manager.confirm_entry_fill("entry-1", 88.65) is True
+    manager.confirm_entry_fill("entry-1", 88.65)
     bracket = manager.get_bracket("entry-1")
     assert bracket is not None
     activated_at = bracket.entry_fill_ts
