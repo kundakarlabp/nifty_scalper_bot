@@ -2002,3 +2002,50 @@ def test_slow_closed_bar_subscriber_that_raises_is_identified(caplog):
         and getattr(record, "duration_ms", 0.0) >= 50.0
         for record in slow_records
     )
+
+
+def test_drain_invocation_returns_within_budget_under_continuous_inflow() -> None:
+    """Regression: one drain invocation must not monopolise the event loop.
+
+    The per-batch budget only yields with `await asyncio.sleep(0)`, which
+    re-queues the drain immediately. Under continuous inflow the pending queue
+    is never empty, so without a total-invocation budget the task never
+    returns and starves timer-driven loop work (observed in production as
+    EVENT_LOOP_LAG_HIGH up to ~2.3s while a drain was active).
+    """
+    mdm = _make_mdm()
+    mdm._tick_drain_invocation_budget_s = 0.02
+    mdm._tick_drain_budget_s = 0.001
+
+    processed = {"n": 0}
+
+    def _slow_tick(raw):
+        processed["n"] += 1
+        time.sleep(0.002)
+
+    mdm._process_queued_tick = _slow_tick
+
+    # Refill the queue on every pop so the batch is never empty -- exactly the
+    # continuous-inflow condition that previously made the drain run forever.
+    real_pop = mdm._pop_pending_tick_batch
+
+    def _always_more():
+        batch = real_pop()
+        if not batch:
+            return [
+                {"symbol": "NFO:NIFTY26JUN24000CE", "last_price": 1.0} for _ in range(5)
+            ]
+        return batch
+
+    mdm._pop_pending_tick_batch = _always_more
+
+    async def _run():
+        started = time.monotonic()
+        await mdm._drain_latest_ticks()
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(_run())
+
+    # It returned at all (no infinite loop) and respected the budget.
+    assert processed["n"] > 0
+    assert elapsed < 0.5, f"drain monopolised the loop for {elapsed:.3f}s"
