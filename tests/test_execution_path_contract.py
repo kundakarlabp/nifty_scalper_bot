@@ -122,14 +122,19 @@ def test_runner_execute_order_does_not_bypass_canonical_entry_api() -> None:
     raise AssertionError("StrategyRunner._execute_order not found")
 
 
-def test_stale_signal_arbitration_reservation_expires() -> None:
-    arbitrator = SignalArbitrator(stale_active_seconds=120.0)
+def test_stale_signal_arbitration_reservation_enters_reentry_cooldown() -> None:
+    arbitrator = SignalArbitrator(
+        stale_active_seconds=120.0,
+        reentry_cooldown_seconds=300.0,
+    )
     symbol = "NFO:NIFTY26JUL23950PE"
+    key = arbitrator._reservation_key(symbol)
     arbitrator.register(symbol, "BUY")
-    arbitrator._state[symbol].last_ts -= 121.0
+    arbitrator._state[key].last_ts -= 121.0
 
-    assert arbitrator.allow(symbol, "BUY") is True
-    assert symbol not in arbitrator._active_symbols
+    assert arbitrator.allow(symbol, "BUY") is False
+    assert key not in arbitrator._active_symbols
+    assert key in arbitrator._state
 
 
 def test_stale_order_pending_accepts_new_trace_but_fresh_duplicate_does_not() -> None:
