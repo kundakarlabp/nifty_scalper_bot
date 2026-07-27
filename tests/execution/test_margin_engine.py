@@ -50,14 +50,14 @@ def _inputs(**overrides: float | int | str | None) -> MarginInputs:
     return MarginInputs(**base)  # type: ignore[arg-type]
 
 
-def test_plan_blocks_when_needed_gt_available() -> None:
+def test_plan_steps_down_fallback_margin_to_affordable_quantity() -> None:
     engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
     )
-    inputs = _inputs(balance=500.0)
-    decision = engine.plan(inputs)
-    assert not decision.ok
-    assert decision.reason is not None and "MARGIN" in decision.reason
+    decision = engine.plan(_inputs(balance=500.0))
+    assert decision.ok
+    assert decision.quantity == 5
+    assert decision.est_required == pytest.approx(500.0)
 
 
 def test_plan_downgrades_mis_after_cutoff() -> None:
