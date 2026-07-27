@@ -45,8 +45,15 @@ class TradeDecision:
 
 
 class SignalArbitrator:
-    def __init__(self, cooldown_seconds: float = 3.0) -> None:
+    def __init__(
+        self,
+        cooldown_seconds: float = 3.0,
+        stale_active_seconds: float = 120.0,
+    ) -> None:
         self._cooldown_seconds = max(float(cooldown_seconds), 0.0)
+        self._stale_active_seconds = max(
+            float(stale_active_seconds), self._cooldown_seconds
+        )
         self._active_symbols: set[str] = set()
         self._state: dict[str, _SymbolState] = {}
         self._lock = threading.RLock()
@@ -63,10 +70,21 @@ class SignalArbitrator:
         direction = self._direction(normalized_action)
         now = time.time()
         with self._lock:
-            if symbol in self._active_symbols:
-                return False
             prev = self._state.get(symbol)
+            if symbol in self._active_symbols:
+                if (
+                    prev is not None
+                    and now - prev.last_ts >= self._stale_active_seconds
+                ):
+                    self._active_symbols.discard(symbol)
+                    self._state.pop(symbol, None)
+                    prev = None
+                else:
+                    return False
             if prev is None:
+                return True
+            if now - prev.last_ts >= self._stale_active_seconds:
+                self._state.pop(symbol, None)
                 return True
             if direction and prev.direction == direction:
                 return False
