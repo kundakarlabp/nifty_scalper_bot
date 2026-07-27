@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import ast
+from datetime import timedelta
 from pathlib import Path
 
+from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
 from nifty_scalper_bot.execution.order_manager import OrderManager
+from nifty_scalper_bot.execution.order_state_machine import ExecutionState, OrderStateMachine
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,3 +120,40 @@ def test_runner_execute_order_does_not_bypass_canonical_entry_api() -> None:
             assert "execute_market_order" not in calls
             return
     raise AssertionError("StrategyRunner._execute_order not found")
+
+
+def test_stale_signal_arbitration_reservation_expires() -> None:
+    arbitrator = SignalArbitrator(stale_active_seconds=120.0)
+    symbol = "NFO:NIFTY26JUL23950PE"
+    arbitrator.register(symbol, "BUY")
+    arbitrator._state[symbol].last_ts -= 121.0
+
+    assert arbitrator.allow(symbol, "BUY") is True
+    assert symbol not in arbitrator._active_symbols
+
+
+def test_stale_order_pending_accepts_new_trace_but_fresh_duplicate_does_not() -> None:
+    machine = OrderStateMachine()
+    assert machine.transition(ExecutionState.SIGNAL_RECEIVED, trace_id="old-trace")
+    assert machine.transition(
+        ExecutionState.ORDER_PENDING,
+        order_id="old-order",
+        reason="order_submit",
+        trace_id="old-trace",
+    )
+    assert not machine.transition(
+        ExecutionState.ORDER_PENDING,
+        reason="order_submit",
+        trace_id="new-trace",
+    )
+
+    machine._entered_at -= timedelta(seconds=121)
+    assert machine.transition(
+        ExecutionState.ORDER_PENDING,
+        reason="order_submit",
+        trace_id="new-trace",
+    )
+    details = machine.current_state_details()
+    assert details["state"] == ExecutionState.ORDER_PENDING.value
+    assert details["order_id"] is None
+    assert details["trace_id"] == "new-trace"
