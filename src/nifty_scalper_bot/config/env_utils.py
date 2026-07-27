@@ -6,6 +6,7 @@ import logging
 import os
 
 LOGGER = logging.getLogger(__name__)
+LIVE_PER_TRADE_RISK_PCT = "7.0"
 
 
 def _strip_inline_comment(text: str) -> str:
@@ -124,6 +125,12 @@ def normalise_live_env_defaults() -> None:
 
     for key, value in defaults.items():
         setdefault_env(key, value)
+
+    if live_requested:
+        # One canonical live risk value. Keep both accepted aliases aligned so
+        # an older private deployment value cannot silently retain the 4% cap.
+        os.environ['RISK__PER_TRADE_RISK_PCT'] = LIVE_PER_TRADE_RISK_PCT
+        os.environ['RISK_PER_TRADE_PCT'] = LIVE_PER_TRADE_RISK_PCT
 
 
 def resolve_build_sha() -> str:
