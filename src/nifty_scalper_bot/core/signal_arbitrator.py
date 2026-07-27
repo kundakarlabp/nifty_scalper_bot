@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,10 +50,14 @@ class SignalArbitrator:
         self,
         cooldown_seconds: float = 3.0,
         stale_active_seconds: float = 120.0,
+        reentry_cooldown_seconds: float = 300.0,
     ) -> None:
         self._cooldown_seconds = max(float(cooldown_seconds), 0.0)
         self._stale_active_seconds = max(
             float(stale_active_seconds), self._cooldown_seconds
+        )
+        self._reentry_cooldown_seconds = max(
+            float(reentry_cooldown_seconds), self._cooldown_seconds
         )
         self._active_symbols: set[str] = set()
         self._state: dict[str, _SymbolState] = {}
@@ -60,62 +65,64 @@ class SignalArbitrator:
 
     def allow(self, signal: Any, action: str | None = None) -> bool:
         if isinstance(signal, str):
-            symbol = str(signal or '').upper()
-            normalized_action = str(action or '').upper()
+            symbol = str(signal or "").upper()
+            normalized_action = str(action or "").upper()
         else:
-            symbol = str(getattr(signal, 'symbol', '') or '').upper()
-            normalized_action = str(getattr(signal, 'action', action or '') or '').upper()
-        if not symbol:
+            symbol = str(getattr(signal, "symbol", "") or "").upper()
+            normalized_action = str(
+                getattr(signal, "action", action or "") or ""
+            ).upper()
+        key = self._reservation_key(symbol)
+        if not key:
             return False
         direction = self._direction(normalized_action)
         now = time.time()
         with self._lock:
-            prev = self._state.get(symbol)
-            if symbol in self._active_symbols:
-                if (
-                    prev is not None
-                    and now - prev.last_ts >= self._stale_active_seconds
-                ):
-                    self._active_symbols.discard(symbol)
-                    self._state.pop(symbol, None)
-                    prev = None
+            prev = self._state.get(key)
+            if key in self._active_symbols:
+                if prev is not None and now - prev.last_ts >= self._stale_active_seconds:
+                    self._active_symbols.discard(key)
+                    prev.last_ts = now
                 else:
                     return False
             if prev is None:
                 return True
-            if now - prev.last_ts >= self._stale_active_seconds:
-                self._state.pop(symbol, None)
-                return True
+            elapsed = now - prev.last_ts
             if direction and prev.direction == direction:
-                return False
-            return now - prev.last_ts >= self._cooldown_seconds
+                return elapsed >= self._reentry_cooldown_seconds
+            return elapsed >= self._cooldown_seconds
 
-    def register(self, symbol: str, action: str = '') -> None:
-        key = str(symbol or '').upper()
+    def register(self, symbol: str, action: str = "") -> None:
+        key = self._reservation_key(symbol)
         if not key:
             return
         with self._lock:
             self._active_symbols.add(key)
-            self._state[key] = _SymbolState(direction=self._direction(action), last_ts=time.time())
+            self._state[key] = _SymbolState(
+                direction=self._direction(action), last_ts=time.time()
+            )
 
     def release(self, symbol: str) -> None:
-        key = str(symbol or '').upper()
+        key = self._reservation_key(symbol)
         if not key:
             return
         with self._lock:
             self._active_symbols.discard(key)
+            state = self._state.get(key)
+            if state is not None:
+                state.last_ts = time.time()
 
     def decide(self, *, underlying: str, votes: list[StrategyVote], option_candidates: list[dict[str, Any]], market_context: dict[str, Any], trace_id: str) -> TradeDecision:
-        mode = str(market_context.get('quality_mode') or 'normal').lower()
-        min_score = {'strict': 7.5, 'normal': 6.5, 'loose': 5.8}.get(mode, 6.5)
-        min_conf = {'strict': 0.75, 'normal': 0.65, 'loose': 0.58}.get(mode, 0.65)
-        min_votes = {'strict': 3, 'normal': 2, 'loose': 2}.get(mode, 2)
-        if market_context.get('regime_trade_allowed') is False:
-            return self._hold(underlying, votes, trace_id, 'regime_block')
-        if market_context.get('spot_stale') is True:
-            return self._hold(underlying, votes, trace_id, 'spot_stale')
+        mode = str(market_context.get("quality_mode") or "normal").lower()
+        min_score = {"strict": 7.5, "normal": 6.5, "loose": 5.8}.get(mode, 6.5)
+        min_conf = {"strict": 0.75, "normal": 0.65, "loose": 0.58}.get(mode, 0.65)
+        min_votes = {"strict": 3, "normal": 2, "loose": 2}.get(mode, 2)
+        if market_context.get("regime_trade_allowed") is False:
+            return self._hold(underlying, votes, trace_id, "regime_block")
+        if market_context.get("spot_stale") is True:
+            return self._hold(underlying, votes, trace_id, "spot_stale")
 
-        agg = {'CE': [], 'PE': []}
+        agg = {"CE": [], "PE": []}
         for v in votes:
             d = str(v.direction).upper()
             if d not in agg:
@@ -126,47 +133,60 @@ class SignalArbitrator:
             conf = max(0.0, min(1.0, conf))
             w = self._weight(v.strategy)
             agg[d].append((score * w, conf, v))
-
         side_stats = {}
         for side, arr in agg.items():
             if not arr:
                 side_stats[side] = (0.0, 0.0, 0)
                 continue
-            wt_score = sum(x[0] for x in arr) / max(1.0, sum(self._weight(x[2].strategy) for x in arr))
+            wt_score = sum(x[0] for x in arr) / max(
+                1.0, sum(self._weight(x[2].strategy) for x in arr)
+            )
             conf = sum(x[1] for x in arr) / len(arr)
             side_stats[side] = (wt_score, conf, len(arr))
 
-        ce_score, ce_conf, ce_n = side_stats['CE']
-        pe_score, pe_conf, pe_n = side_stats['PE']
+        ce_score, ce_conf, ce_n = side_stats["CE"]
+        pe_score, pe_conf, pe_n = side_stats["PE"]
         if ce_score >= min_score and pe_score >= min_score and abs(ce_score - pe_score) < 1.2:
-            return self._hold(underlying, votes, trace_id, 'conflicting_direction')
-        side = 'CE' if ce_score >= pe_score else 'PE'
+            return self._hold(underlying, votes, trace_id, "conflicting_direction")
+        side = "CE" if ce_score >= pe_score else "PE"
         score, conf, count = side_stats[side]
         if count < min_votes:
-            return self._hold(underlying, votes, trace_id, 'insufficient_votes')
+            return self._hold(underlying, votes, trace_id, "insufficient_votes")
         if score < min_score:
-            return self._hold(underlying, votes, trace_id, 'score_low')
+            return self._hold(underlying, votes, trace_id, "score_low")
         if conf < min_conf:
-            return self._hold(underlying, votes, trace_id, 'confidence_low')
-        candidates = [c for c in option_candidates if str(c.get('side', '')).upper() == side]
+            return self._hold(underlying, votes, trace_id, "confidence_low")
+        candidates = [c for c in option_candidates if str(c.get("side", "")).upper() == side]
         if not candidates:
-            return self._hold(underlying, votes, trace_id, 'no_valid_option_candidate')
-        best = max(candidates, key=lambda c: float(c.get('final_score', c.get('score', 0.0)) or 0.0))
-        rr = float(best.get('rr') or 0.0)
+            return self._hold(underlying, votes, trace_id, "no_valid_option_candidate")
+        best = max(
+            candidates,
+            key=lambda c: float(c.get("final_score", c.get("score", 0.0)) or 0.0),
+        )
+        rr = float(best.get("rr") or 0.0)
         if rr < 1.5:
-            return self._hold(underlying, votes, trace_id, 'rr_low')
-        return TradeDecision('BUY', side, str(best.get('symbol')), underlying, round(score, 3), round(conf, 3), best.get('entry_price'), best.get('stop_loss'), best.get('target'), rr, ['aligned_votes'], votes, dict(best), trace_id, time.time())
+            return self._hold(underlying, votes, trace_id, "rr_low")
+        return TradeDecision("BUY", side, str(best.get("symbol")), underlying, round(score, 3), round(conf, 3), best.get("entry_price"), best.get("stop_loss"), best.get("target"), rr, ["aligned_votes"], votes, dict(best), trace_id, time.time())
 
     def _hold(self, underlying: str, votes: list[StrategyVote], trace_id: str, reason: str) -> TradeDecision:
-        return TradeDecision('HOLD', 'NONE', None, underlying, 0.0, 0.0, None, None, None, None, [reason], votes, {}, trace_id, time.time())
+        return TradeDecision("HOLD", "NONE", None, underlying, 0.0, 0.0, None, None, None, None, [reason], votes, {}, trace_id, time.time())
+
+    @staticmethod
+    def _reservation_key(symbol: str) -> str:
+        """Collapse NIFTY option contracts to one underlying entry reservation."""
+        normalized = str(symbol or "").upper().split(":")[-1]
+        for underlying in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY"):
+            if normalized.startswith(underlying):
+                return underlying
+        return re.sub(r"\s+", "", normalized)
 
     @staticmethod
     def _weight(name: str) -> float:
         n = name.lower()
         weights = {
-            'smc': 1.3, 'liquidity': 1.3, 'order block': 1.3, 'vwap': 1.2,
-            'orb': 1.15, 'cpr': 1.1, 'rsi': 0.95, 'bb': 1.0, 'futures': 1.2,
-            'regime': 1.2, 'microstructure': 1.3,
+            "smc": 1.3, "liquidity": 1.3, "order block": 1.3, "vwap": 1.2,
+            "orb": 1.15, "cpr": 1.1, "rsi": 0.95, "bb": 1.0, "futures": 1.2,
+            "regime": 1.2, "microstructure": 1.3,
         }
         for k, v in weights.items():
             if k in n:
@@ -175,8 +195,8 @@ class SignalArbitrator:
 
     @staticmethod
     def _direction(action: str) -> str:
-        if action in {'BUY', 'CLOSE_SHORT'}:
-            return 'LONG'
-        if action in {'SELL', 'CLOSE_LONG'}:
-            return 'SHORT'
-        return ''
+        if action in {"BUY", "CLOSE_SHORT"}:
+            return "LONG"
+        if action in {"SELL", "CLOSE_LONG"}:
+            return "SHORT"
+        return ""
