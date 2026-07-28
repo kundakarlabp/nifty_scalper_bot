@@ -100,7 +100,8 @@ jobs:
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: |
           set +e
-          python -m pytest -q --tb=short --maxfail=1 > /tmp/full-suite.txt 2>&1
+          env -u EXECUTION_MODE -u BROKER_SIMULATION -u ALLOW_REAL_BROKER \
+            python -m pytest -q --tb=short --maxfail=1 > /tmp/full-suite.txt 2>&1
           STATUS=$?
           cat /tmp/full-suite.txt
           exit $STATUS
