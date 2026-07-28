@@ -38,23 +38,10 @@ jobs:
       - name: Focused futures-context tests
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: |
-          CONTEXT_TEST=$(find tests -name 'test_strategy_manager_context_to_option_propagation.py' -print -quit)
-          VWAP_TEST=$(find tests -name 'test_vwap_pro_side_domain.py' -print -quit)
-          test -n "$CONTEXT_TEST"
-          test -n "$VWAP_TEST"
-          set +e
-          python -m pytest -q --tb=short "$CONTEXT_TEST" "$VWAP_TEST" > /tmp/futures-context-focused.txt 2>&1
-          STATUS=$?
-          cat /tmp/futures-context-focused.txt
-          exit $STATUS
-      - name: Upload focused diagnostics
-        if: always() && github.head_ref == 'fix/remaining-live-path-hardening'
-        uses: actions/upload-artifact@v4
-        with:
-          name: futures-context-focused-output
-          path: /tmp/futures-context-focused.txt
-          if-no-files-found: ignore
-          retention-days: 1
+          mapfile -t TEST_FILES < <(find tests -type f \( -name 'test_strategy_manager*.py' -o -name 'test_vwap*.py' \) | sort)
+          test ${#TEST_FILES[@]} -gt 0
+          printf '%s\n' "${TEST_FILES[@]}"
+          python -m pytest -q --tb=short "${TEST_FILES[@]}"
       - name: Core and strategy suites
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q tests/core tests/strategies
