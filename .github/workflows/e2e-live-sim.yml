@@ -83,7 +83,21 @@ jobs:
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q --tb=short tests/core tests/strategies
       - name: Run live runtime E2E tests
-        run: python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim
+        id: live_runtime
+        run: |
+          set +e
+          python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim > /tmp/live-runtime.txt 2>&1
+          STATUS=$?
+          cat /tmp/live-runtime.txt
+          exit $STATUS
+      - name: Upload live runtime diagnostics
+        if: always() && steps.live_runtime.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: futures-context-live-runtime
+          path: /tmp/live-runtime.txt
+          if-no-files-found: error
+          retention-days: 1
       - name: Full suite
         id: full_suite
         if: github.head_ref == 'fix/remaining-live-path-hardening'
@@ -113,7 +127,7 @@ jobs:
             .github/workflows/futures-context-finalize.yml
           git diff --check
           git config user.name "github-actions[bot]"
-          git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src tests .github
           git status --short
           git commit -m "fix: preserve authoritative futures context semantics"
