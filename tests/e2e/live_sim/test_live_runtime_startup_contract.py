@@ -283,7 +283,7 @@ _FIXED_RUNTIME_NOW_IST = pd.Timestamp.now(tz="Asia/Kolkata").floor("s").to_pydat
 
 def _patch_runtime_clock(
     monkeypatch: pytest.MonkeyPatch,
-    now_ist: datetime = _FIXED_RUNTIME_NOW_IST,
+    now_ist: datetime = _FIXED_RUNTIME_NOW_IST.replace(hour=10, minute=30, second=0, microsecond=0),
 ) -> None:
     import nifty_scalper_bot.strategies.runner as runner_mod
     from nifty_scalper_bot.risk import expiry_gate
