@@ -12422,7 +12422,7 @@ class StrategyRunner:
             reason = "insufficient_context_bars"
         elif spot_vwap is None and futures_vwap is None:
             reason = "missing_vwap"
-        elif futures_vwap_slope in (None, 0, 0.0):
+        elif futures_vwap_slope is None:
             reason = "missing_futures_slope"
         elif futures_volume_ratio is None:
             reason = "missing_volume_ratio"
