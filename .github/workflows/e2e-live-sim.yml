@@ -51,9 +51,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
           python -m pip install -r dashboard/requirements.txt
-      - name: Apply futures-context correction
-        if: github.head_ref == 'fix/remaining-live-path-hardening'
-        run: python .github/apply_futures_context_fix.py
       - name: Compile and focused tests
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: |
@@ -68,6 +65,7 @@ jobs:
       - name: Run live runtime E2E tests
         run: python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim
       - name: Full suite
+        id: full_suite
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: |
           set +e
@@ -76,12 +74,12 @@ jobs:
           cat /tmp/full-suite.txt
           exit $STATUS
       - name: Upload full suite diagnostics
-        if: failure() && github.head_ref == 'fix/remaining-live-path-hardening'
+        if: always() && steps.full_suite.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: futures-context-full-suite
           path: /tmp/full-suite.txt
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 1
       - name: Commit clean validated diff
         if: github.head_ref == 'fix/remaining-live-path-hardening'
