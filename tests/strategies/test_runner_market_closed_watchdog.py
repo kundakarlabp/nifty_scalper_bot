@@ -611,3 +611,23 @@ def test_runner_offmarket_nifty_stale_threshold_gte_3600():
         "NSE:NIFTY", market_open=True
     )
     assert threshold_open == 120.0
+
+
+def test_direction_context_zero_slope_is_not_missing():
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._context_required_bars = 0
+    reason, diagnostics = runner._direction_context_missing_reason(
+        {
+            "spot_snapshot": {"symbol": "NSE:NIFTY"},
+            "futures_snapshot": {"symbol": "NFO:NIFTY26JULFUT"},
+            "spot_vwap": 24000.0,
+            "futures_vwap_slope": 0.0,
+            "futures_volume_ratio": 1.0,
+            "regime_snapshot": {"regime": "RANGE"},
+        }
+    )
+
+    assert reason != "missing_futures_slope"
+    assert diagnostics["futures_vwap_slope"] == 0.0
