@@ -59,13 +59,13 @@ jobs:
 
           path = Path('tests/e2e/live_sim/test_live_runtime_startup_contract.py')
           text = path.read_text()
-          old = '_FIXED_RUNTIME_NOW_IST = pd.Timestamp.now(tz="Asia/Kolkata").floor("s").to_pydatetime()'
+          old = '    now_ist: datetime = _FIXED_RUNTIME_NOW_IST,\n'
           new = (
-              '_FIXED_RUNTIME_NOW_IST = pd.Timestamp.now(tz="Asia/Kolkata").floor("s")'
-              '.to_pydatetime().replace(hour=10, minute=30, second=0, microsecond=0)'
+              '    now_ist: datetime = _FIXED_RUNTIME_NOW_IST.replace('\
+              'hour=10, minute=30, second=0, microsecond=0),\n'
           )
           if old not in text:
-              raise SystemExit('live simulation expiry clock anchor not found')
+              raise SystemExit('expiry-gate clock anchor not found')
           path.write_text(text.replace(old, new, 1))
           PY
       - name: Compile and focused tests
