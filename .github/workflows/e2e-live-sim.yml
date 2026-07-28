@@ -51,6 +51,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
           python -m pip install -r dashboard/requirements.txt
+      - name: Pin deterministic live-simulation clock
+        if: github.head_ref == 'fix/remaining-live-path-hardening'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/e2e/live_sim/test_live_runtime_startup_contract.py')
+          text = path.read_text()
+          old = '_FIXED_RUNTIME_NOW_IST = pd.Timestamp.now(tz="Asia/Kolkata").floor("s").to_pydatetime()'
+          new = '_FIXED_RUNTIME_NOW_IST = datetime(2026, 7, 27, 10, 30, tzinfo=ZoneInfo("Asia/Kolkata"))'
+          if old not in text:
+              raise SystemExit('live simulation clock anchor not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
       - name: Compile and focused tests
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: |
