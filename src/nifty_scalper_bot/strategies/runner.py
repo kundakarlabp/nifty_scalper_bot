@@ -124,7 +124,11 @@ from nifty_scalper_bot.execution.order_state_machine import (
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
-from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
+from nifty_scalper_bot.options.strike_selector import (
+    SelectedContract,
+    StrikeSelector,
+    _parse_strike_from_symbol,
+)
 from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.risk.position_sizing import (
@@ -194,6 +198,43 @@ _IST = ZoneInfo("Asia/Kolkata")
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on", "enable", "enabled"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off", "disable", "disabled"}
+
+
+def _derive_strike_distance_from_atm(
+    symbol: str,
+    snapshot: Mapping[str, Any] | None,
+    metadata: Mapping[str, Any] | None,
+) -> float | None:
+    """Distance in points between a candidate's strike and the ATM strike.
+
+    Used only when the snapshot carries no explicit distance. Returns None when
+    either strike is unresolvable, so the caller keeps its explicit "unknown"
+    marker instead of inventing a value.
+    Args: symbol, snapshot, metadata. Returns: points or None. Raises: none.
+    """
+    def _num(*values: Any) -> float | None:
+        for value in values:
+            if value in (None, ""):
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+        return None
+
+    snap = snapshot or {}
+    meta = metadata or {}
+    atm = _num(snap.get("atm_strike"), meta.get("atm_strike"))
+    if atm is None:
+        return None
+    strike = _num(snap.get("strike"), meta.get("strike"))
+    if strike is None:
+        strike = _parse_strike_from_symbol(str(symbol or ""))
+    if strike is None or strike <= 0:
+        return None
+    return abs(strike - atm)
 
 
 class EntryEvaluationRoute(str, Enum):
@@ -17174,6 +17215,16 @@ class StrategyRunner:
             distance_raw = selected_snapshot.get("strike_distance_from_atm")
         if distance_raw is None:
             distance_raw = metadata.get("strike_distance_from_atm")
+        if distance_raw is None:
+            # Derive from strikes rather than falling back to the 999 sentinel:
+            # the snapshot rarely carries an explicit distance, so every
+            # candidate reported distance_from_atm=999.0 in production. Only a
+            # genuinely ATM strike may become 0.
+            distance_raw = _derive_strike_distance_from_atm(
+                selected_symbol, selected_snapshot, metadata
+            )
+        # 999.0 remains the last-resort "unknown" marker when neither an
+        # explicit distance nor both strikes are resolvable.
         distance_atm = abs(float(distance_raw)) if distance_raw is not None else 999.0
         rank_score = (
             score * 10.0
