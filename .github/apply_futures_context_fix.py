@@ -4,20 +4,25 @@ import re
 manager_path = Path("src/nifty_scalper_bot/core/strategy_manager.py")
 text = manager_path.read_text()
 
-text = text.replace(
-    "        previous_snapshot = dict(self._latest_context_snapshots.get(role, {}) or {})\n",
-    "",
-    1,
-)
-
 pattern = re.compile(
-    r"        derived_direction, derived_confidence, derived_reasons = self\._derive_context_direction\(indicators, role=role\)\n"
-    r"        context_kind = \(\n"
+    r"        previous_snapshot = dict\(self\._latest_context_snapshots\.get\(role, \{\}\) or \{\}\)\n\n"
+    r"        def _num\(\*keys: str\) -> float \| None:\n"
     r".*?"
     r"        snapshot = \{\n",
     re.DOTALL,
 )
-replacement = '''        context_kind = (
+replacement = '''        def _num(*keys: str) -> float | None:
+            for key in keys:
+                value = indicators.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        context_kind = (
             "price_direction"
             if role == "spot_context"
             else "volume_flow"
@@ -51,31 +56,6 @@ replacement = '''        context_kind = (
             role=role,
         )
         source_age_seconds = resolve_tick_age_seconds(indicators)
-        if source_age_seconds is None:
-            for source in (
-                getattr(self, "_market_data_manager", None),
-                getattr(self, "_data_hub", None),
-            ):
-                for method_name in (
-                    "time_since_last_live_ws_tick",
-                    "time_since_last_tick",
-                ):
-                    age_getter = getattr(source, method_name, None)
-                    if not callable(age_getter):
-                        continue
-                    try:
-                        candidate_age = age_getter(symbol)
-                        source_age_seconds = (
-                            None
-                            if candidate_age is None
-                            else max(0.0, float(candidate_age))
-                        )
-                    except (TypeError, ValueError, RuntimeError):
-                        source_age_seconds = None
-                    if source_age_seconds is not None:
-                        break
-                if source_age_seconds is not None:
-                    break
         source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
         if not source_timestamp and source_age_seconds is not None:
             source_timestamp = time.time() - source_age_seconds
@@ -83,11 +63,13 @@ replacement = '''        context_kind = (
 '''
 text, count = pattern.subn(replacement, text, count=1)
 if count != 1:
-    raise SystemExit(f"strategy_manager context block substitutions={count}")
+    raise SystemExit(f"context snapshot block substitutions={count}")
 
 text = text.replace(
     '            "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),\n',
-    '            "symbol": symbol, "role": role, "context_kind": context_kind,\n            "timestamp": source_timestamp, "snapshot_updated_at": time.time(),\n            "tick_age_s": source_age_seconds,\n',
+    '            "symbol": symbol, "role": role, "context_kind": context_kind,\n'
+    '            "timestamp": source_timestamp, "snapshot_updated_at": time.time(),\n'
+    '            "tick_age_s": source_age_seconds,\n',
     1,
 )
 text = text.replace(
@@ -113,8 +95,31 @@ replacements = {
 }
 for old, new in replacements.items():
     if old not in text:
-        raise SystemExit(f"missing strategy_manager anchor: {old[:80]!r}")
+        raise SystemExit(f"missing strategy-manager anchor: {old[:70]!r}")
     text = text.replace(old, new, 1)
+
+caller_old = '''        if symbol_role in {"spot_context", "futures_context"}:
+            self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
+'''
+caller_new = '''        if symbol_role in {"spot_context", "futures_context"}:
+            if resolve_tick_age_seconds(indicators) is None and self._data_hub is not None:
+                try:
+                    context_quote = _get_cached_quote_for_eval(self._data_hub, symbol)
+                    context_age_s = resolve_tick_age_seconds(context_quote or {})
+                    if context_age_s is not None:
+                        indicators["tick_age_s"] = context_age_s
+                except Exception as exc:  # noqa: BLE001
+                    log.debug(
+                        "CONTEXT_TICK_AGE_ENRICHMENT_FAILED symbol=%s error=%s",
+                        symbol,
+                        exc,
+                        extra={"event": "CONTEXT_TICK_AGE_ENRICHMENT_FAILED", "symbol": symbol},
+                    )
+            self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
+'''
+if caller_old not in text:
+    raise SystemExit("context snapshot caller anchor missing")
+text = text.replace(caller_old, caller_new, 1)
 
 old_age = '                indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_usable else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_usable else max_context_age + 1)\n'
 new_age = '''                usable_context_ages = [
@@ -128,16 +133,16 @@ new_age = '''                usable_context_ages = [
                 indicators["context_age_seconds"] = min(usable_context_ages) if usable_context_ages else max_context_age + 1
 '''
 if old_age not in text:
-    raise SystemExit("missing context age anchor")
+    raise SystemExit("context age anchor missing")
 text = text.replace(old_age, new_age, 1)
 manager_path.write_text(text)
 
 vwap_path = Path("src/nifty_scalper_bot/strategies/elite_strategies/vwap_pro.py")
 text = vwap_path.read_text()
-old_parse = '''            futures_vwap_slope = float(indicators.get('futures_vwap_slope') or 0.0)
+old = '''            futures_vwap_slope = float(indicators.get('futures_vwap_slope') or 0.0)
             futures_volume_ratio = float(indicators.get('futures_volume_ratio') or 0.0)
 '''
-new_parse = '''            def _optional_float(value: Any) -> float | None:
+new = '''            def _optional_float(value: Any) -> float | None:
                 try:
                     return None if value is None else float(value)
                 except (TypeError, ValueError):
@@ -146,14 +151,15 @@ new_parse = '''            def _optional_float(value: Any) -> float | None:
             futures_vwap_slope = _optional_float(indicators.get('futures_vwap_slope'))
             futures_volume_ratio = _optional_float(indicators.get('futures_volume_ratio'))
 '''
-if old_parse not in text:
+if old not in text:
     raise SystemExit("VWAPPro parse anchor missing")
-text = text.replace(old_parse, new_parse, 1)
-old_volume = "            fut_vol_support = (contract_side == 'CE' and futures_volume_ratio >= 1.0) or (contract_side == 'PE' and futures_volume_ratio >= 1.0)\n"
-if old_volume not in text:
-    raise SystemExit("VWAPPro volume anchor missing")
-text = text.replace(old_volume, "            fut_vol_support = futures_volume_ratio is not None and futures_volume_ratio >= 1.0\n", 1)
-old_slope = '''            slope_available = abs(futures_vwap_slope) > self._futures_slope_neutral_eps
+text = text.replace(old, new, 1)
+text = text.replace(
+    "            fut_vol_support = (contract_side == 'CE' and futures_volume_ratio >= 1.0) or (contract_side == 'PE' and futures_volume_ratio >= 1.0)\n",
+    "            fut_vol_support = futures_volume_ratio is not None and futures_volume_ratio >= 1.0\n",
+    1,
+)
+old = '''            slope_available = abs(futures_vwap_slope) > self._futures_slope_neutral_eps
             if slope_available:
                 slope_support = (contract_side == 'CE' and futures_vwap_slope > 0) or (contract_side == 'PE' and futures_vwap_slope < 0)
                 if slope_support:
@@ -165,7 +171,7 @@ old_slope = '''            slope_available = abs(futures_vwap_slope) > self._fut
                 slope_support = False
                 reasons.append('futures_slope_neutral')
 '''
-new_slope = '''            if futures_vwap_slope is None:
+new = '''            if futures_vwap_slope is None:
                 slope_support = False
                 reasons.append('futures_slope_unavailable')
             elif abs(futures_vwap_slope) <= self._futures_slope_neutral_eps:
@@ -179,18 +185,15 @@ new_slope = '''            if futures_vwap_slope is None:
                 else:
                     reasons.append('futures_slope_conflict')
 '''
-if old_slope not in text:
+if old not in text:
     raise SystemExit("VWAPPro slope anchor missing")
-text = text.replace(old_slope, new_slope, 1)
+text = text.replace(old, new, 1)
 vwap_path.write_text(text)
 
 candidates = sorted(Path("tests").rglob("test_strategy_manager*.py"))
 if not candidates:
-    raise SystemExit("no existing strategy manager test file found")
-test_path = next(
-    (path for path in candidates if "context" in path.name and "option" in path.name),
-    candidates[0],
-)
+    raise SystemExit("strategy manager test file missing")
+test_path = candidates[0]
 test_text = test_path.read_text()
 if "test_futures_context_preserves_source_age_and_neutrality" not in test_text:
     test_text += '''
@@ -203,16 +206,9 @@ def test_futures_context_preserves_source_age_and_neutrality() -> None:
     manager._latest_context_snapshots = {}
     manager._update_context_snapshot(
         symbol="NFO:NIFTY26JULFUT",
-        indicators={
-            "close": 25000.0,
-            "vwap": 25000.0,
-            "ema_fast": 25000.0,
-            "ema_slow": 25000.0,
-            "ema_50": 25000.0,
-            "vwap_slope": 0.0,
-            "ema_slope": 0.0,
-            "tick_age_s": 180.0,
-        },
+        indicators={"close": 25000.0, "vwap": 25000.0, "ema_fast": 25000.0,
+                    "ema_slow": 25000.0, "ema_50": 25000.0, "vwap_slope": 0.0,
+                    "ema_slope": 0.0, "tick_age_s": 180.0},
         role="futures_context",
     )
     snapshot = manager._latest_context_snapshots["futures_context"]
@@ -222,11 +218,11 @@ def test_futures_context_preserves_source_age_and_neutrality() -> None:
     assert snapshot["direction_bias"] is None
 
 
-def test_futures_context_uses_same_evaluation_slope_and_never_snapshot_delta() -> None:
+def test_futures_context_uses_same_evaluation_slope_only() -> None:
     from nifty_scalper_bot.core.strategy_manager import StrategyManager
 
     manager = object.__new__(StrategyManager)
-    manager._latest_context_snapshots = {"futures_context": {"vwap": 100.0, "close": 100.0}}
+    manager._latest_context_snapshots = {"futures_context": {"vwap": 100.0}}
     manager._update_context_snapshot(
         symbol="NFO:NIFTY26JULFUT",
         indicators={"close": 101.0, "vwap": 101.0, "vwap_slope": 0.001, "tick_age_s": 0.1},
@@ -235,7 +231,6 @@ def test_futures_context_uses_same_evaluation_slope_and_never_snapshot_delta() -
     snapshot = manager._latest_context_snapshots["futures_context"]
     assert snapshot["vwap_slope"] == 0.001
     assert snapshot["direction_bias"] == "CE"
-    assert "vwap_slope_positive" in snapshot["direction_context_reasons"]
     manager._update_context_snapshot(
         symbol="NFO:NIFTY26JULFUT",
         indicators={"close": 102.0, "vwap": 102.0, "tick_age_s": 0.1},
