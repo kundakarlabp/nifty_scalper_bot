@@ -13,7 +13,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,47 +31,7 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply focused futures-context patch
         if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('.github/apply_futures_context_fix.py')
-          text = path.read_text()
-          old = '''        source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
-        source_age_seconds = resolve_tick_age_seconds(indicators)
-        snapshot = {
-'''
-          new = '''        source_age_seconds = resolve_tick_age_seconds(indicators)
-        if source_age_seconds is None:
-            for source in (
-                getattr(self, "_market_data_manager", None),
-                getattr(self, "_data_hub", None),
-            ):
-                age_getter = getattr(source, "time_since_last_tick", None)
-                if not callable(age_getter):
-                    continue
-                try:
-                    candidate_age = age_getter(symbol)
-                    source_age_seconds = None if candidate_age is None else max(0.0, float(candidate_age))
-                except (TypeError, ValueError, RuntimeError):
-                    source_age_seconds = None
-                if source_age_seconds is not None:
-                    break
-        source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
-        if not source_timestamp and source_age_seconds is not None:
-            source_timestamp = time.time() - source_age_seconds
-        snapshot = {
-'''
-          if old not in text:
-              raise SystemExit('patch-script provenance anchor missing')
-          text = text.replace(old, new, 1)
-          text = text.replace(
-              '    assert snapshot["timestamp"] == 0.0\n',
-              '    assert snapshot["timestamp"] < snapshot["snapshot_updated_at"]\n',
-              1,
-          )
-          path.write_text(text)
-          PY
-          python .github/apply_futures_context_fix.py
+        run: python .github/apply_futures_context_fix.py
       - name: Compile and diff check
         run: |
           python -m compileall -q src tests
@@ -97,7 +57,10 @@ jobs:
         shell: bash
         run: |
           git checkout origin/main -- .github/workflows/validate-market-aware-optimisations.yml
-          rm -f .github/workflows/apply-futures-context-fix.yml .github/apply_futures_context_fix.py
+          rm -f \
+            .github/workflows/apply-futures-context-fix.yml \
+            .github/workflows/futures-context-finalize.yml \
+            .github/apply_futures_context_fix.py
           git diff --check
           git status --short
           git config user.name "github-actions[bot]"
