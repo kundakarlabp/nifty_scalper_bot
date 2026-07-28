@@ -848,23 +848,10 @@ class StrategyRunner:
         # When broker sync prunes externally-closed positions (manual square-off /
         # auto-square-off), drop their brackets so they are not re-adopted forever.
         try:
-            if (
-                self._position_manager is not None
-                and self._bracket_manager is not None
-                and hasattr(self._position_manager, "set_on_symbols_flat")
+            if self._position_manager is not None and hasattr(
+                self._position_manager, "set_on_symbols_flat"
             ):
-
-                def _on_symbols_flat(symbols: list[str]) -> None:
-                    bm = self._bracket_manager
-                    if bm is None:
-                        return
-                    for _sym in symbols or []:
-                        try:
-                            bm.reconcile_symbol_flat(_sym)
-                        except Exception:  # noqa: BLE001
-                            continue
-
-                self._position_manager.set_on_symbols_flat(_on_symbols_flat)
+                self._position_manager.set_on_symbols_flat(self._on_symbols_flat)
         except Exception:  # noqa: BLE001
             pass
         self._symbol_source: MarketDataManager | None = None
@@ -7451,6 +7438,52 @@ class StrategyRunner:
         """Reset execution state to IDLE. Args: symbol. Returns: none. Raises: none."""
         machine = self._get_execution_state_machine(symbol)
         machine.force_idle()
+
+    def _release_entry_guards(
+        self, symbol: str, *, start_cooldown: bool, reason: str
+    ) -> None:
+        """Converge runner and order-manager guards from canonical lifecycle state."""
+        self._reset_execution_state(symbol)
+        releaser = getattr(self._order_manager, "release_entry_reservation", None)
+        if callable(releaser):
+            releaser(symbol, start_cooldown=start_cooldown)
+        self._logger.info(
+            "ENTRY_GUARDS_RELEASED symbol=%s reason=%s start_cooldown=%s",
+            symbol,
+            reason,
+            start_cooldown,
+            extra={
+                "event": "ENTRY_GUARDS_RELEASED",
+                "symbol": symbol,
+                "reason": reason,
+                "start_cooldown": start_cooldown,
+            },
+        )
+
+    def _on_symbols_flat(self, symbols: list[str]) -> None:
+        """Apply broker-confirmed flat state to brackets and entry guards."""
+        for symbol in symbols or []:
+            if self._bracket_manager is not None:
+                try:
+                    self._bracket_manager.reconcile_symbol_flat(symbol)
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.warning(
+                        "FLAT_SYMBOL_BRACKET_RECONCILE_FAILED symbol=%s error=%s",
+                        symbol,
+                        exc,
+                    )
+            try:
+                self._release_entry_guards(
+                    symbol,
+                    start_cooldown=True,
+                    reason="broker_position_flat",
+                )
+            except Exception as exc:  # noqa: BLE001 - keep other symbols converging
+                self._logger.warning(
+                    "FLAT_SYMBOL_GUARD_RECONCILE_FAILED symbol=%s error=%s",
+                    symbol,
+                    exc,
+                )
 
     # Cooldown logic moved to ExecutionEngine
 
@@ -20001,8 +20034,15 @@ class StrategyRunner:
             try:
                 has_position = bool(self._position_manager.has_open_position(symbol))
             except Exception:
-                has_position = False
+                has_position = True
         if not has_position:
+            resolved_symbol = str(symbol or context.get("symbol") or "")
+            if resolved_symbol:
+                self._release_entry_guards(
+                    resolved_symbol,
+                    start_cooldown=False,
+                    reason=f"entry_order_{reason}",
+                )
             orchestrator = getattr(self, "_orchestrator", None)
             if orchestrator is not None and hasattr(
                 orchestrator, "clear_direction_lock"

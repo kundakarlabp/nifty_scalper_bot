@@ -82,7 +82,6 @@ class SignalArbitrator:
             if key in self._active_symbols:
                 if prev is not None and now - prev.last_ts >= self._stale_active_seconds:
                     self._active_symbols.discard(key)
-                    prev.last_ts = now
                 else:
                     return False
             if prev is None:
@@ -111,6 +110,15 @@ class SignalArbitrator:
             state = self._state.get(key)
             if state is not None:
                 state.last_ts = time.time()
+
+    def clear(self, symbol: str) -> None:
+        """Drop a reservation for an entry that never created exposure."""
+        key = self._reservation_key(symbol)
+        if not key:
+            return
+        with self._lock:
+            self._active_symbols.discard(key)
+            self._state.pop(key, None)
 
     def decide(self, *, underlying: str, votes: list[StrategyVote], option_candidates: list[dict[str, Any]], market_context: dict[str, Any], trace_id: str) -> TradeDecision:
         mode = str(market_context.get("quality_mode") or "normal").lower()

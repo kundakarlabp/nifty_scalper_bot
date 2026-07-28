@@ -7217,26 +7217,7 @@ class OrderManager:
                 self._confirm_position_protection_for_fill(order)
                 order.applied_filled_quantity = broker_filled_quantity
 
-            is_failed_entry_terminal = (
-                status_raw in {"REJECTED", "CANCELLED", "CANCELED", "FAILED", "EXPIRED"}
-                and old_status != new_status
-                and str(getattr(order, "intent", "") or "").upper()
-                in {"ENTRY", "UNKNOWN", ""}
-            )
-            if is_failed_entry_terminal and callable(self.entry_order_failed_callback):
-                try:
-                    self.entry_order_failed_callback(
-                        order_id=str(order_id),
-                        symbol=str(order.symbol),
-                        reason=status_raw.lower(),
-                    )
-                except Exception:
-                    self._logger.exception(
-                        "ENTRY_ORDER_FAILED_CALLBACK_ERROR order_id=%s symbol=%s status=%s",
-                        order_id,
-                        order.symbol,
-                        status_raw,
-                    )
+            self._notify_failed_entry_terminal(order, old_status, status_raw)
 
             # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
             # _check_zombie_orders cancels stuck PENDING orders after 45s via
@@ -7665,6 +7646,48 @@ class OrderManager:
 
         self._signal_arbitrator.release(symbol)
         return exit_id
+
+    def release_entry_reservation(
+        self, symbol: str, *, start_cooldown: bool = True
+    ) -> None:
+        """Converge the entry arbitrator after broker-confirmed terminal state."""
+        if start_cooldown:
+            self._signal_arbitrator.release(symbol)
+        else:
+            self._signal_arbitrator.clear(symbol)
+
+    def _notify_failed_entry_terminal(
+        self,
+        order: OrderDetails,
+        old_status: OrderStatus,
+        raw_status: str,
+    ) -> None:
+        """Converge entry guards once any broker ingress proves terminal failure."""
+        failed = {
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.EXPIRED,
+        }
+        if (
+            order.status not in failed
+            or old_status == order.status
+            or str(order.intent or "").upper() not in {"ENTRY", "UNKNOWN", ""}
+            or not callable(self.entry_order_failed_callback)
+        ):
+            return
+        try:
+            self.entry_order_failed_callback(
+                order_id=str(order.order_id),
+                symbol=str(order.symbol),
+                reason=str(raw_status or order.status.name).lower(),
+            )
+        except Exception:
+            self._logger.exception(
+                "ENTRY_ORDER_FAILED_CALLBACK_ERROR order_id=%s symbol=%s status=%s",
+                order.order_id,
+                order.symbol,
+                raw_status,
+            )
 
     def modify_order(
         self,
@@ -11874,6 +11897,9 @@ class OrderManager:
             and previous_status != OrderStatus.REJECTED
         ):
             self._handle_order_rejected(order)
+        self._notify_failed_entry_terminal(
+            order, previous_status, str(payload.get("status") or "")
+        )
         self._handle_bracket_update(order, previous_status, payload)
         self._handle_guard_order_update(order, previous_status)
         return order
@@ -12949,6 +12975,9 @@ class OrderManager:
                         and old_status != OrderStatus.REJECTED
                     ):
                         self._handle_order_rejected(local_order)
+                    self._notify_failed_entry_terminal(
+                        local_order, old_status, raw_status
+                    )
 
         except Exception as e:
             self._logger.error(f"Reconcile failed: {e}", exc_info=True)

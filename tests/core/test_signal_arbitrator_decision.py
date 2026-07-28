@@ -70,7 +70,7 @@ def test_nifty_ce_and_pe_share_one_entry_reservation(monkeypatch):
     assert arb.allow(pe, 'BUY') is True
 
 
-def test_stale_active_reservation_fails_closed_for_reentry_window(monkeypatch):
+def test_stale_active_reservation_does_not_restart_reentry_window(monkeypatch):
     now = [3000.0]
     monkeypatch.setattr(arbitrator_module.time, 'time', lambda: now[0])
     arb = SignalArbitrator(
@@ -82,5 +82,18 @@ def test_stale_active_reservation_fails_closed_for_reentry_window(monkeypatch):
     arb.register(symbol, 'BUY')
     now[0] += 121.0
     assert arb.allow(symbol, 'BUY') is False
-    now[0] += 300.0
+    now[0] += 178.0
+    assert arb.allow(symbol, 'BUY') is False
+    now[0] += 1.0
+    assert arb.allow(symbol, 'BUY') is True
+
+
+def test_clear_removes_failed_entry_without_reentry_cooldown(monkeypatch):
+    monkeypatch.setattr(arbitrator_module.time, 'time', lambda: 4000.0)
+    arb = SignalArbitrator(reentry_cooldown_seconds=300.0)
+    symbol = 'NFO:NIFTY26JUL23950CE'
+
+    arb.register(symbol, 'BUY')
+    arb.clear(symbol)
+
     assert arb.allow(symbol, 'BUY') is True
