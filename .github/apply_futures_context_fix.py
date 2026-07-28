@@ -102,12 +102,24 @@ caller_old = '''        if symbol_role in {"spot_context", "futures_context"}:
             self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
 '''
 caller_new = '''        if symbol_role in {"spot_context", "futures_context"}:
-            if resolve_tick_age_seconds(indicators) is None and self._data_hub is not None:
+            context_age_s = resolve_tick_age_seconds(indicators)
+            if context_age_s is None:
+                mdm = getattr(self, "_market_data_manager", None)
+                for method_name in ("time_since_last_live_ws_tick", "time_since_last_tick"):
+                    age_getter = getattr(mdm, method_name, None)
+                    if not callable(age_getter):
+                        continue
+                    try:
+                        candidate_age = age_getter(symbol)
+                        context_age_s = None if candidate_age is None else max(0.0, float(candidate_age))
+                    except (TypeError, ValueError, RuntimeError):
+                        context_age_s = None
+                    if context_age_s is not None:
+                        break
+            if context_age_s is None and self._data_hub is not None:
                 try:
                     context_quote = _get_cached_quote_for_eval(self._data_hub, symbol)
                     context_age_s = resolve_tick_age_seconds(context_quote or {})
-                    if context_age_s is not None:
-                        indicators["tick_age_s"] = context_age_s
                 except Exception as exc:  # noqa: BLE001
                     log.debug(
                         "CONTEXT_TICK_AGE_ENRICHMENT_FAILED symbol=%s error=%s",
@@ -115,6 +127,8 @@ caller_new = '''        if symbol_role in {"spot_context", "futures_context"}:
                         exc,
                         extra={"event": "CONTEXT_TICK_AGE_ENRICHMENT_FAILED", "symbol": symbol},
                     )
+            if context_age_s is not None:
+                indicators["tick_age_s"] = context_age_s
             self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
 '''
 if caller_old not in text:
