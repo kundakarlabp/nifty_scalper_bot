@@ -130,6 +130,31 @@ def _clock_skew_tolerance_seconds() -> float:
     return 2.0
 
 
+def _bar_publication_grace_seconds() -> float:
+    """Grace just after a minute rolls, before the new bar is published.
+
+    At HH:MM:00 `expected_closed_start` advances immediately, but the bar for
+    the minute that just closed is only finalized/published a few hundred ms
+    later on the next tick. Without a grace window the newest available bar is
+    one bucket behind expected and gets classified
+    `live_latest_closed_bar_stale` -- exactly the pattern seen in production,
+    firing almost exclusively at HH:MM:00.
+
+    This narrows the transition race only; it does NOT relax freshness
+    generally. Outside the window, and for any bar more than one bucket
+    behind, staleness is reported as before.
+    Args: none. Returns: seconds. Raises: none.
+    """
+    raw = os.getenv("LIVE_BAR_PUBLICATION_GRACE_SECONDS")
+    if raw is None:
+        return 1.5
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 1.5
+    return max(0.0, value)
+
+
 def _coerce_epoch_seconds(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -231,6 +256,20 @@ def _latest_bar_detail(manager: Any, symbol: str, *, now: float) -> dict[str, An
                     "expected_latest_closed_start": expected_closed_start,
                     "interval_s": interval_s,
                 }
+            if bucket_start == expected_closed_start - interval_s:
+                # Exactly one bucket behind, immediately after a minute roll:
+                # the just-closed bar has not been published yet. Accept only
+                # inside the grace window; anything older still fails.
+                grace = _bar_publication_grace_seconds()
+                if grace > 0 and (now - current_bucket_start) <= grace:
+                    return {
+                        "reason": "ready",
+                        "latest_bar_ts": epoch,
+                        "latest_bar_bucket_start": bucket_start,
+                        "expected_latest_closed_start": expected_closed_start,
+                        "interval_s": interval_s,
+                        "bar_publication_grace_applied": True,
+                    }
             if bucket_start < expected_closed_start:
                 latest_stale = {
                     "reason": "live_latest_closed_bar_stale",
