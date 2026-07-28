@@ -44,7 +44,20 @@ jobs:
           python -m pytest -q --tb=short "${TEST_FILES[@]}"
       - name: Core and strategy suites
         if: github.head_ref == 'fix/remaining-live-path-hardening'
-        run: python -m pytest -q tests/core tests/strategies
+        run: |
+          set +e
+          python -m pytest -q --tb=short tests/core tests/strategies > /tmp/futures-context-core-strategy.txt 2>&1
+          STATUS=$?
+          cat /tmp/futures-context-core-strategy.txt
+          exit $STATUS
+      - name: Upload core strategy diagnostics
+        if: always() && github.head_ref == 'fix/remaining-live-path-hardening'
+        uses: actions/upload-artifact@v4
+        with:
+          name: futures-context-core-strategy-output
+          path: /tmp/futures-context-core-strategy.txt
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Live simulation
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim
