@@ -56,14 +56,24 @@ replacement = '''        context_kind = (
                 getattr(self, "_market_data_manager", None),
                 getattr(self, "_data_hub", None),
             ):
-                age_getter = getattr(source, "time_since_last_tick", None)
-                if not callable(age_getter):
-                    continue
-                try:
-                    candidate_age = age_getter(symbol)
-                    source_age_seconds = None if candidate_age is None else max(0.0, float(candidate_age))
-                except (TypeError, ValueError, RuntimeError):
-                    source_age_seconds = None
+                for method_name in (
+                    "time_since_last_live_ws_tick",
+                    "time_since_last_tick",
+                ):
+                    age_getter = getattr(source, method_name, None)
+                    if not callable(age_getter):
+                        continue
+                    try:
+                        candidate_age = age_getter(symbol)
+                        source_age_seconds = (
+                            None
+                            if candidate_age is None
+                            else max(0.0, float(candidate_age))
+                        )
+                    except (TypeError, ValueError, RuntimeError):
+                        source_age_seconds = None
+                    if source_age_seconds is not None:
+                        break
                 if source_age_seconds is not None:
                     break
         source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
