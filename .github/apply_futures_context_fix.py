@@ -50,8 +50,25 @@ replacement = '''        context_kind = (
             direction_inputs,
             role=role,
         )
-        source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
         source_age_seconds = resolve_tick_age_seconds(indicators)
+        if source_age_seconds is None:
+            for source in (
+                getattr(self, "_market_data_manager", None),
+                getattr(self, "_data_hub", None),
+            ):
+                age_getter = getattr(source, "time_since_last_tick", None)
+                if not callable(age_getter):
+                    continue
+                try:
+                    candidate_age = age_getter(symbol)
+                    source_age_seconds = None if candidate_age is None else max(0.0, float(candidate_age))
+                except (TypeError, ValueError, RuntimeError):
+                    source_age_seconds = None
+                if source_age_seconds is not None:
+                    break
+        source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
+        if not source_timestamp and source_age_seconds is not None:
+            source_timestamp = time.time() - source_age_seconds
         snapshot = {
 '''
 text, count = pattern.subn(replacement, text, count=1)
@@ -190,7 +207,7 @@ def test_futures_context_preserves_source_age_and_neutrality() -> None:
     )
     snapshot = manager._latest_context_snapshots["futures_context"]
     assert snapshot["tick_age_s"] == 180.0
-    assert snapshot["timestamp"] == 0.0
+    assert snapshot["timestamp"] < snapshot["snapshot_updated_at"]
     assert snapshot["vwap_slope"] == 0.0
     assert snapshot["direction_bias"] is None
 
