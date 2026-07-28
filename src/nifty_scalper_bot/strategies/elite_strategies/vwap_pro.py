@@ -93,8 +93,14 @@ class VWAPProStrategy(EliteStrategy):
                 or fut_ctx.get("direction_bias")
                 or ""
             ).upper()
-            futures_vwap_slope = float(indicators.get('futures_vwap_slope') or 0.0)
-            futures_volume_ratio = float(indicators.get('futures_volume_ratio') or 0.0)
+            def _optional_float(value: Any) -> float | None:
+                try:
+                    return None if value is None else float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            futures_vwap_slope = _optional_float(indicators.get('futures_vwap_slope'))
+            futures_volume_ratio = _optional_float(indicators.get('futures_volume_ratio'))
             if current_price <= 0 or vwap <= 0:
                 self._no_vote('missing_vwap')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=missing_vwap')
@@ -171,7 +177,7 @@ class VWAPProStrategy(EliteStrategy):
                 reasons.append('not_overextended')
 
             vol_support = avg_vol > 0 and vol >= 0.6 * avg_vol
-            fut_vol_support = (contract_side == 'CE' and futures_volume_ratio >= 1.0) or (contract_side == 'PE' and futures_volume_ratio >= 1.0)
+            fut_vol_support = futures_volume_ratio is not None and futures_volume_ratio >= 1.0
             if vol_support or fut_vol_support:
                 score += 1.0
                 reasons.append('volume_confirmation')
@@ -186,17 +192,19 @@ class VWAPProStrategy(EliteStrategy):
                     score -= 2.0
                     reasons.append('direction_conflict')
 
-            slope_available = abs(futures_vwap_slope) > self._futures_slope_neutral_eps
-            if slope_available:
+            if futures_vwap_slope is None:
+                slope_support = False
+                reasons.append('futures_slope_unavailable')
+            elif abs(futures_vwap_slope) <= self._futures_slope_neutral_eps:
+                slope_support = False
+                reasons.append('futures_slope_neutral')
+            else:
                 slope_support = (contract_side == 'CE' and futures_vwap_slope > 0) or (contract_side == 'PE' and futures_vwap_slope < 0)
                 if slope_support:
                     score += 1.0
                     reasons.append('futures_slope_alignment')
                 else:
                     reasons.append('futures_slope_conflict')
-            else:
-                slope_support = False
-                reasons.append('futures_slope_neutral')
             if not trend_alignment and bias in {'CE', 'PE'}:
                 if 'direction_conflict' not in reasons:
                     conflict_penalty_applied = float(os.getenv('VWAP_PRO_CONFLICT_PENALTY', '2.0') or '2.0')
