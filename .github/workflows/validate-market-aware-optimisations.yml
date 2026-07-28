@@ -29,9 +29,57 @@ jobs:
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
-      - name: Apply focused futures-context patch
+      - name: Prepare and apply focused futures-context patch
         if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
-        run: python .github/apply_futures_context_fix.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('.github/apply_futures_context_fix.py')
+          script = path.read_text()
+
+          script, count = re.subn(
+              r'''        source_age_seconds = resolve_tick_age_seconds\(indicators\)\n        if source_age_seconds is None:\n.*?        source_timestamp = indicators\.get\("timestamp"\) or indicators\.get\("context_timestamp_epoch"\) or 0\.0\n''',
+              '''        source_age_seconds = resolve_tick_age_seconds(indicators)\n        source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0\n''',
+              script,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if count != 1:
+              raise SystemExit(f'freshness fallback rewrite count={count}')
+
+          anchor = "old_age = '                indicators[\"context_age_seconds\"] = min(now_ts - float(spot_ctx.get(\"timestamp\", now_ts)) if spot_usable else max_context_age + 1, now_ts - float(fut_ctx.get(\"timestamp\", now_ts)) if fut_usable else max_context_age + 1)\\n'\n"
+          insertion = '''caller_old = ''' + "'''" + '''        if symbol_role in {"spot_context", "futures_context"}:
+            self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
+''' + "'''" + '''
+caller_new = ''' + "'''" + '''        if symbol_role in {"spot_context", "futures_context"}:
+            if resolve_tick_age_seconds(indicators) is None and self._data_hub is not None:
+                try:
+                    context_quote = _get_cached_quote_for_eval(self._data_hub, symbol)
+                    context_age_s = resolve_tick_age_seconds(context_quote or {})
+                    if context_age_s is not None:
+                        indicators["tick_age_s"] = context_age_s
+                except Exception as exc:  # noqa: BLE001 - provenance enrichment is fail-closed
+                    log.debug(
+                        "CONTEXT_TICK_AGE_ENRICHMENT_FAILED symbol=%s error=%s",
+                        symbol,
+                        exc,
+                        extra={"event": "CONTEXT_TICK_AGE_ENRICHMENT_FAILED", "symbol": symbol},
+                    )
+            self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
+''' + "'''" + '''
+if caller_old not in text:
+    raise SystemExit("context snapshot caller anchor missing")
+text = text.replace(caller_old, caller_new, 1)
+
+'''
+          if anchor not in script:
+              raise SystemExit('helper insertion anchor missing')
+          script = script.replace(anchor, insertion + anchor, 1)
+          path.write_text(script)
+          PY
+          python .github/apply_futures_context_fix.py
       - name: Compile and diff check
         run: |
           python -m compileall -q src tests
@@ -41,27 +89,16 @@ jobs:
         run: |
           mapfile -t TEST_FILES < <(find tests -type f \( -name 'test_strategy_manager*.py' -o -name 'test_vwap*.py' \) | sort)
           test ${#TEST_FILES[@]} -gt 0
-          printf '%s\n' "${TEST_FILES[@]}"
           python -m pytest -q --tb=short "${TEST_FILES[@]}"
       - name: Core and strategy suites
         if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q --tb=short tests/core tests/strategies
+      - name: Live simulation
+        if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
+        run: python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim
       - name: Full suite
         if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
-        run: |
-          set +e
-          python -m pytest -q --tb=short > /tmp/futures-context-full-suite.txt 2>&1
-          STATUS=$?
-          cat /tmp/futures-context-full-suite.txt
-          exit $STATUS
-      - name: Upload full-suite diagnostics
-        if: always() && (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
-        uses: actions/upload-artifact@v4
-        with:
-          name: futures-context-full-suite-output
-          path: /tmp/futures-context-full-suite.txt
-          if-no-files-found: ignore
-          retention-days: 1
+        run: python -m pytest -q
       - name: Commit validated correction and restore CI workflow
         if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         shell: bash
@@ -72,10 +109,10 @@ jobs:
             .github/workflows/futures-context-finalize.yml \
             .github/apply_futures_context_fix.py
           git diff --check
-          git status --short
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src tests .github
+          git status --short
           git commit -m "fix: preserve authoritative futures context semantics"
           git push origin HEAD:${{ github.head_ref || github.ref_name }}
       - name: Operator check execution tests
