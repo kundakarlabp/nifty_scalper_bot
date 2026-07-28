@@ -30,7 +30,47 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply focused futures-context patch
         if: github.head_ref == 'fix/remaining-live-path-hardening'
-        run: python .github/apply_futures_context_fix.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.github/apply_futures_context_fix.py')
+          text = path.read_text()
+          old = '''        source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
+        source_age_seconds = resolve_tick_age_seconds(indicators)
+        snapshot = {
+'''
+          new = '''        source_age_seconds = resolve_tick_age_seconds(indicators)
+        if source_age_seconds is None:
+            for source in (
+                getattr(self, "_market_data_manager", None),
+                getattr(self, "_data_hub", None),
+            ):
+                age_getter = getattr(source, "time_since_last_tick", None)
+                if not callable(age_getter):
+                    continue
+                try:
+                    candidate_age = age_getter(symbol)
+                    source_age_seconds = None if candidate_age is None else max(0.0, float(candidate_age))
+                except (TypeError, ValueError, RuntimeError):
+                    source_age_seconds = None
+                if source_age_seconds is not None:
+                    break
+        source_timestamp = indicators.get("timestamp") or indicators.get("context_timestamp_epoch") or 0.0
+        if not source_timestamp and source_age_seconds is not None:
+            source_timestamp = time.time() - source_age_seconds
+        snapshot = {
+'''
+          if old not in text:
+              raise SystemExit('patch-script provenance anchor missing')
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              '    assert snapshot["timestamp"] == 0.0\n',
+              '    assert snapshot["timestamp"] < snapshot["snapshot_updated_at"]\n',
+              1,
+          )
+          path.write_text(text)
+          PY
+          python .github/apply_futures_context_fix.py
       - name: Compile and diff check
         run: |
           python -m compileall -q src tests
@@ -44,20 +84,7 @@ jobs:
           python -m pytest -q --tb=short "${TEST_FILES[@]}"
       - name: Core and strategy suites
         if: github.head_ref == 'fix/remaining-live-path-hardening'
-        run: |
-          set +e
-          python -m pytest -q --tb=short tests/core tests/strategies > /tmp/futures-context-core-strategy.txt 2>&1
-          STATUS=$?
-          cat /tmp/futures-context-core-strategy.txt
-          exit $STATUS
-      - name: Upload core strategy diagnostics
-        if: always() && github.head_ref == 'fix/remaining-live-path-hardening'
-        uses: actions/upload-artifact@v4
-        with:
-          name: futures-context-core-strategy-output
-          path: /tmp/futures-context-core-strategy.txt
-          if-no-files-found: ignore
-          retention-days: 1
+        run: python -m pytest -q --tb=short tests/core tests/strategies
       - name: Live simulation
         if: github.head_ref == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim
