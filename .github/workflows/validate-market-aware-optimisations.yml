@@ -48,7 +48,20 @@ jobs:
         run: python -m pytest -q --tb=short tests/core tests/strategies
       - name: Full suite
         if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
-        run: python -m pytest -q
+        run: |
+          set +e
+          python -m pytest -q --tb=short > /tmp/futures-context-full-suite.txt 2>&1
+          STATUS=$?
+          cat /tmp/futures-context-full-suite.txt
+          exit $STATUS
+      - name: Upload full-suite diagnostics
+        if: always() && (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
+        uses: actions/upload-artifact@v4
+        with:
+          name: futures-context-full-suite-output
+          path: /tmp/futures-context-full-suite.txt
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Commit validated correction and restore CI workflow
         if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         shell: bash
