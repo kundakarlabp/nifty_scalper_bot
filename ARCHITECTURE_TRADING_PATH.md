@@ -35,6 +35,7 @@
    - Responsibilities:
      - preflight, spread, margin and risk validation;
      - broker submission and acknowledgement reconciliation;
+     - terminal failed-entry propagation to runner and arbitrator guards;
      - bounded broker-rejection recovery;
      - partial-entry remainder cancellation;
      - actual fill quantity/VWAP hand-off to the bracket authority;
@@ -84,6 +85,9 @@ TradePlan
 ```
 
 At every ambiguous broker state, new entries remain blocked until orders, fills and positions are reconciled.
+Rejected, cancelled or expired entries re-arm only after broker-confirmed absence of
+exposure. Broker-confirmed flat positions re-arm the runner while preserving the
+configured post-exit cooldown.
 
 ## Compatibility-only modules
 

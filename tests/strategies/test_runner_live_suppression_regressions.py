@@ -1,8 +1,56 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
+from nifty_scalper_bot.execution.order_state_machine import (
+    ExecutionState,
+    OrderStateMachine,
+)
 from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+
+def _pending_runner(
+    *, has_position: bool
+) -> tuple[StrategyRunner, OrderStateMachine, list]:
+    symbol = "NFO:NIFTY2670724100PE"
+    releases = []
+    runner = object.__new__(StrategyRunner)
+    runner._submitted_entry_order_context = {
+        "OID1": {
+            "symbol": symbol,
+            "underlying": "NIFTY",
+            "underlying_reason_key": "NIFTY:PE:OrderFlow",
+        }
+    }
+    runner._underlying_last_signal_ts = {"NIFTY": 1000.0}
+    runner._reason_last_signal_ts = {"NIFTY:PE:OrderFlow": 1000.0}
+    runner._position_manager = type(
+        "PM", (), {"has_open_position": lambda self, _symbol: has_position}
+    )()
+    runner._order_manager = type(
+        "OM",
+        (),
+        {
+            "release_entry_reservation": (
+                lambda self, released_symbol, *, start_cooldown: releases.append(
+                    (released_symbol, start_cooldown)
+                )
+            )
+        },
+    )()
+    runner._execution_state_lock = threading.RLock()
+    machine = OrderStateMachine()
+    machine.transition(ExecutionState.SIGNAL_RECEIVED)
+    machine.transition(ExecutionState.ORDER_PENDING, order_id="OID1")
+    runner._execution_state_by_symbol = {symbol: machine}
+    runner._orchestrator = None
+    runner._logger = type(
+        "Log",
+        (),
+        {"info": lambda *a, **k: None, "warning": lambda *a, **k: None},
+    )()
+    return runner, machine, releases
 
 
 def test_option_reason_cooldown_key_is_side_aware() -> None:
@@ -55,45 +103,72 @@ def test_live_scalping_cooldown_defaults_match_operator_comments(monkeypatch) ->
 
 
 def test_failed_entry_order_clears_submission_cooldowns_without_position() -> None:
-    runner = object.__new__(StrategyRunner)
-    runner._submitted_entry_order_context = {
-        "OID1": {
-            "symbol": "NFO:NIFTY2670724100PE",
-            "underlying": "NIFTY",
-            "underlying_reason_key": "NIFTY:PE:OrderFlow",
-        }
-    }
-    runner._underlying_last_signal_ts = {"NIFTY": 1000.0}
-    runner._reason_last_signal_ts = {"NIFTY:PE:OrderFlow": 1000.0}
-    runner._position_manager = type("PM", (), {"has_open_position": lambda self, symbol: False})()
-    runner._orchestrator = None
-    runner._logger = type("Log", (), {"info": lambda *a, **k: None})()
+    runner, machine, releases = _pending_runner(has_position=False)
 
-    runner.notify_entry_order_failed(order_id="OID1", symbol="NFO:NIFTY2670724100PE", reason="rejected")
+    runner.notify_entry_order_failed(
+        order_id="OID1",
+        symbol="NFO:NIFTY2670724100PE",
+        reason="rejected",
+    )
 
     assert runner._underlying_last_signal_ts == {}
     assert runner._reason_last_signal_ts == {}
+    assert machine.state == ExecutionState.IDLE
+    assert releases == [("NFO:NIFTY2670724100PE", False)]
 
 
 def test_failed_entry_order_keeps_cooldowns_when_position_exists() -> None:
-    runner = object.__new__(StrategyRunner)
-    runner._submitted_entry_order_context = {
-        "OID1": {
-            "symbol": "NFO:NIFTY2670724100PE",
-            "underlying": "NIFTY",
-            "underlying_reason_key": "NIFTY:PE:OrderFlow",
-        }
-    }
-    runner._underlying_last_signal_ts = {"NIFTY": 1000.0}
-    runner._reason_last_signal_ts = {"NIFTY:PE:OrderFlow": 1000.0}
-    runner._position_manager = type("PM", (), {"has_open_position": lambda self, symbol: True})()
-    runner._orchestrator = None
-    runner._logger = type("Log", (), {"info": lambda *a, **k: None})()
+    runner, machine, releases = _pending_runner(has_position=True)
 
-    runner.notify_entry_order_failed(order_id="OID1", symbol="NFO:NIFTY2670724100PE", reason="rejected")
+    runner.notify_entry_order_failed(
+        order_id="OID1",
+        symbol="NFO:NIFTY2670724100PE",
+        reason="rejected",
+    )
 
     assert runner._underlying_last_signal_ts == {"NIFTY": 1000.0}
     assert runner._reason_last_signal_ts == {"NIFTY:PE:OrderFlow": 1000.0}
+    assert machine.state == ExecutionState.ORDER_PENDING
+    assert releases == []
+
+
+def test_failed_entry_order_keeps_guards_when_position_state_is_unknown() -> None:
+    runner, machine, releases = _pending_runner(has_position=False)
+    runner._position_manager = type(
+        "PM",
+        (),
+        {
+            "has_open_position": lambda self, _symbol: (_ for _ in ()).throw(
+                RuntimeError("position sync unavailable")
+            )
+        },
+    )()
+
+    runner.notify_entry_order_failed(
+        order_id="OID1",
+        symbol="NFO:NIFTY2670724100PE",
+        reason="rejected",
+    )
+
+    assert runner._underlying_last_signal_ts == {"NIFTY": 1000.0}
+    assert machine.state == ExecutionState.ORDER_PENDING
+    assert releases == []
+
+
+def test_confirmed_flat_symbol_converges_bracket_and_entry_guards() -> None:
+    runner, machine, releases = _pending_runner(has_position=False)
+    reconciled = []
+    runner._bracket_manager = type(
+        "BM",
+        (),
+        {"reconcile_symbol_flat": lambda self, symbol: reconciled.append(symbol)},
+    )()
+
+    runner._on_symbols_flat(["NFO:NIFTY2670724100PE"])
+
+    assert reconciled == ["NFO:NIFTY2670724100PE"]
+    assert machine.state == ExecutionState.IDLE
+    assert releases == [("NFO:NIFTY2670724100PE", True)]
 
 
 def test_order_failure_cooldown_rejection_uses_dedup_rollback_path() -> None:

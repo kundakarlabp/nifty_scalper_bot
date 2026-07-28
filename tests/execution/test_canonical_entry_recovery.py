@@ -18,6 +18,10 @@ from nifty_scalper_bot.execution.entry_recovery import (
     quantity_to_exact_lots,
 )
 from nifty_scalper_bot.execution.order_manager import TradePlan, TradePlanSubmitResult
+from nifty_scalper_bot.execution.order_manager_core import (
+    OrderManager,
+    OrderStatus,
+)
 
 
 class _Logger:
@@ -501,3 +505,31 @@ def test_core_submit_explicit_rejection_does_not_second_post(tmp_path):
         )
 
     assert broker.calls == 1
+
+
+def test_failed_entry_terminal_callback_is_transition_scoped() -> None:
+    callbacks = []
+    manager = object.__new__(OrderManager)
+    manager.entry_order_failed_callback = lambda **payload: callbacks.append(payload)
+    manager._logger = _Logger()
+    order = SimpleNamespace(
+        order_id="OID-1",
+        symbol="NFO:NIFTY2671423950CE",
+        intent="ENTRY",
+        status=OrderStatus.REJECTED,
+    )
+
+    manager._notify_failed_entry_terminal(
+        order, OrderStatus.SUBMITTED, "REJECTED"
+    )
+    manager._notify_failed_entry_terminal(
+        order, OrderStatus.REJECTED, "REJECTED"
+    )
+
+    assert callbacks == [
+        {
+            "order_id": "OID-1",
+            "symbol": "NFO:NIFTY2671423950CE",
+            "reason": "rejected",
+        }
+    ]
