@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feat/market-aware-execution-optimisations-20260629
+      - fix/remaining-live-path-hardening
 
 permissions:
   contents: write
@@ -29,7 +30,7 @@ jobs:
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply focused futures-context patch
-        if: github.head_ref == 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -76,23 +77,23 @@ jobs:
           python -m compileall -q src tests
           git diff --check
       - name: Focused futures-context tests
-        if: github.head_ref == 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         run: |
           mapfile -t TEST_FILES < <(find tests -type f \( -name 'test_strategy_manager*.py' -o -name 'test_vwap*.py' \) | sort)
           test ${#TEST_FILES[@]} -gt 0
           printf '%s\n' "${TEST_FILES[@]}"
           python -m pytest -q --tb=short "${TEST_FILES[@]}"
       - name: Core and strategy suites
-        if: github.head_ref == 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q --tb=short tests/core tests/strategies
       - name: Live simulation
-        if: github.head_ref == 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim
       - name: Full suite
-        if: github.head_ref == 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         run: python -m pytest -q
       - name: Commit validated correction and restore CI workflow
-        if: github.head_ref == 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) == 'fix/remaining-live-path-hardening'
         shell: bash
         run: |
           git checkout origin/main -- .github/workflows/validate-market-aware-optimisations.yml
@@ -103,24 +104,24 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src tests .github
           git commit -m "fix: preserve authoritative futures context semantics"
-          git push origin HEAD:${{ github.head_ref }}
+          git push origin HEAD:${{ github.head_ref || github.ref_name }}
       - name: Operator check execution tests
-        if: github.head_ref != 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) != 'fix/remaining-live-path-hardening'
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'check_execution'
       - name: Operator stale tests
-        if: github.head_ref != 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) != 'fix/remaining-live-path-hardening'
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'stale'
       - name: Operator remaining unique tests
-        if: github.head_ref != 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) != 'fix/remaining-live-path-hardening'
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'unique or legacy'
       - name: Notification complete file
-        if: github.head_ref != 'fix/remaining-live-path-hardening'
+        if: (github.head_ref || github.ref_name) != 'fix/remaining-live-path-hardening'
         env:
           BRACKET_AUTO_RESTORE: "false"
         run: python -m pytest -q tests/notifications/test_operator_telegram.py
