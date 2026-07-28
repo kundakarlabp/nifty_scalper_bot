@@ -2109,8 +2109,6 @@ class StrategyManager(_BaseStrategyManager):
         """Store latest spot/futures context snapshots for option strategies."""
         if not hasattr(self, "_latest_context_snapshots"):
             self._latest_context_snapshots: dict[str, dict[str, t.Any]] = {}
-        previous_snapshot = dict(self._latest_context_snapshots.get(role, {}) or {})
-
         def _num(*keys: str) -> float | None:
             for key in keys:
                 value = indicators.get(key)
@@ -2122,7 +2120,6 @@ class StrategyManager(_BaseStrategyManager):
                     continue
             return None
 
-        derived_direction, derived_confidence, derived_reasons = self._derive_context_direction(indicators, role=role)
         context_kind = (
             "price_direction"
             if role == "spot_context"
@@ -2132,38 +2129,30 @@ class StrategyManager(_BaseStrategyManager):
         )
         current_volume = _num("volume")
         current_avg_volume = _num("avg_volume")
-        current_vwap = _num("vwap", "exchange_vwap", "session_vwap")
-        current_close = _num("close", "ltp", "price")
         futures_volume_ratio = _num("futures_volume_ratio")
-        futures_volume_ratio_source = "indicator"
-        if role == "futures_context" and (futures_volume_ratio is None or futures_volume_ratio <= 0):
-            if (
-                current_volume is not None
-                and current_avg_volume is not None
-                and current_avg_volume > 0
-            ):
-                futures_volume_ratio = current_volume / max(current_avg_volume, 1e-9)
-                futures_volume_ratio_source = "derived_volume_avg"
+        futures_volume_ratio_source = "indicator" if futures_volume_ratio is not None else "unavailable"
+        if (
+            role == "futures_context"
+            and futures_volume_ratio is None
+            and current_volume is not None
+            and current_avg_volume is not None
+            and current_avg_volume > 0
+        ):
+            futures_volume_ratio = current_volume / current_avg_volume
+            futures_volume_ratio_source = "derived_volume_avg"
         vwap_slope = _num("vwap_slope")
-        vwap_slope_source = "indicator"
-        if role == "futures_context" and (vwap_slope is None or abs(vwap_slope) <= 1e-12):
-            prev_vwap = previous_snapshot.get("vwap")
-            try:
-                prev_vwap_f = float(prev_vwap) if prev_vwap is not None else None
-            except (TypeError, ValueError):
-                prev_vwap_f = None
-            if current_vwap is not None and prev_vwap_f and prev_vwap_f > 0:
-                vwap_slope = (current_vwap - prev_vwap_f) / prev_vwap_f
-                vwap_slope_source = "derived_previous_snapshot"
         ema_slope = _num("ema_slope")
-        if role == "futures_context" and (ema_slope is None or abs(ema_slope) <= 1e-12):
-            prev_close = previous_snapshot.get("close") or previous_snapshot.get("ltp")
-            try:
-                prev_close_f = float(prev_close) if prev_close is not None else None
-            except (TypeError, ValueError):
-                prev_close_f = None
-            if current_close is not None and prev_close_f and prev_close_f > 0:
-                ema_slope = (current_close - prev_close_f) / prev_close_f
+        vwap_slope_source = "indicator" if vwap_slope is not None else "unavailable"
+        direction_inputs = dict(indicators)
+        direction_inputs.update(
+            futures_volume_ratio=futures_volume_ratio,
+            vwap_slope=vwap_slope,
+            ema_slope=ema_slope,
+        )
+        derived_direction, derived_confidence, derived_reasons = self._derive_context_direction(
+            direction_inputs,
+            role=role,
+        )
         snapshot = {
             "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
@@ -2223,25 +2212,25 @@ class StrategyManager(_BaseStrategyManager):
         ema_fast = _f("ema_fast") or _f("ema_9") or _f("ema9")
         ema_slow = _f("ema_slow") or _f("ema_21") or _f("ema21")
         ema_50 = _f("ema_50") or _f("ema50")
-        vwap_slope = _f("vwap_slope") or 0.0
-        ema_slope = _f("ema_slope") or 0.0
-        futures_volume_ratio = _f("futures_volume_ratio") or 0.0
+        vwap_slope = _f("vwap_slope")
+        ema_slope = _f("ema_slope")
+        futures_volume_ratio = _f("futures_volume_ratio")
         ce_score = pe_score = 0.0
         reasons: list[str] = []
         if close is not None and vwap is not None and vwap > 0:
-            if close >= vwap: ce_score += 1.0; reasons.append("close_above_vwap")
-            else: pe_score += 1.0; reasons.append("close_below_vwap")
+            if close > vwap: ce_score += 1.0; reasons.append("close_above_vwap")
+            elif close < vwap: pe_score += 1.0; reasons.append("close_below_vwap")
         if ema_fast is not None and ema_slow is not None:
-            if ema_fast >= ema_slow: ce_score += 1.0; reasons.append("ema_fast_above_slow")
-            else: pe_score += 1.0; reasons.append("ema_fast_below_slow")
+            if ema_fast > ema_slow: ce_score += 1.0; reasons.append("ema_fast_above_slow")
+            elif ema_fast < ema_slow: pe_score += 1.0; reasons.append("ema_fast_below_slow")
         if close is not None and ema_50 is not None:
-            if close >= ema_50: ce_score += 0.5; reasons.append("close_above_ema50")
-            else: pe_score += 0.5; reasons.append("close_below_ema50")
-        if vwap_slope > 0: ce_score += 0.5; reasons.append("vwap_slope_positive")
-        elif vwap_slope < 0: pe_score += 0.5; reasons.append("vwap_slope_negative")
-        if ema_slope > 0: ce_score += 0.5; reasons.append("ema_slope_positive")
-        elif ema_slope < 0: pe_score += 0.5; reasons.append("ema_slope_negative")
-        if role == "futures_context" and futures_volume_ratio >= 1.0:
+            if close > ema_50: ce_score += 0.5; reasons.append("close_above_ema50")
+            elif close < ema_50: pe_score += 0.5; reasons.append("close_below_ema50")
+        if vwap_slope is not None and vwap_slope > 0: ce_score += 0.5; reasons.append("vwap_slope_positive")
+        elif vwap_slope is not None and vwap_slope < 0: pe_score += 0.5; reasons.append("vwap_slope_negative")
+        if ema_slope is not None and ema_slope > 0: ce_score += 0.5; reasons.append("ema_slope_positive")
+        elif ema_slope is not None and ema_slope < 0: pe_score += 0.5; reasons.append("ema_slope_negative")
+        if role == "futures_context" and futures_volume_ratio is not None and futures_volume_ratio >= 1.0:
             reasons.append("futures_volume_active")
         if close is not None and previous_close is not None:
             if close > previous_close:
@@ -2924,8 +2913,8 @@ class StrategyManager(_BaseStrategyManager):
                 )
             if spot_usable:
                 indicators.setdefault("spot_context", spot_ctx)
-            if fut_usable:
-                indicators.setdefault("futures_context", fut_ctx)
+            if fut_fresh:
+                indicators["futures_context"] = fut_ctx
             direction_bias = (indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or (spot_ctx.get("direction_bias") if spot_usable else None) or (fut_ctx.get("direction_bias") if fut_usable else None))
             direction_confidence = (indicators.get("underlying_direction_confidence") or (spot_ctx.get("underlying_direction_confidence") if spot_usable else None) or (fut_ctx.get("underlying_direction_confidence") if fut_usable else None) or 0.0)
             context_resolved = False
@@ -3033,11 +3022,11 @@ class StrategyManager(_BaseStrategyManager):
                         },
                     )
             if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:
-                indicators.setdefault("futures_volume_ratio", fut_ctx.get("futures_volume_ratio"))
+                indicators["futures_volume_ratio"] = fut_ctx.get("futures_volume_ratio")
             if fut_fresh and fut_ctx.get("vwap") is not None:
-                indicators.setdefault("futures_vwap", fut_ctx.get("vwap"))
+                indicators["futures_vwap"] = fut_ctx.get("vwap")
             if fut_fresh and fut_ctx.get("vwap_slope") is not None:
-                indicators.setdefault("futures_vwap_slope", fut_ctx.get("vwap_slope"))
+                indicators["futures_vwap_slope"] = fut_ctx.get("vwap_slope")
 
         if symbol_role == "tradable_option":
             indicators = _enrich_option_candidate_metadata(symbol, indicators)
