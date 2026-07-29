@@ -8211,12 +8211,26 @@ def _wire_and_start_message_bus(ctx: BotContext) -> bool:
         mdm.bus = bus
     if not ctx.message_bus_tick_subscribed:
         if data_hub is not None:
-            bus.subscribe_once(
-                MessageType.TICK,
-                data_hub.ingest_tick_from_bus,
-                subscriber_id="data_hub.ingest_tick_from_bus",
+            # EXACTLY-ONCE DATAHUB INGRESS.
+            #
+            # DataHub is already registered as a DIRECT MarketDataManager
+            # subscriber (DataHub.subscribe_ticks -> mdm.subscribe(symbol,
+            # self.ingest_tick_sync)). Also subscribing it to MessageBus TICK
+            # gave one accepted market tick two ingress routes, so a single
+            # market event could bump the quote version twice, run every
+            # DataHub subscriber twice, and repeat runner ingress and
+            # position-protection work. The equal-market-timestamp check is
+            # not an event identity and does not reliably reject the second
+            # delivery.
+            #
+            # The direct path is retained because it preserves deterministic
+            # ordering for position protection. MessageBus TICK publication
+            # continues for independent observers; DataHub simply no longer
+            # re-injects from it. DataHub is the single owner of normalized
+            # tick state.
+            LOGGER.info(
+                "MESSAGE_BUS_TICK_OWNER owner=data_hub ingress=direct_mdm_only"
             )
-            LOGGER.info("MESSAGE_BUS_TICK_OWNER owner=data_hub")
         elif runner is not None:
             bus.subscribe_once(
                 MessageType.TICK,
