@@ -362,6 +362,43 @@ class LedgerBracketManager(CanonicalBracketManager):
         close_source: str,
         exit_price: float | None = None,
     ) -> None:
+        # Idempotency + single-flight for FINAL accounting.
+        #
+        # A second closure of an already-accounted bracket re-entered the
+        # accounting block with remaining_quantity already 0, raised
+        # "final exit identity, quantity or fill price unavailable", and
+        # latched ledger_blocked=True with
+        # fill_ledger_degraded:final_exit_accounting_failed. That latch does
+        # not self-heal: _retry_ledger_block() sees a pending exit marker with
+        # quantity 0 and returns before reaching its closed-and-complete
+        # recovery, so entries stayed blocked with
+        # ENTRY_BLOCKED_NATIVE_GATE reason=unresolved_exit_position even after
+        # position reconciliation succeeded.
+        #
+        # Both orderings must be covered: a sequential re-close, and two
+        # callers (watchdog / tick processing / reconciliation) beginning
+        # final accounting concurrently.
+        with self._lock:
+            already_accounted = bool(
+                getattr(bracket, "exit_executed", False)
+                and int(getattr(bracket, "remaining_quantity", 0) or 0) <= 0
+            )
+            if already_accounted or getattr(bracket, "_final_close_in_progress", False):
+                _legacy.LOGGER.info(
+                    "BRACKET_CLOSE_ALREADY_ACCOUNTED bracket_id=%s close_source=%s",
+                    getattr(bracket, "bracket_id", None),
+                    close_source,
+                    extra={
+                        "event": "BRACKET_CLOSE_ALREADY_ACCOUNTED",
+                        "bracket_id": str(getattr(bracket, "bracket_id", "") or ""),
+                        "symbol": getattr(bracket, "symbol", None),
+                        "close_source": close_source,
+                        "concurrent": not already_accounted,
+                    },
+                )
+                return
+            setattr(bracket, "_final_close_in_progress", True)
+
         order_id = str(bracket.exit_order_id or bracket.pending_exit_order_id or "")
         closing_quantity = int(bracket.remaining_quantity or 0)
         resolved_price = self._resolved_exit_price(bracket, exit_price)
@@ -398,6 +435,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             )
 
         with self._lock:
+            setattr(bracket, "_final_close_in_progress", False)
             bracket.remaining_quantity = 0
             bracket.exit_executed = True
             bracket.exit_pending = False

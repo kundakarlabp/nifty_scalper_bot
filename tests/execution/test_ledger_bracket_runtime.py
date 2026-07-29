@@ -232,3 +232,87 @@ def test_release_block_survives_manager_restart(monkeypatch, tmp_path) -> None:
     second._watchdog_thread.join(timeout=1.0)
     assert bracket.bracket_id in second._ledger_blocked
     assert second.has_unresolved_exit() is True
+
+
+def test_duplicate_final_close_does_not_latch_ledger_block(monkeypatch, tmp_path) -> None:
+    """P0: closing an already-accounted bracket twice must be a no-op.
+
+    Production symptom: a second _close_bracket() on a successfully accounted
+    bracket re-entered final accounting with remaining_quantity already 0,
+    raised "final exit identity, quantity or fill price unavailable", and
+    latched ledger_blocked=True with
+    fill_ledger_degraded:final_exit_accounting_failed.
+
+    That latch does not self-heal -- _retry_ledger_block() sees a pending exit
+    marker with quantity 0 and returns early -- so entries stayed blocked with
+    ENTRY_BLOCKED_NATIVE_GATE reason=unresolved_exit_position even after
+    position reconciliation succeeded.
+    """
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    manager.confirm_entry_fill("entry-1", 100.0)
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="final-1",
+        reason="SL Hit (95.00)",
+        price=95.0,
+        residual=0,
+    )
+
+    manager._close_bracket(bracket, close_source="first")
+    assert bracket.exit_executed is True
+    assert bracket.remaining_quantity == 0
+    assert bracket.bracket_id not in manager._ledger_blocked
+
+    # Second closure: previously latched the block.
+    manager._close_bracket(bracket, close_source="duplicate")
+
+    assert bracket.bracket_id not in manager._ledger_blocked
+    assert bracket.remaining_quantity == 0
+    assert bracket.exit_executed is True
+    assert manager.has_unresolved_exit() is False
+
+    # Exactly one entry and one exit fill -- accounting was not repeated.
+    assert manager._fill_ledger is not None
+    fills = manager._fill_ledger.load_fills(bracket.bracket_id)
+    assert len([f for f in fills if f.fill_id.startswith("ENTRY:")]) == 1
+
+
+def test_concurrent_final_close_accounts_once(monkeypatch, tmp_path) -> None:
+    """Two callers beginning final accounting at once must not double-account.
+
+    Watchdog, tick processing and reconciliation can all reach closure; an
+    idempotency check alone does not stop two threads entering together.
+    """
+    import threading
+
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    manager.confirm_entry_fill("entry-1", 100.0)
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="final-1",
+        reason="SL Hit (95.00)",
+        price=95.0,
+        residual=0,
+    )
+
+    barrier = threading.Barrier(2)
+
+    def _close(tag: str) -> None:
+        barrier.wait(timeout=5.0)
+        manager._close_bracket(bracket, close_source=tag)
+
+    threads = [
+        threading.Thread(target=_close, args=("concurrent-a",)),
+        threading.Thread(target=_close, args=("concurrent-b",)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert bracket.bracket_id not in manager._ledger_blocked
+    assert bracket.exit_executed is True
+    assert bracket.remaining_quantity == 0
+    assert manager.has_unresolved_exit() is False
