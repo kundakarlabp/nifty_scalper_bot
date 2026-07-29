@@ -1,7 +1,5 @@
 name: Temporary strategy stall validation
-on:
-  pull_request:
-    branches: [main]
+on: [pull_request]
 permissions:
   contents: write
 jobs:
