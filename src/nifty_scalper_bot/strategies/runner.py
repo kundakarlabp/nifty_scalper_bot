@@ -8713,15 +8713,82 @@ class StrategyRunner:
                     try:
                         loop = asyncio.get_running_loop()
                     except RuntimeError:
-                        asyncio.run(result)
+                        # This runs inside _health_watchdog -> _on_tick_safe,
+                        # i.e. on the market-data tick thread. asyncio.run()
+                        # here executed the readiness recompute synchronously
+                        # and blocked tick ingestion for its full duration --
+                        # the same defect fixed for Telegram dispatch. Submit
+                        # to the attached runtime loop instead; never block.
+                        runtime_loop = self._main_loop
+                        if runtime_loop is not None and not runtime_loop.is_closed():
+                            asyncio.run_coroutine_threadsafe(result, runtime_loop)
+                        else:
+                            result.close()
+                            self._logger.warning(
+                                "STRATEGY_EVAL_STALL_RECOMPUTE_SKIPPED reason=no_runtime_loop",
+                                extra={
+                                    "event": "STRATEGY_EVAL_STALL_RECOMPUTE_SKIPPED",
+                                    "reason": "no_runtime_loop",
+                                },
+                            )
                     else:
                         loop.create_task(result)
             except Exception:
                 self._logger.exception("STRATEGY_EVAL_STALL_READINESS_RECOMPUTE_FAILED")
+        # Evaluation-worker state, captured BEFORE any recovery action so the
+        # log shows why evaluation stalled rather than only that it did.
+        with self._eval_gate_lock:
+            worker_state = {
+                "pending_entry_eval": sorted(self._pending_entry_eval_symbols),
+                "drain_scheduled": self._entry_eval_drain_scheduled,
+                "drain_active": self._entry_eval_active,
+                "drain_count": self._entry_eval_drain_count,
+                "runtime_loop_attached": self._runtime_loop_attached,
+                "shutdown": self._entry_eval_shutdown,
+            }
+        executor = getattr(self, "_entry_eval_executor", None)
+        worker_state["executor_alive"] = bool(
+            executor is not None and not getattr(executor, "_shutdown", False)
+        )
+        was_running = bool(self._running)
+
         try:
             self.start()
         except Exception:
             self._logger.exception("STRATEGY_EVAL_STALL_LOOP_RESTART_FAILED")
+
+        # start() is a no-op while the runner is already running, so on its own
+        # it cannot recover a stalled evaluation loop -- the recovery advertised
+        # "restart_loop" but performed nothing. Post-#918 the real evaluation
+        # mechanism is the coalesced entry-eval drain, so nudge that instead of
+        # relying on a restart that never happens.
+        drain_rescheduled = False
+        if not self._entry_eval_shutdown:
+            with self._eval_gate_lock:
+                needs_drain = (
+                    bool(self._pending_entry_eval_symbols)
+                    and not self._entry_eval_active
+                    and not self._entry_eval_drain_scheduled
+                )
+                if needs_drain:
+                    self._entry_eval_drain_scheduled = True
+            if needs_drain:
+                drain_rescheduled = self._schedule_entry_eval_drain()
+                if not drain_rescheduled:
+                    with self._eval_gate_lock:
+                        self._entry_eval_drain_scheduled = False
+        self._logger.warning(
+            "STRATEGY_EVAL_STALL_WORKER_STATE start_was_noop=%s drain_rescheduled=%s state=%s",
+            was_running,
+            drain_rescheduled,
+            worker_state,
+            extra={
+                "event": "STRATEGY_EVAL_STALL_WORKER_STATE",
+                "start_was_noop": was_running,
+                "drain_rescheduled": drain_rescheduled,
+                **worker_state,
+            },
+        )
         # Reset per-symbol eval throttles once so the next flowing tick can
         # enter _on_tick instead of being held behind stale same-bar state.
         self._last_eval_ts.clear()
