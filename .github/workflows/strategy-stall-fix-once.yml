@@ -1,3 +1,4 @@
+# one-shot armed
 name: Strategy stall fix once
 on:
   push:
