@@ -12,6 +12,25 @@ from nifty_scalper_bot.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
+def _fmt_optional(value: float | None, digits: int) -> str:
+    """Format an optional metric for logging without crashing on None.
+
+    futures_vwap_slope / futures_volume_ratio are legitimately None when the
+    futures context is unavailable (they are no longer conflated with 0.0).
+    Feeding None to a %.4f/%.2f specifier raised
+    "TypeError: must be real number, not NoneType" inside the STRATEGY_NO_VOTE
+    log call, which the broad handler swallowed as a strategy failure -- so
+    VWAPPro silently produced no vote on every evaluation.
+    Args: value, digits. Returns: formatted str or "unavailable". Raises: none.
+    """
+    if value is None:
+        return "unavailable"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "unavailable"
+
+
 class VWAPProStrategy(EliteStrategy):
     """VWAP continuation/pullback strategy emitting scored strategy votes."""
 
@@ -269,7 +288,7 @@ class VWAPProStrategy(EliteStrategy):
                     "vwap=%.2f distance_pct=%.4f allowed_distance=%.4f atr=%.2f "
                     "volume=%.2f avg_volume=%.2f trend_alignment=%s pullback_flag=%s "
                     "context_age_seconds=%.2f context_fresh=%s context_confidence=%.2f "
-                    "futures_vwap_slope=%.4f futures_volume_ratio=%.2f slope_support=%s "
+                    "futures_vwap_slope=%s futures_volume_ratio=%s slope_support=%s "
                     "premium_above_vwap=%s continuation_confirmed=%s reasons=%s",
                     symbol,
                     score,
@@ -290,8 +309,8 @@ class VWAPProStrategy(EliteStrategy):
                     context_age_seconds,
                     context_fresh,
                     underlying_direction_confidence,
-                    futures_vwap_slope,
-                    futures_volume_ratio,
+                    _fmt_optional(futures_vwap_slope, 4),
+                    _fmt_optional(futures_volume_ratio, 2),
                     slope_support,
                     premium_above_vwap,
                     continuation_confirmed,
