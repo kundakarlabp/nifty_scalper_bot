@@ -1,7 +1,7 @@
 name: Temporary strategy stall validation
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [fix/strategy-stall-production]
 permissions:
   contents: write
 jobs:
@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: fix/strategy-stall-single-owner
+          ref: fix/strategy-stall-production
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -151,7 +151,7 @@ PY
           if text.count(old_reset) != 1:
               raise SystemExit('watchdog recovery reset not found exactly once')
           path.write_text(text)
-          PY
+PY
       - name: Focused validation
         run: |
           python -m compileall -q src/nifty_scalper_bot/strategies/runner.py
@@ -168,4 +168,4 @@ PY
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/nifty_scalper_bot/strategies/runner.py tests/strategies/test_runner_market_closed_watchdog.py .github/workflows/tmp-strategy-stall-fix.yml
           git commit -m 'fix: suppress intentional strategy stall alarms'
-          git push origin HEAD:fix/strategy-stall-single-owner
+          git push origin HEAD:fix/strategy-stall-production
