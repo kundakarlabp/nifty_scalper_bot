@@ -13082,20 +13082,56 @@ class MarketDataManager:
             normalized["broker_timestamp"] = broker_timestamp
 
         # 5. Volume Handling
-        volume = self._coerce_float(
-            tick,
-            "volume_traded_today",
-            "volume",
-            "volume_traded",
-            "total_traded_volume",
+        # Volume transport contract.
+        #
+        # Cumulative input is handed to the canonical
+        # _normalise_tick_volume_delta(), which owns the per-symbol/token/
+        # generation baseline, first-observation zero delta, rollback and
+        # out-of-order quarantine and suspicious-jump rejection. Publishing
+        # `volume_cumulative` alone is NOT sufficient: that key is diagnostic
+        # only and the normalizer never consumes it, so the baseline would
+        # never advance and every REST tick would publish delta 0.
+        explicit_delta = self._coerce_float(tick, "volume_delta")
+        has_cumulative = any(
+            tick.get(key) is not None
+            for key in (
+                "volume_traded_today",
+                "volume_traded",
+                "total_traded_volume",
+                "cumulative_volume",
+            )
         )
-        if volume is None and previous:
-            prev_vol = previous.get("volume")
-            if isinstance(prev_vol, (int, float)):
-                volume = float(prev_vol)
 
-        if volume is not None:
-            normalized["volume"] = float(volume)
+        if explicit_delta is not None:
+            # A genuine interval delta is preserved verbatim, never relabelled.
+            normalized["volume_delta"] = float(explicit_delta)
+            normalized["volume"] = float(explicit_delta)
+            cumulative_hint = self._coerce_float(
+                tick, "volume_cumulative", "volume_traded_today"
+            )
+            if cumulative_hint is not None:
+                normalized["volume_cumulative"] = float(cumulative_hint)
+        elif has_cumulative:
+            derived = self._normalise_tick_volume_delta(symbol, tick)
+            for key in (
+                "volume",
+                "volume_delta",
+                "effective_volume_delta",
+                "volume_cumulative",
+                "volume_transition",
+                "volume_delta_untrusted",
+                "volume_baseline_reset",
+            ):
+                if key in derived:
+                    normalized[key] = derived[key]
+        else:
+            plain_volume = self._coerce_float(tick, "volume")
+            if plain_volume is None and previous:
+                prev_vol = previous.get("volume")
+                if isinstance(prev_vol, (int, float)):
+                    plain_volume = float(prev_vol)
+            if plain_volume is not None:
+                normalized["volume"] = float(plain_volume)
 
         instrument_token = tick.get("instrument_token") or tick.get("token")
         if instrument_token is not None:
@@ -13186,6 +13222,20 @@ class MarketDataManager:
     @staticmethod
     def _prepare_rest_tick(tick: Mapping[str, Any], *, source: str) -> dict[str, Any]:
         payload = dict(tick)
+        # Zerodha REST /quote reports `volume` as volume traded TODAY
+        # (cumulative). Generic `volume` on other transports may legitimately
+        # be an interval figure, so the retag happens here at the REST
+        # boundary only, and only when nothing more specific is present.
+        if (
+            payload.get("volume") is not None
+            and payload.get("volume_delta") is None
+            and payload.get("effective_volume_delta") is None
+            and payload.get("volume_traded_today") is None
+            and payload.get("volume_traded") is None
+            and payload.get("total_traded_volume") is None
+            and payload.get("cumulative_volume") is None
+        ):
+            payload["volume_traded_today"] = payload.get("volume")
         broker_timestamp = None
         for candidate in (
             payload.get("timestamp"),
