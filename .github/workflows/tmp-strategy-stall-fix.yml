@@ -1,7 +1,7 @@
 name: Temporary strategy stall validation
 on:
-  push:
-    branches: [fix/strategy-stall-single-owner]
+  pull_request:
+    branches: [main]
 permissions:
   contents: write
 jobs:
