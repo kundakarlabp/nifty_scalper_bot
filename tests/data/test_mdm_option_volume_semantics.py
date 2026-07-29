@@ -174,6 +174,67 @@ def test_explicit_interval_delta_is_not_relabelled_as_cumulative() -> None:
     assert out.get("volume_delta_untrusted") is not True
 
 
+def test_effective_volume_delta_only_remains_interval_volume() -> None:
+    """Compatibility: effective-only interval input must not become cumulative."""
+    mdm = _mdm()
+    prepared = mdm._prepare_rest_tick(
+        {
+            "last_price": 45.0,
+            "volume": 28_574_260,
+            "effective_volume_delta": 65.0,
+            "instrument_token": 1,
+        },
+        source="rest",
+    )
+    out = mdm._normalize_tick(_SYM, prepared)
+
+    assert out is not None
+    assert out["volume"] == 65.0
+    assert out["volume_delta"] == 65.0
+    assert out["effective_volume_delta"] == 65.0
+    assert out.get("volume_cumulative") != 28_574_260.0
+
+
+def test_public_rest_ingress_publishes_incremental_delta() -> None:
+    """REST ingress must preserve its derived delta through queue and storage."""
+    mdm = _mdm()
+    mdm._is_duplicate = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+
+    def process_immediately(tick: dict) -> None:
+        mdm._process_queued_tick(tick)
+
+    mdm._enqueue_tick_threadsafe = process_immediately  # type: ignore[method-assign]
+
+    mdm.ingest_rest_quote(
+        _SYM,
+        {
+            "last_price": 45.0,
+            "volume": 28_574_260,
+            "instrument_token": 1,
+            "timestamp": datetime(2026, 1, 1, 9, 15, 1, tzinfo=timezone.utc),
+        },
+    )
+    first = mdm.get_latest_tick(_SYM)
+
+    mdm.ingest_rest_quote(
+        _SYM,
+        {
+            "last_price": 45.2,
+            "volume": 28_574_325,
+            "instrument_token": 1,
+            "timestamp": datetime(2026, 1, 1, 9, 15, 2, tzinfo=timezone.utc),
+        },
+    )
+    second = mdm.get_latest_tick(_SYM)
+
+    assert first is not None
+    assert first["volume_delta"] == 0.0
+    assert second is not None
+    assert second["volume"] == 65.0
+    assert second["volume_delta"] == 65.0
+    assert second["volume_cumulative"] == 28_574_325.0
+
+
 def _rest(mdm: MarketDataManager, cumulative: int) -> dict:
     """Drive the real REST ingress -> normalize path."""
     raw = mdm._prepare_rest_tick(
