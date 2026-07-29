@@ -952,6 +952,7 @@ class MarketDataManager:
             else:
                 normalized["source"] = source or "rest_poll"
                 normalized["timestamp_source"] = "rest_poll"
+                normalized["_volume_delta_normalized"] = True
                 self._candle_metrics["fallback_quote_tick_total"] += 1
                 self._enqueue_tick_threadsafe(dict(normalized))
         except Exception as exc:  # noqa: BLE001
@@ -8451,7 +8452,9 @@ class MarketDataManager:
                 )
             if raw is None:
                 return
-            volume_delta_normalized = False
+            volume_delta_normalized = bool(
+                raw.pop("_volume_delta_normalized", False)
+            )
             enqueued_mono = raw.get("_enqueued_monotonic")
             if isinstance(enqueued_mono, (int, float)):
                 self._event_loop_lag_seconds = max(
@@ -9255,6 +9258,7 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
+        tick.pop("_volume_delta_normalized", None)
         accepted_current_generation_tick = False
         if source == "ws":
             now_mono = time.monotonic()
@@ -13091,7 +13095,9 @@ class MarketDataManager:
         # `volume_cumulative` alone is NOT sufficient: that key is diagnostic
         # only and the normalizer never consumes it, so the baseline would
         # never advance and every REST tick would publish delta 0.
-        explicit_delta = self._coerce_float(tick, "volume_delta")
+        explicit_delta = self._coerce_float(
+            tick, "volume_delta", "effective_volume_delta"
+        )
         has_cumulative = any(
             tick.get(key) is not None
             for key in (
@@ -13105,6 +13111,7 @@ class MarketDataManager:
         if explicit_delta is not None:
             # A genuine interval delta is preserved verbatim, never relabelled.
             normalized["volume_delta"] = float(explicit_delta)
+            normalized["effective_volume_delta"] = float(explicit_delta)
             normalized["volume"] = float(explicit_delta)
             cumulative_hint = self._coerce_float(
                 tick, "volume_cumulative", "volume_traded_today"
