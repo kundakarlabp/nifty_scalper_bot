@@ -1,12 +1,13 @@
-# one-shot armed
 name: Strategy stall fix once
 on:
-  push:
+  pull_request:
     branches: [main]
+    types: [reopened]
 permissions:
   contents: write
 jobs:
   patch-test-commit:
+    if: github.head_ref == 'fix/strategy-stall-production'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
