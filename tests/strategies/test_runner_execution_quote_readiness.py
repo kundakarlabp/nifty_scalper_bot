@@ -12,3 +12,12 @@ def test_runner_order_readiness_uses_canonical_execution_quote_readiness() -> No
     body = source[function_start:function_end]
 
     assert "evaluate_execution_quote(" in body
+
+
+def test_runner_uses_canonical_order_quote_age_setting_at_every_stage() -> None:
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'os.getenv("ORDER_MAX_QUOTE_AGE_MS"' not in source
+    assert source.count("app_settings.ORDER_MAX_QUOTE_AGE_MS") == 4

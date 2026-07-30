@@ -69,6 +69,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from nifty_scalper_bot.config import settings as app_settings
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -4004,7 +4005,7 @@ class StrategyRunner:
         ltp = 0.0
         lot_size_resolved = False
         lot_size = 0
-        max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
+        max_quote_age_ms = app_settings.ORDER_MAX_QUOTE_AGE_MS
         snapshot_key_used: str | None = None
         snap = None
         candidate_keys: list[str] = []
@@ -18316,10 +18317,7 @@ class StrategyRunner:
                 )
                 quote_fresh = self._is_option_symbol_tick_fresh(
                     signal.symbol,
-                    max_age_s=float(
-                        os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000"
-                    )
-                    / 1000.0,
+                    max_age_s=app_settings.ORDER_MAX_QUOTE_AGE_MS / 1000.0,
                 )
                 sl_ok = signal.stop_loss is not None and signal.take_profit is not None
                 if selected_or_near and quote_fresh and sl_ok:
@@ -18397,10 +18395,7 @@ class StrategyRunner:
                     )
                     tick_age_ms = resolve_tick_age_ms(lone)
                     tick_age_s = None if tick_age_ms is None else tick_age_ms / 1000.0
-                    max_quote_age_s = (
-                        float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
-                        / 1000.0
-                    )
+                    max_quote_age_s = app_settings.ORDER_MAX_QUOTE_AGE_MS / 1000.0
                     is_fresh = bool(
                         tick_age_s is not None and tick_age_s <= max_quote_age_s
                     )
@@ -19674,9 +19669,7 @@ class StrategyRunner:
                 },
             )
 
-            max_quote_age_ms = int(
-                os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000"
-            )
+            max_quote_age_ms = app_settings.ORDER_MAX_QUOTE_AGE_MS
             max_spread_pct = float(
                 os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0"))
                 or "10.0"
