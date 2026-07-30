@@ -20034,13 +20034,34 @@ class StrategyRunner:
                         "reason": "no_order_submitted",
                     },
                 )
+                # Preserve the causal fields. This warning previously carried
+                # only the symbol, so a rejection could not be attributed to a
+                # safety gate, local validation, margin/sizing or an actual
+                # broker failure -- and could not be correlated with the
+                # matching RUNNER_ORDER_MANAGER_REJECTED record. All of
+                # submit_reason, submit_details, broker_attempted and trace_id
+                # are already in scope here; they were simply discarded.
+                # broker_attempted is the key discriminator: False means the
+                # order never reached the broker.
+                _reject_details = dict(submit_details or {})
                 log_throttled(
                     self._logger,
-                    f"runner_order_rejected_{base_symbol}",
-                    "ORDER_REJECTED by order_manager",
+                    f"runner_order_rejected_{base_symbol}_{submit_reason}",
+                    "ORDER_REJECTED by order_manager symbol=%s reason=%s "
+                    "broker_attempted=%s trace_id=%s"
+                    % (base_symbol, submit_reason, broker_attempted, trace_id),
                     interval_sec=300.0,
                     level=logging.WARNING,
-                    extra={"event": "ORDER_REJECTED", "symbol": base_symbol},
+                    extra={
+                        "event": "ORDER_REJECTED",
+                        "symbol": base_symbol,
+                        "order_symbol": order_symbol,
+                        "reason": submit_reason,
+                        "broker_attempted": broker_attempted,
+                        "trace_id": trace_id,
+                        "signal_id": getattr(signal, "signal_id", None),
+                        "details": _reject_details,
+                    },
                 )
                 self._reset_execution_state(base_symbol)
                 self._record_trade_decision_snapshot(
