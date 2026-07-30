@@ -1,11 +1,9 @@
 """Regression tests: stale SL/TP bracket re-anchored to live protected price.
 
 Strategy SL/TP are computed off the option premium at signal time. When the
-premium moves before submission, the precomputed band can land on the wrong
-side of the live protected price, which previously rejected the order with
-``protected_price_invalidates_bracket`` (a lost but valid entry). The order
-manager now re-anchors an *invalid* band to the live price, preserving the
-plan's intended SL/TP distances, while leaving valid brackets untouched.
+premium moves before submission, distance-derived brackets must move with the
+protected price to preserve risk and reward. Absolute technical invalidations
+must remain fixed and fail closed if repricing makes their geometry invalid.
 """
 
 from __future__ import annotations
@@ -15,9 +13,18 @@ import types
 from typing import Any
 
 from nifty_scalper_bot.execution.order_manager import OrderManager, TradePlan
+from nifty_scalper_bot.strategies.runner import StrategyRunner
+from nifty_scalper_bot.strategies.signal_generator import Signal
 
 
-def _plan(side: str, entry: float, sl: float, tp: float) -> TradePlan:
+def _plan(
+    side: str,
+    entry: float,
+    sl: float,
+    tp: float,
+    *,
+    anchor_mode: str = "distance",
+) -> TradePlan:
     return TradePlan(
         symbol="NFO:NIFTY2662324050CE",
         side=side,  # type: ignore[arg-type]
@@ -25,6 +32,7 @@ def _plan(side: str, entry: float, sl: float, tp: float) -> TradePlan:
         entry_price=entry,
         stop_loss=sl,
         take_profit=tp,
+        bracket_anchor_mode=anchor_mode,  # type: ignore[arg-type]
     )
 
 
@@ -59,9 +67,24 @@ async def test_sell_stale_band_reanchored() -> None:
     assert out.take_profit < 90.00 < out.stop_loss
 
 
-async def test_valid_bracket_passes_through_unchanged() -> None:
+async def test_distance_bracket_reanchors_even_while_old_levels_remain_valid() -> None:
     plan = _plan("BUY", entry=130.0, sl=125.0, tp=140.0)
     out = _reanchor(plan, 131.0)  # 125 < 131 < 140 already valid
+
+    assert out.stop_loss == 126.0
+    assert out.take_profit == 141.0
+
+
+async def test_absolute_invalidation_passes_through_unchanged() -> None:
+    plan = _plan(
+        "BUY",
+        entry=130.0,
+        sl=125.0,
+        tp=140.0,
+        anchor_mode="absolute_level",
+    )
+    out = _reanchor(plan, 131.0)
+
     assert out.stop_loss == 125.0
     assert out.take_profit == 140.0
     assert out is plan  # untouched
@@ -78,6 +101,35 @@ async def test_missing_levels_untouched() -> None:
     )
     out = _reanchor(plan, 138.45)
     assert out is plan
+
+
+def test_materialized_explicit_premium_stop_is_marked_absolute() -> None:
+    runner = types.SimpleNamespace(
+        _logger=logging.getLogger("materialize-test"),
+        _validate_long_option_geometry=lambda **kwargs: kwargs["signal"],
+        _anchor_sl_tp_to_execution=lambda **kwargs: kwargs["signal"],
+    )
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY2662324050CE",
+        quantity=65,
+        confidence=0.8,
+        reason="technical_invalidation",
+        stop_loss=97.5,
+        take_profit=105.0,
+        metadata={"setup_invalidation_premium": 97.5},
+    )
+
+    out = StrategyRunner._materialize_option_trade_plan(
+        runner,
+        signal,
+        execution_price=100.0,
+        atr=2.0,
+        entry_side="BUY",
+    )
+
+    assert out.metadata["option_trade_plan_source"] == "explicit_premium_stop"
+    assert out.metadata["bracket_anchor_mode"] == "absolute_level"
 
 
 async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
@@ -97,13 +149,17 @@ async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
     def _fake_managed(**kwargs: Any) -> Any:
         captured.update(kwargs)
         return types.SimpleNamespace(
-            accepted=True, order_id="ORD-1", reason="accepted",
-            details={}, broker_attempted=True,
+            accepted=True,
+            order_id="ORD-1",
+            reason="accepted",
+            details={},
+            broker_attempted=True,
         )
 
     monkeypatch.setattr(mgr, "is_kill_switch_active", lambda: False)
     monkeypatch.setattr(
-        mgr, "_validate_trade_plan",
+        mgr,
+        "_validate_trade_plan",
         lambda plan: OrderPreflightResult(True, "ok", {}),
     )
     monkeypatch.setattr(mgr, "_protected_limit_price", lambda plan: 119.00)
