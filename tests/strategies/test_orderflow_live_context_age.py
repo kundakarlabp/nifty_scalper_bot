@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (
-    _can_upgrade_direction_context_block,
+from nifty_scalper_bot.strategies.elite_strategies import (
+    order_flow_live_context_patch as live_context,
 )
+from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
 
 
 def _metadata(**overrides: object) -> dict[str, object]:
@@ -32,7 +33,15 @@ def test_live_context_upgrade_accepts_canonical_quote_age_seconds(
         "futures_fresh": True,
     }
 
-    assert _can_upgrade_direction_context_block(
+    assert live_context._can_upgrade_direction_context_block(
         _metadata(quote_age_s=0.10),
         indicators,
+    )
+
+
+def test_orderflow_evaluation_is_not_replaced_at_package_import() -> None:
+    assert OrderFlowStrategy._evaluate_signal.__module__.endswith(".order_flow")
+    assert not hasattr(
+        OrderFlowStrategy,
+        "_live_direction_context_proof_patch_installed",
     )
