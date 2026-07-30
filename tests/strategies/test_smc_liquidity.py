@@ -192,7 +192,7 @@ def test_bullish_swing_breach_and_reclaim_is_a_valid_sweep(monkeypatch):
     assert signal.metadata["trade_side"] == "CE"
 
 
-def test_bearish_swing_breach_and_rejection_is_a_valid_sweep(monkeypatch):
+def test_bearish_option_premium_sweep_is_rejected_before_buy(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
     indicators = _ready_smc_indicators(
@@ -206,11 +206,31 @@ def test_bearish_swing_breach_and_rejection_is_a_valid_sweep(monkeypatch):
         underlying_direction_bias="PE",
     )
 
+    assert strategy._evaluate_signal("NFO:NIFTY26JUN25000PE", indicators, 100.0) is None
+    assert strategy.last_no_vote_reason == "premium_not_reversing_up"
+
+
+def test_bearish_underlying_sweep_can_still_select_pe(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    indicators = _ready_smc_indicators(
+        high=102.5,
+        low=100.0,
+        open=101.5,
+        close=100.5,
+        prior_swing_low=99.0,
+        prior_swing_high=102.0,
+        direction_bias="PE",
+        underlying_direction_bias="PE",
+        source_symbol="NSE:NIFTY 50",
+    )
+
     signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000PE", indicators, 100.0)
 
     assert signal is not None
     assert signal.signal == "BUY"
     assert signal.metadata["trade_side"] == "PE"
+    assert signal.metadata["source_domain"] == "underlying_price"
 
 
 def test_explicit_liquidity_sweep_confirmation_remains_supported(monkeypatch):
