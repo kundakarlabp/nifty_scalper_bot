@@ -1321,8 +1321,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._acquire_bucket(self._GENERAL_BUCKET)
         response = self._ensure_json(self._make_request("GET", f"/orders/{order_id}"))
         orders = cast(list[dict], response.get("data", []))
-        for order in orders:
-            if order.get("order_id") == order_id:
+        for order in reversed(orders):
+            if str(order.get("order_id")) == str(order_id):
                 return order
         return {}
 

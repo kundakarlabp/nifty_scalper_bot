@@ -609,6 +609,9 @@ def test_session_pnl_baseline_survives_restart_and_resets_by_ist_day(tmp_path) -
     assert restarted.pnl_reconciliation_snapshot()[
         "session_opening_realized_baseline"
     ] == pytest.approx(-1000.0)
+    restarted._local_realized_pnl = -4000.0
+    with restarted._lock:
+        restarted._refresh_realized_pnl_locked()
 
     new_day = restarted.establish_pnl_session_baseline(
         -1200.0,
@@ -618,6 +621,41 @@ def test_session_pnl_baseline_survives_restart_and_resets_by_ist_day(tmp_path) -
     assert restarted.pnl_reconciliation_snapshot()[
         "session_opening_realized_baseline"
     ] == pytest.approx(-1200.0)
+    assert restarted.pnl_reconciliation_snapshot()[
+        "local_confirmed_realized"
+    ] == pytest.approx(0.0)
+    assert restarted.get_realized_pnl() == pytest.approx(0.0)
+
+
+def test_manual_daily_pnl_reset_clears_local_ledger_and_preserves_zero_baseline(
+    tmp_path,
+) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager._broker_realized_pnl = -1000.0
+    manager._local_realized_pnl = -4000.0
+    with manager._lock:
+        manager._refresh_realized_pnl_locked()
+
+    manager.reset_daily_pnl()
+
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert snapshot["local_confirmed_realized"] == pytest.approx(0.0)
+    assert snapshot["broker_session_realized"] == pytest.approx(0.0)
+    assert manager.get_realized_pnl() == pytest.approx(0.0)
+
+
+def test_late_same_day_broker_baseline_preserves_local_fills(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    trading_date = "2026-07-03"
+    manager._pnl_trading_date = trading_date
+    manager._local_realized_pnl = -50.0
+
+    manager.establish_pnl_session_baseline(
+        -1000.0,
+        trading_date=trading_date,
+    )
+
+    assert manager.get_realized_pnl() == pytest.approx(-50.0)
 
 
 def test_exit_order_id_cannot_register_entry_bracket(tmp_path, monkeypatch) -> None:
@@ -1266,6 +1304,51 @@ def test_live_entry_registers_pending_order_with_position_manager(
         assert bracket is not None and bracket.entry_confirmed is False
     finally:
         bm._running = False
+
+
+def test_system_exit_does_not_poll_for_fill_on_protection_path(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
+
+    class _Broker:
+        def place_order(self, **_kwargs):
+            return {"order_id": "SYSTEM-EXIT-1"}
+
+        def get_orders(self):
+            return []
+
+        def get_positions(self):
+            return []
+
+    class _Positions:
+        def add_pending_order(self, **_kwargs):
+            return None
+
+        def get_position(self, _symbol):
+            return SimpleNamespace(quantity=65, side="LONG")
+
+    manager = OrderManager(_Broker(), _Positions(), object())
+    monkeypatch.setattr(
+        manager,
+        "_confirm_fill_fast",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("system exit must not synchronously poll")
+        ),
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671424100CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        intent="EXIT",
+        tag="stop_exit",
+        check_risk=False,
+    )
+
+    assert order_id == "SYSTEM-EXIT-1"
 
 
 def test_non_incremental_fill_warning_dedupes_per_snapshot(tmp_path) -> None:

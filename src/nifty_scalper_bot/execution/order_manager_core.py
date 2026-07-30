@@ -3611,12 +3611,14 @@ class OrderManager:
                             normalized_symbol,
                         )
 
-                    # ✅ WORLD-CLASS: Fast fill confirmation & bracket activation
-                    # This replaces the old 0.5s sleep
-                    # BUG 5 FIX: 2000ms poll added 0-2s latency to every entry on the
-                    # broker submission thread. 300ms catches most sub-200ms MARKET fills
-                    # during market hours. Pre-activation below handles the rest.
-                    fill_confirmed = self._confirm_fill_fast(order_id, timeout_ms=300)
+                    # Keep the short entry confirmation used to activate protection.
+                    # System exits are confirmed by the order monitor/reconciliation;
+                    # polling here would block the synchronous protection callback.
+                    fill_confirmed = (
+                        False
+                        if is_system_exit
+                        else self._confirm_fill_fast(order_id, timeout_ms=300)
+                    )
                     if fill_confirmed and self._bracket_manager:
                         bracket = self._bracket_manager.get_bracket(order_id)
                         if bracket:

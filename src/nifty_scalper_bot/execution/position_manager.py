@@ -1881,6 +1881,11 @@ class PositionManager:
                 self._broker_realized_pnl = value
                 self._refresh_realized_pnl_locked()
                 return False
+            if self._pnl_trading_date != session_date:
+                self._local_realized_pnl = 0.0
+                self._local_provisional_realized_pnl = 0.0
+                for position in self._positions.values():
+                    position.realized_pnl = 0.0
             self._session_opening_realized_baseline = value
             self._pnl_trading_date = session_date
             self._pnl_account_fingerprint = account_fingerprint
@@ -3394,9 +3399,14 @@ class PositionManager:
     def reset_daily_pnl(self) -> None:
         """Reset realized profit and loss at the start of a new session."""
 
-        self._daily_realized_pnl = 0.0
-        for position in self._positions.values():
-            position.realized_pnl = 0.0
+        with self._lock:
+            self._local_realized_pnl = 0.0
+            self._local_provisional_realized_pnl = 0.0
+            self._pnl_trading_date = self._trading_date_ist()
+            self._session_opening_realized_baseline = self._broker_realized_pnl
+            for position in self._positions.values():
+                position.realized_pnl = 0.0
+            self._refresh_realized_pnl_locked()
         self.save_state()
 
     # Internal helpers -------------------------------------------------
