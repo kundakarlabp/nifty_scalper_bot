@@ -289,3 +289,29 @@ def test_malformed_and_future_rows_still_rejected_during_reconcilable_import() -
             pd.DataFrame([_row(0, close=100.5), _row(0, close=100.9)]),
             source="historical",
         )
+
+
+def test_historical_import_does_not_finalize_current_exchange_minute() -> None:
+    engine = CandleEngine(symbol="NFO:T")
+    current_minute = pd.Timestamp.now(tz=IST).floor("min")
+    previous_minute = current_minute - pd.Timedelta(minutes=1)
+    rows = pd.DataFrame(
+        [
+            {**_row(0), "timestamp": previous_minute},
+            {**_row(1), "timestamp": current_minute},
+        ]
+    )
+
+    engine.import_history(rows, source="historical")
+
+    assert engine.latest_finalized_minute() == previous_minute
+    result = engine.on_tick(
+        {
+            "symbol": "NFO:T",
+            "timestamp": current_minute + pd.Timedelta(seconds=30),
+            "last_price": 101.0,
+            "volume": 1.0,
+        }
+    )
+    assert result is None
+    assert engine.get_current_candle()["timestamp"] == current_minute

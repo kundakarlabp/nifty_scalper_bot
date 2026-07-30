@@ -32,6 +32,7 @@ def _runner(interval: float = 5.0) -> StrategyRunner:
     r._health_watchdog_running = False
     r._health_watchdog_skipped = 0
     r._health_watchdog_interval_s = interval
+    r._main_loop = None
     return r
 
 
@@ -39,11 +40,18 @@ def test_many_ticks_in_one_interval_produce_one_scan() -> None:
     """AUDIT TDD CASE 2: many ticks must not cause many full scans."""
     r = _runner(interval=60.0)
     calls: list[int] = []
-    r._health_watchdog = lambda: calls.append(1)
+    done = threading.Event()
+
+    def _scan() -> None:
+        calls.append(1)
+        done.set()
+
+    r._health_watchdog = _scan
 
     for _ in range(50):
         r._run_health_watchdog_on_cadence()
 
+    assert done.wait(timeout=2.0)
     assert len(calls) == 1, f"expected one scan per interval, got {len(calls)}"
 
 
@@ -51,12 +59,21 @@ def test_scan_runs_again_after_the_interval_elapses() -> None:
     """Cadence must not become a permanent suppression."""
     r = _runner(interval=0.05)
     calls: list[int] = []
-    r._health_watchdog = lambda: calls.append(1)
+    done = threading.Event()
+
+    def _scan() -> None:
+        calls.append(1)
+        done.set()
+
+    r._health_watchdog = _scan
 
     r._run_health_watchdog_on_cadence()
+    assert done.wait(timeout=2.0)
     time.sleep(0.06)
+    done.clear()
     r._run_health_watchdog_on_cadence()
 
+    assert done.wait(timeout=2.0)
     assert len(calls) == 2
 
 
@@ -74,8 +91,7 @@ def test_overlapping_invocation_is_refused() -> None:
 
     r._health_watchdog = _slow
 
-    t = threading.Thread(target=r._run_health_watchdog_on_cadence)
-    t.start()
+    r._run_health_watchdog_on_cadence()
     assert entered.wait(timeout=2.0)
 
     # A second tick arrives while the first scan is still running.
@@ -83,7 +99,9 @@ def test_overlapping_invocation_is_refused() -> None:
     assert len(calls) == 1, "overlapping scan was not refused"
 
     release.set()
-    t.join(timeout=2.0)
+    deadline = time.time() + 2.0
+    while r._health_watchdog_running and time.time() < deadline:
+        time.sleep(0.01)
 
 
 def test_running_flag_is_cleared_even_when_the_scan_raises() -> None:
@@ -95,16 +113,23 @@ def test_running_flag_is_cleared_even_when_the_scan_raises() -> None:
 
     r._health_watchdog = _boom
 
-    try:
-        r._run_health_watchdog_on_cadence()
-    except RuntimeError:
-        pass
+    r._run_health_watchdog_on_cadence()
+    deadline = time.time() + 2.0
+    while r._health_watchdog_running and time.time() < deadline:
+        time.sleep(0.01)
 
     assert r._health_watchdog_running is False
 
     calls: list[int] = []
-    r._health_watchdog = lambda: calls.append(1)
+    done = threading.Event()
+
+    def _scan() -> None:
+        calls.append(1)
+        done.set()
+
+    r._health_watchdog = _scan
     r._run_health_watchdog_on_cadence()
+    assert done.wait(timeout=2.0)
     assert calls == [1]
 
 
@@ -120,6 +145,9 @@ def test_skipped_tick_count_is_reported_for_slow_scans(caplog) -> None:
     r._health_watchdog = _slow
     with caplog.at_level(logging.WARNING):
         r._run_health_watchdog_on_cadence()
+        deadline = time.time() + 2.0
+        while r._health_watchdog_running and time.time() < deadline:
+            time.sleep(0.01)
 
     recs = [
         rec for rec in caplog.records
@@ -128,6 +156,34 @@ def test_skipped_tick_count_is_reported_for_slow_scans(caplog) -> None:
     assert recs, "slow scan was not reported"
     assert recs[-1].duration_ms >= 100.0
     assert hasattr(recs[-1], "ticks_skipped")
+
+
+def test_slow_scan_does_not_block_tick_caller() -> None:
+    r = _runner(interval=0.0)
+    started = threading.Event()
+    release = threading.Event()
+    caller_thread = threading.get_ident()
+    scan_thread: list[int] = []
+
+    def _slow() -> None:
+        scan_thread.append(threading.get_ident())
+        started.set()
+        release.wait(timeout=2.0)
+
+    r._health_watchdog = _slow
+    started_at = time.perf_counter()
+    r._run_health_watchdog_on_cadence()
+    elapsed = time.perf_counter() - started_at
+
+    try:
+        assert elapsed < 0.1
+        assert started.wait(timeout=2.0)
+        assert scan_thread[0] != caller_thread
+    finally:
+        release.set()
+        deadline = time.time() + 2.0
+        while r._health_watchdog_running and time.time() < deadline:
+            time.sleep(0.01)
 
 
 def test_tick_path_calls_the_cadence_wrapper_not_the_scan_directly() -> None:

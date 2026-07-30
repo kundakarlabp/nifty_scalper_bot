@@ -464,6 +464,9 @@ class MarketDataManager:
         self._volume_baseline_by_identity: dict[
             tuple[str, int | None, int, int], dict[str, Any]
         ] = {}
+        self._volume_rebaseline_candidate_by_identity: dict[
+            tuple[str, int | None, int, int], dict[str, Any]
+        ] = {}
         self._volume_delta_clamp_stats: dict[str, dict[str, float]] = {}
         self._last_volume_delta_clamp_summary_ts: dict[str, float] = {}
         self._last_tick_snapshot: dict[str, dict[str, Any]] = {}
@@ -8337,6 +8340,7 @@ class MarketDataManager:
                 "timestamp": incoming_ts,
                 "sequence": incoming_sequence,
             }
+            self._volume_rebaseline_candidate_by_identity.pop(identity, None)
         elif (
             incoming_sequence is not None
             and previous_sequence is not None
@@ -8373,6 +8377,7 @@ class MarketDataManager:
                     "timestamp": incoming_ts,
                     "sequence": incoming_sequence,
                 }
+                self._volume_rebaseline_candidate_by_identity.pop(identity, None)
             trusted = False
             transition["rollback_amount"] = rollback_abs
         else:
@@ -8387,6 +8392,59 @@ class MarketDataManager:
                 trusted = False
                 accepted = False
                 effective_delta = 0.0
+                rebaseline_candidates = getattr(
+                    self, "_volume_rebaseline_candidate_by_identity", None
+                )
+                if rebaseline_candidates is None:
+                    rebaseline_candidates = {}
+                    self._volume_rebaseline_candidate_by_identity = (
+                        rebaseline_candidates
+                    )
+                candidate = rebaseline_candidates.get(identity)
+                candidate_cumulative = (
+                    None
+                    if candidate is None
+                    else float(candidate.get("cumulative", 0.0))
+                )
+                candidate_ts = None if candidate is None else candidate.get("timestamp")
+                candidate_sequence = (
+                    None if candidate is None else candidate.get("sequence")
+                )
+                timestamp_confirms = (
+                    incoming_ts is None
+                    or candidate_ts is None
+                    or incoming_ts > candidate_ts
+                )
+                sequence_confirms = (
+                    incoming_sequence is None
+                    or candidate_sequence is None
+                    or int(incoming_sequence) > int(candidate_sequence)
+                )
+                candidate_delta = (
+                    None
+                    if candidate_cumulative is None
+                    else cumulative - candidate_cumulative
+                )
+                if (
+                    candidate_delta is not None
+                    and 0.0 <= candidate_delta <= max_delta
+                    and timestamp_confirms
+                    and sequence_confirms
+                ):
+                    self._volume_baseline_by_identity[identity] = {
+                        "cumulative": cumulative,
+                        "timestamp": incoming_ts,
+                        "sequence": incoming_sequence,
+                    }
+                    rebaseline_candidates.pop(identity, None)
+                    state = "suspicious_jump_rebased"
+                    reason = "monotonic_confirmation_without_jump_credit"
+                else:
+                    rebaseline_candidates[identity] = {
+                        "cumulative": cumulative,
+                        "timestamp": incoming_ts,
+                        "sequence": incoming_sequence,
+                    }
                 stats = self._volume_delta_clamp_stats.setdefault(
                     canonical, {"interval_count": 0.0, "interval_max_delta": 0.0}
                 )
@@ -8417,7 +8475,9 @@ class MarketDataManager:
                     )
                     stats["interval_count"] = 0.0
                     stats["interval_max_delta"] = 0.0
-                # Do not update baseline: the suspicious cumulative value is quarantined.
+                # The first suspicious value is quarantined. A later monotonic
+                # observation may establish a new baseline, but neither tick
+                # contributes the jump to candle volume.
             else:
                 effective_delta = max(0.0, raw_delta)
                 accepted = True
@@ -8432,6 +8492,9 @@ class MarketDataManager:
                     "timestamp": incoming_ts,
                     "sequence": incoming_sequence,
                 }
+                getattr(
+                    self, "_volume_rebaseline_candidate_by_identity", {}
+                ).pop(identity, None)
         self._last_cumulative_volume_by_symbol[canonical] = float(
             self._volume_baseline_by_identity.get(identity, {"cumulative": cumulative})[
                 "cumulative"

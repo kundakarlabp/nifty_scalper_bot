@@ -915,7 +915,14 @@ class OrderManager:
         self._execution_policy: ExecutionPolicy | None = None
         self._options_policy = OptionsExecutionPolicy()
         self._risk_manager: RiskManager | None = None
-        self._signal_arbitrator = SignalArbitrator()
+        # Runner/risk owns the trading re-entry cooldown.  OrderManager keeps
+        # only the short submission/concurrency reservation; a second default
+        # 300-second cooldown here previously blocked otherwise eligible NIFTY
+        # entries after a position closed.
+        self._signal_arbitrator = SignalArbitrator(
+            cooldown_seconds=3.0,
+            reentry_cooldown_seconds=3.0,
+        )
         self._client_order_index: dict[str, str] = {}
         self._last_skip_reason: str | None = None
         self._margin_block_events: deque[float] = deque()

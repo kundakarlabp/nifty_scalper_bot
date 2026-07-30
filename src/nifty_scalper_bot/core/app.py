@@ -9892,11 +9892,30 @@ def _commit_active_dynamic_basket(
         candidates.sort(key=lambda item: (item[0], item[1]))
         return candidates[0][1]
 
-    if not (selected_ce and selected_ce.endswith("CE") and selected_ce in active_set):
+    def _selected_matches_atm(symbol: str | None, side: str) -> bool:
+        if not (symbol and symbol.endswith(side) and symbol in active_set):
+            return False
+        if atm_strike is None:
+            return True
+        from nifty_scalper_bot.core.active_basket import extract_symbol_strike
+
+        selected_strike = extract_symbol_strike(symbol)
+        return (
+            selected_strike is not None
+            and float(selected_strike) == float(atm_strike)
+        )
+
+    if not _selected_matches_atm(selected_ce, "CE"):
         repaired_ce = _nearest_for_side("CE")
+        if (
+            repaired_ce
+            and atm_strike is not None
+            and not _selected_matches_atm(repaired_ce, "CE")
+        ):
+            repaired_ce = None
         if selected_ce and repaired_ce and selected_ce != repaired_ce:
             LOGGER.warning(
-                "BASKET_SELECTED_PAIR_REPAIRED side=CE previous_selected=%s repaired_selected=%s atm_strike=%s reason=selected_pair_not_in_option_symbols",
+                "BASKET_SELECTED_PAIR_REPAIRED side=CE previous_selected=%s repaired_selected=%s atm_strike=%s reason=selected_pair_not_atm",
                 selected_ce,
                 repaired_ce,
                 atm_strike,
@@ -9906,15 +9925,21 @@ def _commit_active_dynamic_basket(
                     "previous_selected": selected_ce,
                     "repaired_selected": repaired_ce,
                     "atm_strike": atm_strike,
-                    "reason": "selected_pair_not_in_option_symbols",
+                    "reason": "selected_pair_not_atm",
                 },
             )
         selected_ce = repaired_ce
-    if not (selected_pe and selected_pe.endswith("PE") and selected_pe in active_set):
+    if not _selected_matches_atm(selected_pe, "PE"):
         repaired_pe = _nearest_for_side("PE")
+        if (
+            repaired_pe
+            and atm_strike is not None
+            and not _selected_matches_atm(repaired_pe, "PE")
+        ):
+            repaired_pe = None
         if selected_pe and repaired_pe and selected_pe != repaired_pe:
             LOGGER.warning(
-                "BASKET_SELECTED_PAIR_REPAIRED side=PE previous_selected=%s repaired_selected=%s atm_strike=%s reason=selected_pair_not_in_option_symbols",
+                "BASKET_SELECTED_PAIR_REPAIRED side=PE previous_selected=%s repaired_selected=%s atm_strike=%s reason=selected_pair_not_atm",
                 selected_pe,
                 repaired_pe,
                 atm_strike,
@@ -9924,15 +9949,25 @@ def _commit_active_dynamic_basket(
                     "previous_selected": selected_pe,
                     "repaired_selected": repaired_pe,
                     "atm_strike": atm_strike,
-                    "reason": "selected_pair_not_in_option_symbols",
+                    "reason": "selected_pair_not_atm",
                 },
             )
         selected_pe = repaired_pe
     old_ce = getattr(ctx, "selected_ce", None)
     old_pe = getattr(ctx, "selected_pe", None)
-    if not selected_ce and old_ce in active_set and str(old_ce).endswith("CE"):
+    if (
+        atm_strike is None
+        and not selected_ce
+        and old_ce in active_set
+        and str(old_ce).endswith("CE")
+    ):
         selected_ce = old_ce
-    if not selected_pe and old_pe in active_set and str(old_pe).endswith("PE"):
+    if (
+        atm_strike is None
+        and not selected_pe
+        and old_pe in active_set
+        and str(old_pe).endswith("PE")
+    ):
         selected_pe = old_pe
     if current_options and (not selected_ce or not selected_pe):
         LOGGER.warning(
@@ -12809,22 +12844,24 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                         # --- Objective 7: Auto ATM Resubscription via InstrumentManager ---
                         _im = ctx.instrument_manager
+                        fresh_dynamic_basket: dict[str, object] | None = None
                         if spot and spot > 0 and _im and _im.is_loaded():
-                            target_tokens = _im.select_tokens_for_universe(
-                                base="NIFTY",
-                                spot_price=float(spot),
-                                strikes_around_atm=3,
-                                strike_step=ctx.settings.option_universe.strike_step,
+                            fresh_dynamic_basket = asdict(
+                                _im.get_active_nifty_contracts(
+                                    float(spot),
+                                    strikes_around_atm=3,
+                                    strike_step=ctx.settings.option_universe.strike_step,
+                                    include_future=True,
+                                )
                             )
-                            latest_symbols = set()
-                            for t in target_tokens:
-                                s = _im.get_symbol(t)
-                                if s:
-                                    qualified = (
-                                        f"NFO:{s}" if not s.startswith("NFO:") else s
-                                    )
-                                    if qualified.startswith("NFO:NIFTY"):
-                                        latest_symbols.add(qualified)
+                            latest_symbols = {
+                                str(symbol)
+                                for symbol in fresh_dynamic_basket.get(
+                                    "option_symbols", ()
+                                )
+                                if str(symbol).startswith("NFO:NIFTY")
+                                and str(symbol).endswith(("CE", "PE"))
+                            }
                         else:
                             latest_symbols = set(
                                 ctx.option_universe.get_current_universe()
@@ -13083,31 +13120,31 @@ async def startup_sequence(ctx: BotContext) -> None:
                         # where each option sits in the live lifecycle.
                         if add_symbols or drop_symbols:
                             try:
+                                commit_basket = fresh_dynamic_basket or cast(
+                                    dict[str, object],
+                                    getattr(ctx, "active_trading_universe", {}) or {},
+                                )
                                 basket_symbols = [
                                     str(sym)
                                     for sym in dict.fromkeys(
-                                        ["NSE:NIFTY", *sorted(latest_symbols)]
+                                        commit_basket.get("all_symbols")
+                                        or [
+                                            "NSE:NIFTY",
+                                            *sorted(latest_symbols),
+                                        ]
                                     )
                                 ]
+                                commit_atm_strike = cast(
+                                    int | float | str | None,
+                                    commit_basket.get("atm_strike"),
+                                )
                                 committed_ce, committed_pe = (
                                     _commit_active_dynamic_basket(
                                         ctx,
-                                        basket=cast(
-                                            Mapping[str, object],
-                                            getattr(ctx, "active_trading_universe", {})
-                                            or {},
-                                        ),
+                                        basket=commit_basket,
                                         option_symbols=sorted(latest_symbols),
                                         symbols=basket_symbols,
-                                        atm_strike=cast(
-                                            int | float | str | None,
-                                            (
-                                                getattr(
-                                                    ctx, "active_trading_universe", {}
-                                                )
-                                                or {}
-                                            ).get("atm_strike"),
-                                        ),
+                                        atm_strike=commit_atm_strike,
                                     )
                                 )
                                 for _sym in add_symbols:
