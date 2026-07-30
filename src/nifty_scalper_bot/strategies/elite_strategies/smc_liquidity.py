@@ -203,10 +203,33 @@ class SMCStrategy(EliteStrategy):
 
             body = abs(close - open_price)
             displacement_score = body / atr
-            prior_swing_low = float(indicators.get('prior_swing_low') or low)
-            prior_swing_high = float(indicators.get('prior_swing_high') or high)
-            bullish_sweep = bool(indicators.get('liquidity_sweep_confirmed')) or (low <= prior_swing_low and close > open_price)
-            bearish_sweep = bool(indicators.get('liquidity_sweep_confirmed_bear')) or (high >= prior_swing_high and close < open_price)
+            raw_swing_low = indicators.get("prior_swing_low")
+            if raw_swing_low is None:
+                raw_swing_low = indicators.get("swing_low")
+            raw_swing_high = indicators.get("prior_swing_high")
+            if raw_swing_high is None:
+                raw_swing_high = indicators.get("swing_high")
+
+            prior_swing_low = (
+                float(raw_swing_low) if raw_swing_low is not None else None
+            )
+            prior_swing_high = (
+                float(raw_swing_high) if raw_swing_high is not None else None
+            )
+            bullish_sweep = bool(
+                indicators.get("liquidity_sweep_confirmed")
+            ) or (
+                prior_swing_low is not None
+                and low < prior_swing_low
+                and close > prior_swing_low
+            )
+            bearish_sweep = bool(
+                indicators.get("liquidity_sweep_confirmed_bear")
+            ) or (
+                prior_swing_high is not None
+                and high > prior_swing_high
+                and close < prior_swing_high
+            )
             if not bullish_sweep and not bearish_sweep:
                 self._no_vote('no_liquidity_sweep')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
