@@ -86,6 +86,40 @@ def test_managed_order_uses_last_decision_for_broker_attempted_none() -> None:
     assert out.broker_attempted is True
 
 
+def test_trade_plan_provenance_reaches_order_and_bracket_registration() -> None:
+    m = _manager_stub()
+    m._validate_trade_plan = lambda p: OrderPreflightResult(True)
+    m._protected_limit_price = lambda p: 100.0
+    m._lot_size_for_symbol = lambda _s: 75
+    captured = {}
+
+    def _place_order(**kwargs):
+        captured.update(kwargs)
+        return "OID1"
+
+    m.place_order = _place_order
+    plan = TradePlan(
+        symbol="NFO:NIFTY",
+        side="BUY",
+        quantity=75,
+        entry_price=100.0,
+        stop_loss=90.0,
+        take_profit=110.0,
+        strategy_name="VWAPPro",
+        trade_provenance={
+            "strategy_name": "VWAPPro",
+            "setup_name": "continuation_pullback",
+            "regime": "TREND",
+        },
+    )
+
+    out = OrderManager.submit_trade_plan_result(m, plan)
+
+    assert out.accepted is True
+    assert captured["strategy_name"] == "VWAPPro"
+    assert captured["trade_provenance"] == plan.trade_provenance
+
+
 def test_stale_last_order_decision_does_not_leak() -> None:
     m = _manager_stub()
     m._lot_size_for_symbol = lambda s: 75

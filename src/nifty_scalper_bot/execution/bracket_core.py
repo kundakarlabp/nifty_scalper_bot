@@ -271,6 +271,7 @@ class BracketState:
 
     # Metadata
     tag: str | None = None
+    trade_provenance: Dict[str, Any] = field(default_factory=dict)
     entry_order_intent: str = "ENTRY"
     trade_lifecycle_id: str | None = None
     linked_exit_order_ids: list[str] = field(default_factory=list)
@@ -404,6 +405,7 @@ class BracketState:
             "lowest_ltp": self.lowest_ltp,
             "last_ltp": self.last_ltp,
             "tag": self.tag,
+            "trade_provenance": dict(self.trade_provenance),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "exit_executed": self.exit_executed,
@@ -526,7 +528,7 @@ class BracketManager:
         self._orphan_retry_last_attempt: Dict[str, float] = {}
         self._exit_executor: Callable[[str, int], Any] | None = None
         self._trailing_controller_factory: Callable[[BracketState], Any] | None = None
-        self._on_exit_complete_hook: Callable[[str], None] | None = None
+        self._on_exit_complete_hook: Callable[..., None] | None = None
         self._on_position_open_priority_hook: Callable[[str], None] | None = None
         self._on_position_closed_priority_hook: Callable[[str], None] | None = None
         self._active_bracket_symbols_hook: Callable[[Iterable[str]], None] | None = None
@@ -676,9 +678,44 @@ class BracketManager:
         """Attach an external market-exit executor. Args: executor; Returns: None; Raises: None."""
         self._exit_executor = executor
 
-    def attach_on_exit_complete(self, hook: Callable[[str], None] | None) -> None:
+    def attach_on_exit_complete(self, hook: Callable[..., None] | None) -> None:
         """Attach callback fired with symbol when bracket fully closes. Lets runner clear orchestrator direction lock."""
         self._on_exit_complete_hook = hook
+
+    def attach_trade_provenance(
+        self, order_id: str, provenance: Mapping[str, Any]
+    ) -> bool:
+        """Persist strategy/setup identity on the bracket owned by *order_id*."""
+        with self._lock:
+            bracket = self._brackets.get(str(order_id))
+            if bracket is None:
+                return False
+            bracket.trade_provenance.update(dict(provenance or {}))
+            bracket.updated_at = time.time()
+        self.save_state()
+        return True
+
+    def get_completed_trade_outcome(self, symbol: str) -> dict[str, Any] | None:
+        """Return the latest completed outcome for *symbol*, when available."""
+        normalized = normalize_symbol(symbol)
+        with self._lock:
+            matches = [
+                bracket
+                for bracket in self._brackets.values()
+                if bracket.symbol == normalized
+                and isinstance(
+                    getattr(bracket, "_completed_trade_outcome", None), Mapping
+                )
+            ]
+            if not matches:
+                return None
+            latest = max(
+                matches,
+                key=lambda bracket: float(
+                    getattr(bracket, "closed_at", 0.0) or 0.0
+                ),
+            )
+            return dict(getattr(latest, "_completed_trade_outcome"))
 
     def attach_open_position_priority_hooks(
         self,
@@ -1092,6 +1129,7 @@ class BracketManager:
         activate_immediately: bool = False,
         intent: str | None = None,
         resolved_lot_size: int | None = None,
+        trade_provenance: Mapping[str, Any] | None = None,
     ) -> None:
         """Register a position for virtual bracket monitoring.
 
@@ -1154,6 +1192,7 @@ class BracketManager:
                 existing.remaining_quantity = abs(qty)
                 existing.exit_state = BracketExitLifecycle.OPEN_PENDING_FILL.value
                 existing.exit_pending = False
+                existing.trade_provenance.update(dict(trade_provenance or {}))
                 self.save_state()  # Persist updates
                 self._sync_active_bracket_symbols_to_mdm()
                 return
@@ -1221,6 +1260,7 @@ class BracketManager:
                 ),
                 entry_fill_price=price if activate_immediately else None,
                 tag=tag,
+                trade_provenance=dict(trade_provenance or {}),
                 entry_order_intent=normalized_intent or "ENTRY",
                 trade_lifecycle_id=order_id,
                 trailing_config=t_config,
@@ -4419,6 +4459,7 @@ class BracketManager:
                 payload.get("previous_ltp", payload.get("last_ltp", entry_price)),
             ),
             tag=payload.get("tag"),
+            trade_provenance=dict(payload.get("trade_provenance") or {}),
             created_at=finite_float(
                 "created at", payload.get("created_at", time.time())
             ),

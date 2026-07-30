@@ -1324,13 +1324,50 @@ class StrategyRunner:
 
     def _on_bracket_exit_complete(self, symbol: str, *args: Any, **kwargs: Any) -> None:
         """Clear runner state and release entry guards after a bracket exit."""
-        del args, kwargs
         try:
             if not symbol:
                 return
 
             logger = getattr(self, "_logger", LOGGER)
             logger.info("BRACKET_EXIT_COMPLETE symbol=%s", symbol)
+            outcome = kwargs.get("outcome")
+            if outcome is None and args:
+                outcome = args[0]
+            if outcome is None:
+                getter = getattr(
+                    getattr(self, "_bracket_manager", None),
+                    "get_completed_trade_outcome",
+                    None,
+                )
+                if callable(getter):
+                    outcome = getter(symbol)
+            if isinstance(outcome, Mapping):
+                strategy_name = str(outcome.get("strategy_name") or "").strip()
+                net_pnl = outcome.get("net_pnl")
+                recorder = getattr(
+                    getattr(self, "_strategy_manager", None),
+                    "record_trade_result",
+                    None,
+                )
+                if strategy_name and callable(recorder) and net_pnl is not None:
+                    try:
+                        recorder(
+                            strategy_name,
+                            float(net_pnl),
+                            metadata={
+                                key: value
+                                for key, value in outcome.items()
+                                if key != "strategy_name"
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001 - release must continue
+                        logger.error(
+                            "STRATEGY_TRADE_FEEDBACK_FAILED symbol=%s strategy=%s error=%s",
+                            symbol,
+                            strategy_name,
+                            exc,
+                            exc_info=exc,
+                        )
 
             for attr in (
                 "active_trades",
@@ -19942,6 +19979,24 @@ class StrategyRunner:
                 ),
                 requested_lots=_requested_lots,
                 resolved_lot_size=_resolved_lot_size,
+                trade_provenance={
+                    "strategy_name": strategy_name,
+                    "setup_name": str(
+                        metadata.get("setup_type")
+                        or metadata.get("feature")
+                        or signal.reason
+                        or strategy_name
+                    ),
+                    "regime": str(metadata.get("runtime_regime") or "UNKNOWN"),
+                    "signal_id": signal.deterministic_id,
+                    "trace_id": trace_id,
+                    "strategy_profile_version": getattr(
+                        self, "_build_info", {}
+                    ).get(
+                        "strategy_profile_version", "unknown"
+                    ),
+                    "final_score": metadata.get("final_score"),
+                },
             )
             self._logger.info(
                 "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s",

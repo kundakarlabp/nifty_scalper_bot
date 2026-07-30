@@ -7,9 +7,9 @@ lose functionality when broker fill identity is intentionally absent.
 
 from __future__ import annotations
 
-from contextlib import suppress
 import os
 import time
+from contextlib import suppress
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import bracket_manager as _legacy
@@ -334,6 +334,14 @@ class RuntimeBracketManager(LedgerBracketManager):
                 exc,
             )
 
+        outcome = self._completed_trade_outcome(
+            bracket,
+            ledger_pnl=ledger_pnl,
+            gross_pnl=realized_pnl,
+            exit_price=final_exit_px,
+            ledger_complete=bool(ledger_pnl and ledger_pnl.complete),
+        )
+        setattr(bracket, "_completed_trade_outcome", outcome)
         _legacy.LOGGER.info(
             "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s qty=%s entry=%s exit=%s pnl=%s",
             bracket.bracket_id,
@@ -356,7 +364,9 @@ class RuntimeBracketManager(LedgerBracketManager):
                 "entry": entry_px,
                 "exit": final_exit_px,
                 "pnl": realized_pnl,
+                "net_pnl": outcome["net_pnl"],
                 "ledger_complete": bool(ledger_pnl and ledger_pnl.complete),
+                "completed_trade": outcome,
             },
         )
         self._notify_open_position_priority("close", bracket.symbol)
@@ -367,8 +377,10 @@ class RuntimeBracketManager(LedgerBracketManager):
                     "symbol": bracket.symbol,
                     "quantity": filled_qty,
                     "gross_pnl": realized_pnl,
+                    "net_pnl": outcome["net_pnl"],
                     "ledger_complete": bool(ledger_pnl and ledger_pnl.complete),
                     "close_source": close_source,
+                    "completed_trade": outcome,
                 },
             )
         self._clear_ledger_release(bracket)

@@ -7,12 +7,13 @@ re-arming until fill history and broker-flat state are reconciled.
 
 from __future__ import annotations
 
-from contextlib import suppress
 import json
 import os
-from pathlib import Path
 import sqlite3
 import time
+from contextlib import suppress
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import bracket_manager as _legacy
@@ -25,6 +26,7 @@ from nifty_scalper_bot.execution.fill_ledger import (
     FillLeg,
     FillValidationError,
 )
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
 
 class _LedgerReleaseStore:
@@ -355,6 +357,101 @@ class LedgerBracketManager(CanonicalBracketManager):
             )
         return None
 
+    def _completed_trade_outcome(
+        self,
+        bracket: Any,
+        *,
+        ledger_pnl: Any | None,
+        gross_pnl: float | None,
+        exit_price: float | None,
+        ledger_complete: bool,
+    ) -> dict[str, Any]:
+        """Build the strategy-facing outcome from confirmed bracket economics."""
+        entry_price = (
+            ledger_pnl.entry_vwap
+            if ledger_pnl is not None
+            else getattr(bracket, "entry_fill_price", None)
+            or getattr(bracket, "entry_price", None)
+        )
+        resolved_exit = (
+            ledger_pnl.exit_vwap
+            if ledger_pnl is not None and ledger_pnl.exit_vwap is not None
+            else exit_price
+        )
+        quantity = int(
+            getattr(ledger_pnl, "entry_quantity", 0)
+            or getattr(bracket, "quantity", 0)
+            or 0
+        )
+        executed_orders = 2
+        if self._fill_ledger is not None:
+            with suppress(Exception):
+                executed_orders = max(
+                    2,
+                    len(self._fill_ledger.load_fills(str(bracket.bracket_id))),
+                )
+        costs = None
+        net_pnl = gross_pnl
+        if (
+            gross_pnl is not None
+            and entry_price is not None
+            and resolved_exit is not None
+            and quantity > 0
+        ):
+            costs = estimate_round_trip_cost(
+                entry_price=float(entry_price),
+                exit_price=float(resolved_exit),
+                quantity=quantity,
+                executed_orders=executed_orders,
+            )
+            net_pnl = round(float(gross_pnl) - costs.total, 2)
+
+        side = str(getattr(bracket, "side", "BUY") or "BUY").upper()
+        high = float(
+            getattr(bracket, "highest_ltp", entry_price) or entry_price or 0.0
+        )
+        low = float(
+            getattr(bracket, "lowest_ltp", entry_price) or entry_price or 0.0
+        )
+        entry = float(entry_price or 0.0)
+        if side == "SELL":
+            mfe_points = max(0.0, entry - low)
+            mae_points = max(0.0, high - entry)
+        else:
+            mfe_points = max(0.0, high - entry)
+            mae_points = max(0.0, entry - low)
+        closed_at = float(getattr(bracket, "closed_at", None) or time.time())
+        opened_at = float(
+            getattr(bracket, "entry_fill_ts", None)
+            or getattr(bracket, "created_at", closed_at)
+            or closed_at
+        )
+        provenance = dict(getattr(bracket, "trade_provenance", {}) or {})
+        return {
+            **provenance,
+            "bracket_id": str(bracket.bracket_id),
+            "symbol": str(bracket.symbol),
+            "side": side,
+            "quantity": quantity,
+            "entry_price": float(entry_price) if entry_price is not None else None,
+            "exit_price": (
+                float(resolved_exit) if resolved_exit is not None else None
+            ),
+            "gross_pnl": gross_pnl,
+            "estimated_costs": asdict(costs) if costs is not None else None,
+            "net_pnl": net_pnl,
+            "mfe_points": round(mfe_points, 4),
+            "mae_points": round(mae_points, 4),
+            "mfe_pnl": round(mfe_points * quantity, 2),
+            "mae_pnl": round(mae_points * quantity, 2),
+            "holding_seconds": round(max(0.0, closed_at - opened_at), 3),
+            "exit_reason": str(
+                getattr(bracket, "exit_reason", None) or bracket.close_source or ""
+            ),
+            "close_source": str(bracket.close_source or ""),
+            "ledger_complete": bool(ledger_complete),
+        }
+
     def _close_bracket(
         self,
         bracket: Any,
@@ -490,11 +587,21 @@ class LedgerBracketManager(CanonicalBracketManager):
         net_pnl = ledger_pnl.net_pnl if ledger_pnl is not None else None
         if gross_pnl is None and resolved_price is not None:
             entry_price = getattr(bracket, "entry_fill_price", None) or getattr(bracket, "entry_price", None)
-            try:
-                side_mult = -1.0 if str(getattr(bracket, "side", "BUY")).upper() == "SELL" else 1.0
-                gross_pnl = round((float(resolved_price) - float(entry_price)) * int(bracket.quantity or 0) * side_mult, 2)
-            except (TypeError, ValueError):
-                gross_pnl = None
+            if entry_price is not None:
+                try:
+                    side_mult = -1.0 if str(getattr(bracket, "side", "BUY")).upper() == "SELL" else 1.0
+                    gross_pnl = round((float(resolved_price) - float(entry_price)) * int(bracket.quantity or 0) * side_mult, 2)
+                except (TypeError, ValueError):
+                    gross_pnl = None
+        outcome = self._completed_trade_outcome(
+            bracket,
+            ledger_pnl=ledger_pnl,
+            gross_pnl=gross_pnl,
+            exit_price=resolved_price,
+            ledger_complete=ledger_complete,
+        )
+        setattr(bracket, "_completed_trade_outcome", outcome)
+        net_pnl = outcome["net_pnl"]
         _legacy.LOGGER.info(
             "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s qty=%s entry=%s exit=%s pnl=%s net_pnl=%s ledger_complete=%s",
             bracket.bracket_id,
@@ -517,6 +624,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                 "gross_pnl": gross_pnl,
                 "net_pnl": net_pnl,
                 "ledger_complete": ledger_complete,
+                "completed_trade": outcome,
             },
         )
         self._notify_open_position_priority("close", bracket.symbol)
@@ -530,6 +638,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                     "net_pnl": net_pnl,
                     "ledger_complete": ledger_complete,
                     "close_source": close_source,
+                    "completed_trade": outcome,
                 },
             )
 
@@ -603,6 +712,17 @@ class LedgerBracketManager(CanonicalBracketManager):
                 if hook is not None and not getattr(
                     bracket, "_ledger_release_hook_fired", False
                 ):
+                    setattr(
+                        bracket,
+                        "_completed_trade_outcome",
+                        self._completed_trade_outcome(
+                            bracket,
+                            ledger_pnl=pnl,
+                            gross_pnl=pnl.gross_pnl,
+                            exit_price=pnl.exit_vwap,
+                            ledger_complete=True,
+                        ),
+                    )
                     hook(bracket.symbol)
                     setattr(bracket, "_ledger_release_hook_fired", True)
             self._clear_ledger_release(bracket)

@@ -18,6 +18,23 @@ def test_cost_breakdown_components_positive() -> None:
     assert abs(c.cost_per_unit - c.total / 65) < 1e-9
 
 
+def test_round_trip_cost_counts_each_partial_exit_order() -> None:
+    two_orders = estimate_round_trip_cost(
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=130,
+        executed_orders=2,
+    )
+    three_orders = estimate_round_trip_cost(
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=130,
+        executed_orders=3,
+    )
+    assert three_orders.brokerage - two_orders.brokerage == 20.0
+    assert three_orders.total > two_orders.total
+
+
 def test_gate_blocks_thin_target() -> None:
     ok, edge, _ = passes_cost_edge_gate(
         entry_price=120, target_price=122, quantity=65, half_spread=0.5

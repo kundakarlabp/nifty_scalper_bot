@@ -230,6 +230,7 @@ class OrderDetails:
     requested_lots: int = 0
     resolved_lot_size: int = 0
     entry_lifecycle_state: dict[str, Any] | None = None
+    trade_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -292,6 +293,7 @@ class TradePlan:
     selection_timestamp: float | None = None
     requested_lots: int = 0
     resolved_lot_size: int = 0
+    trade_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -2394,6 +2396,7 @@ class OrderManager:
         contract_expiry: str | None = None,
         requested_lots: int = 0,
         resolved_lot_size: int = 0,
+        trade_provenance: Mapping[str, Any] | None = None,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -3549,6 +3552,7 @@ class OrderManager:
                         contract_expiry=contract_expiry,
                         requested_lots=requested_lots,
                         resolved_lot_size=resolved_lot_size,
+                        trade_provenance=dict(trade_provenance or {}),
                     )
                     self._register_order(details)
                     # Sync PositionManager's pending-order registry so the
@@ -3614,6 +3618,7 @@ class OrderManager:
                             tag=tag or "auto",
                             intent=normalized_intent,
                             activate_immediately=False,
+                            trade_provenance=trade_provenance,
                         )
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
                         self._logger.info(
@@ -5018,6 +5023,7 @@ class OrderManager:
                         contract_expiry=plan.contract_expiry,
                         requested_lots=int(plan.requested_lots or 0),
                         resolved_lot_size=int(plan.resolved_lot_size or 0),
+                        trade_provenance=plan.trade_provenance,
                     )
                 except Exception as exc:  # noqa: BLE001
                     err = self._sanitize_broker_error(exc)
@@ -5066,6 +5072,7 @@ class OrderManager:
                     allow_market_entry=plan.allow_market_entry,
                     intent=plan.intent,
                     intended_position_side=plan.intended_position_side,
+                    trade_provenance=plan.trade_provenance,
                 )
             except Exception as exc:  # noqa: BLE001
                 err = self._sanitize_broker_error(exc)
@@ -5112,8 +5119,10 @@ class OrderManager:
                 tag=plan.tag,
                 check_risk=True,
                 product=plan.product,
+                strategy_name=plan.strategy_name,
                 intent=plan.intent,
                 intended_position_side=plan.intended_position_side,
+                trade_provenance=plan.trade_provenance,
             )
         except Exception as exc:  # noqa: BLE001
             err = self._sanitize_broker_error(exc)
@@ -5171,6 +5180,7 @@ class OrderManager:
         basket_version: int | str | None = None,
         instrument_token: int | None = None,
         contract_expiry: str | None = None,
+        trade_provenance: Mapping[str, Any] | None = None,
     ) -> str | None:
         result = self.place_managed_order_result(
             symbol=symbol,
@@ -5193,6 +5203,7 @@ class OrderManager:
             basket_version=basket_version,
             instrument_token=instrument_token,
             contract_expiry=contract_expiry,
+            trade_provenance=trade_provenance,
         )
         return result.order_id if result.accepted else None
 
@@ -5220,6 +5231,7 @@ class OrderManager:
         contract_expiry: str | None = None,
         requested_lots: int = 0,
         resolved_lot_size: int = 0,
+        trade_provenance: Mapping[str, Any] | None = None,
     ) -> ManagedOrderResult:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
@@ -5278,6 +5290,7 @@ class OrderManager:
             stop_loss=stop_loss,  # ✅ Critical: Passing this satisfies the Safety Guard
             take_profit=take_profit,
             signal_id=signal_id,
+            strategy_name=strategy_name,
             trace_id=trace_id,
             tag=tag,
             product=product,
@@ -5290,6 +5303,7 @@ class OrderManager:
             contract_expiry=contract_expiry,
             requested_lots=requested_lots,
             resolved_lot_size=resolved_lot_size,
+            trade_provenance=trade_provenance,
         )
 
         if order_id:
@@ -5872,6 +5886,7 @@ class OrderManager:
                     tp=tp_price,
                     tag=order.tag or source,
                     intent=str(getattr(order, "intent", "ENTRY") or "ENTRY"),
+                    trade_provenance=order.trade_provenance,
                 )
                 bracket_exists = self._bracket_manager.get_bracket(order.order_id)
                 if bracket_exists is None:
