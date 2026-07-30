@@ -531,6 +531,11 @@ class MarketDataManager:
         self._tick_drain_batch_size = self._parse_int_env(
             "MDM_TICK_DRAIN_BATCH", default=100, minimum=10
         )
+        # Thread id of the loop that owns tick draining. Captured in
+        # set_event_loop() and refreshed inside the drain, because
+        # set_event_loop() may legitimately be called from a different thread
+        # than the one that later runs the loop.
+        self._event_loop_thread_id: int | None = None
         self._tick_drain_budget_s = self._parse_float_env(
             "MDM_TICK_DRAIN_BUDGET_SECONDS", default=0.008, minimum=0.001
         )
@@ -6217,6 +6222,16 @@ class MarketDataManager:
                 return
 
             self._main_loop = loop
+            # Establish the loop-thread owner for TICK_STAGE_SLOW telemetry.
+            # Only claim ownership when this call is genuinely running on the
+            # supplied loop; otherwise the owner stays unset and the telemetry
+            # reports "unknown" rather than asserting a thread.
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                self._event_loop_thread_id = threading.get_ident()
             self._ensure_tick_consumer(reason="event_loop_wired")
             with self._pending_tick_lock:
                 if self._pending_count_locked() > 0:
@@ -7269,7 +7284,13 @@ class MarketDataManager:
             )
             drain_active = int(self._tick_active_drains)
         thread_id = threading.get_ident()
-        event_loop_thread = thread_id == getattr(self, "_event_loop_thread_id", None)
+        # Tri-state: True = confirmed loop thread; False = owner known and this
+        # is a different thread; None = owner not established. A plain equality
+        # test made an unestablished owner (None) compare False, reporting
+        # "unknown" as "confirmed off-loop" -- the same class of confidently
+        # wrong field this telemetry was fixed to stop producing.
+        _loop_owner = getattr(self, "_event_loop_thread_id", None)
+        event_loop_thread = None if _loop_owner is None else thread_id == _loop_owner
         key = f"tick_stage_slow:{stage}:{callback_name or ''}:{symbol or ''}"
         log_throttled(
             self._logger,
@@ -7289,7 +7310,7 @@ class MarketDataManager:
                 drain_active,
                 source,
                 thread_id,
-                event_loop_thread,
+                "unknown" if event_loop_thread is None else event_loop_thread,
             ),
             interval_sec=10.0,
             level=logging.WARNING,
