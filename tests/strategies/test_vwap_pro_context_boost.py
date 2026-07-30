@@ -1,10 +1,14 @@
-from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    VWAPProStrategyConfig,
+)
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 
 
 def test_vwap_pro_trend_context_boost_avoids_weak_score(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    strategy = VWAPProStrategy(VWAPProStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
+    strategy = VWAPProStrategy(
+        VWAPProStrategyConfig(enabled=True, quantity=1), indicator_engine=None
+    )
     indicators = {
         "vwap": 100.0,
         "open": 108.9,
@@ -21,8 +25,14 @@ def test_vwap_pro_trend_context_boost_avoids_weak_score(monkeypatch):
         "spread_pct": 0.29,
     }
 
-    signal = strategy._evaluate_signal("NFO:NIFTY26MAY24000CE", indicators, current_price=109.0)
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26MAY24000CE", indicators, current_price=109.0
+    )
 
     assert signal is not None
     assert "trend_context_boost" in signal.metadata["score_reasons"]
     assert signal.metadata["strategy_score"] >= 5.5
+    assert signal.metadata["vwap_domain"] == "option_premium"
+    assert signal.metadata["invalidation_level_domain"] == "option_premium"
+    assert signal.metadata["setup_invalidation_premium"] == 107.0
+    assert "underlying_invalidation_level" not in signal.metadata
