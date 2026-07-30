@@ -3951,7 +3951,9 @@ class StrategyManager(_BaseStrategyManager):
                 _record_no_signal("strategy_partial_no_consensus", "no_trigger_vote", "no_trigger_vote", trigger_vote_count=0, context_vote_count=len(context_votes), final_block_reason="partial")
                 return None
         else:
-            best_signal, best_vote = max(trigger_votes, key=lambda pair: self._extract_raw_score(pair[1]))
+            best_signal, best_vote = max(
+                trigger_votes, key=lambda pair: _weighted_score(pair[1])
+            )
         metadata = dict(best_signal.metadata or {})
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
         single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
@@ -3965,7 +3967,7 @@ class StrategyManager(_BaseStrategyManager):
         negative_context = sum(self._extract_context_veto_score(v) for v in opposite_context)
         context_bonus = min(1.5, 0.45 * positive_context)
         context_penalty = min(1.5, 0.60 * negative_context)
-        final_score = raw_trigger_score + context_bonus - context_penalty
+        final_score = weighted_trigger_score + context_bonus - context_penalty
         final_score = max(0.0, min(10.0, final_score))
         context_confidence_floor = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MIN_CONFIDENCE", "0.80") or "0.80")
         context_freshness_max_age_s = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS", "120") or "120")
@@ -4024,7 +4026,7 @@ class StrategyManager(_BaseStrategyManager):
                 near_atm = strike_distance_from_atm <= near_atm_threshold
             score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
             regime_weight = _regime_weight(best_vote)
-            score_ok = raw_trigger_score >= score_min
+            score_ok = weighted_trigger_score >= score_min
             conf_ok = best_vote.confidence >= conf_min
             selected_ok = selected_option or near_atm
             selected_ok_reason = "selected_option" if selected_option else "near_atm" if near_atm else "not_selected_or_near_atm"
@@ -4033,7 +4035,12 @@ class StrategyManager(_BaseStrategyManager):
             metadata["strike_distance_from_atm"] = strike_distance_from_atm
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
-            threshold_passed = bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed)
+            threshold_passed = bool(
+                weighted_trigger_score >= score_min
+                and best_vote.confidence >= conf_min
+                and selected_ok
+                and not vetoed
+            )
             # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block.
             # Single-vote high-conviction/selected-option paths require explicit,
             # narrower operator overrides to avoid accidental lone-vote approvals.
@@ -4045,7 +4052,12 @@ class StrategyManager(_BaseStrategyManager):
                 "STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE",
                 self._env_bool("STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION", False),
             )
-            high_conviction_allowed = bool(raw_trigger_score >= single_high and selected_ok and not vetoed and allow_high_conviction)
+            high_conviction_allowed = bool(
+                weighted_trigger_score >= single_high
+                and selected_ok
+                and not vetoed
+                and allow_high_conviction
+            )
             # A single trigger on the actually-SELECTED ATM option that already
             # cleared score/confidence/veto gates is the core scalp this platform
             # exists to take. Allow it without the global scalp flag, since
@@ -4055,7 +4067,10 @@ class StrategyManager(_BaseStrategyManager):
             # must clear a high score floor (default 9.0) on top of the normal gates.
             # This keeps single-vote trades to only the strongest signals.
             selected_single_min = self._env_float("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0)
-            if selected_option_scalp_allowed and raw_trigger_score < selected_single_min:
+            if (
+                selected_option_scalp_allowed
+                and weighted_trigger_score < selected_single_min
+            ):
                 selected_option_scalp_allowed = False
             scalp_fallback_allowed = bool((allow_scalp_single and threshold_passed) or selected_option_scalp_allowed)
             final_allowed = bool(high_conviction_allowed or scalp_fallback_allowed)
@@ -4144,7 +4159,7 @@ class StrategyManager(_BaseStrategyManager):
                 switch_allowed = (
                     allow_candidate_switch
                     and (strike_distance_from_atm is not None)
-                    and raw_trigger_score >= switch_min_score
+                    and weighted_trigger_score >= switch_min_score
                     and quote_depth_valid
                     and switch_spread_pct <= self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)
                     and strike_distance_from_atm <= max_candidate_switch_distance
@@ -4321,7 +4336,9 @@ class StrategyManager(_BaseStrategyManager):
             metadata.pop("direction_bias", None)
         metadata["confidence"] = float(best_vote.confidence)
         metadata["consensus_stage"] = metadata_stage
-        metadata["manager_score_source"] = "strategy_score_plus_context_arbitration"
+        metadata["manager_score_source"] = (
+            "regime_weighted_strategy_score_plus_context_arbitration"
+        )
         metadata["approval_path"] = approval_path
         metadata["is_approved"] = True
         log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
