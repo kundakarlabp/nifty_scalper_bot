@@ -16731,6 +16731,12 @@ class StrategyRunner:
         ) or _to_float(metadata.get("premium_stop_price"))
         plan_source = "existing_signal_levels"
         if (
+            stop_loss is not None
+            and explicit_stop is not None
+            and abs(stop_loss - explicit_stop) < 0.01
+        ):
+            plan_source = "explicit_premium_stop"
+        if (
             stop_loss is None
             or stop_loss <= 0
             or take_profit is None
@@ -16811,6 +16817,11 @@ class StrategyRunner:
         final_md["materialized_trade_plan"] = True
         final_md["option_trade_plan_source"] = final_md.get(
             "option_trade_plan_source", plan_source
+        )
+        final_md["bracket_anchor_mode"] = (
+            "absolute_level"
+            if final_md["option_trade_plan_source"] == "explicit_premium_stop"
+            else "distance"
         )
         self._logger.info(
             "OPTION_TRADE_PLAN_MATERIALIZED symbol=%s entry=%.2f sl=%s tp=%s source=%s",
@@ -19855,6 +19866,11 @@ class StrategyRunner:
                 entry_price=price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
+                bracket_anchor_mode=(
+                    "absolute_level"
+                    if metadata.get("bracket_anchor_mode") == "absolute_level"
+                    else "distance"
+                ),
                 strategy_name=strategy_name,
                 signal_id=signal.deterministic_id,
                 trace_id=trace_id,

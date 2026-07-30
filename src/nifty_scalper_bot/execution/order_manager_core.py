@@ -271,6 +271,7 @@ class TradePlan:
     entry_price: float | None
     stop_loss: float | None
     take_profit: float | None
+    bracket_anchor_mode: Literal["distance", "absolute_level"] = "distance"
     strategy_name: str = "runner"
     signal_id: str | None = None
     trace_id: str | None = None
@@ -4673,16 +4674,13 @@ class OrderManager:
         )
 
     def _reanchor_bracket_to_price(self, plan: TradePlan, price: float) -> TradePlan:
-        """Re-anchor a stale SL/TP bracket to the live protected ``price``.
+        """Re-anchor a distance-based SL/TP bracket to protected ``price``.
 
         Strategy SL/TP are computed off the option premium at signal time.
-        Premiums can move materially before submission, so the precomputed
-        band can land on the wrong side of the live protected price and the
-        order is rejected (``protected_price_invalidates_bracket``) — a lost
-        but valid entry. When (and only when) the existing band is invalid
-        against ``price``, rebuild it at ``price`` preserving the plan's
-        intended SL/TP distances (so the sized rupee risk is unchanged).
-        Valid brackets pass through untouched.
+        Premiums can move before submission, so distance-derived levels must
+        move with the protected entry even while the old band remains
+        positionally valid. Absolute technical invalidations stay fixed and
+        are left to the final geometry guard when repricing invalidates them.
         """
         entry = plan.entry_price
         sl = plan.stop_loss
@@ -4697,13 +4695,9 @@ class OrderManager:
         ):
             return plan
 
-        if plan.side == "BUY":
-            bracket_valid = sl < price < tp
-        elif plan.side == "SELL":
-            bracket_valid = tp < price < sl
-        else:
+        if plan.side not in {"BUY", "SELL"}:
             return plan
-        if bracket_valid:
+        if plan.bracket_anchor_mode != "distance" or price == entry:
             return plan
 
         # Preserve the strategy's intended absolute distances from its entry.
