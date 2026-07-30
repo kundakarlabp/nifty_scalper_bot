@@ -112,3 +112,130 @@ def test_real_smc_generate_signal_skips_cold_history_before_evaluate(
         "STRATEGY_SKIPPED_HISTORY_COLD" in record.getMessage()
         for record in caplog.records
     )
+
+
+def _ready_smc_indicators(**overrides):
+    indicators = {
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "open": 99.5,
+        "atr": 1.0,
+        "direction_bias": "CE",
+        "underlying_direction_bias": "CE",
+        "premium_reclaim": True,
+        "bullish_reversal": True,
+        "choch_confirmed": True,
+        "bos_confirmed": True,
+        "retest_confirmed": True,
+    }
+    indicators.update(overrides)
+    return indicators
+
+
+def test_green_candle_without_swing_is_not_a_liquidity_sweep(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+
+    assert (
+        strategy._evaluate_signal(
+            "NFO:NIFTY26JUN25000CE", _ready_smc_indicators(), 100.0
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "no_liquidity_sweep"
+
+
+def test_red_candle_without_swing_is_not_a_liquidity_sweep(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    indicators = _ready_smc_indicators(
+        open=100.5,
+        close=99.5,
+        direction_bias="PE",
+        underlying_direction_bias="PE",
+    )
+
+    assert strategy._evaluate_signal("NFO:NIFTY26JUN25000PE", indicators, 100.0) is None
+    assert strategy.last_no_vote_reason == "no_liquidity_sweep"
+
+
+def test_bullish_swing_breach_without_reclaim_is_not_a_sweep(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    indicators = _ready_smc_indicators(
+        high=99.0,
+        low=97.0,
+        open=98.5,
+        close=97.5,
+        prior_swing_low=98.0,
+        prior_swing_high=101.0,
+    )
+
+    assert strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0) is None
+    assert strategy.last_no_vote_reason == "no_liquidity_sweep"
+
+
+def test_bullish_swing_breach_and_reclaim_is_a_valid_sweep(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    indicators = _ready_smc_indicators(
+        low=98.0,
+        prior_swing_low=99.0,
+        prior_swing_high=102.0,
+    )
+
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0)
+
+    assert signal is not None
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "CE"
+
+
+def test_bearish_swing_breach_and_rejection_is_a_valid_sweep(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    indicators = _ready_smc_indicators(
+        high=102.5,
+        low=100.0,
+        open=101.5,
+        close=100.5,
+        prior_swing_low=99.0,
+        prior_swing_high=102.0,
+        direction_bias="PE",
+        underlying_direction_bias="PE",
+    )
+
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000PE", indicators, 100.0)
+
+    assert signal is not None
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "PE"
+
+
+def test_explicit_liquidity_sweep_confirmation_remains_supported(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    indicators = _ready_smc_indicators(liquidity_sweep_confirmed=True)
+
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0)
+
+    assert signal is not None
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "CE"
+
+
+def test_manager_swing_low_alias_is_accepted(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
+    indicators = _ready_smc_indicators(
+        low=98.0,
+        swing_low=99.0,
+        swing_high=102.0,
+    )
+
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0)
+
+    assert signal is not None
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "CE"
