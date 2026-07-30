@@ -2714,6 +2714,16 @@ class OrderManager:
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
                 for o in self._orders.values()
             )
+            if normalized_intent == "ENTRY" and has_open_local:
+                self._logger.warning(
+                    "ORDER_BLOCKED: open_position_exists symbol=%s side=%s",
+                    symbol,
+                    side,
+                )
+                _log_order_decision(
+                    allowed=False, block_reason="open_position_exists"
+                )
+                return None
             if has_open_local and has_pending_entry:
                 self._logger.warning(
                     "ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s",

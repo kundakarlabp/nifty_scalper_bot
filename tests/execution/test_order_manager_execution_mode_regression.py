@@ -196,6 +196,63 @@ def test_nifty_option_entry_uses_unit_quantity_at_broker_boundary(
     assert broker.payloads[-1]["quantity"] == quantity
 
 
+def test_normal_entry_is_blocked_when_same_symbol_position_is_open(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager._positions, "has_open_position", lambda _symbol: True)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=65,
+        order_type=OrderType.LIMIT,
+        price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+        check_risk=False,
+        intent="ENTRY",
+        signal_id="duplicate-filled-position",
+    )
+
+    assert order_id is None
+    assert broker.calls == 0
+    assert manager._last_order_decision["block_reason"] == "open_position_exists"
+
+
+def test_explicit_scale_in_is_not_blocked_as_normal_entry(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = _MarkedSubmittingBroker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    monkeypatch.setattr(manager._positions, "has_open_position", lambda _symbol: True)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=65,
+        order_type=OrderType.LIMIT,
+        price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+        check_risk=False,
+        intent="SCALE_IN",
+        signal_id="explicit-scale-in",
+    )
+
+    assert order_id is not None
+    assert broker.calls == 1
+
+
 @pytest.mark.parametrize("quantity", [1, 50, 75, 129])
 def test_nifty_option_entry_rejects_invalid_unit_quantities_before_broker(
     monkeypatch, tmp_path, quantity
