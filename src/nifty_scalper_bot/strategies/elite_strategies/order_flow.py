@@ -5,10 +5,20 @@ import time
 from typing import Any
 
 from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import OrderFlowStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    OrderFlowStrategyConfig,
+)
+from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (
+    apply_orderflow_live_context_proof,
+)
+from nifty_scalper_bot.strategies.runtime_context_contract import (
+    resolve_context_age_seconds,
+)
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
-from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -465,7 +475,35 @@ class OrderFlowStrategy(EliteStrategy):
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'
             metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
-            LOGGER.info('ORDERFLOW_TRIGGER_DECISION symbol=%s side=%s trigger_conditions_met=%s trigger_block_reason=%s score=%.2f spread_pct=%.2f context_age_seconds=%s', symbol, side, trigger_conditions_met, trigger_block_reason, strategy_score, spread_pct, indicators.get('context_age_seconds'), extra={'event':'ORDERFLOW_TRIGGER_DECISION','symbol':symbol,'side':side,'trigger_conditions_met':trigger_conditions_met,'trigger_block_reason':trigger_block_reason}); return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
+            LOGGER.info(
+                'ORDERFLOW_TRIGGER_DECISION symbol=%s side=%s trigger_conditions_met=%s trigger_block_reason=%s score=%.2f spread_pct=%.2f context_age_seconds=%s',
+                symbol,
+                side,
+                trigger_conditions_met,
+                trigger_block_reason,
+                strategy_score,
+                spread_pct,
+                indicators.get('context_age_seconds'),
+                extra={
+                    'event': 'ORDERFLOW_TRIGGER_DECISION',
+                    'symbol': symbol,
+                    'side': side,
+                    'trigger_conditions_met': trigger_conditions_met,
+                    'trigger_block_reason': trigger_block_reason,
+                },
+            )
+            signal = EliteSignal(
+                symbol=symbol,
+                signal='BUY',
+                confidence=max(0.1, min(0.85, strategy_score / 10.0)),
+                entry_price=current_price,
+                stop_loss=None,
+                target=None,
+                quantity=self._cfg.quantity or 1,
+                strategy_name='OrderFlow',
+                metadata=metadata,
+            )
+            return apply_orderflow_live_context_proof(signal, indicators)
         except Exception as e:
             LOGGER.error('Failure in OrderFlowStrategy._evaluate_signal: %s', e, exc_info=e)
             return None
