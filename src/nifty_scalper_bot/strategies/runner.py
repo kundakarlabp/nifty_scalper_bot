@@ -1319,7 +1319,7 @@ class StrategyRunner:
             )
 
     def _on_bracket_exit_complete(self, symbol: str, *args: Any, **kwargs: Any) -> None:
-        """Callback from BracketManager after virtual bracket exit completes; clears runner state only."""
+        """Clear runner state and release entry guards after a bracket exit."""
         del args, kwargs
         try:
             if not symbol:
@@ -1359,7 +1359,11 @@ class StrategyRunner:
                 base = symbol
             self._notify_orchestrator_exit(base)
             self._clear_order_in_flight(symbol)
-            self._reset_execution_state(base)
+            self._release_entry_guards(
+                base,
+                start_cooldown=True,
+                reason="bracket_exit_complete",
+            )
 
         except Exception:
             logger = getattr(self, "_logger", LOGGER)
@@ -13531,6 +13535,41 @@ class StrategyRunner:
 
         return True
 
+    def _refresh_risk_halt_state(self, symbol: str) -> bool:
+        """Mirror the authoritative circuit-breaker state into the runner."""
+        if self._risk_manager is None:
+            return self._risk_halt_active
+        try:
+            tripped, reason = self._risk_manager.is_circuit_breaker_tripped()
+        except Exception as exc:
+            self._logger.debug(
+                "Failure in global breaker check: %s",
+                exc,
+                extra={"event": "risk_halt_check_error", "symbol": symbol},
+            )
+            return self._risk_halt_active
+
+        was_halted = self._risk_halt_active
+        self._risk_halt_active = bool(tripped)
+        if self._risk_halt_active and not self._risk_halt_logged:
+            self._risk_halt_logged = True
+            self._logger.error(
+                "Condition met: global risk halt latched",
+                extra={
+                    "event": "risk_halt_latched",
+                    "symbol": symbol,
+                    "reason": reason,
+                },
+            )
+        elif was_halted and not self._risk_halt_active:
+            self._risk_halt_logged = False
+            self._logger.info(
+                "RISK_HALT_CLEARED symbol=%s",
+                symbol,
+                extra={"event": "RISK_HALT_CLEARED", "symbol": symbol},
+            )
+        return self._risk_halt_active
+
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
         self._logger.debug(
@@ -13852,32 +13891,9 @@ class StrategyRunner:
             # Keep a single forward per tick so protective handlers do not churn
             # duplicate state transitions during stressed periods.
 
-            # Global breaker latch: once tripped, keep running only protective paths
-            # (brackets + position reconciliation) and skip strategy/indicator work.
-            if not self._risk_halt_active and self._risk_manager is not None:
-                try:
-                    tripped, _reason = self._risk_manager.is_circuit_breaker_tripped()
-                except Exception as exc:
-                    self._logger.debug(
-                        "Failure in global breaker check: %s",
-                        exc,
-                        extra={"event": "risk_halt_check_error", "symbol": symbol},
-                    )
-                    tripped = False
-                    _reason = ""
-                if tripped:
-                    self._risk_halt_active = True
-                    if not self._risk_halt_logged:
-                        self._risk_halt_logged = True
-                        self._logger.error(
-                            "Condition met: global risk halt latched",
-                            extra={
-                                "event": "risk_halt_latched",
-                                "symbol": symbol,
-                                "reason": _reason,
-                            },
-                        )
-            if self._risk_halt_active:
+            # Mirror the authoritative breaker on every tick so an operator reset
+            # can resume strategy evaluation while protective paths keep running.
+            if self._refresh_risk_halt_state(symbol):
                 if hasattr(self._position_manager, "update_position_price"):
                     try:
                         self._position_manager.update_position_price(symbol, price)

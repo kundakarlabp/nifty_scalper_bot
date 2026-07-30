@@ -171,6 +171,74 @@ def test_confirmed_flat_symbol_converges_bracket_and_entry_guards() -> None:
     assert releases == [("NFO:NIFTY2670724100PE", True)]
 
 
+def test_bracket_completion_releases_entry_guards_with_cooldown() -> None:
+    symbol = "NFO:NIFTY2670724100PE"
+    releases = []
+    runner = object.__new__(StrategyRunner)
+    runner._logger = type(
+        "Log",
+        (),
+        {"info": lambda *a, **k: None, "exception": lambda *a, **k: None},
+    )()
+    runner._normalize_symbol = lambda value: value
+    runner._notify_orchestrator_exit = lambda _symbol: None
+    runner._clear_order_in_flight = lambda _symbol: None
+    runner._release_entry_guards = (
+        lambda released_symbol, *, start_cooldown, reason: releases.append(
+            (released_symbol, start_cooldown, reason)
+        )
+    )
+
+    runner._on_bracket_exit_complete(symbol)
+
+    assert releases == [(symbol, True, "bracket_exit_complete")]
+
+
+def test_runner_risk_halt_clears_after_authoritative_breaker_reset() -> None:
+    states = iter([(True, "daily loss"), (False, "")])
+    events = []
+    runner = object.__new__(StrategyRunner)
+    runner._risk_manager = type(
+        "Risk",
+        (),
+        {"is_circuit_breaker_tripped": lambda self: next(states)},
+    )()
+    runner._risk_halt_active = False
+    runner._risk_halt_logged = False
+    runner._logger = type(
+        "Log",
+        (),
+        {
+            "debug": lambda *a, **k: None,
+            "error": lambda self, *a, **k: events.append(k["extra"]["event"]),
+            "info": lambda self, *a, **k: events.append(k["extra"]["event"]),
+        },
+    )()
+
+    assert runner._refresh_risk_halt_state("NFO:NIFTY2670724100PE") is True
+    assert runner._refresh_risk_halt_state("NFO:NIFTY2670724100PE") is False
+    assert events == ["risk_halt_latched", "RISK_HALT_CLEARED"]
+    assert runner._risk_halt_logged is False
+
+
+def test_runner_risk_halt_stays_fail_closed_when_recheck_fails() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._risk_manager = type(
+        "Risk",
+        (),
+        {
+            "is_circuit_breaker_tripped": lambda self: (_ for _ in ()).throw(
+                RuntimeError("unavailable")
+            )
+        },
+    )()
+    runner._risk_halt_active = True
+    runner._risk_halt_logged = True
+    runner._logger = type("Log", (), {"debug": lambda *a, **k: None})()
+
+    assert runner._refresh_risk_halt_state("NFO:NIFTY2670724100PE") is True
+
+
 def test_order_failure_cooldown_rejection_uses_dedup_rollback_path() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
     assert 'reason="order_failure_cooldown_active")' in source

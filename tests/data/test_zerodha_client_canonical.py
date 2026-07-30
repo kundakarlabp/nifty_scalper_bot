@@ -52,3 +52,31 @@ def test_get_quote_bulk_short_circuits_all_canonical(
     assert "NSE:NIFTY" in out
     assert out["NSE:NIFTY"]["instrument_token"] == 256265
     client.close()
+
+
+def test_get_order_status_returns_latest_history_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = ZerodhaKiteClient(api_key="k", access_token="t")
+    monkeypatch.setattr(client, "_acquire_bucket", lambda _bucket: None)
+    monkeypatch.setattr(
+        client,
+        "_make_request",
+        lambda *_args, **_kwargs: {
+            "data": [
+                {"order_id": "123", "status": "OPEN PENDING"},
+                {"order_id": "123", "status": "OPEN"},
+                {
+                    "order_id": "123",
+                    "status": "COMPLETE",
+                    "average_price": 113.45,
+                },
+            ]
+        },
+    )
+
+    status = client.get_order_status("123")
+
+    assert status["status"] == "COMPLETE"
+    assert status["average_price"] == 113.45
+    client.close()
