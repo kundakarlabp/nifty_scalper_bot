@@ -3,7 +3,7 @@
 Regression for the 2026-07-27 production logs: `_reconcile_state` cleared
 `position_reconciliation_completed` at the START of every run, and readiness
 converted that into the hard blocker `position_reconciliation_incomplete`.
-With refreshes every ~15-20s each taking 2.5-7.2s (periodic_health AND manual
+With refreshes every ~15-20s each taking 2.5-7.2s (two scheduled owners
 overlapping), the 30s readiness check repeatedly landed inside a run and
 live_orders_armed flapped False/True, blocking entries roughly half the time:
 
@@ -18,10 +18,7 @@ not "no refresh is running".
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from nifty_scalper_bot.core.app import _reconciliation_max_age_seconds
 
@@ -129,3 +126,16 @@ def test_reconcile_state_coalesces_overlapping_runs(monkeypatch) -> None:
 
     # Coalesced: no new run id registered, and the in-flight one is untouched.
     assert ctx.position_reconciliation_active_run_ids == started_before
+
+
+def test_health_loop_is_not_a_second_reconciliation_scheduler() -> None:
+    """Only the dedicated sync loop may own scheduled reconciliation."""
+    import inspect
+
+    from nifty_scalper_bot.core import app as app_module
+
+    health_loop_source = inspect.getsource(app_module.NiftyScalperApp._health_loop)
+    app_source = inspect.getsource(app_module)
+
+    assert "_reconcile_state" not in health_loop_source
+    assert 'await _reconcile_state(ctx, source="periodic_health")' in app_source
