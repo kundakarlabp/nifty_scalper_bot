@@ -143,6 +143,60 @@ def test_scaled_fills_persist_and_close_uses_exact_weighted_pnl(
     assert manager.has_unresolved_exit() is False
 
 
+def test_completed_trade_outcome_preserves_provenance_and_net_costs(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    manager.attach_trade_provenance(
+        "entry-1",
+        {
+            "strategy_name": "VWAPPro",
+            "setup_name": "continuation_pullback",
+            "regime": "TREND",
+            "signal_id": "sig-1",
+            "trace_id": "trace-1",
+            "strategy_profile_version": "2026-07-30",
+        },
+    )
+    manager.confirm_entry_fill("entry-1", 100.0)
+    bracket.highest_ltp = 112.0
+    bracket.lowest_ltp = 96.0
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="final-outcome",
+        reason="HARD_TP_BREACH",
+        price=110.0,
+        residual=0,
+    )
+    completed: list[str] = []
+    manager.attach_on_exit_complete(completed.append)
+
+    manager._close_bracket(bracket, close_source="broker_fill", exit_price=110.0)
+
+    assert len(completed) == 1
+    assert completed[0] == SYMBOL
+    outcome = manager.get_completed_trade_outcome(SYMBOL)
+    assert outcome is not None
+    assert outcome["strategy_name"] == "VWAPPro"
+    assert outcome["setup_name"] == "continuation_pullback"
+    assert outcome["regime"] == "TREND"
+    assert outcome["gross_pnl"] == 1300.0
+    assert outcome["estimated_costs"]["total"] > 0
+    assert outcome["net_pnl"] < outcome["gross_pnl"]
+    assert outcome["mfe_pnl"] == 1560.0
+    assert outcome["mae_pnl"] == 520.0
+    assert outcome["exit_reason"] == "HARD_TP_BREACH"
+    assert outcome["ledger_complete"] is True
+
+    restored = manager._decode_restored_bracket(
+        bracket.entry_order_id, bracket.to_dict()
+    )
+    assert restored.trade_provenance == bracket.trade_provenance
+
+
 def test_duplicate_entry_callback_is_idempotent(monkeypatch, tmp_path) -> None:
     manager, _order_manager, _broker = _manager(monkeypatch, tmp_path)
     manager.confirm_entry_fill("entry-1", 100.0)

@@ -1420,6 +1420,7 @@ class StrategyManager(_BaseStrategyManager):
         if regime_label is None:
             regime_label = self._regime_state.regime
         perf.record(pnl, regime=regime_label)
+        self._adaptive_store.record_trade(strategy_name, pnl)
         if metadata:
             log.info(
                 "Condition met: strategy_trade_recorded",

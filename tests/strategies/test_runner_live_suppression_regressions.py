@@ -194,6 +194,112 @@ def test_bracket_completion_releases_entry_guards_with_cooldown() -> None:
     assert releases == [(symbol, True, "bracket_exit_complete")]
 
 
+def test_bracket_completion_records_strategy_net_outcome_before_release() -> None:
+    symbol = "NFO:NIFTY2670724100PE"
+    releases = []
+    recorded = []
+    runner = object.__new__(StrategyRunner)
+    runner._logger = type(
+        "Log",
+        (),
+        {
+            "info": lambda *a, **k: None,
+            "error": lambda *a, **k: None,
+            "exception": lambda *a, **k: None,
+        },
+    )()
+    runner._strategy_manager = type(
+        "SM",
+        (),
+        {
+            "record_trade_result": (
+                lambda self, strategy, pnl, *, metadata: recorded.append(
+                    (strategy, pnl, metadata)
+                )
+            )
+        },
+    )()
+    runner._normalize_symbol = lambda value: value
+    runner._notify_orchestrator_exit = lambda _symbol: None
+    runner._clear_order_in_flight = lambda _symbol: None
+    runner._release_entry_guards = (
+        lambda released_symbol, *, start_cooldown, reason: releases.append(
+            (released_symbol, start_cooldown, reason)
+        )
+    )
+    outcome = {
+        "strategy_name": "VWAPPro",
+        "setup_name": "continuation_pullback",
+        "regime": "TREND",
+        "gross_pnl": 650.0,
+        "net_pnl": 575.0,
+        "exit_reason": "HARD_TP_BREACH",
+    }
+    runner._bracket_manager = type(
+        "BM",
+        (),
+        {"get_completed_trade_outcome": lambda self, _symbol: outcome},
+    )()
+
+    runner._on_bracket_exit_complete(symbol)
+
+    assert recorded == [
+        (
+            "VWAPPro",
+            575.0,
+            {
+                "setup_name": "continuation_pullback",
+                "regime": "TREND",
+                "gross_pnl": 650.0,
+                "net_pnl": 575.0,
+                "exit_reason": "HARD_TP_BREACH",
+            },
+        )
+    ]
+    assert releases == [(symbol, True, "bracket_exit_complete")]
+
+
+def test_strategy_feedback_failure_never_blocks_bracket_guard_release() -> None:
+    symbol = "NFO:NIFTY2670724100PE"
+    releases = []
+    runner = object.__new__(StrategyRunner)
+    runner._logger = type(
+        "Log",
+        (),
+        {
+            "info": lambda *a, **k: None,
+            "error": lambda *a, **k: None,
+            "exception": lambda *a, **k: None,
+        },
+    )()
+    runner._strategy_manager = type(
+        "SM",
+        (),
+        {
+            "record_trade_result": (
+                lambda *_a, **_k: (_ for _ in ()).throw(
+                    RuntimeError("analytics down")
+                )
+            )
+        },
+    )()
+    runner._normalize_symbol = lambda value: value
+    runner._notify_orchestrator_exit = lambda _symbol: None
+    runner._clear_order_in_flight = lambda _symbol: None
+    runner._release_entry_guards = (
+        lambda released_symbol, *, start_cooldown, reason: releases.append(
+            (released_symbol, start_cooldown, reason)
+        )
+    )
+
+    runner._on_bracket_exit_complete(
+        symbol,
+        {"strategy_name": "VWAPPro", "net_pnl": -100.0, "regime": "RANGE"},
+    )
+
+    assert releases == [(symbol, True, "bracket_exit_complete")]
+
+
 def test_runner_risk_halt_clears_after_authoritative_breaker_reset() -> None:
     states = iter([(True, "daily loss"), (False, "")])
     events = []

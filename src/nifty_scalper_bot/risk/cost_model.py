@@ -3,7 +3,7 @@
 Rates current as of June 2026 (post Budget 2026-27, effective 1 Apr 2026):
 - Brokerage: flat Rs 20 per executed order (buy + sell = Rs 40 round trip)
 - STT: 0.15% of premium, sell side only
-- NSE exchange transaction charge: 0.035% of premium, both sides
+- NSE exchange transaction charge: 0.03553% of premium, both sides
 - SEBI charges: Rs 10 per crore (0.0001%), both sides
 - GST: 18% on (brokerage + exchange txn charge + SEBI charges)
 - Stamp duty: 0.003% of premium, buy side only
@@ -46,6 +46,7 @@ def estimate_round_trip_cost(
     exit_price: float,
     quantity: int,
     half_spread: float = 0.0,
+    executed_orders: int = 2,
 ) -> CostBreakdown:
     """Args: entry/exit premium per unit, total quantity, half-spread per unit.
     Returns: full round-trip cost breakdown in rupees. Raises: none.
@@ -57,9 +58,9 @@ def estimate_round_trip_cost(
     buy_value = max(0.0, float(entry_price)) * qty
     sell_value = max(0.0, float(exit_price)) * qty
 
-    brokerage = 2.0 * _rate("COST_BROKERAGE_PER_ORDER", 20.0)
+    brokerage = max(2, int(executed_orders)) * _rate("COST_BROKERAGE_PER_ORDER", 20.0)
     stt = sell_value * _rate("COST_STT_SELL_PCT", 0.0015)
-    exchange_txn = (buy_value + sell_value) * _rate("COST_EXCH_TXN_PCT", 0.00035)
+    exchange_txn = (buy_value + sell_value) * _rate("COST_EXCH_TXN_PCT", 0.0003553)
     sebi = (buy_value + sell_value) * _rate("COST_SEBI_PCT", 0.000001)
     gst = (brokerage + exchange_txn + sebi) * _rate("COST_GST_PCT", 0.18)
     stamp_duty = buy_value * _rate("COST_STAMP_BUY_PCT", 0.00003)
