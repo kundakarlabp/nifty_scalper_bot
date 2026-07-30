@@ -1162,6 +1162,15 @@ class StrategyRunner:
         self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
         self._last_ws_reconnect_attempt_ts: float = 0.0
         self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
+        # Health-watchdog cadence: the scan was previously executed for every
+        # accepted tick on the tick thread.
+        self._health_watchdog_lock = threading.Lock()
+        self._health_watchdog_last_run: float = 0.0
+        self._health_watchdog_running: bool = False
+        self._health_watchdog_skipped: int = 0
+        self._health_watchdog_interval_s: float = parse_float_env(
+            "HEALTH_WATCHDOG_INTERVAL_SECONDS", 5.0
+        )
         # Compatibility mirror of authoritative MDM CandleEngine objects only.
         # StrategyRunner must never instantiate or mutate separate engines.
         self._candle_engines: dict[str, Any] = {}
@@ -7858,7 +7867,7 @@ class StrategyRunner:
                             "stall_sec": round(now_mono - self._last_global_eval_ts, 1),
                         },
                     )
-            self._health_watchdog()
+            self._run_health_watchdog_on_cadence()
             self._logger.debug(
                 "PIPELINE_OK",
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
@@ -8354,6 +8363,62 @@ class StrategyRunner:
         # was ingested, so _on_tick must not run it a second time.
         tick_payload["_protection_already_handled"] = True
         self._on_tick(symbol, tick_payload)
+
+    def _run_health_watchdog_on_cadence(self) -> None:
+        """Run the health watchdog at most once per interval, not per tick.
+
+        _health_watchdog() was invoked for EVERY accepted tick from inside
+        _on_tick_safe, i.e. synchronously on the market-data tick thread. It
+        scans all active symbols and can perform bar hydration, historical
+        repair, MDM history ingestion and stale-symbol recovery assessment,
+        which produced indivisible 176-1,088 ms tick callbacks. The tick drain
+        budget cannot pre-empt that: it is only checked BETWEEN processed ticks,
+        never inside one callback.
+
+        Gating by cadence makes health scanning independent of tick frequency,
+        so one scan happens per interval instead of one per tick. Overlap is
+        prevented so a long scan cannot re-enter from a subsequent tick.
+
+        SCOPE: this reduces how OFTEN the scan runs; it does not yet move the
+        scan off the tick thread. Relocating the blocking history/hydration work
+        to the asynchronous control path is the remaining part of that
+        correction and is deliberately not attempted here.
+        Args: none. Returns: none. Raises: none.
+        """
+        now = time.monotonic()
+        interval = self._health_watchdog_interval_s
+        with self._health_watchdog_lock:
+            if self._health_watchdog_running:
+                self._health_watchdog_skipped += 1
+                return
+            if (now - self._health_watchdog_last_run) < interval:
+                self._health_watchdog_skipped += 1
+                return
+            self._health_watchdog_running = True
+            self._health_watchdog_last_run = now
+        try:
+            self._health_watchdog()
+        finally:
+            duration_ms = (time.monotonic() - now) * 1000.0
+            with self._health_watchdog_lock:
+                self._health_watchdog_running = False
+                skipped = self._health_watchdog_skipped
+                self._health_watchdog_skipped = 0
+            if duration_ms >= 100.0:
+                log_throttled(
+                    self._logger,
+                    "health_watchdog_slow",
+                    "HEALTH_WATCHDOG_SLOW duration_ms=%.1f ticks_skipped=%d interval_s=%.1f"
+                    % (duration_ms, skipped, interval),
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "HEALTH_WATCHDOG_SLOW",
+                        "duration_ms": round(duration_ms, 1),
+                        "ticks_skipped": skipped,
+                        "interval_s": interval,
+                    },
+                )
 
     def _health_watchdog(self) -> None:
         """Args: none; Returns: none; Raises: none."""
