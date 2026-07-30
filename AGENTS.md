@@ -116,6 +116,26 @@ Do not modify unrelated files. Preserve existing user changes.
 
 When ownership or runtime behavior changes, update the appropriate architecture documentation. Use top-of-file role notes only where they clarify a non-obvious boundary; do not add repetitive boilerplate to every file.
 
+Validated correction and publishing workflow
+For requested code fixes, use the repository's established one-issue-at-a-time workflow:
+
+1. Resolve the current authoritative `main` commit through GitHub and start from that exact commit in a clean branch/worktree. Do not edit a stale or dirty checkout, and do not include runtime artifacts such as `positions.json`, caches, logs, or generated data.
+2. Deep-trace the failing path before editing: observed log/test symptom → entry point → owning component → downstream safety effect. Read the complete relevant functions and adjacent interfaces; distinguish the root code defect from data, environment, timing, and test-fixture failures.
+3. Define one small behavioral invariant and first add or identify a regression that fails for the defect. Reuse the existing owner, interface, cache, configuration, and journal. Prefer a few coherent lines over a new helper/module, broad refactor, duplicated mechanism, weakened threshold, or unrelated optimization.
+4. Validate in widening rings: focused regression, adjacent module/suite, production-file compilation, changed-file Ruff/Black/mypy where configured, then the complete repository suite. Preserve the exact commands and results for the PR.
+5. Treat environment-only dependency failures and suspected timing/order-sensitive failures as evidence to investigate, not automatic code failures. Reproduce the failing test alone and rerun the remaining suite when justified. Never hide a genuine regression or describe an unrun suite as passing.
+6. Commit and publish only the intended validated files. Confirm the remote branch is based on the authoritative `main` commit and that every remote blob matches the locally tested blob before opening the PR.
+7. Open one focused PR with the root cause, behavior change, preserved behavior, and validation. Hold merge until all required GitHub workflows are successful, including full-suite, execution-safety, market-aware/E2E, and changed-code quality jobs when present.
+8. Merge the unchanged validated head, verify the resulting `main` commit, then start the next correction from that merge. Do not stack several unmerged trading-path fixes.
+
+GitHub access fallback:
+
+- Local `git`/`gh` is useful but is not the only valid publishing path for this repository.
+- If `gh` is missing, unauthenticated, or local push credentials are unavailable, first check the authenticated GitHub connector and repository permissions.
+- When the connector has access, use its Git data and pull-request operations to create the branch, blobs/tree/commit, update the ref, open the PR, inspect workflow status/logs, and merge. Verify exact blob equality against the locally validated files.
+- Do not stop or ask the user to install `gh` merely because the CLI path is unavailable while the authenticated connector can complete the work safely.
+- Report a publishing blocker only after both the local GitHub path and the connector path are unavailable or require user authentication/authority. A dirty or stale checkout is not a blocker; preserve it and create a clean worktree from the authoritative commit.
+
 Cross-repository integration
 NIMS-Chrome is a dependent repository only when the requested behavior crosses a shared interface, configuration, schema, messaging protocol, deployment contract, or user workflow.
 
