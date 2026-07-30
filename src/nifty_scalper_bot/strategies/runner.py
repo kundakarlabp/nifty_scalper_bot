@@ -935,6 +935,9 @@ class StrategyRunner:
             1.0,
             float(os.getenv("EXEC_REJECT_COOLDOWN_INVALID_LOT_SECONDS", "300") or 300),
         )
+        self._exec_reject_rr_seconds = 5.0
+        self._exec_reject_margin_seconds = 30.0
+        self._exec_reject_position_seconds = 15.0
         self._order_attempt_window: Deque[float] = deque()
         self._signal_attempt_debounce_seconds = max(
             0.5, float(os.getenv("SIGNAL_ATTEMPT_DEBOUNCE_SECONDS", "2") or 2)
@@ -4208,6 +4211,9 @@ class StrategyRunner:
         reject_reason_cooldown = {
             "runtime_symbol_execution_not_ready": self._exec_reject_runtime_not_ready_seconds,
             "invalid_lot_quantity": self._exec_reject_invalid_lot_seconds,
+            "entry_rr_below_floor": self._exec_reject_rr_seconds,
+            "risk_capacity_unavailable": self._exec_reject_margin_seconds,
+            "position_conflict": self._exec_reject_position_seconds,
         }
         normalized_reject_symbol = normalize_symbol(symbol)
         for reject_reason, seconds in reject_reason_cooldown.items():
@@ -4230,6 +4236,45 @@ class StrategyRunner:
                 )
                 return SignalExecutionResult(False, f"{reject_reason}_reject_cooldown")
         return None
+
+    @staticmethod
+    def _deterministic_execution_reject_reason(reason: object) -> str | None:
+        normalized = str(reason or "").strip().lower()
+        if "entry_rr_below_floor" in normalized:
+            return "entry_rr_below_floor"
+        if any(
+            marker in normalized
+            for marker in (
+                "no_qty_after_risk",
+                "insufficient_margin",
+                "available_balance_unavailable",
+            )
+        ):
+            return "risk_capacity_unavailable"
+        if any(
+            marker in normalized
+            for marker in ("single_position_gate", "open_position_exists")
+        ):
+            return "position_conflict"
+        return None
+
+    def _mark_deterministic_execution_reject_cooldown(
+        self,
+        *,
+        symbol: str,
+        reason_key: str,
+        reason: object,
+        now_epoch: float,
+        broker_attempted: bool,
+    ) -> str | None:
+        if broker_attempted:
+            return None
+        reject_reason = self._deterministic_execution_reject_reason(reason)
+        if reject_reason is None:
+            return None
+        reject_key = f"{normalize_symbol(symbol)}:{reason_key}:{reject_reason}"
+        self._execution_reject_cooldown_ts[reject_key] = now_epoch
+        return reject_reason
 
     def get_runtime_readiness_snapshot(self) -> dict[str, object]:
         """Return runtime readiness snapshot. Args: none. Returns: readiness map. Raises: none."""
@@ -19933,6 +19978,13 @@ class StrategyRunner:
                         **dict(getattr(submit_result, "details", {}) or {}),
                         "trace_id": trace_id,
                     }
+                    self._mark_deterministic_execution_reject_cooldown(
+                        symbol=order_symbol,
+                        reason_key=reason_key,
+                        reason=submit_result.reason,
+                        now_epoch=now_epoch,
+                        broker_attempted=broker_attempted,
+                    )
                     if submit_result.reason == "kill_switch_active" and hasattr(
                         self._order_manager, "get_kill_switch_status"
                     ):
