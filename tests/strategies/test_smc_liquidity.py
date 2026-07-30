@@ -113,6 +113,7 @@ def test_real_smc_generate_signal_skips_cold_history_before_evaluate(
         for record in caplog.records
     )
 
+
 def _ready_smc_indicators(**overrides):
     indicators = {
         "high": 101.0,
@@ -155,10 +156,7 @@ def test_red_candle_without_swing_is_not_a_liquidity_sweep(monkeypatch):
         underlying_direction_bias="PE",
     )
 
-    assert (
-        strategy._evaluate_signal("NFO:NIFTY26JUN25000PE", indicators, 100.0)
-        is None
-    )
+    assert strategy._evaluate_signal("NFO:NIFTY26JUN25000PE", indicators, 100.0) is None
     assert strategy.last_no_vote_reason == "no_liquidity_sweep"
 
 
@@ -174,10 +172,7 @@ def test_bullish_swing_breach_without_reclaim_is_not_a_sweep(monkeypatch):
         prior_swing_high=101.0,
     )
 
-    assert (
-        strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0)
-        is None
-    )
+    assert strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0) is None
     assert strategy.last_no_vote_reason == "no_liquidity_sweep"
 
 
@@ -190,12 +185,11 @@ def test_bullish_swing_breach_and_reclaim_is_a_valid_sweep(monkeypatch):
         prior_swing_high=102.0,
     )
 
-    signal = strategy._evaluate_signal(
-        "NFO:NIFTY26JUN25000CE", indicators, 100.0
-    )
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0)
 
     assert signal is not None
-    assert signal.signal == "CE"
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "CE"
 
 
 def test_bearish_swing_breach_and_rejection_is_a_valid_sweep(monkeypatch):
@@ -212,12 +206,11 @@ def test_bearish_swing_breach_and_rejection_is_a_valid_sweep(monkeypatch):
         underlying_direction_bias="PE",
     )
 
-    signal = strategy._evaluate_signal(
-        "NFO:NIFTY26JUN25000PE", indicators, 100.0
-    )
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000PE", indicators, 100.0)
 
     assert signal is not None
-    assert signal.signal == "PE"
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "PE"
 
 
 def test_explicit_liquidity_sweep_confirmation_remains_supported(monkeypatch):
@@ -225,12 +218,11 @@ def test_explicit_liquidity_sweep_confirmation_remains_supported(monkeypatch):
     strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
     indicators = _ready_smc_indicators(liquidity_sweep_confirmed=True)
 
-    signal = strategy._evaluate_signal(
-        "NFO:NIFTY26JUN25000CE", indicators, 100.0
-    )
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0)
 
     assert signal is not None
-    assert signal.signal == "CE"
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "CE"
 
 
 def test_manager_swing_low_alias_is_accepted(monkeypatch):
@@ -242,10 +234,8 @@ def test_manager_swing_low_alias_is_accepted(monkeypatch):
         swing_high=102.0,
     )
 
-    signal = strategy._evaluate_signal(
-        "NFO:NIFTY26JUN25000CE", indicators, 100.0
-    )
+    signal = strategy._evaluate_signal("NFO:NIFTY26JUN25000CE", indicators, 100.0)
 
     assert signal is not None
-    assert signal.signal == "CE"
-
+    assert signal.signal == "BUY"
+    assert signal.metadata["trade_side"] == "CE"
