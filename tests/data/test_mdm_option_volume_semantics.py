@@ -65,6 +65,23 @@ def test_option_volume_rollback_and_suspicious_jump_do_not_poison_candle_volume(
     assert after["volume"] == 50
 
 
+def test_option_volume_rebaselines_after_monotonic_confirmation_without_crediting_jump() -> None:
+    mdm = _mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._normalise_tick_volume_delta(symbol, _raw(1_000))
+
+    suspicious = mdm._normalise_tick_volume_delta(symbol, _raw(2_000_000, ts=2))
+    confirmed = mdm._normalise_tick_volume_delta(symbol, _raw(2_000_025, ts=3))
+    resumed = mdm._normalise_tick_volume_delta(symbol, _raw(2_000_050, ts=4))
+
+    assert suspicious["volume_transition"]["state"] == "suspicious_jump"
+    assert confirmed["volume_transition"]["state"] == "suspicious_jump_rebased"
+    assert confirmed["volume"] == 0
+    assert confirmed["volume_delta_untrusted"] is True
+    assert resumed["volume_transition"]["state"] == "accepted"
+    assert resumed["volume"] == 25
+
+
 def test_raw_cumulative_never_becomes_completed_candle_volume() -> None:
     mdm = _mdm()
     processed = [

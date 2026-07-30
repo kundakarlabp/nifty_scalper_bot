@@ -443,6 +443,28 @@ class CandleEngine:
         symbol = self.symbol or "symbol_unset"
         try:
             incoming = _normalize_history_frame(frame, symbol=symbol)
+            if incoming and source in _HISTORY_RECONCILABLE_SOURCES:
+                current_exchange_minute = pd.Timestamp.now(tz=IST).floor("min")
+                completed_incoming = [
+                    row
+                    for row in incoming
+                    if _to_ist_timestamp(row["timestamp"]) < current_exchange_minute
+                ]
+                deferred_count = len(incoming) - len(completed_incoming)
+                if deferred_count:
+                    LOGGER.info(
+                        "HISTORY_CURRENT_MINUTE_DEFERRED",
+                        extra={
+                            "event": "HISTORY_CURRENT_MINUTE_DEFERRED",
+                            "symbol": symbol,
+                            "source": source,
+                            "current_exchange_minute": (
+                                current_exchange_minute.isoformat()
+                            ),
+                            "deferred_rows": deferred_count,
+                        },
+                    )
+                incoming = completed_incoming
             candidate = list(incoming)
             idempotent = 0
             reconciled = 0

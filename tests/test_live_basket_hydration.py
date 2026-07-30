@@ -57,3 +57,32 @@ def test_commit_active_dynamic_basket_persists_context_fields() -> None:
     assert "spot_symbol" in committed and "futures_symbol" in committed
     assert "NSE:NIFTY" in committed["symbols"]
     assert "NFO:NIFTY26MAYFUT" in committed["symbols"]
+
+
+def test_commit_active_dynamic_basket_repairs_stale_selected_pair_after_atm_shift() -> None:
+    old_ce = "NFO:NIFTY26AUG24250CE"
+    old_pe = "NFO:NIFTY26AUG24250PE"
+    new_ce = "NFO:NIFTY26AUG24300CE"
+    new_pe = "NFO:NIFTY26AUG24300PE"
+    option_symbols = [old_ce, old_pe, new_ce, new_pe]
+    ctx = SimpleNamespace(
+        active_trading_universe={
+            "selected_ce": old_ce,
+            "selected_pe": old_pe,
+            "atm_strike": 24250,
+        },
+        selected_ce=old_ce,
+        selected_pe=old_pe,
+        strategy_runner=None,
+    )
+
+    committed_ce, committed_pe = app._commit_active_dynamic_basket(
+        ctx,
+        basket=ctx.active_trading_universe,
+        option_symbols=option_symbols,
+        symbols=option_symbols,
+        atm_strike=24300,
+    )
+
+    assert (committed_ce, committed_pe) == (new_ce, new_pe)
+    assert ctx.active_trading_universe["atm_strike"] == 24300
