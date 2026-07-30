@@ -592,12 +592,9 @@ def test_entry_gate_uses_protected_price_and_reanchored_stop(monkeypatch) -> Non
     assert inputs.price != 100.0
     assert inputs.symbol == "NFO:NIFTY26AUG25000CE"
     assert inputs.lot_size == 65
-    # Sizing sees the plan's FINAL stop, i.e. whatever survived
-    # _reanchor_bracket_to_price (here the bracket stayed valid at the
-    # protected price, so it is unchanged). Re-anchoring itself is covered by
-    # tests/test_bracket_reanchor.py; what matters here is that the gate runs
-    # after that step and never sizes off the stale signal price.
-    assert inputs.stop_loss == 80.0
+    # Sizing sees the final distance-based stop after it moves from the
+    # signal entry (100) to the protected entry (107).
+    assert inputs.stop_loss == 87.0
 
 
 def test_entry_gate_passes_no_atr_when_option_stop_available(monkeypatch) -> None:
@@ -814,7 +811,7 @@ def test_entry_gate_uses_canonical_lowercase_risk_settings(monkeypatch) -> None:
     assert inputs.atr is None
     assert inputs.symbol == "NFO:NIFTY26AUG25000CE"
     assert inputs.price == 107.0
-    assert inputs.stop_loss == 80.0
+    assert inputs.stop_loss == 87.0
 
 
 def test_entry_gate_result_carries_frozen_sizing_details(monkeypatch) -> None:
