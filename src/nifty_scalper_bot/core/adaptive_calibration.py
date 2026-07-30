@@ -23,16 +23,18 @@ class TradeStats:
 
 @dataclass(slots=True)
 class AdaptiveParameterStore:
-    """Rolling per-strategy stats store. Args: window_trades. Returns: None. Raises: None."""
+    """Store rolling per-strategy trade statistics."""
 
     window_trades: int = 200
     _pnl: dict[str, Deque[float]] = field(default_factory=dict)
     _stats: dict[str, TradeStats] = field(default_factory=dict)
 
     def record_trade(self, strategy: str, pnl: float) -> TradeStats:
-        """Record strategy pnl. Args: strategy,pnl. Returns: TradeStats. Raises: None."""
+        """Record strategy P&L and return its updated statistics."""
 
-        bucket = self._pnl.setdefault(strategy, deque(maxlen=max(1, self.window_trades)))
+        bucket = self._pnl.setdefault(
+            strategy, deque(maxlen=max(1, self.window_trades))
+        )
         bucket.append(float(pnl))
         values = list(bucket)
         wins = [v for v in values if v > 0]
@@ -71,15 +73,16 @@ class AdaptiveParameterStore:
 
 @dataclass(slots=True)
 class WalkForwardOptimizer:
-    """Walk-forward parameter tuner. Args: recalibrate_every,alpha. Returns: None. Raises: None."""
+    """Research-only parameter tuner; live updates are disabled by default."""
 
     recalibrate_every: int = 50
     alpha: float = 0.2
     drawdown_threshold: float = 0.0
+    allow_parameter_updates: bool = False
     _trade_count: dict[str, int] = field(default_factory=dict)
     _params: dict[str, dict[str, float]] = field(default_factory=dict)
     _regime_params: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
-    _frozen: bool = False
+    _frozen_strategies: set[str] = field(default_factory=set)
     risk_scale: float = 1.0
 
     def should_recalibrate(self, strategy: str) -> bool:
@@ -96,44 +99,54 @@ class WalkForwardOptimizer:
         stats: TradeStats,
         current: dict[str, float],
     ) -> dict[str, float]:
-        """Optimize local grid. Args: strategy,regime,stats,current. Returns: params. Raises: None."""
+        """Return research-tuned parameters when updates are explicitly enabled."""
 
-        if self._frozen or stats.rolling_sharpe < 0:
-            self._frozen = True
+        if not self.allow_parameter_updates:
+            return current
+        if strategy in self._frozen_strategies or stats.rolling_sharpe < 0:
+            self._frozen_strategies.add(strategy)
             return current
         if self.drawdown_threshold > 0 and stats.max_drawdown > self.drawdown_threshold:
             self.risk_scale = min(self.risk_scale, 0.5)
 
-        mz = current.get('momentum_z_threshold', 0.5)
-        mv = current.get('microvol_percentile', 60.0)
-        sp = current.get('spread_threshold_pct', 0.3)
+        mz = current.get("momentum_z_threshold", 0.5)
+        mv = current.get("microvol_percentile", 60.0)
+        sp = current.get("spread_threshold_pct", 0.3)
         candidates: list[dict[str, float]] = []
         for dm in (-0.1, 0.0, 0.1):
             for dv in (-5.0, 0.0, 5.0):
                 for ds in (-0.05, 0.0, 0.05):
-                    candidates.append({
-                        'momentum_z_threshold': max(0.1, mz + dm),
-                        'microvol_percentile': min(95.0, max(5.0, mv + dv)),
-                        'spread_threshold_pct': max(0.01, sp + ds),
-                    })
+                    candidates.append(
+                        {
+                            "momentum_z_threshold": max(0.1, mz + dm),
+                            "microvol_percentile": min(95.0, max(5.0, mv + dv)),
+                            "spread_threshold_pct": max(0.01, sp + ds),
+                        }
+                    )
         best = max(candidates, key=lambda p: self._objective(stats, p))
         prev = self._params.get(strategy, current)
         blended = {
-            key: (1.0 - self.alpha) * float(prev.get(key, value)) + self.alpha * float(value)
+            key: (1.0 - self.alpha) * float(prev.get(key, value))
+            + self.alpha * float(value)
             for key, value in best.items()
         }
         self._params[strategy] = blended
         self._regime_params.setdefault(strategy, {})[regime] = blended
         return blended
 
-    def on_regime_change(self, strategy: str, regime: str, current: dict[str, float]) -> dict[str, float]:
-        """Load regime params with EMA blend. Args: strategy,regime,current. Returns: params. Raises: None."""
+    def on_regime_change(
+        self, strategy: str, regime: str, current: dict[str, float]
+    ) -> dict[str, float]:
+        """Load research parameters for a regime when explicitly enabled."""
 
+        if not self.allow_parameter_updates:
+            return current
         target = self._regime_params.get(strategy, {}).get(regime)
         if not target:
             return current
         return {
-            key: (1.0 - self.alpha) * float(current.get(key, value)) + self.alpha * float(value)
+            key: (1.0 - self.alpha) * float(current.get(key, value))
+            + self.alpha * float(value)
             for key, value in target.items()
         }
 
@@ -141,5 +154,5 @@ class WalkForwardOptimizer:
     def _objective(stats: TradeStats, params: dict[str, float]) -> float:
         """Objective score. Args: stats,params. Returns: float. Raises: None."""
 
-        spread_penalty = params['spread_threshold_pct'] * 0.2
+        spread_penalty = params["spread_threshold_pct"] * 0.2
         return stats.rolling_sharpe + stats.win_rate - spread_penalty
