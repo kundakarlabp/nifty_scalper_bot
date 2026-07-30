@@ -14,6 +14,7 @@ import time
 from typing import Any, Mapping
 
 from nifty_scalper_bot.core.polling_failover import decide_polling_fallback
+from nifty_scalper_bot.utils.log_throttle import log_on_change
 
 _PATCH_ATTR = "_polling_failover_runtime_patch_installed"
 _APP_MODULE_NAME = "nifty_scalper_bot.core.app"
@@ -79,7 +80,11 @@ def _safe_feed_health(mdm: Any) -> Mapping[str, Any]:
             "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
             type(exc).__name__,
             exc,
-            extra={"event": "POLLING_FALLBACK_HEALTH_FAILED", "error_type": type(exc).__name__, "error": str(exc)},
+            extra={
+                "event": "POLLING_FALLBACK_HEALTH_FAILED",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
         )
         return {}
     return value if isinstance(value, Mapping) else {}
@@ -99,7 +104,11 @@ def _safe_data_age_ms(mdm: Any) -> float | None:
             "POLLING_FALLBACK_AGE_FAILED error_type=%s error=%s",
             type(exc).__name__,
             exc,
-            extra={"event": "POLLING_FALLBACK_AGE_FAILED", "error_type": type(exc).__name__, "error": str(exc)},
+            extra={
+                "event": "POLLING_FALLBACK_AGE_FAILED",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
         )
         return None
 
@@ -107,7 +116,11 @@ def _safe_data_age_ms(mdm: Any) -> float | None:
 async def _stop_fallback_safely(fallback: Any, *, reason: str) -> None:
     try:
         running_fn = getattr(fallback, "is_running", None)
-        running = bool(running_fn()) if callable(running_fn) else bool(getattr(fallback, "_running", False))
+        running = (
+            bool(running_fn())
+            if callable(running_fn)
+            else bool(getattr(fallback, "_running", False))
+        )
         if not running:
             # Already stopped: repeating set_websocket_mode(True) every healthy
             # supervisor iteration is redundant async churn / noisy telemetry.
@@ -124,7 +137,12 @@ async def _stop_fallback_safely(fallback: Any, *, reason: str) -> None:
             reason,
             type(exc).__name__,
             exc,
-            extra={"event": "POLLING_FALLBACK_STOP_FAILED", "reason": reason, "error_type": type(exc).__name__, "error": str(exc)},
+            extra={
+                "event": "POLLING_FALLBACK_STOP_FAILED",
+                "reason": reason,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
         )
 
 
@@ -134,7 +152,11 @@ async def _start_fallback_safely(fallback: Any, *, decision_reason: str | None) 
         if callable(mode_fn):
             await _maybe_await(mode_fn(False))
         running_fn = getattr(fallback, "is_running", None)
-        running = bool(running_fn()) if callable(running_fn) else bool(getattr(fallback, "_running", False))
+        running = (
+            bool(running_fn())
+            if callable(running_fn)
+            else bool(getattr(fallback, "_running", False))
+        )
         if not running:
             start_fn = getattr(fallback, "start", None)
             if callable(start_fn):
@@ -145,7 +167,12 @@ async def _start_fallback_safely(fallback: Any, *, decision_reason: str | None) 
             decision_reason,
             type(exc).__name__,
             exc,
-            extra={"event": "POLLING_FALLBACK_START_FAILED", "reason": decision_reason, "error_type": type(exc).__name__, "error": str(exc)},
+            extra={
+                "event": "POLLING_FALLBACK_START_FAILED",
+                "reason": decision_reason,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
         )
 
 
@@ -232,16 +259,30 @@ async def _polling_failover_supervisor_iteration(
         feed_health=feed_health,
         data_age_ms=data_age_ms,
     )
-    LOGGER.info(
-        "POLLING_FALLBACK_DECISION activate=%s reason=%s ws_ok=%s lagging=%s futures_fresh=%s options_fresh=%s max_age_ms=%s threshold_ms=%s",
-        decision.activate,
-        decision.reason,
-        decision.ws_ok,
-        decision.lagging,
-        decision.futures_fresh,
-        decision.options_fresh,
-        decision.max_age_ms,
-        decision.threshold_ms,
+    log_on_change(
+        LOGGER,
+        key="polling_fallback_decision",
+        state=(
+            decision.activate,
+            decision.reason,
+            decision.ws_ok,
+            decision.lagging,
+            decision.futures_fresh,
+            decision.options_fresh,
+            decision.required_symbol_recovery_active,
+            decision.stale_required_symbols,
+        ),
+        message=(
+            "POLLING_FALLBACK_DECISION "
+            f"activate={decision.activate} reason={decision.reason} "
+            f"ws_ok={decision.ws_ok} lagging={decision.lagging} "
+            f"futures_fresh={decision.futures_fresh} "
+            f"options_fresh={decision.options_fresh} "
+            f"max_age_ms={decision.max_age_ms} "
+            f"threshold_ms={decision.threshold_ms}"
+        ),
+        reminder_seconds=60.0,
+        level=logging.INFO,
         extra=decision.as_log_extra(),
     )
     now = time.monotonic()
@@ -268,9 +309,10 @@ def apply_app_patch(app_module: Any) -> bool:
     if bool(getattr(app_module, _PATCH_ATTR, False)):
         return False
     supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
-    if callable(supervisor) and getattr(
-        supervisor, "_nifty_polling_supervisor_version", None
-    ) == 2:
+    if (
+        callable(supervisor)
+        and getattr(supervisor, "_nifty_polling_supervisor_version", None) == 2
+    ):
         setattr(app_module, _PATCH_ATTR, True)
         return False
 

@@ -15974,18 +15974,6 @@ class NiftyScalperApp:
                         )
                         await asyncio.sleep(5.0)
                     try:
-                        if _should_reconcile_now(self._ctx):
-                            await _reconcile_state(self._ctx, source="manual")
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.warning(
-                            "Periodic state reconciliation failed",
-                            extra={
-                                "event": "state_reconcile_failed_periodic",
-                                "error": str(exc),
-                            },
-                            exc_info=True,
-                        )
-                    try:
                         _alert_overnight_exposure(self._ctx)
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
