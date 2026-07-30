@@ -1121,7 +1121,9 @@ class DataHub:
             exc,
         )
 
-    def _capture_option_metrics(self, symbol: str, tick: Tick) -> None:
+    def _capture_option_metrics(
+        self, symbol: str, tick: Tick, *, derive_missing: bool = True
+    ) -> None:
         iv_raw = tick.get("implied_volatility") or tick.get("iv")
         if iv_raw is not None:
             try:
@@ -1144,6 +1146,8 @@ class DataHub:
                 self._oi_cache[symbol] = float(oi)
             except (TypeError, ValueError):
                 pass
+        if not derive_missing:
+            return
         if symbol in self._iv_cache and symbol in self._greeks_cache:
             return
         parsed = self._parse_option_symbol(symbol)
@@ -1312,7 +1316,7 @@ class DataHub:
                 },
             )
 
-        self._capture_option_metrics(symbol, canonical_tick)
+        self._capture_option_metrics(symbol, canonical_tick, derive_missing=False)
 
         for callback in subscribers:
             try:
