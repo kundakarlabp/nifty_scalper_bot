@@ -30,6 +30,7 @@ LOGGER = get_logger(__name__)
 
 _PRIMARY_DIRECTIONAL = {'smc', 'vwap', 'orb'}
 _CONTEXT_ONLY = {'oi_max_pain', 'order_flow', 'bb_squeeze'}
+_UNWIRED_DIRECTIONAL_CONTEXT = {'bb_squeeze'}
 _DISABLED_UNTIL_FEATURE_COMPLETE = {'cpr', 'rsi_div'}
 _EXPIRY_ONLY = {'gamma_scalping', 'tuesday_gamma_buyer'}
 _THETA_ONLY = {'straddle'}
@@ -101,6 +102,9 @@ def build_elite_strategies(
 
             if strategy_mode == 'directional_scalp':
                 if field_name in _EXPIRY_ONLY or field_name in _THETA_ONLY:
+                    disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                    continue
+                if field_name in _UNWIRED_DIRECTIONAL_CONTEXT:
                     disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                     continue
                 if field_name not in _PRIMARY_DIRECTIONAL and field_name not in _CONTEXT_ONLY:

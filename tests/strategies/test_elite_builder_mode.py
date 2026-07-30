@@ -22,7 +22,8 @@ def test_directional_mode_disables_gamma_theta_and_context(monkeypatch) -> None:
     assert "EliteTuesdayGammaBuyer" not in names
     assert "StraddleTheta" not in names
     assert "OIMaxPain" not in names
-    assert {"SMC", "VWAPPro", "OrderFlow", "BBSqueeze", "ORBPro"}.issubset(names)
+    assert "BBSqueeze" not in names
+    assert {"SMC", "VWAPPro", "OrderFlow", "ORBPro"}.issubset(names)
     assert "CPRBreakout" not in names
 
 
