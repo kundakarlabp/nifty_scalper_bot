@@ -27,6 +27,19 @@ class ORBProStrategy(EliteStrategy):
         """Args: none. Returns: indicators set. Raises: Exception."""
         return {'orb_high', 'orb_low', 'orb_ready', 'close', 'open', 'volume', 'avg_volume', 'atr', 'direction_bias', 'regime'}
 
+    def notify_entry_accepted(self, side: str) -> None:
+        """Consume today's ORB direction only after order acceptance."""
+        accepted_side = str(side or "").strip().upper()
+        if accepted_side not in {"CE", "PE"}:
+            return
+        today = datetime.now(
+            timezone(timedelta(hours=5, minutes=30))
+        ).date().isoformat()
+        self._fired_today.add((today, accepted_side))
+        self._fired_today = {
+            key for key in self._fired_today if key[0] == today
+        }
+
     def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
@@ -127,10 +140,6 @@ class ORBProStrategy(EliteStrategy):
                 'invalidation_level': orb_low if breakout_side == 'CE' else orb_high,
             }
             LOGGER.info('STRATEGY_VOTE strategy=ORBPro side=%s score=%.2f', breakout_side, strategy_score)
-            self._fired_today.add(day_key)
-            if len(self._fired_today) > 8:
-                today = day_key[0]
-                self._fired_today = {k for k in self._fired_today if k[0] == today}
             return EliteSignal(
                 symbol=symbol,
                 signal='BUY',

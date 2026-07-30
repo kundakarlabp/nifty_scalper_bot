@@ -219,6 +219,13 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
     runner._trade_candidate_selector = SimpleNamespace(_last_rejects={})
     runner._position_manager = None
     runner._orchestrator = None
+    accepted_notifications = []
+    runner._strategy_manager = SimpleNamespace(
+        notify_entry_accepted=lambda strategy, side: accepted_notifications.append(
+            (strategy, side)
+        )
+    )
+    runner._accepted_strategy_notifications = accepted_notifications
     runner._active_atm_strike = 25000
     runner._active_option_symbols = {"NFO:CE", "NFO:PE"}
     runner._active_basket_all_symbols = {"NFO:CE", "NFO:PE"}
@@ -316,6 +323,30 @@ def test_entry_path_allows_ready_ce_candidate_and_submits_order(
     assert result.accepted is True
     assert len(runner._order_manager.plans) == 1
     assert runner._order_manager.plans[0].symbol == "NFO:CE"
+    assert runner._accepted_strategy_notifications == [("test", "CE")]
+
+
+def test_entry_remains_accepted_when_strategy_notification_fails(
+    monkeypatch,
+) -> None:
+    runner, _ = _execution_runner(monkeypatch, ce_ok=True, pe_ok=False)
+
+    def fail_notification(*_args):
+        raise RuntimeError("notification failed")
+
+    runner._strategy_manager.notify_entry_accepted = fail_notification
+
+    result = runner._handle_entry_signal_inner(
+        _signal("NFO:CE"),
+        "NSE:NIFTY",
+        "NFO:CE",
+        100.0,
+        datetime.now(timezone.utc),
+        trace_id="t",
+    )
+
+    assert result.accepted is True
+    assert len(runner._order_manager.plans) == 1
 
 
 def test_entry_path_rejects_stale_pe_candidate_before_order_manager(monkeypatch):
@@ -333,6 +364,7 @@ def test_entry_path_rejects_stale_pe_candidate_before_order_manager(monkeypatch)
     assert result.reason == "selected_pe_unready"
     assert result.details["candidate_blockers"] == ["quote_missing"]
     assert runner._order_manager.plans == []
+    assert runner._accepted_strategy_notifications == []
 
 
 def test_entry_path_rejects_unmapped_nifty_option_before_order_manager(monkeypatch):

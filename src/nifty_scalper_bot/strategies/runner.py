@@ -19987,6 +19987,23 @@ class StrategyRunner:
                 orchestrator = getattr(self, "_orchestrator", None)
                 if orchestrator is not None and hasattr(orchestrator, "notify_entry"):
                     orchestrator.notify_entry(signal.symbol, reason="order_accepted")
+                strategy_manager = getattr(self, "_strategy_manager", None)
+                notify_entry_accepted = getattr(
+                    strategy_manager, "notify_entry_accepted", None
+                )
+                if callable(notify_entry_accepted):
+                    try:
+                        notify_entry_accepted(strategy_name, option_side)
+                    except Exception as exc:  # noqa: BLE001 - order is accepted
+                        self._logger.error(
+                            "STRATEGY_ENTRY_ACCEPTED_HOOK_FAILED "
+                            "strategy=%s side=%s order_id=%s error=%s",
+                            strategy_name,
+                            option_side,
+                            order_id,
+                            exc,
+                            exc_info=exc,
+                        )
                 # Stamp the order id onto the execution state machine so stale-state
                 # reconciliation can tell a real pending order from a wedged one.
                 try:
