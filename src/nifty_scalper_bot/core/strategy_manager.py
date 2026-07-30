@@ -1432,6 +1432,32 @@ class StrategyManager(_BaseStrategyManager):
             )
         self._score_cache.pop(strategy_name, None)
 
+    def notify_entry_accepted(self, strategy_name: str, side: str) -> None:
+        """Notify the originating strategy after an entry order is accepted."""
+        resolved_name = str(strategy_name or "").strip()
+        if not resolved_name:
+            return
+        for strategy in self._strategies:
+            if str(getattr(strategy, "name", "") or "") != resolved_name:
+                continue
+            hook = getattr(strategy, "notify_entry_accepted", None)
+            if not callable(hook):
+                return
+            try:
+                hook(side)
+            except Exception as exc:  # noqa: BLE001 - order is already accepted
+                log.error(
+                    "Failure in strategy entry-accepted hook: %s",
+                    exc,
+                    exc_info=exc,
+                    extra={
+                        "event": "strategy_entry_accepted_hook_error",
+                        "strategy": resolved_name,
+                        "side": side,
+                    },
+                )
+            return
+
     def get_strategy_scores(self, limit: int | None = None) -> list[StrategyScore]:
         """Return ordered strategy scores for observability.
 
