@@ -236,6 +236,15 @@ class SMCStrategy(EliteStrategy):
                 return None
 
             contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
+            if option_premium_domain and bearish_sweep:
+                self._no_vote("premium_not_reversing_up")
+                LOGGER.info(
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s "
+                    "reason=premium_not_reversing_up bearish_sweep=%s",
+                    symbol,
+                    bearish_sweep,
+                )
+                return None
             required_features = ("premium_reclaim", "bullish_reversal", "choch_confirmed", "bos_confirmed", "retest_confirmed")
             present_features = [name for name in required_features if indicators.get(name) is not None]
             feature_completeness = float(len(present_features)) / float(len(required_features))
