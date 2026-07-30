@@ -1162,6 +1162,20 @@ class StrategyRunner:
         self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
         self._last_ws_reconnect_attempt_ts: float = 0.0
         self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
+        # Health-watchdog cadence and dispatch state. The watchdog is control
+        # plane, not data plane: it scans active symbols, hydrates missing bars,
+        # repairs history and assesses WebSocket recovery. Running it inside the
+        # synchronous tick callback made those costs indivisible from tick
+        # ingestion (measured 176-1088 ms single-callback stalls, which the 50 ms
+        # drain budget cannot pre-empt because it is only checked BETWEEN ticks).
+        self._last_health_watchdog_ts: float = 0.0
+        self._health_watchdog_inflight: bool = False
+        self._health_watchdog_interval_s: float = max(
+            0.0,
+            parse_float_env(
+                os.getenv("RUNNER_HEALTH_WATCHDOG_INTERVAL_SECONDS"), 5.0
+            ),
+        )
         # Compatibility mirror of authoritative MDM CandleEngine objects only.
         # StrategyRunner must never instantiate or mutate separate engines.
         self._candle_engines: dict[str, Any] = {}
@@ -7858,7 +7872,7 @@ class StrategyRunner:
                             "stall_sec": round(now_mono - self._last_global_eval_ts, 1),
                         },
                     )
-            self._health_watchdog()
+            self._dispatch_health_watchdog()
             self._logger.debug(
                 "PIPELINE_OK",
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
@@ -8354,6 +8368,44 @@ class StrategyRunner:
         # was ingested, so _on_tick must not run it a second time.
         tick_payload["_protection_already_handled"] = True
         self._on_tick(symbol, tick_payload)
+
+    def _dispatch_health_watchdog(self) -> None:
+        """Run the health watchdog on cadence, off the tick thread.
+
+        Keeps the synchronous tick path free of control-plane work. At most one
+        watchdog pass runs per RUNNER_HEALTH_WATCHDOG_INTERVAL_SECONDS, and at
+        most one is ever in flight, so many ticks inside one interval cannot
+        cause many full scans. Args: none. Returns: none. Raises: none.
+        """
+        now = time.monotonic()
+        interval = max(0.0, float(self._health_watchdog_interval_s))
+        if self._health_watchdog_inflight:
+            return
+        if interval > 0.0 and (now - self._last_health_watchdog_ts) < interval:
+            return
+        self._last_health_watchdog_ts = now
+
+        loop = self._main_loop
+        if loop is None or loop.is_closed():
+            # No runtime loop attached (focused unit tests, early startup).
+            # Run inline rather than silently skipping health checks.
+            self._health_watchdog()
+            return
+
+        self._health_watchdog_inflight = True
+
+        def _run() -> None:
+            try:
+                self._health_watchdog()
+            except Exception:  # noqa: BLE001 - watchdog must never propagate
+                self._logger.exception("HEALTH_WATCHDOG_FAILED")
+            finally:
+                self._health_watchdog_inflight = False
+
+        try:
+            loop.call_soon_threadsafe(_run)
+        except RuntimeError:
+            self._health_watchdog_inflight = False
 
     def _health_watchdog(self) -> None:
         """Args: none; Returns: none; Raises: none."""
