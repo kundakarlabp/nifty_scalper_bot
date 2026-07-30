@@ -400,9 +400,9 @@ class VWAPProStrategy(EliteStrategy):
                 'continuation_confirmed': continuation_confirmed,
                 'early_trend_pullback': early_trend_pullback,
                 'setup_invalidation_premium': current_price - atr_safe,
+                'invalidation_level_domain': 'option_premium',
                 'premium_stop_distance': atr_safe,
                 'premium_target_rr': 2.0,
-                'underlying_invalidation_level': (vwap - atr_safe) if contract_side == 'CE' else (vwap + atr_safe),
                 'no_vote_conflict_mode': 'hard' if hard_conflict else 'soft',
             }
             LOGGER.info('STRATEGY_VOTE strategy=VWAPPro side=%s score=%.2f', contract_side, strategy_score)
