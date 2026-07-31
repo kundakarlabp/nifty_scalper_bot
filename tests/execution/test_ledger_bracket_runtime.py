@@ -197,6 +197,74 @@ def test_completed_trade_outcome_preserves_provenance_and_net_costs(
     assert restored.trade_provenance == bracket.trade_provenance
 
 
+def test_completed_trade_outcome_preserves_execution_loss(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    manager.attach_trade_provenance(
+        "entry-1",
+        {
+            "entry_arrival_price": 99.5,
+            "entry_quote_bid": 99.0,
+            "entry_quote_ask": 100.0,
+            "decision_ts": 1000.0,
+            "entry_submit_ts": 1001.0,
+        },
+    )
+    manager.confirm_entry_fill("entry-1", 100.0)
+    bracket.entry_fill_ts = 1002.0
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="execution-loss-outcome",
+        reason="HARD_TP_BREACH",
+        price=110.0,
+        residual=0,
+    )
+    bracket.exit_arrival_price = 110.2
+    bracket.exit_quote_bid = 110.0
+    bracket.exit_quote_ask = 110.4
+    bracket.exit_triggered_at = 1008.0
+    bracket.exit_submitted_at = 1009.0
+    bracket.exit_order_type = "MARKET"
+    bracket.exit_market_fallback = True
+    bracket.exit_rejected_attempts = 1
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.ledger_bracket_manager.time.time",
+        lambda: 1010.0,
+    )
+
+    manager._close_bracket(bracket, close_source="broker_fill", exit_price=110.0)
+
+    outcome = manager.get_completed_trade_outcome(SYMBOL)
+    assert outcome is not None
+    quality = outcome["execution_quality"]
+    assert quality["entry_slippage_points"] == 0.5
+    assert quality["entry_slippage_cost"] == 65.0
+    assert quality["entry_spread_points"] == 1.0
+    assert quality["decision_to_entry_fill_seconds"] == 2.0
+    assert quality["entry_submit_to_fill_seconds"] == 1.0
+    assert quality["exit_slippage_points"] == 0.2
+    assert quality["exit_slippage_cost"] == 26.0
+    assert quality["exit_spread_points"] == 0.4
+    assert quality["exit_trigger_to_fill_seconds"] == 2.0
+    assert quality["exit_submit_to_fill_seconds"] == 1.0
+    assert quality["exit_order_type"] == "MARKET"
+    assert quality["exit_market_fallback"] is True
+    assert quality["exit_rejected_attempts"] == 1
+
+    restored = manager._decode_restored_bracket(
+        bracket.entry_order_id, bracket.to_dict()
+    )
+    assert restored.exit_arrival_price == bracket.exit_arrival_price
+    assert restored.exit_quote_bid == bracket.exit_quote_bid
+    assert restored.exit_quote_ask == bracket.exit_quote_ask
+    assert restored.exit_submitted_at == bracket.exit_submitted_at
+    assert restored.exit_rejected_attempts == 1
+
+
 def test_duplicate_entry_callback_is_idempotent(monkeypatch, tmp_path) -> None:
     manager, _order_manager, _broker = _manager(monkeypatch, tmp_path)
     manager.confirm_entry_fill("entry-1", 100.0)

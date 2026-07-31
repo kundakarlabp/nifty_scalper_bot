@@ -301,6 +301,13 @@ class BracketState:
     entry_fill_ts: float | None = None
     exit_reason: str | None = None
     exit_triggered_at: float | None = None
+    exit_submitted_at: float | None = None
+    exit_arrival_price: float | None = None
+    exit_quote_bid: float | None = None
+    exit_quote_ask: float | None = None
+    exit_order_type: str | None = None
+    exit_market_fallback: bool = False
+    exit_rejected_attempts: int = 0
     exit_attempt_count: int = 0
     last_exit_attempt_at: float | None = None
     last_exit_error: str | None = None
@@ -421,6 +428,13 @@ class BracketState:
             "entry_fill_price": self.entry_fill_price,
             "exit_reason": self.exit_reason,
             "exit_triggered_at": self.exit_triggered_at,
+            "exit_submitted_at": self.exit_submitted_at,
+            "exit_arrival_price": self.exit_arrival_price,
+            "exit_quote_bid": self.exit_quote_bid,
+            "exit_quote_ask": self.exit_quote_ask,
+            "exit_order_type": self.exit_order_type,
+            "exit_market_fallback": self.exit_market_fallback,
+            "exit_rejected_attempts": self.exit_rejected_attempts,
             "exit_attempt_count": self.exit_attempt_count,
             "last_exit_attempt_at": self.last_exit_attempt_at,
             "last_exit_error": self.last_exit_error,
@@ -3344,6 +3358,16 @@ class BracketManager:
             preferred_order_type=preferred_order_type,
             qty=qty,
         )
+        if bracket is not None:
+            bid = pricing_meta.get("bid")
+            ask = pricing_meta.get("ask")
+            ltp = pricing_meta.get("ltp")
+            executable = bid if side == "SELL" else ask
+            bracket.exit_arrival_price = float(executable or ltp or 0.0) or None
+            bracket.exit_quote_bid = float(bid or 0.0) or None
+            bracket.exit_quote_ask = float(ask or 0.0) or None
+            bracket.exit_order_type = str(order_type or "").upper() or None
+            bracket.exit_market_fallback = bool(pricing_meta.get("fallback"))
         if pricing_meta.get("quote_missing"):
             LOGGER.warning(
                 "EXIT_ORDER_PRICING_DECISION bracket_id=%s reason=%s mode=aggressive_limit side=%s qty=%s bid=%s ask=%s ltp=%s price=%s fallback=%s",
@@ -3857,9 +3881,11 @@ class BracketManager:
                 bracket.pending_exit_order_id = result.order_id
                 bracket.exit_attempt_count += 1
                 bracket.last_exit_attempt_at = time.time()
+                bracket.exit_submitted_at = bracket.last_exit_attempt_at
                 bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
                 submitted = True
             else:
+                bracket.exit_rejected_attempts += 1
                 bracket.last_exit_error = result.error_message or result.status
                 bracket.exit_state = (
                     BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
@@ -4491,6 +4517,15 @@ class BracketManager:
             entry_fill_price=payload.get("entry_fill_price"),
             exit_reason=payload.get("exit_reason"),
             exit_triggered_at=payload.get("exit_triggered_at"),
+            exit_submitted_at=payload.get("exit_submitted_at"),
+            exit_arrival_price=payload.get("exit_arrival_price"),
+            exit_quote_bid=payload.get("exit_quote_bid"),
+            exit_quote_ask=payload.get("exit_quote_ask"),
+            exit_order_type=payload.get("exit_order_type"),
+            exit_market_fallback=bool(payload.get("exit_market_fallback", False)),
+            exit_rejected_attempts=int(
+                payload.get("exit_rejected_attempts", 0) or 0
+            ),
             exit_attempt_count=int(payload.get("exit_attempt_count", 0) or 0),
             last_exit_attempt_at=payload.get("last_exit_attempt_at"),
             last_exit_error=payload.get("last_exit_error"),
