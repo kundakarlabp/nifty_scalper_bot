@@ -1,14 +1,16 @@
 """Final risk guard patch for order-entry SSOT enforcement.
 
 The production order path calls RiskManager.check_order() immediately before
-broker submission. Daily trade count and open-position failsafes must therefore
-live here, not only in read-only/status helpers.
+broker submission. Daily trade count, structural re-entry and economic edge
+failsafes must therefore live here, not only in candidate/status helpers.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
 from typing import Any
+
+from nifty_scalper_bot.risk.net_rr_gate import NetRRResult, evaluate_final_net_rr
 
 _PATCH_APPLIED = False
 _ORIGINAL_CHECK_ORDER: Any = None
@@ -135,8 +137,18 @@ def _stop_reentry_block_reason(position_manager: Any, signal: Any) -> str | None
     return None
 
 
+def _net_rr_block_reason(signal: Any) -> tuple[str, NetRRResult] | None:
+    with suppress(Exception):
+        result = evaluate_final_net_rr(signal)
+        if result is not None and not result.allowed:
+            return (
+                f"net reward-risk insufficient: {result.net_rr:.2f}/{result.minimum:.2f}",
+                result,
+            )
+    return None
+
+
 def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bool, str]:
-    # Preserve the original priority for non-live calls and pre-existing breakers.
     # Protective exits/reductions must never be blocked by entry-only limits.
     position_manager = getattr(self, "position_manager", None)
     if position_manager is not None and _is_reducing_order(position_manager, signal):
@@ -162,6 +174,37 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
                     },
                 )
             return False, reentry_reason
+
+    if live_enabled:
+        net_rr_block = _net_rr_block_reason(signal)
+        if net_rr_block is not None:
+            reason, result = net_rr_block
+            self._last_rejection = "NET_RR_INSUFFICIENT"
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "warning", None)
+            if callable(log):
+                log(
+                    "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
+                    reason,
+                    getattr(signal, "symbol", None),
+                    extra={
+                        "event": "RISK_FINAL_GATE_BLOCK",
+                        "reason": reason,
+                        "code": "NET_RR_INSUFFICIENT",
+                        "symbol": getattr(signal, "symbol", None),
+                        "final_order_gate": True,
+                        "net_rr": round(result.net_rr, 4),
+                        "min_net_rr": result.minimum,
+                        "gross_reward": round(result.gross_reward, 2),
+                        "gross_risk": round(result.gross_risk, 2),
+                        "net_reward": round(result.net_reward, 2),
+                        "net_risk": round(result.net_risk, 2),
+                        "target_cost": round(result.target_cost, 2),
+                        "stop_cost": round(result.stop_cost, 2),
+                        "half_spread": round(result.half_spread, 4),
+                    },
+                )
+            return False, reason
 
     if live_enabled and not bool(getattr(self, "_breaker_tripped", False)):
         blocker = _daily_limit_block_reason(self)
@@ -210,5 +253,6 @@ __all__ = [
     "apply_patches",
     "_daily_limit_block_reason",
     "_is_reducing_order",
+    "_net_rr_block_reason",
     "_stop_reentry_block_reason",
 ]
