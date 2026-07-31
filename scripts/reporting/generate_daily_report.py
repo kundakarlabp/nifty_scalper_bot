@@ -77,6 +77,165 @@ def _number(value: Any) -> float | None:
     return resolved if math.isfinite(resolved) else None
 
 
+def _measured_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        trade
+        for trade in trades
+        if trade.get("ledger_complete") is True
+        and _number(trade.get("net_pnl")) is not None
+    ]
+
+
+def _profit_factor(values: list[float]) -> float | None:
+    positive = sum(value for value in values if value > 0)
+    negative = abs(sum(value for value in values if value < 0))
+    return round(positive / negative, 4) if negative > 0 else None
+
+
+def _max_drawdown(trades: list[dict[str, Any]]) -> float:
+    equity = 0.0
+    peak = 0.0
+    drawdown = 0.0
+    for trade in sorted(
+        trades, key=lambda item: _number(item.get("closed_timestamp")) or 0.0
+    ):
+        equity += _number(trade.get("net_pnl")) or 0.0
+        peak = max(peak, equity)
+        drawdown = max(drawdown, peak - equity)
+    return round(drawdown, 2)
+
+
+def _score_summary(
+    measured: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for trade in measured:
+        score = _number(trade.get("final_score"))
+        if score is not None:
+            grouped[math.floor(score)].append(trade)
+
+    buckets = []
+    for lower, trades in sorted(grouped.items()):
+        net_values = [_number(trade.get("net_pnl")) or 0.0 for trade in trades]
+        buckets.append(
+            {
+                "score_bucket": f"{lower:.1f}–<{lower + 1:.1f}",
+                "measured_trades": len(trades),
+                "wins": sum(value > 0 for value in net_values),
+                "win_rate_pct": round(
+                    sum(value > 0 for value in net_values) / len(trades) * 100.0,
+                    1,
+                ),
+                "average_net_pnl": round(sum(net_values) / len(trades), 2),
+                "profit_factor": _profit_factor(net_values),
+                "max_drawdown": _max_drawdown(trades),
+            }
+        )
+    trades_with_score = sum(len(trades) for trades in grouped.values())
+    return buckets, {
+        "measured_trades": len(measured),
+        "trades_with_score": trades_with_score,
+        "trades_without_score": len(measured) - trades_with_score,
+    }
+
+
+def _metric_summary(values: list[float]) -> dict[str, Any]:
+    ordered = sorted(values)
+    percentile_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
+    return {
+        "coverage": len(ordered),
+        "average": round(sum(ordered) / len(ordered), 3),
+        "p95": round(ordered[percentile_index], 3),
+    }
+
+
+def _execution_summary(measured: list[dict[str, Any]]) -> dict[str, Any]:
+    fields = (
+        "entry_slippage_bps",
+        "entry_spread_points",
+        "decision_to_entry_fill_seconds",
+        "entry_submit_to_fill_seconds",
+        "exit_slippage_bps",
+        "exit_spread_points",
+        "exit_trigger_to_fill_seconds",
+        "exit_submit_to_fill_seconds",
+    )
+    values: dict[str, list[float]] = {field: [] for field in fields}
+    total_slippage_costs: list[float] = []
+    market_fallback_trades = 0
+    rejected_exit_attempts = 0
+    trades_with_quality = 0
+    for trade in measured:
+        quality = trade.get("execution_quality")
+        if not isinstance(quality, Mapping):
+            continue
+        trades_with_quality += 1
+        for field in fields:
+            value = _number(quality.get(field))
+            if value is not None:
+                values[field].append(value)
+        entry_cost = _number(quality.get("entry_slippage_cost"))
+        exit_cost = _number(quality.get("exit_slippage_cost"))
+        if entry_cost is not None and exit_cost is not None:
+            total_slippage_costs.append(entry_cost + exit_cost)
+        if quality.get("exit_market_fallback") is True:
+            market_fallback_trades += 1
+        rejected_exit_attempts += int(
+            _number(quality.get("exit_rejected_attempts")) or 0
+        )
+    return {
+        "measured_trades": len(measured),
+        "trades_with_quality": trades_with_quality,
+        **{
+            field: _metric_summary(metric_values) if metric_values else None
+            for field, metric_values in values.items()
+        },
+        "total_slippage_cost": (
+            _metric_summary(total_slippage_costs) if total_slippage_costs else None
+        ),
+        "market_fallback_trades": market_fallback_trades,
+        "rejected_exit_attempts": rejected_exit_attempts,
+    }
+
+
+def _exit_summary(measured: list[dict[str, Any]]) -> dict[str, Any]:
+    excursions: list[tuple[float, float]] = []
+    by_reason: dict[str, list[float]] = defaultdict(list)
+    for trade in measured:
+        gross = _number(trade.get("gross_pnl"))
+        mfe = _number(trade.get("mfe_pnl"))
+        if gross is not None and mfe is not None:
+            excursions.append((gross, mfe))
+        reason = str(trade.get("exit_reason") or "UNKNOWN").strip() or "UNKNOWN"
+        by_reason[reason].append(_number(trade.get("net_pnl")) or 0.0)
+    total_mfe = sum(mfe for _gross, mfe in excursions)
+    return {
+        "measured_trades": len(measured),
+        "trades_with_excursions": len(excursions),
+        "average_profit_surrendered": (
+            round(
+                sum(mfe - gross for gross, mfe in excursions) / len(excursions),
+                2,
+            )
+            if excursions
+            else None
+        ),
+        "mfe_capture_pct": (
+            round(sum(gross for gross, _mfe in excursions) / total_mfe * 100.0, 2)
+            if total_mfe > 0
+            else None
+        ),
+        "exit_reasons": [
+            {
+                "exit_reason": reason,
+                "trades": len(values),
+                "net_pnl": round(sum(values), 2),
+            }
+            for reason, values in sorted(by_reason.items())
+        ],
+    }
+
+
 def summarise_completed_trades(
     trades: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -187,6 +346,8 @@ def summarise_completed_trades(
         total_costs += estimated_costs
         total_net += net_pnl
 
+    measured = _measured_trades(trades)
+    score_buckets, score_coverage = _score_summary(measured)
     return {
         "groups": groups,
         "totals": {
@@ -197,11 +358,124 @@ def summarise_completed_trades(
             "estimated_costs": round(total_costs, 2),
             "net_pnl": round(total_net, 2),
         },
+        "score_buckets": score_buckets,
+        "score_coverage": score_coverage,
+        "execution_quality": _execution_summary(measured),
+        "exit_quality": _exit_summary(measured),
     }
 
 
 def _display(value: Any, *, suffix: str = "") -> str:
     return "N/A" if value is None else f"{value}{suffix}"
+
+
+def _append_observational_sections(
+    lines: list[str],
+    summary: Mapping[str, Any],
+) -> None:
+    score_coverage = summary.get("score_coverage", {})
+    lines.extend(
+        [
+            "",
+            "## Score Calibration (observational)",
+            "",
+            f"Score coverage: **{int(score_coverage.get('trades_with_score', 0))}/"
+            f"{int(score_coverage.get('measured_trades', 0))}** measured trades",
+            "",
+            "| Score bucket | Trades | Win rate | Avg net P&L | Profit factor | "
+            "Max drawdown |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    score_buckets = summary.get("score_buckets", [])
+    if not score_buckets:
+        lines.append("| N/A | 0 | N/A | N/A | N/A | N/A |")
+    for bucket in score_buckets:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(bucket.get("score_bucket", "N/A")),
+                    str(bucket.get("measured_trades", 0)),
+                    _display(bucket.get("win_rate_pct"), suffix="%"),
+                    _display(bucket.get("average_net_pnl")),
+                    _display(bucket.get("profit_factor")),
+                    _display(bucket.get("max_drawdown")),
+                ]
+            )
+            + " |"
+        )
+
+    execution = summary.get("execution_quality", {})
+    lines.extend(
+        [
+            "",
+            "## Execution Quality (observational)",
+            "",
+            f"Execution-quality coverage: **"
+            f"{int(execution.get('trades_with_quality', 0))}/"
+            f"{int(execution.get('measured_trades', 0))}** measured trades",
+            "",
+            "| Metric | Coverage | Average | P95 |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    execution_metrics = (
+        ("Entry slippage (bps)", "entry_slippage_bps"),
+        ("Entry spread (points)", "entry_spread_points"),
+        ("Decision → entry fill (s)", "decision_to_entry_fill_seconds"),
+        ("Entry submit → fill (s)", "entry_submit_to_fill_seconds"),
+        ("Exit slippage (bps)", "exit_slippage_bps"),
+        ("Exit spread (points)", "exit_spread_points"),
+        ("Exit trigger → fill (s)", "exit_trigger_to_fill_seconds"),
+        ("Exit submit → fill (s)", "exit_submit_to_fill_seconds"),
+        ("Total slippage cost", "total_slippage_cost"),
+    )
+    for label, key in execution_metrics:
+        metric = execution.get(key)
+        coverage = int(metric.get("coverage", 0)) if isinstance(metric, Mapping) else 0
+        average = metric.get("average") if isinstance(metric, Mapping) else None
+        p95 = metric.get("p95") if isinstance(metric, Mapping) else None
+        lines.append(
+            f"| {label} | {coverage} | {_display(average)} | {_display(p95)} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"Market-fallback exits: **"
+            f"{int(execution.get('market_fallback_trades', 0))}**  ",
+            f"Rejected exit attempts: **"
+            f"{int(execution.get('rejected_exit_attempts', 0))}**",
+        ]
+    )
+
+    exit_quality = summary.get("exit_quality", {})
+    lines.extend(
+        [
+            "",
+            "## Exit Quality (observational)",
+            "",
+            f"Excursion coverage: **"
+            f"{int(exit_quality.get('trades_with_excursions', 0))}/"
+            f"{int(exit_quality.get('measured_trades', 0))}** measured trades  ",
+            f"Average profit surrendered: **"
+            f"{_display(exit_quality.get('average_profit_surrendered'))}**  ",
+            f"Aggregate MFE capture: **"
+            f"{_display(exit_quality.get('mfe_capture_pct'), suffix='%')}**",
+            "",
+            "| Exit reason | Trades | Net P&L |",
+            "|---|---:|---:|",
+        ]
+    )
+    exit_reasons = exit_quality.get("exit_reasons", [])
+    if not exit_reasons:
+        lines.append("| N/A | 0 | 0.0 |")
+    for reason in exit_reasons:
+        safe_reason = str(reason.get("exit_reason", "UNKNOWN")).replace("|", "/")
+        lines.append(
+            f"| {safe_reason} | {int(reason.get('trades', 0))} | "
+            f"{float(reason.get('net_pnl', 0.0)):+.2f} |"
+        )
 
 
 def build_trade_outcome_report(
@@ -256,6 +530,7 @@ def build_trade_outcome_report(
             )
             + " |"
         )
+    _append_observational_sections(lines, summary)
     lines.extend(
         [
             "",
