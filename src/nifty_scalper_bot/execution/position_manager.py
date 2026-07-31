@@ -896,6 +896,12 @@ class PositionManager:
             )
         self._positions: Dict[str, Position] = {}
         self._lock = threading.RLock()
+        # Daily entry counter backing max_trades_per_day. The risk guard looked
+        # up trades_today/daily_trade_count/trade_count_today on this object;
+        # none existed, so its _call_count() fell through to 0 and the limit
+        # never fired. Keyed by IST trading date so it self-resets at rollover.
+        self._trades_today_date: str | None = None
+        self._trades_today_count: int = 0
         self._order_locks: dict[str, threading.RLock] = {}
         self._symbol_lifecycle_locks: dict[str, threading.RLock] = {}
         self._orders: Dict[str, Order] = {}
@@ -1688,6 +1694,7 @@ class PositionManager:
                 raise ValueError(f"Position already exists for {symbol_key}")
             self._clear_recent_exit_guard_locked(symbol_key)
             self._positions[symbol_key] = position
+            self._increment_trades_today_locked()
             self._mark_local_position_mutation_locked()
         self._logger.info("Opened %s position for %s", position.side, symbol_key)
         self.save_state()
@@ -1842,6 +1849,28 @@ class PositionManager:
         self._pnl_authority = authority
         self._pnl_reconciliation_status = status
         self._pnl_snapshot_at = _now()
+
+    def _increment_trades_today_locked(self) -> None:
+        """Count one new entry for the current IST trading date. Caller holds
+        the lock. Args: none. Returns: none. Raises: none."""
+        today = self._trading_date_ist()
+        if self._trades_today_date != today:
+            self._trades_today_date = today
+            self._trades_today_count = 0
+        self._trades_today_count += 1
+
+    def trades_today(self) -> int:
+        """Entries opened during the current IST trading date.
+
+        Read by the risk entry guard to enforce max_trades_per_day. Returns 0
+        on a new trading date so the limit resets at IST rollover rather than
+        on process restart.
+        Args: none. Returns: count. Raises: none.
+        """
+        with self._lock:
+            if self._trades_today_date != self._trading_date_ist():
+                return 0
+            return int(self._trades_today_count)
 
     @staticmethod
     def _trading_date_ist(now: datetime | None = None) -> str:
