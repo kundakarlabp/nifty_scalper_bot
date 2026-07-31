@@ -125,14 +125,43 @@ def _daily_limit_block_reason(manager: Any) -> tuple[str, str] | None:
     return None
 
 
+def _stop_reentry_block_reason(position_manager: Any, signal: Any) -> str | None:
+    resolver = getattr(position_manager, "stop_reentry_block_reason", None)
+    if not callable(resolver):
+        return None
+    with suppress(Exception):
+        reason = resolver(signal)
+        return str(reason) if reason else None
+    return None
+
+
 def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bool, str]:
     # Preserve the original priority for non-live calls and pre-existing breakers.
-    # The added SSOT limits are production-entry guards, not replacements for the
-    # existing live-disabled/breaker semantics. Protective exits/reductions must
-    # never be blocked by entry-only daily trade/open-position limits.
+    # Protective exits/reductions must never be blocked by entry-only limits.
     position_manager = getattr(self, "position_manager", None)
     if position_manager is not None and _is_reducing_order(position_manager, signal):
         return _ORIGINAL_CHECK_ORDER(self, signal, live_enabled)
+
+    if live_enabled and position_manager is not None:
+        reentry_reason = _stop_reentry_block_reason(position_manager, signal)
+        if reentry_reason is not None:
+            self._last_rejection = "STOP_REENTRY_COOLDOWN"
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "warning", None)
+            if callable(log):
+                log(
+                    "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
+                    reentry_reason,
+                    getattr(signal, "symbol", None),
+                    extra={
+                        "event": "RISK_FINAL_GATE_BLOCK",
+                        "reason": reentry_reason,
+                        "code": "STOP_REENTRY_COOLDOWN",
+                        "symbol": getattr(signal, "symbol", None),
+                        "final_order_gate": True,
+                    },
+                )
+            return False, reentry_reason
 
     if live_enabled and not bool(getattr(self, "_breaker_tripped", False)):
         blocker = _daily_limit_block_reason(self)
@@ -177,4 +206,9 @@ def apply_patches() -> None:
     _PATCH_APPLIED = True
 
 
-__all__ = ["apply_patches", "_daily_limit_block_reason", "_is_reducing_order"]
+__all__ = [
+    "apply_patches",
+    "_daily_limit_block_reason",
+    "_is_reducing_order",
+    "_stop_reentry_block_reason",
+]
