@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 import inspect
 import logging
+import os
 import secrets
 import time
 from typing import Any
@@ -736,6 +737,82 @@ async def cmd_dumplogs(update: Update, _: ContextTypes.DEFAULT_TYPE, service: An
     await sender(InputFile(bio))
 
 
+def _session_window_ist(now: "datetime | None" = None) -> "tuple[str, str]":
+    """Inclusive HH:MM bounds of the NSE trading session in IST."""
+    start = os.getenv("SESSION_LOG_START_IST", "09:00")
+    end = os.getenv("SESSION_LOG_END_IST", "15:30")
+    return start, end
+
+
+def _filter_session_lines(lines: "list[str]", start: str, end: str) -> "list[str]":
+    """Keep lines whose leading HH:MM:SS falls inside the session window.
+
+    Log lines begin with an IST wall-clock timestamp. Lines without a parseable
+    leading timestamp (tracebacks, continuations) are RETAINED so multi-line
+    records are not silently broken apart.
+    Args: lines, start, end. Returns: filtered lines. Raises: none.
+    """
+    kept: list[str] = []
+    inside = False
+    for line in lines:
+        stamp = line[:5]
+        if len(line) >= 8 and line[2] == ":" and line[5] == ":" and stamp[:2].isdigit():
+            inside = start <= stamp <= end
+            if inside:
+                kept.append(line)
+            continue
+        # Continuation line: follow the state of the record it belongs to.
+        if inside:
+            kept.append(line)
+    return kept
+
+
+async def cmd_sessionlogs(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:
+    """Full trading-session logs (09:00-15:30 IST) as a downloadable file."""
+    del service
+    import gzip
+    import io
+    import time as _time
+
+    start, end = _session_window_ist()
+    ring_lines = await asyncio.to_thread(lambda: _log_ring_tail(200_000))
+    session_lines = await asyncio.to_thread(
+        _filter_session_lines, ring_lines, start, end
+    )
+    if not session_lines:
+        await safe_reply(
+            update,
+            f"No buffered logs inside {start}-{end} IST yet. "
+            f"({len(ring_lines)} lines buffered overall.)",
+        )
+        return
+
+    text = "\n".join(session_lines)
+    stamp = _time.strftime("%Y%m%d")
+    raw = text.encode("utf-8")
+
+    chat = getattr(update, "effective_chat", None)
+    sender = getattr(chat, "send_document", None) if chat is not None else None
+    if sender is None:
+        await safe_reply(update, "Cannot send a document to this chat.")
+        return
+
+    # Telegram caps uploads; gzip keeps a full session comfortably inside it.
+    if len(raw) > 4_000_000:
+        payload = io.BytesIO(gzip.compress(raw))
+        payload.name = f"niftybot-session-{stamp}.txt.gz"
+    else:
+        payload = io.BytesIO(raw)
+        payload.name = f"niftybot-session-{stamp}.txt"
+
+    await sender(InputFile(payload))
+    await safe_reply(
+        update,
+        f"Session {start}-{end} IST: {len(session_lines)} lines "
+        f"({len(raw) // 1024} KB uncompressed).",
+    )
+
+
 async def cmd_stderror(update: Update, _: ContextTypes.DEFAULT_TYPE, service: Any) -> None:
     err = _first_attr(_context(service), ("last_exception", "last_error", "runtime_exception"))
     await safe_reply(update, str(err) if err else "No runtime exception captured.")
@@ -881,6 +958,12 @@ OPERATOR_COMMANDS: list[CommandSpec] = [
     CommandSpec("version", "app version, build and git SHA", cmd_version, "Diagnostics"),
     CommandSpec("errors", "recent error log summary", cmd_errors, "Logs"),
     CommandSpec("logs", "recent log lines inline (/logs [N])", cmd_logs, "Logs"),
+    CommandSpec(
+        "sessionlogs",
+        "full trading session 09:00-15:30 IST as a file",
+        cmd_sessionlogs,
+        "Logs",
+    ),
     CommandSpec("dumplogs", "download recent logs as a .txt file (/dumplogs [N])", cmd_dumplogs, "Logs"),
     CommandSpec("stderror", "last runtime exception/error details", cmd_stderror, "Logs"),
     CommandSpec("selftest", "run non-invasive system self-test", cmd_selftest, "Diagnostics"),

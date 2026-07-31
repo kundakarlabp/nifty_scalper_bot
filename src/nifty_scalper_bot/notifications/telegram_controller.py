@@ -362,9 +362,28 @@ log = get_logger(__name__)
 # -----------------------------
 # In-memory ring buffer logging
 # -----------------------------
+def _ring_capacity() -> int:
+    """Lines retained for Telegram log retrieval.
+
+    The previous fixed 2000 lines held only ~15-90 minutes at live tick-log
+    rates, so /dumplogs could never return a full trading session (09:00-15:30
+    IST) and post-session diagnosis was working from a truncated window.
+    Roughly 200 bytes/line, so the 50k default is ~10 MB resident.
+    Args: none. Returns: line capacity. Raises: none.
+    """
+    raw = os.getenv("TELEGRAM_LOG_RING_LINES")
+    if raw is None:
+        return 50_000
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 50_000
+    return max(2_000, min(value, 200_000))
+
+
 class _Ring:
-    def __init__(self, maxlen: int = 2000) -> None:
-        self.buf: deque[str] = deque(maxlen=maxlen)
+    def __init__(self, maxlen: int | None = None) -> None:
+        self.buf: deque[str] = deque(maxlen=maxlen or _ring_capacity())
 
     def add(self, line: str) -> None:
         # NOTE: all inputs already stringified; keep compact
