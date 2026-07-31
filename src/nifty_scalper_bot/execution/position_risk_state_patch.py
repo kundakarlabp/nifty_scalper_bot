@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 import time
 from contextlib import suppress
@@ -25,15 +24,23 @@ _ORIGINAL_INIT: Any = None
 _ORIGINAL_SAVE_STATE: Any = None
 _ORIGINAL_CLOSE_POSITION: Any = None
 _RISK_KEY = "_risk_runtime"
-_OPTION_RE = re.compile(r"^(?:[A-Z]+:)?([A-Z]+?)(?:\d|[A-Z]{3}\d).*(CE|PE)$")
 
 
 def _option_thesis(symbol: object) -> tuple[str, str] | None:
     text = str(symbol or "").strip().upper()
-    match = _OPTION_RE.match(text)
-    if match is None:
+    if ":" in text:
+        text = text.split(":", 1)[1]
+    option_side = text[-2:] if text.endswith(("CE", "PE")) else ""
+    if not option_side:
         return None
-    return match.group(1), match.group(2)
+    contract = text[:-2]
+    digit_at = next((index for index, char in enumerate(contract) if char.isdigit()), -1)
+    if digit_at <= 0:
+        return None
+    underlying = contract[:digit_at]
+    if not underlying.isalpha():
+        return None
+    return underlying, option_side
 
 
 def _cooldown_seconds() -> float:
