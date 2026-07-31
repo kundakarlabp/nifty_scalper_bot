@@ -70,9 +70,13 @@ def _production_strategy_roles(
         }
         context_names = [name for name in active_names if name in context_class_names]
 
-    if _env_true('ORDERFLOW_ALLOW_TRIGGER_ROLE'):
-        context_names = [name for name in context_names if name != 'OrderFlow']
-    elif 'OrderFlow' in active_names and 'OrderFlow' not in context_names:
+    # OrderFlow is CONTEXT ONLY, structurally. Signal generation belongs to the
+    # three setup families (SMC liquidity, VWAP Pro, ORB Pro). This previously
+    # honoured ORDERFLOW_ALLOW_TRIGGER_ROLE, which REMOVED OrderFlow from the
+    # context list and therefore promoted it into trigger_names below -- the
+    # role inversion that let OrderFlow originate live entries. The env switch
+    # is removed; OrderFlow is always classified as context when active.
+    if 'OrderFlow' in active_names and 'OrderFlow' not in context_names:
         context_names.append('OrderFlow')
 
     trigger_names = [name for name in active_names if name not in context_names]
