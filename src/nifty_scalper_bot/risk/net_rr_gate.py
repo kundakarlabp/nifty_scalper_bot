@@ -64,14 +64,19 @@ def _half_spread(signal: Any, entry: float) -> float:
     ask = _positive(metadata.get("ask") or metadata.get("best_ask"))
     if bid is not None and ask is not None and ask >= bid:
         return (ask - bid) / 2.0
-    absolute = _positive(metadata.get("half_spread") or metadata.get("half_spread_points"))
+    absolute = _positive(
+        metadata.get("half_spread") or metadata.get("half_spread_points")
+    )
     if absolute is not None:
         return absolute
     spread_pct = _positive(metadata.get("spread_pct"))
     if spread_pct is not None:
         return entry * spread_pct / 200.0
     with suppress(TypeError, ValueError):
-        fallback_pct = max(0.0, float(os.getenv("COST_FALLBACK_HALF_SPREAD_PCT", "0.25") or 0.25))
+        fallback_pct = max(
+            0.0,
+            float(os.getenv("COST_FALLBACK_HALF_SPREAD_PCT", "0.25") or 0.25),
+        )
         return entry * fallback_pct / 100.0
     return entry * 0.0025
 
@@ -80,14 +85,22 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
     """Return final BUY-option net RR, or None when the gate is not applicable."""
     symbol = str(getattr(signal, "symbol", "") or "").strip().upper()
     side = str(
-        getattr(signal, "side", "")
-        or getattr(signal, "action", "")
+        getattr(signal, "action", "")
         or getattr(signal, "transaction_type", "")
+        or getattr(signal, "side", "")
     ).strip().upper()
     if not symbol.endswith(("CE", "PE")) or side != "BUY":
         return None
 
-    entry = _price(signal, "entry_price", "price", "limit_price", "reference_price")
+    entry = _price(
+        signal,
+        "entry_price",
+        "price",
+        "limit_price",
+        "reference_price",
+        "premium_risk_reference_price",
+        "current_price",
+    )
     stop = _price(signal, "stop_loss", "sl", "stop_price")
     target = _price(signal, "take_profit", "target", "target_price")
     quantity = _quantity(signal)
@@ -115,7 +128,10 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
     net_risk = gross_risk + stop_cost
     net_rr = net_reward / net_risk if net_reward > 0.0 and net_risk > 0.0 else 0.0
     with suppress(TypeError, ValueError):
-        minimum = max(0.0, float(os.getenv("MIN_NET_REWARD_RISK", "1.5") or 1.5))
+        minimum = max(
+            0.0,
+            float(os.getenv("MIN_NET_REWARD_RISK", "1.5") or 1.5),
+        )
         return NetRRResult(
             allowed=net_rr >= minimum,
             net_rr=net_rr,
