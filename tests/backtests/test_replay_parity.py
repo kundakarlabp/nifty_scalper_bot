@@ -561,3 +561,88 @@ def test_daily_report_trade_db_cli_writes_date_scoped_report(tmp_path: Path) -> 
     assert exit_code == 0
     assert output_path.exists()
     assert "Closed trades: **0**" in output_path.read_text(encoding="utf-8")
+
+
+def test_daily_report_builds_entry_attempt_funnel_without_assuming_fills(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    timestamp = datetime.fromisoformat("2026-07-31T04:00:00+00:00").timestamp()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("""
+            CREATE TABLE trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                order_id TEXT,
+                meta_json TEXT
+            )
+            """)
+        events = [
+            (
+                "TRADE_DECISION",
+                None,
+                {
+                    "trace_id": "blocked",
+                    "candidate_count": 3,
+                    "selected_candidate": None,
+                    "order_submitted": False,
+                },
+            ),
+            (
+                "TRADE_DECISION",
+                None,
+                {
+                    "trace_id": "accepted",
+                    "candidate_count": 2,
+                    "selected_candidate": "NFO:NIFTYCE",
+                    "order_submitted": True,
+                },
+            ),
+            ("ORDER_SUBMIT_ATTEMPT", None, {"trade_id": "trade-1"}),
+            ("ORDER_SUBMITTED", "order-1", {"trade_id": "trade-1"}),
+            ("ORDER_FILL_CONFIRMED", "order-1", {"trade_id": "trade-1"}),
+            ("ORDER_SUBMIT_ATTEMPT", None, {"trade_id": "trade-2"}),
+            ("ORDER_SUBMITTED", "order-2", {"trade_id": "trade-2"}),
+            ("ORDER_REJECTED_FATAL", None, {"trade_id": "trade-3"}),
+        ]
+        connection.executemany(
+            """
+            INSERT INTO trade_events (timestamp, event_type, order_id, meta_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (timestamp, event, order_id, json.dumps(meta))
+                for event, order_id, meta in events
+            ],
+        )
+
+    module = _load_daily_report_module()
+    funnel = module.load_entry_funnel(
+        db_path,
+        report_date="2026-07-31",
+        timezone_name="Asia/Kolkata",
+    )
+    summary = module.summarise_completed_trades([], entry_funnel=funnel)
+    report = module.build_trade_outcome_report(
+        summary,
+        report_date="2026-07-31",
+        timezone_name="Asia/Kolkata",
+    )
+
+    assert funnel == {
+        "decision_events": 2,
+        "candidate_count": 5,
+        "selected_decisions": 1,
+        "pre_order_blocked": 1,
+        "submit_attempts": 2,
+        "orders_submitted": 2,
+        "broker_rejected": 1,
+        "fill_confirmed": 1,
+        "submitted_without_fill_confirmation": 1,
+        "completed_trades": 0,
+    }
+    assert "## Entry Attempt Funnel (observational)" in report
+    assert "| Candidates evaluated | 5 |" in report
+    assert "| Submitted without fill confirmation | 1 |" in report
+    assert "not assumed to be an unfilled or losing trade" in report

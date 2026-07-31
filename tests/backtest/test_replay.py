@@ -150,6 +150,143 @@ def test_replay_advances_clock_once_per_synchronised_timestamp() -> None:
     assert order["timestamp"] == frame.index[-1].to_pydatetime().timestamp()
 
 
+def test_replay_market_order_consumes_historical_depth_across_ticks() -> None:
+    hub = _DummyDataHub()
+    paper = PaperFillEngine(hub, _DummyResolver())
+
+    class _OrderRunner(_DummyRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.order: dict[str, object] | None = None
+
+        def on_tick_event(self, tick: dict[str, float]) -> None:
+            super().on_tick_event(tick)
+            if tick["symbol"] == "OPT" and self.order is None:
+                self.order = paper.place_order(
+                    {
+                        "symbol": "OPT",
+                        "transaction_type": "BUY",
+                        "quantity": 10,
+                        "order_type": "MARKET",
+                    }
+                )
+
+    runner = _OrderRunner()
+    frame = _sample_frame().iloc[:2].copy()
+    frame["option_ask_quantity"] = [4, 6]
+    frame["option_bid_quantity"] = [10, 10]
+
+    result = ReplayHarness(runner, paper, option_symbol="OPT").run_dataframe(frame)
+
+    assert runner.order is not None
+    order = result.orders[0]
+    assert order["status"] == "complete"
+    assert order["filled_quantity"] == 10
+    assert order["remaining_quantity"] == 0
+    assert order["first_fill_timestamp"] < order["last_fill_timestamp"]
+
+
+def test_paper_market_fill_fails_closed_without_a_usable_quote() -> None:
+    hub = _DummyDataHub()
+    hub.quotes["NSE:OPT"] = {"ltp": 0.0}
+    paper = PaperFillEngine(hub, _DummyResolver())
+
+    order = paper.place_order(
+        {
+            "symbol": "OPT",
+            "transaction_type": "BUY",
+            "quantity": 10,
+            "order_type": "MARKET",
+        }
+    )
+
+    assert order["status"] == "rejected"
+    assert order["message"] == "market_quote_unavailable"
+    assert order["filled_quantity"] == 0
+
+
+def test_paper_market_fill_respects_historical_rejection_marker() -> None:
+    hub = _DummyDataHub()
+    hub.quotes["NSE:OPT"] = {
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "replay_reject_reason": "historical_exchange_reject",
+    }
+    order = PaperFillEngine(hub, _DummyResolver()).place_order(
+        {
+            "symbol": "OPT",
+            "transaction_type": "BUY",
+            "quantity": 10,
+            "order_type": "MARKET",
+        }
+    )
+
+    assert order["status"] == "rejected"
+    assert order["message"] == "historical_exchange_reject"
+
+
+def test_paper_fill_uses_measured_execution_calibration() -> None:
+    hub = _DummyDataHub()
+    hub.quotes["NSE:OPT"] = {"ltp": 100.0, "bid": 99.9, "ask": 100.1}
+    paper = PaperFillEngine(hub, _DummyResolver())
+    now = 1_000.0
+    paper.set_clock(lambda: now)
+
+    calibration = paper.calibrate_from_completed_trades(
+        [
+            {
+                "execution_quality": {
+                    "entry_slippage_bps": 8.0,
+                    "exit_slippage_bps": 12.0,
+                    "entry_submit_to_fill_seconds": 0.4,
+                    "exit_submit_to_fill_seconds": 0.8,
+                }
+            }
+        ]
+    )
+    order = paper.place_order(
+        {
+            "symbol": "OPT",
+            "transaction_type": "BUY",
+            "quantity": 10,
+            "order_type": "MARKET",
+        }
+    )
+
+    assert calibration["slippage_bps_p50"] == 10.0
+    assert calibration["fill_latency_seconds_p50"] == pytest.approx(0.6)
+    assert order["average_price"] == pytest.approx(100.1)
+    assert order["fill_latency_seconds"] == pytest.approx(0.6)
+    assert order["first_fill_timestamp"] == pytest.approx(1_000.6)
+
+
+def test_replay_harness_applies_completed_outcome_fill_calibration() -> None:
+    paper = PaperFillEngine(_DummyDataHub(), _DummyResolver())
+    result = ReplayHarness(
+        _DummyRunner(),
+        paper,
+        option_symbol="OPT",
+        calibration_outcomes=[
+            {
+                "execution_quality": {
+                    "entry_slippage_bps": 4.0,
+                    "exit_slippage_bps": 8.0,
+                    "entry_submit_to_fill_seconds": 0.2,
+                    "exit_submit_to_fill_seconds": 0.6,
+                }
+            }
+        ],
+    ).run_dataframe(_sample_frame().iloc[:1])
+
+    assert result.fill_calibration == {
+        "slippage_samples": 2,
+        "latency_samples": 2,
+        "slippage_bps_p50": 6.0,
+        "fill_latency_seconds_p50": pytest.approx(0.4),
+    }
+
+
 def test_replay_rotates_only_time_available_historical_contracts() -> None:
     timestamps = pd.date_range(datetime(2024, 1, 1, 9, 30), periods=2, freq="T")
     frame = _sample_frame().iloc[:2].copy()

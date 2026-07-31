@@ -70,6 +70,101 @@ def load_completed_trades(
     return list(outcomes.values())
 
 
+def load_entry_funnel(
+    db_path: Path,
+    *,
+    report_date: str,
+    timezone_name: str,
+) -> dict[str, int]:
+    """Load a date-scoped entry funnel from the existing trade journal."""
+
+    resolved = db_path.expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Trade journal not found: {resolved}")
+    local_zone = ZoneInfo(timezone_name)
+    local_day = date.fromisoformat(report_date)
+    start = datetime.combine(local_day, time.min, tzinfo=local_zone)
+    end = start + timedelta(days=1)
+    decision_ids: set[str] = set()
+    selected_ids: set[str] = set()
+    blocked_ids: set[str] = set()
+    attempts: set[str] = set()
+    submitted: set[str] = set()
+    filled: set[str] = set()
+    broker_rejected: set[str] = set()
+    completed: set[str] = set()
+    candidate_total = 0
+    uri = f"{resolved.as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(trade_events)")
+        }
+        order_expression = "order_id" if "order_id" in columns else "NULL"
+        rows = connection.execute(
+            f"""
+            SELECT id, event_type, {order_expression}, meta_json
+            FROM trade_events
+            WHERE timestamp >= ?
+              AND timestamp < ?
+            ORDER BY timestamp, id
+            """,
+            (start.timestamp(), end.timestamp()),
+        )
+        for event_id, event_type, order_id, meta_json in rows:
+            try:
+                meta = json.loads(meta_json or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                meta = {}
+            if not isinstance(meta, Mapping):
+                meta = {}
+            event = str(event_type or "").strip().upper()
+            trace_id = str(meta.get("trace_id") or "").strip()
+            trade_id = str(meta.get("trade_id") or "").strip()
+            event_key = (
+                trace_id
+                or trade_id
+                or str(order_id or "").strip()
+                or f"event:{event_id}"
+            )
+            if event == "TRADE_DECISION":
+                decision_ids.add(event_key)
+                count = _number(meta.get("candidate_count"))
+                if count is not None and count > 0:
+                    candidate_total += int(count)
+                if meta.get("selected_candidate"):
+                    selected_ids.add(event_key)
+                if meta.get("order_submitted") is not True:
+                    blocked_ids.add(event_key)
+            elif event == "ORDER_SUBMIT_ATTEMPT":
+                attempts.add(event_key)
+            elif event == "ORDER_SUBMITTED":
+                submitted.add(str(order_id or event_key))
+            elif event == "ORDER_FILL_CONFIRMED":
+                filled.add(str(order_id or event_key))
+            elif event.startswith("ORDER_REJECTED"):
+                broker_rejected.add(event_key)
+            elif event == "BRACKET_CLOSED":
+                completed_trade = meta.get("completed_trade")
+                bracket_id = (
+                    str(completed_trade.get("bracket_id") or "").strip()
+                    if isinstance(completed_trade, Mapping)
+                    else ""
+                )
+                completed.add(bracket_id or event_key)
+    return {
+        "decision_events": len(decision_ids),
+        "candidate_count": candidate_total,
+        "selected_decisions": len(selected_ids),
+        "pre_order_blocked": len(blocked_ids),
+        "submit_attempts": len(attempts),
+        "orders_submitted": len(submitted),
+        "broker_rejected": len(broker_rejected),
+        "fill_confirmed": len(filled),
+        "submitted_without_fill_confirmation": len(submitted - filled),
+        "completed_trades": len(completed),
+    }
+
+
 def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -238,6 +333,8 @@ def _exit_summary(measured: list[dict[str, Any]]) -> dict[str, Any]:
 
 def summarise_completed_trades(
     trades: list[dict[str, Any]],
+    *,
+    entry_funnel: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Aggregate completed outcomes without converting incomplete trades to losses."""
 
@@ -348,7 +445,7 @@ def summarise_completed_trades(
 
     measured = _measured_trades(trades)
     score_buckets, score_coverage = _score_summary(measured)
-    return {
+    summary = {
         "groups": groups,
         "totals": {
             "closed_trades": len(trades),
@@ -363,6 +460,9 @@ def summarise_completed_trades(
         "execution_quality": _execution_summary(measured),
         "exit_quality": _exit_summary(measured),
     }
+    if entry_funnel is not None:
+        summary["entry_funnel"] = dict(entry_funnel)
+    return summary
 
 
 def _display(value: Any, *, suffix: str = "") -> str:
@@ -475,6 +575,33 @@ def _append_observational_sections(
         lines.append(
             f"| {safe_reason} | {int(reason.get('trades', 0))} | "
             f"{float(reason.get('net_pnl', 0.0)):+.2f} |"
+        )
+
+    funnel = summary.get("entry_funnel")
+    if isinstance(funnel, Mapping):
+        lines.extend(
+            [
+                "",
+                "## Entry Attempt Funnel (observational)",
+                "",
+                "| Stage | Count |",
+                "|---|---:|",
+                f"| Candidate decisions | {int(funnel.get('decision_events', 0))} |",
+                f"| Candidates evaluated | {int(funnel.get('candidate_count', 0))} |",
+                f"| Candidate selected | {int(funnel.get('selected_decisions', 0))} |",
+                "| Blocked before submission | "
+                f"{int(funnel.get('pre_order_blocked', 0))} |",
+                f"| Order submit attempts | {int(funnel.get('submit_attempts', 0))} |",
+                f"| Orders submitted | {int(funnel.get('orders_submitted', 0))} |",
+                f"| Broker rejected | {int(funnel.get('broker_rejected', 0))} |",
+                f"| Fill confirmed | {int(funnel.get('fill_confirmed', 0))} |",
+                "| Submitted without fill confirmation | "
+                f"{int(funnel.get('submitted_without_fill_confirmation', 0))} |",
+                f"| Completed trades | {int(funnel.get('completed_trades', 0))} |",
+                "",
+                "A missing fill confirmation is reported as missing coverage, "
+                "not assumed to be an unfilled or losing trade.",
+            ]
         )
 
 
@@ -798,7 +925,12 @@ def main(argv: list[str] | None = None) -> int:
                 report_date=local_day,
                 timezone_name=args.timezone,
             )
-            summary = summarise_completed_trades(trades)
+            funnel = load_entry_funnel(
+                args.trades_db,
+                report_date=local_day,
+                timezone_name=args.timezone,
+            )
+            summary = summarise_completed_trades(trades, entry_funnel=funnel)
             report = build_trade_outcome_report(
                 summary,
                 report_date=local_day,
@@ -826,6 +958,7 @@ __all__ = [
     "build_daily_report",
     "build_trade_outcome_report",
     "load_completed_trades",
+    "load_entry_funnel",
     "load_summary",
     "main",
     "summarise_completed_trades",

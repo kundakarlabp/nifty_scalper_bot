@@ -13,6 +13,7 @@ in scope at the emit site; they were simply discarded.
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -61,3 +62,34 @@ def test_order_rejected_still_identifies_both_symbols() -> None:
     region = _emit_region()
     assert '"symbol": base_symbol' in region
     assert '"order_symbol": order_symbol' in region
+
+
+def test_trade_decision_snapshot_is_persisted_to_existing_journal() -> None:
+    captured: list[tuple[dict[str, object], str | None]] = []
+    runner = SimpleNamespace(
+        _runtime_live_orders_armed=True,
+        _last_trade_decision=None,
+        _order_manager=SimpleNamespace(
+            record_trade_decision=lambda snapshot, trace_id=None: captured.append(
+                (snapshot, trace_id)
+            )
+        ),
+        _logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    )
+
+    StrategyRunner._record_trade_decision_snapshot(
+        runner,
+        symbol="NFO:NIFTYCE",
+        direction="CE",
+        final_reason="order_submitted",
+        candidate_count=2,
+        selected_candidate="NFO:NIFTYCE",
+        strategy_allowed=True,
+        risk_allowed=True,
+        order_submitted=True,
+        trace_id="trace-1",
+    )
+
+    assert captured[0][0]["candidate_count"] == 2
+    assert captured[0][0]["order_submitted"] is True
+    assert captured[0][1] == "trace-1"
