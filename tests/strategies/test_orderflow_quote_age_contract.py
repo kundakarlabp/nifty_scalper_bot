@@ -6,6 +6,9 @@ from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowSt
 
 def test_orderflow_accepts_quote_age_seconds_schema_in_live_mode(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; this test asserts
+    # trigger behaviour, so it opts in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     strategy = OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
     indicators = {
         "bid": 100.0,

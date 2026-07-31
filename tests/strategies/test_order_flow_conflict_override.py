@@ -35,6 +35,9 @@ def _eval(strat, sym, ind):
 # A. Stale PE bias + CE candidate WITHOUT confirming microstructure -> blocked
 def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat, caplog):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     caplog.set_level("INFO")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=150, sell=140))
     assert sig.metadata["trigger_conditions_met"] is False
@@ -52,6 +55,9 @@ def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat, caplog):
 # B. One strong snapshot cannot invalidate directional context
 def test_stale_pe_single_strong_micro_ce_blocked(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
     monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=400, sell=80, quote_update_version=1))
@@ -62,6 +68,9 @@ def test_stale_pe_single_strong_micro_ce_blocked(monkeypatch, strat):
 # C. Reversal becomes eligible only after distinct persistent updates
 def test_stale_ce_strong_micro_pe_requires_persistence(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
     monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
     results = [
@@ -78,6 +87,9 @@ def test_stale_ce_strong_micro_pe_requires_persistence(monkeypatch, strat):
 # D. Tick contradicts candidate side -> not invalidated -> blocked
 def test_tick_contradicts_blocked(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "DOWN", buy=400, sell=80))
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["bias_invalidated_by_microstructure"] is False
@@ -86,6 +98,9 @@ def test_tick_contradicts_blocked(monkeypatch, strat):
 # E. Aligned bias (CE bias, CE candidate) -> allowed normally, not via invalidation
 def test_aligned_bias_allowed_normally(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80))
     assert sig.metadata["trigger_conditions_met"] is True
     assert sig.metadata["bias_invalidated_by_microstructure"] is False
@@ -94,6 +109,9 @@ def test_aligned_bias_allowed_normally(monkeypatch, strat):
 # F. Below default imbalance threshold -> not confirmed -> blocked
 def test_below_imbalance_threshold_blocked(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     # imbalance (210-180)/390 = 0.077 < 0.20 default -> not confirmed
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=210, sell=180))
     assert sig.metadata["bias_invalidated_by_microstructure"] is False
@@ -103,12 +121,18 @@ def test_below_imbalance_threshold_blocked(monkeypatch, strat):
 # G. No directional bias at all -> not gated by conflict
 def test_no_bias_not_conflict_gated(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
     assert sig.metadata["trigger_block_reason"] != "direction_bias_conflict"
 
 
 def test_no_bias_without_spot_or_futures_live_proof_still_blocks(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
 
     assert sig.metadata["trigger_conditions_met"] is False
@@ -118,6 +142,9 @@ def test_no_bias_without_spot_or_futures_live_proof_still_blocks(monkeypatch, st
 
 def test_no_bias_with_fresh_spot_live_proof_can_trigger(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     sig = _eval(
         strat,
         "NFO:NIFTY26MAY24000CE",
@@ -139,6 +166,9 @@ def test_no_bias_with_fresh_spot_live_proof_can_trigger(monkeypatch, strat):
 
 def test_no_bias_with_stale_spot_and_futures_proof_still_blocks(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # OrderFlow is context-only by default; these tests exercise the
+    # trigger-role internals, so they opt in explicitly.
+    monkeypatch.setenv("ORDERFLOW_ALLOW_LIVE_TRIGGER", "true")
     sig = _eval(
         strat,
         "NFO:NIFTY26MAY24000CE",
