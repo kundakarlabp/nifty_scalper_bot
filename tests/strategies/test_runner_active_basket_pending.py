@@ -63,3 +63,56 @@ def test_pending_basket_promotes_only_after_both_legs_have_required_bars() -> No
     assert runner._active_selected_pe == "NFO:NIFTY26MAY23300PE"
     assert runner._pending_selected_ce is None
     assert runner._pending_selected_pe is None
+
+
+def test_unchanged_warm_active_context_skips_history_prewarm() -> None:
+    ce = "NFO:NIFTY26MAY23300CE"
+    pe = "NFO:NIFTY26MAY23300PE"
+    runner = _runner({ce: 30, pe: 30})
+    runner._active_selected_ce = ce
+    runner._active_selected_pe = pe
+    runner._active_atm_strike = 23300
+    runner._active_option_symbols = {ce, pe}
+    runner._symbol_history = {ce: list(range(30)), pe: list(range(30))}
+    prewarm_calls = []
+    runner._prewarm_active_option_history = lambda **kwargs: prewarm_calls.append(
+        kwargs
+    )
+
+    runner.set_active_option_context(
+        selected_ce=ce,
+        selected_pe=pe,
+        atm_strike=23300,
+        option_symbols=[ce, pe],
+    )
+
+    assert prewarm_calls == []
+
+
+def test_option_prewarm_syncs_only_cold_symbols() -> None:
+    ce = "NFO:NIFTY26MAY23300CE"
+    pe = "NFO:NIFTY26MAY23300PE"
+    cold = "NFO:NIFTY26MAY23350CE"
+    runner = _runner({ce: 30, pe: 30, cold: 1})
+    runner._active_selected_ce = ce
+    runner._active_selected_pe = pe
+    runner._active_option_symbols = {ce, pe, cold}
+    runner._symbol_history = {
+        ce: list(range(30)),
+        pe: list(range(30)),
+        cold: [1],
+    }
+    runner._required_bars_for_symbol = lambda _symbol: 30
+    synced = []
+    requested = []
+    runner._sync_history_from_mdm_cache = lambda symbol, **_kwargs: (
+        synced.append(symbol) or 1
+    )
+    runner._request_selected_option_history_prewarm = (
+        lambda symbol, **_kwargs: requested.append(symbol)
+    )
+
+    StrategyRunner._prewarm_active_option_history(runner, source="test")
+
+    assert synced == [cold]
+    assert requested == [cold]

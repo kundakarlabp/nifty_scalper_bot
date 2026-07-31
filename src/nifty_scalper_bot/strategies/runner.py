@@ -2517,6 +2517,10 @@ class StrategyRunner:
             symbol_required = max(
                 required, int(self._required_bars_for_symbol(option_symbol) or 0)
             )
+            if self._option_context_history_ready(
+                option_symbol, required_bars=symbol_required
+            ):
+                continue
             before = self._sync_history_from_mdm_cache(
                 option_symbol,
                 required_bars=symbol_required,
@@ -2530,6 +2534,15 @@ class StrategyRunner:
                     required_bars=symbol_required,
                     trace_id=trace_id,
                 )
+
+    def _option_context_history_ready(
+        self, symbol: str, *, required_bars: int
+    ) -> bool:
+        """Return whether Runner and Indicator histories both meet the target."""
+        runner_history = getattr(self, "_symbol_history", {}) or {}
+        runner_bars = len(runner_history.get(symbol, []) or [])
+        indicator_bars = self._history_count_for_symbol(symbol)
+        return min(runner_bars, indicator_bars) >= int(required_bars)
 
     def _should_log_throttled(self, key: str, interval_s: float = 30.0) -> bool:
         """Decide whether a throttled log should emit. Args: key/interval_s. Returns: bool. Raises: None."""
@@ -3720,6 +3733,27 @@ class StrategyRunner:
         switching = (selected_ce_norm and selected_ce_norm != prev_ce) or (
             selected_pe_norm and selected_pe_norm != prev_pe
         )
+        unchanged_active_context = bool(
+            pair_requested
+            and selected_ce_norm == prev_ce
+            and selected_pe_norm == prev_pe
+            and atm_value == getattr(self, "_active_atm_strike", None)
+            and candidate_symbols
+            == set(getattr(self, "_active_option_symbols", set()) or set())
+            and not getattr(self, "_pending_selected_ce", None)
+            and not getattr(self, "_pending_selected_pe", None)
+        )
+        if unchanged_active_context and all(
+            self._option_context_history_ready(
+                symbol,
+                required_bars=max(
+                    self._option_required_bars,
+                    int(self._required_bars_for_symbol(symbol) or 0),
+                ),
+            )
+            for symbol in candidate_symbols
+        ):
+            return
 
         if pair_requested and switching and not pair_ready:
             self._pending_selected_ce = selected_ce_norm
