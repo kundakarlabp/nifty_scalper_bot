@@ -54,6 +54,19 @@ except Exception as exc:  # noqa: BLE001 - diagnostics must not disable tooling 
     )
 
 try:
+    from nifty_scalper_bot.core.strategy_setup_score_gate import apply_patches as _apply_strategy_setup_score_gate
+
+    _apply_strategy_setup_score_gate()
+except Exception as exc:  # noqa: BLE001 - non-live tooling imports should remain usable
+    get_logger(__name__).error(
+        "STRATEGY_SETUP_SCORE_GATE_PATCH_FAILED error=%s",
+        exc,
+        extra={"event": "STRATEGY_SETUP_SCORE_GATE_PATCH_FAILED", "error_type": type(exc).__name__},
+    )
+    if _real_live_mode_requested():
+        raise RuntimeError("strategy_setup_score_gate_patch_failed") from exc
+
+try:
     from nifty_scalper_bot.core.boot_log_safety import apply_filters as _apply_boot_log_rate_controls
 
     _apply_boot_log_rate_controls()
