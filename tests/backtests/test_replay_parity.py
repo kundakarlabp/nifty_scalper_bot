@@ -341,9 +341,25 @@ def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
                     "gross_pnl": 500.0,
                     "estimated_costs": {"total": 25.0},
                     "net_pnl": 475.0,
+                    "final_score": 8.4,
                     "mfe_pnl": 650.0,
                     "mae_pnl": 100.0,
                     "holding_seconds": 180.0,
+                    "exit_reason": "TRAILING_STOP",
+                    "execution_quality": {
+                        "entry_slippage_bps": 5.0,
+                        "entry_slippage_cost": 65.0,
+                        "entry_spread_points": 1.0,
+                        "decision_to_entry_fill_seconds": 2.0,
+                        "entry_submit_to_fill_seconds": 1.0,
+                        "exit_slippage_bps": 3.0,
+                        "exit_slippage_cost": 26.0,
+                        "exit_spread_points": 0.4,
+                        "exit_trigger_to_fill_seconds": 2.0,
+                        "exit_submit_to_fill_seconds": 1.0,
+                        "exit_market_fallback": True,
+                        "exit_rejected_attempts": 1,
+                    },
                     "ledger_complete": True,
                 },
             ),
@@ -357,9 +373,25 @@ def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
                     "gross_pnl": -200.0,
                     "estimated_costs": {"total": 20.0},
                     "net_pnl": -220.0,
+                    "final_score": 8.8,
                     "mfe_pnl": 40.0,
                     "mae_pnl": 240.0,
                     "holding_seconds": 90.0,
+                    "exit_reason": "STOP_LOSS",
+                    "execution_quality": {
+                        "entry_slippage_bps": 1.0,
+                        "entry_slippage_cost": 13.0,
+                        "entry_spread_points": 0.6,
+                        "decision_to_entry_fill_seconds": 4.0,
+                        "entry_submit_to_fill_seconds": 2.0,
+                        "exit_slippage_bps": 7.0,
+                        "exit_slippage_cost": 52.0,
+                        "exit_spread_points": 0.8,
+                        "exit_trigger_to_fill_seconds": 6.0,
+                        "exit_submit_to_fill_seconds": 3.0,
+                        "exit_market_fallback": False,
+                        "exit_rejected_attempts": 0,
+                    },
                     "ledger_complete": True,
                 },
             ),
@@ -455,8 +487,46 @@ def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
     assert summary["groups"][1]["win_rate_pct"] == 50.0
     assert summary["groups"][1]["net_pnl"] == 255.0
     assert summary["groups"][1]["profit_factor"] == 2.1591
+    assert summary["score_buckets"] == [
+        {
+            "score_bucket": "8.0–<9.0",
+            "measured_trades": 2,
+            "wins": 1,
+            "win_rate_pct": 50.0,
+            "average_net_pnl": 127.5,
+            "profit_factor": 2.1591,
+            "max_drawdown": 220.0,
+        }
+    ]
+    assert summary["score_coverage"] == {
+        "measured_trades": 2,
+        "trades_with_score": 2,
+        "trades_without_score": 0,
+    }
+    assert summary["execution_quality"]["measured_trades"] == 2
+    assert summary["execution_quality"]["entry_slippage_bps"]["average"] == 3.0
+    assert summary["execution_quality"]["entry_slippage_bps"]["p95"] == 5.0
+    assert summary["execution_quality"]["total_slippage_cost"]["average"] == 78.0
+    assert summary["execution_quality"]["market_fallback_trades"] == 1
+    assert summary["execution_quality"]["rejected_exit_attempts"] == 1
+    assert summary["exit_quality"] == {
+        "measured_trades": 2,
+        "trades_with_excursions": 2,
+        "average_profit_surrendered": 195.0,
+        "mfe_capture_pct": 43.48,
+        "exit_reasons": [
+            {"exit_reason": "STOP_LOSS", "trades": 1, "net_pnl": -220.0},
+            {"exit_reason": "TRAILING_STOP", "trades": 1, "net_pnl": 475.0},
+        ],
+    }
     assert "Daily Strategy-by-Regime Outcome Report" in report
     assert "| VWAPPro | TREND | continuation_pullback | 2 | 2 | 50.0% |" in report
+    assert "## Score Calibration (observational)" in report
+    assert "| 8.0–<9.0 | 2 | 50.0% | 127.5 | 2.1591 | 220.0 |" in report
+    assert "## Execution Quality (observational)" in report
+    assert "Entry slippage (bps)" in report
+    assert "## Exit Quality (observational)" in report
+    assert "Average profit surrendered: **195.0**" in report
     assert "Incomplete outcomes: **1**" in report
     assert "does not change live strategy parameters" in report
 
