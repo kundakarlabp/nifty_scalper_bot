@@ -57,7 +57,8 @@ class _ParityRunner:
         self._trades: list[dict[str, Any]] = []
         self._threshold = threshold
 
-    def on_replay_tick(self, symbol: str, tick: dict[str, Any]) -> None:
+    def on_tick_event(self, tick: dict[str, Any]) -> None:
+        symbol = str(tick["symbol"])
         close_price = float(tick.get("close", 0.0))
         self.ticks.append((symbol, close_price))
         if symbol == "OPT" and close_price >= self._threshold:
@@ -131,6 +132,7 @@ def test_backtest_pipeline_parity_generates_identical_trade_logs(
     engine = BacktestEngine(data, strategy, config)
     parity = SinglePipelineParity(
         runner_factory=_runner_factory,
+        reference_runner_factory=_runner_factory,
         paper_factory=_paper_factory,
         option_symbol="OPT",
     )
@@ -176,6 +178,7 @@ def test_backtest_pipeline_parity_detects_mismatched_trade_logs(
 
     parity = SinglePipelineParity(
         runner_factory=mismatch_factory,
+        reference_runner_factory=mismatch_factory,
         paper_factory=_paper_factory,
         option_symbol="OPT",
     )

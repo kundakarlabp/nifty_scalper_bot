@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, cast
 
@@ -55,6 +56,11 @@ class PaperFillEngine:
         self._slippage_model = SlippageModel()
 
     # ------------------------------------------------------------------
+    def set_clock(self, clock: Callable[[], float]) -> None:
+        """Use a caller-owned clock for deterministic paper-order timestamps."""
+
+        self._clock = clock
+
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Simulate order placement returning a broker-like response."""
 
