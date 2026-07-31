@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from nifty_scalper_bot.risk.entry_guard_patch import _net_rr_block_reason
+from nifty_scalper_bot.risk.entry_guard_patch import (
+    _net_rr_block_reason,
+    _real_broker_live,
+)
 from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
 
 
@@ -75,6 +78,20 @@ def test_wider_spread_reduces_net_reward_risk(monkeypatch) -> None:
     assert tight is not None and wide is not None
     assert wide.net_rr < tight.net_rr
     assert wide.target_cost > tight.target_cost
+
+
+def test_economic_rejection_is_real_broker_live_only(monkeypatch) -> None:
+    for name in ("BROKER_SIMULATION", "PAPER_MODE", "PAPER__ENABLED", "SHADOW_MODE"):
+        monkeypatch.delenv(name, raising=False)
+    assert _real_broker_live(True) is True
+    assert _real_broker_live(False) is False
+
+    monkeypatch.setenv("BROKER_SIMULATION", "true")
+    assert _real_broker_live(True) is False
+    monkeypatch.delenv("BROKER_SIMULATION")
+
+    monkeypatch.setenv("PAPER_MODE", "true")
+    assert _real_broker_live(True) is False
 
 
 def test_non_option_and_exit_orders_are_not_gated() -> None:
