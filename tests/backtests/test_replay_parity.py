@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -311,3 +312,179 @@ def test_generate_daily_report_builds_markdown(tmp_path: Path) -> None:
     assert "Daily Strategy Performance Report" in content
     assert "2024-01-01" in content and "2024-01-02" in content
     assert "Maximum Drawdown" in content
+
+
+def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("""
+            CREATE TABLE trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                meta_json TEXT
+            )
+            """)
+        outcomes = [
+            (
+                datetime.fromisoformat("2026-07-31T03:50:00+00:00").timestamp(),
+                {
+                    "strategy_name": "VWAPPro",
+                    "regime": "TREND",
+                    "setup_name": "continuation_pullback",
+                    "bracket_id": "bracket-1",
+                    "gross_pnl": 500.0,
+                    "estimated_costs": {"total": 25.0},
+                    "net_pnl": 475.0,
+                    "mfe_pnl": 650.0,
+                    "mae_pnl": 100.0,
+                    "holding_seconds": 180.0,
+                    "ledger_complete": True,
+                },
+            ),
+            (
+                datetime.fromisoformat("2026-07-31T04:30:00+00:00").timestamp(),
+                {
+                    "strategy_name": "VWAPPro",
+                    "regime": "TREND",
+                    "setup_name": "continuation_pullback",
+                    "bracket_id": "bracket-2",
+                    "gross_pnl": -200.0,
+                    "estimated_costs": {"total": 20.0},
+                    "net_pnl": -220.0,
+                    "mfe_pnl": 40.0,
+                    "mae_pnl": 240.0,
+                    "holding_seconds": 90.0,
+                    "ledger_complete": True,
+                },
+            ),
+            (
+                datetime.fromisoformat("2026-07-31T05:00:00+00:00").timestamp(),
+                {
+                    "strategy_name": "SMC",
+                    "regime": "RANGE",
+                    "setup_name": "liquidity_sweep_retest",
+                    "bracket_id": "bracket-3",
+                    "gross_pnl": None,
+                    "net_pnl": None,
+                    "ledger_complete": False,
+                },
+            ),
+        ]
+        for timestamp, outcome in outcomes:
+            connection.execute(
+                """
+                INSERT INTO trade_events (timestamp, event_type, meta_json)
+                VALUES (?, 'BRACKET_CLOSED', ?)
+                """,
+                (timestamp, json.dumps({"completed_trade": outcome})),
+            )
+        # A duplicate close event must not double-count the same bracket.
+        connection.execute(
+            """
+            INSERT INTO trade_events (timestamp, event_type, meta_json)
+            VALUES (?, 'BRACKET_CLOSED', ?)
+            """,
+            (
+                datetime.fromisoformat("2026-07-31T05:01:00+00:00").timestamp(),
+                json.dumps({"completed_trade": outcomes[-1][1]}),
+            ),
+        )
+        # This is 31 July UTC, but 1 August in Asia/Kolkata and must be excluded.
+        connection.execute(
+            """
+            INSERT INTO trade_events (timestamp, event_type, meta_json)
+            VALUES (?, 'BRACKET_CLOSED', ?)
+            """,
+            (
+                datetime.fromisoformat("2026-07-31T19:00:00+00:00").timestamp(),
+                json.dumps(
+                    {
+                        "completed_trade": {
+                            **outcomes[0][1],
+                            "bracket_id": "bracket-next-day",
+                        }
+                    }
+                ),
+            ),
+        )
+
+    module = _load_daily_report_module()
+    trades = module.load_completed_trades(
+        db_path,
+        report_date="2026-07-31",
+        timezone_name="Asia/Kolkata",
+    )
+    summary = module.summarise_completed_trades(trades)
+    report = module.build_trade_outcome_report(
+        summary,
+        report_date="2026-07-31",
+        timezone_name="Asia/Kolkata",
+    )
+
+    assert len(trades) == 3
+    assert summary["totals"]["closed_trades"] == 3
+    assert summary["totals"]["measured_trades"] == 2
+    assert summary["totals"]["incomplete_trades"] == 1
+    assert summary["totals"]["net_pnl"] == 255.0
+    assert summary["groups"][0] == {
+        "strategy": "SMC",
+        "regime": "RANGE",
+        "setups": ["liquidity_sweep_retest"],
+        "closed_trades": 1,
+        "measured_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate_pct": None,
+        "gross_pnl": 0.0,
+        "estimated_costs": 0.0,
+        "net_pnl": 0.0,
+        "average_net_pnl": None,
+        "profit_factor": None,
+        "average_mfe_pnl": None,
+        "average_mae_pnl": None,
+        "average_holding_seconds": None,
+        "incomplete_trades": 1,
+    }
+    assert summary["groups"][1]["strategy"] == "VWAPPro"
+    assert summary["groups"][1]["win_rate_pct"] == 50.0
+    assert summary["groups"][1]["net_pnl"] == 255.0
+    assert summary["groups"][1]["profit_factor"] == 2.1591
+    assert "Daily Strategy-by-Regime Outcome Report" in report
+    assert "| VWAPPro | TREND | continuation_pullback | 2 | 2 | 50.0% |" in report
+    assert "Incomplete outcomes: **1**" in report
+    assert "does not change live strategy parameters" in report
+
+
+def test_daily_report_trade_db_cli_writes_date_scoped_report(tmp_path: Path) -> None:
+    db_path = tmp_path / "trades.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("""
+            CREATE TABLE trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                meta_json TEXT
+            )
+            """)
+    output_path = tmp_path / "strategy_report.md"
+
+    module = _load_daily_report_module()
+    exit_code = module.main(
+        [
+            "--trades-db",
+            str(db_path),
+            "--date",
+            "2026-07-31",
+            "--timezone",
+            "Asia/Kolkata",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert output_path.exists()
+    assert "Closed trades: **0**" in output_path.read_text(encoding="utf-8")
