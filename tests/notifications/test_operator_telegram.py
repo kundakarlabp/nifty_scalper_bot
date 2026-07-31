@@ -235,6 +235,7 @@ EXPECTED_OPERATOR_COMMANDS = (
     "version",
     "errors",
     "logs",
+    "sessionlogs",
     "dumplogs",
     "stderror",
     "selftest",
