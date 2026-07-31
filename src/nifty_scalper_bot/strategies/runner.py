@@ -1229,6 +1229,10 @@ class StrategyRunner:
         self._entry_eval_trace_id_by_symbol: dict[str, str] = {}
         self._entry_eval_drain_scheduled: bool = False
         self._entry_eval_active: bool = False
+        self._entry_eval_active_started_at: float | None = None
+        self._entry_eval_active_symbol: str | None = None
+        self._entry_eval_active_phase: str | None = None
+        self._entry_eval_stall_disarmed: bool = False
         self._entry_eval_drain_count: int = 0
         self._entry_eval_reschedule_count: int = 0
         self._entry_eval_shutdown: bool = False
@@ -3955,7 +3959,8 @@ class StrategyRunner:
         """Set app-level runtime readiness flags. Args: flags/reason. Returns: none. Raises: none."""
         self._runtime_data_hard_ready = bool(data_hard_ready)
         self._runtime_evaluation_ready = bool(evaluation_ready)
-        self._runtime_live_orders_armed = bool(live_orders_armed)
+        worker_stalled = bool(getattr(self, "_entry_eval_stall_disarmed", False))
+        self._runtime_live_orders_armed = bool(live_orders_armed) and not worker_stalled
         if execution_ready_by_symbol is not None:
             normalized_execution_ready: dict[str, bool] = {}
             for raw_symbol, ready in execution_ready_by_symbol.items():
@@ -3968,7 +3973,9 @@ class StrategyRunner:
                     else:
                         self._runtime_symbol_last_ready_at.pop(runtime_key, None)
             self._runtime_execution_ready_by_symbol = normalized_execution_ready
-        self._runtime_readiness_reason = reason
+        self._runtime_readiness_reason = (
+            "entry_eval_worker_stalled" if worker_stalled else reason
+        )
         self._runtime_startup_ready = bool(
             self._runtime_data_hard_ready and self._runtime_evaluation_ready
         )
@@ -7987,11 +7994,13 @@ class StrategyRunner:
                         },
                     )
                 else:
+                    worker_state = self._entry_eval_liveness_snapshot(now_mono)
                     self._logger.warning(
                         "Strategy evaluation stalled >120s (once per 120s)",
                         extra={
                             "event": "strategy_eval_stall",
                             "stall_sec": round(now_mono - self._last_global_eval_ts, 1),
+                            **worker_state,
                         },
                     )
             self._run_health_watchdog_on_cadence()
@@ -8346,6 +8355,59 @@ class StrategyRunner:
                 },
             )
 
+    def _entry_eval_liveness_snapshot(self, now: float | None = None) -> dict[str, Any]:
+        """Return bounded diagnostic state for the single entry worker."""
+        now = time.monotonic() if now is None else now
+        with self._eval_gate_lock:
+            started_at = getattr(self, "_entry_eval_active_started_at", None)
+            drain_active = bool(getattr(self, "_entry_eval_active", False))
+            active_age = (
+                max(0.0, now - float(started_at))
+                if drain_active and started_at is not None
+                else 0.0
+            )
+            return {
+                "pending_entry_eval": sorted(
+                    getattr(self, "_pending_entry_eval_symbols", set())
+                ),
+                "drain_scheduled": bool(
+                    getattr(self, "_entry_eval_drain_scheduled", False)
+                ),
+                "drain_active": drain_active,
+                "drain_active_age_s": round(active_age, 1),
+                "active_symbol": getattr(self, "_entry_eval_active_symbol", None),
+                "active_phase": getattr(self, "_entry_eval_active_phase", None),
+                "drain_count": int(getattr(self, "_entry_eval_drain_count", 0)),
+                "runtime_loop_attached": bool(
+                    getattr(self, "_runtime_loop_attached", False)
+                ),
+                "shutdown": bool(getattr(self, "_entry_eval_shutdown", False)),
+            }
+
+    def _disarm_stalled_entry_worker_if_needed(self, state: Mapping[str, Any]) -> bool:
+        """Freeze new entries when the sole worker exceeds its safe age."""
+        if (
+            not bool(state.get("drain_active"))
+            or float(state.get("drain_active_age_s") or 0.0) < 90.0
+            or bool(getattr(self, "_entry_eval_stall_disarmed", False))
+        ):
+            return False
+        with self._eval_gate_lock:
+            self._entry_eval_stall_disarmed = True
+        self._runtime_live_orders_armed = False
+        self._runtime_readiness_reason = "entry_eval_worker_stalled"
+        self._logger.critical(
+            "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED symbol=%s phase=%s age_s=%s",
+            state.get("active_symbol"),
+            state.get("active_phase"),
+            state.get("drain_active_age_s"),
+            extra={
+                "event": "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED",
+                **dict(state),
+            },
+        )
+        return True
+
     async def _drain_pending_entry_evaluations(self) -> None:
         """Single-flight bounded drain of pending new-entry candidates.
         Reads the latest canonical tick per symbol (never the stale payload
@@ -8378,6 +8440,10 @@ class StrategyRunner:
                 if self._entry_eval_shutdown:
                     break
                 try:
+                    with self._eval_gate_lock:
+                        self._entry_eval_active_started_at = time.monotonic()
+                        self._entry_eval_active_symbol = symbol
+                        self._entry_eval_active_phase = "evaluate_latest_state"
                     # Heavy phase9 body runs on the dedicated single worker,
                     # NOT on this event loop -- tick drain, candle updates and
                     # heartbeat keep running while it executes. One symbol at
@@ -8403,6 +8469,10 @@ class StrategyRunner:
                         },
                     )
                 finally:
+                    with self._eval_gate_lock:
+                        self._entry_eval_active_started_at = None
+                        self._entry_eval_active_symbol = None
+                        self._entry_eval_active_phase = None
                     processed += 1
                     with self._eval_gate_lock:
                         self._entry_eval_drained_generation[symbol] = captured[symbol]
@@ -8416,6 +8486,10 @@ class StrategyRunner:
         finally:
             with self._eval_gate_lock:
                 self._entry_eval_active = False
+                self._entry_eval_active_started_at = None
+                self._entry_eval_active_symbol = None
+                self._entry_eval_active_phase = None
+                self._entry_eval_stall_disarmed = False
                 needs_next = bool(self._pending_entry_eval_symbols) and not (
                     self._entry_eval_shutdown
                 )
@@ -8600,6 +8674,7 @@ class StrategyRunner:
                     },
                 )
             else:
+                worker_state = self._entry_eval_liveness_snapshot(now)
                 log_throttled(
                     self._logger,
                     "health_watchdog_genuine_stall",
@@ -8609,8 +8684,10 @@ class StrategyRunner:
                     extra={
                         "event": "strategy_eval_stall",
                         "stall_sec": round(now - self._last_global_eval_ts, 1),
+                        **worker_state,
                     },
                 )
+                self._disarm_stalled_entry_worker_if_needed(worker_state)
                 if not self._eval_stall_recovery_attempted:
                     self._eval_stall_recovery_attempted = True
                     self._recover_strategy_eval_stall_once(now)
@@ -8958,15 +9035,7 @@ class StrategyRunner:
                 self._logger.exception("STRATEGY_EVAL_STALL_READINESS_RECOMPUTE_FAILED")
         # Evaluation-worker state, captured BEFORE any recovery action so the
         # log shows why evaluation stalled rather than only that it did.
-        with self._eval_gate_lock:
-            worker_state = {
-                "pending_entry_eval": sorted(self._pending_entry_eval_symbols),
-                "drain_scheduled": self._entry_eval_drain_scheduled,
-                "drain_active": self._entry_eval_active,
-                "drain_count": self._entry_eval_drain_count,
-                "runtime_loop_attached": self._runtime_loop_attached,
-                "shutdown": self._entry_eval_shutdown,
-            }
+        worker_state = self._entry_eval_liveness_snapshot(now)
         executor = getattr(self, "_entry_eval_executor", None)
         worker_state["executor_alive"] = bool(
             executor is not None and not getattr(executor, "_shutdown", False)
