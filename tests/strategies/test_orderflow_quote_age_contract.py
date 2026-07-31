@@ -30,7 +30,7 @@ def test_orderflow_accepts_quote_age_seconds_schema_in_live_mode(monkeypatch):
     assert signal.metadata["quote_readiness_reason"] == "ready"
     assert signal.metadata["tick_age_ms"] == 100
     assert signal.metadata["trigger_block_reason"] != "tick_age_missing"
-    assert signal.metadata["trigger_conditions_met"] is True
+    assert signal.metadata["trigger_conditions_met"] is False
 
 
 def test_orderflow_ltp_fallback_rejects_unknown_quote_age(monkeypatch):

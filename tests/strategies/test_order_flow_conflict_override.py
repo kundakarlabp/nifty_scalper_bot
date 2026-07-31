@@ -38,15 +38,9 @@ def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat, caplog):
     caplog.set_level("INFO")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=150, sell=140))
     assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["trigger_block_reason"] == "direction_bias_conflict"
+    assert sig.metadata["trigger_block_reason"] == "context_only_role"
     assert sig.metadata["bias_invalidated_by_microstructure"] is False
-    rec = next(r for r in caplog.records if getattr(r, "event", None) == "ORDERFLOW_DIRECTION_BIAS_CONFLICT")
-    assert rec.underlying_direction == "PE"
-    assert rec.contract_side == "CE"
-    assert rec.tick_direction == "UP"
-    assert rec.side_alignment_ok is False
-    assert rec.microstructure_confirms_side is False
-    assert rec.bias_invalidated_by_microstructure is False
+    # Trigger-path log record no longer emitted: OrderFlow is context only.
 
 
 # B. One strong snapshot cannot invalidate directional context
@@ -68,9 +62,12 @@ def test_stale_ce_strong_micro_pe_requires_persistence(monkeypatch, strat):
         _eval(strat, "NFO:NIFTY26MAY24000PE", _ind("CE", "UP", buy=400, sell=80, quote_update_version=version))
         for version in (1, 2, 3)
     ]
-    assert results[0].metadata["trigger_conditions_met"] is False
-    assert results[1].metadata["trigger_conditions_met"] is False
-    assert results[2].metadata["trigger_conditions_met"] is True
+    # Persistence is still MEASURED across versions and published as context;
+    # it simply can no longer promote OrderFlow into a trade signal.
+    assert all(r.metadata["trigger_conditions_met"] is False for r in results)
+    assert all(
+        r.metadata["trigger_block_reason"] == "context_only_role" for r in results
+    )
     assert results[2].metadata["bias_invalidated_by_microstructure"] is True
     assert results[2].metadata["reversal_persistence_confirmed"] is True
 
@@ -87,7 +84,7 @@ def test_tick_contradicts_blocked(monkeypatch, strat):
 def test_aligned_bias_allowed_normally(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80))
-    assert sig.metadata["trigger_conditions_met"] is True
+    assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["bias_invalidated_by_microstructure"] is False
 
 
@@ -112,11 +109,11 @@ def test_no_bias_without_spot_or_futures_live_proof_still_blocks(monkeypatch, st
     sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
 
     assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["trigger_block_reason"] == "direction_context_missing_live"
+    assert sig.metadata["trigger_block_reason"] == "context_only_role"
     assert sig.metadata.get("direction_context_live_proof") is not True
 
 
-def test_no_bias_with_fresh_spot_live_proof_can_trigger(monkeypatch, strat):
+def test_no_bias_with_fresh_spot_live_proof_stays_context(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     sig = _eval(
         strat,
@@ -131,10 +128,15 @@ def test_no_bias_with_fresh_spot_live_proof_can_trigger(monkeypatch, strat):
         ),
     )
 
-    assert sig.metadata["trigger_conditions_met"] is True
-    assert sig.metadata["trigger_block_reason"] == ""
-    assert sig.metadata["direction_context_ok"] is True
-    assert sig.metadata["direction_context_live_proof"] is True
+    # Fresh live spot proof is still MEASURED and published.
+    # direction_context_ok stays False here because no CE/PE bias exists; the
+    # live-context patch that previously flipped it was there solely to unblock
+    # TRIGGERING ("all other execution gates already passed"), so with the
+    # trigger role removed it is correctly inert. The proof flag itself is
+    # still recorded for the setup strategies to consume.
+    assert sig.metadata["trigger_conditions_met"] is False
+    assert sig.metadata["trigger_block_reason"] == "context_only_role"
+    assert sig.metadata["direction_context_ok"] is False
 
 
 def test_no_bias_with_stale_spot_and_futures_proof_still_blocks(monkeypatch, strat):
@@ -155,4 +157,4 @@ def test_no_bias_with_stale_spot_and_futures_proof_still_blocks(monkeypatch, str
     )
 
     assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["trigger_block_reason"] == "direction_context_missing_live"
+    assert sig.metadata["trigger_block_reason"] == "context_only_role"

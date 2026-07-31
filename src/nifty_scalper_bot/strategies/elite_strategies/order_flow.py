@@ -91,7 +91,27 @@ class OrderFlowStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live_mode = execution_mode == 'LIVE'
-            allow_orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_LIVE_TRIGGER' if is_live_mode else 'ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            # ROLE (structural, not configurable): OrderFlow is CONTEXT ONLY.
+            #
+            # Trade signal generation belongs exclusively to the three setup
+            # families -- SMC liquidity, VWAP Pro and ORB Pro -- which are
+            # graded against min_score ~5.5-5.8. OrderFlow/OI/IV supply
+            # measured confirmation and must never originate an entry.
+            #
+            # This was previously an env-controlled permission defaulting to
+            # 'true', so OrderFlow held a trigger role out of the box and could
+            # originate entries on its own far weaker ladder
+            # (ORDERFLOW_CONTEXT_MIN_SCORE default 4.0). In the 31 Jul session
+            # every executed trade carried reason=OrderFlow while the graded
+            # strategies correctly refused at 1.50-5.00.
+            #
+            # The permission is removed rather than defaulted off: a role this
+            # consequential should not be re-enablable by environment.
+            # ORDERFLOW_ALLOW_LIVE_TRIGGER and ORDERFLOW_ALLOW_TRIGGER_ROLE are
+            # no longer read. Everything below still computes and publishes the
+            # full confirmation payload (score, depth, imbalance, direction,
+            # metadata) for the setup strategies to consume.
+            allow_orderflow_trigger = False
             allow_ltp_trigger = str(os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', 'false'))).strip().lower() in {'1', 'true', 'yes', 'on'}
             trigger_min_score = safe_float_env('ORDERFLOW_MIN_SCORE_LIVE', 8.0) if is_live_mode else safe_float_env('ORDERFLOW_TRIGGER_MIN_SCORE', 5.0)
             trigger_max_spread_pct = safe_float_env('ORDERFLOW_MAX_SPREAD_PCT', 0.75) if is_live_mode else safe_float_env('ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', 12.0)
@@ -383,7 +403,7 @@ class OrderFlowStrategy(EliteStrategy):
                     )
             trigger_block_reason = ''
             if not allow_orderflow_trigger:
-                trigger_block_reason = 'trigger_role_disabled'
+                trigger_block_reason = 'context_only_role'
             elif not quote_readiness.allowed:
                 trigger_block_reason = quote_readiness.reason
             elif not quote_depth_valid or not depth_available:
