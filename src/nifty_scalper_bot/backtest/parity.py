@@ -32,6 +32,7 @@ class SinglePipelineParity:
         self,
         *,
         runner_factory: Callable[[], Any],
+        reference_runner_factory: Callable[[], Any] | None = None,
         paper_factory: Callable[[], PaperFillEngine],
         option_symbol: str,
         index_symbol: str | None = None,
@@ -52,6 +53,7 @@ class SinglePipelineParity:
         """
 
         self._runner_factory = runner_factory
+        self._reference_runner_factory = reference_runner_factory
         self._paper_factory = paper_factory
         self._option_symbol = option_symbol
         self._index_symbol = index_symbol
@@ -74,6 +76,11 @@ class SinglePipelineParity:
             "Entered SinglePipelineParity.run_frame",
             extra={"event": "single_pipeline_parity_run_enter"},
         )
+        if self._reference_runner_factory is None:
+            raise ValueError(
+                "reference_runner_factory is required; comparing one replay "
+                "pipeline with itself does not prove parity"
+            )
         try:
             live_runner = self._runner_factory()
             live_paper = self._paper_factory()
@@ -85,7 +92,7 @@ class SinglePipelineParity:
             )
             live_result = live_harness.run_dataframe(frame)
 
-            back_runner = self._runner_factory()
+            back_runner = self._reference_runner_factory()
             back_paper = self._paper_factory()
             back_harness = ReplayHarness(
                 back_runner,

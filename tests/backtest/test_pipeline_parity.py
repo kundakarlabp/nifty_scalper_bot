@@ -27,7 +27,8 @@ class _ParityRunner:
         self.ticks: list[tuple[str, float]] = []
         self._trades: list[dict[str, Any]] = []
 
-    def on_replay_tick(self, symbol: str, tick: dict[str, Any]) -> None:
+    def on_tick_event(self, tick: dict[str, Any]) -> None:
+        symbol = str(tick["symbol"])
         self.ticks.append((symbol, float(tick.get("close", 0.0))))
         if symbol == "OPT" and float(tick.get("close", 0.0)) > 101.0:
             self._trades.append({"symbol": symbol, "close": float(tick["close"])})
@@ -62,6 +63,7 @@ def test_single_pipeline_parity_matches() -> None:
     frame = _sample_frame()
     parity = SinglePipelineParity(
         runner_factory=_runner_factory,
+        reference_runner_factory=_runner_factory,
         paper_factory=_paper_factory,
         option_symbol="OPT",
     )
@@ -71,3 +73,18 @@ def test_single_pipeline_parity_matches() -> None:
     assert result.diff == ""
     assert result.live.trades == result.backtest.trades
     assert result.live.orders == result.backtest.orders
+
+
+def test_single_pipeline_parity_requires_independent_reference() -> None:
+    parity = SinglePipelineParity(
+        runner_factory=_runner_factory,
+        paper_factory=_paper_factory,
+        option_symbol="OPT",
+    )
+
+    try:
+        parity.run_frame(_sample_frame())
+    except ValueError as exc:
+        assert "reference_runner_factory" in str(exc)
+    else:  # pragma: no cover - explicit contract failure
+        raise AssertionError("parity must not compare a pipeline with itself")
