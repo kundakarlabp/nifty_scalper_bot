@@ -8132,7 +8132,8 @@ class StrategyRunner:
         This runs synchronously on the ingestion path and is NEVER routed to
         the entry-evaluation worker. Extracted mechanically from _on_tick:
         stop/target/trailing rules, exit quantity, exit idempotency, bracket
-        transitions, broker calls and exception semantics are all unchanged.
+        transitions and exception semantics are unchanged; broker submission
+        runs on the bracket manager's single-worker exit dispatcher.
         Args: symbol, tick. Returns: none. Raises: none.
         """
         if self._bracket_manager:
@@ -8143,7 +8144,10 @@ class StrategyRunner:
                 _ltp = float(_ltp_raw)
                 if _ltp > 0:
                     self._bracket_manager.on_tick(
-                        symbol, _ltp, tick_exchange_epoch(tick)
+                        symbol,
+                        _ltp,
+                        tick_exchange_epoch(tick),
+                        defer_submission=True,
                     )
                     tick_err_map = getattr(
                         self._bracket_manager, "_tick_error_logged", None

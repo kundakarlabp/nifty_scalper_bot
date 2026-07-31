@@ -344,9 +344,11 @@ def test_position_tick_protection_not_executed_twice(monkeypatch):
     runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
         monkeypatch
     )
-    bracket_ticks: list[tuple[str, float]] = []
+    bracket_ticks: list[tuple[str, float, bool]] = []
     runner_obj._bracket_manager = SimpleNamespace(
-        on_tick=lambda sym, ltp, ts: bracket_ticks.append((sym, ltp))
+        on_tick=lambda sym, ltp, ts, **kwargs: bracket_ticks.append(
+            (sym, ltp, kwargs.get("defer_submission") is True)
+        )
     )
 
     loop, thread = _run_loop_in_thread()
@@ -368,6 +370,7 @@ def test_position_tick_protection_not_executed_twice(monkeypatch):
         time.sleep(0.05)
         assert len(bracket_ticks) == 1
         assert bracket_ticks[0][0] == UNDERLYING_SYMBOL
+        assert bracket_ticks[0][2] is True
     finally:
         _stop_loop(loop, thread)
 
