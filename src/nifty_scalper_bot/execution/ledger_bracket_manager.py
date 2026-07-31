@@ -8,6 +8,7 @@ re-arming until fill history and broker-flat state are reconciled.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import time
@@ -427,6 +428,106 @@ class LedgerBracketManager(CanonicalBracketManager):
             or closed_at
         )
         provenance = dict(getattr(bracket, "trade_provenance", {}) or {})
+
+        def _finite(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) and number > 0 else None
+
+        def _elapsed(start: Any, end: Any) -> float | None:
+            start_value = _finite(start)
+            end_value = _finite(end)
+            if start_value is None or end_value is None:
+                return None
+            return round(max(0.0, end_value - start_value), 3)
+
+        entry_arrival = _finite(provenance.get("entry_arrival_price"))
+        entry_bid = _finite(provenance.get("entry_quote_bid"))
+        entry_ask = _finite(provenance.get("entry_quote_ask"))
+        exit_arrival = _finite(getattr(bracket, "exit_arrival_price", None))
+        exit_bid = _finite(getattr(bracket, "exit_quote_bid", None))
+        exit_ask = _finite(getattr(bracket, "exit_quote_ask", None))
+        entry_slippage = None
+        exit_slippage = None
+        if entry_arrival is not None and entry_price is not None:
+            entry_slippage = (
+                float(entry_price) - entry_arrival
+                if side == "BUY"
+                else entry_arrival - float(entry_price)
+            )
+        if exit_arrival is not None and resolved_exit is not None:
+            exit_slippage = (
+                exit_arrival - float(resolved_exit)
+                if side == "BUY"
+                else float(resolved_exit) - exit_arrival
+            )
+        execution_quality = {
+            "entry_arrival_price": entry_arrival,
+            "entry_quote_bid": entry_bid,
+            "entry_quote_ask": entry_ask,
+            "entry_spread_points": (
+                round(entry_ask - entry_bid, 4)
+                if entry_bid is not None and entry_ask is not None
+                else None
+            ),
+            "entry_slippage_points": (
+                round(entry_slippage, 4) if entry_slippage is not None else None
+            ),
+            "entry_slippage_bps": (
+                round(entry_slippage / entry_arrival * 10000.0, 3)
+                if entry_slippage is not None and entry_arrival
+                else None
+            ),
+            "entry_slippage_cost": (
+                round(entry_slippage * quantity, 2)
+                if entry_slippage is not None
+                else None
+            ),
+            "decision_to_entry_fill_seconds": _elapsed(
+                provenance.get("decision_ts"),
+                getattr(bracket, "entry_fill_ts", None),
+            ),
+            "entry_submit_to_fill_seconds": _elapsed(
+                provenance.get("entry_submit_ts"),
+                getattr(bracket, "entry_fill_ts", None),
+            ),
+            "exit_arrival_price": exit_arrival,
+            "exit_quote_bid": exit_bid,
+            "exit_quote_ask": exit_ask,
+            "exit_spread_points": (
+                round(exit_ask - exit_bid, 4)
+                if exit_bid is not None and exit_ask is not None
+                else None
+            ),
+            "exit_slippage_points": (
+                round(exit_slippage, 4) if exit_slippage is not None else None
+            ),
+            "exit_slippage_bps": (
+                round(exit_slippage / exit_arrival * 10000.0, 3)
+                if exit_slippage is not None and exit_arrival
+                else None
+            ),
+            "exit_slippage_cost": (
+                round(exit_slippage * quantity, 2)
+                if exit_slippage is not None
+                else None
+            ),
+            "exit_trigger_to_fill_seconds": _elapsed(
+                getattr(bracket, "exit_triggered_at", None), closed_at
+            ),
+            "exit_submit_to_fill_seconds": _elapsed(
+                getattr(bracket, "exit_submitted_at", None), closed_at
+            ),
+            "exit_order_type": getattr(bracket, "exit_order_type", None),
+            "exit_market_fallback": bool(
+                getattr(bracket, "exit_market_fallback", False)
+            ),
+            "exit_rejected_attempts": int(
+                getattr(bracket, "exit_rejected_attempts", 0) or 0
+            ),
+        }
         return {
             **provenance,
             "bracket_id": str(bracket.bracket_id),
@@ -445,6 +546,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             "mfe_pnl": round(mfe_points * quantity, 2),
             "mae_pnl": round(mae_points * quantity, 2),
             "holding_seconds": round(max(0.0, closed_at - opened_at), 3),
+            "execution_quality": execution_quality,
             "exit_reason": str(
                 getattr(bracket, "exit_reason", None) or bracket.close_source or ""
             ),

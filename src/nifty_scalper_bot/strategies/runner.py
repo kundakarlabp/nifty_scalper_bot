@@ -19906,6 +19906,7 @@ class StrategyRunner:
             _client_order_id = f"nfo:{_identity_digest}"
             _trade_lifecycle_id = f"tl:{_identity_digest}"
             _broker_tag = f"r{_identity_digest[:12]}"
+            _entry_submit_ts = time.time()
             # Request-normalization telemetry: strategy lots -> dynamic
             # lot-size resolution -> REQUESTED broker units. Nothing here is
             # final by name or by value.
@@ -19996,6 +19997,11 @@ class StrategyRunner:
                         "strategy_profile_version", "unknown"
                     ),
                     "final_score": metadata.get("final_score"),
+                    "entry_arrival_price": price,
+                    "entry_quote_bid": selected_snapshot.get("bid"),
+                    "entry_quote_ask": selected_snapshot.get("ask"),
+                    "decision_ts": now_epoch,
+                    "entry_submit_ts": _entry_submit_ts,
                 },
             )
             self._logger.info(
