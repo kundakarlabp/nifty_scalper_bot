@@ -1482,6 +1482,7 @@ from nifty_scalper_bot.shadow.shadow_paper import ShadowPaperTrader
 from nifty_scalper_bot.storage import HubStore
 from nifty_scalper_bot.strategies.elite_strategies.builder import (
     build_elite_strategies,
+    build_production_strategy_profile,
     get_strategy_tags as elite_strategy_tags,
 )
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
@@ -6243,6 +6244,21 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         regime_bias_map=regime_bias_map,
         market_regime_manager=market_regime_manager,
     )
+    strategy_profile = build_production_strategy_profile(
+        settings=settings,
+        strategies=elite_strategies,
+        mode_profile=strategy_manager.get_strategy_mode_profile(),
+        global_min_confidence=_global_min_conf,
+    )
+    LOGGER.info(
+        "PRODUCTION_STRATEGY_PROFILE version=%s profile=%s",
+        strategy_profile["version"],
+        strategy_profile,
+        extra={
+            "event": "PRODUCTION_STRATEGY_PROFILE",
+            "strategy_profile_version": strategy_profile["version"],
+        },
+    )
 
     unified_manager: UnifiedManager | None = None
     try:
@@ -6320,6 +6336,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strike_selector=strike_selector,
         message_bus=message_bus,
         bracket_manager=bracket_manager,
+        strategy_profile=strategy_profile,
     )
     strategy_runner.attach_persistent_state(persistent_state)
     if hasattr(order_manager, "entry_order_failed_callback"):

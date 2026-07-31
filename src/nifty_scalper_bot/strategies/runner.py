@@ -804,10 +804,12 @@ class StrategyRunner:
         data_hub: "DataHub | None" = None,
         strike_selector: StrikeSelector | None = None,
         bracket_manager: Any | None = None,
+        strategy_profile: Mapping[str, Any] | None = None,
     ) -> None:
         self._market_data = market_data_manager
         self._indicator_engine = indicator_engine
         self._strategy_manager = strategy_manager
+        self._strategy_profile = dict(strategy_profile or {})
         self._risk_manager = risk_manager
         self._order_manager = order_manager
         self._position_manager = position_manager
@@ -1309,9 +1311,8 @@ class StrategyRunner:
             "git_branch": os.getenv("GIT_BRANCH", "unknown"),
             "deployment_id": os.getenv("DEPLOYMENT_ID", "unknown"),
             "build_time": os.getenv("BUILD_TIME", "unknown"),
-            "strategy_profile_version": os.getenv(
-                "STRATEGY_PROFILE_VERSION", "unknown"
-            ),
+            "strategy_profile_version": self._strategy_profile.get("version")
+            or os.getenv("STRATEGY_PROFILE_VERSION", "unknown"),
         }
 
         # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP

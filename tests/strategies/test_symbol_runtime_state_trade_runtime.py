@@ -42,7 +42,9 @@ class _StubPositionManager:
         return None
 
 
-def _build_runner() -> StrategyRunner:
+def _build_runner(
+    strategy_profile: dict[str, object] | None = None,
+) -> StrategyRunner:
     return StrategyRunner(
         market_data_manager=SimpleNamespace(),
         indicator_engine=SimpleNamespace(),
@@ -52,7 +54,20 @@ def _build_runner() -> StrategyRunner:
         position_manager=_StubPositionManager(),
         message_bus=MessageBus(),
         config=StrategyRunnerConfig(max_trade_history=5),
+        strategy_profile=strategy_profile,
     )
+
+
+def test_runner_uses_derived_strategy_profile_version() -> None:
+    runner = _build_runner(
+        {"schema_version": 1, "version": "production-v1-abc123def456"}
+    )
+
+    assert (
+        runner._build_info["strategy_profile_version"]
+        == "production-v1-abc123def456"
+    )
+    assert runner._strategy_profile["schema_version"] == 1
 
 
 def test_symbol_runtime_state_defaults_without_last_trade_at() -> None:
