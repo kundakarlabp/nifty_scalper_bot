@@ -7,6 +7,7 @@ failsafes must therefore live here, not only in candidate/status helpers.
 
 from __future__ import annotations
 
+import os
 from contextlib import suppress
 from typing import Any
 
@@ -15,6 +16,23 @@ from nifty_scalper_bot.risk.net_rr_gate import NetRRResult, evaluate_final_net_r
 _PATCH_APPLIED = False
 _ORIGINAL_CHECK_ORDER: Any = None
 _REDUCING_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
+_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+
+
+def _env_true(name: str) -> bool:
+    return str(os.getenv(name, "") or "").strip().lower() in _TRUE_VALUES
+
+
+def _real_broker_live(live_enabled: bool) -> bool:
+    """Apply economic rejection only to real broker-live entry submission."""
+    if not live_enabled:
+        return False
+    return not (
+        _env_true("BROKER_SIMULATION")
+        or _env_true("PAPER_MODE")
+        or _env_true("PAPER__ENABLED")
+        or _env_true("SHADOW_MODE")
+    )
 
 
 def _call_count(owner: Any, *names: str) -> int:
@@ -45,11 +63,19 @@ def _open_position_count(position_manager: Any) -> int:
 
 
 def _position_symbol(position: Any) -> str:
-    return str(getattr(position, "symbol", "") or getattr(position, "tradingsymbol", "") or "").strip()
+    return str(
+        getattr(position, "symbol", "")
+        or getattr(position, "tradingsymbol", "")
+        or ""
+    ).strip()
 
 
 def _signal_symbol(signal: Any) -> str:
-    return str(getattr(signal, "symbol", "") or getattr(signal, "tradingsymbol", "") or "").strip()
+    return str(
+        getattr(signal, "symbol", "")
+        or getattr(signal, "tradingsymbol", "")
+        or ""
+    ).strip()
 
 
 def _position_quantity(position: Any) -> int:
@@ -79,7 +105,12 @@ def _iter_open_positions(position_manager: Any) -> list[Any]:
 def _is_reducing_order(position_manager: Any, signal: Any) -> bool:
     intent = str(getattr(signal, "intent", "") or "").strip().upper()
     reduce_only = bool(getattr(signal, "reduce_only", False))
-    side = str(getattr(signal, "side", "") or getattr(signal, "transaction_type", "") or "").strip().upper()
+    side = str(
+        getattr(signal, "side", "")
+        or getattr(signal, "transaction_type", "")
+        or getattr(signal, "action", "")
+        or ""
+    ).strip().upper()
     symbol = _signal_symbol(signal)
     if intent in _REDUCING_INTENTS or reduce_only:
         return True
@@ -175,7 +206,7 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
                 )
             return False, reentry_reason
 
-    if live_enabled:
+    if _real_broker_live(live_enabled):
         net_rr_block = _net_rr_block_reason(signal)
         if net_rr_block is not None:
             reason, result = net_rr_block
@@ -254,5 +285,6 @@ __all__ = [
     "_daily_limit_block_reason",
     "_is_reducing_order",
     "_net_rr_block_reason",
+    "_real_broker_live",
     "_stop_reentry_block_reason",
 ]
