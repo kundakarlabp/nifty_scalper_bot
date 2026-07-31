@@ -21,6 +21,7 @@ from nifty_scalper_bot.execution.operator_control_patch import apply_patches as 
 from nifty_scalper_bot.execution.protective_order_intent_patch import apply_patches as _apply_protective_order_intent_patches
 from nifty_scalper_bot.execution.order_entry_guard_patch import apply_patches as _apply_order_entry_guard_patches
 from nifty_scalper_bot.execution.position_risk_state_patch import apply_patches as _apply_position_risk_state_patches
+from nifty_scalper_bot.execution.stop_rearm_contract_patch import apply_patches as _apply_stop_rearm_contract_patches
 from nifty_scalper_bot.execution.premium_risk_contract_patch import apply_patches as _apply_premium_risk_contract_patches
 import nifty_scalper_bot.data.quote_identity_extension as _quote_identity_extension
 import nifty_scalper_bot.execution.bracket_ownership_extension as _bracket_ownership_extension
@@ -34,6 +35,7 @@ _apply_operator_control_patches()
 _apply_protective_order_intent_patches()
 _apply_order_entry_guard_patches()
 _apply_position_risk_state_patches()
+_apply_stop_rearm_contract_patches()
 _apply_premium_risk_contract_patches()
 _quote_identity_extension.apply_patches()
 _broker_exposure_quarantine_extension.apply_patches()
