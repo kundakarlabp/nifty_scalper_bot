@@ -24,7 +24,7 @@ def _signal(*, target: float, stop: float = 92.0, **metadata):
 def test_final_net_rr_accepts_economic_trade(monkeypatch) -> None:
     monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
 
-    result = evaluate_final_net_rr(_signal(target=116.0))
+    result = evaluate_final_net_rr(_signal(target=120.0))
 
     assert result is not None
     assert result.allowed is True
@@ -55,7 +55,7 @@ def test_final_gate_uses_strategy_replaced_sl_and_target(monkeypatch) -> None:
         action="BUY",
         quantity=65,
         stop_loss=92.0,
-        take_profit=116.0,
+        take_profit=120.0,
         metadata={
             "premium_risk_reference_price": 100.0,
             "premium_risk_contract_applied": True,
@@ -72,8 +72,8 @@ def test_final_gate_uses_strategy_replaced_sl_and_target(monkeypatch) -> None:
 
 def test_wider_spread_reduces_net_reward_risk(monkeypatch) -> None:
     monkeypatch.setenv("MIN_NET_REWARD_RISK", "0")
-    tight = evaluate_final_net_rr(_signal(target=116.0, bid=99.9, ask=100.1))
-    wide = evaluate_final_net_rr(_signal(target=116.0, bid=99.0, ask=101.0))
+    tight = evaluate_final_net_rr(_signal(target=120.0, bid=99.9, ask=100.1))
+    wide = evaluate_final_net_rr(_signal(target=120.0, bid=99.0, ask=101.0))
 
     assert tight is not None and wide is not None
     assert wide.net_rr < tight.net_rr
