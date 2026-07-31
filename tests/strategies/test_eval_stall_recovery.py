@@ -54,15 +54,61 @@ def test_recovery_nudges_the_real_evaluation_mechanism() -> None:
 
 def test_recovery_captures_evaluation_worker_state() -> None:
     """Stall logs must explain WHY evaluation stalled, not only that it did."""
-    src = _source()
+    src = _source() + inspect.getsource(StrategyRunner._entry_eval_liveness_snapshot)
     for field in (
         "pending_entry_eval",
         "drain_scheduled",
         "drain_active",
+        "drain_active_age_s",
+        "active_symbol",
+        "active_phase",
         "runtime_loop_attached",
         "executor_alive",
     ):
         assert field in src, f"missing worker-state field: {field}"
+
+
+def test_stuck_active_worker_disarms_new_entries() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = MagicMock()
+    runner._eval_gate_lock = threading.Lock()
+    runner._entry_eval_active = True
+    runner._entry_eval_active_started_at = time.monotonic() - 121.0
+    runner._entry_eval_active_symbol = "NFO:NIFTY26JUN24000CE"
+    runner._entry_eval_active_phase = "evaluate_latest_state"
+    runner._entry_eval_drain_scheduled = False
+    runner._pending_entry_eval_symbols = {"NSE:NIFTY"}
+    runner._entry_eval_stall_disarmed = False
+    runner._runtime_live_orders_armed = True
+    runner._runtime_readiness_reason = None
+    state = runner._entry_eval_liveness_snapshot()
+
+    assert runner._disarm_stalled_entry_worker_if_needed(state) is True
+    assert runner._runtime_live_orders_armed is False
+    assert runner._runtime_readiness_reason == "entry_eval_worker_stalled"
+    assert state["active_symbol"] == "NFO:NIFTY26JUN24000CE"
+    assert state["drain_active_age_s"] >= 120.0
+
+
+def test_readiness_refresh_cannot_rearm_a_stuck_worker() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = MagicMock()
+    runner._entry_eval_stall_disarmed = True
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._runtime_symbol_last_ready_at = {}
+    runner._active_selected_ce = None
+    runner._active_selected_pe = None
+    runner._active_option_symbols = set()
+
+    runner.set_runtime_readiness(
+        data_hard_ready=True,
+        evaluation_ready=True,
+        live_orders_armed=True,
+        reason="ready",
+    )
+
+    assert runner._runtime_live_orders_armed is False
+    assert runner._runtime_readiness_reason == "entry_eval_worker_stalled"
 
 
 def test_recovery_reschedules_a_stranded_pending_drain() -> None:
