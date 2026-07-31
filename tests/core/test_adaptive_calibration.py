@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from nifty_scalper_bot.core.adaptive_calibration import (
     AdaptiveParameterStore,
+    ChronologicalWalkForward,
     WalkForwardOptimizer,
 )
 
@@ -73,3 +76,60 @@ def test_negative_strategy_does_not_freeze_other_research_strategy() -> None:
     assert "loser" in opt._frozen_strategies
     assert "winner" not in opt._frozen_strategies
     assert tuned != current
+
+
+def test_chronological_walk_forward_keeps_test_untouched() -> None:
+    records = [
+        {
+            "timestamp": float(index),
+            "baseline": 1.0,
+            "stable": 2.0,
+            "overfit": 3.0 if index < 6 else -5.0,
+        }
+        for index in range(10)
+    ]
+    seen: list[tuple[str, float, float]] = []
+
+    def evaluator(name: str):
+        def _evaluate(fit, evaluation):
+            seen.append((name, fit[-1]["timestamp"], evaluation[0]["timestamp"]))
+            return [row[name] for row in evaluation]
+
+        return _evaluate
+
+    result = ChronologicalWalkForward(
+        train_size=4,
+        validation_size=2,
+        test_size=2,
+    ).evaluate(
+        records,
+        baseline=evaluator("baseline"),
+        candidates={
+            "stable": evaluator("stable"),
+            "overfit": evaluator("overfit"),
+        },
+    )
+
+    assert len(result.folds) == 2
+    assert result.folds[0].selected_candidate == "overfit"
+    assert result.folds[0].candidate_test.total_net_pnl == -10.0
+    assert result.folds[0].baseline_test.total_net_pnl == 2.0
+    assert result.folds[1].selected_candidate == "stable"
+    assert result.folds[1].candidate_test.total_net_pnl == 4.0
+    assert result.aggregate_candidate.total_net_pnl == -6.0
+    assert result.aggregate_baseline.total_net_pnl == 4.0
+    assert all(fit_end < evaluation_start for _, fit_end, evaluation_start in seen)
+
+
+def test_chronological_walk_forward_rejects_unsorted_records() -> None:
+    records = [{"timestamp": 2.0}, {"timestamp": 1.0}]
+
+    def evaluator(_fit, evaluation):
+        return [0.0 for _ in evaluation]
+
+    with pytest.raises(ValueError, match="chronological"):
+        ChronologicalWalkForward(1, 1, 1).evaluate(
+            records,
+            baseline=evaluator,
+            candidates={"candidate": evaluator},
+        )
