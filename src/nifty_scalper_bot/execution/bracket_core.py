@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections import deque
 import hashlib
 from contextlib import suppress
+from queue import Queue
 import threading
 from threading import RLock
 import time
@@ -556,6 +557,16 @@ class BracketManager:
         self._throttle_log_at: Dict[str, float] = {}
         self._lock = _RLOCK_CLASS()
         self._reconcile_lock = threading.Lock()
+        self._exit_dispatch_scheduled: set[str] = set()
+        self._exit_dispatch_queue: Queue[
+            tuple[BracketState, Mapping[str, Any]] | None
+        ] = Queue()
+        self._exit_dispatch_thread = threading.Thread(
+            target=self._exit_dispatch_loop,
+            name="bracket-exit",
+            daemon=True,
+        )
+        self._exit_dispatch_thread.start()
         self._running = True
         self._persistence_degraded_reason: str | None = None
         self._recovery_degraded_reason: str | None = None
@@ -972,6 +983,7 @@ class BracketManager:
     def shutdown(self) -> None:
         """Stop watchdog processing. Args: none; Returns: none; Raises: none."""
         self._running = False
+        self._exit_dispatch_queue.put(None)
 
     # --------------------------------------------------------------------------
     # 1. CORE API (Backward Compatible & Enhanced)
@@ -1661,7 +1673,12 @@ class BracketManager:
     # --------------------------------------------------------------------------
 
     def on_tick(
-        self, symbol: str, ltp: float, exchange_ts: float | None = None
+        self,
+        symbol: str,
+        ltp: float,
+        exchange_ts: float | None = None,
+        *,
+        defer_submission: bool = False,
     ) -> None:
         """Process one tick through trailing and hard SL/TP evaluation.
 
@@ -1672,6 +1689,8 @@ class BracketManager:
                 provided, ticks older than a freshly activated bracket's fill
                 time are not evaluated against it — a replayed pre-fill signal
                 tick must not trigger an immediate false exit right after entry.
+            defer_submission: Latch the trigger synchronously, then dispatch
+                broker submission on the dedicated single-worker exit path.
         """
         symbol = normalize_symbol(symbol)
         # ═══════════════════════════════════════════════════════════
@@ -1835,7 +1854,10 @@ class BracketManager:
         # FIRE EXITS: Batch processing (takes lock once)
         # ═══════════════════════════════════════════════════════════
         if exits_to_fire:
-            self._fire_exits_batch(exits_to_fire)
+            self._fire_exits_batch(
+                exits_to_fire,
+                defer_submission=defer_submission,
+            )
 
     def process_exit_checks(self, symbol: str, ltp: float) -> None:
         """Route tick to the single on-tick exit authority. Args: symbol, ltp; Returns: None; Raises: None."""
@@ -1988,13 +2010,20 @@ class BracketManager:
 
         return None
 
-    def _fire_exits_batch(self, exits: list) -> None:
+    def _fire_exits_batch(
+        self,
+        exits: list,
+        *,
+        defer_submission: bool = False,
+    ) -> None:
         """Latch exit triggers and submit at most one controlled exit order per bracket."""
         now = time.time()
         approved: list[tuple[BracketState, dict[str, Any]]] = []
 
         with self._lock:
             for bracket, action in exits:
+                if bracket.bracket_id in self._exit_dispatch_scheduled:
+                    continue
                 if not self._exit_can_submit_or_reconcile_locked(bracket, now):
                     LOGGER.info(
                         "BRACKET_EXIT_SKIPPED_DUPLICATE bracket_id=%s symbol=%s exit_state=%s pending_exit_order_id=%s",
@@ -2106,9 +2135,35 @@ class BracketManager:
                     )
 
                 approved.append((bracket, action))
+                if defer_submission:
+                    self._exit_dispatch_scheduled.add(bracket.bracket_id)
 
         for bracket, action in approved:
-            self._process_exit_state(bracket, action, now=time.time())
+            if not defer_submission:
+                self._process_exit_state(bracket, action, now=time.time())
+                continue
+            self._exit_dispatch_queue.put((bracket, action))
+
+    def _exit_dispatch_loop(self) -> None:
+        """Persist and submit latched exits serially outside tick ingestion."""
+        while True:
+            item = self._exit_dispatch_queue.get()
+            try:
+                if item is None:
+                    return
+                bracket, action = item
+                try:
+                    self.save_state()
+                except Exception as exc:  # noqa: BLE001 - exits remain mandatory
+                    self._mark_persistence_degraded("exit_trigger_persist_failed", exc)
+                self._process_exit_state(bracket, action, now=time.time())
+            finally:
+                if item is not None:
+                    with self._lock:
+                        self._exit_dispatch_scheduled.discard(
+                            item[0].bracket_id
+                        )
+                self._exit_dispatch_queue.task_done()
 
     def _exit_can_submit_or_reconcile_locked(
         self, bracket: BracketState, now: float

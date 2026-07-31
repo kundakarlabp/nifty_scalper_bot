@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any
 
@@ -102,6 +103,51 @@ def test_first_sl_breach_latches_and_submits_once(caplog) -> None:
     assert len(om.calls) == 1
     assert om.calls[0]["side"] == "SELL"
     assert caplog.text.count("EXIT_TRIGGERED") == 1
+
+
+def test_deferred_exit_latches_without_waiting_for_broker() -> None:
+    broker_started = threading.Event()
+    release_broker = threading.Event()
+
+    class _SlowOrderManager(_OrderManager):
+        def place_order(self, **kwargs: Any) -> str | None:
+            self.calls.append(kwargs)
+            broker_started.set()
+            assert release_broker.wait(timeout=2.0)
+            return self.order_id
+
+    om = _SlowOrderManager(broker=_Broker(status="OPEN"), order_id="exit-1")
+    manager = _active_manager(om)
+
+    started = time.monotonic()
+    manager.on_tick(
+        "NFO:NIFTY2660923100CE",
+        157.10,
+        defer_submission=True,
+    )
+    elapsed = time.monotonic() - started
+
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert elapsed < 0.1
+    assert bracket.exit_pending is True
+    assert bracket.exit_state == BracketExitLifecycle.EXIT_TRIGGERED.value
+    assert broker_started.wait(timeout=1.0)
+
+    # A concurrent watchdog/tick trigger must not submit a second exit.
+    manager.on_tick(
+        "NFO:NIFTY2660923100CE",
+        156.90,
+        defer_submission=True,
+    )
+    release_broker.set()
+    deadline = time.monotonic() + 1.0
+    while bracket.exit_state != BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert bracket.exit_order_id == "exit-1"
+    assert len(om.calls) == 1
 
 
 def test_exit_fill_closes_bracket_and_unfreezes_entries() -> None:
