@@ -9,7 +9,11 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from nifty_scalper_bot.backtest.replay import ReplayHarness, ReplayResult
+from nifty_scalper_bot.backtest.replay import (
+    HistoricalContractCatalog,
+    ReplayHarness,
+    ReplayResult,
+)
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -36,6 +40,7 @@ class SinglePipelineParity:
         paper_factory: Callable[[], PaperFillEngine],
         option_symbol: str,
         index_symbol: str | None = None,
+        contract_catalog: HistoricalContractCatalog | None = None,
     ) -> None:
         """Initialise the parity harness using shared factories.
 
@@ -57,6 +62,7 @@ class SinglePipelineParity:
         self._paper_factory = paper_factory
         self._option_symbol = option_symbol
         self._index_symbol = index_symbol
+        self._contract_catalog = contract_catalog
         self._logger = LOGGER
 
     def run_frame(self, frame: pd.DataFrame) -> PipelineParityResult:
@@ -89,6 +95,7 @@ class SinglePipelineParity:
                 live_paper,
                 option_symbol=self._option_symbol,
                 index_symbol=self._index_symbol,
+                contract_catalog=self._contract_catalog,
             )
             live_result = live_harness.run_dataframe(frame)
 
@@ -99,6 +106,7 @@ class SinglePipelineParity:
                 back_paper,
                 option_symbol=self._option_symbol,
                 index_symbol=self._index_symbol,
+                contract_catalog=self._contract_catalog,
             )
             back_result = back_harness.run_dataframe(frame)
         except Exception as exc:

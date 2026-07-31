@@ -4,20 +4,29 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
-from nifty_scalper_bot.backtest.replay import ReplayHarness
+from nifty_scalper_bot.backtest.replay import (
+    HistoricalContractCatalog,
+    ReplayContractSnapshot,
+    ReplayHarness,
+)
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 
 
 class _DummyDataHub:
     def __init__(self) -> None:
         self.quotes: dict[str, dict[str, float]] = {}
+        self.baskets: list[dict[str, object]] = []
 
     def get_quote(self, symbol: str, allow_pull: bool = False) -> dict[str, float]:
         return self.quotes.setdefault(symbol, {"ltp": 100.0})
 
     def store_quote(self, symbol: str, quote: dict[str, float], *, source: str) -> None:
         self.quotes[symbol] = dict(quote)
+
+    def set_active_contract_basket(self, basket: dict[str, object]) -> None:
+        self.baskets.append(dict(basket))
 
 
 class _DummyResolver:
@@ -36,12 +45,16 @@ class _TradeRecord:
 class _DummyRunner:
     def __init__(self) -> None:
         self.ticks: list[tuple[str, dict[str, float]]] = []
+        self.baskets: list[dict[str, object]] = []
 
     def on_tick_event(self, tick: dict[str, float]) -> None:
         self.ticks.append((str(tick["symbol"]), tick))
 
     def on_replay_tick(self, symbol: str, tick: dict[str, float]) -> None:
         raise AssertionError("replay must use the production tick ingress")
+
+    def set_active_trading_universe(self, basket: dict[str, object]) -> None:
+        self.baskets.append(dict(basket))
 
     def get_status(self) -> dict[str, dict[str, list[_TradeRecord]]]:
         return {"symbols": {"OPT": {"trade_history": [_TradeRecord("BUY")]}}}
@@ -135,3 +148,129 @@ def test_replay_advances_clock_once_per_synchronised_timestamp() -> None:
         }
     )
     assert order["timestamp"] == frame.index[-1].to_pydatetime().timestamp()
+
+
+def test_replay_rotates_only_time_available_historical_contracts() -> None:
+    timestamps = pd.date_range(datetime(2024, 1, 1, 9, 30), periods=2, freq="T")
+    frame = _sample_frame().iloc[:2].copy()
+    frame.index = timestamps
+    frame["option_symbol"] = ["NFO:NIFTY24JAN19500CE", "NFO:NIFTY24JAN19550CE"]
+    first = {
+        "selected_ce": "NFO:NIFTY24JAN19500CE",
+        "selected_pe": "NFO:NIFTY24JAN19500PE",
+        "option_symbols": (
+            "NFO:NIFTY24JAN19500CE",
+            "NFO:NIFTY24JAN19500PE",
+        ),
+        "option_expiry": "2024-01-04",
+    }
+    second = {
+        "selected_ce": "NFO:NIFTY24JAN19550CE",
+        "selected_pe": "NFO:NIFTY24JAN19550PE",
+        "option_symbols": (
+            "NFO:NIFTY24JAN19550CE",
+            "NFO:NIFTY24JAN19550PE",
+        ),
+        "option_expiry": "2024-01-04",
+    }
+    catalog = HistoricalContractCatalog(
+        [
+            ReplayContractSnapshot(timestamps[0].to_pydatetime(), first),
+            ReplayContractSnapshot(timestamps[1].to_pydatetime(), second),
+        ]
+    )
+    hub = _DummyDataHub()
+    runner = _DummyRunner()
+    harness = ReplayHarness(
+        runner,
+        PaperFillEngine(hub, _DummyResolver()),
+        option_symbol="legacy-option",
+        index_symbol="IDX",
+        contract_catalog=catalog,
+    )
+
+    harness.run_dataframe(frame)
+
+    assert [symbol for symbol, _ in runner.ticks if symbol != "IDX"] == [
+        "NFO:NIFTY24JAN19500CE",
+        "NFO:NIFTY24JAN19550CE",
+    ]
+    assert [basket["selected_ce"] for basket in runner.baskets] == [
+        first["selected_ce"],
+        second["selected_ce"],
+    ]
+    assert hub.baskets == runner.baskets
+
+
+def test_replay_rejects_contract_not_available_in_historical_basket() -> None:
+    timestamp = datetime(2024, 1, 1, 9, 30)
+    frame = _sample_frame().iloc[:1].copy()
+    frame.index = pd.DatetimeIndex([timestamp])
+    frame["option_symbol"] = ["NFO:NIFTY24JAN19600CE"]
+    catalog = HistoricalContractCatalog(
+        [
+            ReplayContractSnapshot(
+                timestamp,
+                {
+                    "selected_ce": "NFO:NIFTY24JAN19500CE",
+                    "selected_pe": "NFO:NIFTY24JAN19500PE",
+                    "option_symbols": (
+                        "NFO:NIFTY24JAN19500CE",
+                        "NFO:NIFTY24JAN19500PE",
+                    ),
+                    "option_expiry": "2024-01-04",
+                },
+            )
+        ]
+    )
+    harness = ReplayHarness(
+        _DummyRunner(),
+        PaperFillEngine(_DummyDataHub(), _DummyResolver()),
+        option_symbol="legacy-option",
+        contract_catalog=catalog,
+    )
+
+    with pytest.raises(ValueError, match="not present in historical basket"):
+        harness.run_dataframe(frame)
+
+
+def test_historical_contract_catalog_rejects_lookahead_and_expired_baskets() -> None:
+    catalog = HistoricalContractCatalog(
+        [
+            ReplayContractSnapshot(
+                datetime(2024, 1, 2, 9, 30),
+                {
+                    "selected_ce": "NFO:NIFTY24JAN19500CE",
+                    "selected_pe": "NFO:NIFTY24JAN19500PE",
+                    "option_symbols": (
+                        "NFO:NIFTY24JAN19500CE",
+                        "NFO:NIFTY24JAN19500PE",
+                    ),
+                    "option_expiry": "2024-01-04",
+                },
+            )
+        ]
+    )
+
+    with pytest.raises(LookupError, match="no contract basket"):
+        catalog.resolve(datetime(2024, 1, 2, 9, 29))
+    with pytest.raises(LookupError, match="expired"):
+        catalog.resolve(datetime(2024, 1, 5, 9, 30))
+
+    missing_expiry = HistoricalContractCatalog(
+        [
+            ReplayContractSnapshot(
+                datetime(2024, 1, 2, 9, 30),
+                {
+                    "selected_ce": "NFO:NIFTY24JAN19500CE",
+                    "selected_pe": "NFO:NIFTY24JAN19500PE",
+                    "option_symbols": (
+                        "NFO:NIFTY24JAN19500CE",
+                        "NFO:NIFTY24JAN19500PE",
+                    ),
+                },
+            )
+        ]
+    )
+    with pytest.raises(ValueError, match="requires option_expiry"):
+        missing_expiry.resolve(datetime(2024, 1, 2, 9, 30))
