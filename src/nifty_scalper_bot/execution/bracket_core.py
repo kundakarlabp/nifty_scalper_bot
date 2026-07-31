@@ -581,6 +581,12 @@ class BracketManager:
                 os.getenv("BRACKET_PENDING_ENTRY_RECONCILE_AFTER_SEC"), 5.0
             ),
         )
+        self._pending_entry_stale_after_sec = max(
+            120.0,
+            parse_float_env(
+                os.getenv("BRACKET_PENDING_ENTRY_STALE_AFTER_SEC"), 120.0
+            ),
+        )
         self._stale_cleanup_age = 86400
         self._trail_tier1_pct = parse_float_env(os.getenv("TRAIL_TIER1_PCT"), 1.0)
         self._trail_tier2_pct = parse_float_env(os.getenv("TRAIL_TIER2_PCT"), 2.0)
@@ -903,10 +909,13 @@ class BracketManager:
                 LOGGER.error("Failure in _watchdog_exit_loop: %s", e)
                 time.sleep(0.25)
 
-    def _broker_order_filled(self, order_id: str) -> tuple[bool, float | None]:
+    def _broker_entry_order_status(
+        self, order_id: str
+    ) -> tuple[Mapping[str, Any], bool]:
+        """Return entry-order status and whether broker lookup was authoritative."""
         broker = getattr(self.order_manager, "_broker", None)
         if broker is None:
-            return False, None
+            return {}, False
         for attr in ("get_order_status", "order_status"):
             fn = getattr(broker, attr, None)
             if callable(fn):
@@ -914,18 +923,10 @@ class BracketManager:
                     status = fn(order_id)
                 except Exception:
                     continue
-                if isinstance(status, Mapping):
-                    status_text = str(status.get("status") or "").upper()
-                    if status_text in _FILLED_STATUSES:
-                        avg_price = (
-                            status.get("average_price")
-                            or status.get("avg_price")
-                            or status.get("price")
-                        )
-                        try:
-                            return True, float(avg_price) if avg_price else None
-                        except (TypeError, ValueError):
-                            return True, None
+                if isinstance(status, Mapping) and str(
+                    status.get("status") or ""
+                ).strip():
+                    return status, True
         get_orders = getattr(broker, "get_orders", None)
         if not callable(get_orders):
             get_orders = getattr(broker, "orders", None)
@@ -933,24 +934,30 @@ class BracketManager:
             try:
                 orders = get_orders() or []
             except Exception:
-                orders = []
+                return {}, False
             for order in orders:
                 if not isinstance(order, Mapping):
                     continue
                 if str(order.get("order_id") or "") != str(order_id):
                     continue
-                status_text = str(order.get("status") or "").upper()
-                if status_text in _FILLED_STATUSES:
-                    avg_price = (
-                        order.get("average_price")
-                        or order.get("avg_price")
-                        or order.get("price")
-                    )
-                    try:
-                        return True, float(avg_price) if avg_price else None
-                    except (TypeError, ValueError):
-                        return True, None
-        return False, None
+                return order, True
+            return {}, True
+        return {}, False
+
+    def _broker_order_filled(self, order_id: str) -> tuple[bool, float | None]:
+        status, _known = self._broker_entry_order_status(order_id)
+        status_text = str(status.get("status") or "").upper()
+        if status_text not in _FILLED_STATUSES:
+            return False, None
+        avg_price = (
+            status.get("average_price")
+            or status.get("avg_price")
+            or status.get("price")
+        )
+        try:
+            return True, float(avg_price) if avg_price else None
+        except (TypeError, ValueError):
+            return True, None
 
     def _reconcile_pending_entry(self, bracket: BracketState) -> None:
         if bracket.entry_confirmed or bracket.monitoring_only:
@@ -958,11 +965,41 @@ class BracketManager:
         age = time.time() - float(bracket.created_at or 0.0)
         if age < self._pending_entry_reconcile_after_sec:
             return
-        filled, fill_price = self._broker_order_filled(bracket.entry_order_id)
-        if filled:
+        status, status_known = self._broker_entry_order_status(
+            bracket.entry_order_id
+        )
+        status_text = str(status.get("status") or "").upper()
+        if status_text in _FILLED_STATUSES:
+            fill_price = self._extract_status_price(status)
             self.confirm_entry_fill(
                 bracket.entry_order_id, fill_price or bracket.entry_price
             )
+            return
+        terminal_unfilled = status_text in _CANCELLED_STATUSES
+        authoritatively_absent = (
+            status_known
+            and not status_text
+            and age >= self._pending_entry_stale_after_sec
+        )
+        if not (terminal_unfilled or authoritatively_absent):
+            return
+        if not self._position_flat_for_symbol(bracket.symbol):
+            return
+        LOGGER.warning(
+            "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s order_status=%s age_s=%.1f",
+            bracket.entry_order_id,
+            bracket.symbol,
+            status_text or "ABSENT",
+            age,
+            extra={
+                "event": "PENDING_ENTRY_RECONCILED_FLAT",
+                "entry_order_id": bracket.entry_order_id,
+                "symbol": bracket.symbol,
+                "order_status": status_text or "ABSENT",
+                "age_seconds": age,
+            },
+        )
+        self.unregister_bracket(bracket.entry_order_id)
 
     def _log_throttled(
         self,
