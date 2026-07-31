@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import statistics
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +38,10 @@ class _QuoteMetrics:
     mid: float
     spread: float
     momentum: float
+    bid_quantity: int | None
+    ask_quantity: int | None
+    reject_reason: str | None
+    tradable: bool | None
 
 
 class PaperFillEngine:
@@ -53,6 +59,8 @@ class PaperFillEngine:
             os.getenv("PAPER__RESPECT_LOTSIZE", "true")
         )
         self._slip_bps = max(0.0, _safe_float(os.getenv("PAPER__SLIPPAGE_BPS"), 0.0))
+        self._calibrated_slippage_bps: float | None = None
+        self._calibrated_fill_latency_s: float | None = None
         self._slippage_model = SlippageModel()
 
     # ------------------------------------------------------------------
@@ -60,6 +68,53 @@ class PaperFillEngine:
         """Use a caller-owned clock for deterministic paper-order timestamps."""
 
         self._clock = clock
+
+    def calibrate_from_completed_trades(
+        self, outcomes: list[Mapping[str, Any]]
+    ) -> dict[str, float | int | None]:
+        """Calibrate replay drag from measured completed-trade telemetry."""
+
+        slippage: list[float] = []
+        latency: list[float] = []
+        for outcome in outcomes:
+            quality = outcome.get("execution_quality")
+            if not isinstance(quality, Mapping):
+                continue
+            for key in ("entry_slippage_bps", "exit_slippage_bps"):
+                value = _finite_non_negative(quality.get(key))
+                if value is not None:
+                    slippage.append(value)
+            for key in (
+                "entry_submit_to_fill_seconds",
+                "exit_submit_to_fill_seconds",
+            ):
+                value = _finite_non_negative(quality.get(key))
+                if value is not None:
+                    latency.append(value)
+        self._calibrated_slippage_bps = (
+            float(statistics.median(slippage)) if slippage else None
+        )
+        self._calibrated_fill_latency_s = (
+            float(statistics.median(latency)) if latency else None
+        )
+        return {
+            "slippage_samples": len(slippage),
+            "latency_samples": len(latency),
+            "slippage_bps_p50": self._calibrated_slippage_bps,
+            "fill_latency_seconds_p50": self._calibrated_fill_latency_s,
+        }
+
+    def process_quote(self, symbol: str) -> None:
+        """Advance open orders for ``symbol`` against the latest quote."""
+
+        normalized = DataHub.normalize(symbol)
+        metrics = self._quote_metrics(
+            self.hub.get_quote(normalized, allow_pull=False) or {}
+        )
+        for order in self.orders.values():
+            if order.get("symbol") != normalized or order.get("status") != "open":
+                continue
+            self._apply_fill(order, metrics)
 
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Simulate order placement returning a broker-like response."""
@@ -184,6 +239,28 @@ class PaperFillEngine:
         if quantity <= 0:
             order.update({"status": "rejected", "message": "Quantity must be positive"})
             return
+        if metrics.reject_reason:
+            order.update(
+                {
+                    "status": "rejected",
+                    "message": metrics.reject_reason,
+                    "remaining_quantity": max(
+                        quantity - int(order.get("filled_quantity", 0)), 0
+                    ),
+                }
+            )
+            return
+        if metrics.tradable is False:
+            order.update(
+                {
+                    "status": "rejected",
+                    "message": "historical_quote_not_tradable",
+                    "remaining_quantity": max(
+                        quantity - int(order.get("filled_quantity", 0)), 0
+                    ),
+                }
+            )
+            return
 
         if order_type == "MARKET":
             self._fill_market(order, metrics)
@@ -238,18 +315,53 @@ class PaperFillEngine:
     def _fill_market(self, order: dict[str, Any], metrics: _QuoteMetrics) -> None:
         side = str(order.get("transaction_type") or "").upper()
         quantity = int(order.get("quantity") or 0)
+        if not _valid_market_quote(metrics):
+            order.update(
+                {
+                    "status": "rejected",
+                    "message": "market_quote_unavailable",
+                    "remaining_quantity": max(
+                        quantity - int(order.get("filled_quantity", 0)), 0
+                    ),
+                }
+            )
+            return
+        previous_fill = int(order.get("filled_quantity", 0))
+        remaining = max(quantity - previous_fill, 0)
+        if remaining <= 0:
+            order["status"] = "complete"
+            order["remaining_quantity"] = 0
+            return
+        best_quantity = metrics.ask_quantity if side == "BUY" else metrics.bid_quantity
+        fill_quantity = (
+            remaining
+            if best_quantity is None
+            else min(remaining, max(best_quantity, 0))
+        )
+        if fill_quantity <= 0:
+            order["status"] = "open"
+            order["remaining_quantity"] = remaining
+            return
         base_price = metrics.mid or metrics.ltp
         if base_price <= 0:
             base_price = metrics.bid if side == "BUY" else metrics.ask
-        spread_component = metrics.spread * (1.0 + abs(metrics.momentum))
-        slip_component = self._slip_bps / 10000.0 * base_price
-        model_adjustment = self._slippage_model.estimate(
-            symbol=str(order.get("symbol") or ""),
-            side=side,
-            quantity=quantity,
-            base_price=base_price,
-        )
-        total_adjustment = max(spread_component, slip_component) + abs(model_adjustment)
+        if self._calibrated_slippage_bps is not None:
+            total_adjustment = max(
+                metrics.spread / 2.0,
+                self._calibrated_slippage_bps / 10000.0 * base_price,
+            )
+        else:
+            spread_component = metrics.spread * (1.0 + abs(metrics.momentum))
+            slip_component = self._slip_bps / 10000.0 * base_price
+            model_adjustment = self._slippage_model.estimate(
+                symbol=str(order.get("symbol") or ""),
+                side=side,
+                quantity=fill_quantity,
+                base_price=base_price,
+            )
+            total_adjustment = max(spread_component, slip_component) + abs(
+                model_adjustment
+            )
         LOGGER.debug(
             "paper_fill_market_slippage",
             extra={
@@ -265,10 +377,18 @@ class PaperFillEngine:
             fill_price = base_price + total_adjustment
         else:
             fill_price = max(0.05, base_price - total_adjustment)
-        order["filled_quantity"] = quantity
-        order["average_price"] = fill_price
-        order["remaining_quantity"] = 0
-        order["status"] = "complete"
+        new_total = previous_fill + fill_quantity
+        previous_average = _safe_float(order.get("average_price"), fill_price)
+        order["average_price"] = (
+            previous_average * previous_fill + fill_price * fill_quantity
+        ) / new_total
+        order["filled_quantity"] = new_total
+        order["remaining_quantity"] = max(quantity - new_total, 0)
+        order["status"] = "complete" if new_total >= quantity else "open"
+        latency = self._calibrated_fill_latency_s or 0.0
+        order.setdefault("first_fill_timestamp", self._clock() + latency)
+        order["last_fill_timestamp"] = self._clock() + latency
+        order["fill_latency_seconds"] = latency
 
     # Helpers ------------------------------------------------------------
     def _next_id(self) -> str:
@@ -357,9 +477,59 @@ class PaperFillEngine:
         momentum = 0.0
         if close > 0:
             momentum = (ltp - close) / close
-        return _QuoteMetrics(
-            ltp=ltp, bid=bid, ask=ask, mid=mid, spread=spread, momentum=momentum
+        reject_reason_raw = quote.get("replay_reject_reason")
+        reject_reason = (
+            str(reject_reason_raw).strip() if reject_reason_raw is not None else ""
         )
+        tradable_raw = quote.get("tradable_quote")
+        tradable = self._coerce_bool(tradable_raw) if tradable_raw is not None else None
+        return _QuoteMetrics(
+            ltp=ltp,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            spread=spread,
+            momentum=momentum,
+            bid_quantity=_quote_quantity(quote, "bid"),
+            ask_quantity=_quote_quantity(quote, "ask"),
+            reject_reason=reject_reason or None,
+            tradable=tradable,
+        )
+
+
+def _finite_non_negative(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    resolved = float(value)
+    if not math.isfinite(resolved) or resolved < 0:
+        return None
+    return resolved
+
+
+def _quote_quantity(quote: Mapping[str, Any], side: str) -> int | None:
+    keys = (
+        f"{side}_quantity",
+        f"best_{side}_quantity",
+        f"{side}_qty",
+        f"best_{side}_qty",
+    )
+    for key in keys:
+        if key in quote:
+            return PaperFillEngine._coerce_int(quote.get(key))
+    depth = quote.get("depth")
+    if isinstance(depth, Mapping):
+        book_side = "buy" if side == "bid" else "sell"
+        levels = depth.get(book_side)
+        if isinstance(levels, list) and levels and isinstance(levels[0], Mapping):
+            if "quantity" in levels[0]:
+                return PaperFillEngine._coerce_int(levels[0].get("quantity"))
+    return None
+
+
+def _valid_market_quote(metrics: _QuoteMetrics) -> bool:
+    if metrics.bid > 0 and metrics.ask > 0:
+        return metrics.ask > metrics.bid
+    return metrics.ltp > 0 or metrics.bid > 0 or metrics.ask > 0
 
 
 __all__ = ["PaperFillEngine", "SlippageModel"]

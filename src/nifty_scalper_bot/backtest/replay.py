@@ -31,6 +31,7 @@ class ReplayResult:
     end: datetime | None
     trades: list[dict[str, Any]]
     orders: list[dict[str, Any]]
+    fill_calibration: Mapping[str, float | int | None] | None = None
 
     def format_summary(self) -> str:
         """Return a human-readable summary suitable for Telegram."""
@@ -100,6 +101,7 @@ class ReplayHarness:
         index_symbol: str | None = None,
         clock: ReplayClock | None = None,
         contract_catalog: HistoricalContractCatalog | None = None,
+        calibration_outcomes: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         self._runner = runner
         self._paper = paper_engine
@@ -108,6 +110,10 @@ class ReplayHarness:
         self._clock = clock
         self._contract_catalog = contract_catalog
         self._active_basket_key: tuple[Any, ...] | None = None
+        self._fill_calibration = None
+        calibrate = getattr(paper_engine, "calibrate_from_completed_trades", None)
+        if calibration_outcomes is not None and callable(calibrate):
+            self._fill_calibration = calibrate(list(calibration_outcomes))
         clock_time = getattr(clock, "time", None)
         set_clock = getattr(paper_engine, "set_clock", None)
         if callable(clock_time) and callable(set_clock):
@@ -117,7 +123,9 @@ class ReplayHarness:
         """Replay the provided dataframe and return a :class:`ReplayResult`."""
 
         if data.empty:
-            return ReplayResult(0, None, None, [], [])
+            return ReplayResult(
+                0, None, None, [], [], fill_calibration=self._fill_calibration
+            )
         frame = data.copy()
         if not isinstance(frame.index, pd.DatetimeIndex):
             frame.index = pd.to_datetime(frame.index)
@@ -144,7 +152,14 @@ class ReplayHarness:
             bars += 1
         trades = _collect_trade_history(self._runner)
         orders = self._paper.get_orders() if hasattr(self._paper, "get_orders") else []
-        return ReplayResult(bars, start_ts, end_ts, trades, orders)
+        return ReplayResult(
+            bars,
+            start_ts,
+            end_ts,
+            trades,
+            orders,
+            fill_calibration=self._fill_calibration,
+        )
 
     def run_file(self, path: Path) -> ReplayResult:
         """Load ``path`` as CSV/Parquet and run :meth:`run_dataframe`."""
@@ -168,6 +183,9 @@ class ReplayHarness:
             "trace_id": f"replay:{tick['timestamp'].isoformat()}:{symbol}",
         }
         self._publish_quote(symbol, payload)
+        process_quote = getattr(self._paper, "process_quote", None)
+        if callable(process_quote):
+            process_quote(symbol)
         self._dispatch_tick(symbol, payload)
 
     def _publish_quote(self, symbol: str, tick: Mapping[str, Any]) -> None:
@@ -240,10 +258,23 @@ def _build_tick(row: pd.Series, timestamp: datetime, *, prefix: str) -> dict[str
         "volume": _pick("volume"),
         "oi": _pick("oi"),
     }
-    for name in ("bid", "ask", "instrument_token"):
+    for name in (
+        "bid",
+        "ask",
+        "bid_quantity",
+        "ask_quantity",
+        "instrument_token",
+        "replay_reject_reason",
+        "tradable_quote",
+    ):
         value = row.get(f"{prefix}{name}")
         if value is not None and not pd.isna(value):
-            tick[name] = float(value) if name != "instrument_token" else int(value)
+            if name == "instrument_token":
+                tick[name] = int(value)
+            elif name in {"replay_reject_reason", "tradable_quote"}:
+                tick[name] = value
+            else:
+                tick[name] = float(value)
     return tick
 
 

@@ -4662,8 +4662,9 @@ class StrategyRunner:
         strategy_allowed: bool | None = None,
         risk_allowed: bool | None = None,
         order_submitted: bool = False,
+        trace_id: str | None = None,
     ) -> None:
-        """Update the diagnostic-only latest trade decision snapshot."""
+        """Update diagnostics and persist the decision in the existing journal."""
         try:
             snapshot = TradeDecisionSnapshot(
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -4680,6 +4681,9 @@ class StrategyRunner:
             )
             self._last_trade_decision = snapshot
             globals()["LAST_TRADE_DECISION_SNAPSHOT"] = snapshot
+            recorder = getattr(self._order_manager, "record_trade_decision", None)
+            if callable(recorder):
+                recorder(dataclasses.asdict(snapshot), trace_id=trace_id)
         except Exception as exc:  # noqa: BLE001 - diagnostics must never block trading
             self._logger.debug(
                 "TRADE_DECISION_SNAPSHOT_UPDATE_FAILED error_type=%s",
@@ -4738,6 +4742,7 @@ class StrategyRunner:
             strategy_allowed=False,
             risk_allowed=None,
             order_submitted=False,
+            trace_id=trace_id,
         )
         if reason == "candidate_refresh_pending" and not bool(
             payload.get("event_loop_active", False)
@@ -20210,6 +20215,7 @@ class StrategyRunner:
                     strategy_allowed=True,
                     risk_allowed=True,
                     order_submitted=True,
+                    trace_id=trace_id,
                 )
                 return SignalExecutionResult(
                     True,
@@ -20324,6 +20330,7 @@ class StrategyRunner:
                     strategy_allowed=True,
                     risk_allowed=False,
                     order_submitted=False,
+                    trace_id=trace_id,
                 )
                 return SignalExecutionResult(
                     False, submit_reason, details=submit_details

@@ -1194,6 +1194,26 @@ class OrderManager:
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Failure in _log_trade_event: %s", exc)
 
+    def record_trade_decision(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        trace_id: str | None = None,
+    ) -> None:
+        """Persist one runner decision in the existing trade journal."""
+
+        payload = dict(snapshot)
+        if trace_id:
+            payload["trace_id"] = trace_id
+        self._log_trade_event(
+            "TRADE_DECISION",
+            symbol=str(payload.get("symbol") or ""),
+            side=str(payload.get("direction") or ""),
+            qty=0,
+            price=0.0,
+            meta=payload,
+        )
+
     def _ensure_quote_refresh(
         self,
         mdm: "MarketDataManager",
