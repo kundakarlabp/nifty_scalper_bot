@@ -288,6 +288,9 @@ class TradePlan:
     max_quote_age_ms: int = 5000
     max_spread_pct: float = 5.0
     min_depth_qty: int = 150
+    # Final-snapshot freshness limits. 0 disables the check.
+    max_signal_age_seconds: float = 0.0
+    max_entry_drift_pct: float = 0.0
     allow_market_entry: bool = False
     intent: OrderIntent = "ENTRY"
     intended_position_side: Literal["LONG", "SHORT"] | None = "LONG"
@@ -4533,6 +4536,50 @@ class OrderManager:
                 "spread_too_wide",
                 {"spread_pct": qd["spread_pct"], "limit_pct": plan.max_spread_pct},
             )
+        if is_entry and plan.max_signal_age_seconds > 0:
+            decision_epoch = 0.0
+            with suppress(TypeError, ValueError):
+                decision_epoch = float(
+                    plan.trade_provenance.get("decision_ts") or 0.0
+                )
+            if decision_epoch > 0:
+                signal_age = time.time() - decision_epoch
+                if signal_age > plan.max_signal_age_seconds:
+                    return OrderPreflightResult(
+                        False,
+                        "signal_stale",
+                        {
+                            "signal_age_seconds": round(signal_age, 3),
+                            "limit_seconds": plan.max_signal_age_seconds,
+                            "signal_id": plan.signal_id,
+                        },
+                    )
+        if (
+            is_entry
+            and plan.max_entry_drift_pct > 0
+            and plan.entry_price
+            and float(plan.entry_price) > 0
+        ):
+            reference = qd["ask"] if plan.side == "BUY" else qd["bid"]
+            if reference <= 0:
+                reference = float(qd.get("ltp") or 0.0)
+            if reference > 0:
+                planned = float(plan.entry_price)
+                adverse = (
+                    reference - planned if plan.side == "BUY" else planned - reference
+                )
+                drift_pct = adverse / planned * 100.0
+                if drift_pct > plan.max_entry_drift_pct:
+                    return OrderPreflightResult(
+                        False,
+                        "entry_price_drift",
+                        {
+                            "planned_entry": planned,
+                            "reference_price": reference,
+                            "drift_pct": round(drift_pct, 4),
+                            "limit_pct": plan.max_entry_drift_pct,
+                        },
+                    )
         has_depth_fields = (
             int(qd.get("bid_qty", 0) or 0) > 0
             or int(qd.get("ask_qty", 0) or 0) > 0
