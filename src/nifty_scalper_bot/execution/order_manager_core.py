@@ -79,8 +79,14 @@ from nifty_scalper_bot.execution.options_policy import OptionsExecutionPolicy
 from nifty_scalper_bot.execution.position_manager import (
     OrderIntent,
     PositionManager,
+    _atomic_write_json,
     normalize_broker_order_status,
 )
+
+# Consumed deterministic signal ids are persisted inside the existing position
+# ledger file so a process restart cannot re-trade an already-consumed setup.
+_CONSUMED_SIGNALS_STATE_KEY = "_consumed_signal_ids"
+_CONSUMED_SIGNALS_MAX_PERSISTED = 500
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
     TrailingStopController,
@@ -1024,6 +1030,7 @@ class OrderManager:
         self._last_broker_health_circuit_state: bool = False
         self._last_margin_available_balance: float | None = None
         self._last_margin_balance_source: str | None = None
+        self._restore_consumed_signal_ids()
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -1152,6 +1159,87 @@ class OrderManager:
             )
             return None
 
+    def _consumed_signal_state_path(self) -> Path | None:
+        """Return the existing position-ledger state file, or None."""
+        raw = getattr(self._positions, "_state_path", None)
+        if not raw:
+            return None
+        path = Path(str(raw))
+        return path if path.exists() else None
+
+    def _trading_date_key(self) -> str:
+        resolver = getattr(self._positions, "_trading_date_ist", None)
+        if callable(resolver):
+            with suppress(Exception):
+                return str(resolver())
+        return ""
+
+    def _restore_consumed_signal_ids(self) -> None:
+        """Reload today's consumed signal ids so a restart cannot re-trade a setup."""
+        path = self._consumed_signal_state_path()
+        if path is None:
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return
+        record = (
+            payload.get(_CONSUMED_SIGNALS_STATE_KEY)
+            if isinstance(payload, dict)
+            else None
+        )
+        if not isinstance(record, Mapping):
+            return
+        if str(record.get("trading_date") or "") != self._trading_date_key():
+            return
+        raw_ids = record.get("signal_ids")
+        if not isinstance(raw_ids, list):
+            return
+        restored = 0
+        with self._lock:
+            for value in raw_ids[-self._signal_history.maxlen :]:
+                signal_id = str(value or "").strip()
+                if not signal_id or signal_id in self._seen_signal_ids:
+                    continue
+                self._signal_history.append(signal_id)
+                self._seen_signal_ids.add(signal_id)
+                restored += 1
+        if restored:
+            self._logger.info(
+                "CONSUMED_SIGNAL_IDS_RESTORED count=%s trading_date=%s",
+                restored,
+                self._trading_date_key(),
+                extra={
+                    "event": "CONSUMED_SIGNAL_IDS_RESTORED",
+                    "count": restored,
+                    "trading_date": self._trading_date_key(),
+                },
+            )
+
+    def _persist_consumed_signal_ids(self) -> None:
+        """Write today's consumed signal ids into the existing position ledger."""
+        path = self._consumed_signal_state_path()
+        if path is None:
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        with self._lock:
+            signal_ids = list(self._signal_history)[-_CONSUMED_SIGNALS_MAX_PERSISTED:]
+        payload[_CONSUMED_SIGNALS_STATE_KEY] = {
+            "trading_date": self._trading_date_key(),
+            "signal_ids": signal_ids,
+        }
+        try:
+            _atomic_write_json(path, payload)
+        except Exception as exc:  # noqa: BLE001 - persistence must not break entries
+            self._logger.warning(
+                "CONSUMED_SIGNAL_IDS_PERSIST_FAILED error=%s", exc
+            )
+
     def _remember_signal(self, signal_id: str) -> None:
         """Record signal id to preserve idempotency. Args: signal_id; Returns: None; Raises: None."""
         with self._lock:
@@ -1162,6 +1250,7 @@ class OrderManager:
                 self._seen_signal_ids.discard(stale)
             self._signal_history.append(signal_id)
             self._seen_signal_ids.add(signal_id)
+        self._persist_consumed_signal_ids()
 
     def _log_trade_event(
         self,
