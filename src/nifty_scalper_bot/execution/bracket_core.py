@@ -66,6 +66,11 @@ from nifty_scalper_bot.execution.position_snapshot import (
     decode_position_snapshot,
 )
 
+try:
+    from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+except ImportError:  # pragma: no cover - cost model is always present in prod
+    estimate_round_trip_cost = None  # type: ignore[assignment]
+
 # --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
 try:
     from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
@@ -536,13 +541,11 @@ class BracketManager:
         self._atr_provider = None
         if SafeATRProvider and indicator_engine:
             self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
-        self._trailing_controllers: Dict[str, Any] = {}
         self._recent_ticks: Dict[str, deque] = {}
         self._max_tick_history = 20
         self._orphan_retry_count: Dict[str, int] = {}
         self._orphan_retry_last_attempt: Dict[str, float] = {}
         self._exit_executor: Callable[[str, int], Any] | None = None
-        self._trailing_controller_factory: Callable[[BracketState], Any] | None = None
         self._on_exit_complete_hook: Callable[..., None] | None = None
         self._on_position_open_priority_hook: Callable[[str], None] | None = None
         self._on_position_closed_priority_hook: Callable[[str], None] | None = None
@@ -592,6 +595,20 @@ class BracketManager:
         self._trail_tier2_pct = parse_float_env(os.getenv("TRAIL_TIER2_PCT"), 2.0)
         self._trail_tier3_pct = parse_float_env(os.getenv("TRAIL_TIER3_PCT"), 4.0)
         self._trail_tier4_pct = parse_float_env(os.getenv("TRAIL_TIER4_PCT"), 6.0)
+        # Canonical tier metric is the R-multiple of open profit. The premium-%
+        # thresholds above are only the degraded fallback used when the initial
+        # risk distance is unknown: a fixed 2% of premium is 0.2R on a wide stop
+        # and 1.2R on a tight one, so identical protection was applied to very
+        # different risk. Tiers are therefore keyed to R.
+        self._time_stop_seconds = max(
+            0.0, parse_float_env(os.getenv("LIFECYCLE_TIME_STOP_MIN"), 12.0) * 60.0
+        )
+        self._time_stop_min_progress_r = max(
+            0.0, parse_float_env(os.getenv("TIME_STOP_MIN_PROGRESS_R"), 0.5)
+        )
+        self._trail_tier2_r = parse_float_env(os.getenv("TRAIL_TIER2_R"), 1.0)
+        self._trail_tier3_r = parse_float_env(os.getenv("TRAIL_TIER3_R"), 2.0)
+        self._trail_tier4_r = parse_float_env(os.getenv("TRAIL_TIER4_R"), 3.0)
         self._exit_retry_enabled = os.getenv(
             "EXIT_RETRY_ENABLE", "true"
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -820,12 +837,6 @@ class BracketManager:
                     "error": str(exc),
                 },
             )
-
-    def attach_trailing_controller_factory(
-        self, factory: Callable[[BracketState], Any] | None
-    ) -> None:
-        """Attach a trailing controller factory. Args: factory; Returns: None; Raises: None."""
-        self._trailing_controller_factory = factory
 
     def _watchdog_exit_loop(self) -> None:
         """Run watchdog checks and force exits on hard SL breach. Args: none; Returns: none; Raises: none."""
@@ -1333,12 +1344,6 @@ class BracketManager:
 
             self._brackets[order_id] = state
 
-            if self._trailing_controller_factory:
-                if state.entry_order_id in self._trailing_controllers:
-                    return
-                controller = self._trailing_controller_factory(state)
-                self._trailing_controllers[state.entry_order_id] = controller
-
             # 6. Populate Indices
             self._order_to_entry[order_id] = order_id
             if symbol not in self._symbol_map:
@@ -1354,51 +1359,6 @@ class BracketManager:
                 order_id,
                 symbol,
             )
-
-            # 7. Initialize Adaptive Controller (The "Brain")
-            if (
-                not self._trailing_controller_factory
-                and trailing_atr_mult
-                and self._atr_provider
-                and AdaptiveTrailingController
-            ):
-                try:
-                    # Fallback trail distance must be premium-relative: the old
-                    # absolute 20.0 points is ~13% on a ~150 option premium, so
-                    # with stale/unavailable ATR the controller proposed stops
-                    # far below the current SL and the monotonic guard rejected
-                    # every update — trailing silently dead on the controller
-                    # path while the legacy fallback math trails at ~2-3%.
-                    _fallback_trail = max(
-                        round(max(float(price or 0.0), 1.0) * 0.02, 2), 0.25
-                    )
-                    spec = TrailingSpec(
-                        trail_by=_fallback_trail,  # ~2% of entry premium
-                        step=0.25,  # Tighter early trailing step
-                        activation=0.3,  # Earlier activation threshold
-                    )
-
-                    # We pass a lambda that returns the latest price from the bracket state
-                    ctrl = AdaptiveTrailingController(
-                        symbol=symbol,
-                        side="LONG" if side == "BUY" else "SHORT",
-                        entry=price,
-                        sl_order_id=state.virtual_sl_id,
-                        variety="virtual",
-                        spec=spec,
-                        get_ltp=lambda s: state.last_ltp,
-                        modify_order=self._virtual_modify_sl,
-                        atr_provider=self._atr_provider,
-                        journal=MockJournal(),
-                        atr_multiplier=trailing_atr_mult,
-                    )
-                    self._trailing_controllers[order_id] = ctrl
-                    LOGGER.info(
-                        f"🧠 Adaptive Controller Attached to {symbol} (Mult: {trailing_atr_mult}x)"
-                    )
-
-                except Exception as e:
-                    LOGGER.error(f"Failed to attach Adaptive Controller: {e}")
 
             trail_msg = f"| Trail={t_config.get('mode', 'None')}"
             LOGGER.info(
@@ -1859,22 +1819,9 @@ class BracketManager:
 
             # Check trailing controller (if attached)
             # Wrapped in try/except so trailing failures cannot block SL/TP eval
-            entry_id = bracket.entry_order_id
             trail_updated = False
             try:
-                if entry_id in self._trailing_controllers:
-                    ctrl = self._trailing_controllers[entry_id]
-
-                    # Inject ATR if available
-                    current_atr = self._current_atr.get(symbol)
-                    if current_atr and current_atr > 0 and hasattr(ctrl, "update_atr"):
-                        ctrl.update_atr(current_atr)
-
-                    # Run controller
-                    ctrl.on_tick({"ltp": ltp})
-                else:
-                    # Use built-in adaptive trailing
-                    trail_updated = self._apply_trailing_math(bracket)
+                trail_updated = self._apply_trailing_math(bracket)
             except Exception as _trail_exc:
                 LOGGER.debug(
                     "Trailing logic failed for %s: %s (SL/TP eval continues)",
@@ -2044,6 +1991,10 @@ class BracketManager:
                     "qty": bracket.remaining_quantity,
                     "reason": "HARD_TP_BREACH",
                 }
+
+        time_stop = self._time_stop_action(bracket, ltp)
+        if time_stop is not None:
+            return time_stop
 
         return None
 
@@ -2733,26 +2684,14 @@ class BracketManager:
             if ltp < bracket.lowest_ltp:
                 bracket.lowest_ltp = ltp
 
-        # B. Delegate to World-Class Controller (If attached)
-        if bracket.entry_order_id in self._trailing_controllers:
-            ctrl = self._trailing_controllers[bracket.entry_order_id]
-            # ✅ FIX: Inject dynamic ATR from feed
-            current_atr = self._current_atr.get(bracket.symbol)
-            if current_atr and hasattr(ctrl, "update_atr"):
-                ctrl.update_atr(current_atr)
-            # The controller calculates using ATR and calls _virtual_modify_sl if needed
-            # We updated bracket.last_ltp in on_tick, so controller reads fresh data
-            ctrl.on_tick(None)
-            return
-
-        # C. Fallback Legacy Logic
+        # B. Single trailing authority.
         self._apply_trailing_math(bracket)
 
     def _apply_trailing_math(self, bracket: BracketState) -> bool:
         """Apply adaptive trailing rules for the bracket.
 
         SYNC CONTRACT: this is the FALLBACK trailing path (runs only when the
-        AdaptiveTrailingController could not attach). It must uphold exactly
+        the single trailing authority for virtual brackets. It must uphold
         the invariants of the canonical authority
         HardenedBracketManager._virtual_modify_sl — under-lock compare-and-set,
         monotonic per side (BUY only raises, SELL only lowers), tick rounding,
@@ -2904,6 +2843,63 @@ class BracketManager:
                     return True
         return False
 
+    def _breakeven_cost_per_unit(self, bracket: BracketState) -> float:
+        """Round-trip cost of this position expressed in premium points/unit."""
+        entry = float(bracket.entry_price or 0.0)
+        qty = int(bracket.quantity or 0)
+        if entry <= 0 or qty <= 0 or estimate_round_trip_cost is None:
+            return 0.0
+        try:
+            costs = estimate_round_trip_cost(
+                entry_price=entry, exit_price=entry, quantity=abs(qty)
+            )
+            cost = float(costs.cost_per_unit)
+        except Exception:  # noqa: BLE001 - cost model must never break trailing
+            return 0.0
+        if not math.isfinite(cost) or cost <= 0:
+            return 0.0
+        # Never let an implausible cost estimate swallow the whole stop band.
+        return min(cost, entry * 0.02)
+
+    def _time_stop_action(
+        self, bracket: BracketState, ltp: float
+    ) -> dict[str, Any] | None:
+        """Flatten a stalled position before theta erodes it.
+
+        A long option that reaches neither stop nor target still loses extrinsic
+        value every minute, so "wait and see" is a negative-expectancy default.
+        The trade is closed once it has been held past LIFECYCLE_TIME_STOP_MIN
+        without ever reaching TIME_STOP_MIN_PROGRESS_R of its initial risk.
+        """
+        if self._time_stop_seconds <= 0 or bracket.remaining_quantity <= 0:
+            return None
+        opened_at = float(bracket.entry_fill_ts or 0.0)
+        if opened_at <= 0:
+            return None
+        held = time.time() - opened_at
+        if held < self._time_stop_seconds:
+            return None
+        entry = float(bracket.entry_price or 0.0)
+        initial_sl = float(bracket.initial_sl_trigger_price or bracket.sl_trigger_price or 0.0)
+        initial_risk = abs(entry - initial_sl)
+        if entry <= 0 or initial_risk <= 0:
+            return None
+        if bracket.side == "BUY":
+            mfe = float(bracket.highest_ltp or entry) - entry
+        else:
+            mfe = entry - float(bracket.lowest_ltp or entry)
+        if (mfe / initial_risk) >= self._time_stop_min_progress_r:
+            return None
+        return {
+            "decision": BracketTickDecision.EXIT_STOP.value,
+            "type": "TIME_STOP",
+            "price": ltp,
+            "qty": bracket.remaining_quantity,
+            "reason": (
+                f"TIME_STOP held={int(held)}s progress={mfe / initial_risk:.2f}R"
+            ),
+        }
+
     def _calculate_tiered_trailing_sl(
         self,
         bracket: BracketState,
@@ -2938,38 +2934,51 @@ class BracketManager:
         )
 
         # Use instance-cached thresholds (set at __init__) — not os.getenv on every tick.
-        tier1_threshold = self._trail_tier1_pct
-        tier2_threshold = self._trail_tier2_pct
-        tier3_threshold = self._trail_tier3_pct
-        tier4_threshold = self._trail_tier4_pct
+        # Canonical metric is R (open profit / initial risk); the premium-percent
+        # ladder is the fallback when initial risk is unknown.
+        profit_points = (ltp - entry) if bracket.side == "BUY" else (entry - ltp)
+        if initial_risk > 0:
+            tier_metric = profit_points / initial_risk
+            tier1_threshold = activation_r
+            tier2_threshold = self._trail_tier2_r
+            tier3_threshold = self._trail_tier3_r
+            tier4_threshold = self._trail_tier4_r
+        else:
+            tier_metric = profit_pct
+            tier1_threshold = self._trail_tier1_pct
+            tier2_threshold = self._trail_tier2_pct
+            tier3_threshold = self._trail_tier3_pct
+            tier4_threshold = self._trail_tier4_pct
 
         # ═══════════════════════════════════════════════════════════
         # TIER 0: NO PROFIT (< 1%) - Use original SL
         # ═══════════════════════════════════════════════════════════
-        if profit_pct < tier1_threshold:
+        if tier_metric < tier1_threshold:
             return None  # No change
 
         # ═══════════════════════════════════════════════════════════
         # TIER 1: SMALL PROFIT (1-2%) - BREAKEVEN LOCK
         # ═══════════════════════════════════════════════════════════
-        if tier1_threshold <= profit_pct < tier2_threshold:
-            if initial_risk <= 0 or mfe < (initial_risk * activation_r):
-                return None
-            # Lock at breakeven (entry price)
+        if tier1_threshold <= tier_metric < tier2_threshold:
+            # Lock at TRUE breakeven: exiting at the entry premium is a loss of
+            # the full round-trip cost, so the stop is offset by that cost.
+            cost = self._breakeven_cost_per_unit(bracket)
             if bracket.side == "BUY":
-                if entry > current_sl:
-                    LOGGER.debug(f"🔒 Tier 1: Breakeven lock at {entry:.2f}")
-                    return entry
+                level = entry + cost
+                if level > current_sl and level <= ltp - cost:
+                    LOGGER.debug(f"🔒 Tier 1: Cost-adjusted breakeven at {level:.2f}")
+                    return level
             else:
-                if entry < current_sl:
-                    LOGGER.debug(f"🔒 Tier 1: Breakeven lock at {entry:.2f}")
-                    return entry
+                level = entry - cost
+                if level < current_sl and level >= ltp + cost:
+                    LOGGER.debug(f"🔒 Tier 1: Cost-adjusted breakeven at {level:.2f}")
+                    return level
             return None
 
         # ═══════════════════════════════════════════════════════════
         # TIER 2: MODERATE PROFIT (2-4%) - PROTECT 40%
         # ═══════════════════════════════════════════════════════════
-        if tier2_threshold <= profit_pct < tier3_threshold:
+        if tier2_threshold <= tier_metric < tier3_threshold:
             protection_pct = 0.40
 
             if bracket.side == "BUY":
@@ -2986,7 +2995,7 @@ class BracketManager:
         # ═══════════════════════════════════════════════════════════
         # TIER 3: GOOD PROFIT (4-6%) - PROTECT 50% + ATR TRAIL
         # ═══════════════════════════════════════════════════════════
-        if tier3_threshold <= profit_pct < tier4_threshold:
+        if tier3_threshold <= tier_metric < tier4_threshold:
             protection_pct = 0.50
 
             # Calculate momentum-adjusted ATR multiplier
@@ -4363,10 +4372,6 @@ class BracketManager:
                     if not self._symbol_map[symbol]:
                         del self._symbol_map[symbol]
 
-                # Cleanup Controller
-                if entry_id in self._trailing_controllers:
-                    del self._trailing_controllers[entry_id]
-
                 # ✅ NEW: Cleanup Exit Cooldown
                 if entry_id in self._exit_cooldowns:
                     del self._exit_cooldowns[entry_id]
@@ -4404,7 +4409,6 @@ class BracketManager:
                 "active_brackets": len(self._brackets),
                 "symbols_managed": len(self._symbol_map),
                 "atr_tracked_symbols": len(self._current_atr),
-                "adaptive_controllers": len(self._trailing_controllers),
             }
 
     def _log_bracket_event(
@@ -4799,8 +4803,6 @@ class BracketManager:
             temp_brackets: Dict[str, BracketState] = {}
             temp_order_map: Dict[str, str] = {}
             temp_symbol_map: Dict[str, List[str]] = {}
-            temp_controllers: Dict[str, Any] = {}
-            controller_errors: list[str] = []
             for raw_entry_id, record in records.items():
                 entry_id = str(raw_entry_id).strip()
                 if not entry_id or not isinstance(record, Mapping):
@@ -4809,41 +4811,6 @@ class BracketManager:
                 temp_brackets[entry_id] = bracket
                 temp_order_map[entry_id] = entry_id
                 temp_symbol_map.setdefault(bracket.symbol, []).append(entry_id)
-                if bracket.trailing_enabled:
-                    try:
-                        if self._trailing_controller_factory is not None:
-                            temp_controllers[entry_id] = (
-                                self._trailing_controller_factory(bracket)
-                            )
-                        elif (
-                            bracket.trailing_config.get("mode") == "ATR"
-                            and self._atr_provider
-                            and AdaptiveTrailingController
-                        ):
-                            mult = float(
-                                bracket.trailing_config.get("mult", 1.5) or 1.5
-                            )
-                            spec = TrailingSpec(
-                                trail_by=20.0, step=0.25, activation=0.3
-                            )
-                            temp_controllers[entry_id] = AdaptiveTrailingController(
-                                symbol=bracket.symbol,
-                                side="LONG" if bracket.side == "BUY" else "SHORT",
-                                entry=bracket.entry_price,
-                                sl_order_id=bracket.virtual_sl_id,
-                                variety="virtual",
-                                spec=spec,
-                                get_ltp=lambda _symbol, _b=bracket: _b.last_ltp,
-                                modify_order=self._virtual_modify_sl,
-                                atr_provider=self._atr_provider,
-                                journal=MockJournal(),
-                                atr_multiplier=mult,
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        controller_errors.append(
-                            f"{entry_id}:{type(exc).__name__}:{exc}"
-                        )
-
             parsed_rescue = {
                 str(key): int(value) for key, value in rescue_attempts.items()
             }
@@ -4854,23 +4821,12 @@ class BracketManager:
                 self._brackets = temp_brackets
                 self._order_to_entry = temp_order_map
                 self._symbol_map = temp_symbol_map
-                self._trailing_controllers = temp_controllers
                 if hasattr(self, "_exit_rescue_attempts"):
                     self._exit_rescue_attempts = parsed_rescue
                 if hasattr(self, "_exit_order_open_since"):
                     self._exit_order_open_since = parsed_open_since
             self._clear_persistence_degraded()
             self._recovery_degraded_reason = None
-            if controller_errors:
-                self._recovery_degraded_reason = "trailing_controller_restore_failed"
-                LOGGER.critical(
-                    "BRACKET_TRAILING_RESTORE_DEGRADED errors=%s",
-                    controller_errors,
-                    extra={
-                        "event": "BRACKET_TRAILING_RESTORE_DEGRADED",
-                        "errors": controller_errors,
-                    },
-                )
             LOGGER.info(
                 "BRACKET_STATE_RESTORED count=%s path=%s",
                 len(temp_brackets),

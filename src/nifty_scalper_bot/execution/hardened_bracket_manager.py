@@ -193,12 +193,6 @@ class HardenedBracketManager(_LegacyBracketManager):
                 bracket.escalated_at = None
                 bracket.last_exit_error = None
                 bracket.next_exit_attempt_at = None
-            controller = self._trailing_controllers.get(bracket.entry_order_id)
-            if controller is not None:
-                controller.current_sl = float(bracket.sl_trigger_price)
-                controller.entry_price = float(bracket.entry_price)
-                controller.highest_price = float(bracket.entry_price)
-                controller.lowest_price = float(bracket.entry_price)
 
     def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
         _LegacyBracketManager.confirm_entry_fill(self, order_id, fill_price)
@@ -206,12 +200,8 @@ class HardenedBracketManager(_LegacyBracketManager):
         if bracket is None:
             return
         with self._lock:
-            controller = self._trailing_controllers.get(order_id)
-            if controller is not None:
-                controller.entry_price = float(bracket.entry_price)
-                controller.current_sl = float(bracket.sl_trigger_price)
-                controller.highest_price = float(bracket.entry_price)
-                controller.lowest_price = float(bracket.entry_price)
+            bracket.highest_ltp = float(bracket.entry_price)
+            bracket.lowest_ltp = float(bracket.entry_price)
 
     def _virtual_modify_sl(self, order_id: str, price: float) -> bool:
         """Apply only finite, market-side, monotonic virtual stop updates."""

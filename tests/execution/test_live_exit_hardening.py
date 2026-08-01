@@ -107,17 +107,6 @@ class _OrderManager:
         self.last_skip_reason = reason
 
 
-class _DummyController:
-    def __init__(self) -> None:
-        self.entry_price = 0.0
-        self.current_sl = 0.0
-        self.highest_price = 0.0
-        self.lowest_price = 0.0
-
-    def on_tick(self, _tick: Any) -> None:
-        return None
-
-
 def _manager(
     *, cancel_confirms: bool = True
 ) -> tuple[BracketManager, _OrderManager, _Broker]:
@@ -260,14 +249,15 @@ def test_virtual_trailing_stop_is_monotonic_and_stays_below_market_for_long() ->
     assert bracket.sl_trigger_price == 150.05
 
 
-def test_actual_fill_resynchronizes_attached_trailing_controller() -> None:
+def test_actual_fill_resynchronizes_trailing_watermarks() -> None:
+    """Trailing has one authority (the tiered bracket math), so an actual fill
+    must re-anchor the bracket's own watermarks — there is no second controller
+    holding a stale entry anchor."""
     broker = _Broker()
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
     manager._running = False
     manager._watchdog_thread.join(timeout=1.0)
-    controller = _DummyController()
-    manager.attach_trailing_controller_factory(lambda _state: controller)
     manager.register_virtual_bracket(
         order_id="entry-fill",
         symbol=SYMBOL,
@@ -282,10 +272,9 @@ def test_actual_fill_resynchronizes_attached_trailing_controller() -> None:
     manager.confirm_entry_fill("entry-fill", 102.0)
     bracket = manager.get_bracket("entry-fill")
     assert bracket is not None
-    assert controller.entry_price == bracket.entry_price == 102.0
-    assert controller.current_sl == bracket.sl_trigger_price
-    assert controller.highest_price == 102.0
-    assert controller.lowest_price == 102.0
+    assert bracket.entry_price == 102.0
+    assert bracket.highest_ltp == 102.0
+    assert bracket.lowest_ltp == 102.0
 
 
 @dataclass
