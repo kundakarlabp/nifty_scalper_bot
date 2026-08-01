@@ -421,6 +421,15 @@ class LedgerBracketManager(CanonicalBracketManager):
         else:
             mfe_points = max(0.0, high - entry)
             mae_points = max(0.0, entry - low)
+        initial_sl = float(
+            getattr(bracket, "initial_sl_trigger_price", None)
+            or getattr(bracket, "sl_trigger_price", 0.0)
+            or 0.0
+        )
+        # R-multiple normalisation: MAE/MFE in premium points cannot be compared
+        # across trades with different stop distances, so exit tuning needs them
+        # expressed in units of the risk actually taken.
+        initial_risk = abs(entry - initial_sl) if entry > 0 and initial_sl > 0 else 0.0
         closed_at = float(getattr(bracket, "closed_at", None) or time.time())
         opened_at = float(
             getattr(bracket, "entry_fill_ts", None)
@@ -541,6 +550,16 @@ class LedgerBracketManager(CanonicalBracketManager):
             "gross_pnl": gross_pnl,
             "estimated_costs": asdict(costs) if costs is not None else None,
             "net_pnl": net_pnl,
+            "initial_risk_points": (
+                round(initial_risk, 4) if initial_risk > 0 else None
+            ),
+            "r_multiple": (
+                round(float(net_pnl) / (initial_risk * quantity), 4)
+                if initial_risk > 0 and quantity > 0 and net_pnl is not None
+                else None
+            ),
+            "mfe_r": round(mfe_points / initial_risk, 4) if initial_risk > 0 else None,
+            "mae_r": round(mae_points / initial_risk, 4) if initial_risk > 0 else None,
             "mfe_points": round(mfe_points, 4),
             "mae_points": round(mae_points, 4),
             "mfe_pnl": round(mfe_points * quantity, 2),

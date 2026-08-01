@@ -173,17 +173,19 @@ def test_trail_update_does_not_exit_same_tick_regression() -> None:
     assert bracket is not None
     bracket.trailing_config["breakeven_activation_r"] = 0.20
 
-    manager.on_tick("NFO:NIFTY24100CE", 71.65, exchange_ts=1_000.0)
+    # Breakeven is cost-adjusted: exiting at the entry premium is a loss of the
+    # full round-trip charge, so the lock sits at entry + cost_per_unit (~0.89).
+    manager.on_tick("NFO:NIFTY24100CE", 72.60, exchange_ts=1_000.0)
 
-    assert bracket.sl_trigger_price == 70.80
+    assert bracket.sl_trigger_price == 71.70
     assert bracket.exit_pending is False
     assert order_manager.place_order.call_count == 0
 
-    manager.on_tick("NFO:NIFTY24100CE", 71.40, exchange_ts=1_001.0)
+    manager.on_tick("NFO:NIFTY24100CE", 72.30, exchange_ts=1_001.0)
     assert bracket.exit_pending is False
     assert order_manager.place_order.call_count == 0
 
-    manager.on_tick("NFO:NIFTY24100CE", 70.75, exchange_ts=1_002.0)
+    manager.on_tick("NFO:NIFTY24100CE", 71.65, exchange_ts=1_002.0)
     assert "SL" in str(bracket.exit_reason or "")
     assert order_manager.place_order.call_count == 1
 
@@ -206,10 +208,10 @@ def test_duplicate_same_tick_has_one_trail_update_and_no_exit() -> None:
     assert bracket is not None
     bracket.trailing_config["breakeven_activation_r"] = 0.20
 
-    manager.on_tick("NFO:NIFTY24100CE", 71.65, exchange_ts=2_000.0)
-    manager.on_tick("NFO:NIFTY24100CE", 71.65, exchange_ts=2_000.0)
+    manager.on_tick("NFO:NIFTY24100CE", 72.60, exchange_ts=2_000.0)
+    manager.on_tick("NFO:NIFTY24100CE", 72.60, exchange_ts=2_000.0)
 
-    assert bracket.sl_trigger_price == 70.80
+    assert bracket.sl_trigger_price == 71.70
     assert bracket.trail_revision == 1
     assert order_manager.place_order.call_count == 0
 
@@ -362,10 +364,10 @@ def test_timestampless_duplicate_callback_has_one_trail_revision_and_notificatio
     assert bracket is not None
     bracket.trailing_config["breakeven_activation_r"] = 0.20
 
-    manager.process_exit_checks("NFO:NIFTYNOTSCE", 71.65)
-    manager.process_exit_checks("NFO:NIFTYNOTSCE", 71.65)
+    manager.process_exit_checks("NFO:NIFTYNOTSCE", 72.60)
+    manager.process_exit_checks("NFO:NIFTYNOTSCE", 72.60)
 
-    assert bracket.sl_trigger_price == 70.80
+    assert bracket.sl_trigger_price == 71.70
     assert bracket.trail_revision == 1
     assert [event for event, _ in notifications].count("BRACKET_TRAIL_UPDATED") <= 1
     assert order_manager.place_order.call_count == 0
@@ -449,3 +451,173 @@ def test_active_selection_drift_path_leaves_open_bracket_untouched(caplog) -> No
     assert bracket.tp_trigger_price == 120.0
     assert bracket.remaining_quantity == 65
     assert order_manager.place_order.call_count == 0
+
+
+def test_time_stop_flattens_a_stalled_position(monkeypatch) -> None:
+    """A long option that reaches neither stop nor target still bleeds theta,
+    so a stalled trade must be flattened once past the time stop."""
+    import time as _time
+
+    order_manager = Mock()
+    order_manager.place_order.return_value = "exit-ts"
+    monkeypatch.setenv("LIFECYCLE_TIME_STOP_MIN", "12")
+    manager = BracketManager(order_manager=order_manager)
+    manager.register_virtual_bracket(
+        "stall-1",
+        "NFO:NIFTYSTALLCE",
+        "BUY",
+        65,
+        100.0,
+        95.0,
+        115.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("stall-1")
+    assert bracket is not None
+    bracket.entry_fill_ts = _time.time() - 800.0  # held > 12 min
+
+    action = manager._time_stop_action(bracket, 101.0)
+    assert action is not None
+    assert action["type"] == "TIME_STOP"
+    assert action["qty"] == bracket.remaining_quantity
+
+
+def test_time_stop_spares_a_position_that_made_progress() -> None:
+    import time as _time
+
+    order_manager = Mock()
+    manager = BracketManager(order_manager=order_manager)
+    manager.register_virtual_bracket(
+        "moving-1",
+        "NFO:NIFTYMOVECE",
+        "BUY",
+        65,
+        100.0,
+        95.0,
+        115.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("moving-1")
+    assert bracket is not None
+    bracket.entry_fill_ts = _time.time() - 800.0
+    bracket.highest_ltp = 104.0  # 0.8R of progress, above the 0.5R floor
+
+    assert manager._time_stop_action(bracket, 103.0) is None
+
+
+def test_time_stop_is_inert_before_the_holding_window() -> None:
+    import time as _time
+
+    manager = BracketManager(order_manager=Mock())
+    manager.register_virtual_bracket(
+        "fresh-1",
+        "NFO:NIFTYFRESHCE",
+        "BUY",
+        65,
+        100.0,
+        95.0,
+        115.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("fresh-1")
+    assert bracket is not None
+    bracket.entry_fill_ts = _time.time() - 10.0
+
+    assert manager._time_stop_action(bracket, 101.0) is None
+
+
+def test_breakeven_lock_clears_round_trip_cost() -> None:
+    """Locking at the raw entry premium books a guaranteed loss of the full
+    round-trip charge; the lock must sit above it."""
+    manager = BracketManager(order_manager=Mock())
+    manager.register_virtual_bracket(
+        "be-1",
+        "NFO:NIFTYBECE",
+        "BUY",
+        65,
+        70.80,
+        66.60,
+        78.25,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("be-1")
+    assert bracket is not None
+    bracket.trailing_config["breakeven_activation_r"] = 0.20
+
+    cost = manager._breakeven_cost_per_unit(bracket)
+    assert cost > 0.0
+
+    manager.on_tick("NFO:NIFTYBECE", 72.60)
+    assert bracket.sl_trigger_price > 70.80
+    assert bracket.sl_trigger_price >= 70.80 + cost - 0.05
+
+
+def test_trailing_tiers_are_keyed_to_r_not_premium_percent() -> None:
+    """Identical premium moves on different stop distances must not receive
+    identical protection — the tier ladder is denominated in R."""
+    manager = BracketManager(order_manager=Mock())
+    manager.register_virtual_bracket(
+        "wide-1", "NFO:NIFTYWIDECE", "BUY", 65, 100.0, 80.0, 160.0,
+        activate_immediately=True,
+    )
+    manager.register_virtual_bracket(
+        "tight-1", "NFO:NIFTYTIGHTCE", "BUY", 65, 100.0, 98.0, 106.0,
+        activate_immediately=True,
+    )
+    wide = manager.get_bracket("wide-1")
+    tight = manager.get_bracket("tight-1")
+    assert wide is not None and tight is not None
+
+    # Same +4% premium move: 0.2R on the wide stop, 2.0R on the tight one.
+    wide.highest_ltp = tight.highest_ltp = 104.0
+    wide_sl = manager._calculate_tiered_trailing_sl(
+        bracket=wide, ltp=104.0, profit_pct=4.0, high_water=104.0, atr=2.0
+    )
+    tight_sl = manager._calculate_tiered_trailing_sl(
+        bracket=tight, ltp=104.0, profit_pct=4.0, high_water=104.0, atr=2.0
+    )
+    assert wide_sl is None, "0.2R must not trigger any protection tier"
+    assert tight_sl is not None and tight_sl > 100.0
+
+
+def test_completed_trade_outcome_reports_r_normalised_excursions() -> None:
+    """Premium-point MAE/MFE cannot be compared across trades with different
+    stop distances, so the outcome record carries R-normalised values."""
+    from types import SimpleNamespace
+
+    manager = BracketManager(order_manager=Mock())
+    bracket = SimpleNamespace(
+        bracket_id="r-1",
+        entry_order_id="r-1",
+        trade_lifecycle_id="r-1",
+        symbol="NFO:NIFTYRCE",
+        side="BUY",
+        quantity=65,
+        entry_price=100.0,
+        entry_fill_price=100.0,
+        initial_sl_trigger_price=96.0,
+        sl_trigger_price=96.0,
+        highest_ltp=108.0,
+        lowest_ltp=98.0,
+        close_source="broker_fill",
+        exit_reason="TP",
+        trade_provenance={},
+        closed_at=None,
+        entry_fill_ts=None,
+        created_at=None,
+        tag="",
+    )
+
+    outcome = manager._completed_trade_outcome(
+        bracket,
+        ledger_pnl=None,
+        gross_pnl=520.0,
+        exit_price=108.0,
+        ledger_complete=True,
+    )
+
+    assert outcome["initial_risk_points"] == 4.0
+    assert outcome["mfe_r"] == 2.0
+    assert outcome["mae_r"] == 0.5
+    assert outcome["r_multiple"] is not None
+    assert outcome["r_multiple"] < 2.0  # net of costs

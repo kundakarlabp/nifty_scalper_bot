@@ -1176,14 +1176,13 @@ def test_bracket_tp1_partial_fires_once_on_live_class(monkeypatch, tmp_path) -> 
         bm._running = False
 
 
-def test_fill_reanchor_and_controller_trailing_on_executed_range(
+def test_fill_reanchor_and_canonical_trailing_on_executed_range(
     monkeypatch, tmp_path
 ) -> None:
     """Signal->executed coordination on the live class: a slipped broker fill
-    must re-anchor entry/SL/TP1 to the executed range (tick-rounded), sync the
-    adaptive controller's anchor, and controller-path trailing must ratchet on
-    a rally even with degraded/unavailable ATR (the old absolute 20.0-point
-    fallback trail distance left trailing silently dead on option premiums)."""
+    must re-anchor entry/SL/TP1 to the executed range (tick-rounded) along with
+    the bracket watermarks, and the single canonical trailing authority must
+    ratchet on a rally even with degraded/unavailable ATR."""
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
     class _OM:
@@ -1214,9 +1213,6 @@ def test_fill_reanchor_and_controller_trailing_on_executed_range(
             activate_immediately=False,
             trailing_atr_mult=1.5,
         )
-        controller = bm._trailing_controllers.get("ex-1")
-        assert controller is not None, "adaptive controller must attach"
-
         bm.confirm_entry_fill("ex-1", 146.00)  # +0.85 slippage vs signal
         bracket = bm.get_bracket("ex-1")
 
@@ -1225,11 +1221,10 @@ def test_fill_reanchor_and_controller_trailing_on_executed_range(
         assert bracket.entry_fill_price == 146.00
         assert bracket.sl_trigger_price > 143.15
         assert round(bracket.sl_trigger_price / 0.05, 6) % 1 == 0
-        # Controller anchor synced to executed range.
-        assert float(controller.entry_price) == 146.00
-        assert float(controller.current_sl) == bracket.sl_trigger_price
+        # Watermarks re-anchored to the executed range.
+        assert float(bracket.highest_ltp) == 146.00
 
-        # Controller-path trailing ratchets on a rally despite degraded ATR.
+        # Canonical trailing ratchets on a rally despite degraded ATR.
         sl_path = []
         for px in (147.0, 149.0, 151.0, 153.0, 151.5, 155.0):
             bm.on_tick(sym, px)
