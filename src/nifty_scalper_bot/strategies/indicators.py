@@ -663,6 +663,7 @@ class IndicatorEngine:
             indicators["atr_trend"] = self.get_atr_trend(symbol)
             indicators["volatility_index"] = self.get_volatility_index(symbol)
             indicators["vwap"] = self.get_vwap(symbol)
+            indicators["session_vwap"] = self.get_session_vwap(symbol)
             try:
                 self._augment_session_metrics(symbol, indicators)
             except Exception as e:
@@ -689,6 +690,7 @@ class IndicatorEngine:
                     indicators.setdefault("open", float(opens[-1]))
             _always_include = {
                 "vwap",
+                "session_vwap",
                 "atr",
                 "volume",
                 "avg_volume",
@@ -948,6 +950,50 @@ class IndicatorEngine:
             return value
         except Exception:
             return self._last_valid_vwap.get(symbol)
+
+    def get_session_vwap(self, symbol: str) -> float | None:
+        """Return the session-anchored VWAP for *symbol*. NEVER raises.
+
+        get_vwap() is a rolling `period`-bar volume-weighted mean, which is not
+        VWAP. This anchors at the session open, matching the exchange figure.
+        """
+        try:
+            with self._lock:
+                history = self._histories.get(symbol)
+            if history is None or len(history) == 0:
+                return None
+            timestamps = history.get_timestamps()
+            if not timestamps:
+                return None
+            session_open, _session_close = self._session_bounds(timestamps[-1])
+            closes = history.get_closes()
+            highs = history.get_highs()
+            lows = history.get_lows()
+            volumes = history.get_volumes()
+            provisional = history.get_provisional_flags()
+            cum_pv = 0.0
+            cum_vol = 0.0
+            for index, stamp in enumerate(timestamps):
+                if stamp is None or stamp < session_open:
+                    continue
+                if provisional and index < len(provisional) and provisional[index]:
+                    continue
+                if index >= len(volumes) or index >= len(closes):
+                    continue
+                volume = float(volumes[index] or 0.0)
+                if volume <= 0:
+                    continue
+                high = float(highs[index]) if index < len(highs) else float(closes[index])
+                low = float(lows[index]) if index < len(lows) else float(closes[index])
+                typical = (high + low + float(closes[index])) / 3.0
+                cum_pv += typical * volume
+                cum_vol += volume
+            if cum_vol <= 0:
+                return None
+            value = cum_pv / cum_vol
+            return value if value > 0 else None
+        except Exception:  # noqa: BLE001 - indicator pipeline must not crash
+            return None
 
     def get_atr_trend(self, symbol: str, period: int = 14) -> float | None:
         """Return ATR trend ratio for *symbol*.
@@ -1725,7 +1771,10 @@ class IndicatorEngine:
             for price, volume in zip(prices, volumes, strict=False):
                 v = float(volume)
                 if v <= 0:
-                    v = 1.0
+                    # Substituting 1.0 here silently turned a volume-weighted
+                    # average into an unweighted one. Skip unvolumed bars so an
+                    # all-zero series returns None instead of a fake VWAP.
+                    continue
                 cum_pv += float(price) * v
                 cum_vol += v
             if cum_vol <= 0:
