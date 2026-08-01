@@ -76,6 +76,31 @@ class RiskSwitches:
         elif value > 0:
             self._consecutive_losses = 0
 
+    def restore_runtime(
+        self,
+        consecutive_losses: int = 0,
+        cooldown_until_epoch: float | None = None,
+    ) -> None:
+        """Re-seed streak/cooldown state after an intraday process restart."""
+
+        self._reset_if_needed()
+        self._consecutive_losses = max(
+            self._consecutive_losses, max(0, int(consecutive_losses))
+        )
+        if cooldown_until_epoch:
+            until = datetime.fromtimestamp(float(cooldown_until_epoch), timezone.utc)
+            if until > self._now() and (
+                self._cooldown_until is None or until > self._cooldown_until
+            ):
+                self._cooldown_until = until
+
+    def cooldown_until_epoch(self) -> float:
+        """Return the active cooldown deadline as a UTC epoch (0.0 when idle)."""
+
+        if self.cooldown_remaining() <= 0.0 or self._cooldown_until is None:
+            return 0.0
+        return self._cooldown_until.timestamp()
+
     def engage_cooldown(self, minutes: float | None = None) -> None:
         """Force a cooldown window, used for broker rejections."""
 

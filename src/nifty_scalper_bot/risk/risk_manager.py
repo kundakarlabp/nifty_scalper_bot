@@ -131,6 +131,7 @@ class RiskManager:
     _unified_manager: Any | None = field(init=False, repr=False, default=None)
     # [FIX] Declare the field so __post_init__ can use it
     _last_log_time: float = field(init=False, repr=False, default=0.0)
+    _completed_trade_costs_today: float = field(init=False, repr=False, default=0.0)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
@@ -152,7 +153,6 @@ class RiskManager:
         self._last_rejection = None
         self._breaker_alerted = False
         self._last_trip_time = None
-        self._seed_day_pnl_from_persisted_state()
         pct_cap = max(self.account_balance, 0.0) * (
             self._daily_loss_limit_pct() / 100.0
         )
@@ -183,6 +183,11 @@ class RiskManager:
             reset_hour_utc=self.settings.trading_day_reset_hour_utc,
             max_day_profit=day_profit_cap,
         )
+        # Must run after _switches exists: the seed writes into the day-loss
+        # circuit, so calling it earlier raised AttributeError on any restart
+        # that carried non-zero persisted realised P&L.
+        self._seed_day_pnl_from_persisted_state()
+        self._restore_risk_circuit_from_persisted_state()
         self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
         self._m_cooldown = Gauge(
             "risk_cooldown_seconds", "Seconds remaining on enforced cooldown"
@@ -1118,6 +1123,7 @@ class RiskManager:
             else:
                 self._switches.max_day_loss = max(pct_cap, abs_cap)
             self._switches.reset_day()
+            self._completed_trade_costs_today = 0.0
 
     def _current_trading_day(self) -> datetime:  # pragma: no cover
         now = datetime.now(timezone.utc)
@@ -1233,6 +1239,62 @@ class RiskManager:
         if reason:
             self._trip_breaker(self._format_switch_reason(reason))
 
+    def _restore_risk_circuit_from_persisted_state(self) -> None:
+        """Restore same-day transaction costs, loss streak and cooldown.
+
+        PositionManager realised P&L is gross, so the cost deductions applied by
+        record_completed_trade() were lost on restart and handed back part of
+        the daily loss allowance. The loss streak and cooldown were likewise
+        in-memory only. Both live in the existing ``_risk_runtime`` payload.
+        """
+        reader = getattr(self.position_manager, "get_risk_circuit_state", None)
+        if not callable(reader):
+            return
+        try:
+            state = reader() or {}
+        except Exception:  # noqa: BLE001 - risk init must not fail on accounting
+            return
+        if not isinstance(state, dict) or not state:
+            return
+        costs = abs(float(state.get("completed_trade_costs_today", 0.0) or 0.0))
+        if costs > 0:
+            self._completed_trade_costs_today = costs
+            self._switches.record_pnl(-costs)
+        self._switches.restore_runtime(
+            consecutive_losses=int(state.get("consecutive_losses", 0) or 0),
+            cooldown_until_epoch=float(state.get("loss_cooldown_until_epoch", 0.0) or 0.0),
+        )
+        self._logger.warning(
+            "RISK_CIRCUIT_RESTORED costs=%.2f streak=%d cooldown_s=%.0f",
+            costs,
+            self._switches.consecutive_losses(),
+            self._switches.cooldown_remaining(),
+            extra={
+                "event": "RISK_CIRCUIT_RESTORED",
+                "completed_trade_costs_today": costs,
+                "consecutive_losses": self._switches.consecutive_losses(),
+                "cooldown_remaining": self._switches.cooldown_remaining(),
+            },
+        )
+        reason = self._switches.breach_reason()
+        if reason:
+            self._trip_breaker(self._format_switch_reason(reason))
+
+    def _persist_risk_circuit_state(self) -> None:
+        writer = getattr(self.position_manager, "persist_risk_circuit_state", None)
+        if not callable(writer):
+            return
+        try:
+            writer(
+                completed_trade_costs_today=float(
+                    getattr(self, "_completed_trade_costs_today", 0.0) or 0.0
+                ),
+                consecutive_losses=int(self._switches.consecutive_losses()),
+                loss_cooldown_until_epoch=float(self._switches.cooldown_until_epoch()),
+            )
+        except Exception:  # noqa: BLE001 - persistence must not break trading
+            self._logger.warning("RISK_CIRCUIT_PERSIST_FAILED", exc_info=True)
+
     def record_completed_trade(
         self, net_pnl: float, estimated_costs: float = 0.0
     ) -> None:
@@ -1248,7 +1310,11 @@ class RiskManager:
         costs = abs(float(estimated_costs or 0.0))
         if costs > 0:
             self._switches.record_pnl(-costs)
+            self._completed_trade_costs_today = (
+                float(getattr(self, "_completed_trade_costs_today", 0.0) or 0.0) + costs
+            )
         self._switches.record_trade_result(float(net_pnl))
+        self._persist_risk_circuit_state()
         reason = self._switches.breach_reason()
         if reason:
             self._trip_breaker(self._format_switch_reason(reason))

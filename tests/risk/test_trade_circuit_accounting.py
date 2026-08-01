@@ -67,11 +67,35 @@ def test_charges_are_applied_to_day_loss() -> None:
         _format_switch_reason=lambda reason: reason,
         _trip_breaker=lambda reason: None,
     )
-    stub.record_completed_trade = MethodType(
-        RiskManager.record_completed_trade, stub
-    )
+    stub._completed_trade_costs_today = 0.0
+    stub.position_manager = SimpleNamespace()
+    for name in ("record_completed_trade", "_persist_risk_circuit_state"):
+        setattr(stub, name, MethodType(getattr(RiskManager, name), stub))
 
     stub.record_completed_trade(-100.0, 60.0)
 
     assert switches.day_loss() == 60.0
     assert switches.consecutive_losses() == 1
+
+
+def test_restore_runtime_reinstates_streak_and_cooldown() -> None:
+    import time
+
+    switches = _switches(cooldown_minutes=5.0)
+    switches.restore_runtime(
+        consecutive_losses=2, cooldown_until_epoch=time.time() + 120.0
+    )
+    assert switches.consecutive_losses() == 2
+    assert 0.0 < switches.cooldown_remaining() <= 120.0
+    assert switches.cooldown_until_epoch() > time.time()
+
+
+def test_restore_runtime_ignores_expired_cooldown() -> None:
+    import time
+
+    switches = _switches(cooldown_minutes=5.0)
+    switches.restore_runtime(
+        consecutive_losses=0, cooldown_until_epoch=time.time() - 60.0
+    )
+    assert switches.cooldown_remaining() == 0.0
+    assert switches.cooldown_until_epoch() == 0.0

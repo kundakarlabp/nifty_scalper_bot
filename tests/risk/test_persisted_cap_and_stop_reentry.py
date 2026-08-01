@@ -113,3 +113,33 @@ def test_non_stop_exit_does_not_create_reentry_lock(tmp_path) -> None:
 
     signal = SimpleNamespace(symbol="NFO:NIFTY2680424350PE", side="BUY")
     assert pm.stop_reentry_block_reason(signal) is None
+
+
+def test_risk_circuit_state_survives_intraday_restart(tmp_path) -> None:
+    state_file = tmp_path / "positions.json"
+    first = PositionManager(state_file=str(state_file))
+    first.persist_risk_circuit_state(
+        completed_trade_costs_today=240.0,
+        consecutive_losses=2,
+        loss_cooldown_until_epoch=1785629100.0,
+    )
+
+    restarted = PositionManager(state_file=str(state_file))
+    state = restarted.get_risk_circuit_state()
+
+    assert state["completed_trade_costs_today"] == 240.0
+    assert state["consecutive_losses"] == 2
+    assert state["loss_cooldown_until_epoch"] == 1785629100.0
+
+
+def test_previous_trading_date_risk_circuit_is_not_restored(tmp_path) -> None:
+    state_file = tmp_path / "positions.json"
+    first = PositionManager(state_file=str(state_file))
+    first.persist_risk_circuit_state(completed_trade_costs_today=240.0)
+    with first._lock:
+        first._risk_circuit_state["trading_date"] = "2000-01-01"
+    first.save_state()
+
+    restarted = PositionManager(state_file=str(state_file))
+
+    assert restarted.get_risk_circuit_state() == {}
