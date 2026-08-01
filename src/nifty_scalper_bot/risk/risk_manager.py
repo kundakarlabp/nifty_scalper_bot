@@ -152,6 +152,7 @@ class RiskManager:
         self._last_rejection = None
         self._breaker_alerted = False
         self._last_trip_time = None
+        self._seed_day_pnl_from_persisted_state()
         pct_cap = max(self.account_balance, 0.0) * (
             self._daily_loss_limit_pct() / 100.0
         )
@@ -1177,6 +1178,60 @@ class RiskManager:
         if reason:
             formatted = self._format_switch_reason(reason)
             self._trip_breaker(formatted)
+
+    def _seed_day_pnl_from_persisted_state(self) -> None:
+        """Carry an intraday restart's realised P&L into the day-loss circuit.
+
+        __post_init__ adopts the persisted realised P&L as _last_pnl_snapshot,
+        so _refresh_realized_pnl() sees a zero delta and the day-loss circuit
+        restarted at 0.00 while the real capital loss for the session was
+        already booked. A mid-session redeploy therefore handed the bot a fresh
+        full daily loss allowance. Seed the switches with the persisted amount
+        when it belongs to the current trading day.
+        """
+        manager = self.position_manager
+        try:
+            realized = float(manager.get_realized_pnl())
+        except Exception:  # noqa: BLE001 - risk init must not fail on accounting
+            return
+        if abs(realized) < 1e-6:
+            return
+        session_date = getattr(manager, "_pnl_trading_date", None)
+        today = None
+        resolver = getattr(manager, "_trading_date_ist", None)
+        if callable(resolver):
+            with suppress(Exception):
+                today = str(resolver())
+        if not session_date or not today or str(session_date) != today:
+            self._logger.warning(
+                "DAY_PNL_SEED_SKIPPED realized=%.2f session_date=%s today=%s",
+                realized,
+                session_date,
+                today,
+                extra={
+                    "event": "DAY_PNL_SEED_SKIPPED",
+                    "realized": realized,
+                    "session_date": session_date,
+                    "today": today,
+                },
+            )
+            return
+        self._switches.record_pnl(realized)
+        self._logger.warning(
+            "DAY_PNL_SEEDED_FROM_RESTART realized=%.2f day_loss=%.2f trading_date=%s",
+            realized,
+            self._switches.day_loss(),
+            today,
+            extra={
+                "event": "DAY_PNL_SEEDED_FROM_RESTART",
+                "realized": realized,
+                "day_loss": self._switches.day_loss(),
+                "trading_date": today,
+            },
+        )
+        reason = self._switches.breach_reason()
+        if reason:
+            self._trip_breaker(self._format_switch_reason(reason))
 
     def record_completed_trade(
         self, net_pnl: float, estimated_costs: float = 0.0
