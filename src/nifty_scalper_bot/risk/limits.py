@@ -50,17 +50,30 @@ class RiskSwitches:
 
     # Public API ---------------------------------------------------------
     def record_pnl(self, delta: float) -> None:
-        """Record realised PnL delta for the active trading day."""
+        """Record a realised PnL delta for the active trading day.
+
+        Day P&L only. The loss streak is deliberately NOT advanced here: this
+        is fed by incremental position-accounting deltas, so a single trade
+        exiting in several partial slices produced one streak increment per
+        slice and tripped the consecutive-loss breaker after one losing trade.
+        Use :meth:`record_trade_result` for per-trade outcomes.
+        """
 
         self._reset_if_needed()
         self._day_pnl += float(delta)
-        if delta < 0:
+
+    def record_trade_result(self, net_pnl: float) -> None:
+        """Advance the loss streak and cooldown from one completed trade."""
+
+        self._reset_if_needed()
+        value = float(net_pnl)
+        if value < 0:
             self._consecutive_losses += 1
             if self.cooldown_minutes > 0:
                 self._cooldown_until = self._now() + timedelta(
                     minutes=self.cooldown_minutes
                 )
-        elif delta > 0:
+        elif value > 0:
             self._consecutive_losses = 0
 
     def engage_cooldown(self, minutes: float | None = None) -> None:

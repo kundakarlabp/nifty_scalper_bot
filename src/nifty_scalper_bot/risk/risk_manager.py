@@ -1178,6 +1178,26 @@ class RiskManager:
             formatted = self._format_switch_reason(reason)
             self._trip_breaker(formatted)
 
+    def record_completed_trade(
+        self, net_pnl: float, estimated_costs: float = 0.0
+    ) -> None:
+        """Feed one completed trade into the daily-loss and loss-streak circuits.
+
+        PositionManager realised P&L is gross of charges (it must stay gross to
+        reconcile against the broker's ``realised`` field), so the day-loss
+        circuit under-counted real capital loss by the full round-trip cost and
+        tripped late. The completed-trade outcome already carries the canonical
+        cost estimate, so the charges are applied here as a day-P&L correction.
+        The loss streak is advanced once per trade, not once per exit slice.
+        """
+        costs = abs(float(estimated_costs or 0.0))
+        if costs > 0:
+            self._switches.record_pnl(-costs)
+        self._switches.record_trade_result(float(net_pnl))
+        reason = self._switches.breach_reason()
+        if reason:
+            self._trip_breaker(self._format_switch_reason(reason))
+
     def _trip_breaker(self, reason: str) -> None:  # pragma: no cover
         # [FIX] Nuclear Override: use cached _soft_override field; fall back to env for
         # cases where reset_on_start() was not yet called (e.g. early __post_init__).

@@ -1380,6 +1380,28 @@ class StrategyRunner:
                         )
                 strategy_name = str(outcome.get("strategy_name") or "").strip()
                 net_pnl = outcome.get("net_pnl")
+                circuit = getattr(
+                    getattr(self, "_risk_manager", None),
+                    "record_completed_trade",
+                    None,
+                )
+                if callable(circuit) and net_pnl is not None:
+                    estimated = outcome.get("estimated_costs")
+                    cost_total = 0.0
+                    if isinstance(estimated, Mapping):
+                        try:
+                            cost_total = float(estimated.get("total") or 0.0)
+                        except (TypeError, ValueError):
+                            cost_total = 0.0
+                    try:
+                        circuit(float(net_pnl), cost_total)
+                    except Exception as exc:  # noqa: BLE001 - release must continue
+                        logger.error(
+                            "RISK_TRADE_CIRCUIT_FEED_FAILED symbol=%s error=%s",
+                            symbol,
+                            exc,
+                            exc_info=exc,
+                        )
                 recorder = getattr(
                     getattr(self, "_strategy_manager", None),
                     "record_trade_result",
