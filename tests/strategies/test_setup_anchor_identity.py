@@ -9,7 +9,10 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
 )
-from nifty_scalper_bot.strategies.signal_identity_patch import _deterministic_id
+from nifty_scalper_bot.strategies.signal_identity_patch import (
+    _deterministic_id,
+    has_setup_anchor,
+)
 
 BAR_TS = 1_785_000_000.0
 
@@ -33,6 +36,7 @@ def test_anchor_is_stamped_from_indicator_context() -> None:
 
     assert signal.metadata["setup_candle_timestamp"] == BAR_TS
     assert signal.metadata["latest_bar_ts"] == BAR_TS
+    assert has_setup_anchor(signal.metadata)
 
 
 def test_stamped_signal_resolves_a_rearm_setup_epoch() -> None:
@@ -48,11 +52,34 @@ def test_unstamped_signal_has_no_setup_epoch() -> None:
     """Documents the regression this stamp exists to prevent."""
     signal = _elite_signal()
 
+    assert not has_setup_anchor(signal.metadata)
     assert (
         _signal_setup_epoch(
             SimpleNamespace(symbol=signal.symbol, metadata=signal.metadata)
         )
         is None
+    )
+
+
+def test_anchorless_identity_is_stable_across_wall_clock_time(monkeypatch) -> None:
+    """Missing metadata must not mint a fresh executable setup every minute."""
+    signal = _elite_signal()
+    probe = SimpleNamespace(symbol=signal.symbol, action="BUY", metadata=signal.metadata)
+
+    first = _deterministic_id(probe)
+    second = _deterministic_id(probe)
+
+    assert first == second
+
+
+def test_anchorless_identity_is_stable_across_strike_rotation() -> None:
+    first = _elite_signal("NFO:NIFTY2680424400CE")
+    second = _elite_signal("NFO:NIFTY2680424350CE")
+
+    assert _deterministic_id(
+        SimpleNamespace(symbol=first.symbol, action="BUY", metadata=first.metadata)
+    ) == _deterministic_id(
+        SimpleNamespace(symbol=second.symbol, action="BUY", metadata=second.metadata)
     )
 
 
