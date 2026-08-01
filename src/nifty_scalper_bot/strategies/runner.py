@@ -20108,6 +20108,18 @@ class StrategyRunner:
                 max_spread_pct=max_spread_pct,
                 min_depth_qty=min_depth_qty,
                 allow_market_entry=allow_market_entry,
+                max_signal_age_seconds=max(
+                    0.0,
+                    float(
+                        os.getenv("ENTRY_MAX_SIGNAL_AGE_SECONDS", "15") or "15"
+                    ),
+                ),
+                max_entry_drift_pct=max(
+                    0.0,
+                    float(
+                        os.getenv("ENTRY_MAX_PRICE_DRIFT_PCT", "2.0") or "2.0"
+                    ),
+                ),
                 trade_lifecycle_id=_trade_lifecycle_id,
                 client_order_id=_client_order_id,
                 basket_version=_basket_version,
