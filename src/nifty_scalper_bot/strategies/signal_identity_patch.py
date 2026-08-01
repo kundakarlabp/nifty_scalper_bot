@@ -14,6 +14,7 @@ LOGGER = get_logger(__name__)
 _PATCHED = False
 _OPTION_SUFFIX = re.compile(r"(CE|PE)$")
 _FIRST_DIGIT = re.compile(r"\d")
+_MISSING_ANCHOR = "MISSING_SETUP_ANCHOR"
 _ANCHOR_KEYS = (
     "setup_id",
     "setup_structure_id",
@@ -40,6 +41,12 @@ def _option_thesis(symbol: object, metadata: Mapping[str, Any]) -> tuple[str, st
     return underlying or text, side
 
 
+def has_setup_anchor(metadata: Mapping[str, Any] | None) -> bool:
+    """Return whether metadata carries an explicit setup/bar identity."""
+    payload = metadata or {}
+    return any(payload.get(key) not in (None, "") for key in _ANCHOR_KEYS)
+
+
 def _anchor(metadata: Mapping[str, Any]) -> str:
     for key in _ANCHOR_KEYS:
         value = metadata.get(key)
@@ -51,22 +58,20 @@ def _anchor(metadata: Mapping[str, Any]) -> str:
         if isinstance(value, (int, float)):
             return str(int(float(value)))
         return str(value).strip()
-    # Legacy fallback retained only for signals that provide no setup/bar
-    # identity. It buckets by wall-clock minute, so the same setup earns a new
-    # deterministic id every 60s and duplicate suppression degrades. Strategies
-    # must stamp a bar anchor (see EliteStrategy._stamp_setup_anchor); this
-    # path is a diagnosable last resort, never the normal case.
-    LOGGER.warning(
-        "SIGNAL_IDENTITY_ANCHOR_FALLBACK strategy=%s",
+    # Never mint a new identity from wall-clock time. A stable sentinel keeps
+    # malformed retries idempotent; the real-live preparation gate rejects
+    # anchorless strategy entries before they can reach the broker.
+    LOGGER.error(
+        "SIGNAL_IDENTITY_ANCHOR_MISSING strategy=%s",
         metadata.get("strategy_name") or metadata.get("strategy") or "unknown",
         extra={
-            "event": "SIGNAL_IDENTITY_ANCHOR_FALLBACK",
+            "event": "SIGNAL_IDENTITY_ANCHOR_MISSING",
             "strategy": str(
                 metadata.get("strategy_name") or metadata.get("strategy") or "unknown"
             ),
         },
     )
-    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+    return _MISSING_ANCHOR
 
 
 def _deterministic_id(signal: Any) -> str:
@@ -93,4 +98,9 @@ def apply_patches() -> None:
     _PATCHED = True
 
 
-__all__ = ["apply_patches", "_deterministic_id", "_option_thesis"]
+__all__ = [
+    "apply_patches",
+    "_deterministic_id",
+    "_option_thesis",
+    "has_setup_anchor",
+]
