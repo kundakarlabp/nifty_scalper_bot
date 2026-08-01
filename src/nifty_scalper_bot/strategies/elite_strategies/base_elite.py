@@ -203,6 +203,7 @@ class EliteStrategy(Strategy):
             )
 
             if elite_signal:
+                self._stamp_setup_anchor(elite_signal, indicators_payload)
                 min_conf = max(
                     0.0, min(float(self._config.min_confidence) / 100.0, 1.0)
                 )
@@ -320,6 +321,50 @@ class EliteStrategy(Strategy):
             except (TypeError, ValueError):
                 continue
         return None
+
+    _SETUP_ANCHOR_SOURCES = (
+        "latest_bar_ts",
+        "bar_timestamp",
+        "setup_candle_timestamp",
+        "signal_timestamp",
+    )
+
+    @classmethod
+    def _stamp_setup_anchor(
+        cls, elite_signal: EliteSignal, indicators: Mapping[str, Any]
+    ) -> None:
+        """Stamp the evaluation bar identity onto the signal metadata.
+
+        Without this, only SMCLiquidity carried a setup anchor. Every other
+        strategy produced metadata with no bar identity, so the deterministic
+        signal id degraded to a wall-clock minute bucket (the same setup earned
+        a fresh id every 60s, defeating duplicate suppression) and the
+        structural stop-rearm gate could never observe a newer setup candle.
+        """
+        metadata = elite_signal.metadata
+        anchor = None
+        for key in cls._SETUP_ANCHOR_SOURCES:
+            candidate = metadata.get(key)
+            if candidate in (None, ""):
+                candidate = indicators.get(key)
+            if candidate not in (None, ""):
+                anchor = candidate
+                break
+        if anchor in (None, ""):
+            LOGGER.warning(
+                "SIGNAL_SETUP_ANCHOR_MISSING strategy=%s symbol=%s",
+                getattr(elite_signal, "strategy_name", "") or "",
+                elite_signal.symbol,
+                extra={
+                    "event": "SIGNAL_SETUP_ANCHOR_MISSING",
+                    "strategy": getattr(elite_signal, "strategy_name", "") or "",
+                    "symbol": elite_signal.symbol,
+                },
+            )
+            return
+        metadata.setdefault("latest_bar_ts", anchor)
+        metadata.setdefault("setup_candle_timestamp", anchor)
+        metadata.setdefault("bar_timestamp", anchor)
 
     def _no_vote(self, reason: str) -> None:
         """Record a single no-vote reason. Args: reason. Returns: None. Raises: none."""
