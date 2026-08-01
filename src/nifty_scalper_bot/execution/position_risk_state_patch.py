@@ -70,10 +70,12 @@ def _write_risk_state(owner: Any) -> None:
     if not payload:
         return
     stopped = getattr(owner, "_recent_stop_thesis", None)
+    circuit = getattr(owner, "_risk_circuit_state", None)
     payload[_RISK_KEY] = {
         "trades_today_date": getattr(owner, "_trades_today_date", None),
         "trades_today_count": int(getattr(owner, "_trades_today_count", 0) or 0),
         "recent_stop_thesis": dict(stopped) if isinstance(stopped, dict) else None,
+        "risk_circuit": dict(circuit) if isinstance(circuit, dict) else None,
     }
     tmp_name: str | None = None
     try:
@@ -103,6 +105,9 @@ def _restore_risk_state(owner: Any) -> None:
             owner._trades_today_count = max(
                 0, int(state.get("trades_today_count", 0) or 0)
             )
+    circuit = state.get("risk_circuit")
+    if isinstance(circuit, dict) and str(circuit.get("trading_date") or "") == today:
+        owner._risk_circuit_state = dict(circuit)
     stopped = state.get("recent_stop_thesis")
     if isinstance(stopped, dict):
         with suppress(TypeError, ValueError):
@@ -114,6 +119,7 @@ def _restore_risk_state(owner: Any) -> None:
 def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
     _ORIGINAL_INIT(self, *args, **kwargs)
     self._recent_stop_thesis = None
+    self._risk_circuit_state = {}
     with getattr(self, "_lock"):
         _restore_risk_state(self)
 
@@ -168,6 +174,24 @@ def _patched_close_position(
     return result
 
 
+def get_risk_circuit_state(self: Any) -> dict[str, Any]:
+    """Return the persisted same-day risk-circuit runtime state."""
+    with getattr(self, "_lock"):
+        state = getattr(self, "_risk_circuit_state", None)
+        return dict(state) if isinstance(state, dict) else {}
+
+
+def persist_risk_circuit_state(self: Any, **values: Any) -> None:
+    """Merge and durably store risk-circuit runtime state for today."""
+    with getattr(self, "_lock"):
+        state = getattr(self, "_risk_circuit_state", None)
+        state = dict(state) if isinstance(state, dict) else {}
+        state.update(values)
+        state["trading_date"] = self._trading_date_ist()
+        self._risk_circuit_state = state
+    self.save_state()
+
+
 def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
     """Return an entry-only block reason for an active stop-loss thesis lock."""
     thesis = _option_thesis(getattr(signal, "symbol", None))
@@ -206,8 +230,16 @@ def apply_patches() -> None:
     PositionManager.save_state = _patched_save_state
     PositionManager.close_position = _patched_close_position
     PositionManager.stop_reentry_block_reason = stop_reentry_block_reason
+    PositionManager.get_risk_circuit_state = get_risk_circuit_state
+    PositionManager.persist_risk_circuit_state = persist_risk_circuit_state
     PositionManager._position_risk_state_patch = True
     _PATCH_APPLIED = True
 
 
-__all__ = ["apply_patches", "stop_reentry_block_reason", "_option_thesis"]
+__all__ = [
+    "apply_patches",
+    "stop_reentry_block_reason",
+    "get_risk_circuit_state",
+    "persist_risk_circuit_state",
+    "_option_thesis",
+]
