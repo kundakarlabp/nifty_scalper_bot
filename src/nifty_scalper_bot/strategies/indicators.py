@@ -38,6 +38,23 @@ _FEATURE_CAPABILITIES: dict[str, bool] = {
 }
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _wilder_atr_enabled() -> bool:
+    """Wilder-smoothed ATR is the platform standard and the default here."""
+    return _env_flag("INDICATORS__WILDER_ATR", True)
+
+
+def _wilder_rsi_enabled() -> bool:
+    """RSI smoothing is opt-in: switching it changes what tuned thresholds mean."""
+    return _env_flag("INDICATORS__WILDER_RSI", False)
+
+
 def supports_feature(name: str) -> bool:
     """Args: name. Returns: feature support status. Raises: none."""
     return bool(_FEATURE_CAPABILITIES.get(str(name).strip().lower(), False))
@@ -1550,8 +1567,15 @@ class IndicatorEngine:
         deltas = np.diff(closes)
         gains = np.clip(deltas, a_min=0.0, a_max=None)
         losses = np.clip(-deltas, a_min=0.0, a_max=None)
-        avg_gain = gains[-period:].mean()
-        avg_loss = losses[-period:].mean()
+        if _wilder_rsi_enabled() and gains.size > period:
+            avg_gain = float(gains[:period].mean())
+            avg_loss = float(losses[:period].mean())
+            for gain, loss in zip(gains[period:], losses[period:], strict=False):
+                avg_gain += (float(gain) - avg_gain) / float(period)
+                avg_loss += (float(loss) - avg_loss) / float(period)
+        else:
+            avg_gain = gains[-period:].mean()
+            avg_loss = losses[-period:].mean()
         if np.isclose(avg_loss, 0.0):
             if np.isclose(avg_gain, 0.0):
                 return 50.0
@@ -1563,7 +1587,7 @@ class IndicatorEngine:
         return float(rsi)
 
     def _calculate_ema(self, prices: list[float], period: int) -> float:
-        """Internal EMA calculation using Wilder's smoothing constant.
+        """Internal EMA calculation using the standard smoothing constant.
 
         The Exponential Moving Average is updated recursively as::
 
@@ -1676,8 +1700,17 @@ class IndicatorEngine:
             true_ranges.append(tr)
         if len(true_ranges) < period:
             raise ValueError("Insufficient data for ATR calculation")
-        atr_values = np.asarray(true_ranges[-period:], dtype=float)
-        return float(atr_values.mean())
+        if not _wilder_atr_enabled():
+            atr_values = np.asarray(true_ranges[-period:], dtype=float)
+            return float(atr_values.mean())
+        # Wilder seeds with the arithmetic mean of the first `period` true
+        # ranges, then smooths. A plain rolling mean re-seeds every bar, so a
+        # wide bar leaving the window steps ATR down with no market cause -
+        # and ATR sets stop distance.
+        atr = float(np.asarray(true_ranges[:period], dtype=float).mean())
+        for value in true_ranges[period:]:
+            atr += (float(value) - atr) / float(period)
+        return float(atr)
 
     def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
         """Internal VWAP calculation.
