@@ -45,8 +45,10 @@ def test_consecutive_losses_with_cooldown() -> None:
         clock=clock,
     )
 
-    switches.record_pnl(-10.0)
-    switches.record_pnl(-5.0)
+    # Loss streak and cooldown are driven by completed trades, not by the
+    # incremental position-accounting deltas fed to record_pnl.
+    switches.record_trade_result(-10.0)
+    switches.record_trade_result(-5.0)
 
     assert switches.breach_reason() == "Max consecutive losses reached"
     assert switches.cooldown_remaining() > 0
