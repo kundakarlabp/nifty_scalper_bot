@@ -7,6 +7,10 @@ import hashlib
 import re
 from typing import Any, Mapping
 
+from nifty_scalper_bot.utils.logging import get_logger
+
+LOGGER = get_logger(__name__)
+
 _PATCHED = False
 _OPTION_SUFFIX = re.compile(r"(CE|PE)$")
 _FIRST_DIGIT = re.compile(r"\d")
@@ -47,7 +51,21 @@ def _anchor(metadata: Mapping[str, Any]) -> str:
         if isinstance(value, (int, float)):
             return str(int(float(value)))
         return str(value).strip()
-    # Legacy fallback retained only for signals that provide no setup/bar identity.
+    # Legacy fallback retained only for signals that provide no setup/bar
+    # identity. It buckets by wall-clock minute, so the same setup earns a new
+    # deterministic id every 60s and duplicate suppression degrades. Strategies
+    # must stamp a bar anchor (see EliteStrategy._stamp_setup_anchor); this
+    # path is a diagnosable last resort, never the normal case.
+    LOGGER.warning(
+        "SIGNAL_IDENTITY_ANCHOR_FALLBACK strategy=%s",
+        metadata.get("strategy_name") or metadata.get("strategy") or "unknown",
+        extra={
+            "event": "SIGNAL_IDENTITY_ANCHOR_FALLBACK",
+            "strategy": str(
+                metadata.get("strategy_name") or metadata.get("strategy") or "unknown"
+            ),
+        },
+    )
     return datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
 
 
