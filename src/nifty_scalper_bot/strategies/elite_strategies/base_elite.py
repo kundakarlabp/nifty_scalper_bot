@@ -66,6 +66,26 @@ class EliteSignal:
         }
 
 
+def _as_confidence_fraction(value: Any) -> float:
+    """Normalise a configured confidence threshold to a 0..1 fraction.
+
+    EliteStrategyConfig.min_confidence is expressed in percent while
+    EliteSignal.confidence is a 0..1 fraction. The previous unconditional
+    ``/ 100.0`` silently disabled the gate for any config already written as a
+    fraction (0.6 became 0.006). Values at or below 1.0 are treated as
+    fractions; anything larger is treated as a percentage.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number <= 0.0:
+        return 0.0
+    if number > 1.0:
+        number /= 100.0
+    return min(number, 1.0)
+
+
 class EliteStrategy(Strategy):
     """
     World-Class Base Class for Elite Strategies.
@@ -208,9 +228,7 @@ class EliteStrategy(Strategy):
             self._consecutive_evaluation_failures = 0
             if elite_signal:
                 self._stamp_setup_anchor(elite_signal, indicators_payload)
-                min_conf = max(
-                    0.0, min(float(self._config.min_confidence) / 100.0, 1.0)
-                )
+                min_conf = _as_confidence_fraction(self._config.min_confidence)
                 if float(elite_signal.confidence) < min_conf:
                     self._no_vote("below_strategy_min_confidence")
                     LOGGER.info(
