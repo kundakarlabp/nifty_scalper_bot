@@ -1505,6 +1505,9 @@ class IndicatorEngine:
             ]
             if ranges:
                 current_range = ranges[-1]
+                # NR7: the current bar is the narrowest of the last seven. min()
+                # includes the current bar, so the comparison is deliberately
+                # self-referential and <= is correct on ties.
                 min_range = min(ranges)
                 indicators["nr7"] = current_range <= min_range
                 indicators["nr7_range"] = current_range
