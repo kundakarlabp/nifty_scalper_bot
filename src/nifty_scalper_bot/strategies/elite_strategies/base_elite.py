@@ -85,6 +85,8 @@ class EliteStrategy(Strategy):
         self._last_signal_at: datetime | None = None
         self._signals_generated = 0
         self._last_signal: EliteSignal | None = None
+        self._consecutive_evaluation_failures = 0
+        self._last_evaluation_error: str | None = None
 
         # Inspect signature once at startup
         sig = inspect.signature(self._evaluate_signal)
@@ -202,6 +204,8 @@ class EliteStrategy(Strategy):
                 position=position,
             )
 
+            # The evaluation completed without raising, whatever it decided.
+            self._consecutive_evaluation_failures = 0
             if elite_signal:
                 self._stamp_setup_anchor(elite_signal, indicators_payload)
                 min_conf = max(
@@ -228,9 +232,48 @@ class EliteStrategy(Strategy):
                 extra={"event": "elite_strategy_no_signal", "strategy": self.name},
             )
         except Exception as exc:
-            LOGGER.error("Failure in generate_signal: %s", exc, exc_info=exc)
+            self._record_evaluation_failure(exc)
 
         return None
+
+    def _record_evaluation_failure(self, exc: BaseException) -> None:
+        """Surface a crashed evaluation instead of it looking like no signal.
+
+        A raised exception and a strategy that legitimately declined were both
+        reported as "no signal". VWAPPro once produced no vote on every
+        evaluation because a None reached a %.4f specifier inside its own log
+        call and this handler swallowed the TypeError.
+        """
+        self._consecutive_evaluation_failures = (
+            int(getattr(self, "_consecutive_evaluation_failures", 0)) + 1
+        )
+        self._last_evaluation_error = f"{type(exc).__name__}: {exc}"
+        self._no_vote("evaluation_failed")
+        LOGGER.error(
+            "STRATEGY_EVALUATION_FAILED strategy=%s error_type=%s consecutive=%s error=%s",
+            self.name,
+            type(exc).__name__,
+            self._consecutive_evaluation_failures,
+            exc,
+            exc_info=exc,
+            extra={
+                "event": "STRATEGY_EVALUATION_FAILED",
+                "strategy": self.name,
+                "error_type": type(exc).__name__,
+                "consecutive_failures": self._consecutive_evaluation_failures,
+            },
+        )
+
+    @property
+    def evaluation_health(self) -> dict[str, Any]:
+        """Report evaluation failure state for health/status surfaces."""
+        failures = int(getattr(self, "_consecutive_evaluation_failures", 0))
+        return {
+            "strategy": self.name,
+            "consecutive_evaluation_failures": failures,
+            "last_evaluation_error": getattr(self, "_last_evaluation_error", None),
+            "healthy": failures == 0,
+        }
 
     def evaluate(self) -> Signal | None:
         """Args: none. Returns: Signal|None. Raises: Exception."""
@@ -298,7 +341,7 @@ class EliteStrategy(Strategy):
 
             return self.generate_signal(symbol, indicators, ltp)
         except Exception as exc:
-            LOGGER.error("Failure in evaluate: %s", exc, exc_info=exc)
+            self._record_evaluation_failure(exc)
 
         return None
 
@@ -425,6 +468,7 @@ class EliteStrategy(Strategy):
             "signals_generated": self._signals_generated,
             "last_signal": last_payload,
             "mode": "Legacy" if self._is_legacy_signature else "Push",
+            **self.evaluation_health,
         }
 
     @property
