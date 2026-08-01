@@ -93,6 +93,36 @@ def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
         self._recent_stop_thesis = persisted
 
 
+def record_stop_exit(self: Any, symbol: Any, reason: Any) -> bool:
+    """Latch the structural stop-loss rearm requirement for a stopped thesis.
+
+    Canonical single implementation. ``PositionManager.close_position`` is only
+    reached on session square-off, so the live bracket stop-loss exit callback
+    must call this directly or the guard never arms.
+    """
+    if not _is_stop_reason(reason):
+        return False
+    thesis = _option_thesis(symbol)
+    if thesis is None:
+        return False
+    underlying, option_side = thesis
+    now = time.time()
+    with getattr(self, "_lock"):
+        self._recent_stop_thesis = {
+            "underlying": underlying,
+            "option_side": option_side,
+            "symbol": str(symbol).strip().upper(),
+            "exit_reason": str(reason),
+            "expires_epoch": now + _cooldown_seconds(),
+            "stopped_at_epoch": now,
+            "trading_date": self._trading_date_ist(),
+            "rearm_required": True,
+        }
+    with suppress(Exception):
+        self.save_state()
+    return True
+
+
 def _patched_close_position(
     self: Any,
     symbol: str,
@@ -103,14 +133,7 @@ def _patched_close_position(
     result = _ORIGINAL_CLOSE(
         self, symbol, exit_price, reason, close_time=close_time
     )
-    if _is_stop_reason(reason):
-        with getattr(self, "_lock"):
-            stopped = getattr(self, "_recent_stop_thesis", None)
-            if isinstance(stopped, dict):
-                stopped["stopped_at_epoch"] = time.time()
-                stopped["trading_date"] = self._trading_date_ist()
-                stopped["rearm_required"] = True
-        self.save_state()
+    record_stop_exit(self, symbol, reason)
     return result
 
 
@@ -162,8 +185,14 @@ def apply_patches() -> None:
     PositionManager.__init__ = _patched_init
     PositionManager.close_position = _patched_close_position
     PositionManager.stop_reentry_block_reason = stop_reentry_block_reason
+    PositionManager.record_stop_exit = record_stop_exit
     PositionManager._structural_stop_rearm_patch = True
     _PATCHED = True
 
 
-__all__ = ["apply_patches", "stop_reentry_block_reason", "_signal_setup_epoch"]
+__all__ = [
+    "apply_patches",
+    "record_stop_exit",
+    "stop_reentry_block_reason",
+    "_signal_setup_epoch",
+]

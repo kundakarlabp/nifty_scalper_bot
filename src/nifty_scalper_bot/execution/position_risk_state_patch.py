@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+# Standalone "SL" token (SL Hit, HARD_SL_BREACH, FORCED_SL_EXIT, WATCHDOG_HARD_SL)
+# or an explicit STOP LOSS / STOP_LOSS phrase. "SLIPPAGE" must not match.
+_STOP_REASON_RE = re.compile(r"(?<![A-Z0-9])SL(?![A-Z0-9])|STOP[_ ]?LOSS")
 _PATCH_APPLIED = False
 _ORIGINAL_INIT: Any = None
 _ORIGINAL_SAVE_STATE: Any = None
@@ -122,8 +126,20 @@ def _patched_save_state(self: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def _is_stop_reason(reason: object) -> bool:
+    """Classify an exit reason as a stop-loss exit.
+
+    The live bracket manager emits free-text reasons such as ``"SL Hit (91.4 <=
+    92.0)"``, ``"HARD_SL_BREACH"`` and ``"FORCED_SL_EXIT"``. A plain
+    ``"STOP_LOSS" in text`` test misses all of them, so the stop guard never
+    latched on real exits. Match a standalone ``SL`` token instead, while
+    keeping the legacy exact values.
+    """
     text = str(reason or "").strip().upper().replace("-", "_")
-    return "STOP_LOSS" in text or text in {"SL", "STOP", "STOPLOSS"}
+    if not text:
+        return False
+    if text in {"SL", "STOP", "STOPLOSS"}:
+        return True
+    return bool(_STOP_REASON_RE.search(text))
 
 
 def _patched_close_position(
