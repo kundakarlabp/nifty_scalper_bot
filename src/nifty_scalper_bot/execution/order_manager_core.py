@@ -87,6 +87,10 @@ from nifty_scalper_bot.execution.position_manager import (
 # ledger file so a process restart cannot re-trade an already-consumed setup.
 _CONSUMED_SIGNALS_STATE_KEY = "_consumed_signal_ids"
 _CONSUMED_SIGNALS_MAX_PERSISTED = 500
+
+# Reducing intents must never be vetoed by the risk manager: these orders are
+# what flattens exposure after a breaker trip.
+_REDUCING_ORDER_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
     TrailingStopController,
@@ -3275,6 +3279,24 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 4. RISK MANAGER VALIDATION
         # ---------------------------------------------------------------------
+        if check_risk and self._risk_manager:
+            if str(intent or "").strip().upper() in _REDUCING_ORDER_INTENTS:
+                # A tripped breaker, an active cooldown or the "Stop loss
+                # required" guard in RiskManager.check_order would otherwise
+                # reject the order that flattens a losing position. Exit paths
+                # already pass check_risk=False by convention; enforce it
+                # structurally so a reducing order can never be risk-blocked.
+                self._logger.info(
+                    "PROTECTIVE_EXIT_RISK_CHECK_BYPASSED symbol=%s intent=%s",
+                    normalized_symbol,
+                    intent,
+                    extra={
+                        "event": "PROTECTIVE_EXIT_RISK_CHECK_BYPASSED",
+                        "symbol": normalized_symbol,
+                        "intent": str(intent),
+                    },
+                )
+                check_risk = False
         if check_risk and self._risk_manager:
             signal = OrderSignal(
                 symbol=normalized_symbol,
