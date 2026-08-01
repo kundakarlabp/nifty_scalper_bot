@@ -60,6 +60,7 @@ class VWAPProStrategy(EliteStrategy):
         return {
             "vwap",
             "exchange_vwap",
+            "session_vwap",
             "atr",
             "close",
             "open",
@@ -85,7 +86,16 @@ class VWAPProStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            vwap = float(indicators.get('vwap') or indicators.get('exchange_vwap') or 0.0)
+            # Reference priority: the broker's day VWAP, then our session-anchored
+            # VWAP, then the rolling `period`-bar mean. Previously the rolling
+            # proxy won unconditionally because it is almost never falsy, so the
+            # true VWAP sat unused in the same payload.
+            vwap = float(
+                indicators.get('exchange_vwap')
+                or indicators.get('session_vwap')
+                or indicators.get('vwap')
+                or 0.0
+            )
             atr = float(indicators.get('atr') or 0.0)
             close = float(indicators.get('close') or current_price)
             open_price = float(indicators.get('open') or current_price)
