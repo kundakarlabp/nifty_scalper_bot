@@ -1347,6 +1347,37 @@ class StrategyRunner:
                 if callable(getter):
                     outcome = getter(symbol)
             if isinstance(outcome, Mapping):
+                # Structural stop rearm: PositionManager.close_position is only
+                # reached on session square-off, so the bracket exit outcome is
+                # the canonical stop-loss event for the re-entry guard.
+                recorder = getattr(
+                    getattr(self, "_position_manager", None),
+                    "record_stop_exit",
+                    None,
+                )
+                if callable(recorder):
+                    try:
+                        if recorder(
+                            outcome.get("symbol") or symbol,
+                            outcome.get("exit_reason"),
+                        ):
+                            logger.warning(
+                                "STOP_REARM_LATCHED symbol=%s exit_reason=%s",
+                                symbol,
+                                outcome.get("exit_reason"),
+                                extra={
+                                    "event": "STOP_REARM_LATCHED",
+                                    "symbol": symbol,
+                                    "exit_reason": outcome.get("exit_reason"),
+                                },
+                            )
+                    except Exception as exc:  # noqa: BLE001 - release must continue
+                        logger.error(
+                            "STOP_REARM_LATCH_FAILED symbol=%s error=%s",
+                            symbol,
+                            exc,
+                            exc_info=exc,
+                        )
                 strategy_name = str(outcome.get("strategy_name") or "").strip()
                 net_pnl = outcome.get("net_pnl")
                 recorder = getattr(
