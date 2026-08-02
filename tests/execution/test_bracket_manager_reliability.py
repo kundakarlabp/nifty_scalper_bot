@@ -621,3 +621,100 @@ def test_completed_trade_outcome_reports_r_normalised_excursions() -> None:
     assert outcome["mae_r"] == 0.5
     assert outcome["r_multiple"] is not None
     assert outcome["r_multiple"] < 2.0  # net of costs
+
+
+def _quote_tick(symbol: str, ltp: float, bid: float, ask: float) -> dict:
+    return {
+        "symbol": symbol,
+        "last_price": ltp,
+        "depth": {"buy": [{"price": bid, "quantity": 500}],
+                  "sell": [{"price": ask, "quantity": 500}]},
+        "exchange_timestamp": None,
+    }
+
+
+def test_long_stop_fires_when_bid_crosses_though_ltp_has_not() -> None:
+    """A long option is sold into the bid. If the bid is already below the stop
+    the position is executable below it, and waiting for LTP is late protection."""
+    order_manager = Mock()
+    order_manager.place_order.return_value = "exit-bid"
+    manager = BracketManager(order_manager=order_manager)
+    manager.register_virtual_bracket(
+        "bid-1", "NFO:NIFTYBIDCE", "BUY", 65, 100.0, 99.0, 120.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("bid-1")
+    assert bracket is not None
+
+    manager.on_tick_event(_quote_tick("NFO:NIFTYBIDCE", 100.50, 98.50, 101.50))
+
+    assert "SL" in str(bracket.exit_reason or "").upper()
+    assert "src=bid" in str(bracket.exit_reason or "")
+    assert order_manager.place_order.call_count >= 1
+
+
+def test_short_stop_fires_when_ask_crosses_though_ltp_has_not() -> None:
+    order_manager = Mock()
+    order_manager.place_order.return_value = "exit-ask"
+    manager = BracketManager(order_manager=order_manager)
+    manager.register_virtual_bracket(
+        "ask-1", "NFO:NIFTYASKCE", "SELL", 65, 100.0, 101.0, 80.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("ask-1")
+    assert bracket is not None
+
+    manager.on_tick_event(_quote_tick("NFO:NIFTYASKCE", 99.50, 98.50, 101.50))
+
+    assert "src=ask" in str(bracket.exit_reason or "")
+    assert order_manager.place_order.call_count >= 1
+
+
+def test_stop_holds_when_executable_side_has_not_crossed() -> None:
+    manager = BracketManager(order_manager=Mock())
+    manager.register_virtual_bracket(
+        "hold-1", "NFO:NIFTYHOLDCE", "BUY", 65, 100.0, 97.0, 120.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("hold-1")
+    assert bracket is not None
+
+    manager.on_tick_event(_quote_tick("NFO:NIFTYHOLDCE", 99.00, 98.50, 99.50))
+
+    assert bracket.exit_pending is False
+
+
+def test_stale_quote_falls_back_to_ltp_and_cannot_suppress_protection() -> None:
+    manager = BracketManager(order_manager=Mock())
+    manager.register_virtual_bracket(
+        "stale-1", "NFO:NIFTYSTALECE", "BUY", 65, 100.0, 99.0, 120.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("stale-1")
+    assert bracket is not None
+    # A generous bid captured long ago must not keep a breached position alive.
+    manager._exit_quotes["NFO:NIFTYSTALECE"] = (105.0, 106.0, time.time() - 600.0)
+
+    price, source = manager._executable_exit_price(bracket, 98.0)
+    assert price == 98.0
+    assert source == "ltp_stale_quote"
+
+
+def test_tier4_uses_r_not_premium_percent() -> None:
+    """A tight-stop trade at >3R but only ~2% premium profit must still trail;
+    the Tier-4 guard previously compared premium-percent to an R threshold and
+    returned no stop at all for the largest winners."""
+    manager = BracketManager(order_manager=Mock())
+    manager.register_virtual_bracket(
+        "t4-1", "NFO:NIFTYT4CE", "BUY", 65, 100.0, 99.0, 130.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("t4-1")
+    assert bracket is not None
+    bracket.highest_ltp = 104.0  # 4R on a 1.0-point stop, only +4% premium
+
+    new_sl = manager._calculate_tiered_trailing_sl(
+        bracket=bracket, ltp=104.0, profit_pct=4.0, high_water=104.0, atr=0.0
+    )
+    assert new_sl is not None, "Tier 4 must engage on R, not premium percent"
+    assert new_sl > 100.0

@@ -66,6 +66,8 @@ from nifty_scalper_bot.execution.position_snapshot import (
     decode_position_snapshot,
 )
 
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
+
 try:
     from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 except ImportError:  # pragma: no cover - cost model is always present in prod
@@ -542,6 +544,12 @@ class BracketManager:
         if SafeATRProvider and indicator_engine:
             self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
         self._recent_ticks: Dict[str, deque] = {}
+        # symbol -> (bid, ask, captured_at). Stop breach must be judged on the
+        # side the position is actually liquidated into, not on LTP.
+        self._exit_quotes: Dict[str, tuple[float, float, float]] = {}
+        self._exit_quote_max_age = max(
+            0.0, parse_float_env(os.getenv("EXIT_QUOTE_MAX_AGE_SEC"), 3.0)
+        )
         self._max_tick_history = 20
         self._orphan_retry_count: Dict[str, int] = {}
         self._orphan_retry_last_attempt: Dict[str, float] = {}
@@ -1904,6 +1912,37 @@ class BracketManager:
             )
             self._fire_exits_batch(exits_to_fire)
 
+    def _capture_exit_quote(self, symbol: str, tick: Mapping[str, Any]) -> None:
+        """Cache the executable bid/ask for a symbol from a full tick."""
+        try:
+            bid, ask, _spread, source = resolve_quote_bid_ask_spread(tick)
+        except Exception:  # noqa: BLE001 - a malformed tick must not stop exits
+            return
+        if source == "missing" or not bid or not ask or bid <= 0 or ask < bid:
+            return
+        self._exit_quotes[symbol] = (float(bid), float(ask), time.time())
+
+    def _executable_exit_price(
+        self, bracket: BracketState, ltp: float
+    ) -> tuple[float, str]:
+        """Return the price this position would actually be liquidated at.
+
+        A long option is sold into the bid, a short is bought back at the ask.
+        When LTP still reads above the stop but the bid has already crossed it,
+        the position is executable below the stop and protection must fire.
+        LTP remains the fallback while depth is momentarily absent.
+        """
+        quote = self._exit_quotes.get(bracket.symbol)
+        if quote is None:
+            return float(ltp), "ltp"
+        bid, ask, captured_at = quote
+        if (time.time() - captured_at) > self._exit_quote_max_age:
+            return float(ltp), "ltp_stale_quote"
+        price = bid if bracket.side == "BUY" else ask
+        if price <= 0:
+            return float(ltp), "ltp"
+        return float(price), "bid" if bracket.side == "BUY" else "ask"
+
     def _sl_crossed(self, bracket: BracketState, ltp: float) -> bool:
         """Return True when a tick crosses stop-loss. Args: bracket, ltp; Returns: bool; Raises: none."""
         prev_ltp = float(bracket.previous_ltp or bracket.last_ltp or ltp)
@@ -1933,14 +1972,15 @@ class BracketManager:
         # current-tick trailing calculation.
         if sl_to_check > 0:
             prev_ltp = float(bracket.previous_ltp or bracket.entry_price or ltp)
+            exit_px, exit_src = self._executable_exit_price(bracket, ltp)
             triggered = False
             if bracket.side == "BUY":
-                crossed = prev_ltp > sl_to_check and ltp <= sl_to_check
-                breached = ltp <= sl_to_check
+                crossed = prev_ltp > sl_to_check and exit_px <= sl_to_check
+                breached = exit_px <= sl_to_check
                 triggered = crossed or breached
             elif bracket.side == "SELL":
-                crossed = prev_ltp < sl_to_check and ltp >= sl_to_check
-                breached = ltp >= sl_to_check
+                crossed = prev_ltp < sl_to_check and exit_px >= sl_to_check
+                breached = exit_px >= sl_to_check
                 triggered = crossed or breached
 
             if triggered:
@@ -1951,7 +1991,11 @@ class BracketManager:
                     "qty": bracket.remaining_quantity,
                     "old_sl": sl_to_check,
                     "new_sl": bracket.sl_trigger_price,
-                    "reason": f"HARD_SL_BREACH prev={prev_ltp:.2f} curr={ltp:.2f} sl={sl_to_check:.2f}",
+                    "trigger_price_source": exit_src,
+                    "reason": (
+                        f"HARD_SL_BREACH prev={prev_ltp:.2f} curr={exit_px:.2f} "
+                        f"src={exit_src} sl={sl_to_check:.2f}"
+                    ),
                 }
 
         # Check partial targets (TP1, TP2, etc.)
@@ -2663,6 +2707,7 @@ class BracketManager:
             if not symbol or not isinstance(ltp, (int, float)):
                 return
             exchange_ts = tick_exchange_epoch(tick)
+            self._capture_exit_quote(normalize_symbol(symbol), tick)
             self.on_tick(symbol, float(ltp), exchange_ts)
         except Exception as e:
             LOGGER.error("Failure in BracketManager.on_tick_event: %s", e)
@@ -2762,6 +2807,10 @@ class BracketManager:
             atr=atr,
         )
 
+        if new_sl is None:
+            return False
+
+        new_sl = self._apply_min_profit_floor(bracket, new_sl, ltp)
         if new_sl is None:
             return False
 
@@ -2900,6 +2949,50 @@ class BracketManager:
             ),
         }
 
+    def _min_locked_profit_r(self) -> float:
+        """Post-activation net-profit floor, in units of initial risk."""
+        cached = getattr(self, "_trail_min_locked_profit_r", None)
+        if cached is None:
+            cached = max(
+                0.0, parse_float_env(os.getenv("TRAIL_MIN_LOCKED_PROFIT_R"), 0.10)
+            )
+            self._trail_min_locked_profit_r = cached
+        return float(cached)
+
+    def _apply_min_profit_floor(
+        self, bracket: BracketState, candidate: float, ltp: float
+    ) -> float | None:
+        """Raise a trail candidate to clear costs plus a minimum locked profit.
+
+        Once the trade has earned its activation progress, a stop that merely
+        scratches is not worth holding: the floor is round-trip costs plus
+        TRAIL_MIN_LOCKED_PROFIT_R of initial risk. Returns None when the floor
+        cannot be placed with room below price (it would be a hair-trigger).
+        """
+        entry = float(bracket.entry_price or 0.0)
+        initial_sl = float(
+            bracket.initial_sl_trigger_price or bracket.sl_trigger_price or 0.0
+        )
+        initial_risk = abs(entry - initial_sl)
+        if entry <= 0 or initial_risk <= 0:
+            return candidate
+        profit_points = (ltp - entry) if bracket.side == "BUY" else (entry - ltp)
+        tier_metric = profit_points / initial_risk
+        if tier_metric < self._trail_activation_r(bracket):
+            return candidate
+        cost = self._breakeven_cost_per_unit(bracket)
+        # The positive-profit component starts only after real progress (0.75R);
+        # before that only costs are cleared, so an early cost-adjusted breakeven
+        # is not converted into a noise-sensitive profit stop.
+        locked_r = self._min_locked_profit_r() if tier_metric >= 0.75 else 0.0
+        locked = cost + (initial_risk * locked_r)
+        room = max(cost, 0.05)
+        if bracket.side == "BUY":
+            proposed = max(float(candidate), entry + locked)
+            return None if proposed >= (ltp - room) else proposed
+        proposed = min(float(candidate), entry - locked)
+        return None if proposed <= (ltp + room) else proposed
+
     def _calculate_tiered_trailing_sl(
         self,
         bracket: BracketState,
@@ -3033,7 +3126,7 @@ class BracketManager:
         # ═══════════════════════════════════════════════════════════
         # TIER 4: EXCELLENT PROFIT (> 6%) - PROTECT 60% + TIGHT TRAIL
         # ═══════════════════════════════════════════════════════════
-        if profit_pct >= tier4_threshold:
+        if tier_metric >= tier4_threshold:
             protection_pct = 0.60
 
             # Tighter ATR multiplier for big winners
