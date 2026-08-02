@@ -9,6 +9,9 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
 )
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    EliteStrategyConfig,
+)
 from nifty_scalper_bot.strategies.signal_identity_patch import (
     _deterministic_id,
     has_setup_anchor,
@@ -28,6 +31,36 @@ def _elite_signal(symbol: str = "NFO:NIFTY2680424400CE") -> EliteSignal:
         strategy_name="VWAPPro",
         metadata={"strategy": "VWAPPro"},
     )
+
+
+class _RepeatingStrategy(EliteStrategy):
+    def __init__(self, role: str = "trigger") -> None:
+        self._role = role
+        super().__init__(
+            config=EliteStrategyConfig(min_confidence=0.0),
+            indicator_engine=SimpleNamespace(),
+        )
+
+    def get_required_indicators(self) -> list[str]:
+        return []
+
+    def _evaluate_signal(
+        self,
+        symbol: str,
+        indicators: dict[str, object],
+        current_price: float,
+        position: object | None = None,
+    ) -> EliteSignal:
+        del indicators, position
+        signal = _elite_signal(symbol)
+        signal.entry_price = current_price
+        signal.metadata.update(
+            {
+                "role": self._role,
+                "contract_side": "CE",
+            }
+        )
+        return signal
 
 
 def test_anchor_is_stamped_from_indicator_context() -> None:
@@ -115,3 +148,29 @@ def test_existing_signal_anchor_is_not_overwritten() -> None:
     EliteStrategy._stamp_setup_anchor(signal, {"latest_bar_ts": BAR_TS + 300.0})
 
     assert signal.metadata["setup_candle_timestamp"] == BAR_TS
+
+
+def test_push_trigger_emits_once_per_setup_anchor() -> None:
+    strategy = _RepeatingStrategy(role="trigger")
+    indicators = {"latest_bar_ts": BAR_TS}
+
+    first = strategy.generate_signal(_elite_signal().symbol, indicators, 100.0)
+    repeated = strategy.generate_signal(_elite_signal().symbol, indicators, 100.5)
+    next_bar = strategy.generate_signal(
+        _elite_signal().symbol,
+        {"latest_bar_ts": BAR_TS + 60.0},
+        101.0,
+    )
+
+    assert first is not None
+    assert repeated is None
+    assert strategy.last_no_vote_reason == "setup_anchor_already_emitted"
+    assert next_bar is not None
+
+
+def test_context_vote_remains_tick_responsive_on_same_anchor() -> None:
+    strategy = _RepeatingStrategy(role="context")
+    indicators = {"latest_bar_ts": BAR_TS}
+
+    assert strategy.generate_signal(_elite_signal().symbol, indicators, 100.0) is not None
+    assert strategy.generate_signal(_elite_signal().symbol, indicators, 100.5) is not None
