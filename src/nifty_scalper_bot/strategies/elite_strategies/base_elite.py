@@ -105,7 +105,7 @@ class EliteStrategy(Strategy):
         self._last_signal_at: datetime | None = None
         self._signals_generated = 0
         self._last_signal: EliteSignal | None = None
-        self._last_emitted_setup_by_symbol: dict[str, tuple[str, str, str]] = {}
+        self._accepted_setup_by_symbol: dict[str, tuple[str, str, str]] = {}
         self._consecutive_evaluation_failures = 0
         self._last_evaluation_error: str | None = None
 
@@ -241,16 +241,16 @@ class EliteStrategy(Strategy):
                     )
                     return None
                 if self._is_duplicate_setup_vote(elite_signal):
-                    self._no_vote("setup_anchor_already_emitted")
+                    self._no_vote("setup_anchor_already_consumed")
                     LOGGER.debug(
-                        "STRATEGY_NO_VOTE strategy=%s symbol=%s reason=setup_anchor_already_emitted",
+                        "STRATEGY_NO_VOTE strategy=%s symbol=%s reason=setup_anchor_already_consumed",
                         self.name,
                         elite_signal.symbol,
                         extra={
                             "event": "STRATEGY_NO_VOTE",
                             "strategy": self.name,
                             "symbol": elite_signal.symbol,
-                            "reason": "setup_anchor_already_emitted",
+                            "reason": "setup_anchor_already_consumed",
                         },
                     )
                     return None
@@ -448,17 +448,12 @@ class EliteStrategy(Strategy):
         metadata.setdefault("setup_candle_timestamp", anchor)
         metadata.setdefault("bar_timestamp", anchor)
 
-    def _is_duplicate_setup_vote(self, elite_signal: EliteSignal) -> bool:
-        """Consume one trigger vote per symbol/setup anchor.
-
-        Push evaluation runs on live ticks, but trigger setups are defined by a
-        finalized candle/structure anchor. Re-emitting the same trigger vote on
-        every tick only repeats arbitration and plan construction. Context
-        strategies remain tick-responsive and are deliberately excluded.
-        """
+    def _setup_vote_key(
+        self, elite_signal: EliteSignal
+    ) -> tuple[str, tuple[str, str, str]] | None:
         metadata = elite_signal.metadata
         if str(metadata.get("role") or "trigger").strip().lower() == "context":
-            return False
+            return None
         anchor = next(
             (
                 metadata.get(key)
@@ -468,7 +463,7 @@ class EliteStrategy(Strategy):
             None,
         )
         if anchor is None:
-            return False
+            return None
         symbol_key = str(elite_signal.symbol or "").strip().upper()
         side = str(
             metadata.get("contract_side")
@@ -476,11 +471,36 @@ class EliteStrategy(Strategy):
             or metadata.get("side")
             or ""
         ).strip().upper()
-        vote_key = (str(anchor), str(elite_signal.signal), side)
-        if self._last_emitted_setup_by_symbol.get(symbol_key) == vote_key:
-            return True
-        self._last_emitted_setup_by_symbol[symbol_key] = vote_key
-        return False
+        return symbol_key, (str(anchor), str(elite_signal.signal), side)
+
+    def _is_duplicate_setup_vote(self, elite_signal: EliteSignal) -> bool:
+        """Return whether this finalized trigger setup already entered.
+
+        A setup is consumed only after the existing order-accepted callback.
+        Failed quote/risk/arbitration attempts can therefore retry safely while
+        an accepted setup cannot keep firing after an exit or tick retry.
+        """
+        resolved = self._setup_vote_key(elite_signal)
+        if resolved is None:
+            return False
+        symbol_key, vote_key = resolved
+        return self._accepted_setup_by_symbol.get(symbol_key) == vote_key
+
+    def notify_entry_accepted(self, side: str) -> None:
+        """Consume the last emitted trigger setup after order acceptance."""
+        signal = self._last_signal
+        if signal is None:
+            return
+        resolved = self._setup_vote_key(signal)
+        if resolved is None:
+            return
+        symbol_key, vote_key = resolved
+        accepted_side = str(side or "").strip().upper()
+        vote_side = vote_key[2]
+        if accepted_side in {"CE", "PE"} and vote_side in {"CE", "PE"}:
+            if accepted_side != vote_side:
+                return
+        self._accepted_setup_by_symbol[symbol_key] = vote_key
 
     def _no_vote(self, reason: str) -> None:
         """Record a single no-vote reason. Args: reason. Returns: None. Raises: none."""
