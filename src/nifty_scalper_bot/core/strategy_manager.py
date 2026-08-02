@@ -569,8 +569,10 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     metadata_side = str(metadata.get("trade_side") or metadata.get("side") or "").upper()
     if symbol_side in {"CE", "PE"}:
         if metadata_side in {"CE", "PE"} and metadata_side != symbol_side:
+            # A strategy asking for PE must never be reinterpreted as a CE vote.
             metadata["side_conflict"] = True
             metadata["side_from_metadata"] = metadata_side
+            metadata["no_vote_reason"] = "strategy_contract_side_conflict"
         side = symbol_side
     else:
         side = metadata_side or symbol_side
@@ -590,7 +592,11 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     confidence_score = float(signal.confidence or 0.0) * 10.0
 
     raw_setup_score = max(0.0, min(10.0, score_candidate))
-    vote_score = max(raw_setup_score, max(0.0, min(10.0, confidence_score)))
+    # Confidence is derived from the same indicators that produced the setup
+    # score, so max() double-counted the strongest representation and let a 4.0
+    # setup with 0.92 confidence present as a 9.2 vote. Confidence stays a
+    # separate gate; the setup score alone is authoritative.
+    vote_score = raw_setup_score
     reason = str(signal.reason or '').strip()
     reason_list = list(metadata.get("score_reasons") or [])
     if reason and reason not in reason_list:
@@ -3240,10 +3246,44 @@ class StrategyManager(_BaseStrategyManager):
             adjusted = self._apply_weighted_confidence(base_signal, strategy.name, entry)
             signals.append(adjusted)
             vote = signal_to_vote(adjusted, strategy.name)
+            if vote.metadata.get("side_conflict"):
+                signals.pop()
+                reason = "strategy_contract_side_conflict"
+                no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
+                strategy_reasons[strategy.name] = reason
+                recorder = getattr(strategy, "_record_evaluation_failure", None)
+                if callable(recorder):
+                    # A contract violation is a strategy fault, not a no-trade.
+                    recorder(ValueError(reason))
+                log.error(
+                    "STRATEGY_CONTRACT_SIDE_CONFLICT strategy=%s symbol=%s "
+                    "metadata_side=%s contract_side=%s",
+                    strategy.name,
+                    symbol,
+                    vote.metadata.get("side_from_metadata"),
+                    vote.side,
+                    extra={
+                        "event": "STRATEGY_CONTRACT_SIDE_CONFLICT",
+                        "strategy": strategy.name,
+                        "symbol": symbol,
+                    },
+                )
+                continue
             vote = self._apply_regime_vote_weight(vote=vote, regime_name=regime_name)
             signal_votes.append((adjusted, vote))
-            if len(signals) >= max_votes:
-                break
+
+        # Rank after evaluating every eligible strategy. Capping inside the loop
+        # made the outcome depend on registration order rather than on the market.
+        if len(signal_votes) > max_votes:
+            signal_votes.sort(
+                key=lambda pair: (
+                    -float(pair[1].score or 0.0),
+                    -float(pair[1].confidence or 0.0),
+                    str(pair[1].strategy),
+                )
+            )
+            del signal_votes[max_votes:]
+            signals = [item for item, _vote in signal_votes]
 
         elapsed = time.monotonic() - evaluation_start
         if elapsed > 3.0:
