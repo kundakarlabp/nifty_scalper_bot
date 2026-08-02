@@ -1,5 +1,8 @@
 from nifty_scalper_bot.strategies.elite_strategies.config_models import OrderFlowStrategyConfig
-from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
+from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
+    OrderFlowStrategy,
+    _context_confirmation_score,
+)
 
 
 def test_orderflow_no_missing_depth_when_bid_ask_and_depth_exist() -> None:
@@ -17,6 +20,15 @@ def test_orderflow_no_missing_depth_when_bid_ask_and_depth_exist() -> None:
     signal = strategy._evaluate_signal('NFO:NIFTY26MAY24000CE', indicators, current_price=100.5)
     assert signal is not None
     assert getattr(strategy, 'last_no_vote_reason', None) != 'missing_depth'
+    assert signal.metadata['context_evidence_score'] == 6.0
+    assert signal.metadata['context_bonus_score'] == 3.0
+
+
+def test_orderflow_context_floor_does_not_reinforce_a_trigger() -> None:
+    assert _context_confirmation_score(4.0, 4.0) == (0.0, 0.0)
+    assert _context_confirmation_score(6.0, 4.0) == (2.0, 1.0)
+    assert _context_confirmation_score(10.0, 4.0) == (6.0, 3.0)
+
 
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 
