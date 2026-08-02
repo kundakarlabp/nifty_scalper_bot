@@ -888,19 +888,12 @@ class BracketManager:
                                 bracket.symbol,
                             )
                             continue
-                        if bracket.side == "BUY" and self._sl_crossed(bracket, ltp):
-                            pending.append(
-                                (
-                                    bracket,
-                                    {
-                                        "type": "SL",
-                                        "price": ltp,
-                                        "qty": bracket.remaining_quantity,
-                                        "reason": "WATCHDOG_HARD_SL",
-                                    },
-                                )
+                        if bracket.side not in {"BUY", "SELL"}:
+                            continue
+                        if self._sl_crossed(bracket, ltp):
+                            exec_px, exec_src = self._executable_exit_price(
+                                bracket, ltp
                             )
-                        elif bracket.side == "SELL" and self._sl_crossed(bracket, ltp):
                             pending.append(
                                 (
                                     bracket,
@@ -908,7 +901,12 @@ class BracketManager:
                                         "type": "SL",
                                         "price": ltp,
                                         "qty": bracket.remaining_quantity,
-                                        "reason": "WATCHDOG_HARD_SL",
+                                        "trigger_price": exec_px,
+                                        "trigger_price_source": exec_src,
+                                        "reason": (
+                                            f"WATCHDOG_HARD_SL trigger={exec_px:.2f} "
+                                            f"src={exec_src}"
+                                        ),
                                     },
                                 )
                             )
@@ -1944,13 +1942,23 @@ class BracketManager:
         return float(price), "bid" if bracket.side == "BUY" else "ask"
 
     def _sl_crossed(self, bracket: BracketState, ltp: float) -> bool:
-        """Return True when a tick crosses stop-loss. Args: bracket, ltp; Returns: bool; Raises: none."""
+        """Return True when the stop is breached on the executable side.
+
+        The watchdog is the independent protection path used when normal tick
+        evaluation is delayed or blocked, so it must not carry weaker stop
+        semantics than `_evaluate_exit_fast`. A long is sold into the bid and a
+        short bought back at the ask; an already-breached executable price is
+        sufficient, since requiring a freshly observed crossing would let a
+        position that is already liquidatable below its stop keep running.
+        """
+        exit_px, _source = self._executable_exit_price(bracket, ltp)
+        stop = float(bracket.sl_trigger_price or 0.0)
+        if stop <= 0:
+            return False
         prev_ltp = float(bracket.previous_ltp or bracket.last_ltp or ltp)
         if bracket.side == "BUY":
-            return (
-                prev_ltp > bracket.sl_trigger_price and ltp <= bracket.sl_trigger_price
-            )
-        return prev_ltp < bracket.sl_trigger_price and ltp >= bracket.sl_trigger_price
+            return exit_px <= stop or (prev_ltp > stop and exit_px <= stop)
+        return exit_px >= stop or (prev_ltp < stop and exit_px >= stop)
 
     def _evaluate_exit_fast(
         self,

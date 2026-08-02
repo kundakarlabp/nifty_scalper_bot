@@ -718,3 +718,60 @@ def test_tier4_uses_r_not_premium_percent() -> None:
     )
     assert new_sl is not None, "Tier 4 must engage on R, not premium percent"
     assert new_sl > 100.0
+
+
+def _watchdog_bracket(manager, order_id, symbol, side, sl):
+    manager.register_virtual_bracket(
+        order_id, symbol, side, 65, 100.0, sl,
+        120.0 if side == "BUY" else 80.0, activate_immediately=True,
+    )
+    bracket = manager.get_bracket(order_id)
+    assert bracket is not None
+    return bracket
+
+
+def test_watchdog_stop_uses_bid_for_a_long_position() -> None:
+    """The watchdog is the independent protection path; it must not carry
+    weaker stop semantics than the normal tick evaluator."""
+    manager = BracketManager(order_manager=Mock())
+    bracket = _watchdog_bracket(manager, "wd-1", "NFO:NIFTYWD1CE", "BUY", 99.0)
+    manager._exit_quotes["NFO:NIFTYWD1CE"] = (98.50, 101.50, time.time())
+
+    assert manager._sl_crossed(bracket, 100.50) is True
+
+
+def test_watchdog_stop_uses_ask_for_a_short_position() -> None:
+    manager = BracketManager(order_manager=Mock())
+    bracket = _watchdog_bracket(manager, "wd-2", "NFO:NIFTYWD2CE", "SELL", 101.0)
+    manager._exit_quotes["NFO:NIFTYWD2CE"] = (98.50, 101.50, time.time())
+
+    assert manager._sl_crossed(bracket, 99.50) is True
+
+
+def test_watchdog_holds_when_executable_side_has_not_breached() -> None:
+    manager = BracketManager(order_manager=Mock())
+    bracket = _watchdog_bracket(manager, "wd-3", "NFO:NIFTYWD3CE", "BUY", 97.0)
+    manager._exit_quotes["NFO:NIFTYWD3CE"] = (98.50, 99.50, time.time())
+
+    assert manager._sl_crossed(bracket, 99.00) is False
+
+
+def test_watchdog_falls_back_to_ltp_on_a_stale_quote() -> None:
+    manager = BracketManager(order_manager=Mock())
+    bracket = _watchdog_bracket(manager, "wd-4", "NFO:NIFTYWD4CE", "BUY", 99.0)
+    # A generous but stale bid must not suppress the watchdog.
+    manager._exit_quotes["NFO:NIFTYWD4CE"] = (105.0, 106.0, time.time() - 600.0)
+
+    price, source = manager._executable_exit_price(bracket, 98.0)
+    assert (price, source) == (98.0, "ltp_stale_quote")
+    assert manager._sl_crossed(bracket, 98.0) is True
+
+
+def test_watchdog_payload_records_the_trigger_source() -> None:
+    manager = BracketManager(order_manager=Mock())
+    bracket = _watchdog_bracket(manager, "wd-5", "NFO:NIFTYWD5CE", "BUY", 99.0)
+    manager._exit_quotes["NFO:NIFTYWD5CE"] = (98.50, 101.50, time.time())
+
+    exec_px, exec_src = manager._executable_exit_price(bracket, 100.50)
+    assert exec_px == 98.50
+    assert exec_src == "bid"
