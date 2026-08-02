@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/canonical-trailing-profit-floor
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -49,12 +52,15 @@ jobs:
           assert source.count(tier1_old) == 1, 'tier 1 anchor changed'
           source = source.replace(tier1_old, tier1_new, 1)
 
-          source = source.replace('''                return protected_sl\n            else:\n                profit_amount = entry - high_water\n                protected_sl = entry - (profit_amount * protection_pct)\n                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")\n                return protected_sl\n''', '''                return _apply_minimum_profit_floor(protected_sl)\n            else:\n                profit_amount = entry - high_water\n                protected_sl = entry - (profit_amount * protection_pct)\n                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")\n                return _apply_minimum_profit_floor(protected_sl)\n''', 1)
+          tier2_old = '''                return protected_sl\n            else:\n                profit_amount = entry - high_water\n                protected_sl = entry - (profit_amount * protection_pct)\n                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")\n                return protected_sl\n'''
+          tier2_new = '''                return _apply_minimum_profit_floor(protected_sl)\n            else:\n                profit_amount = entry - high_water\n                protected_sl = entry - (profit_amount * protection_pct)\n                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")\n                return _apply_minimum_profit_floor(protected_sl)\n'''
+          assert source.count(tier2_old) == 1, 'tier 2 return anchor changed'
+          source = source.replace(tier2_old, tier2_new, 1)
 
-          tier3_buy = '''                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")\n                return protected_sl\n'''
-          tier3_buy_new = '''                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")\n                return _apply_minimum_profit_floor(protected_sl)\n'''
-          assert source.count(tier3_buy) >= 2, 'tier 3 return anchors changed'
-          source = source.replace(tier3_buy, tier3_buy_new, 2)
+          tier3_return = '''                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")\n                return protected_sl\n'''
+          tier3_return_new = '''                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")\n                return _apply_minimum_profit_floor(protected_sl)\n'''
+          assert source.count(tier3_return) == 2, 'tier 3 return anchors changed'
+          source = source.replace(tier3_return, tier3_return_new, 2)
 
           tier4_old = '''        # TIER 4: EXCELLENT PROFIT (> 6%) - PROTECT 60% + TIGHT TRAIL\n        # ═══════════════════════════════════════════════════════════\n        if profit_pct >= tier4_threshold:\n'''
           tier4_new = '''        # TIER 4: EXCELLENT PROFIT - PROTECT 60% + TIGHT TRAIL\n        # ═══════════════════════════════════════════════════════════\n        if tier_metric >= tier4_threshold:\n'''
@@ -144,7 +150,7 @@ def test_tier4_uses_r_metric_not_premium_percentage(monkeypatch) -> None:
     )
 
     assert level is not None
-    assert level >= pytest.approx(1009.0)
+    assert level >= 1009.0
 
 
 def test_percent_fallback_remains_available_when_initial_risk_unknown(monkeypatch) -> None:
