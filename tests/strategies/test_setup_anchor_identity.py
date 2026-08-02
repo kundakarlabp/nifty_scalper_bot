@@ -150,21 +150,25 @@ def test_existing_signal_anchor_is_not_overwritten() -> None:
     assert signal.metadata["setup_candle_timestamp"] == BAR_TS
 
 
-def test_push_trigger_emits_once_per_setup_anchor() -> None:
+def test_trigger_retry_is_allowed_until_entry_is_accepted() -> None:
     strategy = _RepeatingStrategy(role="trigger")
     indicators = {"latest_bar_ts": BAR_TS}
+    symbol = _elite_signal().symbol
 
-    first = strategy.generate_signal(_elite_signal().symbol, indicators, 100.0)
-    repeated = strategy.generate_signal(_elite_signal().symbol, indicators, 100.5)
+    first = strategy.generate_signal(symbol, indicators, 100.0)
+    retry_before_acceptance = strategy.generate_signal(symbol, indicators, 100.5)
+    strategy.notify_entry_accepted("CE")
+    repeated_after_acceptance = strategy.generate_signal(symbol, indicators, 101.0)
     next_bar = strategy.generate_signal(
-        _elite_signal().symbol,
+        symbol,
         {"latest_bar_ts": BAR_TS + 60.0},
-        101.0,
+        101.5,
     )
 
     assert first is not None
-    assert repeated is None
-    assert strategy.last_no_vote_reason == "setup_anchor_already_emitted"
+    assert retry_before_acceptance is not None
+    assert repeated_after_acceptance is None
+    assert strategy.last_no_vote_reason == "setup_anchor_already_consumed"
     assert next_bar is not None
 
 
@@ -173,4 +177,5 @@ def test_context_vote_remains_tick_responsive_on_same_anchor() -> None:
     indicators = {"latest_bar_ts": BAR_TS}
 
     assert strategy.generate_signal(_elite_signal().symbol, indicators, 100.0) is not None
+    strategy.notify_entry_accepted("CE")
     assert strategy.generate_signal(_elite_signal().symbol, indicators, 100.5) is not None
