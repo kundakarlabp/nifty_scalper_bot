@@ -46,6 +46,11 @@ class VWAPProStrategy(EliteStrategy):
         self._slack_atr_mult = float(os.getenv('VWAP_SLACK_ATR_MULT', '1.5') or 1.5)
         self._max_distance_pct = float(os.getenv('VWAP_MAX_OPTION_DISTANCE_PCT', '0.18') or 0.18)
         self._max_atr_distance_mult = float(os.getenv('VWAP_MAX_ATR_DISTANCE_MULT', '1.5') or 1.5)
+        self._min_penetration_atr = max(
+            0.0,
+            float(os.getenv("VWAP_MIN_PENETRATION_ATR_MULT", "0.15") or 0.15),
+        )
+        self._accepted_thesis_sides: set[str] = set()
         self._futures_slope_neutral_eps = float(os.getenv("VWAP_FUTURES_SLOPE_NEUTRAL_EPS", "0.00005") or 0.00005)
         self._allow_early_trend_pullback = str(
             os.getenv("VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK_LIVE", "false")
@@ -54,6 +59,12 @@ class VWAPProStrategy(EliteStrategy):
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._early_trend_min_context_conf = float(os.getenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.90") or 0.90)
         self._early_trend_max_context_age = float(os.getenv("VWAP_EARLY_TREND_MAX_CONTEXT_AGE", "2.0") or 2.0)
+
+    def notify_entry_accepted(self, side: str) -> None:
+        """Disarm an accepted VWAP thesis until premium closes below VWAP."""
+        resolved = str(side or "").strip().upper()
+        if resolved in {"CE", "PE"}:
+            self._accepted_thesis_sides.add(resolved)
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicators set. Raises: Exception."""
@@ -183,14 +194,28 @@ class VWAPProStrategy(EliteStrategy):
             if not option_premium_domain:
                 self._no_vote('invalid_price_domain')
                 return None
-            premium_above_vwap = current_price >= vwap
+
+            # An accepted VWAP trade owns this side's thesis until a finalized
+            # premium candle closes below VWAP. The reset candle only rearms;
+            # it cannot immediately originate the next trade.
+            if contract_side in self._accepted_thesis_sides:
+                if close < vwap:
+                    self._accepted_thesis_sides.discard(contract_side)
+                    self._no_vote('vwap_thesis_reset')
+                else:
+                    self._no_vote('vwap_thesis_not_reset')
+                return None
+
+            premium_above_vwap = close >= vwap
             if premium_above_vwap:
                 score += 2.0
                 reasons.append('premium_above_vwap')
 
             candle_body = abs(close - open_price)
             atr_safe = max(atr, current_price * 0.01, 1.0)
-            continuation_confirmed = candle_body >= (0.35 * atr_safe)
+            continuation_confirmed = bool(
+                close > open_price and candle_body >= (0.35 * atr_safe)
+            )
             if continuation_confirmed:
                 score += 1.5
                 reasons.append('premium_continuation')
@@ -200,6 +225,14 @@ class VWAPProStrategy(EliteStrategy):
                 pullback_flag = True
                 score += 1.5
                 reasons.append('premium_reclaim_vwap')
+
+            penetration_atr = max(0.0, close - vwap) / atr_safe
+            penetration_confirmed = bool(
+                premium_above_vwap
+                and penetration_atr >= self._min_penetration_atr
+            )
+            if penetration_confirmed:
+                reasons.append('premium_vwap_penetration')
 
             if distance_pct <= self._max_distance_pct * 0.7:
                 score += 1.0
@@ -287,6 +320,32 @@ class VWAPProStrategy(EliteStrategy):
                 boost = float(os.getenv("VWAP_PRO_TREND_CONTEXT_BOOST", "0.5") or "0.5")
                 score = min(10.0, score + boost)
                 reasons.append("trend_context_boost")
+
+            event_confirmed = bool(
+                continuation_confirmed
+                or pullback_flag
+                or penetration_confirmed
+                or early_trend_pullback
+            )
+            if is_live and not event_confirmed:
+                self._no_vote('vwap_event_unconfirmed')
+                LOGGER.info(
+                    "STRATEGY_NO_VOTE strategy=VWAPPro symbol=%s reason=vwap_event_unconfirmed close=%.2f vwap=%.2f penetration_atr=%.3f",
+                    symbol,
+                    close,
+                    vwap,
+                    penetration_atr,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "VWAPPro",
+                        "symbol": symbol,
+                        "reason": "vwap_event_unconfirmed",
+                        "close": close,
+                        "vwap": vwap,
+                        "penetration_atr": penetration_atr,
+                    },
+                )
+                return None
             threshold_source = 'trend_aligned' if trend_alignment else 'base'
 
             if score < min_score:
@@ -408,6 +467,9 @@ class VWAPProStrategy(EliteStrategy):
                 'futures_volume_ratio': futures_volume_ratio,
                 'trigger_block_reason': '' if strategy_score >= min_score else 'weak_score',
                 'continuation_confirmed': continuation_confirmed,
+                'penetration_confirmed': penetration_confirmed,
+                'vwap_penetration_atr': round(penetration_atr, 4),
+                'vwap_event_confirmed': event_confirmed,
                 'early_trend_pullback': early_trend_pullback,
                 'setup_invalidation_premium': current_price - atr_safe,
                 'invalidation_level_domain': 'option_premium',
