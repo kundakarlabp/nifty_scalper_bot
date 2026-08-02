@@ -105,6 +105,7 @@ class EliteStrategy(Strategy):
         self._last_signal_at: datetime | None = None
         self._signals_generated = 0
         self._last_signal: EliteSignal | None = None
+        self._last_emitted_setup_by_symbol: dict[str, tuple[str, str, str]] = {}
         self._consecutive_evaluation_failures = 0
         self._last_evaluation_error: str | None = None
 
@@ -236,6 +237,20 @@ class EliteStrategy(Strategy):
                         extra={
                             "event": "elite_strategy_below_min_conf",
                             "strategy": self.name,
+                        },
+                    )
+                    return None
+                if self._is_duplicate_setup_vote(elite_signal):
+                    self._no_vote("setup_anchor_already_emitted")
+                    LOGGER.debug(
+                        "STRATEGY_NO_VOTE strategy=%s symbol=%s reason=setup_anchor_already_emitted",
+                        self.name,
+                        elite_signal.symbol,
+                        extra={
+                            "event": "STRATEGY_NO_VOTE",
+                            "strategy": self.name,
+                            "symbol": elite_signal.symbol,
+                            "reason": "setup_anchor_already_emitted",
                         },
                     )
                     return None
@@ -389,6 +404,12 @@ class EliteStrategy(Strategy):
         "setup_candle_timestamp",
         "signal_timestamp",
     )
+    _SETUP_VOTE_ID_SOURCES = (
+        "setup_id",
+        "setup_structure_id",
+        "structure_id",
+        *_SETUP_ANCHOR_SOURCES,
+    )
 
     @classmethod
     def _stamp_setup_anchor(
@@ -426,6 +447,40 @@ class EliteStrategy(Strategy):
         metadata.setdefault("latest_bar_ts", anchor)
         metadata.setdefault("setup_candle_timestamp", anchor)
         metadata.setdefault("bar_timestamp", anchor)
+
+    def _is_duplicate_setup_vote(self, elite_signal: EliteSignal) -> bool:
+        """Consume one trigger vote per symbol/setup anchor.
+
+        Push evaluation runs on live ticks, but trigger setups are defined by a
+        finalized candle/structure anchor. Re-emitting the same trigger vote on
+        every tick only repeats arbitration and plan construction. Context
+        strategies remain tick-responsive and are deliberately excluded.
+        """
+        metadata = elite_signal.metadata
+        if str(metadata.get("role") or "trigger").strip().lower() == "context":
+            return False
+        anchor = next(
+            (
+                metadata.get(key)
+                for key in self._SETUP_VOTE_ID_SOURCES
+                if metadata.get(key) not in (None, "")
+            ),
+            None,
+        )
+        if anchor is None:
+            return False
+        symbol_key = str(elite_signal.symbol or "").strip().upper()
+        side = str(
+            metadata.get("contract_side")
+            or metadata.get("trade_side")
+            or metadata.get("side")
+            or ""
+        ).strip().upper()
+        vote_key = (str(anchor), str(elite_signal.signal), side)
+        if self._last_emitted_setup_by_symbol.get(symbol_key) == vote_key:
+            return True
+        self._last_emitted_setup_by_symbol[symbol_key] = vote_key
+        return False
 
     def _no_vote(self, reason: str) -> None:
         """Record a single no-vote reason. Args: reason. Returns: None. Raises: none."""
