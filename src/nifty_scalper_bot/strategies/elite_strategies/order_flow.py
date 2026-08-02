@@ -244,7 +244,7 @@ class OrderFlowStrategy(EliteStrategy):
                     'quote_update_version': quote_update_version,
                 }
                 side_aligns = direction in {'CE', 'PE'} and direction == side
-                metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'tick_supports_direction': tick_supports})
+                metadata.update({'context_role': 'confirmation', 'vote_timestamp': time.time(), 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'tick_supports_direction': tick_supports})
                 return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.55, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
 
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
@@ -494,7 +494,7 @@ class OrderFlowStrategy(EliteStrategy):
             }
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'
-            metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
+            metadata.update({'context_role': 'confirmation', 'vote_timestamp': time.time(), 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
             LOGGER.info(
                 'ORDERFLOW_TRIGGER_DECISION symbol=%s side=%s trigger_conditions_met=%s trigger_block_reason=%s score=%.2f spread_pct=%.2f context_age_seconds=%s',
                 symbol,

@@ -146,6 +146,23 @@ def _enrich_option_candidate_metadata(symbol: str, indicators: t.Mapping[str, t.
     return enriched
 
 
+def resolve_canonical_vwap(indicators: t.Mapping[str, t.Any] | None) -> float | None:
+    """Single VWAP authority for every strategy-layer consumer.
+
+    Precedence is exchange/session cumulative VWAP first, then the rolling
+    proxy. Direction gating, SMC enrichment and VWAPPro previously resolved in
+    different orders and could classify the same snapshot in opposite
+    directions. Returns None when no VWAP evidence exists — never the current
+    price, which manufactures a reclaim out of nothing.
+    """
+    payload = indicators or {}
+    for key in ("exchange_vwap", "session_vwap", "vwap"):
+        value = _safe_float_value(payload.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
 def _enrich_smc_pre_strategy(
     symbol: str,
     indicators: t.Mapping[str, t.Any],
@@ -207,15 +224,14 @@ def _enrich_smc_pre_strategy(
     if premium_current <= 0 and fallback_price is not None:
         premium_current = fallback_price
     premium_prev_close = previous["close"]
-    premium_vwap = _safe_float_value(enriched.get("vwap"))
-    if premium_vwap is None:
-        premium_vwap = _safe_float_value(enriched.get("exchange_vwap"))
+    premium_vwap = resolve_canonical_vwap(enriched)
     if premium_vwap is None:
         volume_sum = sum(max(0.0, bar["volume"]) for bar in ohlcv)
         if volume_sum > 0:
             premium_vwap = sum(((bar["high"] + bar["low"] + bar["close"]) / 3.0) * max(0.0, bar["volume"]) for bar in ohlcv) / volume_sum
-        else:
-            premium_vwap = premium_current
+        # No volume-backed VWAP exists. Falling back to the current premium made
+        # prev_close < price read as a VWAP reclaim on zero evidence, so the
+        # feature stays absent instead of being manufactured.
 
     tolerance = max(abs(premium_current) * 0.003, 0.05)
     recent_bars = ohlcv[-5:]
@@ -2189,7 +2205,7 @@ class StrategyManager(_BaseStrategyManager):
         snapshot = {
             "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
-            "vwap": _num("vwap", "exchange_vwap", "session_vwap"),
+            "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
             "ema_fast": _num("ema_fast", "ema_9", "ema9"),
             "ema_slow": _num("ema_slow", "ema_21", "ema21"), "ema_50": _num("ema_50", "ema50"),
             "adx": _num("adx"), "atr": _num("atr"), "volume": _num("volume"),
@@ -2241,7 +2257,7 @@ class StrategyManager(_BaseStrategyManager):
         day_open = _f("open") or _f("day_open") or _f("first_ltp")
         recent_ltp_delta = _f("recent_ltp_delta") or _f("net_change") or _f("price_change_pct")
         tick_slope = _f("tick_slope")
-        vwap = _f("vwap") or _f("exchange_vwap") or _f("session_vwap")
+        vwap = _f("exchange_vwap") or _f("session_vwap") or _f("vwap")
         ema_fast = _f("ema_fast") or _f("ema_9") or _f("ema9")
         ema_slow = _f("ema_slow") or _f("ema_21") or _f("ema21")
         ema_50 = _f("ema_50") or _f("ema50")
@@ -3687,8 +3703,28 @@ class StrategyManager(_BaseStrategyManager):
                 continue
         return max(0.0, self._extract_raw_score(vote))
 
+    def _context_vote_is_timestamped(self, vote: StrategyVote) -> bool:
+        """Return whether a context vote proves it is current.
+
+        A hard veto blocks an otherwise valid trade, so it requires an
+        authoritative, fresh timestamp. Missing or stale provenance downgrades
+        the vote to a soft penalty instead of silently defaulting its age to
+        "now" and letting an undated vote veto at full strength.
+        """
+        raw = (vote.metadata or {}).get("vote_timestamp")
+        try:
+            stamped = float(raw)
+        except (TypeError, ValueError):
+            return False
+        if stamped <= 0:
+            return False
+        max_age = max(0.0, self._env_float("CONTEXT_VOTE_MAX_AGE_SEC", 30.0))
+        return (time.time() - stamped) <= max_age
+
     def _extract_context_veto_score(self, vote: StrategyVote) -> float:
         """Args: vote. Returns: context veto score. Raises: none."""
+        if not self._context_vote_is_timestamped(vote):
+            return 0.0
         payload = dict(vote.metadata or {})
         for key in ("context_veto_score", "context_score", "raw_setup_score", "raw_vote_score", "vote_score"):
             try:
@@ -4708,14 +4744,33 @@ class StrategyManager(_BaseStrategyManager):
     ) -> tuple[float, dict[str, t.Any]]:
         """Args: vote+indicators. Returns: trade quality score and metadata. Raises: none."""
         payload = dict(vote.metadata or {})
+        # Missing evidence must score zero. The previous positive defaults let a
+        # setup accumulate quality points for facts never demonstrated, and
+        # "strategy_score" could carry the adaptive historical performance score
+        # injected by _apply_weighted_confidence rather than this trade's setup.
+        raw_setup = float(payload.get("raw_setup_score", vote.score or 0.0))
+        has_direction = payload.get("direction_alignment_score") is not None
+        has_liquidity = payload.get("liquidity_score") is not None
+        has_freshness = indicators.get("stale_data_used") is not None
         components = {
-            "strategy_score": min(3.0, max(0.0, float(payload.get("strategy_score", vote.score or 0.0)) / 3.0)),
-            "direction_alignment": float(payload.get("direction_alignment_score", 1.0)),
-            "liquidity_spread_quality": min(2.0, max(0.0, float(payload.get("liquidity_score", 1.0)))),
-            "freshness_tick_quality": 1.0 if not bool(indicators.get("stale_data_used")) else 0.0,
+            "strategy_score": min(3.0, max(0.0, raw_setup / 3.0)),
+            "direction_alignment": (
+                float(payload.get("direction_alignment_score")) if has_direction else 0.0
+            ),
+            "liquidity_spread_quality": (
+                min(2.0, max(0.0, float(payload.get("liquidity_score"))))
+                if has_liquidity
+                else 0.0
+            ),
+            "freshness_tick_quality": (
+                1.0 if has_freshness and not bool(indicators.get("stale_data_used")) else 0.0
+            ),
             "same_side_context_confirmation": 1.0 if any(v.side == vote.side for v in context_votes) else 0.0,
-            "market_regime_time_suitability": 1.0,
+            "market_regime_time_suitability": float(
+                payload.get("regime_time_suitability_score") or 0.0
+            ),
         }
+        evidence_complete = bool(has_direction and has_liquidity and has_freshness)
         penalties: dict[str, float] = {}
         score_reasons = {str(r) for r in (payload.get("score_reasons") or [])}
         already_blocked_by_strategy = False
@@ -4731,7 +4786,12 @@ class StrategyManager(_BaseStrategyManager):
         spread_pct = float(payload.get("spread_pct") or indicators.get("spread_pct") or 0.0)
         if spread_pct > float(os.getenv("STRATEGY_MAX_SPREAD_PCT", "28.0")) and not already_blocked_by_strategy:
             penalties["spread_above_max"] = -3.0
-        if any(v.side in {"CE", "PE"} and v.side != vote.side and float((v.metadata or {}).get("context_veto_score", v.score)) >= 8.0 for v in context_votes):
+        if any(
+            v.side in {"CE", "PE"}
+            and v.side != vote.side
+            and self._extract_context_veto_score(v) >= 8.0
+            for v in context_votes
+        ):
             penalties["opposite_context_veto"] = -4.0
         if not selected_ok and not near_atm_ok:
             penalties["non_selected_far_otm"] = -3.0
@@ -4749,6 +4809,7 @@ class StrategyManager(_BaseStrategyManager):
             "trade_quality_components": components,
             "trade_quality_penalties": penalties,
             "quality_block_reason": block_reason,
+            "quality_evidence_complete": evidence_complete,
             "already_blocked_by_strategy": already_blocked_by_strategy,
             "strategy_block_reason": strategy_block_reason or None,
             "trade_quality_symbol": symbol,
