@@ -1,0 +1,180 @@
+name: Apply canonical trailing floor patch
+
+on:
+  push:
+    branches:
+      - fix/canonical-trailing-profit-floor
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/canonical-trailing-profit-floor
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply asserted canonical edits
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path('src/nifty_scalper_bot/execution/bracket_core.py')
+          source = source_path.read_text(encoding='utf-8')
+
+          config_old = '''        self._trail_tier4_r = parse_float_env(os.getenv("TRAIL_TIER4_R"), 3.0)\n        self._exit_retry_enabled = os.getenv(\n'''
+          config_new = '''        self._trail_tier4_r = parse_float_env(os.getenv("TRAIL_TIER4_R"), 3.0)\n        # Minimum net profit, expressed in initial-risk units, that must be\n        # protected once trailing activates. Transaction cost is added separately.\n        self._trail_min_locked_profit_r = max(\n            0.0,\n            parse_float_env(os.getenv("TRAIL_MIN_LOCKED_PROFIT_R"), 0.10),\n        )\n        self._exit_retry_enabled = os.getenv(\n'''
+          assert source.count(config_old) == 1, 'tier config anchor changed'
+          source = source.replace(config_old, config_new, 1)
+
+          doc_old = '''        TIERS:\n        - Tier 0 (< 1%): No trailing, use original SL\n        - Tier 1 (1-2%): Lock breakeven\n        - Tier 2 (2-4%): Protect 40% of profit\n        - Tier 3 (4-6%): Protect 50% of profit + ATR trail\n        - Tier 4 (> 6%): Protect 60% of profit + tight ATR trail\n'''
+          doc_new = '''        Canonical tiers use open-profit R multiples whenever initial risk is\n        known; premium percentage is retained only as a degraded fallback. Once\n        Tier 1 activates, every proposed stop must protect transaction costs plus\n        TRAIL_MIN_LOCKED_PROFIT_R of initial risk, provided executable-price room\n        remains. The floor never loosens an existing stop.\n'''
+          assert source.count(doc_old) == 1, 'trailing doc anchor changed'
+          source = source.replace(doc_old, doc_new, 1)
+
+          metric_old = '''        else:\n            tier_metric = profit_pct\n            tier1_threshold = self._trail_tier1_pct\n            tier2_threshold = self._trail_tier2_pct\n            tier3_threshold = self._trail_tier3_pct\n            tier4_threshold = self._trail_tier4_pct\n\n        # ═══════════════════════════════════════════════════════════\n'''
+          metric_new = '''        else:\n            tier_metric = profit_pct\n            tier1_threshold = self._trail_tier1_pct\n            tier2_threshold = self._trail_tier2_pct\n            tier3_threshold = self._trail_tier3_pct\n            tier4_threshold = self._trail_tier4_pct\n\n        cost = self._breakeven_cost_per_unit(bracket)\n        minimum_floor: float | None = None\n        if initial_risk > 0:\n            locked_points = cost + (\n                initial_risk * self._trail_min_locked_profit_r\n            )\n            price_room = max(cost, 0.05)\n            if bracket.side == "BUY":\n                floor_level = entry + locked_points\n                if floor_level <= ltp - price_room:\n                    minimum_floor = floor_level\n            else:\n                floor_level = entry - locked_points\n                if floor_level >= ltp + price_room:\n                    minimum_floor = floor_level\n\n        def _apply_minimum_profit_floor(candidate: float) -> float | None:\n            # R-based floor is unavailable only for degraded percent fallback.\n            if initial_risk <= 0:\n                return candidate\n            if minimum_floor is None:\n                return None\n            if bracket.side == "BUY":\n                return max(candidate, minimum_floor)\n            return min(candidate, minimum_floor)\n\n        # ═══════════════════════════════════════════════════════════\n'''
+          assert source.count(metric_old) == 1, 'tier metric anchor changed'
+          source = source.replace(metric_old, metric_new, 1)
+
+          tier1_old = '''        if tier1_threshold <= tier_metric < tier2_threshold:\n            # Lock at TRUE breakeven: exiting at the entry premium is a loss of\n            # the full round-trip cost, so the stop is offset by that cost.\n            cost = self._breakeven_cost_per_unit(bracket)\n            if bracket.side == "BUY":\n                level = entry + cost\n                if level > current_sl and level <= ltp - cost:\n                    LOGGER.debug(f"🔒 Tier 1: Cost-adjusted breakeven at {level:.2f}")\n                    return level\n            else:\n                level = entry - cost\n                if level < current_sl and level >= ltp + cost:\n                    LOGGER.debug(f"🔒 Tier 1: Cost-adjusted breakeven at {level:.2f}")\n                    return level\n            return None\n'''
+          tier1_new = '''        if tier1_threshold <= tier_metric < tier2_threshold:\n            base_level = entry + cost if bracket.side == "BUY" else entry - cost\n            level = _apply_minimum_profit_floor(base_level)\n            if level is None:\n                return None\n            LOGGER.debug(\n                "Tier 1 net-profit floor symbol=%s metric=%.3f cost=%.3f "\n                "min_locked_r=%.3f level=%.2f",\n                bracket.symbol,\n                tier_metric,\n                cost,\n                self._trail_min_locked_profit_r,\n                level,\n            )\n            return level\n'''
+          assert source.count(tier1_old) == 1, 'tier 1 anchor changed'
+          source = source.replace(tier1_old, tier1_new, 1)
+
+          source = source.replace('''                return protected_sl\n            else:\n                profit_amount = entry - high_water\n                protected_sl = entry - (profit_amount * protection_pct)\n                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")\n                return protected_sl\n''', '''                return _apply_minimum_profit_floor(protected_sl)\n            else:\n                profit_amount = entry - high_water\n                protected_sl = entry - (profit_amount * protection_pct)\n                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")\n                return _apply_minimum_profit_floor(protected_sl)\n''', 1)
+
+          tier3_buy = '''                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")\n                return protected_sl\n'''
+          tier3_buy_new = '''                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")\n                return _apply_minimum_profit_floor(protected_sl)\n'''
+          assert source.count(tier3_buy) >= 2, 'tier 3 return anchors changed'
+          source = source.replace(tier3_buy, tier3_buy_new, 2)
+
+          tier4_old = '''        # TIER 4: EXCELLENT PROFIT (> 6%) - PROTECT 60% + TIGHT TRAIL\n        # ═══════════════════════════════════════════════════════════\n        if profit_pct >= tier4_threshold:\n'''
+          tier4_new = '''        # TIER 4: EXCELLENT PROFIT - PROTECT 60% + TIGHT TRAIL\n        # ═══════════════════════════════════════════════════════════\n        if tier_metric >= tier4_threshold:\n'''
+          assert source.count(tier4_old) == 1, 'tier 4 metric anchor changed'
+          source = source.replace(tier4_old, tier4_new, 1)
+
+          tier4_return = '''                LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")\n                return protected_sl\n'''
+          tier4_return_new = '''                LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")\n                return _apply_minimum_profit_floor(protected_sl)\n'''
+          assert source.count(tier4_return) == 2, 'tier 4 return anchors changed'
+          source = source.replace(tier4_return, tier4_return_new, 2)
+
+          source_path.write_text(source, encoding='utf-8')
+
+          test_path = Path('tests/execution/test_live_exit_hardening.py')
+          tests = test_path.read_text(encoding='utf-8')
+          marker = 'def test_trailing_tier1_locks_positive_net_profit_floor'
+          assert marker not in tests, 'tests already appended'
+          tests += r'''
+
+
+def test_trailing_tier1_locks_positive_net_profit_floor(monkeypatch) -> None:
+    manager, _order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    manager._trail_min_locked_profit_r = 0.10
+    monkeypatch.setattr(manager, "_breakeven_cost_per_unit", lambda _bracket: 1.0)
+    bracket.highest_ltp = 158.0
+
+    level = manager._calculate_tiered_trailing_sl(
+        bracket, ltp=158.0, profit_pct=(8.0 / 150.0) * 100.0,
+        high_water=158.0, atr=3.0,
+    )
+
+    assert level == pytest.approx(152.0)
+
+
+def test_trailing_profit_floor_requires_price_room(monkeypatch) -> None:
+    manager, _order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.trailing_config["breakeven_activation_r"] = 0.10
+    manager._trail_min_locked_profit_r = 0.10
+    monkeypatch.setattr(manager, "_breakeven_cost_per_unit", lambda _bracket: 1.0)
+    bracket.highest_ltp = 151.5
+
+    level = manager._calculate_tiered_trailing_sl(
+        bracket, ltp=151.5, profit_pct=1.0, high_water=151.5, atr=3.0,
+    )
+
+    assert level is None
+
+
+def test_trailing_profit_floor_sell_geometry(monkeypatch) -> None:
+    manager, _order_manager, _broker = _manager()
+    manager.register_virtual_bracket(
+        order_id="entry-short", symbol="NFO:NIFTY2662324050CE", side="SELL",
+        qty=65, price=150.0, sl=160.0, tp=125.0, activate_immediately=True,
+    )
+    bracket = manager.get_bracket("entry-short")
+    assert bracket is not None
+    manager._trail_min_locked_profit_r = 0.10
+    monkeypatch.setattr(manager, "_breakeven_cost_per_unit", lambda _bracket: 1.0)
+    bracket.lowest_ltp = 142.0
+
+    level = manager._calculate_tiered_trailing_sl(
+        bracket, ltp=142.0, profit_pct=(8.0 / 150.0) * 100.0,
+        high_water=142.0, atr=3.0,
+    )
+
+    assert level == pytest.approx(148.0)
+
+
+def test_tier4_uses_r_metric_not_premium_percentage(monkeypatch) -> None:
+    manager, _order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.entry_price = 1000.0
+    bracket.initial_sl_trigger_price = 995.0
+    bracket.sl_trigger_price = 995.0
+    bracket.highest_ltp = 1015.0
+    manager._trail_min_locked_profit_r = 0.10
+    monkeypatch.setattr(manager, "_breakeven_cost_per_unit", lambda _bracket: 0.5)
+    monkeypatch.setattr(manager, "_calculate_momentum", lambda _symbol: 0.0)
+
+    level = manager._calculate_tiered_trailing_sl(
+        bracket, ltp=1015.0, profit_pct=1.5, high_water=1015.0, atr=2.0,
+    )
+
+    assert level is not None
+    assert level >= pytest.approx(1009.0)
+
+
+def test_percent_fallback_remains_available_when_initial_risk_unknown(monkeypatch) -> None:
+    manager, _order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.initial_sl_trigger_price = bracket.entry_price
+    bracket.sl_trigger_price = bracket.entry_price
+    monkeypatch.setattr(manager, "_breakeven_cost_per_unit", lambda _bracket: 1.0)
+
+    level = manager._calculate_tiered_trailing_sl(
+        bracket, ltp=153.0, profit_pct=2.0, high_water=153.0, atr=3.0,
+    )
+
+    assert level is not None
+'''
+          test_path.write_text(tests, encoding='utf-8')
+          PY
+      - name: Install test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Validate targeted regression and compile
+        run: |
+          python -m compileall -q src tests
+          pytest -q tests/execution/test_live_exit_hardening.py
+      - name: Commit canonical source and tests
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/apply-canonical-trailing-floor.yml
+          git add src/nifty_scalper_bot/execution/bracket_core.py tests/execution/test_live_exit_hardening.py
+          git commit -m 'fix(exit): enforce canonical net-profit trailing floor'
+          git push origin HEAD:fix/canonical-trailing-profit-floor
