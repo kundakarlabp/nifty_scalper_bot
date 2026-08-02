@@ -80,7 +80,11 @@ class RuntimeBracketManager(LedgerBracketManager):
             return candidate
 
         cost_points = max(0.0, float(self._breakeven_cost_per_unit(bracket)))
-        locked_r = self._minimum_locked_profit_r()
+        # The positive-profit floor starts only after the canonical 0.75R
+        # progress threshold. Strategies that deliberately arm cost-adjusted
+        # breakeven earlier retain that established behaviour without installing
+        # a noise-sensitive positive-profit stop before meaningful progress.
+        locked_r = self._minimum_locked_profit_r() if tier_metric >= 0.75 else 0.0
         locked_points = cost_points + (initial_risk * locked_r)
         room = max(cost_points, 0.05)
 
