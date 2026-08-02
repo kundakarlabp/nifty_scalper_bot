@@ -1,3 +1,4 @@
+import time
 import pytest
 import types
 from types import SimpleNamespace
@@ -1064,3 +1065,66 @@ def test_legacy_place_order_without_lot_metadata_keeps_safe_defaults(
     sig = inspect.signature(OrderManager.place_order)
     assert sig.parameters["requested_lots"].default == 0
     assert sig.parameters["resolved_lot_size"].default == 0
+
+
+def _live_entry_manager(quote: dict):
+    """Minimal stub exercising the live-entry quote-evidence gate."""
+    m = _manager_stub()
+    m.is_live_mode = lambda: True
+    m._lot_size_for_symbol = lambda _s: 65
+    m._get_latest_quote_safe = lambda _s: quote
+    m._extract_quote_diagnostics = lambda q: OrderManager._extract_quote_diagnostics(m, q)
+    return m
+
+
+def _live_plan(**overrides):
+    kwargs = dict(
+        symbol="NFO:NIFTY24500CE", side="BUY", quantity=65,
+        entry_price=100.0, stop_loss=95.0, take_profit=110.0,
+        intent="ENTRY", trade_lifecycle_id="lc-1", resolved_lot_size=65,
+        client_order_id="coid-1", signal_id="sig-1",
+    )
+    kwargs.update(overrides)
+    return TradePlan(**kwargs)
+
+
+def _reject_reason(quote: dict) -> str | None:
+    m = _live_entry_manager(quote)
+    qd = m._extract_quote_diagnostics(quote)
+    result = OrderManager._validate_live_entry_quote(m, _live_plan(), qd)
+    return None if result is None else result.reason
+
+
+def test_live_entry_rejects_ltp_only_quote() -> None:
+    """An LTP-only quote with no bid/ask and no depth previously passed the
+    final preflight and reached the broker."""
+    assert _reject_reason(
+        {"ltp": 100.0, "received_at": time.time()}
+    ) == "entry_bid_ask_missing"
+
+
+def test_live_entry_rejects_missing_executable_depth() -> None:
+    assert _reject_reason(
+        {"ltp": 100.0, "bid": 99.5, "ask": 100.5, "received_at": time.time()}
+    ) == "entry_executable_depth_missing"
+
+
+def test_live_entry_rejects_insufficient_executable_depth() -> None:
+    """A BUY is filled against the ask, so ask-side depth is what must cover it."""
+    assert _reject_reason(
+        {
+            "ltp": 100.0, "bid": 99.5, "ask": 100.5,
+            "bid_quantity": 5000, "ask_quantity": 25,
+            "received_at": time.time(),
+        }
+    ) == "entry_executable_depth_insufficient"
+
+
+def test_live_entry_accepts_complete_quote_evidence() -> None:
+    assert _reject_reason(
+        {
+            "ltp": 100.0, "bid": 99.5, "ask": 100.5,
+            "bid_quantity": 5000, "ask_quantity": 500,
+            "received_at": time.time(),
+        }
+    ) is None

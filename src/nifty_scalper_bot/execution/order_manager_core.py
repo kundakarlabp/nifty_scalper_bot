@@ -4357,6 +4357,55 @@ class OrderManager:
             }
         return None
 
+    def _validate_live_entry_quote(
+        self, plan: TradePlan, qd: dict[str, Any]
+    ) -> OrderPreflightResult | None:
+        """Fail closed on incomplete quote evidence for a live entry.
+
+        The general checks only rejected a wide spread when both sides were
+        already positive, and depth only when a depth field existed, so an
+        LTP-only quote with bid=0/ask=0 and no depth passed straight through to
+        the broker. Returns None when the quote is fully proven.
+        """
+        if qd["bid"] <= 0 or qd["ask"] < qd["bid"]:
+            return OrderPreflightResult(
+                False,
+                "entry_bid_ask_missing",
+                {"bid": qd["bid"], "ask": qd["ask"]},
+            )
+        if qd.get("age_ms") is None:
+            return OrderPreflightResult(
+                False,
+                "entry_quote_timestamp_unusable",
+                {"timestamp_key": qd.get("timestamp_key")},
+            )
+        if qd["spread_pct"] > plan.max_spread_pct:
+            return OrderPreflightResult(
+                False,
+                "entry_spread_too_wide",
+                {"spread_pct": qd["spread_pct"], "limit_pct": plan.max_spread_pct},
+            )
+        # For one-lot option buying the executable side matters, not the
+        # aggregate book: a BUY entry is filled against the ask.
+        executable_qty = qd["ask_qty"] if plan.side == "BUY" else qd["bid_qty"]
+        if executable_qty <= 0:
+            return OrderPreflightResult(
+                False,
+                "entry_executable_depth_missing",
+                {"side": plan.side, "bid_qty": qd["bid_qty"], "ask_qty": qd["ask_qty"]},
+            )
+        if executable_qty < int(plan.quantity):
+            return OrderPreflightResult(
+                False,
+                "entry_executable_depth_insufficient",
+                {
+                    "side": plan.side,
+                    "executable_qty": executable_qty,
+                    "required_qty": int(plan.quantity),
+                },
+            )
+        return None
+
     def _validate_trade_plan(self, plan: TradePlan) -> OrderPreflightResult:
         symbol = normalize_symbol(plan.symbol)
         if not is_strategy_instrument(symbol):
@@ -4558,6 +4607,10 @@ class OrderManager:
                 "spread_too_wide",
                 {"spread_pct": qd["spread_pct"], "limit_pct": plan.max_spread_pct},
             )
+        if live_entry:
+            quote_rejection = OrderManager._validate_live_entry_quote(self, plan, qd)
+            if quote_rejection is not None:
+                return quote_rejection
         if is_entry and plan.max_signal_age_seconds > 0:
             decision_epoch = 0.0
             with suppress(TypeError, ValueError):

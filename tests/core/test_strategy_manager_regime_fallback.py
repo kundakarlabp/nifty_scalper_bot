@@ -106,3 +106,100 @@ def test_vote_ranking_is_independent_of_registration_order() -> None:
     assert _rank([weak, strong, middle]) == ["Zzz", "Mmm"]
     assert _rank([strong, middle, weak]) == ["Zzz", "Mmm"]
     assert _rank([middle, weak, strong]) == ["Zzz", "Mmm"]
+
+
+def _context_vote(side: str, veto: float, *, stamped: bool = True):
+    import time
+
+    from nifty_scalper_bot.core.strategy_manager import StrategyVote
+
+    metadata = {"context_veto_score": veto}
+    if stamped:
+        metadata["vote_timestamp"] = time.time()
+    return StrategyVote(
+        strategy="OrderFlow", side=side, score=veto,
+        confidence=0.5, reasons=[], metadata=metadata,
+    )
+
+
+def test_undated_context_vote_cannot_hard_veto() -> None:
+    """Defaulting a missing vote timestamp to 'now' let a provenance-free vote
+    block a valid trade at full strength."""
+    manager = StrategyManager([], None, None)
+
+    assert manager._extract_context_veto_score(_context_vote("PE", 9.0)) == 9.0
+    assert (
+        manager._extract_context_veto_score(_context_vote("PE", 9.0, stamped=False))
+        == 0.0
+    )
+
+
+def test_stale_context_vote_cannot_hard_veto() -> None:
+    import time
+
+    manager = StrategyManager([], None, None)
+    vote = _context_vote("PE", 9.0)
+    vote.metadata["vote_timestamp"] = time.time() - 600.0
+
+    assert manager._extract_context_veto_score(vote) == 0.0
+
+
+def test_canonical_vwap_prefers_session_over_rolling_and_never_invents_one() -> None:
+    from nifty_scalper_bot.core.strategy_manager import resolve_canonical_vwap
+
+    assert resolve_canonical_vwap(
+        {"vwap": 102.94, "session_vwap": 103.31, "exchange_vwap": 103.45}
+    ) == 103.45
+    assert resolve_canonical_vwap({"vwap": 102.94, "session_vwap": 103.31}) == 103.31
+    assert resolve_canonical_vwap({"vwap": 102.94}) == 102.94
+    # No VWAP evidence must stay absent, never fall back to the current price.
+    assert resolve_canonical_vwap({"current_price": 103.0, "ltp": 103.0}) is None
+    assert resolve_canonical_vwap({}) is None
+
+
+def test_quality_score_awards_nothing_for_missing_evidence() -> None:
+    from nifty_scalper_bot.core.strategy_manager import StrategyVote
+
+    manager = StrategyManager([], None, None)
+    bare = StrategyVote(
+        strategy="Bare", side="CE", score=6.0, confidence=0.7,
+        reasons=[], metadata={"raw_setup_score": 6.0},
+    )
+
+    _score, meta = manager._compute_trade_quality_score(
+        bare, {}, symbol="NFO:NIFTY24500CE",
+        selected_ok=True, near_atm_ok=True, context_votes=[],
+    )
+    components = meta["trade_quality_components"]
+
+    assert components["direction_alignment"] == 0.0
+    assert components["liquidity_spread_quality"] == 0.0
+    assert components["freshness_tick_quality"] == 0.0
+    assert components["market_regime_time_suitability"] == 0.0
+    assert meta["quality_evidence_complete"] is False
+
+
+def test_quality_score_credits_demonstrated_evidence() -> None:
+    from nifty_scalper_bot.core.strategy_manager import StrategyVote
+
+    manager = StrategyManager([], None, None)
+    proven = StrategyVote(
+        strategy="Proven", side="CE", score=6.0, confidence=0.7, reasons=[],
+        metadata={
+            "raw_setup_score": 6.0,
+            "direction_alignment_score": 1.0,
+            "liquidity_score": 2.0,
+            "regime_time_suitability_score": 1.0,
+        },
+    )
+
+    _score, meta = manager._compute_trade_quality_score(
+        proven, {"stale_data_used": False}, symbol="NFO:NIFTY24500CE",
+        selected_ok=True, near_atm_ok=True, context_votes=[],
+    )
+    components = meta["trade_quality_components"]
+
+    assert components["direction_alignment"] == 1.0
+    assert components["liquidity_spread_quality"] == 2.0
+    assert components["freshness_tick_quality"] == 1.0
+    assert meta["quality_evidence_complete"] is True
