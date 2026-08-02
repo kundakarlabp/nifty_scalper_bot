@@ -29,6 +29,20 @@ def safe_float_env(name: str, default: float) -> float:
     return parse_float_env(os.getenv(name), default)
 
 
+def _context_confirmation_score(
+    strategy_score: float, context_min_score: float
+) -> tuple[float, float]:
+    """Return directional evidence and its bounded confirmation contribution.
+
+    The first context points pay only for quote availability/freshness and must
+    not reinforce a trigger. Only score above the context admission floor is
+    directional evidence; half of that evidence is published so the manager's
+    existing 0.45 multiplier remains gradual instead of saturating immediately.
+    """
+    evidence = max(0.0, min(10.0, float(strategy_score)) - max(0.0, float(context_min_score)))
+    return evidence, 0.5 * evidence
+
+
 class OrderFlowStrategy(EliteStrategy):
     """Order-flow vote using spread, depth imbalance and tick direction."""
 
@@ -244,7 +258,17 @@ class OrderFlowStrategy(EliteStrategy):
                     'quote_update_version': quote_update_version,
                 }
                 side_aligns = direction in {'CE', 'PE'} and direction == side
-                metadata.update({'context_role': 'confirmation', 'vote_timestamp': time.time(), 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'tick_supports_direction': tick_supports})
+                context_evidence_score, context_confirmation_score = (
+                    _context_confirmation_score(strategy_score, context_min_score)
+                )
+                metadata.update({
+                    'context_role': 'confirmation',
+                    'vote_timestamp': time.time(),
+                    'context_evidence_score': context_evidence_score,
+                    'context_bonus_score': context_confirmation_score if side_aligns else 0.0,
+                    'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0,
+                    'tick_supports_direction': tick_supports,
+                })
                 return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.55, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
 
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
@@ -451,6 +475,9 @@ class OrderFlowStrategy(EliteStrategy):
             elif not tick_supports:
                 trigger_block_reason = 'negative_premium_flow'
 
+            context_evidence_score, context_confirmation_score = (
+                _context_confirmation_score(strategy_score, context_min_score)
+            )
             metadata = {
                 'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'trigger' if trigger_conditions_met else 'context',
                 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'trade_side': side,
@@ -478,11 +505,11 @@ class OrderFlowStrategy(EliteStrategy):
                 'negative_premium_flow_mode': 'hard' if clear_adverse_flow else 'soft',
                 'tick_age_ms': tick_age_ms,
                 'quote_update_version': quote_update_version,
-                 'quote_readiness_allowed': quote_readiness.allowed,
-                 'quote_readiness_reason': quote_readiness.reason,
-                 'real_ticks_last_60s': quote_readiness.real_ticks_last_60s,
-                 'real_tick_count_derived': quote_readiness.real_tick_count_derived,
-                 'reversal_persistence_confirmed': reversal_persistence_confirmed,
+                'quote_readiness_allowed': quote_readiness.allowed,
+                'quote_readiness_reason': quote_readiness.reason,
+                'real_ticks_last_60s': quote_readiness.real_ticks_last_60s,
+                'real_tick_count_derived': quote_readiness.real_tick_count_derived,
+                'reversal_persistence_confirmed': reversal_persistence_confirmed,
                 'selected_or_near_atm': selected_or_near_atm,
                 'bias_invalidated_by_microstructure': bias_invalidated_by_microstructure,
                 'microstructure_confirms_side': microstructure_confirms_side,
@@ -491,10 +518,16 @@ class OrderFlowStrategy(EliteStrategy):
                 'orderflow_conflict_override_applied': conflict_override_applied,
                 'orderflow_conflict_override': conflict_override_applied,
                 'conflict_override_reason': 'high_conviction_depth_spread_tick_near_atm' if conflict_override_applied else '',
+                'context_evidence_score': context_evidence_score,
             }
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'
-            metadata.update({'context_role': 'confirmation', 'vote_timestamp': time.time(), 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
+            metadata.update({
+                'context_role': 'confirmation',
+                'vote_timestamp': time.time(),
+                'context_bonus_score': context_confirmation_score if side_aligns else 0.0,
+                'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0,
+            })
             LOGGER.info(
                 'ORDERFLOW_TRIGGER_DECISION symbol=%s side=%s trigger_conditions_met=%s trigger_block_reason=%s score=%.2f spread_pct=%.2f context_age_seconds=%s',
                 symbol,
