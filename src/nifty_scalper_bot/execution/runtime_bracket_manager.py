@@ -7,7 +7,6 @@ lose functionality when broker fill identity is intentionally absent.
 
 from __future__ import annotations
 
-import math
 import os
 import time
 from contextlib import suppress
@@ -19,112 +18,6 @@ from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketMana
 
 class RuntimeBracketManager(LedgerBracketManager):
     """Final runtime export for the staged lifecycle implementation."""
-
-    def _minimum_locked_profit_r(self) -> float:
-        """Return the cached post-activation net-profit floor in initial-risk units."""
-        cached = getattr(self, "_trail_min_locked_profit_r", None)
-        if cached is not None:
-            return float(cached)
-        try:
-            value = float(os.getenv("TRAIL_MIN_LOCKED_PROFIT_R", "0.10"))
-        except (TypeError, ValueError):
-            value = 0.10
-        value = value if math.isfinite(value) else 0.10
-        self._trail_min_locked_profit_r = max(0.0, value)
-        return self._trail_min_locked_profit_r
-
-    def _calculate_tiered_trailing_sl(
-        self,
-        bracket: Any,
-        ltp: float,
-        profit_pct: float,
-        high_water: float,
-        atr: float,
-    ) -> float | None:
-        """Delegate to the canonical ladder, then enforce one net-profit invariant.
-
-        The inherited core ladder is the only tier implementation. This override
-        corrects its Tier-4 dimensional comparison by supplying the canonical
-        R-metric only for that legacy percentage check, then floors the single
-        returned candidate at round-trip costs plus ``TRAIL_MIN_LOCKED_PROFIT_R``.
-        """
-        entry = float(getattr(bracket, "entry_price", 0.0) or 0.0)
-        current_sl = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
-        initial_sl = float(
-            getattr(bracket, "initial_sl_trigger_price", 0.0) or current_sl
-        )
-        initial_risk = abs(entry - initial_sl)
-        side = str(getattr(bracket, "side", "") or "").upper()
-        profit_points = (ltp - entry) if side == "BUY" else (entry - ltp)
-        tier_metric = (profit_points / initial_risk) if initial_risk > 0 else None
-
-        corrected_profit_pct = float(profit_pct)
-        if tier_metric is not None and tier_metric >= float(self._trail_tier4_r):
-            # bracket_core's final legacy guard compares profit_pct with an R
-            # threshold. Supplying the already-computed R value fixes only that
-            # dimensional mismatch; all tier calculations still live in super().
-            corrected_profit_pct = max(corrected_profit_pct, tier_metric)
-
-        candidate = super()._calculate_tiered_trailing_sl(
-            bracket=bracket,
-            ltp=ltp,
-            profit_pct=corrected_profit_pct,
-            high_water=high_water,
-            atr=atr,
-        )
-        if candidate is None or initial_risk <= 0 or tier_metric is None:
-            return candidate
-
-        activation_r = float(self._trail_activation_r(bracket))
-        if tier_metric < activation_r:
-            return candidate
-
-        cost_points = max(0.0, float(self._breakeven_cost_per_unit(bracket)))
-        # The positive-profit floor starts only after the canonical 0.75R
-        # progress threshold. Strategies that deliberately arm cost-adjusted
-        # breakeven earlier retain that established behaviour without installing
-        # a noise-sensitive positive-profit stop before meaningful progress.
-        locked_r = self._minimum_locked_profit_r() if tier_metric >= 0.75 else 0.0
-        locked_points = cost_points + (initial_risk * locked_r)
-        room = max(cost_points, 0.05)
-
-        if side == "BUY":
-            floor = entry + locked_points
-            proposed = max(float(candidate), floor)
-            if proposed >= (float(ltp) - room):
-                return None
-        else:
-            floor = entry - locked_points
-            proposed = min(float(candidate), floor)
-            if proposed <= (float(ltp) + room):
-                return None
-
-        if proposed != float(candidate):
-            _legacy.LOGGER.info(
-                "TRAIL_MIN_PROFIT_FLOOR_APPLIED symbol=%s side=%s tier_metric_r=%.3f locked_r=%.3f cost_points=%.3f candidate_sl=%.2f floored_sl=%.2f ltp=%.2f",
-                getattr(bracket, "symbol", ""),
-                side,
-                tier_metric,
-                locked_r,
-                cost_points,
-                float(candidate),
-                proposed,
-                float(ltp),
-                extra={
-                    "event": "TRAIL_MIN_PROFIT_FLOOR_APPLIED",
-                    "symbol": getattr(bracket, "symbol", ""),
-                    "side": side,
-                    "initial_risk_points": initial_risk,
-                    "tier_metric_r": tier_metric,
-                    "minimum_locked_profit_r": locked_r,
-                    "minimum_locked_profit_points": initial_risk * locked_r,
-                    "estimated_cost_points": cost_points,
-                    "candidate_sl": float(candidate),
-                    "applied_sl": proposed,
-                    "ltp": float(ltp),
-                },
-            )
-        return proposed
 
     def _block_ledger_release(
         self,
