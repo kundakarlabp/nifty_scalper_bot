@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from types import SimpleNamespace
 
 from nifty_scalper_bot.core.boot_log_safety import BootLogRateControl
-from nifty_scalper_bot.core.boot_readiness_safety import adapt_compute_live_readiness
+from nifty_scalper_bot.core.boot_readiness_safety import (
+    adapt_compute_live_readiness,
+    adapt_register_and_subscribe_live_symbol,
+    adapt_replay_latest_mdm_ticks_to_bus,
+    adapt_sync_history_from_mdm,
+    adapt_wire_and_start_message_bus,
+)
 from nifty_scalper_bot.execution.readiness import normalize_readiness_blockers
 
 
@@ -25,9 +33,24 @@ def _record(event: str, **extra):
 
 def test_rate_control_allows_changed_basket_state() -> None:
     control = BootLogRateControl(interval_seconds=30.0)
-    first = _record("CONTRACT_SSOT_BASKET_SELECTED", selected_ce="CE1", selected_pe="PE1", atm_strike=24250)
-    same = _record("CONTRACT_SSOT_BASKET_SELECTED", selected_ce="CE1", selected_pe="PE1", atm_strike=24250)
-    changed = _record("CONTRACT_SSOT_BASKET_SELECTED", selected_ce="CE2", selected_pe="PE2", atm_strike=24300)
+    first = _record(
+        "CONTRACT_SSOT_BASKET_SELECTED",
+        selected_ce="CE1",
+        selected_pe="PE1",
+        atm_strike=24250,
+    )
+    same = _record(
+        "CONTRACT_SSOT_BASKET_SELECTED",
+        selected_ce="CE1",
+        selected_pe="PE1",
+        atm_strike=24250,
+    )
+    changed = _record(
+        "CONTRACT_SSOT_BASKET_SELECTED",
+        selected_ce="CE2",
+        selected_pe="PE2",
+        atm_strike=24300,
+    )
 
     assert control.filter(first) is True
     assert control.filter(same) is False
@@ -36,8 +59,18 @@ def test_rate_control_allows_changed_basket_state() -> None:
 
 def test_rate_control_covers_bootstrap_state() -> None:
     control = BootLogRateControl(interval_seconds=30.0)
-    first = _record("LIVE_UNIVERSE_BOOTSTRAP_STATUS", symbol="NSE:NIFTY", ready=False, reason="waiting")
-    same = _record("LIVE_UNIVERSE_BOOTSTRAP_STATUS", symbol="NSE:NIFTY", ready=False, reason="waiting")
+    first = _record(
+        "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
+        symbol="NSE:NIFTY",
+        ready=False,
+        reason="waiting",
+    )
+    same = _record(
+        "LIVE_UNIVERSE_BOOTSTRAP_STATUS",
+        symbol="NSE:NIFTY",
+        ready=False,
+        reason="waiting",
+    )
 
     assert control.filter(first) is True
     assert control.filter(same) is False
@@ -116,7 +149,11 @@ def test_live_validation_checklist_log_contains_primary_gate(caplog) -> None:
         execution_ready=False,
     )
 
-    record = next(r for r in caplog.records if getattr(r, "event", "") == "LIVE_VALIDATION_CHECKLIST")
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "event", "") == "LIVE_VALIDATION_CHECKLIST"
+    )
     assert decision.primary_blocker == "selected_option_quote_missing"
     assert record.primary_blocker == "selected_option_quote_missing"
     assert record.evaluation_ready is True
@@ -151,3 +188,190 @@ def test_session_readiness_adapter_removes_option_details_outside_session() -> N
     )
 
     assert reasons == ["market_closed"]
+
+
+def test_cached_tick_replay_skips_when_message_bus_is_inactive() -> None:
+    calls: list[str] = []
+
+    async def original(ctx, *, reason: str) -> int:
+        calls.append(reason)
+        return 10
+
+    adapted = adapt_replay_latest_mdm_ticks_to_bus(original)
+    ctx = SimpleNamespace(message_bus=SimpleNamespace(running=False))
+
+    assert asyncio.run(adapted(ctx, reason="post_runner_start")) == 0
+    assert calls == []
+
+
+def test_cached_tick_replay_preserved_when_message_bus_is_running() -> None:
+    calls: list[str] = []
+
+    async def original(ctx, *, reason: str) -> int:
+        calls.append(reason)
+        return 3
+
+    adapted = adapt_replay_latest_mdm_ticks_to_bus(original)
+    ctx = SimpleNamespace(message_bus=SimpleNamespace(running=True))
+
+    assert asyncio.run(adapted(ctx, reason="post_runner_start")) == 3
+    assert calls == ["post_runner_start"]
+
+
+def test_startup_symbol_wiring_does_not_activate_runner_early() -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.added: list[str] = []
+
+        def add_symbol(self, symbol: str) -> None:
+            self.added.append(symbol)
+
+        def on_datahub_tick(self, tick) -> None:
+            del tick
+
+    class Hub:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def subscribe_ticks(self, symbol, callback, **kwargs):
+            self.calls.append(
+                {
+                    "symbol": symbol,
+                    "callback": callback,
+                    **kwargs,
+                }
+            )
+            return True
+
+    def original(ctx, symbol, token, reason, role="tradable_option") -> bool:
+        del reason, role
+        if hasattr(ctx.strategy_runner, "add_symbol"):
+            ctx.strategy_runner.add_symbol(symbol)
+        ctx.data_hub.subscribe_ticks(
+            symbol,
+            ctx.strategy_runner.on_datahub_tick,
+            token=token,
+            force_live=True,
+        )
+        return True
+
+    runner = Runner()
+    hub = Hub()
+    ctx = SimpleNamespace(strategy_runner=runner, data_hub=hub)
+    adapted = adapt_register_and_subscribe_live_symbol(original)
+
+    assert (
+        adapted(
+            ctx,
+            "NFO:NIFTY2680424750CE",
+            16868098,
+            "basket_commit_live_startup",
+        )
+        is True
+    )
+    assert runner.added == []
+    assert hub.calls[0]["force_live"] is False
+
+
+def test_runtime_symbol_wiring_keeps_immediate_data_subscription() -> None:
+    class Runner:
+        def add_symbol(self, symbol: str) -> None:
+            raise AssertionError(f"unexpected activation: {symbol}")
+
+        def on_datahub_tick(self, tick) -> None:
+            del tick
+
+    class Hub:
+        def __init__(self) -> None:
+            self.force_live: bool | None = None
+
+        def subscribe_ticks(self, symbol, callback, **kwargs):
+            del symbol, callback
+            self.force_live = bool(kwargs["force_live"])
+            return True
+
+    def original(ctx, symbol, token, reason, role="tradable_option") -> bool:
+        del reason, role
+        if hasattr(ctx.strategy_runner, "add_symbol"):
+            ctx.strategy_runner.add_symbol(symbol)
+        ctx.data_hub.subscribe_ticks(
+            symbol,
+            ctx.strategy_runner.on_datahub_tick,
+            token=token,
+            force_live=True,
+        )
+        return True
+
+    runner = Runner()
+    hub = Hub()
+    ctx = SimpleNamespace(strategy_runner=runner, data_hub=hub)
+    adapted = adapt_register_and_subscribe_live_symbol(original)
+
+    assert adapted(ctx, "NFO:NIFTY2680424800PE", 16869634, "runtime_rotation")
+    assert hub.force_live is True
+
+
+def test_inactive_subscriberless_bus_is_detached_from_direct_mdm() -> None:
+    bus = SimpleNamespace(
+        running=False,
+        subscribers={"tick": [], "signal": []},
+    )
+    mdm = SimpleNamespace(bus=bus)
+    ctx = SimpleNamespace(message_bus=bus, market_data_manager=mdm)
+
+    def original(input_ctx) -> bool:
+        assert input_ctx is ctx
+        return False
+
+    adapted = adapt_wire_and_start_message_bus(original)
+
+    assert adapted(ctx) is False
+    assert mdm.bus is None
+
+
+def test_message_bus_attachment_is_preserved_for_real_subscribers() -> None:
+    bus = SimpleNamespace(
+        running=False,
+        subscribers={"tick": [object()]},
+    )
+    mdm = SimpleNamespace(bus=bus)
+    ctx = SimpleNamespace(message_bus=bus, market_data_manager=mdm)
+
+    adapted = adapt_wire_and_start_message_bus(lambda _ctx: False)
+
+    assert adapted(ctx) is False
+    assert mdm.bus is bus
+
+
+def test_history_sync_adapter_corrects_futures_role_only() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def original(self, symbol: str, *args, **kwargs):
+        del self, args
+        calls.append((symbol, kwargs["role"]))
+        return kwargs["role"]
+
+    adapted = adapt_sync_history_from_mdm(original)
+
+    assert (
+        adapted(
+            object(),
+            "NFO:NIFTY26AUGFUT",
+            required_bars=20,
+            role="spot_context",
+        )
+        == "futures_context"
+    )
+    assert (
+        adapted(
+            object(),
+            "NFO:NIFTY2680424750CE",
+            required_bars=20,
+            role="selected_option",
+        )
+        == "selected_option"
+    )
+    assert calls == [
+        ("NFO:NIFTY26AUGFUT", "futures_context"),
+        ("NFO:NIFTY2680424750CE", "selected_option"),
+    ]
