@@ -1,7 +1,7 @@
 """Deterministic market-data hardening bootstrap.
 
-This module verifies that candle, manager, and WebSocket hardening hooks are
-installed before the trading application is built.
+This module verifies that candle, manager, DataHub, and WebSocket hardening hooks
+are installed before the trading application is built.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 _MDM_HARDENING_ATTR = "_freshness_hardening_installed"
+_DATAHUB_HARDENING_ATTR = "_active_basket_subscription_hardening_installed"
 _WS_HARDENING_ATTR = "_market_data_hardening_installed"
 _CANDLE_HARDENING_ATTR = "_candle_state_hardening_installed"
 _CLOCK_FLUSH_HARDENING_ATTR = "_candle_clock_flush_hardening_installed"
@@ -24,6 +25,10 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
     from nifty_scalper_bot.data.candle_state_hardening import (
         install_candle_state_hardening,
     )
+    from nifty_scalper_bot.data.data_hub import DataHub
+    from nifty_scalper_bot.data.data_hub_subscription_hardening import (
+        install_data_hub_subscription_hardening,
+    )
     from nifty_scalper_bot.data.market_data_hardening import (
         install_market_data_manager_hardening,
     )
@@ -36,6 +41,7 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
     install_candle_state_hardening(CandleEngine)
     install_market_data_manager_hardening(MarketDataManager)
     install_candle_clock_flush_hardening(MarketDataManager)
+    install_data_hub_subscription_hardening(DataHub)
     install_websocket_market_data_hardening(WebSocketManager)
 
     full_state = {
@@ -43,6 +49,7 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
         "clock_flush": bool(
             getattr(MarketDataManager, _CLOCK_FLUSH_HARDENING_ATTR, False)
         ),
+        "datahub": bool(getattr(DataHub, _DATAHUB_HARDENING_ATTR, False)),
         "mdm": bool(getattr(MarketDataManager, _MDM_HARDENING_ATTR, False)),
         "websocket": bool(getattr(WebSocketManager, _WS_HARDENING_ATTR, False)),
     }
@@ -51,11 +58,12 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
 
     if logger is not None:
         logger.info(
-            "MARKET_DATA_HARDENING_INSTALLED mdm=%s websocket=%s candle=%s clock_flush=%s",
+            "MARKET_DATA_HARDENING_INSTALLED mdm=%s websocket=%s candle=%s clock_flush=%s datahub=%s",
             full_state["mdm"],
             full_state["websocket"],
             full_state["candle"],
             full_state["clock_flush"],
+            full_state["datahub"],
             extra={"event": "MARKET_DATA_HARDENING_INSTALLED", **full_state},
         )
 

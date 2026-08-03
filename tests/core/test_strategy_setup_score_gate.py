@@ -8,6 +8,7 @@ from nifty_scalper_bot.core.strategy_setup_score_gate import (
     filter_context_promotions,
     setup_gate_result,
 )
+from nifty_scalper_bot.strategies.signal_generator import Signal
 
 
 def _vote(**metadata):
@@ -95,15 +96,38 @@ def test_malformed_orderflow_trigger_is_normalized_to_context() -> None:
         trigger_conditions_met=True,
     )
 
-    changed = enforce_context_only_role(signal, vote)
+    updated_signal, changed = enforce_context_only_role(signal, vote)
 
     assert changed is True
-    for metadata in (signal.metadata, vote.metadata):
+    for metadata in (updated_signal.metadata, vote.metadata):
         assert metadata["role"] == "context"
         assert metadata["can_trigger"] is False
         assert metadata["trigger_conditions_met"] is False
         assert metadata["trigger_eligible"] is False
         assert metadata["trigger_block_reason"] == "context_only_role"
+
+
+def test_frozen_signal_is_replaced_not_mutated() -> None:
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY2680424600PE",
+        quantity=65,
+        confidence=0.8,
+        reason="OrderFlow",
+        stop_loss=None,
+        take_profit=None,
+        metadata={"strategy": "OrderFlow", "role": "trigger"},
+    )
+    vote = _vote(strategy="OrderFlow", role="trigger", can_trigger=True)
+
+    updated_signal, changed = enforce_context_only_role(signal, vote)
+
+    assert changed is True
+    assert updated_signal is not signal
+    assert signal.metadata["role"] == "trigger"
+    assert updated_signal.metadata["role"] == "context"
+    assert updated_signal.metadata["can_trigger"] is False
+    assert vote.metadata["role"] == "context"
 
 
 def test_orderflow_is_removed_from_context_promotion_candidates() -> None:
