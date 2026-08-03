@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Mapping
 
 REQUIRED_SCORE_COMPONENTS: tuple[str, ...] = (
     'direction_score',
@@ -34,6 +35,84 @@ def resolve_signal_domain(symbol: str, metadata: dict[str, object] | None = None
     option_premium_domain = bool(option_symbol and not source_symbol)
     underlying_domain = bool(source_symbol)
     return contract_side, option_premium_domain, underlying_domain
+
+
+def canonical_max_spread_pct() -> float:
+    """Return the single live entry spread limit used by strategy and execution."""
+    for name in ("ORDER_MAX_SPREAD_PCT", "SPREAD_MAX_PCT"):
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 10.0
+
+
+def build_trade_quality_evidence(
+    indicators: Mapping[str, object] | None,
+    *,
+    side: str,
+) -> dict[str, object]:
+    """Derive canonical quality fields from evidence already owned by the engine."""
+    payload = dict(indicators or {})
+    resolved_side = str(side or "").strip().upper()
+    direction = str(
+        payload.get("underlying_direction_bias")
+        or payload.get("direction_bias")
+        or ""
+    ).strip().upper()
+
+    bid = ask = 0.0
+    try:
+        bid = float(payload.get("bid") or 0.0)
+        ask = float(payload.get("ask") or 0.0)
+    except (TypeError, ValueError):
+        pass
+    bid_ask_valid = bid > 0.0 and ask >= bid
+
+    spread_observed = payload.get("spread_pct") is not None
+    try:
+        spread_pct = float(payload.get("spread_pct")) if spread_observed else 999.0
+    except (TypeError, ValueError):
+        spread_pct = 999.0
+    if not spread_observed and bid_ask_valid:
+        midpoint = (bid + ask) / 2.0
+        if midpoint > 0:
+            spread_pct = ((ask - bid) / midpoint) * 100.0
+            spread_observed = True
+
+    spread_limit = canonical_max_spread_pct()
+    spread_pass = bool(not spread_observed or spread_pct <= spread_limit)
+    depth_valid = bool(payload.get("quote_depth_valid"))
+    tradable_quote = bool(payload.get("tradable_quote"))
+    quote_valid = bool(bid_ask_valid or tradable_quote)
+    if depth_valid and quote_valid and spread_pass:
+        liquidity_score = 2.0
+    elif quote_valid and spread_pass:
+        liquidity_score = 1.0
+    else:
+        liquidity_score = 0.0
+
+    regime = str(payload.get("regime") or payload.get("market_regime") or "").upper()
+    regime_score = 1.0 if regime and regime != "CHOPPY" else 0.0
+
+    return {
+        "direction_alignment_score": (
+            2.0
+            if resolved_side in {"CE", "PE"} and direction == resolved_side
+            else 0.0
+        ),
+        "liquidity_score": liquidity_score,
+        "regime_time_suitability_score": regime_score,
+        "quality_spread_observed": spread_observed,
+        "quality_spread_pass": spread_pass,
+        "quality_spread_pct": spread_pct if spread_observed else None,
+        "quality_spread_limit_pct": spread_limit,
+    }
 
 
 @dataclass(slots=True)
