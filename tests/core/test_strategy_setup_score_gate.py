@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.strategy_setup_score_gate import (
-    _enforce_permanent_context_only_role,
-    _remove_permanent_context_only_promotions,
+    enforce_context_only_role,
+    filter_context_promotions,
     setup_gate_result,
 )
 
@@ -95,7 +95,7 @@ def test_malformed_orderflow_trigger_is_normalized_to_context() -> None:
         trigger_conditions_met=True,
     )
 
-    changed = _enforce_permanent_context_only_role(signal, vote)
+    changed = enforce_context_only_role(signal, vote)
 
     assert changed is True
     for metadata in (signal.metadata, vote.metadata):
@@ -116,9 +116,7 @@ def test_orderflow_is_removed_from_context_promotion_candidates() -> None:
         _vote(strategy="VWAPPro", role="context", raw_setup_score=9.0),
     )
 
-    eligible, blocked = _remove_permanent_context_only_promotions(
-        [orderflow, vwap_context]
-    )
+    eligible, blocked = filter_context_promotions([orderflow, vwap_context])
 
     assert eligible == [vwap_context]
     assert blocked == ["OrderFlow"]
