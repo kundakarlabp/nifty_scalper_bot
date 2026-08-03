@@ -80,6 +80,26 @@ def test_wider_spread_reduces_net_reward_risk(monkeypatch) -> None:
     assert wide.target_cost > tight.target_cost
 
 
+def test_malformed_minimum_uses_safe_default_instead_of_bypassing(monkeypatch) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "not-a-number")
+
+    result = evaluate_final_net_rr(_signal(target=112.0))
+
+    assert result is not None
+    assert result.minimum == 1.5
+    assert result.allowed is False
+
+
+def test_nonfinite_minimum_uses_safe_default(monkeypatch) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "nan")
+
+    result = evaluate_final_net_rr(_signal(target=112.0))
+
+    assert result is not None
+    assert result.minimum == 1.5
+    assert result.allowed is False
+
+
 def test_economic_rejection_is_real_broker_live_only(monkeypatch) -> None:
     for name in ("BROKER_SIMULATION", "PAPER_MODE", "PAPER__ENABLED", "SHADOW_MODE"):
         monkeypatch.delenv(name, raising=False)

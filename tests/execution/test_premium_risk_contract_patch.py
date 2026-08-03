@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from nifty_scalper_bot.execution.premium_risk_contract_patch import (
+    anchor_option_geometry_to_execution,
     apply_premium_risk_contract,
+    install_runner_geometry_hardening,
+    validate_option_premium_geometry,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
 
@@ -87,3 +90,123 @@ def test_sell_geometry_is_symmetric() -> None:
 
     assert result.stop_loss == 105.0
     assert result.take_profit == 92.5
+
+
+def test_untrusted_spot_scale_atr_is_not_used_as_premium_distance() -> None:
+    signal = _signal(stop_loss=82.5, take_profit=195.0)
+
+    result = validate_option_premium_geometry(
+        None,
+        signal,
+        entry_price=120.0,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result.stop_loss == 108.0
+    assert result.take_profit == 144.0
+    assert result.metadata["premium_risk_source"] == "premium_percent_fallback"
+    assert result.metadata["premium_risk_domain"] == "option_premium"
+
+
+def test_underlying_scale_target_is_rebuilt_symmetrically() -> None:
+    signal = _signal(stop_loss=110.0, take_profit=24900.0)
+
+    result = validate_option_premium_geometry(
+        None,
+        signal,
+        entry_price=120.0,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result.stop_loss == 110.0
+    assert result.take_profit == 140.0
+    assert (result.take_profit - 120.0) / (120.0 - result.stop_loss) == 2.0
+
+
+def test_premium_target_rr_remains_authoritative() -> None:
+    signal = _signal(
+        stop_loss=92.0,
+        take_profit=150.0,
+        premium_stop_distance=8.0,
+        premium_target_rr=1.5,
+        invalidation_level_domain="option_premium",
+    )
+
+    result = validate_option_premium_geometry(
+        None,
+        signal,
+        entry_price=100.0,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result.stop_loss == 92.0
+    assert result.take_profit == 112.0
+
+
+def test_execution_anchor_preserves_valid_geometry_instead_of_widening() -> None:
+    signal = _signal(stop_loss=92.0, take_profit=116.0)
+
+    result = anchor_option_geometry_to_execution(
+        None,
+        signal,
+        signal_price=100.0,
+        execution_price=100.0,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result.stop_loss == 92.0
+    assert result.take_profit == 116.0
+
+
+def test_execution_anchor_translates_distance_geometry() -> None:
+    signal = _signal(stop_loss=92.0, take_profit=116.0)
+
+    result = anchor_option_geometry_to_execution(
+        None,
+        signal,
+        signal_price=100.0,
+        execution_price=105.0,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result.stop_loss == 97.0
+    assert result.take_profit == 121.0
+
+
+def test_absolute_invalidation_is_not_moved_by_anchor() -> None:
+    signal = _signal(
+        stop_loss=92.0,
+        take_profit=116.0,
+        bracket_anchor_mode="absolute_level",
+    )
+
+    result = anchor_option_geometry_to_execution(
+        None,
+        signal,
+        signal_price=100.0,
+        execution_price=105.0,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result is signal
+    assert result.stop_loss == 92.0
+    assert result.take_profit == 116.0
+
+
+def test_runner_geometry_installer_is_idempotent() -> None:
+    runner_cls = type("Runner", (), {})
+
+    install_runner_geometry_hardening(runner_cls)
+    first_validate = runner_cls._validate_long_option_geometry
+    first_anchor = runner_cls._anchor_sl_tp_to_execution
+    install_runner_geometry_hardening(runner_cls)
+
+    assert runner_cls._premium_geometry_hardening_installed is True
+    assert runner_cls._validate_long_option_geometry is first_validate
+    assert runner_cls._anchor_sl_tp_to_execution is first_anchor

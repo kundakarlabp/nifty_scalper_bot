@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from contextlib import suppress
 from dataclasses import dataclass
@@ -81,6 +82,18 @@ def _half_spread(signal: Any, entry: float) -> float:
     return entry * 0.0025
 
 
+def _minimum_net_rr() -> float:
+    """Return a finite non-negative threshold; malformed config never bypasses."""
+    raw = os.getenv("MIN_NET_REWARD_RISK", "1.5")
+    try:
+        parsed = float(raw or 1.5)
+    except (TypeError, ValueError):
+        return 1.5
+    if not math.isfinite(parsed):
+        return 1.5
+    return max(0.0, parsed)
+
+
 def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
     """Return final BUY-option net RR, or None when the gate is not applicable."""
     symbol = str(getattr(signal, "symbol", "") or "").strip().upper()
@@ -127,24 +140,19 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
     net_reward = gross_reward - target_cost
     net_risk = gross_risk + stop_cost
     net_rr = net_reward / net_risk if net_reward > 0.0 and net_risk > 0.0 else 0.0
-    with suppress(TypeError, ValueError):
-        minimum = max(
-            0.0,
-            float(os.getenv("MIN_NET_REWARD_RISK", "1.5") or 1.5),
-        )
-        return NetRRResult(
-            allowed=net_rr >= minimum,
-            net_rr=net_rr,
-            minimum=minimum,
-            gross_reward=gross_reward,
-            gross_risk=gross_risk,
-            net_reward=net_reward,
-            net_risk=net_risk,
-            target_cost=target_cost,
-            stop_cost=stop_cost,
-            half_spread=half_spread,
-        )
-    return None
+    minimum = _minimum_net_rr()
+    return NetRRResult(
+        allowed=net_rr >= minimum,
+        net_rr=net_rr,
+        minimum=minimum,
+        gross_reward=gross_reward,
+        gross_risk=gross_risk,
+        net_reward=net_reward,
+        net_risk=net_risk,
+        target_cost=target_cost,
+        stop_cost=stop_cost,
+        half_spread=half_spread,
+    )
 
 
 __all__ = ["NetRRResult", "evaluate_final_net_rr"]
