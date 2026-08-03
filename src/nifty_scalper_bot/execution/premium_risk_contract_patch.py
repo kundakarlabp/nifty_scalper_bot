@@ -3,8 +3,8 @@
 Elite strategies may publish explicit option-premium invalidation metadata.  The
 legacy runner normalisation must not widen those stops or replace their targets
 with an ATR from an ambiguous price domain.  This module keeps the existing
-StrategyManager output patch and installs a small, idempotent StrategyRunner
-geometry hardening hook after the application module is fully imported.
+StrategyManager output patch and installs small, idempotent runtime hooks after
+the application module is fully imported.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Any, Mapping
 _PATCH_APPLIED = False
 _ORIGINAL_GENERATE_SIGNAL: Any = None
 _RUNNER_PATCH_ATTR = "_premium_geometry_hardening_installed"
+_BRACKET_PATCH_ATTR = "_premium_exit_provenance_hardening_installed"
 _TICK_SIZE = 0.05
 
 
@@ -346,6 +347,49 @@ def anchor_option_geometry_to_execution(
     )
 
 
+def _enrich_virtual_bracket_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Restore optional TP1/trailing fields from durable trade provenance."""
+
+    enriched = dict(kwargs)
+    provenance = enriched.get("trade_provenance")
+    if not isinstance(provenance, Mapping):
+        return enriched
+    exit_plan = provenance.get("exit_plan")
+    source = dict(exit_plan) if isinstance(exit_plan, Mapping) else dict(provenance)
+
+    if _positive_float(enriched.get("tp1_price")) is None:
+        tp1_price = _positive_float(source.get("tp1_price"))
+        if tp1_price is not None:
+            enriched["tp1_price"] = tp1_price
+    if _positive_float(enriched.get("tp1_qty")) is None:
+        tp1_qty = _positive_float(source.get("tp1_qty"))
+        if tp1_qty is not None:
+            enriched["tp1_qty"] = int(tp1_qty)
+    if _positive_float(enriched.get("trailing_atr_mult")) is None:
+        trailing = _positive_float(source.get("trailing_atr_mult"))
+        if trailing is not None:
+            enriched["trailing_atr_mult"] = trailing
+    if _positive_float(enriched.get("resolved_lot_size")) is None:
+        lot_size = _positive_float(source.get("resolved_lot_size"))
+        if lot_size is not None:
+            enriched["resolved_lot_size"] = int(lot_size)
+    return enriched
+
+
+def install_bracket_exit_provenance_hardening(bracket_cls: type[Any]) -> None:
+    """Wrap the fully composed bracket class without bypassing ownership guards."""
+    if bool(getattr(bracket_cls, _BRACKET_PATCH_ATTR, False)):
+        return
+    original = bracket_cls.register_virtual_bracket
+
+    def register_virtual_bracket(self: Any, *args: Any, **kwargs: Any) -> Any:
+        return original(self, *args, **_enrich_virtual_bracket_kwargs(kwargs))
+
+    bracket_cls._premium_exit_provenance_original_register = original
+    bracket_cls.register_virtual_bracket = register_virtual_bracket
+    setattr(bracket_cls, _BRACKET_PATCH_ATTR, True)
+
+
 def install_runner_geometry_hardening(runner_cls: type[Any]) -> None:
     """Install the domain-safe geometry methods on StrategyRunner once."""
     if bool(getattr(runner_cls, _RUNNER_PATCH_ATTR, False)):
@@ -384,9 +428,11 @@ def apply_patches() -> None:
 
 
 __all__ = [
+    "_enrich_virtual_bracket_kwargs",
     "anchor_option_geometry_to_execution",
     "apply_patches",
     "apply_premium_risk_contract",
+    "install_bracket_exit_provenance_hardening",
     "install_runner_geometry_hardening",
     "validate_option_premium_geometry",
 ]
