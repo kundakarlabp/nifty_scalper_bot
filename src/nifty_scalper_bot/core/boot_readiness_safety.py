@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import wraps
 import logging
 from typing import Any, Awaitable, Callable, TypeVar
@@ -33,24 +34,55 @@ def adapt_compute_live_readiness(
 def adapt_replay_latest_mdm_ticks_to_bus(
     original: Callable[..., Awaitable[int]],
 ) -> Callable[..., Awaitable[int]]:
-    """Skip cached-tick replay when the optional MessageBus is inactive."""
+    """Replay cached ticks through the active authoritative ingress."""
 
     @wraps(original)
     async def wrapped(ctx: Any, *, reason: str) -> int:
+        if bool(getattr(ctx, "data_observation_ready", False)):
+            return int(await original(ctx, reason=reason))
+
         bus = getattr(ctx, "message_bus", None)
-        if bus is None or not bool(getattr(bus, "running", False)):
+        if bus is not None and bool(getattr(bus, "running", False)):
+            return int(await original(ctx, reason=reason))
+
+        mdm = getattr(ctx, "market_data_manager", None)
+        hub = getattr(ctx, "data_hub", None)
+        ingest = getattr(hub, "ingest_tick_sync", None)
+        latest_ticks = getattr(mdm, "_latest_ticks", {}) if mdm is not None else {}
+        if callable(ingest) and isinstance(latest_ticks, Mapping):
+            replayed = 0
+            for symbol, tick in list(latest_ticks.items()):
+                if not isinstance(tick, Mapping):
+                    continue
+                payload = dict(tick)
+                payload["symbol"] = str(symbol)
+                payload["source"] = "mdm_replay"
+                ingest(payload)
+                replayed += 1
             _LOGGER.info(
-                "MDM_CACHED_TICKS_REPLAY_SKIPPED "
-                "reason=message_bus_not_running requested_reason=%s",
+                "MDM_CACHED_TICKS_REPLAYED count=%d reason=%s path=direct_datahub",
+                replayed,
                 reason,
                 extra={
-                    "event": "MDM_CACHED_TICKS_REPLAY_SKIPPED",
-                    "reason": "message_bus_not_running",
-                    "requested_reason": reason,
+                    "event": "MDM_CACHED_TICKS_REPLAYED",
+                    "count": replayed,
+                    "reason": reason,
+                    "path": "direct_datahub",
                 },
             )
-            return 0
-        return int(await original(ctx, reason=reason))
+            return replayed
+
+        _LOGGER.info(
+            "MDM_CACHED_TICKS_REPLAY_SKIPPED "
+            "reason=message_bus_not_running requested_reason=%s",
+            reason,
+            extra={
+                "event": "MDM_CACHED_TICKS_REPLAY_SKIPPED",
+                "reason": "message_bus_not_running",
+                "requested_reason": reason,
+            },
+        )
+        return 0
 
     return wrapped
 
