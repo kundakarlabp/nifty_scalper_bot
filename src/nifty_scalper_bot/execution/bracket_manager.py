@@ -56,7 +56,7 @@ tick_exchange_epoch = _tick_exchange_epoch_with_receipt
 _original_confirm_entry_fill = BoundBracketManager.confirm_entry_fill
 
 
-def _confirm_entry_fill_once(self, order_id, fill_price):
+def _confirm_entry_fill_once(self, order_id, fill_price, filled_qty=None):
     """Ignore an identical repeated COMPLETE callback without resetting protection."""
     bracket = self.get_bracket(order_id)
     try:
@@ -84,7 +84,7 @@ def _confirm_entry_fill_once(self, order_id, fill_price):
             },
         )
         return True
-    return _original_confirm_entry_fill(self, order_id, fill_price)
+    return _original_confirm_entry_fill(self, order_id, fill_price, filled_qty)
 
 
 BoundBracketManager.confirm_entry_fill = _confirm_entry_fill_once

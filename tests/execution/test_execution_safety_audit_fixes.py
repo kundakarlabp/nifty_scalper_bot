@@ -1527,7 +1527,7 @@ def test_bracket_registration_is_idempotent_when_fill_replayed_after_position_fa
                 sl_trigger_price=kwargs["sl"],
             )
 
-        def confirm_entry_fill(self, order_id, _entry_price):
+        def confirm_entry_fill(self, order_id, _entry_price, _filled_qty=None):
             assert self.bracket is not None and self.bracket.order_id == order_id
             self.confirm_calls += 1
             self.bracket.quantity = 130

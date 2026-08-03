@@ -775,3 +775,72 @@ def test_watchdog_payload_records_the_trigger_source() -> None:
     exec_px, exec_src = manager._executable_exit_price(bracket, 100.50)
     assert exec_px == 98.50
     assert exec_src == "bid"
+
+
+def _pending_bracket(manager, order_id, symbol, qty, **kw):
+    manager.register_virtual_bracket(
+        order_id, symbol, "BUY", qty, 100.0, 95.0, 110.0,
+        activate_immediately=False, **kw,
+    )
+    bracket = manager.get_bracket(order_id)
+    assert bracket is not None
+    return bracket
+
+
+def test_partial_entry_fill_shrinks_the_bracket_to_the_held_position() -> None:
+    """Brackets are pre-registered at the requested size. A partial fill whose
+    remainder is cancelled would otherwise leave exits sized above the position,
+    which is either rejected (leaving it unprotected) or fills into a naked short."""
+    manager = BracketManager(order_manager=Mock())
+    bracket = _pending_bracket(manager, "pf-1", "NFO:NIFTYPF1CE", 130)
+
+    manager.confirm_entry_fill("pf-1", 100.0, 65)
+
+    assert bracket.quantity == 65
+    assert bracket.remaining_quantity == 65
+    assert bracket.active is True
+
+
+def test_full_entry_fill_leaves_quantity_untouched() -> None:
+    manager = BracketManager(order_manager=Mock())
+    bracket = _pending_bracket(manager, "pf-2", "NFO:NIFTYPF2CE", 130)
+
+    manager.confirm_entry_fill("pf-2", 100.0, 130)
+
+    assert bracket.quantity == 130
+    assert bracket.remaining_quantity == 130
+
+
+def test_unreported_fill_quantity_preserves_existing_behaviour() -> None:
+    manager = BracketManager(order_manager=Mock())
+    bracket = _pending_bracket(manager, "pf-3", "NFO:NIFTYPF3CE", 130)
+
+    manager.confirm_entry_fill("pf-3", 100.0)
+
+    assert bracket.quantity == 130
+    assert bracket.remaining_quantity == 130
+
+
+def test_overreported_fill_quantity_never_grows_the_bracket() -> None:
+    """A reported quantity above the registered size is a data fault, not an
+    instruction to trade more."""
+    manager = BracketManager(order_manager=Mock())
+    bracket = _pending_bracket(manager, "pf-4", "NFO:NIFTYPF4CE", 65)
+
+    manager.confirm_entry_fill("pf-4", 100.0, 260)
+
+    assert bracket.quantity == 65
+    assert bracket.remaining_quantity == 65
+
+
+def test_partial_fill_drops_a_now_oversized_scale_out_level() -> None:
+    manager = BracketManager(order_manager=Mock())
+    from nifty_scalper_bot.execution.bracket_core import TargetLevel
+
+    bracket = _pending_bracket(manager, "pf-5", "NFO:NIFTYPF5CE", 150)
+    bracket.tp_levels = [TargetLevel(price=105.0, quantity=75, name="TP1")]
+
+    manager.confirm_entry_fill("pf-5", 100.0, 75)
+
+    assert bracket.quantity == 75
+    assert [lvl for lvl in bracket.tp_levels if not lvl.executed] == []

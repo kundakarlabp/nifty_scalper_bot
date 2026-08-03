@@ -1406,12 +1406,62 @@ class BracketManager:
             self.save_state()
             self._sync_active_bracket_symbols_to_mdm()
 
-    def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
+    def _reconcile_entry_fill_quantity(
+        self, bracket: BracketState, filled_qty: int | None
+    ) -> None:
+        """Shrink a bracket to the quantity the broker actually filled.
+
+        Exits must never be sized above the held position: an oversized exit is
+        either rejected (leaving the position unprotected while it retries) or
+        fills into a naked opposite exposure. Only shrinking is permitted -- a
+        reported quantity above the registered size is a data fault, not an
+        instruction to trade more.
+        """
+        if filled_qty is None:
+            return
+        try:
+            filled = int(filled_qty)
+        except (TypeError, ValueError):
+            return
+        registered = int(bracket.quantity or 0)
+        if filled <= 0 or registered <= 0 or filled >= registered:
+            return
+        bracket.quantity = filled
+        bracket.remaining_quantity = filled
+        # A partial-target slice at or above the whole position is no longer a
+        # scale-out; drop it rather than exit the entire position at TP1.
+        bracket.tp_levels = [
+            level
+            for level in bracket.tp_levels
+            if level.executed or int(level.quantity) < filled
+        ]
+        LOGGER.warning(
+            "BRACKET_QTY_RECONCILED order_id=%s symbol=%s requested=%s filled=%s",
+            bracket.entry_order_id,
+            bracket.symbol,
+            registered,
+            filled,
+            extra={
+                "event": "BRACKET_QTY_RECONCILED",
+                "order_id": bracket.entry_order_id,
+                "symbol": bracket.symbol,
+                "requested_qty": registered,
+                "filled_qty": filled,
+            },
+        )
+
+    def confirm_entry_fill(
+        self, order_id: str, fill_price: float, filled_qty: int | None = None
+    ) -> None:
         """Activate a bracket once entry fill is confirmed.
 
         Args:
             order_id: Entry order identifier for the bracket.
             fill_price: Confirmed fill price from the broker.
+            filled_qty: Confirmed filled quantity. Brackets are pre-registered
+                with the *requested* size, so a partial entry fill (whose
+                remainder is then cancelled) would otherwise leave protective
+                exits sized larger than the position actually held.
 
         Returns:
             None.
@@ -1441,6 +1491,8 @@ class BracketManager:
                     },
                 )
                 return
+
+            self._reconcile_entry_fill_quantity(bracket, filled_qty)
 
             # Update entry price with actual fill
             if fill_price and fill_price > 0:

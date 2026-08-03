@@ -6122,7 +6122,9 @@ class OrderManager:
                 bracket_exists = self._bracket_manager.get_bracket(order.order_id)
                 if bracket_exists is None:
                     raise RuntimeError("entry bracket registration was not confirmed")
-            self._bracket_manager.confirm_entry_fill(order.order_id, entry_price)
+            self._bracket_manager.confirm_entry_fill(
+                order.order_id, entry_price, int(order.filled_quantity or 0) or None
+            )
             verified = self._bracket_manager.get_bracket(order.order_id)
             if (
                 verified is None
