@@ -39,11 +39,14 @@ def test_directional_mode_disables_gamma_theta_and_context(monkeypatch) -> None:
     assert "CPRBreakout" not in names
 
 
-def test_orb_direction_is_consumed_only_after_entry_acceptance(
+def test_orb_setup_identity_is_runner_owned_and_stable(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("ENABLE_ORB_STRATEGY", "true")
-    strategy = ORBProStrategy(ORBProStrategyConfig(), indicator_engine=None)
+    strategy = ORBProStrategy(
+        ORBProStrategyConfig(min_confidence=0.0),
+        indicator_engine=None,
+    )
     indicators = {
         "orb_ready": True,
         "orb_high": 105.0,
@@ -56,16 +59,31 @@ def test_orb_direction_is_consumed_only_after_entry_acceptance(
         "volume": 1000.0,
         "avg_volume": 900.0,
         "direction_bias": "CE",
+        "underlying_direction_bias": "CE",
         "regime": "TREND_UP",
+        "spread_pct": 0.5,
+        "bid": 109.5,
+        "ask": 110.0,
+        "quote_depth_valid": True,
+        "tradable_quote": True,
+        "stale_data_used": False,
+        "latest_bar_ts": 1_785_000_000.0,
+        "session_date": "2026-08-03",
     }
 
-    assert strategy._evaluate_signal("NFO:NIFTYCE", indicators, 110.0) is not None
-    assert strategy._evaluate_signal("NFO:NIFTYCE", indicators, 110.0) is not None
-
+    first = strategy.generate_signal("NFO:NIFTYCE", indicators, 110.0)
+    assert first is not None
     strategy.notify_entry_accepted("CE")
+    repeated = strategy.generate_signal(
+        "NFO:NIFTYCE",
+        {**indicators, "latest_bar_ts": 1_785_000_060.0},
+        110.0,
+    )
 
-    assert strategy._evaluate_signal("NFO:NIFTYCE", indicators, 110.0) is None
-    assert strategy.last_no_vote_reason == "direction_already_traded_today"
+    assert repeated is not None
+    assert first.metadata["setup_id"] == repeated.metadata["setup_id"]
+    assert first.metadata["direction_alignment_score"] == 2.0
+    assert first.metadata["liquidity_score"] == 2.0
 
 
 def test_production_profile_is_stable_and_changes_with_material_settings(
