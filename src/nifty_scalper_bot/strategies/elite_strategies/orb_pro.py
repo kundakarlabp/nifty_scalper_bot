@@ -47,6 +47,7 @@ class ORBProStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         if str(os.getenv('ENABLE_ORB_STRATEGY', 'false')).strip().lower() not in {'1','true','yes','on'}:
+            self._no_vote('strategy_disabled_by_env')
             return None
         try:
             self._no_vote("stale_or_invalid_data")
@@ -161,9 +162,10 @@ class ORBProStrategy(EliteStrategy):
                 strategy_name='ORBPro',
                 metadata=metadata,
             )
-        except Exception as e:
-            LOGGER.error('Failure in ORBProStrategy._evaluate_signal: %s', e, exc_info=e)
-            return None
+        except Exception:
+            # The base wrapper records evaluation failures distinctly from
+            # legitimate no-votes; do not convert an ORB crash into reason=none.
+            raise
 
 
 __all__ = ['ORBProStrategy']
