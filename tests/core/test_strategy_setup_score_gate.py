@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.strategy_setup_score_gate import (
+    _enforce_permanent_context_only_role,
     _remove_permanent_context_only_promotions,
     setup_gate_result,
 )
@@ -75,6 +76,34 @@ def test_context_cannot_promote_an_explicitly_failed_trigger() -> None:
     )
 
     assert result is None
+
+
+def test_malformed_orderflow_trigger_is_normalized_to_context() -> None:
+    signal = SimpleNamespace(
+        action="BUY",
+        metadata={
+            "strategy": "OrderFlow",
+            "role": "trigger",
+            "can_trigger": True,
+            "trigger_conditions_met": True,
+        },
+    )
+    vote = _vote(
+        strategy="OrderFlow",
+        role="trigger",
+        can_trigger=True,
+        trigger_conditions_met=True,
+    )
+
+    changed = _enforce_permanent_context_only_role(signal, vote)
+
+    assert changed is True
+    for metadata in (signal.metadata, vote.metadata):
+        assert metadata["role"] == "context"
+        assert metadata["can_trigger"] is False
+        assert metadata["trigger_conditions_met"] is False
+        assert metadata["trigger_eligible"] is False
+        assert metadata["trigger_block_reason"] == "context_only_role"
 
 
 def test_orderflow_is_removed_from_context_promotion_candidates() -> None:
