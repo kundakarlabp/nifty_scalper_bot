@@ -7,7 +7,8 @@ Fixed: 'Signal' object has no attribute 'strategy_name' crash.
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field, asdict
+import os
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping
 
@@ -15,6 +16,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal, Strategy
+from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -105,7 +107,6 @@ class EliteStrategy(Strategy):
         self._last_signal_at: datetime | None = None
         self._signals_generated = 0
         self._last_signal: EliteSignal | None = None
-        self._accepted_setup_by_symbol: dict[str, tuple[str, str, str]] = {}
         self._consecutive_evaluation_failures = 0
         self._last_evaluation_error: str | None = None
 
@@ -229,6 +230,16 @@ class EliteStrategy(Strategy):
             self._consecutive_evaluation_failures = 0
             if elite_signal:
                 self._stamp_setup_anchor(elite_signal, indicators_payload)
+                self._stamp_structural_setup_id(elite_signal, indicators_payload)
+                quality = self._stamp_quality_evidence(elite_signal, indicators_payload)
+                if (
+                    str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+                    == "LIVE"
+                    and bool(quality.get("quality_spread_observed"))
+                    and not bool(quality.get("quality_spread_pass"))
+                ):
+                    self._no_vote("wide_spread")
+                    return None
                 min_conf = _as_confidence_fraction(self._config.min_confidence)
                 if float(elite_signal.confidence) < min_conf:
                     self._no_vote("below_strategy_min_confidence")
@@ -237,20 +248,6 @@ class EliteStrategy(Strategy):
                         extra={
                             "event": "elite_strategy_below_min_conf",
                             "strategy": self.name,
-                        },
-                    )
-                    return None
-                if self._is_duplicate_setup_vote(elite_signal):
-                    self._no_vote("setup_anchor_already_consumed")
-                    LOGGER.debug(
-                        "STRATEGY_NO_VOTE strategy=%s symbol=%s reason=setup_anchor_already_consumed",
-                        self.name,
-                        elite_signal.symbol,
-                        extra={
-                            "event": "STRATEGY_NO_VOTE",
-                            "strategy": self.name,
-                            "symbol": elite_signal.symbol,
-                            "reason": "setup_anchor_already_consumed",
                         },
                     )
                     return None
@@ -415,14 +412,7 @@ class EliteStrategy(Strategy):
     def _stamp_setup_anchor(
         cls, elite_signal: EliteSignal, indicators: Mapping[str, Any]
     ) -> None:
-        """Stamp the evaluation bar identity onto the signal metadata.
-
-        Without this, only SMCLiquidity carried a setup anchor. Every other
-        strategy produced metadata with no bar identity, so the deterministic
-        signal id degraded to a wall-clock minute bucket (the same setup earned
-        a fresh id every 60s, defeating duplicate suppression) and the
-        structural stop-rearm gate could never observe a newer setup candle.
-        """
+        """Stamp the evaluation bar identity onto the signal metadata."""
         metadata = elite_signal.metadata
         anchor = None
         for key in cls._SETUP_ANCHOR_SOURCES:
@@ -447,6 +437,73 @@ class EliteStrategy(Strategy):
         metadata.setdefault("latest_bar_ts", anchor)
         metadata.setdefault("setup_candle_timestamp", anchor)
         metadata.setdefault("bar_timestamp", anchor)
+
+    @staticmethod
+    def _stamp_structural_setup_id(
+        elite_signal: EliteSignal, indicators: Mapping[str, Any]
+    ) -> None:
+        """Use market structure, not process memory, as the reusable setup key."""
+        metadata = elite_signal.metadata
+        if metadata.get("setup_id") not in (None, ""):
+            return
+        if str(metadata.get("role") or "trigger").lower() == "context":
+            return
+        strategy = str(
+            elite_signal.strategy_name or metadata.get("strategy") or ""
+        ).lower()
+        side = str(
+            metadata.get("contract_side")
+            or metadata.get("trade_side")
+            or metadata.get("side")
+            or ""
+        ).upper()
+        if "orb" in strategy:
+            session = str(
+                indicators.get("session_date")
+                or str(metadata.get("latest_bar_ts") or "")[:10]
+                or datetime.now(timezone.utc).date().isoformat()
+            )
+            high = metadata.get("opening_range_high")
+            low = metadata.get("opening_range_low")
+            if high is not None and low is not None:
+                metadata["setup_id"] = f"orb:{session}:{side}:{high}:{low}"
+        elif "smc" in strategy:
+            reference = (
+                indicators.get("prior_swing_low")
+                if side == "CE"
+                else indicators.get("prior_swing_high")
+                if side == "PE"
+                else None
+            )
+            if reference is None:
+                reference = metadata.get("sweep_level")
+            if reference is not None:
+                metadata["setup_id"] = f"smc:{side}:{reference}"
+
+    @staticmethod
+    def _stamp_quality_evidence(
+        elite_signal: EliteSignal, indicators: Mapping[str, Any]
+    ) -> dict[str, object]:
+        """Attach the canonical quality contract to every elite trigger vote."""
+        metadata = elite_signal.metadata
+        side = str(
+            metadata.get("contract_side")
+            or metadata.get("trade_side")
+            or metadata.get("side")
+            or ""
+        ).upper()
+        evidence = build_trade_quality_evidence(indicators, side=side)
+        for key, value in evidence.items():
+            metadata.setdefault(key, value)
+        for key in (
+            "spread_pct",
+            "quote_depth_valid",
+            "tradable_quote",
+            "stale_data_used",
+        ):
+            if metadata.get(key) is None and indicators.get(key) is not None:
+                metadata[key] = indicators.get(key)
+        return evidence
 
     def _setup_vote_key(
         self, elite_signal: EliteSignal
@@ -474,33 +531,13 @@ class EliteStrategy(Strategy):
         return symbol_key, (str(anchor), str(elite_signal.signal), side)
 
     def _is_duplicate_setup_vote(self, elite_signal: EliteSignal) -> bool:
-        """Return whether this finalized trigger setup already entered.
-
-        A setup is consumed only after the existing order-accepted callback.
-        Failed quote/risk/arbitration attempts can therefore retry safely while
-        an accepted setup cannot keep firing after an exit or tick retry.
-        """
-        resolved = self._setup_vote_key(elite_signal)
-        if resolved is None:
-            return False
-        symbol_key, vote_key = resolved
-        return self._accepted_setup_by_symbol.get(symbol_key) == vote_key
+        """Compatibility shim; runner deterministic identity owns deduplication."""
+        del elite_signal
+        return False
 
     def notify_entry_accepted(self, side: str) -> None:
-        """Consume the last emitted trigger setup after order acceptance."""
-        signal = self._last_signal
-        if signal is None:
-            return
-        resolved = self._setup_vote_key(signal)
-        if resolved is None:
-            return
-        symbol_key, vote_key = resolved
-        accepted_side = str(side or "").strip().upper()
-        vote_side = vote_key[2]
-        if accepted_side in {"CE", "PE"} and vote_side in {"CE", "PE"}:
-            if accepted_side != vote_side:
-                return
-        self._accepted_setup_by_symbol[symbol_key] = vote_key
+        """Compatibility hook; order lifecycle is owned by the runner."""
+        del side
 
     def _no_vote(self, reason: str) -> None:
         """Record a single no-vote reason. Args: reason. Returns: None. Raises: none."""

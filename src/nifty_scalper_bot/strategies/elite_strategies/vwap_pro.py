@@ -5,7 +5,10 @@ from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
-from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
+from nifty_scalper_bot.strategies.signal_quality import (
+    canonical_max_spread_pct,
+    resolve_signal_domain,
+)
 from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -13,16 +16,7 @@ LOGGER = get_logger(__name__)
 
 
 def _fmt_optional(value: float | None, digits: int) -> str:
-    """Format an optional metric for logging without crashing on None.
-
-    futures_vwap_slope / futures_volume_ratio are legitimately None when the
-    futures context is unavailable (they are no longer conflated with 0.0).
-    Feeding None to a %.4f/%.2f specifier raised
-    "TypeError: must be real number, not NoneType" inside the STRATEGY_NO_VOTE
-    log call, which the broad handler swallowed as a strategy failure -- so
-    VWAPPro silently produced no vote on every evaluation.
-    Args: value, digits. Returns: formatted str or "unavailable". Raises: none.
-    """
+    """Format an optional metric for logging without crashing on None."""
     if value is None:
         return "unavailable"
     try:
@@ -50,7 +44,10 @@ class VWAPProStrategy(EliteStrategy):
             0.0,
             float(os.getenv("VWAP_MIN_PENETRATION_ATR_MULT", "0.15") or 0.15),
         )
-        self._accepted_thesis_sides: set[str] = set()
+        # The last finalized below-VWAP/reclaim anchor defines the thesis.
+        # It is structural, not an order-state latch; the runner persists the
+        # resulting setup_id and owns accepted/failed order lifecycle.
+        self._thesis_anchor_by_side: dict[str, str] = {}
         self._futures_slope_neutral_eps = float(os.getenv("VWAP_FUTURES_SLOPE_NEUTRAL_EPS", "0.00005") or 0.00005)
         self._allow_early_trend_pullback = str(
             os.getenv("VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK_LIVE", "false")
@@ -59,12 +56,6 @@ class VWAPProStrategy(EliteStrategy):
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._early_trend_min_context_conf = float(os.getenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.90") or 0.90)
         self._early_trend_max_context_age = float(os.getenv("VWAP_EARLY_TREND_MAX_CONTEXT_AGE", "2.0") or 2.0)
-
-    def notify_entry_accepted(self, side: str) -> None:
-        """Disarm an accepted VWAP thesis until premium closes below VWAP."""
-        resolved = str(side or "").strip().upper()
-        if resolved in {"CE", "PE"}:
-            self._accepted_thesis_sides.add(resolved)
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicators set. Raises: Exception."""
@@ -86,6 +77,8 @@ class VWAPProStrategy(EliteStrategy):
             "futures_vwap_slope",
             "futures_volume_ratio",
             "spread_pct",
+            "quote_depth_valid",
+            "tradable_quote",
             "spot_context",
             "futures_context",
             "stale_data_used",
@@ -97,10 +90,6 @@ class VWAPProStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            # Reference priority: the broker's day VWAP, then our session-anchored
-            # VWAP, then the rolling `period`-bar mean. Previously the rolling
-            # proxy won unconditionally because it is almost never falsy, so the
-            # true VWAP sat unused in the same payload.
             vwap = float(
                 indicators.get('exchange_vwap')
                 or indicators.get('session_vwap')
@@ -133,6 +122,7 @@ class VWAPProStrategy(EliteStrategy):
                 or fut_ctx.get("direction_bias")
                 or ""
             ).upper()
+
             def _optional_float(value: Any) -> float | None:
                 try:
                     return None if value is None else float(value)
@@ -160,8 +150,7 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote('stale_data')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=stale_data')
                 return None
-            max_spread_pct = 12.0 if str(os.getenv('EXECUTION_MODE','SHADOW')).strip().upper() == 'LIVE' else 28.0
-
+            max_spread_pct = canonical_max_spread_pct()
             if spread_pct > max_spread_pct:
                 self._no_vote('wide_spread')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=wide_spread')
@@ -195,15 +184,28 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote('invalid_price_domain')
                 return None
 
-            # An accepted VWAP trade owns this side's thesis until a finalized
-            # premium candle closes below VWAP. The reset candle only rearms;
-            # it cannot immediately originate the next trade.
-            if contract_side in self._accepted_thesis_sides:
-                if close < vwap:
-                    self._accepted_thesis_sides.discard(contract_side)
-                    self._no_vote('vwap_thesis_reset')
-                else:
-                    self._no_vote('vwap_thesis_not_reset')
+            bar_anchor = next(
+                (
+                    indicators.get(key)
+                    for key in (
+                        "latest_bar_ts",
+                        "bar_timestamp",
+                        "setup_candle_timestamp",
+                    )
+                    if indicators.get(key) not in (None, "")
+                ),
+                None,
+            )
+            if close < vwap:
+                if bar_anchor is not None:
+                    self._thesis_anchor_by_side[contract_side] = str(bar_anchor)
+                self._no_vote('vwap_thesis_reset')
+                return None
+            if (open_price < vwap or low < vwap) and bar_anchor is not None:
+                self._thesis_anchor_by_side[contract_side] = str(bar_anchor)
+            thesis_anchor = self._thesis_anchor_by_side.get(contract_side)
+            if not thesis_anchor:
+                self._no_vote('vwap_thesis_not_armed')
                 return None
 
             premium_above_vwap = close >= vwap
@@ -305,7 +307,10 @@ class VWAPProStrategy(EliteStrategy):
                 and not premium_above_vwap
                 and not pullback_flag
                 and distance_pct <= min(self._max_distance_pct * 0.15, 0.03)
-                and spread_pct <= float(os.getenv("VWAP_EARLY_TREND_MAX_SPREAD_PCT", "8.0") or 8.0)
+                and spread_pct <= min(
+                    canonical_max_spread_pct(),
+                    float(os.getenv("VWAP_EARLY_TREND_MAX_SPREAD_PCT", "8.0") or 8.0),
+                )
             )
             if early_trend_pullback:
                 score += 1.2
@@ -314,7 +319,10 @@ class VWAPProStrategy(EliteStrategy):
                 trend_alignment
                 and context_fresh
                 and underlying_direction_confidence >= float(os.getenv("VWAP_CONTEXT_BOOST_MIN_CONFIDENCE", "0.90") or "0.90")
-                and spread_pct <= float(os.getenv("LIVE_MAX_SPREAD_PCT", "0.75") or "0.75")
+                and spread_pct <= min(
+                    canonical_max_spread_pct(),
+                    float(os.getenv("VWAP_CONTEXT_BOOST_MAX_SPREAD_PCT", "0.75") or "0.75"),
+                )
                 and premium_above_vwap
             ):
                 boost = float(os.getenv("VWAP_PRO_TREND_CONTEXT_BOOST", "0.5") or "0.5")
@@ -422,6 +430,7 @@ class VWAPProStrategy(EliteStrategy):
                 'trade_side': contract_side,
                 'side': contract_side,
                 'contract_side': contract_side,
+                'setup_id': f"vwap:{contract_side}:{thesis_anchor}",
                 'premium_above_vwap': premium_above_vwap,
                 'direction_bias': direction if direction in {'CE', 'PE'} else None,
                 "underlying_direction_bias": underlying_direction if underlying_direction in {"CE", "PE"} else None,
