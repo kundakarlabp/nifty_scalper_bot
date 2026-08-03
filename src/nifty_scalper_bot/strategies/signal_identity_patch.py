@@ -1,9 +1,10 @@
-"""Make live signal identity stable across option strike rotation and tick retries."""
+"""Make live signal identity stable and observable across tick retries."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import logging
 import re
 from typing import Any, Mapping
 
@@ -47,7 +48,7 @@ def has_setup_anchor(metadata: Mapping[str, Any] | None) -> bool:
     return any(payload.get(key) not in (None, "") for key in _ANCHOR_KEYS)
 
 
-def _anchor(metadata: Mapping[str, Any]) -> str:
+def _anchor_value(metadata: Mapping[str, Any]) -> str | None:
     for key in _ANCHOR_KEYS:
         value = metadata.get(key)
         if value in (None, ""):
@@ -58,6 +59,13 @@ def _anchor(metadata: Mapping[str, Any]) -> str:
         if isinstance(value, (int, float)):
             return str(int(float(value)))
         return str(value).strip()
+    return None
+
+
+def _anchor(metadata: Mapping[str, Any]) -> str:
+    value = _anchor_value(metadata)
+    if value is not None:
+        return value
     # Never mint a new identity from wall-clock time. A stable sentinel keeps
     # malformed retries idempotent; the real-live preparation gate rejects
     # anchorless strategy entries before they can reach the broker.
@@ -84,17 +92,79 @@ def _deterministic_id(signal: Any) -> str:
     return hashlib.md5(raw.encode()).hexdigest()[:16]
 
 
+def _install_elite_signal_observability() -> None:
+    from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
+
+    current = EliteStrategy.generate_signal
+    if getattr(current, "_elite_signal_observability_patch", False):
+        return
+
+    def generate_signal(
+        self: Any,
+        symbol: str,
+        indicators: Mapping[str, Any],
+        current_price: float,
+        position: Any | None = None,
+    ) -> Any:
+        signal = current(self, symbol, indicators, current_price, position)
+        if signal is None:
+            return None
+        metadata = dict(getattr(signal, "metadata", {}) or {})
+        strategy = str(
+            metadata.get("strategy_name")
+            or metadata.get("strategy")
+            or getattr(self, "name", "unknown")
+        )
+        _, side = _option_thesis(getattr(signal, "symbol", symbol), metadata)
+        setup_anchor = _anchor_value(metadata)
+        setup_id = metadata.get("setup_id") or metadata.get("setup_structure_id")
+        raw_score = metadata.get("raw_setup_score")
+        if raw_score is None:
+            raw_score = metadata.get("strategy_score") or metadata.get("context_score")
+        role = str(metadata.get("role") or "trigger").lower()
+        LOGGER.log(
+            logging.DEBUG if role == "context" else logging.INFO,
+            "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s quote_update_version=%s",
+            strategy,
+            getattr(signal, "symbol", symbol),
+            side or None,
+            raw_score,
+            getattr(signal, "confidence", None),
+            setup_id,
+            setup_anchor,
+            metadata.get("quote_update_version"),
+            extra={
+                "event": "ELITE_SIGNAL_GENERATED",
+                "strategy": strategy,
+                "symbol": getattr(signal, "symbol", symbol),
+                "side": side or None,
+                "raw_setup_score": raw_score,
+                "confidence": getattr(signal, "confidence", None),
+                "setup_id": setup_id,
+                "setup_anchor": setup_anchor,
+                "quote_update_version": metadata.get("quote_update_version"),
+                "role": role,
+            },
+        )
+        return signal
+
+    generate_signal.__name__ = getattr(current, "__name__", "generate_signal")
+    generate_signal.__doc__ = getattr(current, "__doc__", None)
+    setattr(generate_signal, "_elite_signal_observability_patch", True)
+    setattr(generate_signal, "_original", current)
+    EliteStrategy.generate_signal = generate_signal  # type: ignore[assignment]
+
+
 def apply_patches() -> None:
     global _PATCHED
     if _PATCHED:
         return
     from nifty_scalper_bot.strategies.signal_generator import Signal
 
-    if getattr(Signal, "_stable_setup_identity_patch", False):
-        _PATCHED = True
-        return
-    Signal.deterministic_id = property(_deterministic_id)
-    Signal._stable_setup_identity_patch = True
+    if not getattr(Signal, "_stable_setup_identity_patch", False):
+        Signal.deterministic_id = property(_deterministic_id)
+        Signal._stable_setup_identity_patch = True
+    _install_elite_signal_observability()
     _PATCHED = True
 
 

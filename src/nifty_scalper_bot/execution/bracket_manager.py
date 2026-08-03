@@ -56,9 +56,80 @@ tick_exchange_epoch = _tick_exchange_epoch_with_receipt
 _original_confirm_entry_fill = BoundBracketManager.confirm_entry_fill
 
 
+def _positive_filled_quantity(value):
+    try:
+        quantity = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return quantity if quantity > 0 else None
+
+
+def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
+    """Shrink bracket and durable entry fill to a later authoritative quantity."""
+    reported = _positive_filled_quantity(filled_qty)
+    if bracket is None or reported is None:
+        return False
+    intent = str(getattr(bracket, "entry_order_intent", "ENTRY") or "ENTRY").upper()
+    if intent not in {"ENTRY", "SCALE_IN", "REVERSAL"}:
+        return False
+    try:
+        registered = int(getattr(bracket, "quantity", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if registered <= 0 or reported >= registered:
+        return False
+
+    reconciler = getattr(self, "_reconcile_entry_fill_quantity", None)
+    if not callable(reconciler):
+        return False
+    reconciler(bracket, reported)
+
+    # On the first callback the ledger has not been written yet; pre-shrinking
+    # makes the existing ledger layer record the actual quantity. On a later
+    # duplicate callback, explicitly shrink the already-persisted ENTRY row.
+    if bool(getattr(bracket, "entry_confirmed", False)):
+        ledger = getattr(self, "_fill_ledger", None)
+        ledger_reconcile = getattr(ledger, "reconcile_entry_quantity", None)
+        fill_id_builder = getattr(self, "_entry_fill_id", None)
+        if callable(ledger_reconcile) and callable(fill_id_builder):
+            try:
+                ledger_reconcile(fill_id_builder(str(order_id)), reported)
+            except Exception as exc:  # noqa: BLE001 - block release on accounting drift
+                blocker = getattr(self, "_block_ledger_release", None)
+                if callable(blocker):
+                    blocker(
+                        bracket,
+                        reason="entry_fill_quantity_reconcile_failed",
+                        payload={
+                            "order_id": str(order_id),
+                            "filled_qty": reported,
+                            "error": str(exc),
+                        },
+                    )
+                raise
+        _core.LOGGER.warning(
+            "FILL_LEDGER_ENTRY_QTY_RECONCILED order_id=%s symbol=%s requested=%s filled=%s",
+            order_id,
+            bracket.symbol,
+            registered,
+            reported,
+            extra={
+                "event": "FILL_LEDGER_ENTRY_QTY_RECONCILED",
+                "order_id": str(order_id),
+                "symbol": bracket.symbol,
+                "requested_qty": registered,
+                "filled_qty": reported,
+            },
+        )
+    return True
+
+
 def _confirm_entry_fill_once(self, order_id, fill_price, filled_qty=None):
-    """Ignore an identical repeated COMPLETE callback without resetting protection."""
+    """Keep repeated COMPLETE callbacks idempotent while accepting smaller fills."""
     bracket = self.get_bracket(order_id)
+    quantity_reconciled = _reconcile_confirmed_entry_quantity(
+        self, order_id, bracket, filled_qty
+    )
     try:
         price = float(fill_price)
         prior = float(bracket.entry_fill_price) if bracket is not None else None
@@ -71,16 +142,24 @@ def _confirm_entry_fill_once(self, order_id, fill_price, filled_qty=None):
         and price is not None
         and abs(prior - price) < 1e-9
     ):
+        event = (
+            "BRACKET_DUPLICATE_FILL_QTY_RECONCILED"
+            if quantity_reconciled
+            else "BRACKET_ACTIVATION_DUPLICATE_IGNORED"
+        )
         _core.LOGGER.info(
-            "BRACKET_ACTIVATION_DUPLICATE_IGNORED order_id=%s symbol=%s fill_price=%.2f",
+            "%s order_id=%s symbol=%s fill_price=%.2f filled_qty=%s",
+            event,
             order_id,
             bracket.symbol,
             price,
+            _positive_filled_quantity(filled_qty),
             extra={
-                "event": "BRACKET_ACTIVATION_DUPLICATE_IGNORED",
+                "event": event,
                 "order_id": str(order_id),
                 "symbol": bracket.symbol,
                 "fill_price": price,
+                "filled_qty": _positive_filled_quantity(filled_qty),
             },
         )
         return True

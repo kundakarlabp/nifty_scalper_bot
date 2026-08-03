@@ -1,15 +1,10 @@
-"""Live direction-context proof for OrderFlow.
-
-This helper is deliberately narrow.  It does not invent an underlying CE/PE bias.
-It only prevents a live OrderFlow candidate from being blocked solely because
-``direction_bias`` is absent when fresh spot/futures context proof is present and
-all other execution gates already passed.
-"""
+"""Live direction-context proof and quote identity for OrderFlow."""
 
 from __future__ import annotations
 
 import os
 from typing import Any, Mapping
+import zlib
 
 from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_ms
 from nifty_scalper_bot.strategies.runtime_context_contract import (
@@ -37,6 +32,54 @@ def _safe_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number == number else None
+
+
+def _stable_version(value: Any) -> int:
+    try:
+        numeric = int(float(value))
+    except (TypeError, ValueError):
+        numeric = 0
+    if numeric > 0:
+        return numeric
+    return int(zlib.crc32(str(value).encode("utf-8")) & 0x7FFFFFFF) or 1
+
+
+def _stamp_quote_update_identity(
+    metadata: dict[str, Any], indicators: Mapping[str, Any]
+) -> None:
+    """Preserve the real version, or a stable integer quote fingerprint."""
+    for source in (metadata, indicators):
+        for key in (
+            "quote_update_version",
+            "update_version",
+            "tick_version",
+            "last_tick_ts_ms",
+            "timestamp_ms",
+            "last_tick_timestamp",
+        ):
+            value = source.get(key)
+            if value not in (None, "", 0, 0.0):
+                metadata["quote_update_version"] = _stable_version(value)
+                metadata.setdefault("quote_update_version_source", key)
+                return
+
+    bid = _safe_float(metadata.get("bid") or indicators.get("bid"))
+    ask = _safe_float(metadata.get("ask") or indicators.get("ask"))
+    imbalance = _safe_float(
+        metadata.get("depth_imbalance") or indicators.get("depth_imbalance")
+    )
+    tick_direction = str(
+        metadata.get("tick_direction") or indicators.get("tick_direction") or ""
+    ).upper()
+    if bid is None and ask is None and imbalance is None and not tick_direction:
+        return
+    raw = (
+        f"{bid if bid is not None else 'na'}:"
+        f"{ask if ask is not None else 'na'}:"
+        f"{imbalance if imbalance is not None else 'na'}:{tick_direction or 'na'}"
+    )
+    metadata["quote_update_version"] = _stable_version(raw)
+    metadata["quote_update_version_source"] = "microstructure_fingerprint"
 
 
 def _can_upgrade_direction_context_block(
@@ -86,12 +129,16 @@ def apply_orderflow_live_context_proof(
     signal: Any,
     indicators: Mapping[str, Any],
 ) -> Any:
-    """Upgrade an otherwise valid live OrderFlow signal using fresh context proof."""
+    """Preserve quote identity and upgrade only fully proven live context."""
 
-    if signal is None or not _env_live():
+    if signal is None:
         return signal
     metadata = dict(getattr(signal, "metadata", {}) or {})
-    if not _can_upgrade_direction_context_block(metadata, indicators or {}):
+    _stamp_quote_update_identity(metadata, indicators or {})
+    signal.metadata = metadata
+    if not _env_live() or not _can_upgrade_direction_context_block(
+        metadata, indicators or {}
+    ):
         return signal
     metadata.update(
         {
