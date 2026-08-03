@@ -12,6 +12,9 @@ Operational constraints:
 
 from __future__ import annotations
 
+from contextlib import suppress
+from typing import Any, Mapping
+
 from nifty_scalper_bot.execution import bracket_core as _core
 
 for _name in dir(_core):
@@ -54,6 +57,52 @@ _core.tick_exchange_epoch = _tick_exchange_epoch_with_receipt
 tick_exchange_epoch = _tick_exchange_epoch_with_receipt
 
 _original_confirm_entry_fill = BoundBracketManager.confirm_entry_fill
+_original_register_virtual_bracket = BoundBracketManager.register_virtual_bracket
+
+
+def _positive_number(value: Any) -> float | None:
+    with suppress(TypeError, ValueError):
+        parsed = float(value)
+        if parsed > 0.0:
+            return parsed
+    return None
+
+
+def _enrich_virtual_bracket_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Restore optional TP1/trailing fields from durable trade provenance."""
+
+    enriched = dict(kwargs)
+    provenance = enriched.get("trade_provenance")
+    if not isinstance(provenance, Mapping):
+        return enriched
+    exit_plan = provenance.get("exit_plan")
+    source = dict(exit_plan) if isinstance(exit_plan, Mapping) else dict(provenance)
+
+    if _positive_number(enriched.get("tp1_price")) is None:
+        tp1_price = _positive_number(source.get("tp1_price"))
+        if tp1_price is not None:
+            enriched["tp1_price"] = tp1_price
+    if _positive_number(enriched.get("tp1_qty")) is None:
+        tp1_qty = _positive_number(source.get("tp1_qty"))
+        if tp1_qty is not None:
+            enriched["tp1_qty"] = int(tp1_qty)
+    if _positive_number(enriched.get("trailing_atr_mult")) is None:
+        trailing = _positive_number(source.get("trailing_atr_mult"))
+        if trailing is not None:
+            enriched["trailing_atr_mult"] = trailing
+    if _positive_number(enriched.get("resolved_lot_size")) is None:
+        lot_size = _positive_number(source.get("resolved_lot_size"))
+        if lot_size is not None:
+            enriched["resolved_lot_size"] = int(lot_size)
+    return enriched
+
+
+def _register_virtual_bracket_with_provenance(self, *args, **kwargs):
+    return _original_register_virtual_bracket(
+        self,
+        *args,
+        **_enrich_virtual_bracket_kwargs(kwargs),
+    )
 
 
 def _positive_filled_quantity(value):
@@ -166,6 +215,7 @@ def _confirm_entry_fill_once(self, order_id, fill_price, filled_qty=None):
     return _original_confirm_entry_fill(self, order_id, fill_price, filled_qty)
 
 
+BoundBracketManager.register_virtual_bracket = _register_virtual_bracket_with_provenance
 BoundBracketManager.confirm_entry_fill = _confirm_entry_fill_once
 BracketManager = BoundBracketManager
 
@@ -175,5 +225,6 @@ __all__ = sorted(
         "BoundBracketManager",
         "BracketManager",
         "RuntimeBracketManager",
+        "_enrich_virtual_bracket_kwargs",
     }
 )
