@@ -16,6 +16,7 @@ from nifty_scalper_bot.strategies.signal_identity_patch import (
     _deterministic_id,
     has_setup_anchor,
 )
+from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
 
 BAR_TS = 1_785_000_000.0
 
@@ -58,6 +59,7 @@ class _RepeatingStrategy(EliteStrategy):
             {
                 "role": self._role,
                 "contract_side": "CE",
+                "raw_setup_score": 9.0,
             }
         )
         return signal
@@ -150,26 +152,28 @@ def test_existing_signal_anchor_is_not_overwritten() -> None:
     assert signal.metadata["setup_candle_timestamp"] == BAR_TS
 
 
-def test_trigger_retry_is_allowed_until_entry_is_accepted() -> None:
+def test_strategy_hook_does_not_own_order_lifecycle() -> None:
     strategy = _RepeatingStrategy(role="trigger")
-    indicators = {"latest_bar_ts": BAR_TS}
+    indicators = {
+        "latest_bar_ts": BAR_TS,
+        "direction_bias": "CE",
+        "bid": 99.5,
+        "ask": 100.0,
+        "spread_pct": 0.5,
+        "quote_depth_valid": True,
+        "tradable_quote": True,
+        "regime": "TREND_UP",
+        "stale_data_used": False,
+    }
     symbol = _elite_signal().symbol
 
     first = strategy.generate_signal(symbol, indicators, 100.0)
-    retry_before_acceptance = strategy.generate_signal(symbol, indicators, 100.5)
     strategy.notify_entry_accepted("CE")
-    repeated_after_acceptance = strategy.generate_signal(symbol, indicators, 101.0)
-    next_bar = strategy.generate_signal(
-        symbol,
-        {"latest_bar_ts": BAR_TS + 60.0},
-        101.5,
-    )
+    repeated = strategy.generate_signal(symbol, indicators, 100.5)
 
     assert first is not None
-    assert retry_before_acceptance is not None
-    assert repeated_after_acceptance is None
-    assert strategy.last_no_vote_reason == "setup_anchor_already_consumed"
-    assert next_bar is not None
+    assert repeated is not None
+    assert _deterministic_id(first) == _deterministic_id(repeated)
 
 
 def test_context_vote_remains_tick_responsive_on_same_anchor() -> None:
@@ -179,3 +183,80 @@ def test_context_vote_remains_tick_responsive_on_same_anchor() -> None:
     assert strategy.generate_signal(_elite_signal().symbol, indicators, 100.0) is not None
     strategy.notify_entry_accepted("CE")
     assert strategy.generate_signal(_elite_signal().symbol, indicators, 100.5) is not None
+
+
+def test_orb_and_smc_structural_ids_ignore_new_bar_noise() -> None:
+    orb_first = EliteSignal(
+        symbol="NFO:NIFTY2680424400CE",
+        signal="BUY",
+        confidence=0.8,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target=120.0,
+        strategy_name="ORBPro",
+        metadata={
+            "role": "trigger",
+            "contract_side": "CE",
+            "opening_range_high": 105.0,
+            "opening_range_low": 95.0,
+        },
+    )
+    orb_second = _elite_signal()
+    orb_second.strategy_name = "ORBPro"
+    orb_second.metadata.update(orb_first.metadata)
+    for signal, bar_ts in ((orb_first, BAR_TS), (orb_second, BAR_TS + 60.0)):
+        EliteStrategy._stamp_setup_anchor(signal, {"latest_bar_ts": bar_ts})
+        EliteStrategy._stamp_structural_setup_id(
+            signal,
+            {"latest_bar_ts": bar_ts, "session_date": "2026-08-03"},
+        )
+    assert orb_first.metadata["setup_id"] == orb_second.metadata["setup_id"]
+
+    smc_first = _elite_signal()
+    smc_second = _elite_signal()
+    for signal, bar_ts in ((smc_first, BAR_TS), (smc_second, BAR_TS + 60.0)):
+        signal.strategy_name = "SMC"
+        signal.metadata.update(
+            {"strategy": "SMC", "role": "trigger", "contract_side": "CE"}
+        )
+        EliteStrategy._stamp_setup_anchor(signal, {"latest_bar_ts": bar_ts})
+        EliteStrategy._stamp_structural_setup_id(
+            signal,
+            {"latest_bar_ts": bar_ts, "prior_swing_low": 98.0},
+        )
+    assert smc_first.metadata["setup_id"] == smc_second.metadata["setup_id"]
+
+
+def test_quality_evidence_uses_order_spread_policy(monkeypatch) -> None:
+    monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
+    good = build_trade_quality_evidence(
+        {
+            "direction_bias": "CE",
+            "bid": 99.5,
+            "ask": 100.0,
+            "spread_pct": 0.5,
+            "quote_depth_valid": True,
+            "tradable_quote": True,
+            "regime": "TREND_UP",
+        },
+        side="CE",
+    )
+    wide = build_trade_quality_evidence(
+        {
+            "direction_bias": "CE",
+            "bid": 98.0,
+            "ask": 100.0,
+            "spread_pct": 2.0,
+            "quote_depth_valid": True,
+            "tradable_quote": True,
+            "regime": "TREND_UP",
+        },
+        side="CE",
+    )
+
+    assert good["direction_alignment_score"] == 2.0
+    assert good["liquidity_score"] == 2.0
+    assert good["regime_time_suitability_score"] == 1.0
+    assert good["quality_spread_pass"] is True
+    assert wide["liquidity_score"] == 0.0
+    assert wide["quality_spread_pass"] is False
