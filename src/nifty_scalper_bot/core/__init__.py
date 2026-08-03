@@ -132,15 +132,18 @@ def _install_market_data_runtime_hardening() -> dict[str, bool]:
 
 
 def _install_premium_geometry_runtime_hardening() -> None:
-    """Install option-premium geometry ownership after StrategyRunner imports."""
+    """Install option-premium geometry ownership after runtime composition."""
 
     try:
+        from nifty_scalper_bot.execution.bracket_manager import BoundBracketManager
         from nifty_scalper_bot.execution.premium_risk_contract_patch import (
+            install_bracket_exit_provenance_hardening,
             install_runner_geometry_hardening,
         )
         from nifty_scalper_bot.strategies.runner import StrategyRunner
 
         install_runner_geometry_hardening(StrategyRunner)
+        install_bracket_exit_provenance_hardening(BoundBracketManager)
         _LOGGER.info(
             "PREMIUM_GEOMETRY_HARDENING_INSTALLED",
             extra={"event": "PREMIUM_GEOMETRY_HARDENING_INSTALLED"},
