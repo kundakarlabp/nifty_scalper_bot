@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.execution.bracket_manager import (
-    _enrich_virtual_bracket_kwargs,
-)
+import types
+
 from nifty_scalper_bot.execution.order_manager import TradePlan
+from nifty_scalper_bot.execution.premium_risk_contract_patch import (
+    _enrich_virtual_bracket_kwargs,
+    install_bracket_exit_provenance_hardening,
+)
+from nifty_scalper_bot.execution import runtime_order_manager as runtime_module
 from nifty_scalper_bot.execution.runtime_order_manager import (
     _enrich_trade_plan_exit_provenance,
+    _submit_core_with_exit_provenance,
 )
 
 
@@ -106,3 +111,59 @@ def test_explicit_registration_values_override_provenance() -> None:
     assert kwargs["tp1_price"] == 109.0
     assert kwargs["tp1_qty"] == 65
     assert kwargs["resolved_lot_size"] == 65
+
+
+def test_bracket_installer_preserves_existing_composed_registration() -> None:
+    calls = []
+
+    class Bracket:
+        def register_virtual_bracket(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return "registered"
+
+    original = Bracket.register_virtual_bracket
+    install_bracket_exit_provenance_hardening(Bracket)
+    installed = Bracket.register_virtual_bracket
+    install_bracket_exit_provenance_hardening(Bracket)
+
+    result = Bracket().register_virtual_bracket(
+        order_id="OID-2",
+        trade_provenance={
+            "tp1_price": 110.0,
+            "tp1_qty": 65,
+            "resolved_lot_size": 65,
+        },
+    )
+
+    assert result == "registered"
+    assert installed is Bracket.register_virtual_bracket
+    assert installed is not original
+    assert len(calls) == 1
+    assert calls[0][1]["tp1_price"] == 110.0
+    assert calls[0][1]["tp1_qty"] == 65
+    assert calls[0][1]["resolved_lot_size"] == 65
+
+
+def test_recovery_submit_enriches_rebuilt_plan(monkeypatch) -> None:
+    captured = {}
+
+    def fake_submit(manager, plan):
+        captured["manager"] = manager
+        captured["plan"] = plan
+        return types.SimpleNamespace(accepted=True, order_id="OID-3")
+
+    monkeypatch.setattr(
+        runtime_module._core.OrderManager,
+        "submit_trade_plan_result",
+        fake_submit,
+    )
+    manager = object()
+    rebuilt = _plan(quantity=130)
+
+    result = _submit_core_with_exit_provenance(manager, rebuilt)
+
+    assert result.order_id == "OID-3"
+    assert captured["manager"] is manager
+    assert captured["plan"] is rebuilt
+    assert rebuilt.trade_provenance["tp1_price"] == 110.0
+    assert rebuilt.trade_provenance["tp1_qty"] == 65
