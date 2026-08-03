@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
@@ -104,7 +105,6 @@ class ORBProStrategy(EliteStrategy):
             if vol_tick:
                 score += 1.0
                 reasons.append('volume_or_tick_confirmation')
-            # Real RR from the actual stop (range invalidation) and target (2*ATR)
             stop_level = orb_low if breakout_side == 'CE' else orb_high
             risk = abs(close - stop_level)
             rr = (2.0 * atr) / risk if risk > 1e-9 else 0.0
@@ -118,6 +118,10 @@ class ORBProStrategy(EliteStrategy):
                 reasons.append(f'rr_thin_{rr:.1f}')
 
             strategy_score = max(0.0, min(10.0, score))
+            session_date = str(
+                indicators.get('session_date')
+                or datetime.now(timezone.utc).date().isoformat()
+            )
             metadata = {
                 'strategy': 'ORBPro',
                 'strategy_name': 'ORBPro',
@@ -125,6 +129,7 @@ class ORBProStrategy(EliteStrategy):
                 'trade_side': breakout_side,
                 'side': breakout_side,
                 'contract_side': breakout_side,
+                'setup_id': f'orb:{session_date}:{breakout_side}:{orb_high}:{orb_low}',
                 'direction_bias': breakout_side,
                 'raw_setup_score': strategy_score,
                 'strategy_score': strategy_score,
