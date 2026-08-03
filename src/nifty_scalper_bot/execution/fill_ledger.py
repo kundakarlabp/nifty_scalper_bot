@@ -272,6 +272,45 @@ class BracketFillLedgerStore:
             raise FillLedgerError(f"unable to persist fill {leg.fill_id}: {exc}") from exc
         return True
 
+    def reconcile_entry_quantity(self, fill_id: str, filled_qty: int) -> bool:
+        """Shrink an existing ENTRY fill to a later authoritative broker quantity.
+
+        Fill rows stay immutable except for this explicit partial-fill correction.
+        The method can never grow exposure or alter price, side, fees, or identity.
+        """
+        quantity = int(filled_qty or 0)
+        if quantity <= 0:
+            raise FillValidationError("reconciled entry quantity must be positive")
+        key = str(fill_id or "").strip()
+        existing = self.get_fill(key)
+        if existing is None:
+            return False
+        if existing.kind != "ENTRY":
+            raise FillConflictError(f"fill_id {key!r} is not an entry fill")
+        if quantity >= existing.quantity:
+            return False
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE bracket_fill_legs
+                    SET quantity = ?
+                    WHERE fill_id = ? AND kind = 'ENTRY' AND quantity > ?
+                    """,
+                    (quantity, key, quantity),
+                )
+                changed = cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            raise FillLedgerError(
+                f"unable to reconcile entry fill {key}: {exc}"
+            ) from exc
+        current = self.get_fill(key)
+        if current is None or current.kind != "ENTRY" or current.quantity > quantity:
+            raise FillConflictError(
+                f"entry fill {key!r} quantity reconciliation was not durable"
+            )
+        return changed
+
     def load_fills(self, bracket_id: str) -> list[FillLeg]:
         try:
             with self._connect() as connection:
