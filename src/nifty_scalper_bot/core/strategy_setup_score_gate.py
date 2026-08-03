@@ -57,6 +57,37 @@ def setup_gate_result(vote: Any) -> tuple[bool, float | None, float | None, str 
     return True, score, minimum, None
 
 
+def _enforce_permanent_context_only_role(signal: Any, vote: Any) -> bool:
+    """Normalize permanent context strategies before the combiner sees them."""
+    strategy = str(getattr(vote, "strategy", "") or "").strip()
+    if strategy.lower() not in _PERMANENT_CONTEXT_ONLY_STRATEGIES:
+        return False
+    if getattr(signal, "action", None) in {"CLOSE_LONG", "CLOSE_SHORT"}:
+        return False
+
+    metadata = dict(getattr(vote, "metadata", {}) or {})
+    signal_metadata = dict(getattr(signal, "metadata", {}) or {})
+    changed = bool(
+        str(metadata.get("role") or "trigger").strip().lower() != "context"
+        or metadata.get("can_trigger") is not False
+        or metadata.get("trigger_conditions_met") is not False
+    )
+    enforced = {
+        "role": "context",
+        "can_trigger": False,
+        "trigger_conditions_met": False,
+        "trigger_eligible": False,
+        "trigger_block_reason": "context_only_role",
+        "trigger_disqualified_by": "context_only_role",
+        "context_role": "confirmation",
+    }
+    metadata.update(enforced)
+    signal_metadata.update(enforced)
+    setattr(vote, "metadata", metadata)
+    setattr(signal, "metadata", signal_metadata)
+    return changed
+
+
 def _remove_permanent_context_only_promotions(
     context_votes: list[tuple[Any, Any]],
 ) -> tuple[list[tuple[Any, Any]], list[str]]:
@@ -90,8 +121,13 @@ def apply_patches() -> None:
         ) -> Any:
             eligible: list[tuple[Any, Any]] = []
             rejected: list[dict[str, Any]] = []
+            role_corrections: list[str] = []
 
             for signal, vote in signals:
+                if _enforce_permanent_context_only_role(signal, vote):
+                    role_corrections.append(
+                        str(getattr(vote, "strategy", "unknown") or "unknown")
+                    )
                 metadata = dict(getattr(vote, "metadata", {}) or {})
                 role = str(metadata.get("role") or "trigger").strip().lower()
                 is_close = getattr(signal, "action", None) in {
@@ -111,6 +147,22 @@ def apply_patches() -> None:
                         )
                         continue
                 eligible.append((signal, vote))
+
+            if role_corrections:
+                log_throttled(
+                    LOGGER,
+                    f"permanent_context_role:{str(symbol).upper()}",
+                    "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED symbol=%s strategies=%s",
+                    symbol,
+                    role_corrections,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED",
+                        "symbol": str(symbol).upper(),
+                        "strategies": role_corrections,
+                    },
+                )
 
             eligible_trigger_exists = any(
                 str((getattr(vote, "metadata", {}) or {}).get("role") or "trigger")
@@ -198,5 +250,6 @@ def apply_patches() -> None:
 __all__ = [
     "apply_patches",
     "setup_gate_result",
+    "_enforce_permanent_context_only_role",
     "_remove_permanent_context_only_promotions",
 ]
