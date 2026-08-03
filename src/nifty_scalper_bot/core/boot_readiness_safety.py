@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from functools import wraps
-import logging
 from typing import Any, Awaitable, Callable, TypeVar
 
 _LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
@@ -116,12 +116,20 @@ class _DeferredDataHubView:
 class _WiringContextView:
     """Read-through context with startup-safe runner/DataHub views."""
 
-    def __init__(self, ctx: Any, *, defer_datahub: bool) -> None:
+    def __init__(
+        self,
+        ctx: Any,
+        *,
+        defer_datahub: bool,
+        withhold_runner_activation: bool,
+    ) -> None:
         self._ctx = ctx
         runner = getattr(ctx, "strategy_runner", None)
         hub = getattr(ctx, "data_hub", None)
         self.strategy_runner = (
-            _RunnerWiringView(runner) if runner is not None else None
+            _RunnerWiringView(runner)
+            if withhold_runner_activation and runner is not None
+            else runner
         )
         self.data_hub = (
             _DeferredDataHubView(hub) if defer_datahub and hub is not None else hub
@@ -144,9 +152,11 @@ def adapt_register_and_subscribe_live_symbol(
         reason: str,
         role: str = "tradable_option",
     ) -> bool:
+        startup_wiring = reason == "basket_commit_live_startup"
         view = _WiringContextView(
             ctx,
-            defer_datahub=reason == "basket_commit_live_startup",
+            defer_datahub=startup_wiring,
+            withhold_runner_activation=startup_wiring,
         )
         return bool(original(view, symbol, token, reason, role))
 
