@@ -7,6 +7,7 @@ only and cannot be promoted into a trigger.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any, Mapping
 
@@ -54,14 +55,15 @@ def setup_gate_result(vote: Any) -> tuple[bool, float | None, float | None, str 
     return True, score, minimum, None
 
 
-def enforce_context_only_role(signal: Any, vote: Any) -> bool:
-    """Force permanent context strategies back to their declared role."""
+def enforce_context_only_role(signal: Any, vote: Any) -> tuple[Any, bool]:
+    """Return a signal/vote pair with permanent context roles enforced safely."""
     strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
     if strategy not in _CONTEXT_ONLY or getattr(signal, "action", None) in {
         "CLOSE_LONG",
         "CLOSE_SHORT",
     }:
-        return False
+        return signal, False
+
     enforced = {
         "role": "context",
         "can_trigger": False,
@@ -73,12 +75,24 @@ def enforce_context_only_role(signal: Any, vote: Any) -> bool:
     }
     vote_metadata = dict(getattr(vote, "metadata", {}) or {})
     signal_metadata = dict(getattr(signal, "metadata", {}) or {})
-    changed = any(vote_metadata.get(key) != value for key, value in enforced.items())
+    changed = any(
+        vote_metadata.get(key) != value or signal_metadata.get(key) != value
+        for key, value in enforced.items()
+    )
     vote_metadata.update(enforced)
     signal_metadata.update(enforced)
     vote.metadata = vote_metadata
-    signal.metadata = signal_metadata
-    return changed
+
+    # Signal is a frozen dataclass in production. Never assign signal.metadata;
+    # preserve immutability and return a replacement instead.
+    with_metadata = getattr(signal, "with_metadata", None)
+    if callable(with_metadata):
+        signal = with_metadata(**enforced)
+    elif dataclasses.is_dataclass(signal):
+        signal = dataclasses.replace(signal, metadata=signal_metadata)
+    else:
+        signal.metadata = signal_metadata
+    return signal, changed
 
 
 def filter_context_promotions(
@@ -116,7 +130,8 @@ def apply_patches() -> None:
             rejected: list[dict[str, Any]] = []
             corrected: list[str] = []
             for signal, vote in signals:
-                if enforce_context_only_role(signal, vote):
+                signal, role_changed = enforce_context_only_role(signal, vote)
+                if role_changed:
                     corrected.append(str(getattr(vote, "strategy", "unknown")))
                 metadata = dict(getattr(vote, "metadata", {}) or {})
                 role = str(metadata.get("role") or "trigger").strip().lower()
