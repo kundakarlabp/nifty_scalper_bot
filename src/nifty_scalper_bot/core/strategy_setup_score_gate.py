@@ -1,8 +1,8 @@
 """Fail-closed setup-quality and context-role gates for strategy combination.
 
 Context may confirm or veto a valid trigger, but it must never convert a setup
-that failed its own strategy threshold into an executable entry. OrderFlow is a
-permanent confirmation-only strategy and cannot be promoted into a trigger.
+that failed its own threshold into an entry. OrderFlow is permanently context
+only and cannot be promoted into a trigger.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ LOGGER = get_logger(__name__)
 
 _SCORE_KEYS = ("raw_setup_score", "setup_score", "strategy_score")
 _MIN_KEYS = ("setup_min", "setup_min_score", "trigger_min_score", "min_score")
-_PERMANENT_CONTEXT_ONLY_STRATEGIES = frozenset({"orderflow"})
+_CONTEXT_ONLY = frozenset({"orderflow"})
 
 
 def _float_from(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> float | None:
@@ -32,10 +32,7 @@ def _float_from(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> float | N
 
 
 def setup_gate_result(vote: Any) -> tuple[bool, float | None, float | None, str | None]:
-    """Return whether an explicit trigger setup contract passed.
-
-    Votes without setup score/minimum metadata retain legacy behaviour.
-    """
+    """Return whether an explicit trigger setup contract passed."""
     metadata = dict(getattr(vote, "metadata", {}) or {})
     if str(metadata.get("role") or "trigger").strip().lower() == "context":
         return True, None, None, None
@@ -57,21 +54,14 @@ def setup_gate_result(vote: Any) -> tuple[bool, float | None, float | None, str 
     return True, score, minimum, None
 
 
-def _enforce_permanent_context_only_role(signal: Any, vote: Any) -> bool:
-    """Normalize permanent context strategies before the combiner sees them."""
-    strategy = str(getattr(vote, "strategy", "") or "").strip()
-    if strategy.lower() not in _PERMANENT_CONTEXT_ONLY_STRATEGIES:
+def enforce_context_only_role(signal: Any, vote: Any) -> bool:
+    """Force permanent context strategies back to their declared role."""
+    strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
+    if strategy not in _CONTEXT_ONLY or getattr(signal, "action", None) in {
+        "CLOSE_LONG",
+        "CLOSE_SHORT",
+    }:
         return False
-    if getattr(signal, "action", None) in {"CLOSE_LONG", "CLOSE_SHORT"}:
-        return False
-
-    metadata = dict(getattr(vote, "metadata", {}) or {})
-    signal_metadata = dict(getattr(signal, "metadata", {}) or {})
-    changed = bool(
-        str(metadata.get("role") or "trigger").strip().lower() != "context"
-        or metadata.get("can_trigger") is not False
-        or metadata.get("trigger_conditions_met") is not False
-    )
     enforced = {
         "role": "context",
         "can_trigger": False,
@@ -81,25 +71,28 @@ def _enforce_permanent_context_only_role(signal: Any, vote: Any) -> bool:
         "trigger_disqualified_by": "context_only_role",
         "context_role": "confirmation",
     }
-    metadata.update(enforced)
+    vote_metadata = dict(getattr(vote, "metadata", {}) or {})
+    signal_metadata = dict(getattr(signal, "metadata", {}) or {})
+    changed = any(vote_metadata.get(key) != value for key, value in enforced.items())
+    vote_metadata.update(enforced)
     signal_metadata.update(enforced)
-    setattr(vote, "metadata", metadata)
-    setattr(signal, "metadata", signal_metadata)
+    vote.metadata = vote_metadata
+    signal.metadata = signal_metadata
     return changed
 
 
-def _remove_permanent_context_only_promotions(
+def filter_context_promotions(
     context_votes: list[tuple[Any, Any]],
 ) -> tuple[list[tuple[Any, Any]], list[str]]:
-    """Remove strategies that are never allowed to originate an entry."""
+    """Remove permanent context-only strategies from promotion candidates."""
     eligible: list[tuple[Any, Any]] = []
     blocked: list[str] = []
     for signal, vote in context_votes:
         strategy = str(getattr(vote, "strategy", "") or "").strip()
-        if strategy.lower() in _PERMANENT_CONTEXT_ONLY_STRATEGIES:
+        if strategy.lower() in _CONTEXT_ONLY:
             blocked.append(strategy or "unknown")
-            continue
-        eligible.append((signal, vote))
+        else:
+            eligible.append((signal, vote))
     return eligible, blocked
 
 
@@ -109,7 +102,7 @@ def apply_patches() -> None:
     cls = strategy_module.StrategyManager
 
     if not getattr(cls, "_hard_setup_score_gate_installed", False):
-        original = cls._combine_strategy_votes
+        original_combine = cls._combine_strategy_votes
 
         def _combine_strategy_votes(
             self: Any,
@@ -121,13 +114,10 @@ def apply_patches() -> None:
         ) -> Any:
             eligible: list[tuple[Any, Any]] = []
             rejected: list[dict[str, Any]] = []
-            role_corrections: list[str] = []
-
+            corrected: list[str] = []
             for signal, vote in signals:
-                if _enforce_permanent_context_only_role(signal, vote):
-                    role_corrections.append(
-                        str(getattr(vote, "strategy", "unknown") or "unknown")
-                    )
+                if enforce_context_only_role(signal, vote):
+                    corrected.append(str(getattr(vote, "strategy", "unknown")))
                 metadata = dict(getattr(vote, "metadata", {}) or {})
                 role = str(metadata.get("role") or "trigger").strip().lower()
                 is_close = getattr(signal, "action", None) in {
@@ -148,23 +138,23 @@ def apply_patches() -> None:
                         continue
                 eligible.append((signal, vote))
 
-            if role_corrections:
+            if corrected:
                 log_throttled(
                     LOGGER,
-                    f"permanent_context_role:{str(symbol).upper()}",
+                    f"context_role_enforced:{str(symbol).upper()}",
                     "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED symbol=%s strategies=%s",
                     symbol,
-                    role_corrections,
+                    corrected,
                     interval_sec=30.0,
                     level=logging.WARNING,
                     extra={
                         "event": "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED",
                         "symbol": str(symbol).upper(),
-                        "strategies": role_corrections,
+                        "strategies": corrected,
                     },
                 )
 
-            eligible_trigger_exists = any(
+            trigger_exists = any(
                 str((getattr(vote, "metadata", {}) or {}).get("role") or "trigger")
                 .strip()
                 .lower()
@@ -173,9 +163,7 @@ def apply_patches() -> None:
                 not in {"CLOSE_LONG", "CLOSE_SHORT"}
                 for signal, vote in eligible
             )
-            if rejected and not eligible_trigger_exists:
-                # Never pass context-only votes to the legacy promotion path after an
-                # explicit trigger failed its own setup threshold.
+            if rejected and not trigger_exists:
                 log_throttled(
                     LOGGER,
                     f"hard_setup_score_gate:{str(symbol).upper()}",
@@ -191,8 +179,7 @@ def apply_patches() -> None:
                     },
                 )
                 return None
-
-            return original(
+            return original_combine(
                 self,
                 symbol=symbol,
                 signals=eligible,
@@ -200,7 +187,7 @@ def apply_patches() -> None:
                 no_vote_reason_counts=no_vote_reason_counts,
             )
 
-        cls._hard_setup_score_gate_original_combine = original
+        cls._hard_setup_score_gate_original_combine = original_combine
         cls._combine_strategy_votes = _combine_strategy_votes
         cls._hard_setup_score_gate_installed = True
 
@@ -214,13 +201,11 @@ def apply_patches() -> None:
             indicators: Mapping[str, Any],
             mode_profile: dict[str, Any],
         ) -> Any:
-            eligible, blocked = _remove_permanent_context_only_promotions(
-                context_votes
-            )
+            eligible, blocked = filter_context_promotions(context_votes)
             if blocked:
                 log_throttled(
                     LOGGER,
-                    f"permanent_context_only:{str(symbol).upper()}",
+                    f"context_promotion_blocked:{str(symbol).upper()}",
                     "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED symbol=%s strategies=%s",
                     symbol,
                     blocked,
@@ -235,11 +220,7 @@ def apply_patches() -> None:
             if not eligible:
                 return None
             return original_promotion(
-                self,
-                symbol,
-                eligible,
-                indicators,
-                mode_profile,
+                self, symbol, eligible, indicators, mode_profile
             )
 
         cls._permanent_context_only_original_promotion = original_promotion
@@ -249,7 +230,7 @@ def apply_patches() -> None:
 
 __all__ = [
     "apply_patches",
+    "enforce_context_only_role",
+    "filter_context_promotions",
     "setup_gate_result",
-    "_enforce_permanent_context_only_role",
-    "_remove_permanent_context_only_promotions",
 ]
