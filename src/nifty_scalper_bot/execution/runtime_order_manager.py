@@ -140,6 +140,12 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
     return plan
 
 
+def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
+    """Enrich every initial or rebuilt recovery plan before core submission."""
+    _enrich_trade_plan_exit_provenance(plan)
+    return _core.OrderManager.submit_trade_plan_result(manager, plan)
+
+
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
 
@@ -180,7 +186,7 @@ class RuntimeOrderManager(_core.OrderManager):
         if blocked is not NO_BLOCK:
             return blocked
         return _recover_submit(
-            _core.OrderManager.submit_trade_plan_result,
+            _submit_core_with_exit_provenance,
             self,
             plan,
         )
@@ -254,4 +260,5 @@ __all__ = [
     "RuntimeOrderManager",
     "_enrich_trade_plan_exit_provenance",
     "_strip_exit_identity_kwargs",
+    "_submit_core_with_exit_provenance",
 ]
