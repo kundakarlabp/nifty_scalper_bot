@@ -260,7 +260,9 @@ class LedgerBracketManager(CanonicalBracketManager):
             )
         )
 
-    def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
+    def confirm_entry_fill(
+        self, order_id: str, fill_price: float, filled_qty: int | None = None
+    ) -> None:
         bracket = self.get_bracket(order_id)
         ledger_ok = True
         if bracket is not None:
@@ -268,7 +270,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                 getattr(bracket, "entry_order_intent", "ENTRY") or "ENTRY"
             ).upper()
             if entry_intent not in {"ENTRY", "SCALE_IN", "REVERSAL"}:
-                super().confirm_entry_fill(order_id, fill_price)
+                super().confirm_entry_fill(order_id, fill_price, filled_qty)
                 return
             try:
                 self._record_entry_fill(bracket, float(fill_price))
@@ -280,7 +282,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                     reason="entry_fill_persist_failed",
                     payload={"order_id": order_id, "error": str(exc)},
                 )
-        super().confirm_entry_fill(order_id, fill_price)
+        super().confirm_entry_fill(order_id, fill_price, filled_qty)
         bracket = self.get_bracket(order_id)
         if bracket is not None and ledger_ok:
             self._clear_ledger_release(bracket)

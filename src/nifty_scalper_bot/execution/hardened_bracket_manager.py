@@ -194,8 +194,12 @@ class HardenedBracketManager(_LegacyBracketManager):
                 bracket.last_exit_error = None
                 bracket.next_exit_attempt_at = None
 
-    def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
-        _LegacyBracketManager.confirm_entry_fill(self, order_id, fill_price)
+    def confirm_entry_fill(
+        self, order_id: str, fill_price: float, filled_qty: int | None = None
+    ) -> None:
+        _LegacyBracketManager.confirm_entry_fill(
+            self, order_id, fill_price, filled_qty
+        )
         bracket = self.get_bracket(order_id)
         if bracket is None:
             return

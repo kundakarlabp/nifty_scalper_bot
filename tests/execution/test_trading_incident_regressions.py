@@ -108,7 +108,9 @@ class _ExactPendingBracketManager:
     def has_active_bracket(self, _symbol: str) -> bool:
         raise AssertionError("exact entry bracket must be checked before symbol guard")
 
-    def confirm_entry_fill(self, order_id: str, _price: float) -> None:
+    def confirm_entry_fill(
+        self, order_id: str, _price: float, _filled_qty: int | None = None
+    ) -> None:
         assert order_id == ENTRY_ID
         self.bracket.entry_confirmed = True
         self.bracket.active = True

@@ -64,7 +64,9 @@ class CanonicalBracketManager(HardenedBracketManager):
         )
         super().__init__(*args, **kwargs)
 
-    def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
+    def confirm_entry_fill(
+        self, order_id: str, fill_price: float, filled_qty: int | None = None
+    ) -> None:
         """Activate a confirmed entry and re-anchor every outstanding target.
 
         The legacy implementation already re-anchors SL and the final TP. This
@@ -82,7 +84,7 @@ class CanonicalBracketManager(HardenedBracketManager):
                     float(target.price or 0.0) for target in before.tp_levels
                 ]
 
-        super().confirm_entry_fill(order_id, fill_price)
+        super().confirm_entry_fill(order_id, fill_price, filled_qty)
 
         bracket = self.get_bracket(order_id)
         if bracket is None:
