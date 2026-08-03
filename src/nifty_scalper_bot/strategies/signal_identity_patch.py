@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import logging
 import re
 from typing import Any, Mapping
 
@@ -120,7 +121,9 @@ def _install_elite_signal_observability() -> None:
         raw_score = metadata.get("raw_setup_score")
         if raw_score is None:
             raw_score = metadata.get("strategy_score") or metadata.get("context_score")
-        LOGGER.info(
+        role = str(metadata.get("role") or "trigger").lower()
+        LOGGER.log(
+            logging.DEBUG if role == "context" else logging.INFO,
             "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s quote_update_version=%s",
             strategy,
             getattr(signal, "symbol", symbol),
@@ -140,7 +143,7 @@ def _install_elite_signal_observability() -> None:
                 "setup_id": setup_id,
                 "setup_anchor": setup_anchor,
                 "quote_update_version": metadata.get("quote_update_version"),
-                "role": metadata.get("role"),
+                "role": role,
             },
         )
         return signal
