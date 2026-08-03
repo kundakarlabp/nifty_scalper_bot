@@ -302,10 +302,13 @@ def test_startup_symbol_wiring_does_not_activate_runner_early() -> None:
     assert hub.calls[0]["force_live"] is False
 
 
-def test_runtime_symbol_wiring_keeps_immediate_data_subscription() -> None:
+def test_runtime_symbol_wiring_preserves_activation_and_live_subscription() -> None:
     class Runner:
+        def __init__(self) -> None:
+            self.added: list[str] = []
+
         def add_symbol(self, symbol: str) -> None:
-            raise AssertionError(f"unexpected activation: {symbol}")
+            self.added.append(symbol)
 
         def on_datahub_tick(self, tick) -> None:
             del tick
@@ -337,6 +340,7 @@ def test_runtime_symbol_wiring_keeps_immediate_data_subscription() -> None:
     adapted = adapt_register_and_subscribe_live_symbol(original)
 
     assert adapted(ctx, "NFO:NIFTY2680424800PE", 16869634, "runtime_rotation")
+    assert runner.added == ["NFO:NIFTY2680424800PE"]
     assert hub.force_live is True
 
 
