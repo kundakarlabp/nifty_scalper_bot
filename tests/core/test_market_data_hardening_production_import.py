@@ -9,6 +9,7 @@ def test_production_app_import_installs_all_market_data_hardening() -> None:
     assert app_module is not None
 
     from nifty_scalper_bot.data.candle_engine import CandleEngine
+    from nifty_scalper_bot.data.data_hub import DataHub
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
     from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 
@@ -16,6 +17,10 @@ def test_production_app_import_installs_all_market_data_hardening() -> None:
     assert getattr(MarketDataManager, "_freshness_hardening_installed", False) is True
     assert (
         getattr(MarketDataManager, "_candle_clock_flush_hardening_installed", False)
+        is True
+    )
+    assert (
+        getattr(DataHub, "_active_basket_subscription_hardening_installed", False)
         is True
     )
     assert getattr(WebSocketManager, "_market_data_hardening_installed", False) is True
@@ -31,10 +36,15 @@ def test_production_app_import_is_idempotent() -> None:
     assert id(reloaded) == before["app"]
 
     from nifty_scalper_bot.data.candle_engine import CandleEngine
+    from nifty_scalper_bot.data.data_hub import DataHub
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
     assert getattr(CandleEngine, "_candle_state_hardening_installed", False) is True
     assert (
         getattr(MarketDataManager, "_candle_clock_flush_hardening_installed", False)
+        is True
+    )
+    assert (
+        getattr(DataHub, "_active_basket_subscription_hardening_installed", False)
         is True
     )
