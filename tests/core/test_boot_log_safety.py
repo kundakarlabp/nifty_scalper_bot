@@ -204,6 +204,35 @@ def test_cached_tick_replay_skips_when_message_bus_is_inactive() -> None:
     assert calls == []
 
 
+def test_cached_tick_replay_uses_direct_datahub_when_bus_is_inactive() -> None:
+    replayed: list[dict] = []
+
+    async def original(ctx, *, reason: str) -> int:
+        raise AssertionError(f"unexpected bus replay: {reason}")
+
+    adapted = adapt_replay_latest_mdm_ticks_to_bus(original)
+    ctx = SimpleNamespace(
+        message_bus=SimpleNamespace(running=False),
+        market_data_manager=SimpleNamespace(
+            _latest_ticks={
+                "NSE:NIFTY": {"last_price": 24775.0},
+                "NFO:NIFTY26AUGFUT": {"last_price": 24665.0},
+            }
+        ),
+        data_hub=SimpleNamespace(
+            ingest_tick_sync=lambda tick: replayed.append(dict(tick))
+        ),
+        data_observation_ready=False,
+    )
+
+    assert asyncio.run(adapted(ctx, reason="post_runner_start")) == 2
+    assert [tick["symbol"] for tick in replayed] == [
+        "NSE:NIFTY",
+        "NFO:NIFTY26AUGFUT",
+    ]
+    assert all(tick["source"] == "mdm_replay" for tick in replayed)
+
+
 def test_cached_tick_replay_preserved_when_message_bus_is_running() -> None:
     calls: list[str] = []
 
