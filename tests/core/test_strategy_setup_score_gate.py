@@ -3,7 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
-from nifty_scalper_bot.core.strategy_setup_score_gate import setup_gate_result
+from nifty_scalper_bot.core.strategy_setup_score_gate import (
+    enforce_context_only_role,
+    filter_context_promotions,
+    setup_gate_result,
+)
 
 
 def _vote(**metadata):
@@ -69,6 +73,93 @@ def test_context_cannot_promote_an_explicitly_failed_trigger() -> None:
         symbol="NFO:NIFTY2680625000CE",
         signals=[weak_trigger, strong_context],
         indicators={},
+    )
+
+    assert result is None
+
+
+def test_malformed_orderflow_trigger_is_normalized_to_context() -> None:
+    signal = SimpleNamespace(
+        action="BUY",
+        metadata={
+            "strategy": "OrderFlow",
+            "role": "trigger",
+            "can_trigger": True,
+            "trigger_conditions_met": True,
+        },
+    )
+    vote = _vote(
+        strategy="OrderFlow",
+        role="trigger",
+        can_trigger=True,
+        trigger_conditions_met=True,
+    )
+
+    changed = enforce_context_only_role(signal, vote)
+
+    assert changed is True
+    for metadata in (signal.metadata, vote.metadata):
+        assert metadata["role"] == "context"
+        assert metadata["can_trigger"] is False
+        assert metadata["trigger_conditions_met"] is False
+        assert metadata["trigger_eligible"] is False
+        assert metadata["trigger_block_reason"] == "context_only_role"
+
+
+def test_orderflow_is_removed_from_context_promotion_candidates() -> None:
+    orderflow = (
+        SimpleNamespace(action="BUY"),
+        _vote(strategy="OrderFlow", role="context", raw_setup_score=10.0),
+    )
+    vwap_context = (
+        SimpleNamespace(action="BUY"),
+        _vote(strategy="VWAPPro", role="context", raw_setup_score=9.0),
+    )
+
+    eligible, blocked = filter_context_promotions([orderflow, vwap_context])
+
+    assert eligible == [vwap_context]
+    assert blocked == ["OrderFlow"]
+
+
+def test_orderflow_cannot_promote_even_when_every_promotion_flag_is_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED", "true")
+    monkeypatch.setenv(
+        "STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro"
+    )
+    manager = StrategyManager.__new__(StrategyManager)
+    orderflow = (
+        SimpleNamespace(action="BUY"),
+        _vote(
+            strategy="OrderFlow",
+            role="context",
+            raw_setup_score=10.0,
+            context_score=10.0,
+        ),
+    )
+
+    result = manager._try_context_promotion(
+        "NFO:NIFTY2680625000CE",
+        [orderflow],
+        {
+            "direction_bias": "CE",
+            "context_fresh": True,
+            "context_age_seconds": 0.1,
+            "is_selected_option": True,
+            "bid": 99.5,
+            "ask": 100.0,
+            "quote_depth_valid": True,
+        },
+        {
+            "mode": "LIVE",
+            "allow_context_promotion": True,
+            "allow_single_vote": True,
+            "min_trade_quality": 7.0,
+        },
     )
 
     assert result is None
