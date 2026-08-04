@@ -67,7 +67,7 @@ jobs:
         run: |
           python -m compileall -q src tests
           git diff --check
-          git rm --ignore-unmatch \
+          git rm -f --ignore-unmatch \
             .github/workflows/one-shot-definition-site-premium-geometry.yml \
             .github/workflows/one-shot-pr-definition-site-premium-geometry.yml \
             .github/one-shot-definition-site-trigger \
