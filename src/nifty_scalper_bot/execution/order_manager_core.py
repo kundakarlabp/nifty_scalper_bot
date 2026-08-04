@@ -272,6 +272,35 @@ def _stamp_entry_sizing(details: dict | None, result: Any) -> Any:
     return result
 
 
+def _positive_exit_provenance_value(value: Any) -> float | None:
+    """Return a finite positive provenance value, otherwise ``None``."""
+    with suppress(TypeError, ValueError):
+        parsed = float(value)
+        if math.isfinite(parsed) and parsed > 0.0:
+            return parsed
+    return None
+
+
+def _virtual_bracket_exit_fields(
+    provenance: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve optional bracket fields from durable trade provenance."""
+    if not isinstance(provenance, Mapping):
+        return {}
+    nested = provenance.get("exit_plan")
+    source = nested if isinstance(nested, Mapping) else provenance
+    fields: dict[str, Any] = {}
+    for key in ("tp1_price", "trailing_atr_mult"):
+        value = _positive_exit_provenance_value(source.get(key))
+        if value is not None:
+            fields[key] = value
+    for key in ("tp1_qty", "resolved_lot_size"):
+        value = _positive_exit_provenance_value(source.get(key))
+        if value is not None:
+            fields[key] = int(value)
+    return fields
+
+
 @dataclass(slots=True)
 class TradePlan:
     """Strategy-to-execution trade intent contract."""
@@ -6107,6 +6136,14 @@ class OrderManager:
                         },
                     )
                     return
+                exit_fields = _virtual_bracket_exit_fields(
+                    order.trade_provenance
+                )
+                resolved_lot_size = int(
+                    getattr(order, "resolved_lot_size", 0) or 0
+                )
+                if resolved_lot_size > 0:
+                    exit_fields.setdefault("resolved_lot_size", resolved_lot_size)
                 self._bracket_manager.register_virtual_bracket(
                     order_id=order.order_id,
                     symbol=order.symbol,
@@ -6118,6 +6155,38 @@ class OrderManager:
                     tag=order.tag or source,
                     intent=str(getattr(order, "intent", "ENTRY") or "ENTRY"),
                     trade_provenance=order.trade_provenance,
+                    **exit_fields,
+                )
+                tp1_armed = bool(
+                    exit_fields.get("tp1_price") and exit_fields.get("tp1_qty")
+                )
+                provenance = (
+                    order.trade_provenance
+                    if isinstance(order.trade_provenance, Mapping)
+                    else {}
+                )
+                self._logger.info(
+                    "TP1_BRACKET_%s order_id=%s symbol=%s tp1_price=%s tp1_qty=%s lot_size=%s reason=%s",
+                    "ARMED" if tp1_armed else "SKIPPED",
+                    order.order_id,
+                    order.symbol,
+                    exit_fields.get("tp1_price"),
+                    exit_fields.get("tp1_qty"),
+                    exit_fields.get("resolved_lot_size"),
+                    provenance.get("tp1_skip_reason"),
+                    extra={
+                        "event": (
+                            "TP1_BRACKET_ARMED"
+                            if tp1_armed
+                            else "TP1_BRACKET_SKIPPED"
+                        ),
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "tp1_price": exit_fields.get("tp1_price"),
+                        "tp1_qty": exit_fields.get("tp1_qty"),
+                        "resolved_lot_size": exit_fields.get("resolved_lot_size"),
+                        "reason": provenance.get("tp1_skip_reason"),
+                    },
                 )
                 bracket_exists = self._bracket_manager.get_bracket(order.order_id)
                 if bracket_exists is None:

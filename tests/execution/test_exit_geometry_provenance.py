@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 import types
+from types import SimpleNamespace
 
-from nifty_scalper_bot.execution.order_manager import TradePlan
-from nifty_scalper_bot.execution.premium_risk_contract_patch import (
-    _enrich_virtual_bracket_kwargs,
-    install_bracket_exit_provenance_hardening,
+from nifty_scalper_bot.execution.order_manager import (
+    OrderDetails,
+    OrderManager,
+    OrderStatus,
+    OrderType,
+    TradePlan,
 )
 from nifty_scalper_bot.execution import runtime_order_manager as runtime_module
 from nifty_scalper_bot.execution.runtime_order_manager import (
@@ -37,6 +41,7 @@ def test_multilot_plan_gets_lot_aligned_tp1() -> None:
     assert plan.trade_provenance["tp1_price"] == 110.0
     assert plan.trade_provenance["tp1_qty"] == 65
     assert plan.trade_provenance["initial_reward_risk"] == 2.0
+    assert plan.trade_provenance["tp1_status"] == "armed"
 
 
 def test_single_lot_plan_does_not_create_fractional_tp1() -> None:
@@ -46,6 +51,8 @@ def test_single_lot_plan_does_not_create_fractional_tp1() -> None:
 
     assert "tp1_price" not in plan.trade_provenance
     assert "tp1_qty" not in plan.trade_provenance
+    assert plan.trade_provenance["tp1_status"] == "skipped"
+    assert plan.trade_provenance["tp1_skip_reason"] == "single_lot"
 
 
 def test_existing_exit_provenance_is_preserved() -> None:
@@ -69,80 +76,78 @@ def test_configured_atr_trailing_is_persisted(monkeypatch) -> None:
     assert plan.trade_provenance["trailing_atr_mult"] == 1.25
 
 
-def test_fill_registration_restores_optional_exit_fields_from_provenance() -> None:
-    kwargs = _enrich_virtual_bracket_kwargs(
-        {
-            "order_id": "OID-1",
-            "symbol": "NFO:NIFTY2680424400CE",
-            "side": "BUY",
-            "qty": 130,
-            "price": 100.0,
-            "sl": 90.0,
-            "tp": 120.0,
-            "trade_provenance": {
-                "tp1_price": 110.0,
-                "tp1_qty": 65,
-                "trailing_atr_mult": 1.25,
-                "resolved_lot_size": 65,
-            },
-        }
+
+def test_fill_registration_passes_tp1_through_actual_order_manager_path() -> None:
+    class CapturingBracketManager:
+        def __init__(self) -> None:
+            self.bracket = None
+            self.registration = {}
+
+        def get_bracket(self, order_id):
+            return self.bracket
+
+        def has_active_bracket(self, symbol):
+            return False
+
+        def register_virtual_bracket(self, **kwargs):
+            self.registration = dict(kwargs)
+            self.bracket = SimpleNamespace(entry_confirmed=False, active=False)
+
+        def confirm_entry_fill(self, order_id, fill_price, filled_qty=None):
+            self.bracket.entry_confirmed = True
+            self.bracket.active = True
+            return True
+
+    bracket_manager = CapturingBracketManager()
+    manager = SimpleNamespace(
+        _bracket_manager=bracket_manager,
+        _logger=logging.getLogger("tp1-fill-registration-test"),
+        _notify_bracket_event=lambda *args, **kwargs: None,
     )
-
-    assert kwargs["tp1_price"] == 110.0
-    assert kwargs["tp1_qty"] == 65
-    assert kwargs["trailing_atr_mult"] == 1.25
-    assert kwargs["resolved_lot_size"] == 65
-
-
-def test_explicit_registration_values_override_provenance() -> None:
-    kwargs = _enrich_virtual_bracket_kwargs(
-        {
-            "tp1_price": 109.0,
-            "tp1_qty": 65,
-            "resolved_lot_size": 65,
-            "trade_provenance": {
-                "tp1_price": 110.0,
-                "tp1_qty": 130,
-                "resolved_lot_size": 75,
-            },
-        }
-    )
-
-    assert kwargs["tp1_price"] == 109.0
-    assert kwargs["tp1_qty"] == 65
-    assert kwargs["resolved_lot_size"] == 65
-
-
-def test_bracket_installer_preserves_existing_composed_registration() -> None:
-    calls = []
-
-    class Bracket:
-        def register_virtual_bracket(self, *args, **kwargs):
-            calls.append((args, kwargs))
-            return "registered"
-
-    original = Bracket.register_virtual_bracket
-    install_bracket_exit_provenance_hardening(Bracket)
-    installed = Bracket.register_virtual_bracket
-    install_bracket_exit_provenance_hardening(Bracket)
-
-    result = Bracket().register_virtual_bracket(
-        order_id="OID-2",
+    order = OrderDetails(
+        order_id="OID-TP1",
+        symbol="NFO:NIFTY2680424400CE",
+        side="BUY",
+        quantity=130,
+        order_type=OrderType.LIMIT,
+        status=OrderStatus.FILLED,
+        price=100.0,
+        fill_price=100.0,
+        average_price=100.0,
+        filled_quantity=130,
+        stop_loss=90.0,
+        take_profit=120.0,
+        intent="ENTRY",
+        resolved_lot_size=65,
         trade_provenance={
             "tp1_price": 110.0,
             "tp1_qty": 65,
+            "trailing_atr_mult": 1.25,
             "resolved_lot_size": 65,
+            "tp1_status": "armed",
         },
     )
 
-    assert result == "registered"
-    assert installed is Bracket.register_virtual_bracket
-    assert installed is not original
-    assert len(calls) == 1
-    assert calls[0][1]["tp1_price"] == 110.0
-    assert calls[0][1]["tp1_qty"] == 65
-    assert calls[0][1]["resolved_lot_size"] == 65
+    OrderManager._register_virtual_bracket_for_fill(
+        manager,
+        order,
+        source="test",
+    )
 
+    assert bracket_manager.registration["tp1_price"] == 110.0
+    assert bracket_manager.registration["tp1_qty"] == 65
+    assert bracket_manager.registration["trailing_atr_mult"] == 1.25
+    assert bracket_manager.registration["resolved_lot_size"] == 65
+
+
+def test_unresolved_lot_size_records_tp1_skip_reason() -> None:
+    plan = _plan(quantity=130)
+    plan.resolved_lot_size = 0
+
+    _enrich_trade_plan_exit_provenance(plan)
+
+    assert plan.trade_provenance["tp1_status"] == "skipped"
+    assert plan.trade_provenance["tp1_skip_reason"] == "lot_size_unresolved"
 
 def test_recovery_submit_enriches_rebuilt_plan(monkeypatch) -> None:
     captured = {}
