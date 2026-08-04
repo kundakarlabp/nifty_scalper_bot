@@ -103,3 +103,75 @@ def test_instrument_manager_uses_ist_exchange_trading_date(monkeypatch):
 
     monkeypatch.setattr(im, "datetime", FixedDateTime)
     assert im._exchange_trading_date().isoformat() == "2026-06-02"
+
+
+def test_active_contract_basket_holds_atm_inside_hysteresis_band(monkeypatch):
+    rows, _weekly, _monthly = _dump()
+    mgr = InstrumentManager(KiteDump(rows))
+    monkeypatch.setenv("ATM_STRIKE_HYSTERESIS_POINTS", "5")
+
+    assert mgr.get_active_nifty_contracts(25010).atm_strike == 25000
+    assert mgr.get_active_nifty_contracts(25024).atm_strike == 25000
+    assert mgr.get_active_nifty_contracts(25026).atm_strike == 25000
+    assert mgr.get_active_nifty_contracts(25023).atm_strike == 25000
+
+
+def test_active_contract_basket_shifts_once_after_confirmed_crossing(monkeypatch):
+    rows, _weekly, _monthly = _dump()
+    mgr = InstrumentManager(KiteDump(rows))
+    monkeypatch.setenv("ATM_STRIKE_HYSTERESIS_POINTS", "5")
+
+    assert mgr.get_active_nifty_contracts(25010).atm_strike == 25000
+    assert mgr.get_active_nifty_contracts(25030).atm_strike == 25050
+    assert mgr.get_active_nifty_contracts(25024).atm_strike == 25050
+    assert mgr.get_active_nifty_contracts(25020).atm_strike == 25000
+
+
+def test_hysteresis_does_not_block_option_or_future_rollover(monkeypatch):
+    from nifty_scalper_bot.core import instrument_manager as im
+
+    rows, weekly, monthly = _dump()
+    rows.append(_row(3, "NIFTYWEEKFUT", "FUT", weekly))
+    mgr = InstrumentManager(KiteDump(rows))
+    monkeypatch.setenv("ATM_STRIKE_HYSTERESIS_POINTS", "5")
+    trading_day = {"value": weekly - timedelta(days=1)}
+    monkeypatch.setattr(im, "_exchange_trading_date", lambda: trading_day["value"])
+
+    initial = mgr.get_active_nifty_contracts(25010)
+    assert initial.atm_strike == 25000
+    assert initial.option_expiry == weekly
+    assert initial.futures_symbol == "NFO:NIFTYWEEKFUT"
+
+    trading_day["value"] = weekly + timedelta(days=1)
+    rolled = mgr.get_active_nifty_contracts(25026)
+    assert rolled.atm_strike == 25000
+    assert rolled.option_expiry == monthly
+    assert rolled.futures_symbol == "NFO:NIFTYCURFUT"
+
+
+def test_hysteresis_falls_back_when_held_pair_is_unavailable(monkeypatch):
+    from nifty_scalper_bot.core import instrument_manager as im
+
+    rows, weekly, monthly = _dump()
+    rows = [
+        row
+        for row in rows
+        if not (
+            row.get("expiry") == monthly
+            and row.get("instrument_type") in {"CE", "PE"}
+            and row.get("strike") == 25000
+        )
+    ]
+    mgr = InstrumentManager(KiteDump(rows))
+    monkeypatch.setenv("ATM_STRIKE_HYSTERESIS_POINTS", "5")
+    trading_day = {"value": weekly - timedelta(days=1)}
+    monkeypatch.setattr(im, "_exchange_trading_date", lambda: trading_day["value"])
+
+    assert mgr.get_active_nifty_contracts(25010).atm_strike == 25000
+    trading_day["value"] = weekly + timedelta(days=1)
+
+    rolled = mgr.get_active_nifty_contracts(25026)
+    assert rolled.option_expiry == monthly
+    assert rolled.atm_strike == 25050
+    assert rolled.selected_ce == "NFO:NIFTYM25050CE"
+    assert rolled.selected_pe == "NFO:NIFTYM25050PE"
