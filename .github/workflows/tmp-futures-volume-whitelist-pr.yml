@@ -28,5 +28,19 @@ jobs:
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
 
+      - name: Keep generated regression name within lint width
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tools/tmp_apply_futures_volume_whitelist_pr.py")
+          text = path.read_text()
+          text = text.replace(
+              "test_futures_volume_ignores_trade_quantity_and_preserves_cumulative_baseline",
+              "test_futures_volume_ignores_trade_quantity_and_keeps_baseline",
+          )
+          path.write_text(text)
+          PY
+
       - name: Prove regressions, apply exact patch, validate and commit
         run: python tools/tmp_apply_futures_volume_whitelist_pr.py
