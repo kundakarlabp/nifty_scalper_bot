@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Any
 
 from nifty_scalper_bot.strategies.signal_generator import StrategyManager
@@ -75,3 +76,106 @@ def test_augment_futures_metrics_tries_configured_runtime_future_when_hub_unreso
     manager._augment_futures_metrics(indicators)
     assert "NFO:NIFTY26JUNFUT" in hub.calls
     assert "NFO:NIFTY26MAYFUT" not in hub.calls
+
+
+class _VolumeHub:
+    def __init__(
+        self,
+        quotes: list[dict[str, float]],
+        active: str = "NFO:NIFTY26JUNFUT",
+    ) -> None:
+        self._quotes = list(quotes)
+        self._active = active
+
+    def get_active_futures_symbol(self):
+        return self._active
+
+    def get_quote(self, symbol: str, allow_pull: bool = False):
+        del allow_pull
+        if symbol == "NSE:NIFTY":
+            return {"ltp": 24000.0, "vwap": 24000.0}
+        if symbol == self._active and self._quotes:
+            return self._quotes.pop(0)
+        return {}
+
+
+def test_futures_volume_ignores_trade_quantity_and_keeps_baseline() -> None:
+    symbol = "NFO:NIFTY26JUNFUT"
+    hub = _VolumeHub(
+        [
+            {"volume_traded_today": 1000.0},
+            {"last_quantity": 10.0},
+            {"volume_traded_today": 1050.0},
+        ],
+        active=symbol,
+    )
+    manager = _manager(futures_symbol=symbol, hub=hub)
+
+    first: dict[str, Any] = {}
+    manager._augment_futures_metrics(first)
+    assert manager._last_futures_volume == 1000.0
+    assert list(manager._futures_volume_history) == []
+    assert first["futures_volume_source"] == "volume_traded_today"
+    assert first["futures_volume_trusted"] is True
+
+    trade_quantity_only: dict[str, Any] = {}
+    manager._augment_futures_metrics(trade_quantity_only)
+    assert manager._last_futures_volume == 1000.0
+    assert list(manager._futures_volume_history) == []
+    assert trade_quantity_only["futures_volume"] is None
+    assert trade_quantity_only["futures_volume_trusted"] is False
+
+    next_cumulative: dict[str, Any] = {}
+    manager._augment_futures_metrics(next_cumulative)
+    assert manager._last_futures_volume == 1050.0
+    assert list(manager._futures_volume_history) == [50.0]
+    assert next_cumulative["futures_volume_ratio"] == 1.0
+
+
+def test_futures_volume_rejects_same_session_decrease_without_false_spike() -> None:
+    symbol = "NFO:NIFTY26JUNFUT"
+    hub = _VolumeHub(
+        [
+            {"volume_traded": 1000.0},
+            {"volume_traded": 1100.0},
+            {"volume_traded": 900.0},
+            {"volume_traded": 1150.0},
+        ],
+        active=symbol,
+    )
+    manager = _manager(futures_symbol=symbol, hub=hub)
+
+    manager._augment_futures_metrics({})
+    manager._augment_futures_metrics({})
+
+    decreased: dict[str, Any] = {}
+    manager._augment_futures_metrics(decreased)
+    assert manager._last_futures_volume == 1100.0
+    assert list(manager._futures_volume_history) == [100.0]
+    assert decreased["futures_volume"] is None
+    assert decreased["futures_volume_trusted"] is False
+
+    recovered: dict[str, Any] = {}
+    manager._augment_futures_metrics(recovered)
+    assert manager._last_futures_volume == 1150.0
+    assert list(manager._futures_volume_history) == [100.0, 50.0]
+    assert recovered["futures_volume_ratio"] == 50.0 / 75.0
+
+
+def test_futures_volume_resets_baseline_when_contract_changes() -> None:
+    symbol = "NFO:NIFTY26JULFUT"
+    hub = _VolumeHub([{"volume_traded_today": 125.0}], active=symbol)
+    manager = _manager(futures_symbol=symbol, hub=hub)
+    manager._last_futures_volume = 9000.0
+    manager._last_futures_volume_symbol = "NFO:NIFTY26JUNFUT"
+    manager._last_futures_volume_date = date.today()
+    manager._futures_volume_history.append(75.0)
+
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert manager._last_futures_volume == 125.0
+    assert manager._last_futures_volume_symbol == symbol
+    assert list(manager._futures_volume_history) == []
+    assert indicators["futures_volume_ratio"] is None
+    assert indicators["futures_volume_trusted"] is True
