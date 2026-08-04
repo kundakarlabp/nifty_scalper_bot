@@ -24,24 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Execute guarded migration
-        shell: bash
-        run: |
-          python - <<'WRAPPER'
-          from pathlib import Path
-
-          workflow = Path(
-              ".github/workflows/one-shot-definition-site-premium-geometry.yml"
-          ).read_text(encoding="utf-8")
-          marker = "          python - <<'PY'\n"
-          start = workflow.index(marker) + len(marker)
-          end = workflow.index("\n          PY", start)
-          raw = workflow[start:end]
-          script = "\n".join(
-              line[10:] if line.startswith("          ") else line
-              for line in raw.splitlines()
-          )
-          exec(compile(script, "definition-site-migration", "exec"), {})
-          WRAPPER
+        run: python tools/one_shot_definition_site_migration.py
 
       - name: Validate and commit canonical diff
         shell: bash
@@ -51,7 +34,8 @@ jobs:
           git rm --ignore-unmatch \
             .github/workflows/one-shot-definition-site-premium-geometry.yml \
             .github/workflows/one-shot-pr-definition-site-premium-geometry.yml \
-            .github/one-shot-definition-site-trigger
+            .github/one-shot-definition-site-trigger \
+            tools/one_shot_definition_site_migration.py
           git add -A
           git diff --cached --check
           git config user.name "github-actions[bot]"
