@@ -1,0 +1,26 @@
+name: Runtime audit source export
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    if: github.head_ref == 'fix/runtime-delivery-liveness-20260804'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Archive checked-out source
+        run: git archive --format=zip --output=runtime-audit-source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-audit-source
+          path: runtime-audit-source.zip
+          retention-days: 1
