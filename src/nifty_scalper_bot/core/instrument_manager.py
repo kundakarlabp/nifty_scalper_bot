@@ -91,6 +91,7 @@ class InstrumentManager:
         self._instrument_data: dict[int, dict] = {}  # token → full instrument dict
         self._lock = threading.RLock()
         self._loaded = False
+        self._active_nifty_atm_strike: int | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -506,6 +507,28 @@ class InstrumentManager:
         )
         return rows
 
+    def _stabilized_nifty_atm_strike(
+        self, spot: float, strike_step: int
+    ) -> tuple[int, int, int, bool]:
+        """Return ATM with a dead-band around the currently active strike."""
+        raw_atm = _atm_strike_for_spot(spot, strike_step)
+        with self._lock:
+            active_atm = self._active_nifty_atm_strike
+        if active_atm is None or active_atm <= 0 or active_atm % strike_step:
+            return raw_atm, raw_atm, 0, False
+
+        configured = parse_int_env(os.getenv("ATM_STRIKE_HYSTERESIS_POINTS"), 5)
+        max_hysteresis = max(0, (strike_step // 2) - 1)
+        hysteresis = max(0, min(configured, max_hysteresis))
+        if hysteresis == 0 or raw_atm == active_atm:
+            return raw_atm, raw_atm, hysteresis, False
+
+        lower_boundary = active_atm - (strike_step / 2.0) - hysteresis
+        upper_boundary = active_atm + (strike_step / 2.0) + hysteresis
+        if lower_boundary < spot < upper_boundary:
+            return active_atm, raw_atm, hysteresis, True
+        return raw_atm, raw_atm, hysteresis, False
+
     def get_active_nifty_contracts(
         self,
         spot_price: float,
@@ -576,17 +599,79 @@ class InstrumentManager:
             extra={"event": "CONTRACT_SSOT_OPTION_EXPIRY_SELECTED", "expiry": str(option_expiry)},
         )
 
-        atm = _atm_strike_for_spot(spot, int(strike_step))
+        atm, raw_atm, atm_hysteresis, hysteresis_held = (
+            self._stabilized_nifty_atm_strike(spot, int(strike_step))
+        )
         around = max(0, int(strikes_around_atm))
-        target_strikes = {float(atm + i * int(strike_step)) for i in range(-around, around + 1)}
         expiry_options = [item for item in options if item[0] == option_expiry]
 
-        selected_ce = next((item for item in expiry_options if item[2] == float(atm) and item[3] == "CE"), None)
-        selected_pe = next((item for item in expiry_options if item[2] == float(atm) and item[3] == "PE"), None)
+        def find_atm_pair(
+            strike: int,
+        ) -> tuple[
+            tuple[date, int, float, str, dict[str, Any]] | None,
+            tuple[date, int, float, str, dict[str, Any]] | None,
+        ]:
+            ce = next(
+                (
+                    item
+                    for item in expiry_options
+                    if item[2] == float(strike) and item[3] == "CE"
+                ),
+                None,
+            )
+            pe = next(
+                (
+                    item
+                    for item in expiry_options
+                    if item[2] == float(strike) and item[3] == "PE"
+                ),
+                None,
+            )
+            return ce, pe
+
+        selected_ce, selected_pe = find_atm_pair(atm)
+        if (selected_ce is None or selected_pe is None) and atm != raw_atm:
+            raw_ce, raw_pe = find_atm_pair(raw_atm)
+            if raw_ce is not None and raw_pe is not None:
+                LOGGER.warning(
+                    "CONTRACT_SSOT_ATM_HYSTERESIS_FALLBACK held_atm=%s raw_atm=%s expiry=%s reason=held_pair_unavailable",
+                    atm,
+                    raw_atm,
+                    option_expiry,
+                    extra={
+                        "event": "CONTRACT_SSOT_ATM_HYSTERESIS_FALLBACK",
+                        "held_atm": atm,
+                        "raw_atm": raw_atm,
+                        "expiry": str(option_expiry),
+                        "reason": "held_pair_unavailable",
+                    },
+                )
+                atm = raw_atm
+                selected_ce, selected_pe = raw_ce, raw_pe
+                hysteresis_held = False
         if selected_ce is None or selected_pe is None:
             raise RuntimeError(
                 f"CONTRACT_SSOT_ATM_PAIR_MISSING atm_strike={atm} expiry={option_expiry} "
                 f"ce_found={selected_ce is not None} pe_found={selected_pe is not None}"
+            )
+
+        target_strikes = {
+            float(atm + i * int(strike_step)) for i in range(-around, around + 1)
+        }
+        if hysteresis_held:
+            LOGGER.debug(
+                "CONTRACT_SSOT_ATM_HYSTERESIS_HELD active_atm=%s raw_atm=%s spot=%s hysteresis=%s",
+                atm,
+                raw_atm,
+                spot,
+                atm_hysteresis,
+                extra={
+                    "event": "CONTRACT_SSOT_ATM_HYSTERESIS_HELD",
+                    "active_atm": atm,
+                    "raw_atm": raw_atm,
+                    "spot_price": spot,
+                    "hysteresis_points": atm_hysteresis,
+                },
             )
 
         def opt_sort(item: tuple[date, int, float, str, dict[str, Any]]) -> tuple[float, int, str]:
@@ -675,8 +760,13 @@ class InstrumentManager:
                 "strikes_around_atm": around,
                 "strike_step": int(strike_step),
                 "future_available": bool(future_symbol),
+                "raw_atm_strike": raw_atm,
+                "atm_hysteresis_points": atm_hysteresis,
+                "atm_hysteresis_held": hysteresis_held,
             },
         )
+        with self._lock:
+            self._active_nifty_atm_strike = atm
         LOGGER.info(
             "CONTRACT_SSOT_BASKET_SELECTED selected_ce=%s selected_pe=%s futures_symbol=%s atm_strike=%s option_count=%d token_count=%d",
             basket.selected_ce, basket.selected_pe, basket.futures_symbol, basket.atm_strike, len(basket.option_symbols), len(basket.all_tokens),
