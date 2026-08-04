@@ -14,3 +14,4 @@ def test_side_specific_delivery_blockers_normalize_to_one_primary_blocker() -> N
 
     assert decision.primary_blocker == "selected_option_runner_delivery_missing"
     assert decision.blocker_list == ["selected_option_runner_delivery_missing"]
+    assert decision.secondary_blockers == []
