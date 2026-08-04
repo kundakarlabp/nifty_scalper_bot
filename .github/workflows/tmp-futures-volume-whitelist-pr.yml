@@ -28,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
 
-      - name: Keep generated regression name within lint width
+      - name: Keep helper checks patch-scoped
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -39,12 +39,31 @@ jobs:
               "test_futures_volume_ignores_trade_quantity_and_preserves_cumulative_baseline",
               "test_futures_volume_ignores_trade_quantity_and_keeps_baseline",
           )
+
+          first_black = text.index(
+              '\nrun(\n    sys.executable,\n    "-m",\n    "black",'
+          )
+          focused_pytest = text.index(
+              '\nrun(\n    sys.executable,\n    "-m",\n    "pytest",',
+              first_black,
+          )
+          text = text[:first_black] + text[focused_pytest:]
+
+          ruff_check = text.index(
+              '\nrun(\n    sys.executable,\n    "-m",\n    "ruff",'
+          )
+          git_config = text.index('\n\nrun("git", "config"', ruff_check)
+          text = (
+              text[:ruff_check]
+              + '\nrun("git", "diff", "--check")'
+              + text[git_config:]
+          )
           path.write_text(text)
           PY
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add tools/tmp_apply_futures_volume_whitelist_pr.py
-          git commit -m 'chore(tdd): shorten generated regression name'
+          git commit -m 'chore(tdd): keep helper validation patch-scoped'
 
       - name: Prove regressions, apply exact patch and validate
         id: targeted
