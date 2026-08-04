@@ -160,6 +160,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
     setattr(plan, "trade_provenance", enriched)
     return plan
 
+
 def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
     """Enrich every initial or rebuilt recovery plan before core submission."""
     _enrich_trade_plan_exit_provenance(plan)
@@ -204,25 +205,28 @@ class RuntimeOrderManager(_core.OrderManager):
         _enrich_trade_plan_exit_provenance(plan)
         provenance = getattr(plan, "trade_provenance", {}) or {}
         tp1_armed = provenance.get("tp1_status") == "armed"
-        self._logger.info(
-            "TP1_PLAN_%s symbol=%s qty=%s lot_size=%s tp1_price=%s tp1_qty=%s reason=%s",
-            "ARMED" if tp1_armed else "SKIPPED",
-            getattr(plan, "symbol", ""),
-            getattr(plan, "quantity", 0),
-            getattr(plan, "resolved_lot_size", 0),
-            provenance.get("tp1_price"),
-            provenance.get("tp1_qty"),
-            provenance.get("tp1_skip_reason"),
-            extra={
-                "event": "TP1_PLAN_ARMED" if tp1_armed else "TP1_PLAN_SKIPPED",
-                "symbol": getattr(plan, "symbol", ""),
-                "quantity": getattr(plan, "quantity", 0),
-                "resolved_lot_size": getattr(plan, "resolved_lot_size", 0),
-                "tp1_price": provenance.get("tp1_price"),
-                "tp1_qty": provenance.get("tp1_qty"),
-                "reason": provenance.get("tp1_skip_reason"),
-            },
-        )
+        logger = getattr(self, "_logger", None)
+        log_info = getattr(logger, "info", None)
+        if callable(log_info):
+            log_info(
+                "TP1_PLAN_%s symbol=%s qty=%s lot_size=%s tp1_price=%s tp1_qty=%s reason=%s",
+                "ARMED" if tp1_armed else "SKIPPED",
+                getattr(plan, "symbol", ""),
+                getattr(plan, "quantity", 0),
+                getattr(plan, "resolved_lot_size", 0),
+                provenance.get("tp1_price"),
+                provenance.get("tp1_qty"),
+                provenance.get("tp1_skip_reason"),
+                extra={
+                    "event": "TP1_PLAN_ARMED" if tp1_armed else "TP1_PLAN_SKIPPED",
+                    "symbol": getattr(plan, "symbol", ""),
+                    "quantity": getattr(plan, "quantity", 0),
+                    "resolved_lot_size": getattr(plan, "resolved_lot_size", 0),
+                    "tp1_price": provenance.get("tp1_price"),
+                    "tp1_qty": provenance.get("tp1_qty"),
+                    "reason": provenance.get("tp1_skip_reason"),
+                },
+            )
         blocked = self._blocked("submit_trade_plan_result", (plan,), {})
         if blocked is not NO_BLOCK:
             return blocked
