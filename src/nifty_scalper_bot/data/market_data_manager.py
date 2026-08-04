@@ -432,6 +432,10 @@ class MarketDataManager:
         self._required_symbol_missing_grace_sec = self._parse_float_env(
             "MDM_REQUIRED_SYMBOL_MISSING_GRACE_SECONDS", default=15.0, minimum=0.0
         )
+        self._symbol_recovery_cooldown_s = self._parse_float_env(
+            "MDM_SYMBOL_RECOVERY_COOLDOWN_SECONDS", default=30.0, minimum=1.0
+        )
+        self._zombie_market_was_open: bool | None = None
         self._subscription_divergence_since_mono: float | None = None
         self._last_symbol_level_recovery_mono: float | None = None
         self._symbol_recovery_attempt_state: dict[str, dict[str, Any]] = {}
@@ -9150,24 +9154,7 @@ class MarketDataManager:
     def _publish_tick_to_bus_safe(self, tick: dict[str, Any]) -> None:
         """Publish a normalized tick to MessageBus without ever crashing MDM."""
         bus = getattr(self, "bus", None) or getattr(self, "_tick_bus", None)
-        if bus is None:
-            log_throttled(
-                self._logger,
-                "mdm_bus_publish_skipped_no_bus",
-                "MDM_BUS_PUBLISH_SKIPPED reason=no_bus symbol=%s" % tick.get("symbol"),
-                interval_sec=30.0,
-                level=logging.DEBUG,
-            )
-            return
-        if not self._bus_is_running():
-            log_throttled(
-                self._logger,
-                "mdm_bus_publish_skipped_bus_not_running",
-                "MDM_BUS_PUBLISH_SKIPPED reason=bus_not_running symbol=%s"
-                % tick.get("symbol"),
-                interval_sec=30.0,
-                level=logging.DEBUG,
-            )
+        if bus is None or not self._bus_is_running():
             return
         loop = (
             getattr(self, "_main_loop", None)
@@ -9991,16 +9978,34 @@ class MarketDataManager:
 
         from nifty_scalper_bot.utils.market_hours import is_market_open
 
-        if not is_market_open():
+        market_open = bool(is_market_open())
+        if not market_open:
+            self._zombie_market_was_open = False
             self._zombie_stale_logged = False
             return
+        opening_transition = self._zombie_market_was_open is False
+        self._zombie_market_was_open = True
         self._monitor_spot_ws_health()
         ws_healthy = self._is_ws_healthy()
         connected = self._is_ws_connected()
 
+        now_mono = time.monotonic()
         with self._lock:
             required = self._required_live_symbols()
             candidate_symbols = sorted(required)
+            if opening_transition:
+                for sym in candidate_symbols:
+                    self._required_symbol_since_mono[sym] = now_mono
+                self._logger.info(
+                    "MDM_MARKET_OPEN_SYMBOL_GRACE_RESET symbols=%d grace_s=%.1f",
+                    len(candidate_symbols),
+                    self._required_symbol_missing_grace_sec,
+                    extra={
+                        "event": "MDM_MARKET_OPEN_SYMBOL_GRACE_RESET",
+                        "symbols": candidate_symbols,
+                        "grace_s": self._required_symbol_missing_grace_sec,
+                    },
+                )
             since_by_symbol = {
                 sym: self._required_symbol_since_mono.get(sym)
                 for sym in candidate_symbols
@@ -10009,7 +10014,6 @@ class MarketDataManager:
             self._zombie_stale_logged = False
             return
 
-        now_mono = time.monotonic()
         stale_symbols: list[str] = []
         missing_symbols: list[str] = []
         fresh_symbols: list[str] = []

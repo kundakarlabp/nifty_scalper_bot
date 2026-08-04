@@ -1240,6 +1240,7 @@ class StrategyRunner:
         self._entry_eval_stall_disarmed: bool = False
         self._entry_eval_drain_count: int = 0
         self._entry_eval_reschedule_count: int = 0
+        self._entry_eval_last_progress_ts: float = time.monotonic()
         self._entry_eval_shutdown: bool = False
         # True only once canonical startup has handed over the authoritative
         # running application loop via attach_runtime_loop().
@@ -2058,12 +2059,30 @@ class StrategyRunner:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                thread = threading.Thread(
-                    target=lambda: asyncio.run(_run()),
-                    name=f"runtime-history-ensure-{normalized}",
-                    daemon=True,
+                runtime_loop = getattr(self, "_main_loop", None)
+                runtime_loop_attached = bool(
+                    getattr(self, "_runtime_loop_attached", False)
                 )
-                thread.start()
+                if (
+                    runtime_loop is not None
+                    and not runtime_loop.is_closed()
+                    and runtime_loop_attached
+                ):
+                    scheduled_coro = _run()
+                    try:
+                        runtime_loop.call_soon_threadsafe(
+                            lambda coro=scheduled_coro: safe_task(coro)
+                        )
+                    except Exception:
+                        scheduled_coro.close()
+                        raise
+                else:
+                    thread = threading.Thread(
+                        target=lambda: asyncio.run(_run()),
+                        name=f"runtime-history-ensure-{normalized}",
+                        daemon=True,
+                    )
+                    thread.start()
             else:
                 scheduled_coro = _run()
                 try:
@@ -5234,9 +5253,15 @@ class StrategyRunner:
         if not hasattr(self, "_callbacks"):
             self._callbacks = {}
         if self._data_hub is not None:
-            if normalized_symbol not in self._datahub_registered_symbols:
+            checker = getattr(self._data_hub, "has_tick_subscription", None)
+            actually_registered = (
+                bool(checker(normalized_symbol, self.on_datahub_tick))
+                if callable(checker)
+                else normalized_symbol in self._datahub_registered_symbols
+            )
+            if not actually_registered:
                 self._data_hub.subscribe_ticks(symbol, self.on_datahub_tick)
-                self._datahub_registered_symbols.add(normalized_symbol)
+            self._datahub_registered_symbols.add(normalized_symbol)
             return
         callback = self._callbacks.get(symbol)
         callback_already_registered = callback is not None
@@ -5342,9 +5367,19 @@ class StrategyRunner:
         )
 
     def has_datahub_subscription(self, symbol: str, token: int | None = None) -> bool:
-        """Check whether DataHub callback is already registered. Args: symbol/token. Returns: bool. Raises: none."""
-        _ = token
-        return normalize_symbol(symbol) in self._datahub_registered_symbols
+        """Return actual DataHub-to-runner callback registration state."""
+        normalized = normalize_symbol(symbol)
+        registered = normalized in self._datahub_registered_symbols
+        checker = getattr(self._data_hub, "has_tick_subscription", None)
+        if callable(checker):
+            registered = bool(
+                checker(normalized, self.on_datahub_tick, token=token)
+            )
+            if registered:
+                self._datahub_registered_symbols.add(normalized)
+            else:
+                self._datahub_registered_symbols.discard(normalized)
+        return registered
 
     def _safe_subscribe(
         self,
@@ -7872,39 +7907,6 @@ class StrategyRunner:
                 normalized_symbol,
                 tick.get("ltp") or tick.get("last_price", "?"),
             )
-            # ✅ FIX: Throttle stall warning to 30s — same-bar-skip causes expected
-            # gaps between _last_global_eval_ts updates (one eval per bar ≈ 60s cycle).
-            # ✅ FIX D: Raise stall threshold to 120s. Options tick once per ~13min;
-            # the 5s threshold fired constantly between normal tick batches.
-            # A genuine stall = no strategy evaluation for > 2 full minutes with active ticks.
-            if (
-                self.ready
-                and now_mono - self._last_global_eval_ts > 120.0
-                and now_mono - self._last_stall_warn_ts > 120.0
-            ):
-                self._last_stall_warn_ts = now_mono
-                if not is_market_open_now():
-                    log_throttled(
-                        self._logger,
-                        "strategy_stall_check_skipped_market_closed",
-                        "STALL_CHECK_SKIPPED reason=market_closed",
-                        interval_sec=300.0,
-                        level=logging.DEBUG,
-                        extra={
-                            "event": "STALL_CHECK_SKIPPED",
-                            "reason": "market_closed",
-                        },
-                    )
-                else:
-                    worker_state = self._entry_eval_liveness_snapshot(now_mono)
-                    self._logger.warning(
-                        "Strategy evaluation stalled >120s (once per 120s)",
-                        extra={
-                            "event": "strategy_eval_stall",
-                            "stall_sec": round(now_mono - self._last_global_eval_ts, 1),
-                            **worker_state,
-                        },
-                    )
             self._run_health_watchdog_on_cadence()
             self._logger.debug(
                 "PIPELINE_OK",
@@ -8190,6 +8192,12 @@ class StrategyRunner:
                 self._entry_eval_generation_by_symbol[symbol] += 1
                 generation = self._entry_eval_generation_by_symbol[symbol]
                 already_pending = symbol in self._pending_entry_eval_symbols
+                if (
+                    not already_pending
+                    and not self._pending_entry_eval_symbols
+                    and not self._entry_eval_active
+                ):
+                    self._entry_eval_last_progress_ts = time.monotonic()
                 self._pending_entry_eval_symbols.add(symbol)
                 if trace_id:
                     self._entry_eval_trace_id_by_symbol[symbol] = trace_id
@@ -8258,25 +8266,49 @@ class StrategyRunner:
             )
 
     def _entry_eval_liveness_snapshot(self, now: float | None = None) -> dict[str, Any]:
-        """Return bounded diagnostic state for the single entry worker."""
+        """Return bounded liveness state for the single entry-eval worker."""
         now = time.monotonic() if now is None else now
-        with self._eval_gate_lock:
+        lock = getattr(self, "_eval_gate_lock", None) or threading.Lock()
+        with lock:
             started_at = getattr(self, "_entry_eval_active_started_at", None)
             drain_active = bool(getattr(self, "_entry_eval_active", False))
+            drain_scheduled = bool(
+                getattr(self, "_entry_eval_drain_scheduled", False)
+            )
+            pending = sorted(getattr(self, "_pending_entry_eval_symbols", set()))
             active_age = (
                 max(0.0, now - float(started_at))
                 if drain_active and started_at is not None
                 else 0.0
             )
+            last_progress = float(
+                getattr(
+                    self,
+                    "_entry_eval_last_progress_ts",
+                    getattr(self, "_last_global_eval_ts", now),
+                )
+                or now
+            )
+            progress_age = max(0.0, now - last_progress)
+            work_outstanding = bool(pending or drain_active or drain_scheduled)
+            drain_stranded = bool(pending and not drain_active and not drain_scheduled)
+            worker_stalled = bool(
+                work_outstanding
+                and (
+                    active_age >= 90.0
+                    if drain_active
+                    else progress_age >= 90.0
+                )
+            )
             return {
-                "pending_entry_eval": sorted(
-                    getattr(self, "_pending_entry_eval_symbols", set())
-                ),
-                "drain_scheduled": bool(
-                    getattr(self, "_entry_eval_drain_scheduled", False)
-                ),
+                "pending_entry_eval": pending,
+                "drain_scheduled": drain_scheduled,
                 "drain_active": drain_active,
                 "drain_active_age_s": round(active_age, 1),
+                "last_progress_age_s": round(progress_age, 1),
+                "work_outstanding": work_outstanding,
+                "drain_stranded": drain_stranded,
+                "worker_stalled": worker_stalled,
                 "active_symbol": getattr(self, "_entry_eval_active_symbol", None),
                 "active_phase": getattr(self, "_entry_eval_active_phase", None),
                 "drain_count": int(getattr(self, "_entry_eval_drain_count", 0)),
@@ -8321,6 +8353,7 @@ class StrategyRunner:
                 return
             self._entry_eval_active = True
             self._entry_eval_drain_scheduled = False
+            self._entry_eval_last_progress_ts = time.monotonic()
             # ONE bounded batch per invocation: snapshot and clear. Symbols
             # that receive newer ticks during this batch are re-added below
             # and handled by exactly one follow-up drain, so a continuously
@@ -8375,6 +8408,7 @@ class StrategyRunner:
                         self._entry_eval_active_started_at = None
                         self._entry_eval_active_symbol = None
                         self._entry_eval_active_phase = None
+                        self._entry_eval_last_progress_ts = time.monotonic()
                     processed += 1
                     with self._eval_gate_lock:
                         self._entry_eval_drained_generation[symbol] = captured[symbol]
@@ -8401,6 +8435,7 @@ class StrategyRunner:
                     needs_next = False
                 self._entry_eval_drain_count += 1
                 self._entry_eval_reschedule_count += rescheduled
+                self._entry_eval_last_progress_ts = time.monotonic()
             duration_ms = (time.monotonic() - drain_started) * 1000.0
             self._logger.debug(
                 "ENTRY_EVAL_DRAIN pending_count=%d processed_count=%d "
@@ -8557,12 +8592,9 @@ class StrategyRunner:
         now = time.monotonic()
         market_open = is_market_open_now()
         tick_flowing = (now - self._last_tick_seen_ts) <= 5.0
-        eval_stalled = (now - self._last_global_eval_ts) > 5.0
-
-        # ✅ FIX: Throttle — same-bar-skip keeps eval_stalled=True for the whole bar.
-        # Only warn if stall > 90s (longer than one full bar cycle) to avoid spam.
-        genuine_stall = (now - self._last_global_eval_ts) > 90.0
-        if self.ready and tick_flowing and eval_stalled and genuine_stall:
+        worker_state = self._entry_eval_liveness_snapshot(now)
+        worker_stalled = bool(worker_state.get("worker_stalled"))
+        if self.ready and tick_flowing and worker_stalled:
             if not market_open:
                 log_throttled(
                     self._logger,
@@ -8576,16 +8608,19 @@ class StrategyRunner:
                     },
                 )
             else:
-                worker_state = self._entry_eval_liveness_snapshot(now)
+                stall_sec = max(
+                    float(worker_state.get("drain_active_age_s") or 0.0),
+                    float(worker_state.get("last_progress_age_s") or 0.0),
+                )
                 log_throttled(
                     self._logger,
                     "health_watchdog_genuine_stall",
-                    "Strategy eval genuinely stalled while ticks flowing (>90s)",
+                    "Entry evaluation worker stalled while work is outstanding",
                     interval_sec=120.0,
                     level=logging.WARNING,
                     extra={
                         "event": "strategy_eval_stall",
-                        "stall_sec": round(now - self._last_global_eval_ts, 1),
+                        "stall_sec": round(stall_sec, 1),
                         **worker_state,
                     },
                 )
@@ -8593,7 +8628,7 @@ class StrategyRunner:
                 if not self._eval_stall_recovery_attempted:
                     self._eval_stall_recovery_attempted = True
                     self._recover_strategy_eval_stall_once(now)
-        elif self._eval_stall_recovery_attempted and not eval_stalled:
+        elif self._eval_stall_recovery_attempted and not worker_stalled:
             self._eval_stall_recovery_attempted = False
 
         now_wall = time.time()
@@ -8894,15 +8929,20 @@ class StrategyRunner:
 
     # Watchdog recovery for a genuine live eval stall while ticks are flowing.
     def _recover_strategy_eval_stall_once(self, now: float | None = None) -> None:
-        """Recompute readiness and nudge evaluation after one genuine live stall."""
+        """Recompute readiness and reschedule one stranded entry-eval drain."""
         now = time.monotonic() if now is None else now
+        worker_state = self._entry_eval_liveness_snapshot(now)
+        stall_sec = max(
+            float(worker_state.get("drain_active_age_s") or 0.0),
+            float(worker_state.get("last_progress_age_s") or 0.0),
+        )
         self._logger.warning(
-            "STRATEGY_EVAL_STALL_RECOVERY_ONCE stall_sec=%s action=recompute_readiness_and_restart_loop",
-            round(now - self._last_global_eval_ts, 1),
+            "STRATEGY_EVAL_STALL_RECOVERY_ONCE stall_sec=%s action=recompute_readiness_and_reschedule_drain",
+            round(stall_sec, 1),
             extra={
                 "event": "STRATEGY_EVAL_STALL_RECOVERY_ONCE",
-                "stall_sec": round(now - self._last_global_eval_ts, 1),
-                "action": "recompute_readiness_and_restart_loop",
+                "stall_sec": round(stall_sec, 1),
+                "action": "recompute_readiness_and_reschedule_drain",
             },
         )
         callback = getattr(self, "_runtime_readiness_recompute_callback", None)
@@ -8913,12 +8953,6 @@ class StrategyRunner:
                     try:
                         loop = asyncio.get_running_loop()
                     except RuntimeError:
-                        # This runs inside _health_watchdog -> _on_tick_safe,
-                        # i.e. on the market-data tick thread. asyncio.run()
-                        # here executed the readiness recompute synchronously
-                        # and blocked tick ingestion for its full duration --
-                        # the same defect fixed for Telegram dispatch. Submit
-                        # to the attached runtime loop instead; never block.
                         runtime_loop = self._main_loop
                         if runtime_loop is not None and not runtime_loop.is_closed():
                             asyncio.run_coroutine_threadsafe(result, runtime_loop)
@@ -8935,25 +8969,11 @@ class StrategyRunner:
                         loop.create_task(result)
             except Exception:
                 self._logger.exception("STRATEGY_EVAL_STALL_READINESS_RECOMPUTE_FAILED")
-        # Evaluation-worker state, captured BEFORE any recovery action so the
-        # log shows why evaluation stalled rather than only that it did.
-        worker_state = self._entry_eval_liveness_snapshot(now)
+
         executor = getattr(self, "_entry_eval_executor", None)
         worker_state["executor_alive"] = bool(
             executor is not None and not getattr(executor, "_shutdown", False)
         )
-        was_running = bool(self._running)
-
-        try:
-            self.start()
-        except Exception:
-            self._logger.exception("STRATEGY_EVAL_STALL_LOOP_RESTART_FAILED")
-
-        # start() is a no-op while the runner is already running, so on its own
-        # it cannot recover a stalled evaluation loop -- the recovery advertised
-        # "restart_loop" but performed nothing. Post-#918 the real evaluation
-        # mechanism is the coalesced entry-eval drain, so nudge that instead of
-        # relying on a restart that never happens.
         drain_rescheduled = False
         if not self._entry_eval_shutdown:
             with self._eval_gate_lock:
@@ -8970,19 +8990,15 @@ class StrategyRunner:
                     with self._eval_gate_lock:
                         self._entry_eval_drain_scheduled = False
         self._logger.warning(
-            "STRATEGY_EVAL_STALL_WORKER_STATE start_was_noop=%s drain_rescheduled=%s state=%s",
-            was_running,
+            "STRATEGY_EVAL_STALL_WORKER_STATE drain_rescheduled=%s state=%s",
             drain_rescheduled,
             worker_state,
             extra={
                 "event": "STRATEGY_EVAL_STALL_WORKER_STATE",
-                "start_was_noop": was_running,
                 "drain_rescheduled": drain_rescheduled,
                 **worker_state,
             },
         )
-        # Reset per-symbol eval throttles once so the next flowing tick can
-        # enter _on_tick instead of being held behind stale same-bar state.
         self._last_eval_ts.clear()
         self._last_periodic_eval_at_by_symbol.clear()
 
