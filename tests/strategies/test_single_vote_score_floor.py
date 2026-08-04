@@ -1,6 +1,8 @@
 """Selected-option single-vote scalps require a high score floor (default 9.0).
 
-A lone vote (no consensus) is riskier, so only the strongest signals should pass.
+A lone vote remains disabled by default. A selected-option trigger may pass only
+when a fresh, strong, explicitly allowed context strategy confirms it and the
+combined score clears the same conservative floor.
 """
 
 from __future__ import annotations
@@ -229,3 +231,177 @@ async def test_option_entry_blocked_when_bias_conflicts_option_side() -> None:
     )
     assert result is None
     assert decision.final_block_reason == "underlying_direction_conflict"
+
+
+def _context_vote(
+    *,
+    side: str = "CE",
+    score: float = 10.0,
+    confidence: float = 0.85,
+    age_s: float = 0.0,
+):
+    import time
+
+    from nifty_scalper_bot.core.strategy_manager import Signal, StrategyVote
+
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY2670724050CE",
+        quantity=65,
+        confidence=confidence,
+        reason="OrderFlow",
+        stop_loss=140.0,
+        take_profit=150.0,
+        metadata={
+            "strategy": "OrderFlow",
+            "role": "context",
+            "quote_depth_valid": True,
+            "tradable_quote": True,
+        },
+    )
+    vote = StrategyVote(
+        strategy="OrderFlow",
+        side=side,
+        score=score,
+        confidence=confidence,
+        reasons=[],
+        metadata={
+            "role": "context",
+            "raw_setup_score": score,
+            "context_bonus_score": max(0.0, 0.5 * (score - 4.0)),
+            "vote_timestamp": time.time() - age_s,
+            "quote_depth_valid": True,
+            "tradable_quote": True,
+            "trigger_conditions_met": False,
+            "trigger_block_reason": "context_only_role",
+        },
+    )
+    return signal, vote
+
+
+async def test_selected_smc_trigger_uses_fresh_same_side_orderflow_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
+    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
+    context = _context_vote(score=10.0, confidence=0.85)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
+    assert result.metadata["final_trade_score"] >= 9.0
+
+
+async def test_stale_orderflow_context_cannot_unlock_single_trigger(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
+    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
+    stale_context = _context_vote(score=10.0, confidence=0.85, age_s=60.0)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, stale_context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[
+        "NFO:NIFTY2670724050CE"
+    ]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
+
+
+async def test_stale_context_cannot_inflate_fresh_confirmation_score(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
+    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
+    fresh_context = _context_vote(score=8.0, confidence=0.80)
+    stale_context = _context_vote(score=10.0, confidence=0.85, age_s=60.0)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, fresh_context, stale_context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[
+        "NFO:NIFTY2670724050CE"
+    ]
+    assert decision.reason == "single_trigger_context_score_below_min"
+
+
+async def test_unapproved_context_strategy_cannot_unlock_single_trigger(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
+    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
+    signal, vote = _context_vote(score=10.0, confidence=0.85)
+    signal = signal.with_metadata(strategy="VWAPPro")
+    vote.strategy = "VWAPPro"
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, (signal, vote)],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[
+        "NFO:NIFTY2670724050CE"
+    ]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
+
+
+async def test_opposite_side_context_remains_a_veto_not_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
+    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
+    opposite_context = _context_vote(side="PE", score=10.0, confidence=0.85)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, opposite_context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[
+        "NFO:NIFTY2670724050CE"
+    ]
+    assert decision.reason == "hard_context_veto"
