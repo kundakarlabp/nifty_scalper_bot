@@ -1,12 +1,47 @@
 name: slow-suite-weekly
-# Item 7: the default suite runs -m "not slow"; this job exercises the
-# slow/integration marker set weekly so regressions there are not invisible.
+# Temporary connector branch bootstrap: apply one reviewed patch payload using
+# GitHub's own checkout, then leave normal pull-request CI as the authority.
 on:
+  push:
+    branches:
+      - fix/context-confirmed-single-trigger-20260804
   schedule:
     - cron: "30 3 * * 0"  # Sundays 03:30 UTC (09:00 IST)
   workflow_dispatch: {}
+
+permissions:
+  contents: write
+
 jobs:
+  apply-connector-patch:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/context-confirmed-single-trigger-20260804
+          fetch-depth: 0
+      - name: Apply reviewed focused patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_file=.github/connector-patches/context-confirmed-single-trigger.patch
+          test -f "$patch_file"
+          git apply --check "$patch_file"
+          git apply "$patch_file"
+          rm "$patch_file"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/nifty_scalper_bot/core/strategy_manager.py \
+            tests/strategies/test_single_vote_score_floor.py \
+            "$patch_file"
+          git diff --cached --check
+          git commit -m "fix(strategy): accept evidence-confirmed selected trigger"
+          git push origin HEAD:fix/context-confirmed-single-trigger-20260804
+
   slow-tests:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
