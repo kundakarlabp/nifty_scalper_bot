@@ -46,7 +46,7 @@ replace_once(
 
 append_once(
     VOLUME_TEST,
-    "test_futures_volume_ignores_trade_quantity_and_preserves_cumulative_baseline",
+    "test_futures_volume_ignores_trade_quantity_and_keeps_baseline",
     r'''
     class _VolumeHub:
         def __init__(
@@ -69,7 +69,7 @@ append_once(
             return {}
 
 
-    def test_futures_volume_ignores_trade_quantity_and_preserves_cumulative_baseline() -> None:
+    def test_futures_volume_ignores_trade_quantity_and_keeps_baseline() -> None:
         symbol = "NFO:NIFTY26JUNFUT"
         hub = _VolumeHub(
             [
@@ -187,7 +187,7 @@ run(
     "-q",
     str(VOLUME_TEST.relative_to(ROOT)),
     "-k",
-    "test_futures_volume_ignores_trade_quantity_and_preserves_cumulative_baseline",
+    "test_futures_volume_ignores_trade_quantity_and_keeps_baseline",
     expect=1,
 )
 run(
@@ -372,15 +372,6 @@ replace_once(
 run(
     sys.executable,
     "-m",
-    "black",
-    "src/nifty_scalper_bot/strategies/signal_generator.py",
-    "src/nifty_scalper_bot/strategies/runner.py",
-    "tests/strategies/test_active_futures_resolution.py",
-    "tests/strategies/test_runner_active_basket_pending.py",
-)
-run(
-    sys.executable,
-    "-m",
     "pytest",
     "-q",
     str(VOLUME_TEST.relative_to(ROOT)),
@@ -396,26 +387,7 @@ run(
     "tests/strategies/test_active_futures_resolution.py",
     "tests/strategies/test_runner_active_basket_pending.py",
 )
-run(
-    sys.executable,
-    "-m",
-    "ruff",
-    "check",
-    "src/nifty_scalper_bot/strategies/signal_generator.py",
-    "src/nifty_scalper_bot/strategies/runner.py",
-    "tests/strategies/test_active_futures_resolution.py",
-    "tests/strategies/test_runner_active_basket_pending.py",
-)
-run(
-    sys.executable,
-    "-m",
-    "black",
-    "--check",
-    "src/nifty_scalper_bot/strategies/signal_generator.py",
-    "src/nifty_scalper_bot/strategies/runner.py",
-    "tests/strategies/test_active_futures_resolution.py",
-    "tests/strategies/test_runner_active_basket_pending.py",
-)
+run("git", "diff", "--check")
 
 run("git", "config", "user.name", "github-actions[bot]")
 run("git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
