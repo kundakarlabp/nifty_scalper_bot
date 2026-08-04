@@ -1,0 +1,42 @@
+name: Entry path patch once
+
+on:
+  push:
+    branches:
+      - fix/entry-policy-critical-feed-20260804
+
+permissions:
+  contents: write
+
+concurrency:
+  group: entry-path-patch-once
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/entry-policy-critical-feed-20260804
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install project
+        run: pip install -e '.[dev]'
+      - name: Run tests-first targeted correction
+        run: python .github/entry_path_patch.py
+      - name: Commit clean correction
+        run: |
+          git checkout origin/main -- .github/workflows/validate-market-aware-optimisations.yml
+          git checkout origin/main -- .github/workflows/strategy-stall-fix-once.yml
+          rm -f .github/workflows/entry-path-patch-once.yml
+          rm -f .github/entry_path_patch.py
+          rm -f .github/entry-policy-trigger
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(runtime): pre-gate expiry entries and narrow feed recovery'
+          git push origin HEAD:fix/entry-policy-critical-feed-20260804
