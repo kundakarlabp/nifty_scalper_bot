@@ -2,87 +2,176 @@ name: Validate Market-Aware Optimisations
 
 on:
   pull_request:
-  push:
-    branches:
-      - feat/market-aware-execution-optimisations-20260629
 
 permissions:
   contents: write
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip -q
-          python -m pip install -e '.[dev]' -q
-          python -m pip install -r dashboard/requirements.txt -q
-      - name: Compile and diff check
-        run: python -m compileall -q src tests
-      - name: Operator check execution tests
-        env:
-          BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'check_execution'
-      - name: Operator stale tests
-        env:
-          BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'stale'
-      - name: Operator remaining unique tests
-        env:
-          BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications/test_operator_telegram.py -k 'unique or legacy'
-      - name: Notification complete file
-        env:
-          BRACKET_AUTO_RESTORE: "false"
-        run: python -m pytest -q tests/notifications/test_operator_telegram.py
-
-  strategy-stall-fix-once:
-    if: github.event_name == 'pull_request' && github.head_ref == 'fix/strategy-stall-production'
+  targeted-entry-path-tdd:
+    if: github.head_ref == 'fix/entry-policy-critical-feed-20260804'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: fix/strategy-stall-production
+          ref: fix/entry-policy-critical-feed-20260804
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install project
         run: pip install -e '.[dev]'
-      - name: Add focused regressions
-        env:
-          TESTS_B64: CgpkZWYgdGVzdF9zdHJhdGVneV9zdGFsbF93YXJuaW5nX2hhc19zaW5nbGVfb3duZXIoKToKICAgIHNvdXJjZSA9IF9yZWFkX3J1bm5lcl9zb3VyY2UoKQogICAgYXNzZXJ0ICJTdHJhdGVneSBldmFsdWF0aW9uIHN0YWxsZWQgPjEyMHMgKG9uY2UgcGVyIDEyMHMpIiBub3QgaW4gc291cmNlCiAgICBhc3NlcnQgKAogICAgICAgIHNvdXJjZS5jb3VudCgiU3RyYXRlZ3kgZXZhbCBnZW51aW5lbHkgc3RhbGxlZCB3aGlsZSB0aWNrcyBmbG93aW5nICg+OTBzKSIpCiAgICAgICAgPT0gMQogICAgKQoKCmRlZiB0ZXN0X3N0cmF0ZWd5X3N0YWxsX3dhdGNoZG9nX3NraXBzX2FjdGl2ZV9yaXNrX2JyZWFrZXIobW9ua2V5cGF0Y2gpOgogICAgaW1wb3J0IG5pZnR5X3NjYWxwZXJfYm90LnN0cmF0ZWdpZXMucnVubmVyIGFzIHJ1bm5lcl9tb2R1bGUKICAgIGZyb20gbmlmdHlfc2NhbHBlcl9ib3Quc3RyYXRlZ2llcy5ydW5uZXIgaW1wb3J0IFN0cmF0ZWd5UnVubmVyCgogICAgY2xhc3MgX1Jpc2tNYW5hZ2VyOgogICAgICAgIF9icmVha2VyX3RyaXBwZWQgPSBUcnVlCgogICAgY2xhc3MgX01hcmtldERhdGE6CiAgICAgICAgZGVmIF9yZXF1aXJlZF9saXZlX3N5bWJvbHMoc2VsZik6CiAgICAgICAgICAgIHJldHVybiBzZXQoKQoKICAgIHJ1bm5lciA9IFN0cmF0ZWd5UnVubmVyLl9fbmV3X18oU3RyYXRlZ3lSdW5uZXIpCiAgICBydW5uZXIucmVhZHkgPSBUcnVlCiAgICBydW5uZXIuX3Jpc2tfbWFuYWdlciA9IF9SaXNrTWFuYWdlcigpCiAgICBydW5uZXIuX21hcmtldF9kYXRhID0gX01hcmtldERhdGEoKQogICAgcnVubmVyLl9sYXN0X3RpY2tfc2Vlbl90cyA9IHRpbWUubW9ub3RvbmljKCkKICAgIHJ1bm5lci5fbGFzdF9nbG9iYWxfZXZhbF90cyA9IHRpbWUubW9ub3RvbmljKCkgLSAyMDAuMAogICAgcnVubmVyLl9ldmFsX3N0YWxsX3JlY292ZXJ5X2F0dGVtcHRlZCA9IEZhbHNlCiAgICBydW5uZXIuX2NhbmRsZV9lbmdpbmVzID0ge30KICAgIHJ1bm5lci5fYWN0aXZlX3N5bWJvbHMgPSBzZXQoKQogICAgcnVubmVyLl90cmFja2VkX3N5bWJvbHMgPSBzZXQoKQogICAgcnVubmVyLl9sYXN0X3RpY2tfdGltZV9ieV9zeW1ib2wgPSB7fQogICAgcnVubmVyLl9hY3RpdmVfb3B0aW9uX3N5bWJvbHMgPSBzZXQoKQogICAgcnVubmVyLl9hY3RpdmVfc2VsZWN0ZWRfY2UgPSBOb25lCiAgICBydW5uZXIuX2FjdGl2ZV9zZWxlY3RlZF9wZSA9IE5vbmUKICAgIHJ1bm5lci5fc2VsZWN0ZWRfY2Vfc3ltYm9sID0gTm9uZQogICAgcnVubmVyLl9zZWxlY3RlZF9wZV9zeW1ib2wgPSBOb25lCiAgICBydW5uZXIuX3BlbmRpbmdfc2VsZWN0ZWRfY2UgPSBOb25lCiAgICBydW5uZXIuX3BlbmRpbmdfc2VsZWN0ZWRfcGUgPSBOb25lCiAgICBydW5uZXIuX2FjdGl2ZV9jb250cmFjdF9iYXNrZXQgPSBOb25lCiAgICBydW5uZXIuX2RhdGFfaHViID0gTm9uZQogICAgcnVubmVyLl9sYXN0X3dzX3N0YWxlX2xvZ190c19ieV9zeW1ib2wgPSB7fQogICAgcnVubmVyLl9sYXN0X3dzX3JlY29ubmVjdF9hdHRlbXB0X3RzID0gMC4wCiAgICBydW5uZXIuX2xvZ190aHJvdHRsZV9zdGF0ZSA9IHt9CiAgICBydW5uZXIuX2xvZ2dlciA9IGxvZ2dpbmcuZ2V0TG9nZ2VyKCJ0ZXN0LnJ1bm5lci5icmVha2VyX3N0YWxsIikKICAgIHdhcm5pbmdzID0gW10KICAgIHJ1bm5lci5fbG9nZ2VyLndhcm5pbmcgPSAoCiAgICAgICAgbGFtYmRhIG1zZywgKmFyZ3MsICoqa3dhcmdzOiB3YXJuaW5ncy5hcHBlbmQobXNnICUgYXJncyBpZiBhcmdzIGVsc2UgbXNnKQogICAgKQogICAgcmVjb3ZlcmllcyA9IFtdCiAgICBydW5uZXIuX3JlY292ZXJfc3RyYXRlZ3lfZXZhbF9zdGFsbF9vbmNlID0gbGFtYmRhIG5vdzogcmVjb3Zlcmllcy5hcHBlbmQobm93KQoKICAgIG1vbmtleXBhdGNoLnNldGF0dHIocnVubmVyX21vZHVsZSwgImlzX21hcmtldF9vcGVuX25vdyIsIGxhbWJkYTogVHJ1ZSkKICAgIHJ1bm5lci5faGVhbHRoX3dhdGNoZG9nKCkKCiAgICBhc3NlcnQgd2FybmluZ3MgPT0gW10KICAgIGFzc2VydCByZWNvdmVyaWVzID09IFtdCiAgICBhc3NlcnQgcnVubmVyLl9ldmFsX3N0YWxsX3JlY292ZXJ5X2F0dGVtcHRlZCBpcyBGYWxzZQo=
-        run: echo "$TESTS_B64" | base64 -d >> tests/strategies/test_runner_market_closed_watchdog.py
-      - name: Prove regressions fail before correction
+      - name: Add focused regressions first
         run: |
-          if pytest -q tests/strategies/test_runner_market_closed_watchdog.py -k 'single_owner or active_risk_breaker'; then
-            echo 'Expected pre-fix failure did not occur'
+          cat >> tests/strategies/test_runner_symbol_role_gate.py <<'PY'
+
+
+def test_expiry_entry_policy_blocks_before_live_readiness_and_preparation(monkeypatch):
+    runner_obj, strategy_manager, risk_manager, order_manager, _selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
+    runner_obj._emit_no_trade_decision = Mock()
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.expiry_theta_block",
+        lambda: (True, "expiry_day_after_13:30_ist"),
+    )
+
+    runner_obj._on_tick(
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "last_price": 24000.0,
+            "timestamp": time.time(),
+            "trace_id": "expiry-entry-pregate",
+            "source": "ws",
+        },
+    )
+
+    strategy_manager.generate_signal.assert_called_once()
+    risk_manager.validate.assert_not_called()
+    order_manager.submit.assert_not_called()
+    assert any(
+        call.kwargs.get("stage") == "phase10_entry_policy"
+        and call.kwargs.get("reason") == "expiry_day_after_13:30_ist"
+        and call.kwargs.get("allowed") is False
+        for call in runner_obj._emit_runner_eval_decision.call_args_list
+    )
+    runner_obj._emit_no_trade_decision.assert_called_once_with(
+        symbol="NFO:NIFTY26JUN24000CE",
+        trace_id="expiry-entry-pregate",
+        category="entry_session_policy",
+        reason="expiry_day_after_13:30_ist",
+    )
+PY
+          cat >> tests/data/test_mdm_tick_coalescing.py <<'PY'
+
+
+def test_optional_context_option_is_not_recovery_critical():
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    selected_ce = "NFO:NIFTY26JUN24000CE"
+    selected_pe = "NFO:NIFTY26JUN24000PE"
+    optional_ce = "NFO:NIFTY26JUN25000CE"
+    mdm.set_active_contract_basket(
+        {
+            "all_tokens": list(mapping),
+            "token_by_symbol": {symbol: token for token, symbol in mapping.items()},
+            "spot_symbol": "NSE:NIFTY",
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "option_symbols": [selected_ce, selected_pe, optional_ce],
+        }
+    )
+
+    required = mdm._required_live_symbols()
+
+    assert "NFO:NIFTY26JUNFUT" in required
+    assert selected_ce in required
+    assert selected_pe in required
+    assert optional_ce not in required
+PY
+      - name: Prove both regressions fail before correction
+        run: |
+          if pytest -q tests/strategies/test_runner_symbol_role_gate.py::test_expiry_entry_policy_blocks_before_live_readiness_and_preparation; then
+            echo 'Expected late-expiry-gate regression to fail before correction'
             exit 1
           fi
-      - name: Apply minimal runner correction
-        env:
-          PATCH_B64: ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCnBhdGggPSBQYXRoKCJzcmMvbmlmdHlfc2NhbHBlcl9ib3Qvc3RyYXRlZ2llcy9ydW5uZXIucHkiKQp0ZXh0ID0gcGF0aC5yZWFkX3RleHQoKQpkdXBsaWNhdGUgPSAiIiIgICAgICAgICAgICAjIOKchSBGSVg6IFRocm90dGxlIHN0YWxsIHdhcm5pbmcgdG8gMzBzIOKAlCBzYW1lLWJhci1za2lwIGNhdXNlcyBleHBlY3RlZAogICAgICAgICAgICAjIGdhcHMgYmV0d2VlbiBfbGFzdF9nbG9iYWxfZXZhbF90cyB1cGRhdGVzIChvbmUgZXZhbCBwZXIgYmFyIOKJiCA2MHMgY3ljbGUpLgogICAgICAgICAgICAjIOKchSBGSVggRDogUmFpc2Ugc3RhbGwgdGhyZXNob2xkIHRvIDEyMHMuIE9wdGlvbnMgdGljayBvbmNlIHBlciB+MTNtaW47CiAgICAgICAgICAgICMgdGhlIDVzIHRocmVzaG9sZCBmaXJlZCBjb25zdGFudGx5IGJldHdlZW4gbm9ybWFsIHRpY2sgYmF0Y2hlcy4KICAgICAgICAgICAgIyBBIGdlbnVpbmUgc3RhbGwgPSBubyBzdHJhdGVneSBldmFsdWF0aW9uIGZvciA+IDIgZnVsbCBtaW51dGVzIHdpdGggYWN0aXZlIHRpY2tzLgogICAgICAgICAgICBpZiAoCiAgICAgICAgICAgICAgICBzZWxmLnJlYWR5CiAgICAgICAgICAgICAgICBhbmQgbm93X21vbm8gLSBzZWxmLl9sYXN0X2dsb2JhbF9ldmFsX3RzID4gMTIwLjAKICAgICAgICAgICAgICAgIGFuZCBub3dfbW9ubyAtIHNlbGYuX2xhc3Rfc3RhbGxfd2Fybl90cyA+IDEyMC4wCiAgICAgICAgICAgICk6CiAgICAgICAgICAgICAgICBzZWxmLl9sYXN0X3N0YWxsX3dhcm5fdHMgPSBub3dfbW9ubwogICAgICAgICAgICAgICAgaWYgbm90IGlzX21hcmtldF9vcGVuX25vdygpOgogICAgICAgICAgICAgICAgICAgIGxvZ190aHJvdHRsZWQoCiAgICAgICAgICAgICAgICAgICAgICAgIHNlbGYuX2xvZ2dlciwKICAgICAgICAgICAgICAgICAgICAgICAgInN0cmF0ZWd5X3N0YWxsX2NoZWNrX3NraXBwZWRfbWFya2V0X2Nsb3NlZCIsCiAgICAgICAgICAgICAgICAgICAgICAgICJTVEFMTF9DSEVDS19TS0lQUEVEIHJlYXNvbj1tYXJrZXRfY2xvc2VkIiwKICAgICAgICAgICAgICAgICAgICAgICAgaW50ZXJ2YWxfc2VjPTMwMC4wLAogICAgICAgICAgICAgICAgICAgICAgICBsZXZlbD1sb2dnaW5nLkRFQlVHLAogICAgICAgICAgICAgICAgICAgICAgICBleHRyYT17CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAiZXZlbnQiOiAiU1RBTExfQ0hFQ0tfU0tJUFBFRCIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAicmVhc29uIjogIm1hcmtldF9jbG9zZWQiLAogICAgICAgICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICAgICAgc2VsZi5fbG9nZ2VyLndhcm5pbmcoCiAgICAgICAgICAgICAgICAgICAgICAgICJTdHJhdGVneSBldmFsdWF0aW9uIHN0YWxsZWQgPjEyMHMgKG9uY2UgcGVyIDEyMHMpIiwKICAgICAgICAgICAgICAgICAgICAgICAgZXh0cmE9ewogICAgICAgICAgICAgICAgICAgICAgICAgICAgImV2ZW50IjogInN0cmF0ZWd5X2V2YWxfc3RhbGwiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgInN0YWxsX3NlYyI6IHJvdW5kKG5vd19tb25vIC0gc2VsZi5fbGFzdF9nbG9iYWxfZXZhbF90cywgMSksCiAgICAgICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAgICAgKQoiIiIKaWYgdGV4dC5jb3VudChkdXBsaWNhdGUpICE9IDE6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJkdXBsaWNhdGUgc3RhbGwgYmxvY2sgbm90IGZvdW5kIGV4YWN0bHkgb25jZSIpCnRleHQgPSB0ZXh0LnJlcGxhY2UoZHVwbGljYXRlLCAiIikKb2xkID0gIiIiICAgICAgICBnZW51aW5lX3N0YWxsID0gKG5vdyAtIHNlbGYuX2xhc3RfZ2xvYmFsX2V2YWxfdHMpID4gOTAuMAogICAgICAgIGlmIHNlbGYucmVhZHkgYW5kIHRpY2tfZmxvd2luZyBhbmQgZXZhbF9zdGFsbGVkIGFuZCBnZW51aW5lX3N0YWxsOgoiIiIKbmV3ID0gIiIiICAgICAgICBnZW51aW5lX3N0YWxsID0gKG5vdyAtIHNlbGYuX2xhc3RfZ2xvYmFsX2V2YWxfdHMpID4gOTAuMAogICAgICAgIHJpc2tfYnJlYWtlcl90cmlwcGVkID0gYm9vbCgKICAgICAgICAgICAgZ2V0YXR0cihzZWxmLl9yaXNrX21hbmFnZXIsICJfYnJlYWtlcl90cmlwcGVkIiwgRmFsc2UpCiAgICAgICAgKQogICAgICAgIGlmICgKICAgICAgICAgICAgc2VsZi5yZWFkeQogICAgICAgICAgICBhbmQgdGlja19mbG93aW5nCiAgICAgICAgICAgIGFuZCBldmFsX3N0YWxsZWQKICAgICAgICAgICAgYW5kIGdlbnVpbmVfc3RhbGwKICAgICAgICAgICAgYW5kIG5vdCByaXNrX2JyZWFrZXJfdHJpcHBlZAogICAgICAgICk6CiIiIgppZiB0ZXh0LmNvdW50KG9sZCkgIT0gMToKICAgIHJhaXNlIFN5c3RlbUV4aXQoIndhdGNoZG9nIGNvbmRpdGlvbiBub3QgZm91bmQgZXhhY3RseSBvbmNlIikKdGV4dCA9IHRleHQucmVwbGFjZShvbGQsIG5ldykKb2xkX3Jlc2V0ID0gIiIiICAgICAgICBlbGlmIHNlbGYuX2V2YWxfc3RhbGxfcmVjb3ZlcnlfYXR0ZW1wdGVkIGFuZCBub3QgZXZhbF9zdGFsbGVkOgogICAgICAgICAgICBzZWxmLl9ldmFsX3N0YWxsX3JlY292ZXJ5X2F0dGVtcHRlZCA9IEZhbHNlCiIiIgpuZXdfcmVzZXQgPSAiIiIgICAgICAgIGVsaWYgc2VsZi5fZXZhbF9zdGFsbF9yZWNvdmVyeV9hdHRlbXB0ZWQgYW5kICgKICAgICAgICAgICAgbm90IGV2YWxfc3RhbGxlZCBvciByaXNrX2JyZWFrZXJfdHJpcHBlZAogICAgICAgICk6CiAgICAgICAgICAgIHNlbGYuX2V2YWxfc3RhbGxfcmVjb3ZlcnlfYXR0ZW1wdGVkID0gRmFsc2UKIiIiCmlmIHRleHQuY291bnQob2xkX3Jlc2V0KSAhPSAxOgogICAgcmFpc2UgU3lzdGVtRXhpdCgid2F0Y2hkb2cgcmVzZXQgbm90IGZvdW5kIGV4YWN0bHkgb25jZSIpCnBhdGgud3JpdGVfdGV4dCh0ZXh0KQo=
-        run: echo "$PATCH_B64" | base64 -d | python
-      - name: Validate focused and full trading path
+          if pytest -q tests/data/test_mdm_tick_coalescing.py::test_optional_context_option_is_not_recovery_critical; then
+            echo 'Expected optional-context recovery regression to fail before correction'
+            exit 1
+          fi
+      - name: Apply narrow production corrections
         run: |
-          python -m compileall -q src/nifty_scalper_bot/strategies/runner.py
-          pytest -q tests/strategies/test_runner_market_closed_watchdog.py
-          pytest -q tests/core tests/strategies tests/execution
-          pytest -q tests/e2e/live_sim
-          pytest -q
-      - name: Commit clean correction
+          python - <<'PY'
+          from pathlib import Path
+
+          runner = Path('src/nifty_scalper_bot/strategies/runner.py')
+          text = runner.read_text()
+          old = '''            if signal and signal.action != "HOLD":
+                phase = "phase10_signal_execution"
+                self._last_strategy_versions[symbol] = current_version
+                signal_phase = self._data_phase.get(symbol)
+                live_ready, live_ready_reason, live_ready_details = (
+'''
+          new = '''            if signal and signal.action != "HOLD":
+                phase = "phase10_signal_execution"
+                self._last_strategy_versions[symbol] = current_version
+                signal_phase = self._data_phase.get(symbol)
+                entry_symbol = str(signal.symbol or symbol)
+                if signal.action in {"BUY", "SELL"} and is_nifty_option_symbol(
+                    entry_symbol
+                ):
+                    expiry_blocked, expiry_reason = expiry_theta_block()
+                    if expiry_blocked:
+                        self._emit_runner_eval_decision(
+                            symbol=entry_symbol,
+                            stage="phase10_entry_policy",
+                            reason=expiry_reason,
+                            allowed=False,
+                            trace_id=trace_id,
+                        )
+                        self._emit_no_trade_decision(
+                            symbol=entry_symbol,
+                            trace_id=trace_id,
+                            category="entry_session_policy",
+                            reason=expiry_reason,
+                        )
+                        return
+                live_ready, live_ready_reason, live_ready_details = (
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'runner phase10 anchor count={text.count(old)}')
+          runner.write_text(text.replace(old, new, 1))
+
+          mdm = Path('src/nifty_scalper_bot/data/market_data_manager.py')
+          text = mdm.read_text()
+          old = '        add(self._basket_value(basket, "option_symbols", None))\n'
+          new = '        # Nearby option strikes are context-only; the selected pair owns recovery.\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'mdm option requirement anchor count={text.count(old)}')
+          mdm.write_text(text.replace(old, new, 1))
+          PY
+      - name: Validate focused regressions
         run: |
-          rm -f .github/workflows/tmp-strategy-stall-fix.yml .github/strategy-stall-trigger
+          python -m compileall -q src/nifty_scalper_bot/strategies/runner.py src/nifty_scalper_bot/data/market_data_manager.py
+          pytest -q tests/strategies/test_runner_symbol_role_gate.py
+          pytest -q tests/data/test_mdm_tick_coalescing.py
+          pytest -q tests/risk/test_expiry_gate.py tests/core/test_polling_failover.py
+      - name: Validate full repository
+        run: pytest -q
+      - name: Commit clean targeted correction
+        run: |
+          git checkout origin/main -- .github/workflows/validate-market-aware-optimisations.yml
+          git checkout origin/main -- .github/workflows/strategy-stall-fix-once.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'fix: suppress intentional strategy stall alarms'
-          git push origin HEAD:fix/strategy-stall-production
+          git add src/nifty_scalper_bot/strategies/runner.py \
+                  src/nifty_scalper_bot/data/market_data_manager.py \
+                  tests/strategies/test_runner_symbol_role_gate.py \
+                  tests/data/test_mdm_tick_coalescing.py \
+                  .github/workflows/validate-market-aware-optimisations.yml \
+                  .github/workflows/strategy-stall-fix-once.yml
+          git commit -m 'fix(runtime): pre-gate expiry entries and narrow feed recovery'
+          git push origin HEAD:fix/entry-policy-critical-feed-20260804
