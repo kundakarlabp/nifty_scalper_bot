@@ -28,7 +28,6 @@ jobs:
         run: |
           python - <<'WRAPPER'
           from pathlib import Path
-          import textwrap
 
           workflow = Path(
               ".github/workflows/one-shot-definition-site-premium-geometry.yml"
@@ -36,7 +35,11 @@ jobs:
           marker = "          python - <<'PY'\n"
           start = workflow.index(marker) + len(marker)
           end = workflow.index("\n          PY", start)
-          script = textwrap.dedent(workflow[start:end])
+          raw = workflow[start:end]
+          script = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in raw.splitlines()
+          )
           exec(compile(script, "definition-site-migration", "exec"), {})
           WRAPPER
 
