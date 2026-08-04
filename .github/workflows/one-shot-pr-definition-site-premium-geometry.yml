@@ -1,0 +1,57 @@
+name: One-shot PR definition-site premium geometry
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/definition-site-premium-geometry'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/definition-site-premium-geometry
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Execute guarded migration
+        shell: bash
+        run: |
+          python - <<'WRAPPER'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path(
+              ".github/workflows/one-shot-definition-site-premium-geometry.yml"
+          ).read_text(encoding="utf-8")
+          marker = "          python - <<'PY'\n"
+          start = workflow.index(marker) + len(marker)
+          end = workflow.index("\n          PY", start)
+          script = textwrap.dedent(workflow[start:end])
+          exec(compile(script, "definition-site-migration", "exec"), {})
+          WRAPPER
+
+      - name: Validate and commit canonical diff
+        shell: bash
+        run: |
+          python -m compileall -q src tests
+          git diff --check
+          git rm --ignore-unmatch \
+            .github/workflows/one-shot-definition-site-premium-geometry.yml \
+            .github/workflows/one-shot-pr-definition-site-premium-geometry.yml \
+            .github/one-shot-definition-site-trigger
+          git add -A
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refactor(execution): own premium geometry at definition sites"
+          git push origin HEAD:fix/definition-site-premium-geometry
