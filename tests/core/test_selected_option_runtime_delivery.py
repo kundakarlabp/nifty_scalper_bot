@@ -28,16 +28,21 @@ class _MdmStub:
 class _RunnerStub:
     def __init__(self) -> None:
         self.added: list[str] = []
+        self.subscribed: list[str] = []
+        self._tracked_symbols: set[str] = set()
 
     def add_symbol(self, symbol: str) -> None:
         self.added.append(symbol)
+
+    def _subscribe_symbol(self, symbol: str) -> None:
+        self.subscribed.append(symbol)
 
     def on_datahub_tick(self, _tick) -> None:
         return None
 
     def has_datahub_subscription(self, symbol: str, token: int | None = None) -> bool:
         del token
-        return symbol in self.added
+        return symbol in self.subscribed
 
 
 def test_datahub_subscription_probe_checks_the_specific_callback() -> None:
@@ -101,6 +106,7 @@ def test_selected_pair_role_promotion_reasserts_live_delivery() -> None:
     hub = Hub()
     ce = "NFO:NIFTY26AUG24600CE"
     pe = "NFO:NIFTY26AUG24600PE"
+    runner._tracked_symbols.update({ce, pe})
     ctx = SimpleNamespace(
         active_symbol_tokens={ce: 101, pe: 102},
         market_data_manager=mdm,
@@ -115,7 +121,8 @@ def test_selected_pair_role_promotion_reasserts_live_delivery() -> None:
     )
 
     assert result == {ce: True, pe: True}
-    assert runner.added == [ce, pe]
+    assert runner.added == []
+    assert runner.subscribed == [ce, pe]
     assert [(sym, token, force) for sym, _cb, token, force in hub.calls] == [
         (ce, 101, True),
         (pe, 102, True),

@@ -10417,22 +10417,46 @@ def _ensure_selected_option_runtime_delivery(
     selected_pe: str | None,
     reason: str,
 ) -> dict[str, bool]:
-    """Idempotently promote the selected pair onto the runner delivery path."""
+    """Reassert selected-pair delivery without resetting Runner symbol state."""
     results: dict[str, bool] = {}
     runner = getattr(ctx, "strategy_runner", None)
+    mdm = getattr(ctx, "market_data_manager", None)
+    hub = getattr(ctx, "data_hub", None)
+    tracked = set(getattr(runner, "_tracked_symbols", set()) or set())
+    token_map = getattr(ctx, "active_symbol_tokens", {}) or {}
+    mdm_token_map = getattr(mdm, "_symbol_to_token", {}) or {}
+
     for symbol in dict.fromkeys(
         str(sym).strip().upper() for sym in (selected_ce, selected_pe) if sym
     ):
-        token = (getattr(ctx, "active_symbol_tokens", {}) or {}).get(symbol)
-        requested = _register_and_subscribe_live_symbol(
-            ctx, symbol, token, reason, role="tradable_option"
-        )
-        delivery_ready = bool(
-            runner is not None
-            and hasattr(runner, "has_datahub_subscription")
-            and runner.has_datahub_subscription(symbol, token)
-        )
-        results[symbol] = bool(requested and delivery_ready)
+        token = token_map.get(symbol) or mdm_token_map.get(symbol)
+        if mdm is not None and token is not None:
+            if hasattr(mdm, "ensure_tracking"):
+                mdm.ensure_tracking(symbol, seed=False, subscribe=False)
+            if hasattr(mdm, "register_symbol"):
+                mdm.register_symbol(symbol, int(token))
+            if hasattr(mdm, "request_token_subscription"):
+                mdm.request_token_subscription(int(token), symbol=symbol)
+
+        # Existing context options must be promoted in place. Calling
+        # add_symbol() here would reset their data phase to HYDRATION.
+        if runner is not None and symbol in tracked:
+            subscribe = getattr(runner, "_subscribe_symbol", None)
+            if callable(subscribe):
+                subscribe(symbol)
+        if hub is not None and runner is not None and hasattr(hub, "subscribe_ticks"):
+            hub.subscribe_ticks(
+                symbol, runner.on_datahub_tick, token=token, force_live=True
+            )
+
+        delivery_ready = False
+        checker = getattr(runner, "has_datahub_subscription", None)
+        if callable(checker):
+            try:
+                delivery_ready = bool(checker(symbol, token))
+            except Exception:
+                delivery_ready = False
+        results[symbol] = bool(token is not None and delivery_ready)
         LOGGER.info(
             "SELECTED_OPTION_RUNTIME_DELIVERY symbol=%s token=%s ready=%s reason=%s",
             symbol,
