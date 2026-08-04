@@ -4144,9 +4144,10 @@ class StrategyManager(_BaseStrategyManager):
                 and selected_ok
                 and not vetoed
             )
-            # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block.
-            # Single-vote high-conviction/selected-option paths require explicit,
-            # narrower operator overrides to avoid accidental lone-vote approvals.
+            # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block
+            # for an unconfirmed lone trigger. High-conviction/selected-option
+            # overrides remain explicit; context-confirmed triggers use the
+            # separate, evidence-bound path below.
             allow_high_conviction = self._env_bool(
                 "STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE",
                 self._env_bool("STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION", False),
@@ -4168,26 +4169,100 @@ class StrategyManager(_BaseStrategyManager):
             selected_option_scalp_allowed = bool(threshold_passed and selected_option and allow_selected_option)
             # Single-vote (no consensus) is riskier, so a lone selected-option scalp
             # must clear a high score floor (default 9.0) on top of the normal gates.
-            # This keeps single-vote trades to only the strongest signals.
+            # This keeps unconfirmed single-vote trades to only the strongest signals.
             selected_single_min = self._env_float("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0)
             if (
                 selected_option_scalp_allowed
                 and weighted_trigger_score < selected_single_min
             ):
                 selected_option_scalp_allowed = False
-            scalp_fallback_allowed = bool((allow_scalp_single and threshold_passed) or selected_option_scalp_allowed)
-            final_allowed = bool(high_conviction_allowed or scalp_fallback_allowed)
+
+            # A trigger plus a fresh, same-side context vote is not an unconfirmed
+            # single vote. OrderFlow remains permanently context-only, but its
+            # validated market-microstructure evidence may confirm an SMC/VWAP
+            # trigger through the existing context-bonus path. Require the actual
+            # selected option, the normal trigger thresholds, a current timestamped
+            # context vote, usable depth/tradable quote, and the same conservative
+            # final-score floor used by selected-option single votes.
+            context_confirm_min_score = self._env_float(
+                "STRATEGY_SINGLE_TRIGGER_CONTEXT_MIN_SCORE", 8.0
+            )
+            context_confirm_min_confidence = self._env_float(
+                "STRATEGY_SINGLE_TRIGGER_CONTEXT_MIN_CONFIDENCE", 0.80
+            )
+            context_confirm_allowed_strategies = {
+                name.strip().lower()
+                for name in str(
+                    os.getenv(
+                        "STRATEGY_SINGLE_TRIGGER_CONTEXT_ALLOWED_STRATEGIES",
+                        "OrderFlow",
+                    )
+                    or "OrderFlow"
+                ).split(",")
+                if name.strip()
+            }
+            qualifying_context_votes: list[StrategyVote] = []
+            for context_vote in same_side_context:
+                context_metadata = dict(context_vote.metadata or {})
+                context_quote_ready = bool(
+                    context_metadata.get("quote_depth_valid")
+                    or context_metadata.get("tradable_quote")
+                )
+                if (
+                    context_vote.strategy.strip().lower()
+                    in context_confirm_allowed_strategies
+                    and self._context_vote_is_timestamped(context_vote)
+                    and self._extract_raw_score(context_vote)
+                    >= context_confirm_min_score
+                    and float(context_vote.confidence)
+                    >= context_confirm_min_confidence
+                    and context_quote_ready
+                ):
+                    qualifying_context_votes.append(context_vote)
+            confirmed_positive_context = sum(
+                self._extract_context_score(vote)
+                for vote in qualifying_context_votes
+            )
+            confirmed_context_bonus = min(
+                1.5, 0.45 * confirmed_positive_context
+            )
+            context_confirmed_final_score = max(
+                0.0,
+                min(
+                    10.0,
+                    weighted_trigger_score
+                    + confirmed_context_bonus
+                    - context_penalty,
+                ),
+            )
+            context_confirmed_single_allowed = bool(
+                mode_profile.get("allow_single_vote", True)
+                and threshold_passed
+                and selected_option
+                and qualifying_context_votes
+                and context_confirmed_final_score >= selected_single_min
+            )
+
+            scalp_fallback_allowed = bool(
+                (allow_scalp_single and threshold_passed)
+                or selected_option_scalp_allowed
+            )
+            final_allowed = bool(
+                high_conviction_allowed
+                or scalp_fallback_allowed
+                or context_confirmed_single_allowed
+            )
             approval_path_single = (
                 "single_vote_high_conviction" if high_conviction_allowed
+                else "single_trigger_context_confirmed"
+                if context_confirmed_single_allowed
                 else "single_vote_selected_option" if selected_option_scalp_allowed
                 else "single_vote_fallback" if scalp_fallback_allowed
                 else None
             )
             blocked_reason = None
             if not final_allowed:
-                if threshold_passed and not allow_scalp_single:
-                    blocked_reason = "single_vote_scalp_disabled"
-                elif not score_ok:
+                if not score_ok:
                     blocked_reason = "raw_score_below_min"
                 elif not conf_ok:
                     blocked_reason = "confidence_below_min"
@@ -4195,13 +4270,23 @@ class StrategyManager(_BaseStrategyManager):
                     blocked_reason = "not_selected_or_near_atm"
                 elif vetoed:
                     blocked_reason = "hard_context_veto"
+                elif same_side_context and not qualifying_context_votes:
+                    blocked_reason = "single_trigger_context_confirmation_invalid"
+                elif (
+                    qualifying_context_votes
+                    and context_confirmed_final_score < selected_single_min
+                ):
+                    blocked_reason = "single_trigger_context_score_below_min"
+                elif threshold_passed and not allow_scalp_single:
+                    blocked_reason = "single_vote_scalp_disabled"
                 else:
                     blocked_reason = "single_vote_gate_failed_unknown"
             log.info(
-                "SINGLE_VOTE_DECISION threshold_passed=%s high_conviction_allowed=%s scalp_fallback_allowed=%s final_allowed=%s allow_scalp_single=%s approval_path=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
+                "SINGLE_VOTE_DECISION threshold_passed=%s high_conviction_allowed=%s scalp_fallback_allowed=%s context_confirmed_single_allowed=%s final_allowed=%s allow_scalp_single=%s approval_path=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
                 threshold_passed,
                 high_conviction_allowed,
                 scalp_fallback_allowed,
+                context_confirmed_single_allowed,
                 final_allowed,
                 allow_scalp_single,
                 approval_path_single,
@@ -4221,6 +4306,17 @@ class StrategyManager(_BaseStrategyManager):
                     "threshold_passed": threshold_passed,
                     "high_conviction_allowed": high_conviction_allowed,
                     "scalp_fallback_allowed": scalp_fallback_allowed,
+                    "context_confirmed_single_allowed": context_confirmed_single_allowed,
+                    "qualifying_context_strategies": [
+                        vote.strategy for vote in qualifying_context_votes
+                    ],
+                    "context_confirm_min_score": context_confirm_min_score,
+                    "context_confirm_min_confidence": context_confirm_min_confidence,
+                    "context_confirm_allowed_strategies": sorted(
+                        context_confirm_allowed_strategies
+                    ),
+                    "confirmed_context_bonus": confirmed_context_bonus,
+                    "context_confirmed_final_score": context_confirmed_final_score,
                     "final_allowed": final_allowed,
                     "allow_scalp_single": allow_scalp_single,
                     "approval_path": approval_path_single,
@@ -4241,6 +4337,17 @@ class StrategyManager(_BaseStrategyManager):
             if high_conviction_allowed:
                 metadata_stage = "preliminary_single_high_conviction"
                 approval_path = "single_vote_high_conviction"
+            elif context_confirmed_single_allowed:
+                metadata_stage = "single_trigger_context_confirmed"
+                approval_path = "single_trigger_context_confirmed"
+                context_bonus = confirmed_context_bonus
+                final_score = context_confirmed_final_score
+                metadata["context_confirmation_strategies"] = [
+                    vote.strategy for vote in qualifying_context_votes
+                ]
+                metadata["context_confirmation_final_score"] = round(
+                    context_confirmed_final_score, 3
+                )
             elif scalp_fallback_allowed:
                 metadata_stage = "single_vote_scalp_controlled"
                 approval_path = approval_path_single or "single_vote_fallback"
@@ -4282,6 +4389,13 @@ class StrategyManager(_BaseStrategyManager):
                         blocked_reason = "quote_depth_invalid"
                     elif vetoed:
                         blocked_reason = "hard_context_veto"
+                    elif same_side_context and not qualifying_context_votes:
+                        blocked_reason = "single_trigger_context_confirmation_invalid"
+                    elif (
+                        qualifying_context_votes
+                        and context_confirmed_final_score < selected_single_min
+                    ):
+                        blocked_reason = "single_trigger_context_score_below_min"
                     elif not allow_scalp_single:
                         blocked_reason = "single_vote_scalp_disabled"
                     else:
