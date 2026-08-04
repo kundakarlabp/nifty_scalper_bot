@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.execution.premium_risk_contract_patch import (
+import inspect
+import subprocess
+import sys
+
+from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
     apply_premium_risk_contract,
-    install_runner_geometry_hardening,
     validate_option_premium_geometry,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
@@ -199,14 +202,40 @@ def test_absolute_invalidation_is_not_moved_by_anchor() -> None:
     assert result.take_profit == 116.0
 
 
-def test_runner_geometry_installer_is_idempotent() -> None:
-    runner_cls = type("Runner", (), {})
 
-    install_runner_geometry_hardening(runner_cls)
-    first_validate = runner_cls._validate_long_option_geometry
-    first_anchor = runner_cls._anchor_sl_tp_to_execution
-    install_runner_geometry_hardening(runner_cls)
+def test_runner_geometry_is_owned_at_definition_site() -> None:
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
 
-    assert runner_cls._premium_geometry_hardening_installed is True
-    assert runner_cls._validate_long_option_geometry is first_validate
-    assert runner_cls._anchor_sl_tp_to_execution is first_anchor
+    assert StrategyRunner._validate_long_option_geometry.__module__ == (
+        "nifty_scalper_bot.strategies.runner"
+    )
+    assert StrategyRunner._anchor_sl_tp_to_execution.__module__ == (
+        "nifty_scalper_bot.strategies.runner"
+    )
+
+
+def test_plain_runner_import_has_canonical_geometry_without_core_app() -> None:
+    code = """
+from nifty_scalper_bot.strategies.runner import StrategyRunner
+print('VALIDATE=' + StrategyRunner._validate_long_option_geometry.__module__)
+print('ANCHOR=' + StrategyRunner._anchor_sl_tp_to_execution.__module__)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "VALIDATE=nifty_scalper_bot.strategies.runner" in result.stdout
+    assert "ANCHOR=nifty_scalper_bot.strategies.runner" in result.stdout
+
+
+def test_geometry_helper_has_no_class_mutation_hooks() -> None:
+    import nifty_scalper_bot.strategies.premium_risk_geometry as geometry
+
+    source = inspect.getsource(geometry)
+    assert "StrategyRunner." not in source
+    assert "StrategyManager.generate_signal =" not in source
+    assert "install_runner_geometry_hardening" not in source
+    assert "install_bracket_exit_provenance_hardening" not in source

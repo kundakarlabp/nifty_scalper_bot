@@ -142,6 +142,11 @@ from nifty_scalper_bot.strategies.market_regime_engine import (
     MarketRegime,
     MarketRegimeEngine,
 )
+from nifty_scalper_bot.strategies.premium_risk_geometry import (
+    anchor_option_geometry_to_execution,
+    apply_premium_risk_contract,
+    validate_option_premium_geometry,
+)
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.signal_quality import (
     infer_option_side,
@@ -6641,140 +6646,13 @@ class StrategyRunner:
         entry_side: OrderSide,
         atr: float,
     ) -> Signal:
-        """
-        ✅ PRODUCTION FIX (Feb 3, 2026): Ensure SL/TP are correct for position SIDE.
-
-        RULE (Non-Negotiable):
-        - LONG (BUY): SL below entry, TP above entry
-        - SHORT (SELL): SL above entry, TP below entry
-
-        Strategies calculate SL/TP based on market direction (bullish/bearish),
-        but the ACTUAL trade is on OPTION PREMIUM. For LONG options:
-        - You profit when premium RISES (regardless of CE/PE)
-        - You lose when premium FALLS
-
-        This method corrects any inverted SL/TP from strategy signals.
-        """
-        sl = signal.stop_loss
-        tp = signal.take_profit
-
-        if entry_price <= 0:
-            return signal
-
-        # Use ATR-based defaults if missing
-        if atr <= 0:
-            atr = entry_price * 0.015  # 1.5% fallback
-
-        if sl is None or sl <= 0:
-            sl = (
-                entry_price - (atr * 1.5)
-                if entry_side == "BUY"
-                else entry_price + (atr * 1.5)
-            )
-        if tp is None or tp <= 0:
-            tp = (
-                entry_price + (atr * 3.0)
-                if entry_side == "BUY"
-                else entry_price - (atr * 3.0)
-            )
-
-        corrected = False
-        original_sl = sl
-        original_tp = tp
-
-        if signal.stop_loss is None or signal.stop_loss <= 0:
-            corrected = True  # a missing/invalid SL was replaced by the ATR default
-        if signal.take_profit is None or signal.take_profit <= 0:
-            corrected = True
-
-        if entry_side == "BUY":  # LONG position
-            # SL must be BELOW entry
-            if sl >= entry_price:
-                # Mirror the distance to the correct side
-                distance = abs(sl - entry_price)
-                sl = entry_price - distance
-                corrected = True
-
-            # TP must be ABOVE entry
-            if tp <= entry_price:
-                # Mirror the distance to the correct side
-                distance = abs(entry_price - tp)
-                tp = entry_price + distance
-                corrected = True
-
-        else:  # SHORT position
-            # SL must be ABOVE entry
-            if sl <= entry_price:
-                distance = abs(entry_price - sl)
-                sl = entry_price + distance
-                corrected = True
-
-            # TP must be BELOW entry
-            if tp >= entry_price:
-                distance = abs(tp - entry_price)
-                tp = entry_price - distance
-                corrected = True
-
-        # Ensure minimum distances
-        min_sl_distance = atr * 0.5
-        min_tp_distance = atr * 1.0
-
-        if entry_side == "BUY":
-            # Guard against an SL that mirrored to an absurd value (e.g. an
-            # underlying-derived stop) leaving it at/near zero or further than the
-            # full premium below entry. Reset to a sane ATR/percent premium stop.
-            max_sl_distance = max(entry_price * 0.6, atr * 2.0)
-            if sl <= 0 or (entry_price - sl) > max_sl_distance:
-                sl = entry_price - min(
-                    max(atr * 1.5, entry_price * 0.1), max_sl_distance
-                )
-                corrected = True
-            if entry_price - sl < min_sl_distance:
-                sl = entry_price - min_sl_distance
-                corrected = True  # ✅ FIX 5
-            if tp - entry_price < min_tp_distance:
-                tp = entry_price + min_tp_distance
-                corrected = True  # ✅ FIX 5
-        else:
-            if sl - entry_price < min_sl_distance:
-                sl = entry_price + min_sl_distance
-                corrected = True  # ✅ FIX 5
-            if entry_price - tp < min_tp_distance:
-                tp = entry_price - min_tp_distance
-                corrected = True  # ✅ FIX 5
-
-        # Force positive prices
-        sl = max(0.05, sl)
-        tp = max(0.05, tp)
-
-        if corrected:
-            self._logger.warning(
-                f"⚠️ SL/TP CORRECTED for {entry_side}: "
-                f"SL {original_sl:.2f}→{sl:.2f} | TP {original_tp:.2f}→{tp:.2f}",
-                extra={
-                    "event": "sl_tp_corrected",
-                    "entry_side": entry_side,
-                    "entry_price": entry_price,
-                    "original_sl": original_sl,
-                    "original_tp": original_tp,
-                    "corrected_sl": sl,
-                    "corrected_tp": tp,
-                },
-            )
-
-        if not corrected:
-            return signal
-
-        # Create corrected signal
-        return Signal(
-            action=signal.action,
-            symbol=signal.symbol,
-            quantity=signal.quantity,
-            confidence=signal.confidence,
-            reason=signal.reason,
-            stop_loss=sl,
-            take_profit=tp,
-            metadata=signal.metadata,
+        """Validate option exits in the premium price domain."""
+        return validate_option_premium_geometry(
+            self,
+            signal,
+            entry_price=entry_price,
+            entry_side=entry_side,
+            atr=atr,
         )
 
     def _anchor_sl_tp_to_execution(
@@ -6788,45 +6666,16 @@ class StrategyRunner:
         sl_mult: float = 1.5,
         tp_mult: float = 3.0,
     ) -> Signal:
-        """Anchor risk exits to execution price and enforce ordering constraints."""
-        sl = float(signal.stop_loss) if signal.stop_loss is not None else 0.0
-        tp = float(signal.take_profit) if signal.take_profit is not None else 0.0
-        tick_size = 0.05
-        fill_delta = float(execution_price) - float(signal_price)
-        if abs(fill_delta) > tick_size:
-            if sl > 0:
-                sl += fill_delta
-            if tp > 0:
-                tp += fill_delta
-        if atr <= 0:
-            atr = execution_price * 0.015
-
-        if entry_side == "BUY":
-            floor_sl = execution_price - (atr * sl_mult)
-            floor_tp = execution_price + (atr * tp_mult)
-            sl = min(sl if sl > 0 else floor_sl, floor_sl)
-            tp = max(tp if tp > 0 else floor_tp, floor_tp)
-            if not (sl < execution_price < tp):
-                sl = min(sl, execution_price - max(atr * 0.5, tick_size))
-                tp = max(tp, execution_price + max(atr, tick_size))
-        else:
-            ceil_sl = execution_price + (atr * sl_mult)
-            ceil_tp = execution_price - (atr * tp_mult)
-            sl = max(sl if sl > 0 else ceil_sl, ceil_sl)
-            tp = min(tp if tp > 0 else ceil_tp, ceil_tp)
-            if not (tp < execution_price < sl):
-                sl = max(sl, execution_price + max(atr * 0.5, tick_size))
-                tp = min(tp, execution_price - max(atr, tick_size))
-
-        return Signal(
-            action=signal.action,
-            symbol=signal.symbol,
-            quantity=signal.quantity,
-            confidence=signal.confidence,
-            reason=signal.reason,
-            stop_loss=max(0.05, sl),
-            take_profit=max(0.05, tp),
-            metadata=signal.metadata,
+        """Translate valid distance geometry to execution without widening it."""
+        return anchor_option_geometry_to_execution(
+            self,
+            signal,
+            signal_price=signal_price,
+            execution_price=execution_price,
+            entry_side=entry_side,
+            atr=atr,
+            sl_mult=sl_mult,
+            tp_mult=tp_mult,
         )
 
     def aggregate_signals_by_symbol(
@@ -19303,7 +19152,10 @@ class StrategyRunner:
             )
             atr_for_plan = max(float(metadata.get("atr", 0.0) or 0.0), 1.0)
             try:
-                signal = dataclasses.replace(signal, metadata=dict(metadata))
+                signal = apply_premium_risk_contract(
+                    dataclasses.replace(signal, metadata=dict(metadata)),
+                    float(trade_price or 0.0),
+                )
                 signal = self._materialize_option_trade_plan(
                     signal,
                     execution_price=float(trade_price or 0.0),

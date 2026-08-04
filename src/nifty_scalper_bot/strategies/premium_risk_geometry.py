@@ -1,10 +1,8 @@
-"""Preserve option-premium risk geometry through the live execution boundary.
+"""Canonical option-premium risk geometry.
 
-Elite strategies may publish explicit option-premium invalidation metadata.  The
-legacy runner normalisation must not widen those stops or replace their targets
-with an ATR from an ambiguous price domain.  This module keeps the existing
-StrategyManager output patch and installs small, idempotent runtime hooks after
-the application module is fully imported.
+This module is deliberately side-effect free. StrategyRunner calls these
+functions directly, so live, paper, replay, and tests use identical geometry
+without import-order hooks or class mutation.
 """
 
 from __future__ import annotations
@@ -13,12 +11,7 @@ import dataclasses
 from contextlib import suppress
 from typing import Any, Mapping
 
-_PATCH_APPLIED = False
-_ORIGINAL_GENERATE_SIGNAL: Any = None
-_RUNNER_PATCH_ATTR = "_premium_geometry_hardening_installed"
-_BRACKET_PATCH_ATTR = "_premium_exit_provenance_hardening_installed"
 _TICK_SIZE = 0.05
-
 
 def _positive_float(value: Any) -> float | None:
     with suppress(TypeError, ValueError):
@@ -346,93 +339,8 @@ def anchor_option_geometry_to_execution(
         atr=atr,
     )
 
-
-def _enrich_virtual_bracket_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    """Restore optional TP1/trailing fields from durable trade provenance."""
-
-    enriched = dict(kwargs)
-    provenance = enriched.get("trade_provenance")
-    if not isinstance(provenance, Mapping):
-        return enriched
-    exit_plan = provenance.get("exit_plan")
-    source = dict(exit_plan) if isinstance(exit_plan, Mapping) else dict(provenance)
-
-    if _positive_float(enriched.get("tp1_price")) is None:
-        tp1_price = _positive_float(source.get("tp1_price"))
-        if tp1_price is not None:
-            enriched["tp1_price"] = tp1_price
-    if _positive_float(enriched.get("tp1_qty")) is None:
-        tp1_qty = _positive_float(source.get("tp1_qty"))
-        if tp1_qty is not None:
-            enriched["tp1_qty"] = int(tp1_qty)
-    if _positive_float(enriched.get("trailing_atr_mult")) is None:
-        trailing = _positive_float(source.get("trailing_atr_mult"))
-        if trailing is not None:
-            enriched["trailing_atr_mult"] = trailing
-    if _positive_float(enriched.get("resolved_lot_size")) is None:
-        lot_size = _positive_float(source.get("resolved_lot_size"))
-        if lot_size is not None:
-            enriched["resolved_lot_size"] = int(lot_size)
-    return enriched
-
-
-def install_bracket_exit_provenance_hardening(bracket_cls: type[Any]) -> None:
-    """Wrap the fully composed bracket class without bypassing ownership guards."""
-    if bool(getattr(bracket_cls, _BRACKET_PATCH_ATTR, False)):
-        return
-    original = bracket_cls.register_virtual_bracket
-
-    def register_virtual_bracket(self: Any, *args: Any, **kwargs: Any) -> Any:
-        return original(self, *args, **_enrich_virtual_bracket_kwargs(kwargs))
-
-    bracket_cls._premium_exit_provenance_original_register = original
-    bracket_cls.register_virtual_bracket = register_virtual_bracket
-    setattr(bracket_cls, _BRACKET_PATCH_ATTR, True)
-
-
-def install_runner_geometry_hardening(runner_cls: type[Any]) -> None:
-    """Install the domain-safe geometry methods on StrategyRunner once."""
-    if bool(getattr(runner_cls, _RUNNER_PATCH_ATTR, False)):
-        return
-    runner_cls._premium_geometry_original_validate = getattr(
-        runner_cls, "_validate_long_option_geometry", None
-    )
-    runner_cls._premium_geometry_original_anchor = getattr(
-        runner_cls, "_anchor_sl_tp_to_execution", None
-    )
-    runner_cls._validate_long_option_geometry = validate_option_premium_geometry
-    runner_cls._anchor_sl_tp_to_execution = anchor_option_geometry_to_execution
-    setattr(runner_cls, _RUNNER_PATCH_ATTR, True)
-
-
-def _patched_generate_signal(
-    self: Any, symbol: str, current_price: float, *args: Any, **kwargs: Any
-) -> Any:
-    signal = _ORIGINAL_GENERATE_SIGNAL(self, symbol, current_price, *args, **kwargs)
-    return apply_premium_risk_contract(signal, float(current_price or 0.0))
-
-
-def apply_patches() -> None:
-    global _PATCH_APPLIED, _ORIGINAL_GENERATE_SIGNAL
-    if _PATCH_APPLIED:
-        return
-    from nifty_scalper_bot.core.strategy_manager import StrategyManager
-
-    if getattr(StrategyManager, "_premium_risk_contract_patch", False):
-        _PATCH_APPLIED = True
-        return
-    _ORIGINAL_GENERATE_SIGNAL = StrategyManager.generate_signal
-    StrategyManager.generate_signal = _patched_generate_signal
-    StrategyManager._premium_risk_contract_patch = True
-    _PATCH_APPLIED = True
-
-
 __all__ = [
-    "_enrich_virtual_bracket_kwargs",
     "anchor_option_geometry_to_execution",
-    "apply_patches",
     "apply_premium_risk_contract",
-    "install_bracket_exit_provenance_hardening",
-    "install_runner_geometry_hardening",
     "validate_option_premium_geometry",
 ]

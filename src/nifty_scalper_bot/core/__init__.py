@@ -131,42 +131,11 @@ def _install_market_data_runtime_hardening() -> dict[str, bool]:
     return state
 
 
-def _install_premium_geometry_runtime_hardening() -> None:
-    """Install option-premium geometry ownership after runtime composition."""
-
-    try:
-        from nifty_scalper_bot.execution.bracket_manager import BoundBracketManager
-        from nifty_scalper_bot.execution.premium_risk_contract_patch import (
-            install_bracket_exit_provenance_hardening,
-            install_runner_geometry_hardening,
-        )
-        from nifty_scalper_bot.strategies.runner import StrategyRunner
-
-        install_runner_geometry_hardening(StrategyRunner)
-        install_bracket_exit_provenance_hardening(BoundBracketManager)
-        _LOGGER.info(
-            "PREMIUM_GEOMETRY_HARDENING_INSTALLED",
-            extra={"event": "PREMIUM_GEOMETRY_HARDENING_INSTALLED"},
-        )
-    except Exception as exc:  # noqa: BLE001
-        _LOGGER.error(
-            "PREMIUM_GEOMETRY_HARDENING_FAILED error=%s",
-            exc,
-            exc_info=True,
-            extra={
-                "event": "PREMIUM_GEOMETRY_HARDENING_FAILED",
-                "error_type": type(exc).__name__,
-            },
-        )
-        if _real_live_mode_requested():
-            raise RuntimeError("premium_geometry_hardening_failed") from exc
-
 
 def _apply_app_runtime_patches(app_module: Any) -> None:
     # The production app import is the single authoritative installation point.
     # Do not require tests or callers to invoke market-data hardening manually.
     _install_market_data_runtime_hardening()
-    _install_premium_geometry_runtime_hardening()
 
     from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
     from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
