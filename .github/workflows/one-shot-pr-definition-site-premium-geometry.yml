@@ -23,6 +23,42 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Narrow migration replacement to materialisation boundary
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tools/one_shot_definition_site_migration.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''materialise_line = (
+              "                signal = dataclasses.replace(signal, metadata=dict(metadata))\\n"
+          )
+          materialise_call = ''' + "'''" + '''                signal = apply_premium_risk_contract(
+                              dataclasses.replace(signal, metadata=dict(metadata)),
+                              float(trade_price or 0.0),
+                          )
+          ''' + "'''" + '''
+          '''
+          new = '''materialise_line = ''' + "'''" + '''            try:
+                          signal = dataclasses.replace(signal, metadata=dict(metadata))
+                          signal = self._materialize_option_trade_plan(
+          ''' + "'''" + '''
+          materialise_call = ''' + "'''" + '''            try:
+                          signal = apply_premium_risk_contract(
+                              dataclasses.replace(signal, metadata=dict(metadata)),
+                              float(trade_price or 0.0),
+                          )
+                          signal = self._materialize_option_trade_plan(
+          ''' + "'''" + '''
+          '''
+          if text.count(old) != 1:
+              raise RuntimeError(
+                  f"migration materialisation patch expected once, found {text.count(old)}"
+              )
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
       - name: Execute guarded migration
         run: python tools/one_shot_definition_site_migration.py
 
