@@ -3641,6 +3641,12 @@ class StrategyRunner:
         active = set(getattr(self, "_active_option_symbols", set()) or set())
         active.update({pending_ce, pending_pe})
         self._active_option_symbols = active
+        self._eval_option_whitelist = self._compute_eval_option_whitelist(
+            active,
+            self._active_atm_strike,
+            pending_ce,
+            pending_pe,
+        )
         self._pending_selected_ce = None
         self._pending_selected_pe = None
         self._pending_atm_strike = None

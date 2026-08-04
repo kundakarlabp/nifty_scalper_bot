@@ -1292,6 +1292,9 @@ class StrategyManager:
         self._orchestrator = orchestrator
         self._futures_symbol = self._canonical_futures_symbol(futures_symbol)
         self._futures_volume_history: Deque[float] = deque(maxlen=120)
+        self._last_futures_volume: float | None = None
+        self._last_futures_volume_date: dt.date | None = None
+        self._last_futures_volume_symbol: str | None = None
         self._last_index_ltp: float | None = None
         self._last_index_vwap: float | None = None
         self._last_index_update_ts: float | None = None
@@ -2007,6 +2010,8 @@ class StrategyManager:
         indicators.setdefault("futures_volume", None)
         indicators.setdefault("futures_volume_avg", None)
         indicators.setdefault("futures_volume_ratio", None)
+        indicators.setdefault("futures_volume_source", None)
+        indicators.setdefault("futures_volume_trusted", False)
         indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
         indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
 
@@ -2028,34 +2033,56 @@ class StrategyManager:
             quote = None
 
         if quote:
-            volume = self._extract_float(
-                quote,
-                ("volume_traded_today", "volume_traded", "volume", "last_quantity"),
-            )
+            volume = None
+            volume_source = None
+            for key in ("volume_traded_today", "volume_traded"):
+                candidate = self._extract_float(quote, (key,))
+                if candidate is not None and math.isfinite(candidate) and candidate >= 0:
+                    volume = candidate
+                    volume_source = key
+                    break
+
             if volume is not None:
-                last_volume = getattr(self, "_last_futures_volume", None)
-                if last_volume is None:
-                    volume_delta = volume
-                elif volume < last_volume:
-                    volume_delta = volume
-                    self._logger.info(
-                        "Condition met: futures_volume_reset",
+                current_date = dt.datetime.now().date()
+                same_stream = (
+                    self._last_futures_volume_symbol == self._futures_symbol
+                    and self._last_futures_volume_date == current_date
+                )
+                volume_delta: float | None = None
+                trusted = True
+
+                if not same_stream or self._last_futures_volume is None:
+                    self._futures_volume_history.clear()
+                    self._last_futures_volume = volume
+                    self._last_futures_volume_symbol = self._futures_symbol
+                    self._last_futures_volume_date = current_date
+                elif volume >= self._last_futures_volume:
+                    volume_delta = volume - self._last_futures_volume
+                    self._last_futures_volume = volume
+                else:
+                    trusted = False
+                    self._logger.warning(
+                        "FUTURES_VOLUME_DECREASE_REJECTED symbol=%s last=%s current=%s",
+                        self._futures_symbol,
+                        self._last_futures_volume,
+                        volume,
                         extra={
-                            "event": "futures_volume_reset",
+                            "event": "FUTURES_VOLUME_DECREASE_REJECTED",
                             "symbol": self._futures_symbol,
-                            "last_volume": last_volume,
+                            "last_volume": self._last_futures_volume,
                             "current_volume": volume,
+                            "volume_source": volume_source,
                         },
                     )
-                else:
-                    volume_delta = volume - last_volume
 
-                self._last_futures_volume = volume
-                if volume_delta >= 0:
+                indicators["futures_volume_source"] = volume_source
+                indicators["futures_volume_trusted"] = trusted
+                if trusted:
+                    indicators["futures_volume"] = volume
+                if volume_delta is not None:
                     self._futures_volume_history.append(volume_delta)
 
-                indicators["futures_volume"] = volume
-                if self._futures_volume_history:
+                if volume_delta is not None and self._futures_volume_history:
                     avg = sum(self._futures_volume_history) / len(
                         self._futures_volume_history
                     )
@@ -2070,6 +2097,7 @@ class StrategyManager:
                                 "volume_delta": volume_delta,
                                 "volume_avg": avg,
                                 "volume_ratio": indicators["futures_volume_ratio"],
+                                "volume_source": volume_source,
                             },
                         )
 

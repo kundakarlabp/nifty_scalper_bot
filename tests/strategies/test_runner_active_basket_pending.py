@@ -116,3 +116,26 @@ def test_option_prewarm_syncs_only_cold_symbols() -> None:
 
     assert synced == [cold]
     assert requested == [cold]
+
+
+def test_pending_promotion_refreshes_option_evaluation_whitelist() -> None:
+    ce = "NFO:NIFTY26MAY23300CE"
+    pe = "NFO:NIFTY26MAY23300PE"
+    old_context = "NFO:NIFTY26MAY23250CE"
+    runner = _runner({ce: 30, pe: 30})
+    runner._pending_selected_ce = ce
+    runner._pending_selected_pe = pe
+    runner._pending_atm_strike = 23300
+    runner._active_option_symbols = {old_context}
+    runner._eval_option_whitelist = {"STALE"}
+    calls = []
+
+    def compute(option_symbols, atm_strike, selected_ce, selected_pe):
+        calls.append((set(option_symbols), atm_strike, selected_ce, selected_pe))
+        return {selected_ce, selected_pe}
+
+    runner._compute_eval_option_whitelist = compute
+
+    assert runner._maybe_promote_pending_active_basket(source="test") is True
+    assert calls == [({old_context, ce, pe}, 23300, ce, pe)]
+    assert runner._eval_option_whitelist == {ce, pe}
