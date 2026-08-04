@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -445,6 +446,45 @@ async def test_create_task_failure_closes_coroutine_and_does_not_overwrite_newer
         == "recovery_or_open_position"
     )
     assert [w for w in recwarn if "was never awaited" in str(w.message)] == []
+
+
+def test_sync_schedule_uses_attached_runtime_loop_without_spawning_thread(
+    monkeypatch,
+) -> None:
+    r = _runner_for_scheduling()
+    calls: list[tuple[str, str]] = []
+
+    async def _ensurer(symbol, **kw):
+        calls.append((symbol, kw["role"]))
+
+    r.set_runtime_history_ensurer(_ensurer)
+    loop = asyncio.new_event_loop()
+    r._main_loop = loop
+    r._runtime_loop_attached = True
+
+    class _ForbiddenThread:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("attached runtime loop must own history scheduling")
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.threading.Thread", _ForbiddenThread
+    )
+    try:
+        assert r._schedule_runtime_history_ensure(
+            "NFO:NIFTY26JUN24000CE",
+            role="selected_option",
+            phase="runner_sync",
+            reason="sync_basket_commit",
+            required_bars=30,
+        )
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+
+    assert calls == [("NFO:NIFTY26JUN24000CE", "selected_option")]
+    assert r._runtime_history_ensure_inflight == {}
+    assert r._runtime_history_ensure_roles == {}
 
 
 async def test_selected_option_with_canonical_source_warm_indicator_short_reseeds_immediately() -> (

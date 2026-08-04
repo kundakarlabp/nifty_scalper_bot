@@ -2059,12 +2059,30 @@ class StrategyRunner:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                thread = threading.Thread(
-                    target=lambda: asyncio.run(_run()),
-                    name=f"runtime-history-ensure-{normalized}",
-                    daemon=True,
+                runtime_loop = getattr(self, "_main_loop", None)
+                runtime_loop_attached = bool(
+                    getattr(self, "_runtime_loop_attached", False)
                 )
-                thread.start()
+                if (
+                    runtime_loop is not None
+                    and not runtime_loop.is_closed()
+                    and runtime_loop_attached
+                ):
+                    scheduled_coro = _run()
+                    try:
+                        runtime_loop.call_soon_threadsafe(
+                            lambda coro=scheduled_coro: safe_task(coro)
+                        )
+                    except Exception:
+                        scheduled_coro.close()
+                        raise
+                else:
+                    thread = threading.Thread(
+                        target=lambda: asyncio.run(_run()),
+                        name=f"runtime-history-ensure-{normalized}",
+                        daemon=True,
+                    )
+                    thread.start()
             else:
                 scheduled_coro = _run()
                 try:
