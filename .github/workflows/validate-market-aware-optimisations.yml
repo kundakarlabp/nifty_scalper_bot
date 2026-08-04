@@ -2,13 +2,16 @@ name: Validate Market-Aware Optimisations
 
 on:
   pull_request:
+  push:
+    branches:
+      - fix/entry-policy-critical-feed-20260804
 
 permissions:
   contents: write
 
 jobs:
   targeted-entry-path-tdd:
-    if: github.head_ref == 'fix/entry-policy-critical-feed-20260804'
+    if: github.ref == 'refs/heads/fix/entry-policy-critical-feed-20260804' || github.head_ref == 'fix/entry-policy-critical-feed-20260804'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -165,13 +168,9 @@ PY
         run: |
           git checkout origin/main -- .github/workflows/validate-market-aware-optimisations.yml
           git checkout origin/main -- .github/workflows/strategy-stall-fix-once.yml
+          rm -f .github/entry-policy-trigger
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/nifty_scalper_bot/strategies/runner.py \
-                  src/nifty_scalper_bot/data/market_data_manager.py \
-                  tests/strategies/test_runner_symbol_role_gate.py \
-                  tests/data/test_mdm_tick_coalescing.py \
-                  .github/workflows/validate-market-aware-optimisations.yml \
-                  .github/workflows/strategy-stall-fix-once.yml
+          git add -A
           git commit -m 'fix(runtime): pre-gate expiry entries and narrow feed recovery'
           git push origin HEAD:fix/entry-policy-critical-feed-20260804
