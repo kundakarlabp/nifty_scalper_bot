@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 _TICK_SIZE = 0.05
 
+
 def _positive_float(value: Any) -> float | None:
     with suppress(TypeError, ValueError):
         parsed = float(value)
@@ -338,6 +339,7 @@ def anchor_option_geometry_to_execution(
         entry_side=side,
         atr=atr,
     )
+
 
 __all__ = [
     "anchor_option_geometry_to_execution",
