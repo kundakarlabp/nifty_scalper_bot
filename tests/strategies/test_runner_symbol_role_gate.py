@@ -462,3 +462,36 @@ def test_runner_delivery_requires_callback_registration():
     r._datahub_registered_symbols = set()
 
     assert r._runner_delivery_ready_for_symbol(selected_ce) is False
+
+
+def test_expiry_entry_policy_blocks_before_live_readiness_and_preparation(monkeypatch):
+    runner_obj, strategy_manager, risk_manager, order_manager, _selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.expiry_theta_block",
+        lambda: (True, "expiry_day_after_13:30_ist"),
+    )
+
+    runner_obj._on_tick(
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "last_price": 24000.0,
+            "timestamp": time.time(),
+            "trace_id": "expiry-entry-pregate",
+            "source": "ws",
+        },
+    )
+
+    strategy_manager.generate_signal.assert_called_once()
+    risk_manager.validate.assert_not_called()
+    order_manager.submit.assert_not_called()
+    assert any(
+        call.kwargs.get("stage") == "phase10_entry_policy"
+        and call.kwargs.get("reason") == "expiry_day_after_13:30_ist"
+        and call.kwargs.get("allowed") is False
+        for call in runner_obj._emit_runner_eval_decision.call_args_list
+    )
+

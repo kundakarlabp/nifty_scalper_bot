@@ -2083,3 +2083,30 @@ def test_market_open_transition_restarts_required_symbol_grace(monkeypatch):
 
     assert requests == []
     assert time.monotonic() - mdm._required_symbol_since_mono[stale] < 1.0
+
+
+def test_optional_context_option_is_not_recovery_critical():
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    selected_ce = "NFO:NIFTY26JUN24000CE"
+    selected_pe = "NFO:NIFTY26JUN24000PE"
+    optional_ce = "NFO:NIFTY26JUN25000CE"
+    mdm.set_active_contract_basket(
+        {
+            "all_tokens": list(mapping),
+            "token_by_symbol": {symbol: token for token, symbol in mapping.items()},
+            "spot_symbol": "NSE:NIFTY",
+            "futures_symbol": "NFO:NIFTY26JUNFUT",
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "option_symbols": [selected_ce, selected_pe, optional_ce],
+        }
+    )
+
+    required = mdm._required_live_symbols()
+
+    assert "NFO:NIFTY26JUNFUT" in required
+    assert selected_ce in required
+    assert selected_pe in required
+    assert optional_ce not in required
+

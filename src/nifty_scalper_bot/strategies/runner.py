@@ -16073,6 +16073,20 @@ class StrategyRunner:
                 phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
                 signal_phase = self._data_phase.get(symbol)
+                entry_symbol = str(signal.symbol or symbol)
+                if signal.action in {"BUY", "SELL"} and is_nifty_option_symbol(
+                    entry_symbol
+                ):
+                    expiry_blocked, expiry_reason = expiry_theta_block()
+                    if expiry_blocked:
+                        self._emit_runner_eval_decision(
+                            symbol=entry_symbol,
+                            stage="phase10_entry_policy",
+                            reason=expiry_reason,
+                            allowed=False,
+                            trace_id=trace_id,
+                        )
+                        return
                 live_ready, live_ready_reason, live_ready_details = (
                     self._symbol_live_entry_ready(
                         symbol, signal=signal, trace_id=trace_id
