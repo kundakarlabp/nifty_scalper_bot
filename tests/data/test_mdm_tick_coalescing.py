@@ -2049,3 +2049,37 @@ def test_drain_invocation_returns_within_budget_under_continuous_inflow() -> Non
     # It returned at all (no infinite loop) and respected the budget.
     assert processed["n"] > 0
     assert elapsed < 0.5, f"drain monopolised the loop for {elapsed:.3f}s"
+
+
+def test_market_open_transition_restarts_required_symbol_grace(monkeypatch):
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    stale = "NFO:NIFTY26JUN24000CE"
+    for sym in mdm._required_live_symbols():
+        mdm._required_symbol_since_mono[sym] = now - 600.0
+        mdm._last_valid_live_tick_mono[sym] = now
+    mdm._last_valid_live_tick_mono[stale] = now - 600.0
+    mdm._required_symbol_missing_grace_sec = 15.0
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    requests: list[str] = []
+    market_open = {"value": False}
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: market_open["value"])
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: requests.append(symbol) or True,
+    )
+
+    mdm._check_zombie_ticks()  # establishes PREOPEN/CLOSED state
+    market_open["value"] = True
+    mdm._check_zombie_ticks()
+
+    assert requests == []
+    assert time.monotonic() - mdm._required_symbol_since_mono[stale] < 1.0

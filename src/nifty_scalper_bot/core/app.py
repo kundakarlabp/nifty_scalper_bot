@@ -9288,6 +9288,28 @@ async def _recompute_and_push_runtime_readiness(
         except Exception:
             return False
 
+    def _runner_delivery_ready(sym: str | None) -> bool:
+        if not sym:
+            return False
+        runner = getattr(ctx, "strategy_runner", None)
+        if runner is None:
+            return False
+        # A legacy/no-DataHub runtime uses Runner's active-symbol route. Live
+        # DataHub runtimes require the concrete callback registration.
+        if getattr(ctx, "data_hub", None) is None:
+            active_symbols = getattr(runner, "_active_symbols", None)
+            return True if active_symbols is None else sym in set(active_symbols)
+        checker = getattr(runner, "has_datahub_subscription", None)
+        if not callable(checker):
+            return False
+        token = (getattr(ctx, "active_symbol_tokens", {}) or {}).get(sym)
+        if token is None and mdm is not None:
+            token = (getattr(mdm, "_symbol_to_token", {}) or {}).get(sym)
+        try:
+            return bool(checker(sym, token))
+        except Exception:
+            return False
+
     def _subscription_or_live_tick(sym: str | None) -> bool:
         sub = _subscription_confirmed(sym)
         if sub:
@@ -9511,21 +9533,31 @@ async def _recompute_and_push_runtime_readiness(
     )
     ce_bid_ask_complete = bool(ce_status and ce_status.tradable_quote)
     pe_bid_ask_complete = bool(pe_status and pe_status.tradable_quote)
+    ce_runner_delivery_ready = _runner_delivery_ready(selected_ce)
+    pe_runner_delivery_ready = _runner_delivery_ready(selected_pe)
     ce_exec_ready = bool(
-        ce_status and basket_hard_ready and ce_status.ready_for_execution
+        ce_status
+        and basket_hard_ready
+        and ce_status.ready_for_execution
+        and ce_runner_delivery_ready
     )
     pe_exec_ready = bool(
-        pe_status and basket_hard_ready and pe_status.ready_for_execution
+        pe_status
+        and basket_hard_ready
+        and pe_status.ready_for_execution
+        and pe_runner_delivery_ready
     )
     ce_eval_ready = bool(
         ce_status
         and ce_status.ready_for_evaluation
         and ce_bars >= option_eval_min_live_bars
+        and ce_runner_delivery_ready
     )
     pe_eval_ready = bool(
         pe_status
         and pe_status.ready_for_evaluation
         and pe_bars >= option_eval_min_live_bars
+        and pe_runner_delivery_ready
     )
     spot_ready = bool(spot_status and spot_status.ready_for_evaluation)
     futures_ready = (
@@ -9597,6 +9629,12 @@ async def _recompute_and_push_runtime_readiness(
             missing.append("futures_history_gap")
     if not basket_hard_ready:
         missing.extend(basket_missing or ["active_basket_hydration_not_ready"])
+    if not ce_runner_delivery_ready:
+        missing.append("selected_ce_runner_delivery_missing")
+    if not pe_runner_delivery_ready:
+        missing.append("selected_pe_runner_delivery_missing")
+    if not (ce_runner_delivery_ready and pe_runner_delivery_ready):
+        missing.append("selected_option_runner_delivery_missing")
     if not evaluation_ready:
         missing.append("eval_not_ready")
     if not selected_history_ready:
@@ -10370,6 +10408,46 @@ def _register_and_subscribe_live_symbol(
                 normalized,
             )
     return bool(resolved_token)
+
+
+def _ensure_selected_option_runtime_delivery(
+    ctx: BotContext,
+    *,
+    selected_ce: str | None,
+    selected_pe: str | None,
+    reason: str,
+) -> dict[str, bool]:
+    """Idempotently promote the selected pair onto the runner delivery path."""
+    results: dict[str, bool] = {}
+    runner = getattr(ctx, "strategy_runner", None)
+    for symbol in dict.fromkeys(
+        str(sym).strip().upper() for sym in (selected_ce, selected_pe) if sym
+    ):
+        token = (getattr(ctx, "active_symbol_tokens", {}) or {}).get(symbol)
+        requested = _register_and_subscribe_live_symbol(
+            ctx, symbol, token, reason, role="tradable_option"
+        )
+        delivery_ready = bool(
+            runner is not None
+            and hasattr(runner, "has_datahub_subscription")
+            and runner.has_datahub_subscription(symbol, token)
+        )
+        results[symbol] = bool(requested and delivery_ready)
+        LOGGER.info(
+            "SELECTED_OPTION_RUNTIME_DELIVERY symbol=%s token=%s ready=%s reason=%s",
+            symbol,
+            token,
+            results[symbol],
+            reason,
+            extra={
+                "event": "SELECTED_OPTION_RUNTIME_DELIVERY",
+                "symbol": symbol,
+                "token": token,
+                "ready": results[symbol],
+                "reason": reason,
+            },
+        )
+    return results
 
 
 def _next_nse_open_after(now_ist: datetime) -> datetime:
@@ -12889,6 +12967,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                         )
                         add_symbols = sorted(added)
                         drop_symbols = sorted(removed)
+                        incoming_ce = (
+                            str((fresh_dynamic_basket or {}).get("selected_ce") or "")
+                            or None
+                        )
+                        incoming_pe = (
+                            str((fresh_dynamic_basket or {}).get("selected_pe") or "")
+                            or None
+                        )
+                        selection_changed = bool(
+                            incoming_ce
+                            and incoming_pe
+                            and (
+                                incoming_ce != getattr(ctx, "selected_ce", None)
+                                or incoming_pe != getattr(ctx, "selected_pe", None)
+                            )
+                        )
                         market_open = get_market_state() == MarketState.OPEN
                         if not market_open and drop_symbols:
                             LOGGER.info(
@@ -12901,7 +12995,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             drop_symbols = []
 
-                        if add_symbols or drop_symbols:
+                        if add_symbols or drop_symbols or selection_changed:
                             LOGGER.info(
                                 "ACTIVE_BASKET_REFRESH added=%d removed=%d reason=%s",
                                 len(add_symbols),
@@ -13135,7 +13229,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         # Universe summary + per-symbol pipeline status after
                         # a dynamic-universe mutation so operators can see
                         # where each option sits in the live lifecycle.
-                        if add_symbols or drop_symbols:
+                        if add_symbols or drop_symbols or selection_changed:
                             try:
                                 commit_basket = fresh_dynamic_basket or cast(
                                     dict[str, object],
@@ -13164,7 +13258,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         atm_strike=commit_atm_strike,
                                     )
                                 )
-                                for _sym in add_symbols:
+                                _ensure_selected_option_runtime_delivery(
+                                    ctx,
+                                    selected_ce=committed_ce,
+                                    selected_pe=committed_pe,
+                                    reason="dynamic_basket_committed",
+                                )
+                                for _sym in dict.fromkeys(
+                                    [*add_symbols, committed_ce, committed_pe]
+                                ):
+                                    if not _sym:
+                                        continue
                                     _tok = active_symbol_tokens.get(_sym)
                                     _emit_option_symbol_pipeline_status(
                                         ctx,

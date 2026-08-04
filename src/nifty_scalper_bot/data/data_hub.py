@@ -1689,6 +1689,31 @@ class DataHub:
                 except Exception as exc:  # noqa: BLE001
                     self._log_listener_failure(exc)
 
+    def has_tick_subscription(
+        self,
+        symbol: str,
+        callback: TickListener,
+        *,
+        token: int | None = None,
+    ) -> bool:
+        """Return whether *callback* is registered for symbol or its token."""
+        canonical = self._canonical_quote_symbol(symbol)
+        token_int: int | None = None
+        if token is not None:
+            try:
+                token_int = int(token)
+            except (TypeError, ValueError):
+                token_int = None
+        if token_int is None:
+            token_int = self._token_from_symbol(canonical)
+        with self._lock:
+            if callback in self._tick_subscribers.get(canonical, set()):
+                return True
+            return bool(
+                token_int is not None
+                and callback in self._tick_subscribers_by_token.get(token_int, set())
+            )
+
     def unsubscribe(self, symbol: str, callback: Optional[TickListener] = None):
         return self.unsubscribe_ticks(symbol, callback)
 

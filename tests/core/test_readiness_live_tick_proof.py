@@ -368,3 +368,30 @@ async def test_futures_readiness_blocker_names_live_stale_vs_history_short(
 
     assert ctx.context_exec_ready is False
     assert "futures_live_tick_stale" in str(ctx.live_block_reason)
+
+
+@pytest.mark.asyncio
+async def test_live_readiness_requires_selected_option_runner_delivery(monkeypatch) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    snaps = {
+        "NSE:NIFTY": Snap(25000, 2, True, 24999, 25001, True),
+        "NFO:CE": Snap(100, 2, True, 99.95, 100.05, True),
+        "NFO:PE": Snap(110, 2, True, 109.95, 110.05, True),
+    }
+    mdm = SimpleNamespace(
+        get_symbol_snapshot=lambda s: snaps.get(s),
+        get_ohlc_bars=lambda s, **k: _history_bars(),
+        has_ws_tradable_quote=lambda s: True,
+        _confirmed_subscriptions={1, 2},
+        _symbol_to_token={"NFO:CE": 1, "NFO:PE": 2},
+        _last_tick_ts=_fresh_tick_ts(),
+    )
+    ctx = make_ctx(mdm)
+    ctx.data_hub = object()
+    ctx.strategy_runner.has_datahub_subscription = lambda symbol, token=None: False
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason="test")
+
+    assert ctx.evaluation_ready is False
+    assert ctx.live_orders_armed is False
+    assert "selected_option_runner_delivery_missing" in str(ctx.live_block_reason)

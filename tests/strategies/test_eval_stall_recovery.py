@@ -39,10 +39,10 @@ def test_recovery_does_not_block_the_tick_thread_with_asyncio_run() -> None:
     assert "run_coroutine_threadsafe" in src
 
 
-def test_recovery_reports_when_start_was_a_noop() -> None:
-    """Operators must see that the advertised restart did nothing."""
+def test_recovery_does_not_call_runner_start() -> None:
+    """Recovery must nudge the actual drain, not call start(), which is a no-op."""
     src = _source()
-    assert "start_was_noop" in src
+    assert "self.start()" not in src
     assert "STRATEGY_EVAL_STALL_WORKER_STATE" in src
 
 
@@ -128,8 +128,6 @@ def test_recovery_reschedules_a_stranded_pending_drain() -> None:
     runner._runtime_readiness_recompute_callback = None
     runner._last_eval_ts = {}
     runner._last_periodic_eval_at_by_symbol = {}
-    runner.start = lambda: None
-
     scheduled: list[bool] = []
     runner._schedule_entry_eval_drain = lambda: (scheduled.append(True), True)[1]
 
@@ -138,7 +136,6 @@ def test_recovery_reschedules_a_stranded_pending_drain() -> None:
     assert scheduled == [True], "stranded pending drain was not rescheduled"
     payload = runner._logger.warning.call_args[1]["extra"]
     assert payload["event"] == "STRATEGY_EVAL_STALL_WORKER_STATE"
-    assert payload["start_was_noop"] is True
     assert payload["drain_rescheduled"] is True
     assert payload["pending_entry_eval"] == ["NFO:NIFTY26JUN24000CE"]
 
@@ -160,8 +157,6 @@ def test_recovery_does_not_reschedule_when_a_drain_is_already_active() -> None:
     runner._runtime_readiness_recompute_callback = None
     runner._last_eval_ts = {}
     runner._last_periodic_eval_at_by_symbol = {}
-    runner.start = lambda: None
-
     scheduled: list[bool] = []
     runner._schedule_entry_eval_drain = lambda: (scheduled.append(True), True)[1]
 
@@ -169,3 +164,44 @@ def test_recovery_does_not_reschedule_when_a_drain_is_already_active() -> None:
 
     assert scheduled == []
     assert runner._logger.warning.call_args[1]["extra"]["drain_rescheduled"] is False
+
+
+def test_idle_worker_is_not_classified_as_stalled() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._eval_gate_lock = threading.Lock()
+    runner._entry_eval_active = False
+    runner._entry_eval_active_started_at = None
+    runner._entry_eval_active_symbol = None
+    runner._entry_eval_active_phase = None
+    runner._entry_eval_drain_scheduled = False
+    runner._pending_entry_eval_symbols = set()
+    runner._entry_eval_drain_count = 10
+    runner._runtime_loop_attached = True
+    runner._entry_eval_shutdown = False
+    runner._entry_eval_last_progress_ts = time.monotonic() - 600.0
+
+    state = runner._entry_eval_liveness_snapshot()
+
+    assert state["work_outstanding"] is False
+    assert state["worker_stalled"] is False
+
+
+def test_pending_unscheduled_worker_is_classified_as_stranded() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._eval_gate_lock = threading.Lock()
+    runner._entry_eval_active = False
+    runner._entry_eval_active_started_at = None
+    runner._entry_eval_active_symbol = None
+    runner._entry_eval_active_phase = None
+    runner._entry_eval_drain_scheduled = False
+    runner._pending_entry_eval_symbols = {"NFO:NIFTY26AUG24600CE"}
+    runner._entry_eval_drain_count = 2
+    runner._runtime_loop_attached = True
+    runner._entry_eval_shutdown = False
+    runner._entry_eval_last_progress_ts = time.monotonic() - 100.0
+
+    state = runner._entry_eval_liveness_snapshot()
+
+    assert state["work_outstanding"] is True
+    assert state["drain_stranded"] is True
+    assert state["worker_stalled"] is True
