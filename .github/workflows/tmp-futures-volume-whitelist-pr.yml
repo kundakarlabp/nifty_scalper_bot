@@ -41,6 +41,29 @@ jobs:
           )
           path.write_text(text)
           PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tools/tmp_apply_futures_volume_whitelist_pr.py
+          git commit -m 'chore(tdd): shorten generated regression name'
 
-      - name: Prove regressions, apply exact patch, validate and commit
-        run: python tools/tmp_apply_futures_volume_whitelist_pr.py
+      - name: Prove regressions, apply exact patch and validate
+        id: targeted
+        shell: bash
+        run: |
+          set +e
+          python tools/tmp_apply_futures_volume_whitelist_pr.py > tdd-helper.log 2>&1
+          rc=$?
+          cat tdd-helper.log
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload TDD evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: futures-volume-whitelist-tdd-log
+          path: tdd-helper.log
+
+      - name: Fail when targeted correction failed
+        if: steps.targeted.outputs.rc != '0'
+        run: exit 1
