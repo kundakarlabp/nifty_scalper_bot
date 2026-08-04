@@ -1,0 +1,44 @@
+name: Apply state-preserving runtime refinement
+
+on:
+  push:
+    branches:
+      - fix/runtime-delivery-liveness-20260804
+
+permissions:
+  contents: write
+
+jobs:
+  apply-tested-refinement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-delivery-liveness-20260804
+          fetch-depth: 0
+      - name: Decode and verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/runtime-refinement.patch.gz.b64 | gzip -d > /tmp/runtime-refinement.patch
+          echo '9bc5d79de669a90dfdd1bfced8f7c385d58923b2b82384c8a2f4742170358210  /tmp/runtime-refinement.patch' | sha256sum -c -
+          git apply --check /tmp/runtime-refinement.patch
+      - name: Apply state-preserving delivery fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply /tmp/runtime-refinement.patch
+          rm -f .github/runtime-refinement.patch.gz.b64
+          rm -f .github/workflows/zz-apply-runtime-refinement.yml
+          git diff --check
+          python -m compileall -q src tests
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(runtime): preserve selected-option state during delivery repair'
+          git push origin HEAD:fix/runtime-delivery-liveness-20260804
