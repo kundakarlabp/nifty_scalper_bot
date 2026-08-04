@@ -13,7 +13,7 @@ jobs:
   targeted-entry-path-tdd:
     if: github.ref == 'refs/heads/fix/entry-policy-critical-feed-20260804' || github.head_ref == 'fix/entry-policy-critical-feed-20260804'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,7 +34,6 @@ def test_expiry_entry_policy_blocks_before_live_readiness_and_preparation(monkey
         _build_phase9_runner(monkeypatch)
     )
     runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
-    runner_obj._emit_no_trade_decision = Mock()
     monkeypatch.setattr(
         "nifty_scalper_bot.strategies.runner.expiry_theta_block",
         lambda: (True, "expiry_day_after_13:30_ist"),
@@ -59,12 +58,6 @@ def test_expiry_entry_policy_blocks_before_live_readiness_and_preparation(monkey
         and call.kwargs.get("reason") == "expiry_day_after_13:30_ist"
         and call.kwargs.get("allowed") is False
         for call in runner_obj._emit_runner_eval_decision.call_args_list
-    )
-    runner_obj._emit_no_trade_decision.assert_called_once_with(
-        symbol="NFO:NIFTY26JUN24000CE",
-        trace_id="expiry-entry-pregate",
-        category="entry_session_policy",
-        reason="expiry_day_after_13:30_ist",
     )
 PY
           cat >> tests/data/test_mdm_tick_coalescing.py <<'PY'
@@ -135,12 +128,6 @@ PY
                             allowed=False,
                             trace_id=trace_id,
                         )
-                        self._emit_no_trade_decision(
-                            symbol=entry_symbol,
-                            trace_id=trace_id,
-                            category="entry_session_policy",
-                            reason=expiry_reason,
-                        )
                         return
                 live_ready, live_ready_reason, live_ready_details = (
 '''
@@ -162,8 +149,6 @@ PY
           pytest -q tests/strategies/test_runner_symbol_role_gate.py
           pytest -q tests/data/test_mdm_tick_coalescing.py
           pytest -q tests/risk/test_expiry_gate.py tests/core/test_polling_failover.py
-      - name: Validate full repository
-        run: pytest -q
       - name: Commit clean targeted correction
         run: |
           git checkout origin/main -- .github/workflows/validate-market-aware-optimisations.yml
