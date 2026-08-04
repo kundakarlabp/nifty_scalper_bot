@@ -110,6 +110,7 @@ def test_active_contract_basket_holds_atm_inside_hysteresis_band(monkeypatch):
     mgr = InstrumentManager(KiteDump(rows))
     monkeypatch.setenv("ATM_STRIKE_HYSTERESIS_POINTS", "5")
 
+    # Midpoint noise must not churn the active CE/PE basket.
     assert mgr.get_active_nifty_contracts(25010).atm_strike == 25000
     assert mgr.get_active_nifty_contracts(25024).atm_strike == 25000
     assert mgr.get_active_nifty_contracts(25026).atm_strike == 25000
