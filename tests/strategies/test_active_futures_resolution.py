@@ -118,6 +118,7 @@ def test_futures_volume_ignores_trade_quantity_and_keeps_baseline() -> None:
     assert first["futures_volume_source"] == "volume_traded_today"
     assert first["futures_volume_trusted"] is True
 
+    # Per-trade quantity must not replace the cumulative session-volume baseline.
     trade_quantity_only: dict[str, Any] = {}
     manager._augment_futures_metrics(trade_quantity_only)
     assert manager._last_futures_volume == 1000.0
