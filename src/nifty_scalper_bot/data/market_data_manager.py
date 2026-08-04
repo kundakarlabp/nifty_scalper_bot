@@ -2470,7 +2470,7 @@ class MarketDataManager:
         add(self._basket_value(basket, "active_futures_symbol", None))
         add(self._basket_value(basket, "selected_ce", None))
         add(self._basket_value(basket, "selected_pe", None))
-        add(self._basket_value(basket, "option_symbols", None))
+        # Nearby option strikes are context-only; the selected pair owns recovery.
         add(getattr(self, "_open_position_symbols", set()))
         add(getattr(self, "_active_bracket_symbols", set()))
         current = {sym for sym in required if sym}
