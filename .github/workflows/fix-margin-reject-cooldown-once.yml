@@ -34,20 +34,8 @@ jobs:
 
           runner = Path('src/nifty_scalper_bot/strategies/runner.py')
           text = runner.read_text()
-          old = '''            for marker in (
-                "no_qty_after_risk",
-                "insufficient_margin",
-                "available_balance_unavailable",
-            )
-          '''
-          new = '''            for marker in (
-                "no_qty_after_risk",
-                "insufficient_margin",
-                "margin needed=",
-                "margin_no_qty",
-                "available_balance_unavailable",
-            )
-          '''
+          old = '                "insufficient_margin",\n                "available_balance_unavailable",'
+          new = '                "insufficient_margin",\n                "margin needed=",\n                "margin_no_qty",\n                "available_balance_unavailable",'
           if old not in text:
               raise SystemExit('margin reject classifier needle not found')
           runner.write_text(text.replace(old, new, 1))
