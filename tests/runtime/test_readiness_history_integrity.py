@@ -1,4 +1,7 @@
-"""Regression coverage for live-readiness and runner-history ownership boundaries."""
+"""Regression coverage for live-readiness and runner-history ownership boundaries.
+
+History hydration must remain separate from runtime symbol activation.
+"""
 
 from __future__ import annotations
 
