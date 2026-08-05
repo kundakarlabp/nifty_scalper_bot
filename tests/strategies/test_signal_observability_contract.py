@@ -15,6 +15,9 @@ from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (
     apply_orderflow_live_context_proof,
 )
+from nifty_scalper_bot.strategies.signal_identity_patch import (
+    _stamp_evaluation_identity,
+)
 
 
 class _ObservableStrategy(EliteStrategy):
@@ -138,6 +141,53 @@ def test_elite_evaluation_snapshot_identity_tracks_quote_version() -> None:
         first.metadata["evaluation_snapshot_id"]
         != changed.metadata["evaluation_snapshot_id"]
     )
+
+
+def test_indicator_quote_version_overrides_stale_signal_metadata() -> None:
+    signal = SimpleNamespace(
+        symbol="NFO:NIFTY2680724500CE",
+        action="BUY",
+        metadata={
+            "strategy": "Observable",
+            "contract_side": "CE",
+            "latest_bar_ts": 1_785_000_000.0,
+            "quote_update_version": 6,
+            "quote_update_version_source": "microstructure_fingerprint",
+        },
+    )
+
+    result = _stamp_evaluation_identity(
+        signal,
+        {
+            "quote_update_version": 7,
+            "quote_update_version_source": "datahub_quote:quote_update_version",
+        },
+    )
+
+    assert result.metadata["quote_update_version"] == 7
+    assert (
+        result.metadata["quote_update_version_source"]
+        == "datahub_quote:quote_update_version"
+    )
+
+
+def test_signal_metadata_quote_version_is_valid_fallback() -> None:
+    signal = SimpleNamespace(
+        symbol="NFO:NIFTY2680724500CE",
+        action="BUY",
+        metadata={
+            "strategy": "Observable",
+            "contract_side": "CE",
+            "latest_bar_ts": 1_785_000_000.0,
+            "quote_update_version": 6,
+            "quote_update_version_source": "microstructure_fingerprint",
+        },
+    )
+
+    result = _stamp_evaluation_identity(signal, {})
+
+    assert result.metadata["quote_update_version"] == 6
+    assert result.metadata["quote_update_version_source"] == "microstructure_fingerprint"
 
 
 def _orderflow_signal(*, bid: float = 99.5) -> SimpleNamespace:
