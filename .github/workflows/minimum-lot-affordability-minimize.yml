@@ -1,0 +1,129 @@
+name: Minimum Lot Affordability Minimize
+
+on:
+  push:
+    branches:
+      - fix/minimum-lot-affordability-readiness-20260806
+
+permissions:
+  contents: write
+
+jobs:
+  minimize-validate-commit:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/minimum-lot-affordability-readiness-20260806
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+
+      - name: Restore baseline orchestration and apply only functional edits
+        run: |
+          git checkout 088e2cf92a5e811ae42ec05aeac949897d45874d -- src/nifty_scalper_bot/core/app.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/core/app.py')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '''from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds\nfrom nifty_scalper_bot.execution.readiness import (''',
+                  '''from nifty_scalper_bot.execution.affordability import (\n    evaluate_minimum_lot_affordability,\n)\nfrom nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds\nfrom nifty_scalper_bot.execution.readiness import (''',
+              ),
+              (
+                  '''    context_exec_ready: bool = False\n    broker_ready: bool = False\n    broker_auth_invalid: bool = False''',
+                  '''    context_exec_ready: bool = False\n    broker_ready: bool = False\n    execution_capacity_ready: bool = False\n    minimum_lot_affordability_by_symbol: dict[str, dict[str, object]] = field(\n        default_factory=dict\n    )\n    broker_auth_invalid: bool = False''',
+              ),
+              (
+                  '''    broker_ready = bool(\n        getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)\n    )\n    execution_ready_by_symbol: dict[str, bool] = {}\n    if selected_ce:\n        execution_ready_by_symbol[str(selected_ce)] = bool(ce_exec_ready)\n    if selected_pe:\n        execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)\n    all_selected_options_exec_ready = bool(ce_exec_ready and pe_exec_ready)\n    live_orders_armed = bool(\n        live_mode\n        and market_open\n        and evaluation_ready\n        and context_exec_ready\n        and broker_ready\n        and all_selected_options_exec_ready\n    )\n    missing = []''',
+                  '''    broker_ready = bool(\n        getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)\n    )\n    ce_market_exec_ready = bool(ce_exec_ready)\n    pe_market_exec_ready = bool(pe_exec_ready)\n    affordability_by_symbol: dict[str, dict[str, object]] = {}\n\n    def _minimum_lot_capacity(symbol: str | None, status: object | None):\n        if not symbol or status is None:\n            return None\n        decision = evaluate_minimum_lot_affordability(\n            symbol=str(symbol),\n            quote={\n                "bid": getattr(status, "bid", None),\n                "ask": getattr(status, "ask", None),\n                "ltp": getattr(_snapshot(symbol), "ltp", None),\n            },\n            order_manager=getattr(ctx, "order_manager", None),\n            data_hub=getattr(ctx, "data_hub", None),\n            fallback_balance=(\n                getattr(ctx, "last_valid_broker_balance", None)\n                if bool(getattr(ctx, "broker_balance_valid", False))\n                else None\n            ),\n        )\n        affordability_by_symbol[str(symbol)] = decision.to_dict()\n        return decision\n\n    ce_affordability = (\n        _minimum_lot_capacity(selected_ce, ce_status) if live_mode else None\n    )\n    pe_affordability = (\n        _minimum_lot_capacity(selected_pe, pe_status) if live_mode else None\n    )\n    if live_mode:\n        ce_capacity_ready = bool(\n            ce_market_exec_ready\n            and ce_affordability is not None\n            and ce_affordability.affordable\n        )\n        pe_capacity_ready = bool(\n            pe_market_exec_ready\n            and pe_affordability is not None\n            and pe_affordability.affordable\n        )\n        execution_capacity_ready = bool(ce_capacity_ready or pe_capacity_ready)\n    else:\n        ce_capacity_ready = ce_market_exec_ready\n        pe_capacity_ready = pe_market_exec_ready\n        execution_capacity_ready = True\n    ce_exec_ready = bool(ce_market_exec_ready and ce_capacity_ready)\n    pe_exec_ready = bool(pe_market_exec_ready and pe_capacity_ready)\n    execution_ready_by_symbol: dict[str, bool] = {}\n    if selected_ce:\n        execution_ready_by_symbol[str(selected_ce)] = bool(ce_exec_ready)\n    if selected_pe:\n        execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)\n    selected_options_data_exec_ready = bool(\n        ce_market_exec_ready and pe_market_exec_ready\n    )\n    all_selected_options_exec_ready = bool(\n        selected_options_data_exec_ready and execution_capacity_ready\n    )\n    live_orders_armed = bool(\n        live_mode\n        and market_open\n        and evaluation_ready\n        and context_exec_ready\n        and broker_ready\n        and all_selected_options_exec_ready\n    )\n    missing = []\n    if (\n        live_mode\n        and selected_options_data_exec_ready\n        and not execution_capacity_ready\n    ):\n        capacity_decisions = [\n            item\n            for item in (ce_affordability, pe_affordability)\n            if item is not None\n        ]\n        if capacity_decisions and all(item.determinate for item in capacity_decisions):\n            missing.append("minimum_lot_unaffordable")\n        else:\n            missing.append("execution_capacity_unavailable")''',
+              ),
+              (
+                  '''    ctx.context_exec_ready = bool(context_exec_ready)\n    ctx.broker_ready = bool(broker_ready)\n    LOGGER.info(\n        "READINESS_BLOCKER_SUMMARY''',
+                  '''    ctx.context_exec_ready = bool(context_exec_ready)\n    ctx.broker_ready = bool(broker_ready)\n    ctx.execution_capacity_ready = bool(execution_capacity_ready)\n    ctx.minimum_lot_affordability_by_symbol = dict(affordability_by_symbol)\n    LOGGER.info(\n        "EXECUTION_CAPACITY_READINESS ready=%s selected_ce=%s selected_pe=%s ce_affordable=%s pe_affordable=%s affordability=%s",\n        bool(execution_capacity_ready),\n        selected_ce,\n        selected_pe,\n        bool(ce_affordability and ce_affordability.affordable),\n        bool(pe_affordability and pe_affordability.affordable),\n        affordability_by_symbol,\n        extra={\n            "event": "EXECUTION_CAPACITY_READINESS",\n            "ready": bool(execution_capacity_ready),\n            "selected_ce": selected_ce,\n            "selected_pe": selected_pe,\n            "affordability_by_symbol": affordability_by_symbol,\n        },\n    )\n    LOGGER.info(\n        "READINESS_BLOCKER_SUMMARY''',
+              ),
+              (
+                  '''LOGGER = logging.getLogger("nifty_scalper_bot.core.app")\nSYNC_LOCK = threading.Lock()''',
+                  '''LOGGER = logging.getLogger("nifty_scalper_bot.core.app")\n_START_TIME = time_module.monotonic()\nSYNC_LOCK = threading.Lock()''',
+              ),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'patch anchor count={count}: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Validate minimal tree
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: |
+          python -m compileall -q src tests dashboard scripts
+          python -m ruff check --select E9,F63,F7,F82 src/nifty_scalper_bot/core/app.py
+          python -m black --check \
+            src/nifty_scalper_bot/execution/affordability.py \
+            src/nifty_scalper_bot/execution/readiness.py \
+            src/nifty_scalper_bot/main.py \
+            tests/execution/test_minimum_lot_affordability.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_readiness_live_tick_proof.py
+          python -m pytest -q \
+            tests/execution/test_minimum_lot_affordability.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_readiness_semantics.py \
+            tests/core/test_readiness_live_tick_proof.py \
+            tests/core/test_history_readiness_ssot.py \
+            tests/core/test_active_basket_readiness_sync.py \
+            tests/core/test_app_health.py \
+            tests/execution/test_margin_engine.py \
+            tests/execution/test_margin_freshness_zero_balance.py \
+            tests/test_main_health_readiness.py \
+            tests/test_market_open_rearm_loop.py
+          python -m pytest -q
+
+      - name: Enforce compact app diff and clean artifacts
+        run: |
+          git restore --source=HEAD --worktree --staged positions.json 2>/dev/null || rm -f positions.json
+          rm -rf .pytest-data-dir
+          python - <<'PY'
+          import subprocess
+
+          output = subprocess.check_output(
+              [
+                  'git', 'diff', '--numstat',
+                  '088e2cf92a5e811ae42ec05aeac949897d45874d',
+                  '--', 'src/nifty_scalper_bot/core/app.py',
+              ],
+              text=True,
+          ).strip()
+          additions, deletions, _path = output.split('\t')
+          changes = int(additions) + int(deletions)
+          if changes > 190:
+              raise SystemExit(f'app diff remains too large: {changes}')
+          print(f'app diff compact: +{additions}/-{deletions}')
+          PY
+
+      - name: Commit compact validated tree
+        run: |
+          rm -rf .pytest-data-dir
+          git restore --source=HEAD --worktree --staged positions.json 2>/dev/null || rm -f positions.json
+          git rm .github/workflows/minimum-lot-affordability-minimize.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/nifty_scalper_bot/core/app.py
+          git commit -m 'refactor(execution): keep affordability readiness diff focused [skip ci]'
+          git push origin HEAD:fix/minimum-lot-affordability-readiness-20260806
