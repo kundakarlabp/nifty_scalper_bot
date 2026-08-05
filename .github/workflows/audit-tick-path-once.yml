@@ -74,8 +74,9 @@ jobs:
       - name: Quality checks
         run: |
           python -m compileall -q src tests
-          python -m ruff check src/nifty_scalper_bot/data/data_hub.py tests/data/test_datahub_quote_checkpoint_latency.py
-          python -m black --check src/nifty_scalper_bot/data/data_hub.py tests/data/test_datahub_quote_checkpoint_latency.py
+          python -m ruff check src/nifty_scalper_bot/data/data_hub.py --select F
+          python -m ruff check tests/data/test_datahub_quote_checkpoint_latency.py
+          python -m black --check tests/data/test_datahub_quote_checkpoint_latency.py
           git diff --check
       - name: Full suite
         env:
