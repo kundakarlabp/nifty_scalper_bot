@@ -717,7 +717,6 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         assert ctx.position_reconciliation_completed is True
         assert ctx.websocket_manager is not None
         ctx.websocket_manager.connect()
-        ctx.strategy_runner.start()
         broker = ctx.broker_client.client
         broker.register_order_update_callback(
             ctx.order_manager.apply_broker_order_update
@@ -752,6 +751,9 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
                 failure_message=f"startup tick did not reach DataHub for {sym}",
             )
         _pump_runtime(loop, ctx, iterations=20)
+        # Runtime ownership is established by explicit registration above; start only after it.
+        ctx.strategy_runner.start()
+        _pump_runtime(loop, ctx, iterations=2)
 
         assert ctx.live_orders_armed is False
         loop.run_until_complete(
