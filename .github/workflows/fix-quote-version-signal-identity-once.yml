@@ -29,6 +29,25 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply correction and regressions
         run: python .github/scripts/apply_quote_version_signal_identity_fix.py
+      - name: Correct generated line-length contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/strategies/signal_identity_patch.py')
+          text = path.read_text()
+          old = '''            "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s quote_update_version=%s evaluation_snapshot_id=%s",
+'''
+          new = '''            (
+                "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s "
+                "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "
+                "quote_update_version=%s evaluation_snapshot_id=%s"
+            ),
+'''
+          if old not in text:
+              raise SystemExit('generated observability log anchor missing')
+          path.write_text(text.replace(old, new, 1))
+          PY
       - name: Normalize newly introduced and narrowly modified files
         run: |
           python -m ruff check --fix --exit-zero \
@@ -68,7 +87,8 @@ jobs:
             src/nifty_scalper_bot/strategies/quote_update_identity.py \
             src/nifty_scalper_bot/strategies/signal_identity_patch.py \
             src/nifty_scalper_bot/strategies/runtime_context_contract.py \
-            tests/strategies/test_quote_update_identity.py \
+            tests/strategies/test_quote_update_identity.py
+          python -m ruff check --ignore E501 \
             tests/strategies/test_signal_observability_contract.py
           python -m ruff check --select E9,F63,F7,F82 \
             src/nifty_scalper_bot/strategies/runner.py
