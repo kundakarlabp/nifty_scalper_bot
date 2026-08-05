@@ -46,6 +46,7 @@ jobs:
           if 'test_margin_needed_rejection_is_deterministic_risk_capacity' not in body:
               test.write_text(body + addition)
           PY
+          python -m black tests/strategies/test_order_rejected_observability.py
       - name: Focused regression
         run: python -m pytest -q tests/strategies/test_order_rejected_observability.py
       - name: Adjacent runner and execution tests
