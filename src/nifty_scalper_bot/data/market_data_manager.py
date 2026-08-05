@@ -5490,7 +5490,7 @@ class MarketDataManager:
             valid_symbols = [s for s, count in bars.items() if count >= min_bars]
             spot_symbol = str(requirements.get("spot") or "NSE:NIFTY")
             spot_age_ms = self.symbol_data_age_ms_or_none(spot_symbol)
-            threshold_ms = 120000
+            threshold_ms = max(1, int(self._tick_stale_threshold_ms))
             spot_fresh = (
                 spot_age_ms is not None and 0 <= int(spot_age_ms) <= threshold_ms
             )
@@ -5714,7 +5714,6 @@ class MarketDataManager:
 
         spot_ready = True
         if spot:
-            spot_bar_ready = bars.get(spot, 0) >= min_bars
             try:
                 spot_ready = bool(
                     self._is_symbol_fresh(spot, self._tick_stale_threshold_ms)
@@ -5722,8 +5721,8 @@ class MarketDataManager:
             except Exception as exc:
                 self._logger.error("Failure in _readiness_state: %s", exc, exc_info=exc)
                 spot_ready = False
-            if not spot_ready and spot_bar_ready:
-                spot_ready = True
+            if not spot_ready:
+                missing_hard.append("fresh_spot_tick_missing")
         return {
             "hard_ready": bool(spot_ready and ce_ready and pe_ready),
             "spot_ready": spot_ready,

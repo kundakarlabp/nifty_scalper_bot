@@ -5627,8 +5627,6 @@ class StrategyRunner:
                 )
                 if one_minute_bars:
                     self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start
-                self._active_symbols.add(normalized_symbol)
-                self._tracked_symbols.add(normalized_symbol)
                 self._data_phase.setdefault(normalized_symbol, "HYDRATION")
             indicator_count = self._indicator_engine.replace_history(
                 normalized_symbol,
@@ -9010,70 +9008,70 @@ class StrategyRunner:
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
-        """
-        Download historical data to warm up indicators.
-        Skips if startup hydration was already performed by App.py.
-        """
+        """Restore canonical history for active symbols still short after app hydration."""
         total_bars = 0
 
         try:
-            # FIX 1: Verify actual indicator arrays are warmed up
-            is_fully_warmed_up = True
-            targets = tuple(self._active_symbols)
+            with self._lock:
+                targets = list(self._active_symbols)
 
-            for symbol in targets:
-                bars = self._indicator_engine.get_history(symbol)
-                if not bars or len(bars) < self._required_candles:
-                    is_fully_warmed_up = False
-                    break
-
-            if is_fully_warmed_up:
+            cold_targets = [
+                symbol
+                for symbol in targets
+                if len(self._indicator_engine.get_history(symbol) or [])
+                < self._required_candles
+            ]
+            if not cold_targets:
                 self._logger.info(
                     "⏭️ Skipping historical backfill (indicators fully warmed up)"
                 )
                 return
 
-            # 2. FALLBACK: Only runs if App.py failed
             self._logger.warning(
-                "⚠️ StrategyRunner memory is empty! Triggering fallback backfill..."
+                "⚠️ StrategyRunner history short! Triggering targeted fallback backfill..."
             )
 
-            with self._lock:
-                targets = list(self._active_symbols)
-
-            if not targets:
-                self._logger.warning("⚠️ Backfill skipped: No active symbols found.")
-                return
-
-            for symbol in targets:
+            for symbol in cold_targets:
                 try:
                     target = self._required_bars_for_symbol(symbol)
                     rows = self._get_mdm_bars(symbol, target)
                     if rows:
-                        for bar_data in rows:
-                            self.ingest_historical_bar(bar_data)
-                            total_bars += 1
-                        if len(rows) >= target:
-                            self._set_symbol_hydration_state(symbol, SymbolState.READY)
+                        runner_count = self.reseed_history_from_bars(
+                            symbol,
+                            rows,
+                            source="runner_fallback_backfill",
+                            min_bars=target,
+                        )
+                        total_bars += runner_count
+                        if runner_count >= target:
+                            self._set_symbol_hydration_state(
+                                symbol, SymbolState.READY
+                            )
                         else:
                             self._set_symbol_hydration_state(
                                 symbol, SymbolState.HYDRATING
                             )
                             self._request_mdm_hydration(symbol, target)
                     else:
-                        self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+                        self._set_symbol_hydration_state(
+                            symbol, SymbolState.HYDRATING
+                        )
                         self._request_mdm_hydration(symbol, target)
 
-                except Exception as e:
+                except Exception as exc:
                     self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-                    self._logger.error(f"❌ Fallback fetch failed for {symbol}: {e}")
+                    self._logger.error(
+                        "❌ Fallback fetch failed for %s: %s", symbol, exc
+                    )
 
         except Exception as exc:
-            self._logger.error(f"❌ History backfill crashed: {exc}", exc_info=True)
+            self._logger.error(
+                "❌ History backfill crashed: %s", exc, exc_info=True
+            )
 
         if total_bars > 0:
             self._logger.info(
-                f"✅ Emergency Backfill complete. Ingested {total_bars} bars."
+                "✅ Emergency Backfill complete. Reseeded %d bars.", total_bars
             )
 
     def _hydrate_missing_bars(self, symbol: str, min_bars: int) -> list[dict[str, Any]]:

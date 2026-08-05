@@ -86,8 +86,8 @@ def test_fallback_backfill_reseeds_only_cold_active_symbols() -> None:
         list(warm_rows) if symbol == warm else list(cold_rows)
     )
     runner._set_symbol_hydration_state = lambda *_a, **_k: None
-    runner._request_mdm_hydration = (
-        lambda symbol, target: requested.append((symbol, target))
+    runner._request_mdm_hydration = lambda symbol, target: requested.append(
+        (symbol, target)
     )
     runner.ingest_historical_bar = lambda _row: (_ for _ in ()).throw(
         AssertionError("fallback must replace canonical history, not append rows")
@@ -163,9 +163,7 @@ def test_wait_until_ready_reports_configured_spot_stale_threshold(
     mdm.ready = False
     mdm.degraded = False
     mdm._logger = logging.getLogger("test.wait_until_ready_threshold")
-    monkeypatch.setattr(
-        mdm_module, "get_market_state", lambda: MarketState.POSTMARKET
-    )
+    monkeypatch.setattr(mdm_module, "get_market_state", lambda: MarketState.POSTMARKET)
     caplog.set_level(logging.INFO, logger="test.wait_until_ready_threshold")
 
     asyncio.run(mdm.wait_until_ready(timeout=0.01))
