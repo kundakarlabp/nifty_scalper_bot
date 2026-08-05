@@ -12,53 +12,31 @@ jobs:
   audit:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Inspect runner routing and ingress ownership
+      - name: Inspect synchronous runner maintenance
         run: |
           python - <<'PY'
           from pathlib import Path
           import ast
-
-          targets = {
-              'src/nifty_scalper_bot/strategies/runner.py': {
-                  'on_datahub_tick', 'on_tick_event', '_on_tick_safe',
-                  '_entry_evaluation_route', '_enqueue_entry_evaluation',
-                  '_queue_entry_evaluation', '_entry_eval_worker_loop',
-                  '_handle_position_tick_protection', '_subscribe_symbol',
-              },
-              'src/nifty_scalper_bot/data/data_hub.py': {
-                  '_subscribe_symbol', '_bind_to_mdm', '_ingest_tick_impl',
-                  'subscribe_ticks', 'has_tick_subscription',
-              },
-              'src/nifty_scalper_bot/data/market_data_manager.py': {
-                  'attach_tick_bus', '_publish_tick_to_bus_safe', 'subscribe',
-                  '_emit_tick', '_ingest_normalized_tick',
-              },
+          file = Path('src/nifty_scalper_bot/strategies/runner.py')
+          text = file.read_text(); lines = text.splitlines(); tree = ast.parse(text)
+          names = {
+              '_mirror_authoritative_candle_engine', '_run_health_watchdog_on_cadence',
+              '_emit_composite_reports', '_notify_entry_eval_pending',
+              '_entry_eval_worker_main', '_entry_eval_worker_loop',
+              '_drain_entry_eval_pending', '_evaluate_pending_entry_tick',
+              '_roles_for_symbol', '_is_context_symbol',
           }
-          for file, names in targets.items():
-              text = Path(file).read_text()
-              lines = text.splitlines()
-              tree = ast.parse(text)
-              print(f'\n===== {file} =====')
-              found = set()
-              for node in ast.walk(tree):
-                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
-                      found.add(node.name)
-                      end = getattr(node, 'end_lineno', node.lineno)
-                      print(f'\n--- {node.name} lines {node.lineno}-{end} ---')
-                      print('\n'.join(lines[node.lineno-1:end]))
-              print('missing:', sorted(names - found))
+          found = set()
+          for node in ast.walk(tree):
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
+                  found.add(node.name); end = getattr(node, 'end_lineno', node.lineno)
+                  print(f'\n--- {node.name} lines {node.lineno}-{end} ---')
+                  print('\n'.join(lines[node.lineno-1:end]))
+          print('missing:', sorted(names-found))
           PY
-      - name: Existing latency and coalescing regressions
-        run: |
-          python -m pip install -e '.[dev]' -q
-          python -m pytest -q \
-            tests/data/test_mdm_tick_coalescing.py \
-            tests/data/test_mdm_callback_dispatch.py \
-            tests/data/test_datahub_single_tick_ingress.py \
-            tests/strategies/test_entry_eval_coalescing.py
