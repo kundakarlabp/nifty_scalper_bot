@@ -87,6 +87,8 @@ run(
     str(TEST.relative_to(ROOT)),
 )
 
+run("git", "config", "user.name", "github-actions[bot]")
+run("git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
 run("git", "rm", "-f", str(WORKFLOW.relative_to(ROOT)), str(SCRIPT.relative_to(ROOT)))
 run(
     "git",
