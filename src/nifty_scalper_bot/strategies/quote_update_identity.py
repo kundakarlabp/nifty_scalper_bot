@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 import hashlib
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 _QUOTE_VERSION_KEYS = (
