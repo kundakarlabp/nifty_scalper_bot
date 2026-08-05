@@ -5714,7 +5714,6 @@ class MarketDataManager:
 
         spot_ready = True
         if spot:
-            spot_bar_ready = bars.get(spot, 0) >= min_bars
             try:
                 spot_ready = bool(
                     self._is_symbol_fresh(spot, self._tick_stale_threshold_ms)
@@ -5722,8 +5721,6 @@ class MarketDataManager:
             except Exception as exc:
                 self._logger.error("Failure in _readiness_state: %s", exc, exc_info=exc)
                 spot_ready = False
-            if not spot_ready and spot_bar_ready:
-                spot_ready = True
         return {
             "hard_ready": bool(spot_ready and ce_ready and pe_ready),
             "spot_ready": spot_ready,
