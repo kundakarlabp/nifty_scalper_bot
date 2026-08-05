@@ -2169,6 +2169,29 @@ class StrategyManager(_BaseStrategyManager):
                     continue
             return None
 
+        def _history_ema(period: int) -> float | None:
+            if role != "futures_context":
+                return None
+            getter = getattr(getattr(self, "_indicator_engine", None), "get_ema", None)
+            if not callable(getter):
+                return None
+            try:
+                value = getter(symbol, period=period)
+            except TypeError:
+                value = getter(symbol, period)
+            except Exception as exc:  # noqa: BLE001 - context remains fail-closed
+                log.debug(
+                    "FUTURES_CONTEXT_EMA_FALLBACK_FAILED symbol=%s period=%s error=%s",
+                    symbol,
+                    period,
+                    exc,
+                )
+                return None
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
         context_kind = (
             "price_direction"
             if role == "spot_context"
@@ -2192,11 +2215,33 @@ class StrategyManager(_BaseStrategyManager):
         vwap_slope = _num("vwap_slope")
         ema_slope = _num("ema_slope")
         vwap_slope_source = "indicator" if vwap_slope is not None else "unavailable"
+        ema_fast = _num("ema_fast", "ema_9", "ema9")
+        ema_slow = _num("ema_slow", "ema_21", "ema21")
+        ema_50 = _num("ema_50", "ema50")
+        ema_fast_source = "indicator" if ema_fast is not None else "unavailable"
+        ema_slow_source = "indicator" if ema_slow is not None else "unavailable"
+        ema_50_source = "indicator" if ema_50 is not None else "unavailable"
+        if role == "futures_context":
+            if ema_fast is None:
+                ema_fast = _history_ema(9)
+                if ema_fast is not None:
+                    ema_fast_source = "indicator_engine_history"
+            if ema_slow is None:
+                ema_slow = _history_ema(21)
+                if ema_slow is not None:
+                    ema_slow_source = "indicator_engine_history"
+            if ema_50 is None:
+                ema_50 = _history_ema(50)
+                if ema_50 is not None:
+                    ema_50_source = "indicator_engine_history"
         direction_inputs = dict(indicators)
         direction_inputs.update(
             futures_volume_ratio=futures_volume_ratio,
             vwap_slope=vwap_slope,
             ema_slope=ema_slope,
+            ema_fast=ema_fast,
+            ema_slow=ema_slow,
+            ema_50=ema_50,
         )
         derived_direction, derived_confidence, derived_reasons = self._derive_context_direction(
             direction_inputs,
@@ -2206,8 +2251,11 @@ class StrategyManager(_BaseStrategyManager):
             "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
             "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
-            "ema_fast": _num("ema_fast", "ema_9", "ema9"),
-            "ema_slow": _num("ema_slow", "ema_21", "ema21"), "ema_50": _num("ema_50", "ema50"),
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow, "ema_50": ema_50,
+            "ema_fast_source": ema_fast_source,
+            "ema_slow_source": ema_slow_source,
+            "ema_50_source": ema_50_source,
             "adx": _num("adx"), "atr": _num("atr"), "volume": _num("volume"),
             "avg_volume": _num("avg_volume"), "futures_volume_ratio": futures_volume_ratio,
             "vwap_slope": vwap_slope, "ema_slope": ema_slope,
