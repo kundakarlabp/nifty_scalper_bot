@@ -3740,16 +3740,38 @@ class StrategyManager(_BaseStrategyManager):
         except (TypeError, ValueError):
             return 0.0
 
-    def _extract_context_score(self, vote: StrategyVote) -> float:
-        """Args: vote. Returns: context score. Raises: none."""
+    def _extract_raw_context_score(self, vote: StrategyVote) -> float:
+        """Return context evidence before regime weighting."""
         payload = dict(vote.metadata or {})
-        for key in ("context_bonus_score", "context_score", "raw_setup_score", "raw_vote_score", "vote_score"):
+        for key in (
+            "context_bonus_score",
+            "context_score",
+            "raw_setup_score",
+            "raw_vote_score",
+            "vote_score",
+        ):
             try:
                 if payload.get(key) is not None:
                     return max(0.0, float(payload.get(key)))
             except (TypeError, ValueError):
                 continue
         return max(0.0, self._extract_raw_score(vote))
+
+    def _extract_context_score(self, vote: StrategyVote) -> float:
+        """Return positive context evidence after exactly one regime weighting."""
+        payload = dict(vote.metadata or {})
+        explicit_weighted = payload.get("regime_weighted_context_score")
+        try:
+            if explicit_weighted is not None:
+                return max(0.0, float(explicit_weighted))
+        except (TypeError, ValueError):
+            pass
+        raw_context_score = self._extract_raw_context_score(vote)
+        try:
+            regime_weight = float(payload.get("regime_weight", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            regime_weight = 1.0
+        return max(0.0, raw_context_score * max(0.0, regime_weight))
 
     def _context_vote_is_timestamped(self, vote: StrategyVote) -> bool:
         """Return whether a context vote proves it is current.
@@ -4267,6 +4289,10 @@ class StrategyManager(_BaseStrategyManager):
                     and context_quote_ready
                 ):
                     qualifying_context_votes.append(context_vote)
+            confirmed_raw_context_score = sum(
+                self._extract_raw_context_score(vote)
+                for vote in qualifying_context_votes
+            )
             confirmed_positive_context = sum(
                 self._extract_context_score(vote)
                 for vote in qualifying_context_votes
@@ -4290,6 +4316,43 @@ class StrategyManager(_BaseStrategyManager):
                 and qualifying_context_votes
                 and context_confirmed_final_score >= selected_single_min
             )
+            if qualifying_context_votes:
+                log.info(
+                    "SINGLE_TRIGGER_CONTEXT_SCORE symbol=%s trigger_strategy=%s "
+                    "weighted_trigger_score=%.3f raw_context_score=%.3f "
+                    "regime_weighted_context_score=%.3f context_bonus=%.3f "
+                    "context_penalty=%.3f final_score=%.3f final_min=%.3f allowed=%s",
+                    symbol_norm,
+                    best_vote.strategy,
+                    weighted_trigger_score,
+                    confirmed_raw_context_score,
+                    confirmed_positive_context,
+                    confirmed_context_bonus,
+                    context_penalty,
+                    context_confirmed_final_score,
+                    selected_single_min,
+                    context_confirmed_single_allowed,
+                    extra={
+                        "event": "SINGLE_TRIGGER_CONTEXT_SCORE",
+                        "symbol": symbol_norm,
+                        "trigger_strategy": best_vote.strategy,
+                        "weighted_trigger_score": weighted_trigger_score,
+                        "raw_context_score": confirmed_raw_context_score,
+                        "regime_weighted_context_score": confirmed_positive_context,
+                        "context_bonus": confirmed_context_bonus,
+                        "context_penalty": context_penalty,
+                        "final_score": context_confirmed_final_score,
+                        "final_min": selected_single_min,
+                        "allowed": context_confirmed_single_allowed,
+                        "qualifying_context_strategies": [
+                            vote.strategy for vote in qualifying_context_votes
+                        ],
+                        "qualifying_context_regime_weights": [
+                            float((vote.metadata or {}).get("regime_weight", 1.0) or 1.0)
+                            for vote in qualifying_context_votes
+                        ],
+                    },
+                )
 
             scalp_fallback_allowed = bool(
                 (allow_scalp_single and threshold_passed)
@@ -4395,6 +4458,15 @@ class StrategyManager(_BaseStrategyManager):
                 ]
                 metadata["context_confirmation_final_score"] = round(
                     context_confirmed_final_score, 3
+                )
+                metadata["context_confirmation_raw_score"] = round(
+                    confirmed_raw_context_score, 3
+                )
+                metadata["context_confirmation_regime_weighted_score"] = round(
+                    confirmed_positive_context, 3
+                )
+                metadata["context_confirmation_score_min"] = round(
+                    selected_single_min, 3
                 )
             elif scalp_fallback_allowed:
                 metadata_stage = "single_vote_scalp_controlled"
