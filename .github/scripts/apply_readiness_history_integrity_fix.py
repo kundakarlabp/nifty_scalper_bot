@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import subprocess
 from pathlib import Path
 
@@ -47,6 +48,20 @@ def replace_function(
     path.write_text(text[:start] + new_function + text[end:])
 
 
+def prove_red() -> None:
+    result = run(
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        str(TEST.relative_to(ROOT)),
+        check=False,
+    )
+    if result.returncode == 0:
+        raise RuntimeError("red phase unexpectedly passed")
+    print("RED_PHASE_CONFIRMED", flush=True)
+
+
 def apply_fix() -> None:
     replace_once(
         RUNNER,
@@ -58,7 +73,7 @@ def apply_fix() -> None:
         RUNNER,
         "    async def _backfill_history(self) -> None:\n",
         "    def _hydrate_missing_bars(",
-        '''    async def _backfill_history(self) -> None:\n        """\n        Restore canonical history for active symbols still short after app hydration.\n        """\n        total_bars = 0\n\n        try:\n            with self._lock:\n                targets = list(self._active_symbols)\n\n            cold_targets = [\n                symbol\n                for symbol in targets\n                if len(self._indicator_engine.get_history(symbol) or [])\n                < self._required_candles\n            ]\n            if not cold_targets:\n                self._logger.info(\n                    "⏭️ Skipping historical backfill (indicators fully warmed up)"\n                )\n                return\n\n            self._logger.warning(\n                "⚠️ StrategyRunner history short! Triggering targeted fallback backfill..."\n            )\n\n            for symbol in cold_targets:\n                try:\n                    target = self._required_bars_for_symbol(symbol)\n                    rows = self._get_mdm_bars(symbol, target)\n                    if rows:\n                        runner_count = self.reseed_history_from_bars(\n                            symbol,\n                            rows,\n                            source="runner_fallback_backfill",\n                            min_bars=target,\n                        )\n                        total_bars += runner_count\n                        if runner_count >= target:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.READY\n                            )\n                        else:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.HYDRATING\n                            )\n                            self._request_mdm_hydration(symbol, target)\n                    else:\n                        self._set_symbol_hydration_state(\n                            symbol, SymbolState.HYDRATING\n                        )\n                        self._request_mdm_hydration(symbol, target)\n\n                except Exception as exc:\n                    self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)\n                    self._logger.error(\n                        "❌ Fallback fetch failed for %s: %s", symbol, exc\n                    )\n\n        except Exception as exc:\n            self._logger.error(\n                "❌ History backfill crashed: %s", exc, exc_info=True\n            )\n\n        if total_bars > 0:\n            self._logger.info(\n                "✅ Emergency Backfill complete. Reseeded %d bars.", total_bars\n            )\n\n''',
+        '''    async def _backfill_history(self) -> None:\n        """Restore canonical history for active symbols still short after app hydration."""\n        total_bars = 0\n\n        try:\n            with self._lock:\n                targets = list(self._active_symbols)\n\n            cold_targets = [\n                symbol\n                for symbol in targets\n                if len(self._indicator_engine.get_history(symbol) or [])\n                < self._required_candles\n            ]\n            if not cold_targets:\n                self._logger.info(\n                    "⏭️ Skipping historical backfill (indicators fully warmed up)"\n                )\n                return\n\n            self._logger.warning(\n                "⚠️ StrategyRunner history short! Triggering targeted fallback backfill..."\n            )\n\n            for symbol in cold_targets:\n                try:\n                    target = self._required_bars_for_symbol(symbol)\n                    rows = self._get_mdm_bars(symbol, target)\n                    if rows:\n                        runner_count = self.reseed_history_from_bars(\n                            symbol,\n                            rows,\n                            source="runner_fallback_backfill",\n                            min_bars=target,\n                        )\n                        total_bars += runner_count\n                        if runner_count >= target:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.READY\n                            )\n                        else:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.HYDRATING\n                            )\n                            self._request_mdm_hydration(symbol, target)\n                    else:\n                        self._set_symbol_hydration_state(\n                            symbol, SymbolState.HYDRATING\n                        )\n                        self._request_mdm_hydration(symbol, target)\n\n                except Exception as exc:\n                    self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)\n                    self._logger.error(\n                        "❌ Fallback fetch failed for %s: %s", symbol, exc\n                    )\n\n        except Exception as exc:\n            self._logger.error(\n                "❌ History backfill crashed: %s", exc, exc_info=True\n            )\n\n        if total_bars > 0:\n            self._logger.info(\n                "✅ Emergency Backfill complete. Reseeded %d bars.", total_bars\n            )\n\n''',
     )
 
     replace_once(
@@ -71,27 +86,10 @@ def apply_fix() -> None:
         '''        spot_ready = True\n        if spot:\n            spot_bar_ready = bars.get(spot, 0) >= min_bars\n            try:\n                spot_ready = bool(\n                    self._is_symbol_fresh(spot, self._tick_stale_threshold_ms)\n                )\n            except Exception as exc:\n                self._logger.error("Failure in _readiness_state: %s", exc, exc_info=exc)\n                spot_ready = False\n            if not spot_ready and spot_bar_ready:\n                spot_ready = True\n''',
         '''        spot_ready = True\n        if spot:\n            try:\n                spot_ready = bool(\n                    self._is_symbol_fresh(spot, self._tick_stale_threshold_ms)\n                )\n            except Exception as exc:\n                self._logger.error("Failure in _readiness_state: %s", exc, exc_info=exc)\n                spot_ready = False\n            if not spot_ready:\n                missing_hard.append("fresh_spot_tick_missing")\n''',
     )
+    print("NARROW_FIX_APPLIED", flush=True)
 
 
-def main() -> None:
-    focused = [
-        str(TEST.relative_to(ROOT)),
-        "tests/strategies/test_canonical_runner_history_sync.py",
-        "tests/data/test_canonical_history_hydration.py",
-        "tests/test_market_data_manager_spot_readiness.py",
-    ]
-    red = run("python", "-m", "pytest", "-q", focused[0], check=False)
-    if red.returncode == 0:
-        raise RuntimeError("red phase unexpectedly passed")
-    print("RED_PHASE_CONFIRMED", flush=True)
-
-    apply_fix()
-    run("python", "-m", "pytest", "-q", *focused)
-    run("python", "-m", "compileall", "-q", "src/nifty_scalper_bot")
-    run("python", "-m", "ruff", "check", str(RUNNER.relative_to(ROOT)), str(MDM.relative_to(ROOT)), focused[0])
-    run("python", "-m", "black", "--check", str(RUNNER.relative_to(ROOT)), str(MDM.relative_to(ROOT)), focused[0])
-    run("git", "diff", "--check")
-
+def commit_clean_diff() -> None:
     run("git", "config", "user.name", "github-actions[bot]")
     run(
         "git",
@@ -124,6 +122,18 @@ def main() -> None:
         "fix(runtime): preserve readiness and history integrity",
     )
     run("git", "push", "origin", "HEAD")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("phase", choices=("red", "apply", "commit"))
+    phase = parser.parse_args().phase
+    if phase == "red":
+        prove_red()
+    elif phase == "apply":
+        apply_fix()
+    else:
+        commit_clean_diff()
 
 
 if __name__ == "__main__":
