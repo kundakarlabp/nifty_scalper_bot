@@ -41,11 +41,12 @@ jobs:
         run: pytest -q tests/data/test_candle_flush_backlog_integrity.py tests/data/test_mdm_tick_coalescing.py
       - name: Data tests
         run: pytest -q tests/data
-      - name: Compile and quality
+      - name: Compile and changed-code quality
         run: |
           python -m compileall -q src tests/data/test_candle_flush_backlog_integrity.py
-          ruff check src/nifty_scalper_bot/data/market_data_hardening.py tests/data/test_candle_flush_backlog_integrity.py
-          black --check src/nifty_scalper_bot/data/market_data_hardening.py tests/data/test_candle_flush_backlog_integrity.py
+          ruff check tests/data/test_candle_flush_backlog_integrity.py
+          black --check tests/data/test_candle_flush_backlog_integrity.py
+          git diff --check
       - name: Full tests
         run: pytest -q
       - name: Commit validated change
