@@ -29,6 +29,8 @@ jobs:
         run: python .github/scripts/apply_readiness_history_integrity_fix.py red
       - name: Apply narrow production fix
         run: python .github/scripts/apply_readiness_history_integrity_fix.py apply
+      - name: Format new regression test
+        run: python -m black tests/strategies/test_runtime_history_activation_integrity.py
       - name: Focused integrity regressions
         run: python -m pytest -q tests/strategies/test_runtime_history_activation_integrity.py
       - name: Related history regressions
@@ -41,7 +43,7 @@ jobs:
         run: python -m compileall -q src/nifty_scalper_bot
       - name: New test lint
         run: python -m ruff check tests/strategies/test_runtime_history_activation_integrity.py
-      - name: New test format
+      - name: New test format check
         run: python -m black --check tests/strategies/test_runtime_history_activation_integrity.py
       - name: Diff integrity
         run: git diff --check
