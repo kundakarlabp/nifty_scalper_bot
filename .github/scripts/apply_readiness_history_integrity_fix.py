@@ -104,11 +104,18 @@ def commit_clean_diff() -> None:
         str(WORKFLOW.relative_to(ROOT)),
         str(SCRIPT.relative_to(ROOT)),
     )
-    run("git", "add", str(RUNNER.relative_to(ROOT)), str(MDM.relative_to(ROOT)))
+    run(
+        "git",
+        "add",
+        str(RUNNER.relative_to(ROOT)),
+        str(MDM.relative_to(ROOT)),
+        str(TEST.relative_to(ROOT)),
+    )
     staged = run("git", "diff", "--cached", "--name-only")
     expected = {
         str(RUNNER.relative_to(ROOT)),
         str(MDM.relative_to(ROOT)),
+        str(TEST.relative_to(ROOT)),
         str(WORKFLOW.relative_to(ROOT)),
         str(SCRIPT.relative_to(ROOT)),
     }
