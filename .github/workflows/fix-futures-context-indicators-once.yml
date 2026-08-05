@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   validate:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -27,7 +28,9 @@ jobs:
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply correction and regression
-        run: python .github/scripts/apply_futures_context_fix.py
+        run: |
+          python .github/scripts/apply_futures_context_fix.py
+          python -m black -q tests/core/test_strategy_manager_context_age.py
       - name: Focused regression
         run: python -m pytest -q tests/core/test_strategy_manager_context_age.py
       - name: Adjacent futures context tests
