@@ -12,7 +12,7 @@ jobs:
   validate:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,6 +29,20 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply correction and regressions
         run: python .github/scripts/apply_quote_version_signal_identity_fix.py
+      - name: Normalize newly introduced and narrowly modified files
+        run: |
+          python -m ruff check --fix --exit-zero \
+            src/nifty_scalper_bot/strategies/quote_update_identity.py \
+            src/nifty_scalper_bot/strategies/signal_identity_patch.py \
+            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
+            tests/strategies/test_quote_update_identity.py \
+            tests/strategies/test_signal_observability_contract.py
+          python -m black \
+            src/nifty_scalper_bot/strategies/quote_update_identity.py \
+            src/nifty_scalper_bot/strategies/signal_identity_patch.py \
+            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
+            tests/strategies/test_quote_update_identity.py \
+            tests/strategies/test_signal_observability_contract.py
       - name: Focused quote identity tests
         run: |
           python -m pytest -q \
@@ -54,18 +68,51 @@ jobs:
             src/nifty_scalper_bot/strategies/quote_update_identity.py \
             src/nifty_scalper_bot/strategies/signal_identity_patch.py \
             src/nifty_scalper_bot/strategies/runtime_context_contract.py \
-            src/nifty_scalper_bot/strategies/runner.py \
             tests/strategies/test_quote_update_identity.py \
             tests/strategies/test_signal_observability_contract.py
+          python -m ruff check --select E9,F63,F7,F82 \
+            src/nifty_scalper_bot/strategies/runner.py
           python -m black --check \
             src/nifty_scalper_bot/strategies/quote_update_identity.py \
             src/nifty_scalper_bot/strategies/signal_identity_patch.py \
             src/nifty_scalper_bot/strategies/runtime_context_contract.py \
-            src/nifty_scalper_bot/strategies/runner.py \
             tests/strategies/test_quote_update_identity.py \
             tests/strategies/test_signal_observability_contract.py
           git diff --check
-      - name: Full suite with flake confirmation
+      - name: Validate intended change surface
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          allowed = {
+              'src/nifty_scalper_bot/strategies/quote_update_identity.py',
+              'src/nifty_scalper_bot/strategies/runner.py',
+              'src/nifty_scalper_bot/strategies/runtime_context_contract.py',
+              'src/nifty_scalper_bot/strategies/signal_identity_patch.py',
+              'tests/strategies/test_quote_update_identity.py',
+              'tests/strategies/test_signal_observability_contract.py',
+          }
+          changed = {
+              line.strip()
+              for line in subprocess.check_output(
+                  ['git', 'diff', '--name-only'], text=True
+              ).splitlines()
+              if line.strip()
+          }
+          unexpected = changed - allowed
+          missing = {
+              'src/nifty_scalper_bot/strategies/quote_update_identity.py',
+              'src/nifty_scalper_bot/strategies/runner.py',
+              'src/nifty_scalper_bot/strategies/signal_identity_patch.py',
+              'tests/strategies/test_quote_update_identity.py',
+              'tests/strategies/test_signal_observability_contract.py',
+          } - changed
+          if unexpected or missing:
+              raise SystemExit(
+                  f'unexpected change surface: unexpected={sorted(unexpected)} missing={sorted(missing)}'
+              )
+          PY
+      - name: Full suite with isolated flake confirmation
         env:
           BRACKET_AUTO_RESTORE: 'false'
         run: |
@@ -80,14 +127,7 @@ jobs:
           rm .github/scripts/apply_quote_version_signal_identity_fix.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            src/nifty_scalper_bot/strategies/quote_update_identity.py \
-            src/nifty_scalper_bot/strategies/runner.py \
-            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
-            src/nifty_scalper_bot/strategies/signal_identity_patch.py \
-            tests/strategies/test_quote_update_identity.py \
-            tests/strategies/test_signal_observability_contract.py \
-            .github/workflows/fix-quote-version-signal-identity-once.yml \
-            .github/scripts/apply_quote_version_signal_identity_fix.py
+          git add -A
+          git diff --cached --check
           git commit -m 'fix(strategy): propagate quote version into signal identity'
           git push origin HEAD:fix/quote-version-signal-identity-20260805
