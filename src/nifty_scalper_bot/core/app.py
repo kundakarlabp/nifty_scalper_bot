@@ -34,23 +34,27 @@ Safe-edit notes:
 from __future__ import annotations
 
 import asyncio  # Required for startup reconciliation and background tasks
-import hashlib
+from collections import OrderedDict
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field, replace
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
+from importlib import import_module
+from importlib import metadata as importlib_metadata
 import inspect
+import hashlib
 import logging
 import math
 import os
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
+from pathlib import Path
 import random
 import sqlite3
 import threading
 import time as time_module
 import uuid
-from collections import OrderedDict
-from contextlib import suppress
-from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime, time, timedelta, timezone
-from importlib import import_module
-from importlib import metadata as importlib_metadata
-from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -58,21 +62,19 @@ from typing import (
     Coroutine,
     Iterable,
     Literal,
-    Mapping,
     Sequence,
+    Mapping,
     TypedDict,
     TypeVar,
     cast,
 )
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytz
-
-from nifty_scalper_bot.config.defaults import (
-    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
-)
 from nifty_scalper_bot.config.env_utils import parse_float_env
+from nifty_scalper_bot.journal.trade_journal import TradeJournal
+from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
+
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -80,13 +82,17 @@ from nifty_scalper_bot.core.active_basket import (
     normalize_active_basket_schema,
     pick_atm_option_symbols_from_basket,
 )
+
 from nifty_scalper_bot.core.history_roles import (
     resolve_symbol_history_role as _shared_resolve_symbol_history_role,
 )
+
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
     RobustDataProvider,
 )
+from nifty_scalper_bot.infra.watchdog import start_watchdog
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.execution.affordability import (
     evaluate_minimum_lot_affordability,
 )
@@ -95,15 +101,11 @@ from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
     normalize_readiness_blockers,
 )
-from nifty_scalper_bot.infra.watchdog import start_watchdog
-from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
-from nifty_scalper_bot.journal.trade_journal import TradeJournal
 from nifty_scalper_bot.utils.market_hours import (
     get_runtime_market_mode,
     post_market_basket_refresh_seconds,
     post_market_quiet_mode_enabled,
 )
-from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 _START_TIME = time_module.monotonic()
@@ -1426,8 +1428,6 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.config.settings import Settings, get_settings
-from nifty_scalper_bot.core.contract_selector import get_atm_contracts
-from nifty_scalper_bot.core.instrument_manager import InstrumentManager
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.option_universe import OptionUniverseManager
@@ -1449,18 +1449,11 @@ from nifty_scalper_bot.execution.bracket_manager import (
     BracketManager,
     SupportsCancelOrder,
 )
+
 from nifty_scalper_bot.execution.lifecycle_manager import LifecycleManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
-from nifty_scalper_bot.execution.ownership import (
-    SymbolLifecycleClassification,
-    classify_symbol_lifecycle,
-)
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
-from nifty_scalper_bot.execution.position_snapshot import (
-    BrokerExposureState,
-    decode_position_snapshot,
-)
 from nifty_scalper_bot.execution.post_fill_monitor import PostFillMonitor
 from nifty_scalper_bot.execution.readiness import (
     HydrationStatus,
@@ -1480,11 +1473,11 @@ from nifty_scalper_bot.infra.structured_logger import (
 )
 from nifty_scalper_bot.notifications.telegram_commands import (
     Services as TelegramCommandServices,
-)
-from nifty_scalper_bot.notifications.telegram_commands import (
     register_telegram_commands,
 )
+from nifty_scalper_bot.core.instrument_manager import InstrumentManager
 from nifty_scalper_bot.options.contracts import OptionsContractStore
+from nifty_scalper_bot.core.contract_selector import get_atm_contracts
 from nifty_scalper_bot.options.strike_selector import StrikeSelector
 from nifty_scalper_bot.risk import RiskManager, RiskSnapshot, RiskState
 from nifty_scalper_bot.risk.session_gate import build_session_guard
@@ -1494,8 +1487,6 @@ from nifty_scalper_bot.storage import HubStore
 from nifty_scalper_bot.strategies.elite_strategies.builder import (
     build_elite_strategies,
     build_production_strategy_profile,
-)
-from nifty_scalper_bot.strategies.elite_strategies.builder import (
     get_strategy_tags as elite_strategy_tags,
 )
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
@@ -1507,6 +1498,7 @@ from nifty_scalper_bot.streaming import (
 )
 from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.utils.config_validation import validate_execution_config
+from nifty_scalper_bot.utils.metrics import critical_errors_total
 from nifty_scalper_bot.utils.env import (
     coalesce_bool,
     coalesce_float,
@@ -1533,13 +1525,20 @@ from nifty_scalper_bot.utils.market_hours import (
     allow_offhours_testing_safe,
     get_market_session_state,
     get_market_state,
-    is_market_open_now,
     is_market_open_session,
+    is_market_open_now,
 )
-from nifty_scalper_bot.utils.metrics import critical_errors_total, ensure_multiproc_dir
+from nifty_scalper_bot.execution.ownership import (
+    SymbolLifecycleClassification,
+    classify_symbol_lifecycle,
+)
+from nifty_scalper_bot.execution.position_snapshot import (
+    BrokerExposureState,
+    decode_position_snapshot,
+)
+from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
-from nifty_scalper_bot.utils.reasons import SOFT
-from nifty_scalper_bot.utils.reasons import canonical as canonical_reason
+from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
 from nifty_scalper_bot.utils.symbols import (
     canonical,
     normalize_symbol,
@@ -1547,15 +1546,14 @@ from nifty_scalper_bot.utils.symbols import (
 )
 
 if TYPE_CHECKING:
-    from telegram.ext import Application
-
-    from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
     from nifty_scalper_bot.notifications.telegram_enhanced import (
         TelegramEnhancedNotifier,
     )
+    from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
     from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
         TelegramWebhookController,
     )
+    from telegram.ext import Application
 else:
     TelegramEnhancedNotifier = Any
     TelegramWebhookController = Any
@@ -2592,6 +2590,7 @@ def _telegram_requires_http_controller(settings: Settings) -> bool:
     return _telegram_transport_mode(settings) == "webhook"
 
 
+
 def _reconciliation_max_age_seconds() -> float:
     """Max age of a successful reconciliation before it is treated as stale.
 
@@ -2634,8 +2633,6 @@ def get_http_app() -> FastAPI:
         )
         from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
             TelegramWebhookController as _TelegramWebhookController,
-        )
-        from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
             register_webhook as _register_webhook,
         )
     except Exception as exc:
@@ -3665,8 +3662,7 @@ class RuntimeSelfChecker:
             None.
         """
         # ✅ FIX: Streamer being disconnected outside trading hours is expected
-        from datetime import datetime
-        from datetime import time as dt_time
+        from datetime import datetime, time as dt_time
         from zoneinfo import ZoneInfo
 
         ist = ZoneInfo("Asia/Kolkata")
@@ -4739,8 +4735,8 @@ def parse_nifty_option_symbol(symbol: str) -> dict | None:
     Parse NIFTY option symbol to extract strike, expiry, and option type.
     """
     import calendar
-    import re
     from datetime import datetime, timedelta, timezone  # Ensure timezone is imported
+    import re
 
     symbol = symbol.replace("NFO:", "").strip()
 
@@ -8257,7 +8253,9 @@ def _wire_and_start_message_bus(ctx: BotContext) -> bool:
             # continues for independent observers; DataHub simply no longer
             # re-injects from it. DataHub is the single owner of normalized
             # tick state.
-            LOGGER.info("MESSAGE_BUS_TICK_OWNER owner=data_hub ingress=direct_mdm_only")
+            LOGGER.info(
+                "MESSAGE_BUS_TICK_OWNER owner=data_hub ingress=direct_mdm_only"
+            )
         elif runner is not None:
             bus.subscribe_once(
                 MessageType.TICK,
@@ -9668,9 +9666,15 @@ async def _recompute_and_push_runtime_readiness(
         and all_selected_options_exec_ready
     )
     missing = []
-    if live_mode and selected_options_data_exec_ready and not execution_capacity_ready:
+    if (
+        live_mode
+        and selected_options_data_exec_ready
+        and not execution_capacity_ready
+    ):
         capacity_decisions = [
-            item for item in (ce_affordability, pe_affordability) if item is not None
+            item
+            for item in (ce_affordability, pe_affordability)
+            if item is not None
         ]
         if capacity_decisions and all(item.determinate for item in capacity_decisions):
             missing.append("minimum_lot_unaffordable")
@@ -10045,8 +10049,9 @@ def _commit_active_dynamic_basket(
         from nifty_scalper_bot.core.active_basket import extract_symbol_strike
 
         selected_strike = extract_symbol_strike(symbol)
-        return selected_strike is not None and float(selected_strike) == float(
-            atm_strike
+        return (
+            selected_strike is not None
+            and float(selected_strike) == float(atm_strike)
         )
 
     if not _selected_matches_atm(selected_ce, "CE"):
@@ -14978,14 +14983,13 @@ def _should_reconcile_now(ctx: BotContext) -> bool:
             "HEALTH_RECONCILE_SKIP_WHEN_CLOSED", "true"
         ).strip().lower() not in {"1", "true", "yes", "on"}:
             return True
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
         from nifty_scalper_bot.risk.session_gate import (
             MARKET_CLOSE,
             MARKET_OPEN,
             _is_market_open,
         )
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
         now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
         if _is_market_open(now_ist, start=MARKET_OPEN, end=MARKET_CLOSE):
@@ -15255,12 +15259,8 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                 average_price=avg_price,
                                 position_side=pos.side,
                             )
-                        except (
-                            Exception
-                        ) as guard_exc:  # noqa: BLE001 - keep other symbols blocked independently
-                            guard_failed_reason = (
-                                f"{type(guard_exc).__name__}: {guard_exc}"
-                            )
+                        except Exception as guard_exc:  # noqa: BLE001 - keep other symbols blocked independently
+                            guard_failed_reason = f"{type(guard_exc).__name__}: {guard_exc}"
                             LOGGER.exception(
                                 "POSITION_ORPHAN_GUARD_FAILED symbol=%s quantity=%s position_side=%s guard_result=%r bracket_managed=%s reason=%s",
                                 norm_symbol,
@@ -15275,20 +15275,14 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                     "quantity": pos.quantity,
                                     "position_side": pos.side,
                                     "guard_result": guard_result,
-                                    "bracket_managed": bm.is_symbol_managed(
-                                        norm_symbol
-                                    ),
+                                    "bracket_managed": bm.is_symbol_managed(norm_symbol),
                                     "reason": guard_failed_reason,
                                 },
                             )
                             continue
 
-                        bracket_id = (
-                            guard_result if isinstance(guard_result, str) else None
-                        )
-                        lifecycle_getter = getattr(
-                            bm, "get_symbol_lifecycle_snapshot", None
-                        )
+                        bracket_id = guard_result if isinstance(guard_result, str) else None
+                        lifecycle_getter = getattr(bm, "get_symbol_lifecycle_snapshot", None)
                         lifecycle_snapshot = (
                             lifecycle_getter(norm_symbol)
                             if callable(lifecycle_getter)
@@ -15296,77 +15290,47 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                         )
                         bracket_managed = bool(
                             lifecycle_snapshot.get("managed")
-                            if isinstance(lifecycle_snapshot, Mapping)
-                            and lifecycle_snapshot
+                            if isinstance(lifecycle_snapshot, Mapping) and lifecycle_snapshot
                             else bm.is_symbol_managed(norm_symbol)
                         )
                         verification_reason = None
                         if not bracket_managed:
                             verification_reason = "symbol_not_managed"
-                        elif (
-                            isinstance(lifecycle_snapshot, Mapping)
-                            and lifecycle_snapshot
-                        ):
-                            active_ids = set(
-                                lifecycle_snapshot.get("active_bracket_ids") or ()
-                            )
+                        elif isinstance(lifecycle_snapshot, Mapping) and lifecycle_snapshot:
+                            active_ids = set(lifecycle_snapshot.get("active_bracket_ids") or ())
                             if not active_ids:
                                 verification_reason = "no_active_bracket"
                             elif bracket_id and bracket_id not in active_ids:
                                 verification_reason = "returned_bracket_not_active"
-                            elif (
-                                int(lifecycle_snapshot.get("protected_quantity") or 0)
-                                <= 0
-                            ):
+                            elif int(lifecycle_snapshot.get("protected_quantity") or 0) <= 0:
                                 verification_reason = "bracket_quantity_not_positive"
                             elif not bool(lifecycle_snapshot.get("has_valid_stop")):
                                 verification_reason = "bracket_stop_missing"
-                            elif bool(
-                                lifecycle_snapshot.get("pending_entry")
-                            ) and not bool(lifecycle_snapshot.get("orphan_origin")):
-                                verification_reason = (
-                                    "pending_entry_not_orphan_protection"
-                                )
+                            elif bool(lifecycle_snapshot.get("pending_entry")) and not bool(
+                                lifecycle_snapshot.get("orphan_origin")
+                            ):
+                                verification_reason = "pending_entry_not_orphan_protection"
                         elif bracket_id:
-                            bracket = (
-                                bm.get_bracket(bracket_id)
-                                if hasattr(bm, "get_bracket")
-                                else None
-                            )
+                            bracket = bm.get_bracket(bracket_id) if hasattr(bm, "get_bracket") else None
                             if bracket is None:
                                 verification_reason = "returned_bracket_missing"
                             else:
-                                bracket_symbol = normalize_symbol(
-                                    getattr(bracket, "symbol", "")
-                                ) or getattr(bracket, "symbol", "")
-                                bracket_status = str(
-                                    getattr(bracket, "status", "") or ""
-                                ).upper()
-                                bracket_qty = int(
-                                    getattr(
-                                        bracket, "quantity", getattr(bracket, "qty", 0)
-                                    )
-                                    or 0
-                                )
-                                stop_value = getattr(
-                                    bracket, "stop_loss", getattr(bracket, "sl", None)
-                                )
+                                bracket_symbol = normalize_symbol(getattr(bracket, "symbol", "")) or getattr(bracket, "symbol", "")
+                                bracket_status = str(getattr(bracket, "status", "") or "").upper()
+                                bracket_qty = int(getattr(bracket, "quantity", getattr(bracket, "qty", 0)) or 0)
+                                stop_value = getattr(bracket, "stop_loss", getattr(bracket, "sl", None))
                                 if bracket_symbol != norm_symbol:
                                     verification_reason = "bracket_symbol_mismatch"
                                 elif bracket_status == "CLOSED":
                                     verification_reason = "bracket_closed"
                                 elif bracket_qty <= 0:
-                                    verification_reason = (
-                                        "bracket_quantity_not_positive"
-                                    )
+                                    verification_reason = "bracket_quantity_not_positive"
                                 elif stop_value is None:
                                     verification_reason = "bracket_stop_missing"
 
                         if verification_reason is None:
                             if hasattr(ctx, "unprotected_broker_positions"):
-                                ctx.unprotected_broker_positions.discard(
-                                    str(norm_symbol)
-                                )
+                                ctx.unprotected_broker_positions.discard(str(norm_symbol))
                             LOGGER.info(
                                 "POSITION_ADOPTED_TO_BRACKET symbol=%s quantity=%s",
                                 norm_symbol,
@@ -15399,9 +15363,7 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                             )
 
                 if hasattr(ctx, "unprotected_broker_positions"):
-                    ctx.unprotected_broker_position = bool(
-                        ctx.unprotected_broker_positions
-                    )
+                    ctx.unprotected_broker_position = bool(ctx.unprotected_broker_positions)
 
             # =================================================================
             # ✅ D. CLEANUP GHOST BRACKETS (Safety Cleanup)
@@ -15444,13 +15406,11 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                 _b = (getattr(bm, "_brackets", {}) or {}).get(_bid)
                                 if _b is None:
                                     continue
-                                _is_orphan_origin = (
-                                    str(
-                                        getattr(_b, "entry_order_id", "") or ""
-                                    ).startswith("orphan_")
-                                    or str(getattr(_b, "tag", "") or "")
-                                    == "orphan_recovery"
-                                )
+                                _is_orphan_origin = str(
+                                    getattr(_b, "entry_order_id", "") or ""
+                                ).startswith("orphan_") or str(
+                                    getattr(_b, "tag", "") or ""
+                                ) == "orphan_recovery"
                                 if not getattr(_b, "entry_confirmed", False):
                                     if not _is_orphan_origin:
                                         _in_fill_window = True
@@ -15470,9 +15430,7 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                     },
                                 )
                                 continue
-                            exposure_getter = getattr(
-                                ctx.position_manager, "broker_exposure_state", None
-                            )
+                            exposure_getter = getattr(ctx.position_manager, "broker_exposure_state", None)
                             exposure = (
                                 exposure_getter(ghost_sym)
                                 if callable(exposure_getter)
@@ -15491,11 +15449,7 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                 broker_exposure_state=exposure,
                             )
                             if (
-                                exposure
-                                not in (
-                                    BrokerExposureState.FLAT,
-                                    BrokerExposureState.ABSENT,
-                                )
+                                exposure not in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT)
                                 or lifecycle != SymbolLifecycleClassification.GHOST_FLAT
                                 or not bool(exposure_snapshot.get("fresh", False))
                             ):
@@ -15509,18 +15463,10 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                     extra={
                                         "event": "GHOST_SWEEP_DEFERRED_BROKER_UNKNOWN",
                                         "symbol": ghost_sym,
-                                        "exposure_state": getattr(
-                                            exposure, "value", str(exposure)
-                                        ),
-                                        "snapshot_age_seconds": exposure_snapshot.get(
-                                            "age_seconds"
-                                        ),
-                                        "snapshot_fresh": exposure_snapshot.get(
-                                            "fresh"
-                                        ),
-                                        "lifecycle": getattr(
-                                            lifecycle, "value", str(lifecycle)
-                                        ),
+                                        "exposure_state": getattr(exposure, "value", str(exposure)),
+                                        "snapshot_age_seconds": exposure_snapshot.get("age_seconds"),
+                                        "snapshot_fresh": exposure_snapshot.get("fresh"),
+                                        "lifecycle": getattr(lifecycle, "value", str(lifecycle)),
                                     },
                                 )
                                 continue
@@ -15545,17 +15491,13 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
             ctx.position_reconciliation_completed = True
             ctx.position_reconciliation_in_progress = False
             ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
-            duration_ms = (
-                ctx.position_reconciliation_completed_at - started_at
-            ).total_seconds() * 1000.0
+            duration_ms = (ctx.position_reconciliation_completed_at - started_at).total_seconds() * 1000.0
             active_run_ids.discard(reconcile_run_id)
-            run_record.update(
-                {
-                    "completed_at": ctx.position_reconciliation_completed_at.isoformat(),
-                    "duration_ms": duration_ms,
-                    "active_run_count": len(active_run_ids),
-                }
-            )
+            run_record.update({
+                "completed_at": ctx.position_reconciliation_completed_at.isoformat(),
+                "duration_ms": duration_ms,
+                "active_run_count": len(active_run_ids),
+            })
             LOGGER.info(
                 "POSITION_RECONCILE_SUCCESS run_id=%s source=%s duration_ms=%.3f",
                 reconcile_run_id,
