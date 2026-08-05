@@ -7415,11 +7415,11 @@ FAILED tests/core/test_history_readiness_ssot.py::test_both_ready_blocker_absent
 !!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
 RC=1
 ===== GIT_STATUS =====
+ M .ci/minimum-lot-diagnostics.txt
  M src/nifty_scalper_bot/core/app.py
  M src/nifty_scalper_bot/execution/readiness.py
  M src/nifty_scalper_bot/main.py
  M tests/core/test_readiness_live_tick_proof.py
-?? .ci/
 ?? src/nifty_scalper_bot/execution/affordability.py
 ?? tests/core/test_minimum_lot_affordability_readiness.py
 ?? tests/execution/test_minimum_lot_affordability.py
