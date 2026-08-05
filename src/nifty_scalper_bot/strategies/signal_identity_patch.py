@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from nifty_scalper_bot.strategies.quote_update_identity import (
+    build_evaluation_snapshot_id,
+    resolve_quote_update_identity,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -29,12 +33,16 @@ _ANCHOR_KEYS = (
 
 
 def _option_thesis(symbol: object, metadata: Mapping[str, Any]) -> tuple[str, str]:
-    side = str(metadata.get("option_side") or metadata.get("contract_side") or "").upper()
+    side = str(
+        metadata.get("option_side") or metadata.get("contract_side") or ""
+    ).upper()
     text = str(symbol or "").strip().upper().split(":")[-1]
     suffix = _OPTION_SUFFIX.search(text)
     if side not in {"CE", "PE"} and suffix is not None:
         side = suffix.group(1)
-    underlying = str(metadata.get("underlying") or metadata.get("base_symbol") or "").upper()
+    underlying = str(
+        metadata.get("underlying") or metadata.get("base_symbol") or ""
+    ).upper()
     if not underlying:
         body = _OPTION_SUFFIX.sub("", text)
         digit = _FIRST_DIGIT.search(body)
@@ -54,7 +62,11 @@ def _anchor_value(metadata: Mapping[str, Any]) -> str | None:
         if value in (None, ""):
             continue
         if isinstance(value, datetime):
-            dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            dt = (
+                value
+                if value.tzinfo is not None
+                else value.replace(tzinfo=timezone.utc)
+            )
             return dt.isoformat()
         if isinstance(value, (int, float)):
             return str(int(float(value)))
@@ -84,12 +96,41 @@ def _anchor(metadata: Mapping[str, Any]) -> str:
 
 def _deterministic_id(signal: Any) -> str:
     metadata = dict(getattr(signal, "metadata", {}) or {})
-    strategy = str(metadata.get("strategy_name") or metadata.get("strategy") or "manual")
+    strategy = str(
+        metadata.get("strategy_name") or metadata.get("strategy") or "manual"
+    )
     underlying, option_side = _option_thesis(getattr(signal, "symbol", ""), metadata)
     setup_anchor = _anchor(metadata)
     action = str(getattr(signal, "action", ""))
     raw = f"{strategy}:{underlying}:{option_side}:{action}:{setup_anchor}"
     return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+
+def _stamp_evaluation_identity(signal: Any, indicators: Mapping[str, Any]) -> Any:
+    """Attach exact quote-snapshot identity while preserving setup identity."""
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    version, resolved_source = resolve_quote_update_identity(
+        ("signal_metadata", metadata),
+        ("indicator_context", indicators),
+    )
+    if version is None:
+        return signal
+    setup_signal_id = _deterministic_id(signal)
+    evaluation_snapshot_id = build_evaluation_snapshot_id(setup_signal_id, version)
+    source = str(metadata.get("quote_update_version_source") or resolved_source or "")
+    updates = {
+        "quote_update_version": version,
+        "quote_update_version_source": source or None,
+        "setup_signal_id": setup_signal_id,
+        "evaluation_snapshot_id": evaluation_snapshot_id,
+    }
+    with_metadata = getattr(signal, "with_metadata", None)
+    if callable(with_metadata):
+        return with_metadata(**updates)
+    mutable = getattr(signal, "metadata", None)
+    if isinstance(mutable, dict):
+        mutable.update(updates)
+    return signal
 
 
 def _install_elite_signal_observability() -> None:
@@ -109,6 +150,7 @@ def _install_elite_signal_observability() -> None:
         signal = current(self, symbol, indicators, current_price, position)
         if signal is None:
             return None
+        signal = _stamp_evaluation_identity(signal, indicators)
         metadata = dict(getattr(signal, "metadata", {}) or {})
         strategy = str(
             metadata.get("strategy_name")
@@ -124,7 +166,11 @@ def _install_elite_signal_observability() -> None:
         role = str(metadata.get("role") or "trigger").lower()
         LOGGER.log(
             logging.DEBUG if role == "context" else logging.INFO,
-            "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s quote_update_version=%s",
+            (
+                "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s "
+                "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "
+                "quote_update_version=%s evaluation_snapshot_id=%s"
+            ),
             strategy,
             getattr(signal, "symbol", symbol),
             side or None,
@@ -133,6 +179,7 @@ def _install_elite_signal_observability() -> None:
             setup_id,
             setup_anchor,
             metadata.get("quote_update_version"),
+            metadata.get("evaluation_snapshot_id"),
             extra={
                 "event": "ELITE_SIGNAL_GENERATED",
                 "strategy": strategy,
@@ -143,6 +190,11 @@ def _install_elite_signal_observability() -> None:
                 "setup_id": setup_id,
                 "setup_anchor": setup_anchor,
                 "quote_update_version": metadata.get("quote_update_version"),
+                "quote_update_version_source": metadata.get(
+                    "quote_update_version_source"
+                ),
+                "setup_signal_id": metadata.get("setup_signal_id"),
+                "evaluation_snapshot_id": metadata.get("evaluation_snapshot_id"),
                 "role": role,
             },
         )
@@ -172,5 +224,6 @@ __all__ = [
     "apply_patches",
     "_deterministic_id",
     "_option_thesis",
+    "_stamp_evaluation_identity",
     "has_setup_anchor",
 ]

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 _LIVE_DIRECTION_CONTEXT_KEYS = frozenset(
@@ -35,6 +35,7 @@ _LIVE_DIRECTION_CONTEXT_KEYS = frozenset(
         "market_data_age_ms",
         "market_data_age_s",
         "quote_update_version",
+        "quote_update_version_source",
         "update_version",
         "tick_version",
         "last_tick_ts_ms",

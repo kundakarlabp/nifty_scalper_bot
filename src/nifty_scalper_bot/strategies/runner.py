@@ -148,6 +148,9 @@ from nifty_scalper_bot.strategies.premium_risk_geometry import (
     validate_option_premium_geometry,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
+from nifty_scalper_bot.strategies.quote_update_identity import (
+    resolve_quote_update_identity,
+)
 from nifty_scalper_bot.strategies.signal_quality import (
     infer_option_side,
     missing_score_components,
@@ -189,6 +192,7 @@ from nifty_scalper_bot.utils.symbols import (
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.data_hub import DataHub
+    from nifty_scalper_bot.execution.order_manager import ExitIntent
     from nifty_scalper_bot.data.persistent_state import (
         PersistentStateManager,
         TradeDict,
@@ -15586,6 +15590,20 @@ class StrategyRunner:
                             and ask_f is not None
                         ):
                             tradable_quote = ask_f > bid_f
+                        quote_update_version, quote_update_version_source = (
+                            resolve_quote_update_identity(
+                                ("datahub_quote", quote_map),
+                                ("runner_tick", tick_map),
+                                (
+                                    "runner_counter",
+                                    {
+                                        "quote_update_version": self._quote_update_version_for_eval(
+                                            symbol
+                                        )
+                                    },
+                                ),
+                            )
+                        )
                         runtime_ctx.update(
                             {
                                 "bid": bid,
@@ -15618,6 +15636,8 @@ class StrategyRunner:
                                 "quote_age_s": quote_map.get("quote_age_s")
                                 or quote_map.get("data_age_seconds")
                                 or tick_map.get("data_age_seconds"),
+                                "quote_update_version": quote_update_version,
+                                "quote_update_version_source": quote_update_version_source,
                             }
                         )
                         indicators_ctx.update(runtime_ctx)
