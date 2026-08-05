@@ -5627,8 +5627,6 @@ class StrategyRunner:
                 )
                 if one_minute_bars:
                     self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start
-                self._active_symbols.add(normalized_symbol)
-                self._tracked_symbols.add(normalized_symbol)
                 self._data_phase.setdefault(normalized_symbol, "HYDRATION")
             indicator_count = self._indicator_engine.replace_history(
                 normalized_symbol,
@@ -9050,9 +9048,13 @@ class StrategyRunner:
                     target = self._required_bars_for_symbol(symbol)
                     rows = self._get_mdm_bars(symbol, target)
                     if rows:
-                        for bar_data in rows:
-                            self.ingest_historical_bar(bar_data)
-                            total_bars += 1
+                        reseeded = self.reseed_history_from_bars(
+                            symbol,
+                            rows,
+                            source="runner_fallback",
+                            min_bars=target,
+                        )
+                        total_bars += int(reseeded or 0)
                         if len(rows) >= target:
                             self._set_symbol_hydration_state(symbol, SymbolState.READY)
                         else:
