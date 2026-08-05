@@ -1,0 +1,29 @@
+name: One-shot runtime readiness history TDD
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-targeted-fix:
+    if: github.head_ref == 'fix/runtime-readiness-history-integrity-20260805'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Apply narrow correction and validate
+        run: python .github/scripts/apply_runtime_readiness_history_fix.py
