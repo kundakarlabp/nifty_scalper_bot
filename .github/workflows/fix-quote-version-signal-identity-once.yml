@@ -22,15 +22,16 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
-      - name: Apply correction and regressions
-        run: python .github/scripts/apply_quote_version_signal_identity_fix.py
-      - name: Correct generated static contracts
+
+      - name: Apply correction and static fixes
         run: |
+          python .github/scripts/apply_quote_version_signal_identity_fix.py
           python - <<'PY'
           from pathlib import Path
 
@@ -67,7 +68,8 @@ jobs:
               raise SystemExit('runner TYPE_CHECKING anchor missing')
           runner_path.write_text(runner_text.replace(type_old, type_new, 1))
           PY
-      - name: Normalize newly introduced and narrowly modified files
+
+      - name: Normalize modified files
         run: |
           python -m ruff check --fix --exit-zero \
             src/nifty_scalper_bot/strategies/quote_update_identity.py \
@@ -81,7 +83,8 @@ jobs:
             src/nifty_scalper_bot/strategies/runtime_context_contract.py \
             tests/strategies/test_quote_update_identity.py \
             tests/strategies/test_signal_observability_contract.py
-      - name: Focused quote identity tests
+
+      - name: Focused and adjacent regressions
         run: |
           python -m pytest -q \
             tests/strategies/test_quote_update_identity.py \
@@ -89,8 +92,6 @@ jobs:
             tests/strategies/test_signal_identity_patch.py \
             tests/strategies/test_runtime_context_contract.py \
             tests/strategies/test_runner_eval_pregate.py
-      - name: Adjacent strategy and live-safety tests
-        run: |
           python -m pytest -q \
             tests/strategies/test_signal_observability_contract.py \
             tests/strategies/test_signal_identity_patch.py \
@@ -99,6 +100,7 @@ jobs:
             tests/strategies/test_runtime_context_contract_autoinstall.py \
             tests/strategies/test_orderflow_quote_age_contract.py \
             tests/core/test_strategy_live_safety.py
+
       - name: Quality checks
         run: |
           python -m compileall -q src tests
@@ -118,6 +120,7 @@ jobs:
             tests/strategies/test_quote_update_identity.py \
             tests/strategies/test_signal_observability_contract.py
           git diff --check
+
       - name: Validate intended change surface
         run: |
           python - <<'PY'
@@ -131,27 +134,34 @@ jobs:
               'tests/strategies/test_quote_update_identity.py',
               'tests/strategies/test_signal_observability_contract.py',
           }
-          changed = {
-              line.strip()
-              for line in subprocess.check_output(
-                  ['git', 'diff', '--name-only'], text=True
-              ).splitlines()
-              if line.strip()
-          }
-          unexpected = changed - allowed
-          missing = {
+          status = subprocess.check_output(
+              ['git', 'status', '--porcelain', '--untracked-files=all'], text=True
+          )
+          changed = set()
+          for line in status.splitlines():
+              if not line.strip():
+                  continue
+              path = line[3:].strip()
+              if ' -> ' in path:
+                  path = path.split(' -> ', 1)[1]
+              changed.add(path)
+          required = {
               'src/nifty_scalper_bot/strategies/quote_update_identity.py',
               'src/nifty_scalper_bot/strategies/runner.py',
               'src/nifty_scalper_bot/strategies/signal_identity_patch.py',
               'tests/strategies/test_quote_update_identity.py',
               'tests/strategies/test_signal_observability_contract.py',
-          } - changed
+          }
+          unexpected = changed - allowed
+          missing = required - changed
           if unexpected or missing:
               raise SystemExit(
-                  f'unexpected change surface: unexpected={sorted(unexpected)} missing={sorted(missing)}'
+                  f'unexpected change surface: unexpected={sorted(unexpected)} '
+                  f'missing={sorted(missing)}'
               )
           PY
-      - name: Full suite with isolated flake confirmation
+
+      - name: Full repository suite
         env:
           BRACKET_AUTO_RESTORE: 'false'
         run: |
@@ -160,7 +170,8 @@ jobs:
           fi
           python -m pytest -q tests/e2e/live_sim/test_partial_fill_and_bracket_resize.py
           python -m pytest -q
-      - name: Commit validated correction
+
+      - name: Commit exact validated correction
         run: |
           rm .github/workflows/fix-quote-version-signal-identity-once.yml
           rm .github/scripts/apply_quote_version_signal_identity_fix.py
