@@ -1,0 +1,190 @@
+name: Fix futures context indicators once
+
+on:
+  push:
+    branches:
+      - fix/futures-context-indicators-20260805
+
+permissions:
+  contents: write
+
+jobs:
+  patch-validate-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/futures-context-indicators-20260805
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Apply regression-first correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/core/strategy_manager.py')
+          text = path.read_text()
+          old_helper = '''        def _num(*keys: str) -> float | None:
+            for key in keys:
+                value = indicators.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        context_kind = (
+'''
+          new_helper = '''        def _num(*keys: str) -> float | None:
+            for key in keys:
+                value = indicators.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        def _history_ema(period: int) -> float | None:
+            if role != "futures_context":
+                return None
+            getter = getattr(getattr(self, "_indicator_engine", None), "get_ema", None)
+            if not callable(getter):
+                return None
+            try:
+                value = getter(symbol, period=period)
+            except TypeError:
+                value = getter(symbol, period)
+            except Exception as exc:  # noqa: BLE001 - context remains fail-closed
+                log.debug(
+                    "FUTURES_CONTEXT_EMA_FALLBACK_FAILED symbol=%s period=%s error=%s",
+                    symbol,
+                    period,
+                    exc,
+                )
+                return None
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        context_kind = (
+'''
+          if old_helper not in text:
+              raise SystemExit('context helper patch needle not found')
+          text = text.replace(old_helper, new_helper, 1)
+
+          old_metrics = '''        vwap_slope = _num("vwap_slope")
+        ema_slope = _num("ema_slope")
+        vwap_slope_source = "indicator" if vwap_slope is not None else "unavailable"
+        direction_inputs = dict(indicators)
+        direction_inputs.update(
+            futures_volume_ratio=futures_volume_ratio,
+            vwap_slope=vwap_slope,
+            ema_slope=ema_slope,
+        )
+'''
+          new_metrics = '''        vwap_slope = _num("vwap_slope")
+        ema_slope = _num("ema_slope")
+        vwap_slope_source = "indicator" if vwap_slope is not None else "unavailable"
+        ema_fast = _num("ema_fast", "ema_9", "ema9")
+        ema_slow = _num("ema_slow", "ema_21", "ema21")
+        ema_50 = _num("ema_50", "ema50")
+        ema_fast_source = "indicator" if ema_fast is not None else "unavailable"
+        ema_slow_source = "indicator" if ema_slow is not None else "unavailable"
+        ema_50_source = "indicator" if ema_50 is not None else "unavailable"
+        if role == "futures_context":
+            if ema_fast is None:
+                ema_fast = _history_ema(9)
+                if ema_fast is not None:
+                    ema_fast_source = "indicator_engine_history"
+            if ema_slow is None:
+                ema_slow = _history_ema(21)
+                if ema_slow is not None:
+                    ema_slow_source = "indicator_engine_history"
+            if ema_50 is None:
+                ema_50 = _history_ema(50)
+                if ema_50 is not None:
+                    ema_50_source = "indicator_engine_history"
+        direction_inputs = dict(indicators)
+        direction_inputs.update(
+            futures_volume_ratio=futures_volume_ratio,
+            vwap_slope=vwap_slope,
+            ema_slope=ema_slope,
+            ema_fast=ema_fast,
+            ema_slow=ema_slow,
+            ema_50=ema_50,
+        )
+'''
+          if old_metrics not in text:
+              raise SystemExit('context metrics patch needle not found')
+          text = text.replace(old_metrics, new_metrics, 1)
+
+          old_snapshot = '''            "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
+            "ema_fast": _num("ema_fast", "ema_9", "ema9"),
+            "ema_slow": _num("ema_slow", "ema_21", "ema21"), "ema_50": _num("ema_50", "ema50"),
+            "adx": _num("adx"), "atr": _num("atr"), "volume": _num("volume"),
+'''
+          new_snapshot = '''            "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow, "ema_50": ema_50,
+            "ema_fast_source": ema_fast_source,
+            "ema_slow_source": ema_slow_source,
+            "ema_50_source": ema_50_source,
+            "adx": _num("adx"), "atr": _num("atr"), "volume": _num("volume"),
+'''
+          if old_snapshot not in text:
+              raise SystemExit('context snapshot patch needle not found')
+          text = text.replace(old_snapshot, new_snapshot, 1)
+          path.write_text(text)
+
+          test_path = Path('tests/core/test_strategy_manager_context_age.py')
+          test_text = test_path.read_text()
+          regression = '''\n\ndef test_futures_context_uses_hydrated_history_when_ema_aliases_are_absent() -> None:\n    from datetime import datetime, timedelta, timezone\n\n    from nifty_scalper_bot.strategies.indicators import IndicatorEngine\n\n    symbol = "NFO:NIFTY26AUGFUT"\n    engine = IndicatorEngine()\n    started_at = datetime(2026, 8, 5, 3, 45, tzinfo=timezone.utc)\n    for index in range(60):\n        price = 25000.0 + float(index)\n        engine.update_price(\n            symbol,\n            {"open": price, "high": price, "low": price, "close": price},\n            volume=0,\n            timestamp=started_at + timedelta(minutes=index),\n        )\n\n    manager = object.__new__(StrategyManager)\n    manager._indicator_engine = engine\n    manager._latest_context_snapshots = {}\n    manager._update_context_snapshot(\n        symbol=symbol,\n        indicators={"ltp": 25059.0, "close": 25059.0},\n        role="futures_context",\n    )\n\n    snapshot = manager._latest_context_snapshots["futures_context"]\n    assert snapshot["vwap"] is None\n    assert snapshot["ema_fast"] > snapshot["ema_slow"] > snapshot["ema_50"]\n    assert snapshot["ema_fast_source"] == "indicator_engine_history"\n    assert snapshot["ema_slow_source"] == "indicator_engine_history"\n    assert snapshot["ema_50_source"] == "indicator_engine_history"\n    assert snapshot["direction_bias"] == "CE"\n    assert "ema_fast_above_slow" in snapshot["direction_context_reasons"]\n'''
+          if 'test_futures_context_uses_hydrated_history_when_ema_aliases_are_absent' in test_text:
+              raise SystemExit('regression already exists')
+          test_path.write_text(test_text.rstrip() + regression + '\n')
+          PY
+      - name: Focused regression
+        run: python -m pytest -q tests/core/test_strategy_manager_context_age.py
+      - name: Adjacent futures context tests
+        run: |
+          python -m pytest -q \
+            tests/core/test_strategy_manager_context_age.py \
+            tests/core/test_futures_resolver_fallback.py \
+            tests/strategies/test_active_futures_resolution.py \
+            tests/strategies/test_runner_symbol_role_gate.py \
+            tests/core/test_strategy_live_safety.py \
+            tests/strategies/test_vwap_pro_none_futures_context.py
+      - name: Quality checks
+        run: |
+          python -m compileall -q src tests
+          python -m ruff check --select E9,F63,F7,F82 src/nifty_scalper_bot/core/strategy_manager.py
+          python -m ruff check tests/core/test_strategy_manager_context_age.py
+          python -m black --check tests/core/test_strategy_manager_context_age.py
+          git diff --check
+      - name: Full suite
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: python -m pytest -q
+      - name: Commit validated correction
+        run: |
+          rm .github/workflows/fix-futures-context-indicators-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/core/strategy_manager.py tests/core/test_strategy_manager_context_age.py .github/workflows/fix-futures-context-indicators-once.yml
+          git commit -m 'fix(strategy): restore futures context EMA availability'
+          git push origin HEAD:fix/futures-context-indicators-20260805
