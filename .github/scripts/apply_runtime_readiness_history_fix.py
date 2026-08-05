@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -12,89 +13,59 @@ SCRIPT = Path(__file__).resolve()
 
 
 def run(*args: str) -> None:
+    print("+", " ".join(args), flush=True)
     subprocess.run(args, cwd=ROOT, check=True)
 
 
-def replace_once(path: Path, old: str, new: str, label: str) -> None:
+def replace_regex(path: Path, pattern: str, replacement: str, label: str) -> None:
     text = path.read_text(encoding="utf-8")
-    count = text.count(old)
+    updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
     if count != 1:
-        raise SystemExit(f"{label}: expected one source block, found {count}")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        raise SystemExit(f"{label}: expected one source match, found {count}")
+    path.write_text(updated, encoding="utf-8")
+    print(f"applied: {label}", flush=True)
 
 
-replace_once(
+# Historical bar count must never promote a stale/missing live spot quote to ready.
+replace_regex(
     MDM,
-    '''        spot_ready = True
-        if spot:
-            spot_bar_ready = bars.get(spot, 0) >= min_bars
-            try:
-                spot_ready = bool(
-                    self._is_symbol_fresh(spot, self._tick_stale_threshold_ms)
-                )
-            except Exception as exc:
-                self._logger.error("Failure in _readiness_state: %s", exc, exc_info=exc)
-                spot_ready = False
-            if not spot_ready and spot_bar_ready:
-                spot_ready = True
-''',
-    '''        spot_ready = True
-        if spot:
-            try:
-                spot_ready = bool(
-                    self._is_symbol_fresh(spot, self._tick_stale_threshold_ms)
-                )
-            except Exception as exc:
-                self._logger.error("Failure in _readiness_state: %s", exc, exc_info=exc)
-                spot_ready = False
-''',
-    "spot readiness",
+    r'(?m)^\s{12}spot_bar_ready = bars\.get\(spot, 0\) >= min_bars\n',
+    "",
+    "remove spot history promotion input",
+)
+replace_regex(
+    MDM,
+    r'(?m)^\s{12}if not spot_ready and spot_bar_ready:\n\s{16}spot_ready = True\n',
+    "",
+    "remove stale spot promotion",
 )
 
-replace_once(
+# Reseeding canonical history is data hydration only; it must not claim runtime ownership.
+replace_regex(
     RUNNER,
-    '''                self._active_symbols.add(normalized_symbol)
-                self._tracked_symbols.add(normalized_symbol)
-                self._data_phase.setdefault(normalized_symbol, "HYDRATION")
-''',
-    '''                self._data_phase.setdefault(normalized_symbol, "HYDRATION")
-''',
-    "reseed activation",
+    r'(?m)^\s{16}self\._active_symbols\.add\(normalized_symbol\)\n'
+    r'\s{16}self\._tracked_symbols\.add\(normalized_symbol\)\n',
+    "",
+    "remove reseed activation side effects",
 )
 
-replace_once(
+# Fallback recovery must replace/deduplicate canonical history, not replay every cached row.
+replace_regex(
     RUNNER,
-    '''                    if rows:
-                        for bar_data in rows:
-                            self.ingest_historical_bar(bar_data)
-                            total_bars += 1
-                        if len(rows) >= target:
-                            self._set_symbol_hydration_state(symbol, SymbolState.READY)
-                        else:
-                            self._set_symbol_hydration_state(
-                                symbol, SymbolState.HYDRATING
-                            )
-                            self._request_mdm_hydration(symbol, target)
-''',
-    '''                    if rows:
-                        reseeded = self.reseed_history_from_bars(
-                            symbol,
-                            rows,
-                            source="runner_fallback",
-                            min_bars=target,
-                        )
-                        total_bars += int(reseeded or 0)
-                        if len(rows) >= target:
-                            self._set_symbol_hydration_state(symbol, SymbolState.READY)
-                        else:
-                            self._set_symbol_hydration_state(
-                                symbol, SymbolState.HYDRATING
-                            )
-                            self._request_mdm_hydration(symbol, target)
-''',
-    "fallback reseed",
+    r'(?m)^\s{24}for bar_data in rows:\n'
+    r'\s{28}self\.ingest_historical_bar\(bar_data\)\n'
+    r'\s{28}total_bars \+= 1\n',
+    '                        reseeded = self.reseed_history_from_bars(\n'
+    '                            symbol,\n'
+    '                            rows,\n'
+    '                            source="runner_fallback",\n'
+    '                            min_bars=target,\n'
+    '                        )\n'
+    '                        total_bars += int(reseeded or 0)\n',
+    "use idempotent fallback reseed",
 )
 
+run("python", "-m", "black", str(MDM), str(RUNNER), str(TEST))
 run("python", "-m", "pytest", str(TEST), "-q")
 run("python", "-m", "compileall", "-q", str(MDM), str(RUNNER))
 run(
