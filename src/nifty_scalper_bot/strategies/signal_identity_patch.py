@@ -110,14 +110,21 @@ def _stamp_evaluation_identity(signal: Any, indicators: Mapping[str, Any]) -> An
     """Attach exact quote-snapshot identity while preserving setup identity."""
     metadata = dict(getattr(signal, "metadata", {}) or {})
     version, resolved_source = resolve_quote_update_identity(
-        ("signal_metadata", metadata),
         ("indicator_context", indicators),
+        ("signal_metadata", metadata),
     )
     if version is None:
         return signal
     setup_signal_id = _deterministic_id(signal)
     evaluation_snapshot_id = build_evaluation_snapshot_id(setup_signal_id, version)
-    source = str(metadata.get("quote_update_version_source") or resolved_source or "")
+    if str(resolved_source or "").startswith("indicator_context:"):
+        source = str(
+            indicators.get("quote_update_version_source") or resolved_source or ""
+        )
+    else:
+        source = str(
+            metadata.get("quote_update_version_source") or resolved_source or ""
+        )
     updates = {
         "quote_update_version": version,
         "quote_update_version_source": source or None,
