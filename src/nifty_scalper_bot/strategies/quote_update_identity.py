@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import hashlib
 from typing import Any, Mapping
 
@@ -13,11 +14,16 @@ _QUOTE_VERSION_KEYS = (
 
 
 def coerce_quote_update_version(value: Any) -> int | None:
-    """Return a positive integer quote version, otherwise ``None``."""
-    try:
-        version = int(float(value))
-    except (TypeError, ValueError, OverflowError):
+    """Return an exact positive integer quote version, otherwise ``None``."""
+    if isinstance(value, bool) or value in (None, ""):
         return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    if not parsed.is_finite() or parsed != parsed.to_integral_value():
+        return None
+    version = int(parsed)
     return version if version > 0 else None
 
 
