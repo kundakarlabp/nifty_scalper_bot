@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "src/nifty_scalper_bot/strategies/runner.py"
 MDM = ROOT / "src/nifty_scalper_bot/data/market_data_manager.py"
+TEST = ROOT / "tests/strategies/test_runtime_history_activation_integrity.py"
 WORKFLOW = ROOT / ".github/workflows/one-shot-readiness-history-integrity.yml"
 SCRIPT = Path(__file__).resolve()
 
@@ -27,9 +28,23 @@ def run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 def replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()
-    if text.count(old) != 1:
-        raise RuntimeError(f"expected one match in {path}: found {text.count(old)}")
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"expected one match in {path}: found {count}")
     path.write_text(text.replace(old, new, 1))
+
+
+def replace_function(
+    path: Path, start_marker: str, end_marker: str, new_function: str
+) -> None:
+    text = path.read_text()
+    start = text.find(start_marker)
+    if start < 0:
+        raise RuntimeError(f"function start not found in {path}: {start_marker!r}")
+    end = text.find(end_marker, start)
+    if end < 0:
+        raise RuntimeError(f"function end not found in {path}: {end_marker!r}")
+    path.write_text(text[:start] + new_function + text[end:])
 
 
 def apply_fix() -> None:
@@ -38,15 +53,18 @@ def apply_fix() -> None:
         '''                if one_minute_bars:\n                    self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start\n                self._active_symbols.add(normalized_symbol)\n                self._tracked_symbols.add(normalized_symbol)\n                self._data_phase.setdefault(normalized_symbol, "HYDRATION")\n''',
         '''                if one_minute_bars:\n                    self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start\n                self._data_phase.setdefault(normalized_symbol, "HYDRATION")\n''',
     )
-    replace_once(
+
+    replace_function(
         RUNNER,
-        '''        total_bars = 0\n\n        try:\n            # FIX 1: Verify actual indicator arrays are warmed up\n            is_fully_warmed_up = True\n            targets = tuple(self._active_symbols)\n\n            for symbol in targets:\n                bars = self._indicator_engine.get_history(symbol)\n                if not bars or len(bars) < self._required_candles:\n                    is_fully_warmed_up = False\n                    break\n\n            if is_fully_warmed_up:\n                self._logger.info(\n                    "⏭️ Skipping historical backfill (indicators fully warmed up)"\n                )\n                return\n\n            # 2. FALLBACK: Only runs if App.py failed\n            self._logger.warning(\n                "⚠️ StrategyRunner memory is empty! Triggering fallback backfill..."\n            )\n\n            with self._lock:\n                targets = list(self._active_symbols)\n\n            if not targets:\n                self._logger.warning("⚠️ Backfill skipped: No active symbols found.")\n                return\n\n            for symbol in targets:\n                try:\n                    target = self._required_bars_for_symbol(symbol)\n                    rows = self._get_mdm_bars(symbol, target)\n                    if rows:\n                        for bar_data in rows:\n                            self.ingest_historical_bar(bar_data)\n                            total_bars += 1\n                        if len(rows) >= target:\n                            self._set_symbol_hydration_state(symbol, SymbolState.READY)\n                        else:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.HYDRATING\n                            )\n                            self._request_mdm_hydration(symbol, target)\n                    else:\n                        self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)\n                        self._request_mdm_hydration(symbol, target)\n\n                except Exception as e:\n                    self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)\n                    self._logger.error(f"❌ Fallback fetch failed for {symbol}: {e}")\n''',
-        '''        total_bars = 0\n\n        try:\n            with self._lock:\n                targets = list(self._active_symbols)\n\n            cold_targets = [\n                symbol\n                for symbol in targets\n                if len(self._indicator_engine.get_history(symbol) or [])\n                < self._required_candles\n            ]\n            if not cold_targets:\n                self._logger.info(\n                    "⏭️ Skipping historical backfill (indicators fully warmed up)"\n                )\n                return\n\n            # Fallback only for active symbols that remain short after App hydration.\n            self._logger.warning(\n                "⚠️ StrategyRunner history short! Triggering targeted fallback backfill..."\n            )\n\n            for symbol in cold_targets:\n                try:\n                    target = self._required_bars_for_symbol(symbol)\n                    rows = self._get_mdm_bars(symbol, target)\n                    if rows:\n                        runner_count = self.reseed_history_from_bars(\n                            symbol,\n                            rows,\n                            source="runner_fallback_backfill",\n                            min_bars=target,\n                        )\n                        total_bars += runner_count\n                        if runner_count >= target:\n                            self._set_symbol_hydration_state(symbol, SymbolState.READY)\n                        else:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.HYDRATING\n                            )\n                            self._request_mdm_hydration(symbol, target)\n                    else:\n                        self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)\n                        self._request_mdm_hydration(symbol, target)\n\n                except Exception as e:\n                    self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)\n                    self._logger.error(f"❌ Fallback fetch failed for {symbol}: {e}")\n''',
+        "    async def _backfill_history(self) -> None:\n",
+        "    def _hydrate_missing_bars(",
+        '''    async def _backfill_history(self) -> None:\n        """\n        Restore canonical history for active symbols still short after app hydration.\n        """\n        total_bars = 0\n\n        try:\n            with self._lock:\n                targets = list(self._active_symbols)\n\n            cold_targets = [\n                symbol\n                for symbol in targets\n                if len(self._indicator_engine.get_history(symbol) or [])\n                < self._required_candles\n            ]\n            if not cold_targets:\n                self._logger.info(\n                    "⏭️ Skipping historical backfill (indicators fully warmed up)"\n                )\n                return\n\n            self._logger.warning(\n                "⚠️ StrategyRunner history short! Triggering targeted fallback backfill..."\n            )\n\n            for symbol in cold_targets:\n                try:\n                    target = self._required_bars_for_symbol(symbol)\n                    rows = self._get_mdm_bars(symbol, target)\n                    if rows:\n                        runner_count = self.reseed_history_from_bars(\n                            symbol,\n                            rows,\n                            source="runner_fallback_backfill",\n                            min_bars=target,\n                        )\n                        total_bars += runner_count\n                        if runner_count >= target:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.READY\n                            )\n                        else:\n                            self._set_symbol_hydration_state(\n                                symbol, SymbolState.HYDRATING\n                            )\n                            self._request_mdm_hydration(symbol, target)\n                    else:\n                        self._set_symbol_hydration_state(\n                            symbol, SymbolState.HYDRATING\n                        )\n                        self._request_mdm_hydration(symbol, target)\n\n                except Exception as exc:\n                    self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)\n                    self._logger.error(\n                        "❌ Fallback fetch failed for %s: %s", symbol, exc\n                    )\n\n        except Exception as exc:\n            self._logger.error(\n                "❌ History backfill crashed: %s", exc, exc_info=True\n            )\n\n        if total_bars > 0:\n            self._logger.info(\n                "✅ Emergency Backfill complete. Reseeded %d bars.", total_bars\n            )\n\n''',
     )
+
     replace_once(
         MDM,
-        '''            threshold_ms = 120000\n''',
-        '''            threshold_ms = max(1, int(self._tick_stale_threshold_ms))\n''',
+        "            threshold_ms = 120000\n",
+        "            threshold_ms = max(1, int(self._tick_stale_threshold_ms))\n",
     )
     replace_once(
         MDM,
@@ -57,7 +75,7 @@ def apply_fix() -> None:
 
 def main() -> None:
     focused = [
-        "tests/strategies/test_runtime_history_activation_integrity.py",
+        str(TEST.relative_to(ROOT)),
         "tests/strategies/test_canonical_runner_history_sync.py",
         "tests/data/test_canonical_history_hydration.py",
         "tests/test_market_data_manager_spot_readiness.py",
@@ -70,24 +88,9 @@ def main() -> None:
     apply_fix()
     run("python", "-m", "pytest", "-q", *focused)
     run("python", "-m", "compileall", "-q", "src/nifty_scalper_bot")
-    run(
-        "python",
-        "-m",
-        "ruff",
-        "check",
-        str(RUNNER.relative_to(ROOT)),
-        str(MDM.relative_to(ROOT)),
-        focused[0],
-    )
-    run(
-        "python",
-        "-m",
-        "black",
-        "--check",
-        str(RUNNER.relative_to(ROOT)),
-        str(MDM.relative_to(ROOT)),
-        focused[0],
-    )
+    run("python", "-m", "ruff", "check", str(RUNNER.relative_to(ROOT)), str(MDM.relative_to(ROOT)), focused[0])
+    run("python", "-m", "black", "--check", str(RUNNER.relative_to(ROOT)), str(MDM.relative_to(ROOT)), focused[0])
+    run("git", "diff", "--check")
 
     run("git", "config", "user.name", "github-actions[bot]")
     run(
@@ -96,9 +99,30 @@ def main() -> None:
         "user.email",
         "41898282+github-actions[bot]@users.noreply.github.com",
     )
-    run("git", "rm", "-f", str(WORKFLOW.relative_to(ROOT)), str(SCRIPT.relative_to(ROOT)))
-    run("git", "add", str(RUNNER.relative_to(ROOT)), str(MDM.relative_to(ROOT)), focused[0])
-    run("git", "commit", "-m", "fix(runtime): preserve readiness and history integrity")
+    run(
+        "git",
+        "rm",
+        "-f",
+        str(WORKFLOW.relative_to(ROOT)),
+        str(SCRIPT.relative_to(ROOT)),
+    )
+    run("git", "add", str(RUNNER.relative_to(ROOT)), str(MDM.relative_to(ROOT)))
+    staged = run("git", "diff", "--cached", "--name-only")
+    expected = {
+        str(RUNNER.relative_to(ROOT)),
+        str(MDM.relative_to(ROOT)),
+        str(WORKFLOW.relative_to(ROOT)),
+        str(SCRIPT.relative_to(ROOT)),
+    }
+    actual = {line.strip() for line in staged.stdout.splitlines() if line.strip()}
+    if actual != expected:
+        raise RuntimeError(f"unexpected staged files: {sorted(actual)}")
+    run(
+        "git",
+        "commit",
+        "-m",
+        "fix(runtime): preserve readiness and history integrity",
+    )
     run("git", "push", "origin", "HEAD")
 
 
