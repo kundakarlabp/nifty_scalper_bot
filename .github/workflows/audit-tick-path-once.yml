@@ -18,45 +18,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Static tick-path audit
+      - name: Inspect runner routing and ingress ownership
         run: |
           python - <<'PY'
           from pathlib import Path
           import ast
 
           targets = {
-              'src/nifty_scalper_bot/data/market_data_manager.py': [
-                  '_enqueue_tick_threadsafe', '_drain_pending_ticks_once',
-                  '_process_queued_tick', '_emit_tick', '_dispatch_callback',
-                  '_invoke_tick_callback', '_publish_tick_bus',
-              ],
-              'src/nifty_scalper_bot/data/data_hub.py': [
-                  '_ingest_tick_impl', 'ingest_tick_sync', 'subscribe_ticks',
-                  '_capture_option_metrics', 'checkpoint_quotes', '_mark_quotes_dirty',
-              ],
-              'src/nifty_scalper_bot/strategies/runner.py': [
-                  '_on_tick', 'on_tick', '_queue_entry_evaluation',
-                  '_entry_eval_worker_loop', '_process_entry_eval',
-              ],
+              'src/nifty_scalper_bot/strategies/runner.py': {
+                  'on_datahub_tick', 'on_tick_event', '_on_tick_safe',
+                  '_entry_evaluation_route', '_enqueue_entry_evaluation',
+                  '_queue_entry_evaluation', '_entry_eval_worker_loop',
+                  '_handle_position_tick_protection', '_subscribe_symbol',
+              },
+              'src/nifty_scalper_bot/data/data_hub.py': {
+                  '_subscribe_symbol', '_bind_to_mdm', '_ingest_tick_impl',
+                  'subscribe_ticks', 'has_tick_subscription',
+              },
+              'src/nifty_scalper_bot/data/market_data_manager.py': {
+                  'attach_tick_bus', '_publish_tick_to_bus_safe', 'subscribe',
+                  '_emit_tick', '_ingest_normalized_tick',
+              },
           }
           for file, names in targets.items():
               text = Path(file).read_text()
+              lines = text.splitlines()
               tree = ast.parse(text)
               print(f'\n===== {file} =====')
+              found = set()
               for node in ast.walk(tree):
                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
+                      found.add(node.name)
                       end = getattr(node, 'end_lineno', node.lineno)
-                      lines = text.splitlines()
                       print(f'\n--- {node.name} lines {node.lineno}-{end} ---')
                       print('\n'.join(lines[node.lineno-1:end]))
-
-          print('\n===== tick subscription call sites =====')
-          for path in Path('src').rglob('*.py'):
-              text = path.read_text(errors='ignore')
-              for idx, line in enumerate(text.splitlines(), 1):
-                  if any(token in line for token in ('subscribe_ticks(', '.subscribe(', 'attach_tick_bus(', 'tick_bus.subscribe(')):
-                      if 'market_data' in str(path) or 'data_hub' in str(path) or 'runner' in str(path) or 'app.py' in str(path) or 'position' in str(path) or 'bracket' in str(path):
-                          print(f'{path}:{idx}: {line.strip()}')
+              print('missing:', sorted(names - found))
           PY
       - name: Existing latency and coalescing regressions
         run: |
