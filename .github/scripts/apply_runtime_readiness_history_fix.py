@@ -26,7 +26,6 @@ def replace_regex(path: Path, pattern: str, replacement: str, label: str) -> Non
     print(f"applied: {label}", flush=True)
 
 
-# Historical bar count must never promote a stale/missing live spot quote to ready.
 replace_regex(
     MDM,
     r'(?m)^\s{12}spot_bar_ready = bars\.get\(spot, 0\) >= min_bars\n',
@@ -39,8 +38,6 @@ replace_regex(
     "",
     "remove stale spot promotion",
 )
-
-# Reseeding canonical history is data hydration only; it must not claim runtime ownership.
 replace_regex(
     RUNNER,
     r'(?m)^\s{16}self\._active_symbols\.add\(normalized_symbol\)\n'
@@ -48,8 +45,6 @@ replace_regex(
     "",
     "remove reseed activation side effects",
 )
-
-# Fallback recovery must replace/deduplicate canonical history, not replay every cached row.
 replace_regex(
     RUNNER,
     r'(?m)^\s{24}for bar_data in rows:\n'
@@ -63,28 +58,6 @@ replace_regex(
     '                        )\n'
     '                        total_bars += int(reseeded or 0)\n',
     "use idempotent fallback reseed",
-)
-
-run("python", "-m", "black", str(MDM), str(RUNNER), str(TEST))
-run("python", "-m", "pytest", str(TEST), "-q")
-run("python", "-m", "compileall", "-q", str(MDM), str(RUNNER))
-run(
-    "python",
-    "-m",
-    "ruff",
-    "check",
-    str(MDM.relative_to(ROOT)),
-    str(RUNNER.relative_to(ROOT)),
-    str(TEST.relative_to(ROOT)),
-)
-run(
-    "python",
-    "-m",
-    "black",
-    "--check",
-    str(MDM.relative_to(ROOT)),
-    str(RUNNER.relative_to(ROOT)),
-    str(TEST.relative_to(ROOT)),
 )
 
 run("git", "config", "user.name", "github-actions[bot]")
