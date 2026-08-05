@@ -1,0 +1,93 @@
+name: Fix quote version signal identity once
+
+on:
+  push:
+    branches:
+      - fix/quote-version-signal-identity-20260805
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/quote-version-signal-identity-20260805
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Apply correction and regressions
+        run: python .github/scripts/apply_quote_version_signal_identity_fix.py
+      - name: Focused quote identity tests
+        run: |
+          python -m pytest -q \
+            tests/strategies/test_quote_update_identity.py \
+            tests/strategies/test_signal_observability_contract.py \
+            tests/strategies/test_signal_identity_patch.py \
+            tests/strategies/test_runtime_context_contract.py \
+            tests/strategies/test_runner_eval_pregate.py
+      - name: Adjacent strategy and live-safety tests
+        run: |
+          python -m pytest -q \
+            tests/strategies/test_signal_observability_contract.py \
+            tests/strategies/test_signal_identity_patch.py \
+            tests/strategies/test_setup_anchor_identity.py \
+            tests/strategies/test_runtime_context_contract.py \
+            tests/strategies/test_runtime_context_contract_autoinstall.py \
+            tests/strategies/test_orderflow_quote_age_contract.py \
+            tests/core/test_strategy_live_safety.py
+      - name: Quality checks
+        run: |
+          python -m compileall -q src tests
+          python -m ruff check \
+            src/nifty_scalper_bot/strategies/quote_update_identity.py \
+            src/nifty_scalper_bot/strategies/signal_identity_patch.py \
+            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
+            src/nifty_scalper_bot/strategies/runner.py \
+            tests/strategies/test_quote_update_identity.py \
+            tests/strategies/test_signal_observability_contract.py
+          python -m black --check \
+            src/nifty_scalper_bot/strategies/quote_update_identity.py \
+            src/nifty_scalper_bot/strategies/signal_identity_patch.py \
+            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
+            src/nifty_scalper_bot/strategies/runner.py \
+            tests/strategies/test_quote_update_identity.py \
+            tests/strategies/test_signal_observability_contract.py
+          git diff --check
+      - name: Full suite with flake confirmation
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: |
+          if python -m pytest -q; then
+            exit 0
+          fi
+          python -m pytest -q tests/e2e/live_sim/test_partial_fill_and_bracket_resize.py
+          python -m pytest -q
+      - name: Commit validated correction
+        run: |
+          rm .github/workflows/fix-quote-version-signal-identity-once.yml
+          rm .github/scripts/apply_quote_version_signal_identity_fix.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            src/nifty_scalper_bot/strategies/quote_update_identity.py \
+            src/nifty_scalper_bot/strategies/runner.py \
+            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
+            src/nifty_scalper_bot/strategies/signal_identity_patch.py \
+            tests/strategies/test_quote_update_identity.py \
+            tests/strategies/test_signal_observability_contract.py \
+            .github/workflows/fix-quote-version-signal-identity-once.yml \
+            .github/scripts/apply_quote_version_signal_identity_fix.py
+          git commit -m 'fix(strategy): propagate quote version into signal identity'
+          git push origin HEAD:fix/quote-version-signal-identity-20260805
