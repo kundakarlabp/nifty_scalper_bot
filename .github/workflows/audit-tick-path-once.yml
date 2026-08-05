@@ -1,4 +1,4 @@
-name: Audit tick path once
+name: Fix tick path latency once
 
 on:
   push:
@@ -6,37 +6,86 @@ on:
       - fix/tick-path-latency-20260805
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  audit:
+  patch-validate-commit:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: fix/tick-path-latency-20260805
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Inspect synchronous runner maintenance
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Apply targeted correction and regression
         run: |
           python - <<'PY'
           from pathlib import Path
-          import ast
-          file = Path('src/nifty_scalper_bot/strategies/runner.py')
-          text = file.read_text(); lines = text.splitlines(); tree = ast.parse(text)
-          names = {
-              '_mirror_authoritative_candle_engine', '_run_health_watchdog_on_cadence',
-              '_emit_composite_reports', '_notify_entry_eval_pending',
-              '_entry_eval_worker_main', '_entry_eval_worker_loop',
-              '_drain_entry_eval_pending', '_evaluate_pending_entry_tick',
-              '_roles_for_symbol', '_is_context_symbol',
-          }
-          found = set()
-          for node in ast.walk(tree):
-              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
-                  found.add(node.name); end = getattr(node, 'end_lineno', node.lineno)
-                  print(f'\n--- {node.name} lines {node.lineno}-{end} ---')
-                  print('\n'.join(lines[node.lineno-1:end]))
-          print('missing:', sorted(names-found))
+
+          path = Path('src/nifty_scalper_bot/data/data_hub.py')
+          text = path.read_text()
+          replacements = [
+              (
+                  'self._persist_queue: deque[tuple[str, dict[str, Any]]] = deque()\n        self._persist_latest: dict[str, dict[str, Any]] = {}',
+                  'self._persist_queue: deque[tuple[str, dict[str, Any] | None]] = deque()\n        self._persist_latest: dict[str, dict[str, Any] | None] = {}',
+              ),
+              (
+                  'def _enqueue_snapshot(self, kind: str, payload: dict[str, Any]) -> None:',
+                  'def _enqueue_snapshot(\n        self, kind: str, payload: dict[str, Any] | None\n    ) -> None:',
+              ),
+              (
+                  '                payload = self._persist_latest.pop(kind, _payload)\n                self._persist_inflight_kind = kind\n            try:\n                self._save_snapshot(kind, payload)',
+                  '                payload = self._persist_latest.pop(kind, _payload)\n                self._persist_inflight_kind = kind\n            try:\n                if kind == "quotes" and payload is None:\n                    with self._lock:\n                        payload = self._snapshot_quotes_unlocked()\n                self._save_snapshot(kind, payload or {})',
+              ),
+              (
+                  '            payload = self._snapshot_quotes_unlocked()\n            self._quote_checkpoint_dirty = False\n            self._quote_checkpoint_deadline = 0.0\n        self._enqueue_snapshot("quotes", payload)',
+                  '            self._quote_checkpoint_dirty = False\n            self._quote_checkpoint_deadline = 0.0\n        # Queue only a snapshot request. The worker copies the quote map so the\n        # first tick after each checkpoint deadline never performs an O(N) copy.\n        self._enqueue_snapshot("quotes", None)',
+              ),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'patch needle not found: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          test = Path('tests/data/test_datahub_quote_checkpoint_latency.py')
+          test.write_text('''from __future__ import annotations\n\nimport threading\nfrom typing import Any\n\nfrom nifty_scalper_bot.data.data_hub import DataHub\n\n\nclass _MDM:\n    def attach_tick_bus(self, _bus: Any) -> None:\n        return None\n\n\nclass _Store:\n    def __init__(self) -> None:\n        self.saved: list[tuple[str, dict[str, Any], int]] = []\n\n    def load_snapshot(self, _kind: str) -> dict[str, Any]:\n        return {}\n\n    def save_snapshot(self, kind: str, payload: dict[str, Any]) -> None:\n        self.saved.append((kind, payload, threading.get_ident()))\n\n\ndef test_quote_snapshot_copy_runs_on_persistence_worker() -> None:\n    store = _Store()\n    hub = DataHub(_MDM(), store=store)\n    caller_thread = threading.get_ident()\n    snapshot_threads: list[int] = []\n    original = hub._snapshot_quotes_unlocked\n\n    def _record_snapshot_thread() -> dict[str, Any]:\n        snapshot_threads.append(threading.get_ident())\n        return original()\n\n    hub._snapshot_quotes_unlocked = _record_snapshot_thread  # type: ignore[method-assign]\n    with hub._lock:\n        hub._quotes["NFO:NIFTY26AUG25000CE"] = {"ltp": 100.0}\n        hub._quote_checkpoint_dirty = True\n        hub._quote_checkpoint_deadline = 0.0\n\n    hub.checkpoint_quotes(force=True, wait=True)\n\n    assert snapshot_threads\n    assert all(thread_id != caller_thread for thread_id in snapshot_threads)\n    assert store.saved[0][0] == "quotes"\n    assert store.saved[0][1]["NFO:NIFTY26AUG25000CE"]["ltp"] == 100.0\n    hub.close()\n\n\ndef test_quote_checkpoint_enqueues_lazy_snapshot_request() -> None:\n    store = _Store()\n    hub = DataHub(_MDM(), store=store)\n    entered = threading.Event()\n    release = threading.Event()\n    original = hub._snapshot_quotes_unlocked\n\n    def _blocked_snapshot() -> dict[str, Any]:\n        entered.set()\n        assert release.wait(timeout=5.0)\n        return original()\n\n    hub._snapshot_quotes_unlocked = _blocked_snapshot  # type: ignore[method-assign]\n    with hub._lock:\n        hub._quotes["NSE:NIFTY"] = {"ltp": 25000.0}\n        hub._quote_checkpoint_dirty = True\n        hub._quote_checkpoint_deadline = 0.0\n\n    hub.checkpoint_quotes(force=True)\n\n    assert entered.wait(timeout=5.0)\n    # The caller returned even though snapshot construction is still blocked on\n    # the persistence worker. This is the tick-path latency contract.\n    assert hub.quote_checkpoint_inflight() is True\n    release.set()\n    assert hub.flush_persistence(timeout=5.0) is True\n    hub.close()\n''')
           PY
+      - name: Focused regression
+        run: python -m pytest -q tests/data/test_datahub_quote_checkpoint_latency.py
+      - name: Adjacent data-path tests
+        run: |
+          python -m pytest -q \
+            tests/data/test_datahub_quote_checkpoint_latency.py \
+            tests/data/test_datahub_single_tick_ingress.py \
+            tests/data/test_mdm_tick_coalescing.py \
+            tests/data/test_mdm_callback_dispatch.py \
+            tests/strategies/test_entry_eval_coalescing.py
+      - name: Quality checks
+        run: |
+          python -m compileall -q src tests
+          python -m ruff check src/nifty_scalper_bot/data/data_hub.py tests/data/test_datahub_quote_checkpoint_latency.py
+          python -m black --check src/nifty_scalper_bot/data/data_hub.py tests/data/test_datahub_quote_checkpoint_latency.py
+          git diff --check
+      - name: Full suite
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: python -m pytest -q
+      - name: Commit validated correction
+        run: |
+          rm .github/workflows/audit-tick-path-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/data/data_hub.py tests/data/test_datahub_quote_checkpoint_latency.py .github/workflows/audit-tick-path-once.yml
+          git commit -m 'fix(datahub): move quote snapshot copy off tick path'
+          git push origin HEAD:fix/tick-path-latency-20260805
