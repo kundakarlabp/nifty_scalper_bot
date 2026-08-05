@@ -66,6 +66,8 @@ _READINESS_PRIORITY = [
     "broker_auth_invalid",
     "broker_session_invalid",
     "broker_balance_unavailable",
+    "minimum_lot_unaffordable",
+    "execution_capacity_unavailable",
     "position_reconciliation_failed",
     "position_reconciliation_incomplete",
     "unresolved_exit_position",

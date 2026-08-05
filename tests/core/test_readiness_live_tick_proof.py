@@ -48,7 +48,13 @@ def make_ctx(mdm, live: bool = True):
         market_data_manager=mdm,
         strategy_runner=Runner(),
         broker_client=object(),
-        order_manager=object(),
+        order_manager=SimpleNamespace(
+            resolve_lot_size=lambda symbol: 65,
+            _margin_factor=1.0,
+            _margin_buffer=1.0,
+        ),
+        broker_balance_valid=True,
+        last_valid_broker_balance=100_000.0,
         active_trading_universe={
             "spot_symbol": "NSE:NIFTY",
             "selected_ce": "NFO:CE",
@@ -371,7 +377,9 @@ async def test_futures_readiness_blocker_names_live_stale_vs_history_short(
 
 
 @pytest.mark.asyncio
-async def test_live_readiness_requires_selected_option_runner_delivery(monkeypatch) -> None:
+async def test_live_readiness_requires_selected_option_runner_delivery(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
     snaps = {
         "NSE:NIFTY": Snap(25000, 2, True, 24999, 25001, True),
