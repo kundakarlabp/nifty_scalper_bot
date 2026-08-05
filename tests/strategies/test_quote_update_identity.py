@@ -29,6 +29,15 @@ def test_quote_identity_uses_alias_and_ignores_invalid_values() -> None:
     assert coerce_quote_update_version("not-a-version") is None
 
 
+def test_quote_version_coercion_rejects_lossy_or_boolean_values() -> None:
+    assert coerce_quote_update_version(True) is None
+    assert coerce_quote_update_version(False) is None
+    assert coerce_quote_update_version(7.5) is None
+    assert coerce_quote_update_version("7.5") is None
+    assert coerce_quote_update_version("7.0") == 7
+    assert coerce_quote_update_version("1e3") == 1000
+
+
 def test_evaluation_snapshot_identity_is_stable_per_setup_and_quote() -> None:
     first = build_evaluation_snapshot_id("setup-1", 7)
     repeated = build_evaluation_snapshot_id("setup-1", 7)
