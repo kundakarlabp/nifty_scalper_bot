@@ -36,14 +36,18 @@ jobs:
 
           path = Path('src/nifty_scalper_bot/strategies/signal_identity_patch.py')
           text = path.read_text()
-          old = '''            "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s quote_update_version=%s evaluation_snapshot_id=%s",
-'''
-          new = '''            (
-                "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s "
-                "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "
-                "quote_update_version=%s evaluation_snapshot_id=%s"
-            ),
-'''
+          old = (
+              '            "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s '
+              'raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s '
+              'quote_update_version=%s evaluation_snapshot_id=%s",\n'
+          )
+          new = (
+              '            (\n'
+              '                "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s "\n'
+              '                "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "\n'
+              '                "quote_update_version=%s evaluation_snapshot_id=%s"\n'
+              '            ),\n'
+          )
           if old not in text:
               raise SystemExit('generated observability log anchor missing')
           path.write_text(text.replace(old, new, 1))
