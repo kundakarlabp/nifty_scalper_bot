@@ -40,11 +40,24 @@ jobs:
       - name: Compile
         run: python -m compileall -q src/nifty_scalper_bot
       - name: Scoped Ruff
+        id: ruff
+        shell: bash
         run: |
+          set +e
           python -m ruff check \
             src/nifty_scalper_bot/strategies/runner.py \
             src/nifty_scalper_bot/data/market_data_manager.py \
-            tests/strategies/test_runtime_history_activation_integrity.py
+            tests/strategies/test_runtime_history_activation_integrity.py \
+            2>&1 | tee /tmp/readiness-history-ruff.txt
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      - name: Upload Ruff output
+        if: failure() && steps.ruff.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: readiness-history-ruff-output
+          path: /tmp/readiness-history-ruff.txt
       - name: Scoped Black
         run: |
           python -m black --check \
