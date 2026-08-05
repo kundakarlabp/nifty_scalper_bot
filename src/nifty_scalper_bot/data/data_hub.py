@@ -261,8 +261,8 @@ class DataHub:
         self._quote_checkpoint_dirty = False
         self._quote_checkpoint_deadline = 0.0
         self._persist_cv = threading.Condition()
-        self._persist_queue: deque[tuple[str, dict[str, Any]]] = deque()
-        self._persist_latest: dict[str, dict[str, Any]] = {}
+        self._persist_queue: deque[tuple[str, dict[str, Any] | None]] = deque()
+        self._persist_latest: dict[str, dict[str, Any] | None] = {}
         self._persist_inflight_kind: str | None = None
         self._persist_closed = False
         self._persist_worker = threading.Thread(target=self._persistence_worker_loop, name="datahub-persist", daemon=True)
@@ -517,7 +517,9 @@ class DataHub:
     def _snapshot_positions_unlocked(self) -> dict[str, Any]:
         return {str(k): dict(v) for k, v in self._positions.items()}
 
-    def _enqueue_snapshot(self, kind: str, payload: dict[str, Any]) -> None:
+    def _enqueue_snapshot(
+        self, kind: str, payload: dict[str, Any] | None
+    ) -> None:
         with self._persist_cv:
             if self._persist_closed:
                 LOGGER.warning("DATAHUB_PERSIST_REJECTED_AFTER_CLOSE kind=%s", kind)
@@ -538,7 +540,10 @@ class DataHub:
                 payload = self._persist_latest.pop(kind, _payload)
                 self._persist_inflight_kind = kind
             try:
-                self._save_snapshot(kind, payload)
+                if kind == "quotes" and payload is None:
+                    with self._lock:
+                        payload = self._snapshot_quotes_unlocked()
+                self._save_snapshot(kind, payload or {})
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning(
                     "DATAHUB_SNAPSHOT_SAVE_FAILED kind=%s error=%r",
@@ -568,10 +573,11 @@ class DataHub:
                 return
             if not force and self._monotonic() < self._quote_checkpoint_deadline:
                 return
-            payload = self._snapshot_quotes_unlocked()
             self._quote_checkpoint_dirty = False
             self._quote_checkpoint_deadline = 0.0
-        self._enqueue_snapshot("quotes", payload)
+        # Queue only a snapshot request. The worker copies the quote map so the
+        # first tick after each checkpoint deadline never performs an O(N) copy.
+        self._enqueue_snapshot("quotes", None)
         if wait:
             self.flush_persistence(timeout=10.0)
 
