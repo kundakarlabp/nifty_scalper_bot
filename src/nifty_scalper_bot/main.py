@@ -11,9 +11,6 @@ Production Entrypoint
 import asyncio
 import logging
 import os
-from nifty_scalper_bot.config.defaults import (
-    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
-)
 import socket
 import sys
 from contextlib import asynccontextmanager, suppress
@@ -24,6 +21,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
 from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.runtime_install_proof import build_runtime_install_proof
@@ -543,7 +543,13 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
             "data_hard_ready": bool(getattr(ctx, "data_hard_ready", False)),
             "evaluation_ready": bool(getattr(ctx, "evaluation_ready", False)),
             "live_orders_armed": bool(getattr(ctx, "live_orders_armed", False)),
+            "execution_capacity_ready": bool(
+                getattr(ctx, "execution_capacity_ready", False)
+            ),
         },
+        "minimum_lot_affordability": dict(
+            getattr(ctx, "minimum_lot_affordability_by_symbol", {}) or {}
+        ),
         "broker_authentication": auth_state,
         **broker_status,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),

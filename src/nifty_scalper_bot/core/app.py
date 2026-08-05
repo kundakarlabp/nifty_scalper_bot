@@ -93,6 +93,9 @@ from nifty_scalper_bot.data.robust_provider import (
 )
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
+from nifty_scalper_bot.execution.affordability import (
+    evaluate_minimum_lot_affordability,
+)
 from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds
 from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
@@ -105,6 +108,7 @@ from nifty_scalper_bot.utils.market_hours import (
 )
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
+_START_TIME = time_module.monotonic()
 SYNC_LOCK = threading.Lock()
 instrument_cache_ready = threading.Event()
 
@@ -3062,6 +3066,10 @@ class BotContext:
     selected_pe_exec_ready: bool = False
     context_exec_ready: bool = False
     broker_ready: bool = False
+    execution_capacity_ready: bool = False
+    minimum_lot_affordability_by_symbol: dict[str, dict[str, object]] = field(
+        default_factory=dict
+    )
     broker_auth_invalid: bool = False
     broker_auth_error: str | None = None
     broker_auth_invalid_at: datetime | None = None
@@ -9589,12 +9597,66 @@ async def _recompute_and_push_runtime_readiness(
     broker_ready = bool(
         getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)
     )
+    ce_market_exec_ready = bool(ce_exec_ready)
+    pe_market_exec_ready = bool(pe_exec_ready)
+    affordability_by_symbol: dict[str, dict[str, object]] = {}
+
+    def _minimum_lot_capacity(symbol: str | None, status: object | None):
+        if not symbol or status is None:
+            return None
+        decision = evaluate_minimum_lot_affordability(
+            symbol=str(symbol),
+            quote={
+                "bid": getattr(status, "bid", None),
+                "ask": getattr(status, "ask", None),
+                "ltp": getattr(_snapshot(symbol), "ltp", None),
+            },
+            order_manager=getattr(ctx, "order_manager", None),
+            data_hub=getattr(ctx, "data_hub", None),
+            fallback_balance=(
+                getattr(ctx, "last_valid_broker_balance", None)
+                if bool(getattr(ctx, "broker_balance_valid", False))
+                else None
+            ),
+        )
+        affordability_by_symbol[str(symbol)] = decision.to_dict()
+        return decision
+
+    ce_affordability = (
+        _minimum_lot_capacity(selected_ce, ce_status) if live_mode else None
+    )
+    pe_affordability = (
+        _minimum_lot_capacity(selected_pe, pe_status) if live_mode else None
+    )
+    if live_mode:
+        ce_capacity_ready = bool(
+            ce_market_exec_ready
+            and ce_affordability is not None
+            and ce_affordability.affordable
+        )
+        pe_capacity_ready = bool(
+            pe_market_exec_ready
+            and pe_affordability is not None
+            and pe_affordability.affordable
+        )
+        execution_capacity_ready = bool(ce_capacity_ready or pe_capacity_ready)
+    else:
+        ce_capacity_ready = ce_market_exec_ready
+        pe_capacity_ready = pe_market_exec_ready
+        execution_capacity_ready = True
+    ce_exec_ready = bool(ce_market_exec_ready and ce_capacity_ready)
+    pe_exec_ready = bool(pe_market_exec_ready and pe_capacity_ready)
     execution_ready_by_symbol: dict[str, bool] = {}
     if selected_ce:
         execution_ready_by_symbol[str(selected_ce)] = bool(ce_exec_ready)
     if selected_pe:
         execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)
-    all_selected_options_exec_ready = bool(ce_exec_ready and pe_exec_ready)
+    selected_options_data_exec_ready = bool(
+        ce_market_exec_ready and pe_market_exec_ready
+    )
+    all_selected_options_exec_ready = bool(
+        selected_options_data_exec_ready and execution_capacity_ready
+    )
     live_orders_armed = bool(
         live_mode
         and market_open
@@ -9604,6 +9666,20 @@ async def _recompute_and_push_runtime_readiness(
         and all_selected_options_exec_ready
     )
     missing = []
+    if (
+        live_mode
+        and selected_options_data_exec_ready
+        and not execution_capacity_ready
+    ):
+        capacity_decisions = [
+            item
+            for item in (ce_affordability, pe_affordability)
+            if item is not None
+        ]
+        if capacity_decisions and all(item.determinate for item in capacity_decisions):
+            missing.append("minimum_lot_unaffordable")
+        else:
+            missing.append("execution_capacity_unavailable")
     if not selected_ce:
         missing.append("selected_ce_missing")
     if not selected_pe:
@@ -9753,6 +9829,24 @@ async def _recompute_and_push_runtime_readiness(
     ctx.selected_pe_exec_ready = bool(pe_exec_ready)
     ctx.context_exec_ready = bool(context_exec_ready)
     ctx.broker_ready = bool(broker_ready)
+    ctx.execution_capacity_ready = bool(execution_capacity_ready)
+    ctx.minimum_lot_affordability_by_symbol = dict(affordability_by_symbol)
+    LOGGER.info(
+        "EXECUTION_CAPACITY_READINESS ready=%s selected_ce=%s selected_pe=%s ce_affordable=%s pe_affordable=%s affordability=%s",
+        bool(execution_capacity_ready),
+        selected_ce,
+        selected_pe,
+        bool(ce_affordability and ce_affordability.affordable),
+        bool(pe_affordability and pe_affordability.affordable),
+        affordability_by_symbol,
+        extra={
+            "event": "EXECUTION_CAPACITY_READINESS",
+            "ready": bool(execution_capacity_ready),
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "affordability_by_symbol": affordability_by_symbol,
+        },
+    )
     LOGGER.info(
         "READINESS_BLOCKER_SUMMARY primary_blocker=%s blockers=%s secondary_blockers=%s data_hard_ready=%s evaluation_ready=%s execution_ready=%s live_orders_armed=%s",
         normalized_decision.primary_blocker,
