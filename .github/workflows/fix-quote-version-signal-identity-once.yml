@@ -29,28 +29,43 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply correction and regressions
         run: python .github/scripts/apply_quote_version_signal_identity_fix.py
-      - name: Correct generated line-length contract
+      - name: Correct generated static contracts
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path('src/nifty_scalper_bot/strategies/signal_identity_patch.py')
-          text = path.read_text()
-          old = (
+          signal_path = Path('src/nifty_scalper_bot/strategies/signal_identity_patch.py')
+          signal_text = signal_path.read_text()
+          log_old = (
               '            "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s '
               'raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s '
               'quote_update_version=%s evaluation_snapshot_id=%s",\n'
           )
-          new = (
+          log_new = (
               '            (\n'
               '                "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s "\n'
               '                "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "\n'
               '                "quote_update_version=%s evaluation_snapshot_id=%s"\n'
               '            ),\n'
           )
-          if old not in text:
+          if log_old not in signal_text:
               raise SystemExit('generated observability log anchor missing')
-          path.write_text(text.replace(old, new, 1))
+          signal_path.write_text(signal_text.replace(log_old, log_new, 1))
+
+          runner_path = Path('src/nifty_scalper_bot/strategies/runner.py')
+          runner_text = runner_path.read_text()
+          type_old = (
+              'if TYPE_CHECKING:\n'
+              '    from nifty_scalper_bot.data.data_hub import DataHub\n'
+          )
+          type_new = (
+              'if TYPE_CHECKING:\n'
+              '    from nifty_scalper_bot.data.data_hub import DataHub\n'
+              '    from nifty_scalper_bot.execution.order_manager import ExitIntent\n'
+          )
+          if type_old not in runner_text:
+              raise SystemExit('runner TYPE_CHECKING anchor missing')
+          runner_path.write_text(runner_text.replace(type_old, type_new, 1))
           PY
       - name: Normalize newly introduced and narrowly modified files
         run: |
