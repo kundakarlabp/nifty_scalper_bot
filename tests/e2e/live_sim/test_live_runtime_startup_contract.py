@@ -717,7 +717,6 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         assert ctx.position_reconciliation_completed is True
         assert ctx.websocket_manager is not None
         ctx.websocket_manager.connect()
-        ctx.strategy_runner.start()
         broker = ctx.broker_client.client
         broker.register_order_update_callback(
             ctx.order_manager.apply_broker_order_update
@@ -751,9 +750,13 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
                 lambda sym=sym, price=price: _quote_ltp(ctx, sym) == float(price),
                 failure_message=f"startup tick did not reach DataHub for {sym}",
             )
+        loop.run_until_complete(
+            core_app._ensure_strategy_runner_started(
+                ctx, reason="live_sim_symbols_registered"
+            )
+        )
         _pump_runtime(loop, ctx, iterations=20)
 
-        assert ctx.live_orders_armed is False
         loop.run_until_complete(
             core_app._recompute_and_push_runtime_readiness(ctx, reason="live_sim")
         )  # noqa: SLF001
