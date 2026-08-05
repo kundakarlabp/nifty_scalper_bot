@@ -25,5 +25,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
-      - name: Prove regressions, apply narrow fix, validate and commit
-        run: python .github/scripts/apply_readiness_history_integrity_fix.py
+      - name: Prove regressions on untouched code
+        run: python .github/scripts/apply_readiness_history_integrity_fix.py red
+      - name: Apply narrow production fix
+        run: python .github/scripts/apply_readiness_history_integrity_fix.py apply
+      - name: Focused integrity regressions
+        run: python -m pytest -q tests/strategies/test_runtime_history_activation_integrity.py
+      - name: Related history regressions
+        run: |
+          python -m pytest -q tests/strategies/test_canonical_runner_history_sync.py
+          python -m pytest -q tests/data/test_canonical_history_hydration.py
+      - name: Related spot readiness regressions
+        run: python -m pytest -q tests/test_market_data_manager_spot_readiness.py
+      - name: Compile
+        run: python -m compileall -q src/nifty_scalper_bot
+      - name: Scoped Ruff
+        run: |
+          python -m ruff check \
+            src/nifty_scalper_bot/strategies/runner.py \
+            src/nifty_scalper_bot/data/market_data_manager.py \
+            tests/strategies/test_runtime_history_activation_integrity.py
+      - name: Scoped Black
+        run: |
+          python -m black --check \
+            src/nifty_scalper_bot/strategies/runner.py \
+            src/nifty_scalper_bot/data/market_data_manager.py \
+            tests/strategies/test_runtime_history_activation_integrity.py
+      - name: Diff integrity
+        run: git diff --check
+      - name: Commit clean implementation
+        run: python .github/scripts/apply_readiness_history_integrity_fix.py commit
