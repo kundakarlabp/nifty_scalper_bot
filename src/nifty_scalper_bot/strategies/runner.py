@@ -4409,6 +4409,8 @@ class StrategyRunner:
             for marker in (
                 "no_qty_after_risk",
                 "insufficient_margin",
+                "margin needed=",
+                "margin_no_qty",
                 "available_balance_unavailable",
             )
         ):

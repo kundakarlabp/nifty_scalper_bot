@@ -93,3 +93,17 @@ def test_trade_decision_snapshot_is_persisted_to_existing_journal() -> None:
     assert captured[0][0]["candidate_count"] == 2
     assert captured[0][0]["order_submitted"] is True
     assert captured[0][1] == "trace-1"
+
+
+def test_margin_needed_rejection_is_deterministic_risk_capacity() -> None:
+    assert (
+        StrategyRunner._deterministic_execution_reject_reason("MARGIN needed=11225.50")
+        == "risk_capacity_unavailable"
+    )
+
+
+def test_margin_no_qty_rejection_is_deterministic_risk_capacity() -> None:
+    assert (
+        StrategyRunner._deterministic_execution_reject_reason("margin_no_qty")
+        == "risk_capacity_unavailable"
+    )
