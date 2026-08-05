@@ -31,14 +31,15 @@ def main() -> None:
     )
     replace_once(
         "        _pump_runtime(loop, ctx, iterations=20)\n\n"
-        "        assert ctx.live_orders_armed is False\n",
+        "        assert ctx.live_orders_armed is False\n"
+        "        loop.run_until_complete(\n",
         "        loop.run_until_complete(\n"
         "            core_app._ensure_strategy_runner_started(\n"
         "                ctx, reason=\"live_sim_symbols_registered\"\n"
         "            )\n"
         "        )\n"
         "        _pump_runtime(loop, ctx, iterations=20)\n\n"
-        "        assert ctx.live_orders_armed is False\n",
+        "        loop.run_until_complete(\n",
     )
 
     run(
