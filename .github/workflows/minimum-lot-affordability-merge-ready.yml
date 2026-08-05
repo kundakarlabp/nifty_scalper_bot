@@ -1,0 +1,200 @@
+name: Minimum Lot Affordability Merge Ready
+
+on:
+  push:
+    branches:
+      - fix/minimum-lot-affordability-readiness-20260806
+
+permissions:
+  contents: write
+
+concurrency:
+  group: minimum-lot-affordability-merge-ready
+  cancel-in-progress: false
+
+jobs:
+  validate-and-commit:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/minimum-lot-affordability-readiness-20260806
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+
+      - name: Apply production correction, uptime fix, and regressions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          source = Path(
+              '.github/workflows/minimum-lot-affordability-once.yml'
+          ).read_text(encoding='utf-8')
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n\n      - name: Format changed Python"
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          exec(
+              compile(
+                  textwrap.dedent(source[start:end]),
+                  'affordability_patch.py',
+                  'exec',
+              ),
+              {},
+          )
+
+          integration = Path(
+              'tests/core/test_minimum_lot_affordability_readiness.py'
+          )
+          text = integration.read_text(encoding='utf-8')
+          replacements = (
+              (
+                  '            set_runtime_readiness=lambda **kw: calls.append(kw),\n        ),',
+                  '            set_runtime_readiness=lambda **kw: calls.append(kw),\n            has_datahub_subscription=lambda *args, **kwargs: True,\n        ),',
+              ),
+              (
+                  '    assert ctx.readiness_decision.primary_blocker == "minimum_lot_unaffordable"',
+                  '    assert (\n        ctx.live_block_reason\n        == "execution_not_armed:minimum_lot_unaffordable"\n    )',
+              ),
+              (
+                  '    assert ctx.readiness_decision.primary_blocker is None',
+                  '    assert ctx.live_block_reason is None',
+              ),
+          )
+          for old, new in replacements:
+              assert text.count(old) == 1, (old, text.count(old))
+              text = text.replace(old, new, 1)
+          integration.write_text(text, encoding='utf-8')
+
+          live_tick = Path('tests/core/test_readiness_live_tick_proof.py')
+          text = live_tick.read_text(encoding='utf-8')
+          old = '        broker_client=object(),\n        order_manager=object(),\n        active_trading_universe={'
+          new = '        broker_client=object(),\n        order_manager=SimpleNamespace(\n            resolve_lot_size=lambda symbol: 65,\n            _margin_factor=1.0,\n            _margin_buffer=1.0,\n        ),\n        broker_balance_valid=True,\n        last_valid_broker_balance=100_000.0,\n        active_trading_universe={'
+          assert text.count(old) == 1, text.count(old)
+          live_tick.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          app_path = Path('src/nifty_scalper_bot/core/app.py')
+          app_text = app_path.read_text(encoding='utf-8')
+          old = 'LOGGER = logging.getLogger("nifty_scalper_bot.core.app")\nSYNC_LOCK = threading.Lock()'
+          new = 'LOGGER = logging.getLogger("nifty_scalper_bot.core.app")\n_START_TIME = time_module.monotonic()\nSYNC_LOCK = threading.Lock()'
+          assert app_text.count(old) == 1, app_text.count(old)
+          app_path.write_text(app_text.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Correct import ordering and format
+        run: |
+          python -m ruff check --select I --fix \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/execution/affordability.py \
+            src/nifty_scalper_bot/execution/readiness.py \
+            src/nifty_scalper_bot/main.py \
+            tests/execution/test_minimum_lot_affordability.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_readiness_live_tick_proof.py
+          python -m black \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/execution/affordability.py \
+            src/nifty_scalper_bot/execution/readiness.py \
+            src/nifty_scalper_bot/main.py \
+            tests/execution/test_minimum_lot_affordability.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_readiness_live_tick_proof.py
+
+      - name: Focused and adjacent regressions
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: |
+          python -m pytest -q \
+            tests/execution/test_minimum_lot_affordability.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_readiness_semantics.py \
+            tests/core/test_readiness_live_tick_proof.py \
+            tests/core/test_history_readiness_ssot.py \
+            tests/core/test_active_basket_readiness_sync.py \
+            tests/core/test_startup_risk_balance.py \
+            tests/core/test_app_health.py \
+            tests/execution/test_margin_engine.py \
+            tests/execution/test_margin_freshness_zero_balance.py \
+            tests/execution/test_readiness_priority.py \
+            tests/execution/test_readiness_execution_safety_blockers.py \
+            tests/test_main_health_readiness.py \
+            tests/test_market_open_rearm_loop.py
+
+      - name: Compile, fatal Ruff, and Black
+        run: |
+          python -m compileall -q src tests dashboard scripts
+          python -m ruff check --select E9,F63,F7,F82,I \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/execution/affordability.py \
+            src/nifty_scalper_bot/execution/readiness.py \
+            src/nifty_scalper_bot/main.py \
+            tests/execution/test_minimum_lot_affordability.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_readiness_live_tick_proof.py
+          python -m black --check \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/execution/affordability.py \
+            src/nifty_scalper_bot/execution/readiness.py \
+            src/nifty_scalper_bot/main.py \
+            tests/execution/test_minimum_lot_affordability.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_readiness_live_tick_proof.py
+
+      - name: Complete repository suite
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: python -m pytest -q
+
+      - name: Verify intended production change surface
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          intended = {
+              'src/nifty_scalper_bot/execution/affordability.py',
+              'src/nifty_scalper_bot/execution/readiness.py',
+              'src/nifty_scalper_bot/core/app.py',
+              'src/nifty_scalper_bot/main.py',
+              'tests/execution/test_minimum_lot_affordability.py',
+              'tests/core/test_minimum_lot_affordability_readiness.py',
+              'tests/core/test_readiness_live_tick_proof.py',
+          }
+          status = subprocess.check_output(
+              ['git', 'status', '--porcelain'], text=True
+          ).splitlines()
+          actual = {line[3:] for line in status if len(line) >= 4}
+          temp_prefixes = ('.github/workflows/minimum-lot-', '.ci/')
+          unexpected = {
+              path
+              for path in actual - intended
+              if not path.startswith(temp_prefixes)
+          }
+          if unexpected:
+              raise SystemExit(f'unexpected changes: {sorted(unexpected)}')
+          if intended - actual:
+              raise SystemExit(f'missing intended changes: {sorted(intended - actual)}')
+          PY
+
+      - name: Commit validated correction and remove temporary tooling
+        run: |
+          rm -rf .ci
+          find .github/workflows -maxdepth 1 -type f \
+            -name 'minimum-lot-affordability-*.yml' -print -delete
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git reset -- .ci 2>/dev/null || true
+          git commit -m 'fix(execution): gate live readiness on minimum lot affordability [skip ci]'
+          git push origin HEAD:fix/minimum-lot-affordability-readiness-20260806
