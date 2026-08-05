@@ -1,3 +1,5 @@
+"""Regression coverage for live-readiness and runner-history ownership boundaries."""
+
 from __future__ import annotations
 
 import inspect
