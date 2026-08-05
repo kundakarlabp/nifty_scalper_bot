@@ -15,6 +15,9 @@ from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (
     apply_orderflow_live_context_proof,
 )
+from nifty_scalper_bot.strategies.signal_identity_patch import (
+    _stamp_evaluation_identity,
+)
 
 
 class _ObservableStrategy(EliteStrategy):
@@ -48,7 +51,6 @@ class _ObservableStrategy(EliteStrategy):
                 "raw_setup_score": 8.0,
                 "setup_id": "observable:ce:1",
                 "latest_bar_ts": indicators["latest_bar_ts"],
-                "quote_update_version": 7,
             },
         )
 
@@ -75,11 +77,18 @@ def test_elite_signal_log_contains_structural_identity(caplog) -> None:
 
     signal = strategy.generate_signal(
         "NFO:NIFTY2680724500CE",
-        {"latest_bar_ts": 1_785_000_000.0},
+        {"latest_bar_ts": 1_785_000_000.0, "quote_update_version": 7},
         100.0,
     )
 
     assert signal is not None
+    assert signal.metadata["quote_update_version"] == 7
+    assert (
+        signal.metadata["quote_update_version_source"]
+        == "indicator_context:quote_update_version"
+    )
+    assert signal.metadata["setup_signal_id"] == signal.deterministic_id
+    assert signal.metadata["evaluation_snapshot_id"]
     records = [
         record
         for record in caplog.records
@@ -93,6 +102,92 @@ def test_elite_signal_log_contains_structural_identity(caplog) -> None:
     assert record.raw_setup_score == 8.0
     assert record.setup_id == "observable:ce:1"
     assert record.quote_update_version == 7
+    assert (
+        record.quote_update_version_source == "indicator_context:quote_update_version"
+    )
+    assert record.setup_signal_id == signal.deterministic_id
+    assert record.evaluation_snapshot_id == signal.metadata["evaluation_snapshot_id"]
+
+
+def test_elite_evaluation_snapshot_identity_tracks_quote_version() -> None:
+    strategy = _ObservableStrategy()
+    base = {"latest_bar_ts": 1_785_000_000.0}
+
+    first = strategy.generate_signal(
+        "NFO:NIFTY2680724500CE",
+        {**base, "quote_update_version": 7},
+        100.0,
+    )
+    repeated = strategy.generate_signal(
+        "NFO:NIFTY2680724500CE",
+        {**base, "quote_update_version": 7},
+        100.0,
+    )
+    changed = strategy.generate_signal(
+        "NFO:NIFTY2680724500CE",
+        {**base, "quote_update_version": 8},
+        100.0,
+    )
+
+    assert first is not None and repeated is not None and changed is not None
+    assert (
+        first.deterministic_id == repeated.deterministic_id == changed.deterministic_id
+    )
+    assert (
+        first.metadata["evaluation_snapshot_id"]
+        == repeated.metadata["evaluation_snapshot_id"]
+    )
+    assert (
+        first.metadata["evaluation_snapshot_id"]
+        != changed.metadata["evaluation_snapshot_id"]
+    )
+
+
+def test_indicator_quote_version_overrides_stale_signal_metadata() -> None:
+    signal = SimpleNamespace(
+        symbol="NFO:NIFTY2680724500CE",
+        action="BUY",
+        metadata={
+            "strategy": "Observable",
+            "contract_side": "CE",
+            "latest_bar_ts": 1_785_000_000.0,
+            "quote_update_version": 6,
+            "quote_update_version_source": "microstructure_fingerprint",
+        },
+    )
+
+    result = _stamp_evaluation_identity(
+        signal,
+        {
+            "quote_update_version": 7,
+            "quote_update_version_source": "datahub_quote:quote_update_version",
+        },
+    )
+
+    assert result.metadata["quote_update_version"] == 7
+    assert (
+        result.metadata["quote_update_version_source"]
+        == "datahub_quote:quote_update_version"
+    )
+
+
+def test_signal_metadata_quote_version_is_valid_fallback() -> None:
+    signal = SimpleNamespace(
+        symbol="NFO:NIFTY2680724500CE",
+        action="BUY",
+        metadata={
+            "strategy": "Observable",
+            "contract_side": "CE",
+            "latest_bar_ts": 1_785_000_000.0,
+            "quote_update_version": 6,
+            "quote_update_version_source": "microstructure_fingerprint",
+        },
+    )
+
+    result = _stamp_evaluation_identity(signal, {})
+
+    assert result.metadata["quote_update_version"] == 6
+    assert result.metadata["quote_update_version_source"] == "microstructure_fingerprint"
 
 
 def _orderflow_signal(*, bid: float = 99.5) -> SimpleNamespace:
@@ -108,7 +203,9 @@ def _orderflow_signal(*, bid: float = 99.5) -> SimpleNamespace:
     )
 
 
-def test_orderflow_quote_fingerprint_is_stable_and_changes_with_quote(monkeypatch) -> None:
+def test_orderflow_quote_fingerprint_is_stable_and_changes_with_quote(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     first = apply_orderflow_live_context_proof(_orderflow_signal(), {})
     repeated = apply_orderflow_live_context_proof(_orderflow_signal(), {})
@@ -124,9 +221,7 @@ def test_orderflow_prefers_existing_quote_version(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     signal = _orderflow_signal()
 
-    result = apply_orderflow_live_context_proof(
-        signal, {"quote_update_version": 42}
-    )
+    result = apply_orderflow_live_context_proof(signal, {"quote_update_version": 42})
 
     assert result.metadata["quote_update_version"] == 42
     assert result.metadata["quote_update_version_source"] == "quote_update_version"
