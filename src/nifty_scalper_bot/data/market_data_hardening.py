@@ -488,6 +488,15 @@ def _flush_due_candles(self: Any, *, now: Any | None = None, grace_seconds: floa
     if now_ts is None:
         return 0
 
+    # Candle finalisation and bounded tick draining share the owning event loop.
+    # Do not make a minute immutable while accepted ticks are still pending or
+    # currently being drained; otherwise those ticks are rejected later as
+    # finalized_minute and the resulting OHLC/indicator state is incomplete.
+    pending_ticks = max(int(getattr(self, "_pending_tick_count", 0) or 0), 0)
+    drain_active = max(int(getattr(self, "_tick_drain_active", 0) or 0), 0)
+    if pending_ticks or drain_active:
+        return 0
+
     engines = list(getattr(self, "_engines", {}).items())
     flushed = 0
     for symbol, engine in engines:
