@@ -74,6 +74,12 @@ def test_fallback_backfill_reseeds_only_cold_active_symbols() -> None:
     reseeded: list[str] = []
     requested: list[tuple[str, int]] = []
 
+    def _get_mdm_bars(symbol: str, _target: int) -> list[dict]:
+        if symbol == warm:
+            raise AssertionError("fallback must not refetch an already-warm symbol")
+        assert symbol == cold
+        return list(cold_rows)
+
     runner._logger = logging.getLogger("test.runtime_history_fallback")
     runner._lock = threading.RLock()
     runner._active_symbols = {warm, cold}
@@ -82,9 +88,7 @@ def test_fallback_backfill_reseeds_only_cold_active_symbols() -> None:
         get_history=lambda symbol: list(histories.get(symbol, []))
     )
     runner._required_bars_for_symbol = lambda _symbol: 20
-    runner._get_mdm_bars = lambda symbol, _target: (
-        list(warm_rows) if symbol == warm else list(cold_rows)
-    )
+    runner._get_mdm_bars = _get_mdm_bars
     runner._set_symbol_hydration_state = lambda *_a, **_k: None
     runner._request_mdm_hydration = lambda symbol, target: requested.append(
         (symbol, target)
