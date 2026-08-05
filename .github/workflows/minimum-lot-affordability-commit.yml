@@ -79,6 +79,7 @@ jobs:
       - name: Remove runtime artifacts and verify change surface
         run: |
           git restore --source=HEAD --worktree --staged positions.json 2>/dev/null || rm -f positions.json
+          rm -rf .pytest-data-dir
           python - <<'PY'
           import subprocess
 
@@ -109,7 +110,7 @@ jobs:
 
       - name: Commit only production code and regressions
         run: |
-          rm -rf .ci
+          rm -rf .ci .pytest-data-dir
           find .github/workflows -maxdepth 1 -type f \
             -name 'minimum-lot-affordability-*.yml' -print -delete
           git restore --source=HEAD --worktree --staged positions.json 2>/dev/null || rm -f positions.json
