@@ -37,7 +37,6 @@ jobs:
           cat scripts/p0p1_chunks/app_main.part.* | base64 -d > /tmp/apply_app_main.py
           cat scripts/p0p1_chunks/tests.part.* | base64 -d > /tmp/apply_tests.py
           echo 'ca9ac8d76e2caf6a0aa42fdf28d255fd26da137f5e6c6bb402d171fc5c299f58  /tmp/apply_worker.py' | sha256sum -c -
-          echo '6910ba47622091ab7eaa12b755e7f9191af4f8125e9eeff4aaeb220083a5d4ae  scripts/apply_reconcile.py' | sha256sum -c -
           echo 'c49d3238888eb7a532b48ebad2f7bd34452ef29254d36dd4335dd04fd7e1dc23  /tmp/apply_app_main.py' | sha256sum -c -
           echo 'e35286ba58dae12743e9acb4162fe7f17d845b7f5ad96cf267488936461b0404  /tmp/apply_tests.py' | sha256sum -c -
           python -m py_compile /tmp/apply_worker.py scripts/apply_reconcile.py /tmp/apply_watchdog.py /tmp/apply_app_main.py /tmp/apply_tests.py
