@@ -56,6 +56,22 @@ def test_zero_volume_series_yields_no_vwap() -> None:
     assert engine.get_session_vwap("NFO:NIFTY2680424400CE") is None
 
 
+def test_session_vwap_slope_uses_finalized_positive_volume_bars() -> None:
+    engine = _engine_with_bars([_session_bar(i, 100.0 + i, 100) for i in range(5)])
+
+    # Session VWAP progresses 100.0, 100.5, ..., 102.0.  Three bars back it
+    # was 100.5, so the percentage slope is (102 / 100.5 - 1) * 100.
+    assert engine.get_session_vwap_slope(
+        "NFO:NIFTY2680424400CE", lookback=3
+    ) == pytest.approx((102.0 / 100.5 - 1.0) * 100.0)
+
+
+def test_session_vwap_slope_fails_closed_without_enough_volume_history() -> None:
+    engine = _engine_with_bars([_session_bar(0, 100.0, 100), _session_bar(1, 101.0, 0)])
+
+    assert engine.get_session_vwap_slope("NFO:NIFTY2680424400CE", lookback=1) is None
+
+
 def test_unvolumed_bars_do_not_get_fake_weights() -> None:
     engine = IndicatorEngine()
     # Only the second bar carries volume, so it alone defines VWAP.

@@ -2192,6 +2192,30 @@ class StrategyManager(_BaseStrategyManager):
             except (TypeError, ValueError):
                 return None
 
+        def _history_vwap_slope() -> float | None:
+            if role != "futures_context":
+                return None
+            getter = getattr(
+                getattr(self, "_indicator_engine", None),
+                "get_session_vwap_slope",
+                None,
+            )
+            if not callable(getter):
+                return None
+            try:
+                value = getter(symbol, lookback=3)
+            except Exception as exc:  # noqa: BLE001 - context remains fail-closed
+                log.debug(
+                    "FUTURES_CONTEXT_VWAP_SLOPE_FALLBACK_FAILED symbol=%s error=%s",
+                    symbol,
+                    exc,
+                )
+                return None
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
         context_kind = (
             "price_direction"
             if role == "spot_context"
@@ -2222,6 +2246,10 @@ class StrategyManager(_BaseStrategyManager):
         ema_slow_source = "indicator" if ema_slow is not None else "unavailable"
         ema_50_source = "indicator" if ema_50 is not None else "unavailable"
         if role == "futures_context":
+            if vwap_slope is None:
+                vwap_slope = _history_vwap_slope()
+                if vwap_slope is not None:
+                    vwap_slope_source = "indicator_engine_history"
             if ema_fast is None:
                 ema_fast = _history_ema(9)
                 if ema_fast is not None:
