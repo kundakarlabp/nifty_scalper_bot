@@ -51,6 +51,90 @@ jobs:
           python /tmp/apply_worker.py
           python scripts/fix_worker_stop_wakeup_final.py
           python scripts/apply_reconcile.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/nifty_scalper_bot/execution/position_identity_extension.py")
+          text = path.read_text(encoding="utf-8")
+
+          replacements = [
+              (
+                  "import inspect\nimport threading\n",
+                  "import inspect\n",
+                  "threading import",
+              ),
+              (
+                  '''        self._single_reconcile_lock = threading.Lock()
+                  self._single_reconcile_generation = 0
+                  self._single_reconcile_coalesced = 0
+                  self._cost_basis_unresolved_symbols = set()
+          ''',
+                  '''        self._cost_basis_unresolved_symbols = set()
+          ''',
+                  "duplicate reconcile state",
+              ),
+              (
+                  '''    def reconcile_now(self: Any) -> bool:
+                  lock = getattr(self, "_single_reconcile_lock", None)
+                  if lock is None:
+                      self._single_reconcile_lock = threading.Lock()
+                      lock = self._single_reconcile_lock
+                  if not lock.acquire(False):
+                      self._single_reconcile_coalesced = int(getattr(self, "_single_reconcile_coalesced", 0)) + 1
+                      return bool(getattr(self, "_last_reconcile_success_at", None))
+                  try:
+                      self._single_reconcile_generation = int(getattr(self, "_single_reconcile_generation", 0)) + 1
+                      return bool(_ORIGINALS["PositionManager.reconcile_now"](self))
+                  finally:
+                      lock.release()
+          ''',
+                  '''    def reconcile_now(self: Any) -> bool:
+                  return bool(_ORIGINALS["PositionManager.reconcile_now"](self))
+          ''',
+                  "reconcile wrapper",
+              ),
+              (
+                  '''    def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
+                  prepared, unresolved = _prepare_broker_positions(self, broker_positions)
+                  self._cost_basis_unresolved_symbols = set(unresolved)
+                  if unresolved and isinstance(prepared, list):
+                      prepared = [row for row in prepared if _prepared_row_symbol(row) not in unresolved]
+                  result = _ORIGINALS["PositionManager.synchronize_with_broker"](
+                      self,
+                      prepared,
+                  )
+                  _canonicalize_position_store(self)
+                  return result
+          ''',
+                  '''    def synchronize_with_broker(
+                  self: Any,
+                  broker_positions: Any,
+                  *args: Any,
+                  **kwargs: Any,
+              ) -> Any:
+                  prepared, unresolved = _prepare_broker_positions(self, broker_positions)
+                  self._cost_basis_unresolved_symbols = set(unresolved)
+                  if unresolved and isinstance(prepared, list):
+                      prepared = [row for row in prepared if _prepared_row_symbol(row) not in unresolved]
+                  result = _ORIGINALS["PositionManager.synchronize_with_broker"](
+                      self,
+                      prepared,
+                      *args,
+                      **kwargs,
+                  )
+                  _canonicalize_position_store(self)
+                  return result
+          ''',
+                  "synchronize wrapper",
+              ),
+          ]
+          for old, new, label in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
           python /tmp/apply_watchdog.py
           python /tmp/apply_app_main.py
           python /tmp/apply_tests.py
@@ -59,6 +143,7 @@ jobs:
           python -m black \
             src/nifty_scalper_bot/data/market_data_hardening.py \
             src/nifty_scalper_bot/execution/position_manager.py \
+            src/nifty_scalper_bot/execution/position_identity_extension.py \
             src/nifty_scalper_bot/infra/watchdog.py \
             src/nifty_scalper_bot/core/app.py \
             src/nifty_scalper_bot/main.py \
@@ -84,6 +169,7 @@ jobs:
           python -m ruff check \
             src/nifty_scalper_bot/data/market_data_hardening.py \
             src/nifty_scalper_bot/execution/position_manager.py \
+            src/nifty_scalper_bot/execution/position_identity_extension.py \
             src/nifty_scalper_bot/infra/watchdog.py \
             src/nifty_scalper_bot/core/app.py \
             src/nifty_scalper_bot/main.py \
@@ -94,6 +180,7 @@ jobs:
           python -m black --check \
             src/nifty_scalper_bot/data/market_data_hardening.py \
             src/nifty_scalper_bot/execution/position_manager.py \
+            src/nifty_scalper_bot/execution/position_identity_extension.py \
             src/nifty_scalper_bot/infra/watchdog.py \
             src/nifty_scalper_bot/core/app.py \
             src/nifty_scalper_bot/main.py \
@@ -128,6 +215,7 @@ jobs:
           allowed = {
               'src/nifty_scalper_bot/data/market_data_hardening.py',
               'src/nifty_scalper_bot/execution/position_manager.py',
+              'src/nifty_scalper_bot/execution/position_identity_extension.py',
               'src/nifty_scalper_bot/infra/watchdog.py',
               'src/nifty_scalper_bot/core/app.py',
               'src/nifty_scalper_bot/main.py',
@@ -157,6 +245,7 @@ jobs:
           required = {
               'src/nifty_scalper_bot/data/market_data_hardening.py',
               'src/nifty_scalper_bot/execution/position_manager.py',
+              'src/nifty_scalper_bot/execution/position_identity_extension.py',
               'src/nifty_scalper_bot/infra/watchdog.py',
               'src/nifty_scalper_bot/core/app.py',
               'src/nifty_scalper_bot/main.py',
