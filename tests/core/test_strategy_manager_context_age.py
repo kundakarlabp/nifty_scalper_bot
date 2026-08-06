@@ -85,3 +85,35 @@ def test_futures_context_uses_hydrated_history_when_ema_aliases_are_absent() -> 
     assert snapshot["ema_50_source"] == "indicator_engine_history"
     assert snapshot["direction_bias"] == "CE"
     assert "ema_fast_above_slow" in snapshot["direction_context_reasons"]
+
+
+def test_futures_context_derives_current_vwap_slope_from_hydrated_history() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+
+    symbol = "NFO:NIFTY26AUGFUT"
+    engine = IndicatorEngine()
+    started_at = datetime(2026, 8, 5, 3, 45, tzinfo=timezone.utc)
+    for index in range(10):
+        price = 25000.0 + float(index)
+        engine.update_price(
+            symbol,
+            {"open": price, "high": price, "low": price, "close": price},
+            volume=100,
+            timestamp=started_at + timedelta(minutes=index),
+        )
+
+    manager = object.__new__(StrategyManager)
+    manager._indicator_engine = engine
+    manager._latest_context_snapshots = {}
+    manager._update_context_snapshot(
+        symbol=symbol,
+        indicators={"ltp": 25009.0, "close": 25009.0},
+        role="futures_context",
+    )
+
+    snapshot = manager._latest_context_snapshots["futures_context"]
+    assert snapshot["vwap_slope"] > 0
+    assert snapshot["vwap_slope_source"] == "indicator_engine_history"
+    assert "vwap_slope_positive" in snapshot["direction_context_reasons"]

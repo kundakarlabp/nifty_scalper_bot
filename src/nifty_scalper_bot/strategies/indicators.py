@@ -995,6 +995,53 @@ class IndicatorEngine:
         except Exception:  # noqa: BLE001 - indicator pipeline must not crash
             return None
 
+    def get_session_vwap_slope(
+        self, symbol: str, *, lookback: int = 3
+    ) -> float | None:
+        """Return percentage change in session VWAP over finalized volume bars."""
+        try:
+            with self._lock:
+                history = self._histories.get(symbol)
+            if history is None or lookback < 1:
+                return None
+            timestamps = history.get_timestamps()
+            if not timestamps:
+                return None
+            session_open, _session_close = self._session_bounds(timestamps[-1])
+            closes = history.get_closes()
+            highs = history.get_highs()
+            lows = history.get_lows()
+            volumes = history.get_volumes()
+            provisional = history.get_provisional_flags()
+            cumulative_vwaps: list[float] = []
+            cum_pv = 0.0
+            cum_vol = 0.0
+            for index, stamp in enumerate(timestamps):
+                if stamp is None or stamp < session_open:
+                    continue
+                if provisional and index < len(provisional) and provisional[index]:
+                    continue
+                if index >= len(volumes) or index >= len(closes):
+                    continue
+                volume = float(volumes[index] or 0.0)
+                if volume <= 0:
+                    continue
+                close = float(closes[index])
+                high = float(highs[index]) if index < len(highs) else close
+                low = float(lows[index]) if index < len(lows) else close
+                cum_pv += ((high + low + close) / 3.0) * volume
+                cum_vol += volume
+                cumulative_vwaps.append(cum_pv / cum_vol)
+            if len(cumulative_vwaps) <= lookback:
+                return None
+            current = cumulative_vwaps[-1]
+            reference = cumulative_vwaps[-(lookback + 1)]
+            if reference <= 0:
+                return None
+            return ((current / reference) - 1.0) * 100.0
+        except Exception:  # noqa: BLE001 - indicator pipeline must not crash
+            return None
+
     def get_atr_trend(self, symbol: str, period: int = 14) -> float | None:
         """Return ATR trend ratio for *symbol*.
 
