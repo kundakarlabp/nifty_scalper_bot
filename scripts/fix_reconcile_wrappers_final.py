@@ -8,6 +8,42 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+position_path = Path("src/nifty_scalper_bot/execution/position_manager.py")
+position = position_path.read_text(encoding="utf-8")
+position = replace_once(
+    position,
+    '''        for column in ("unrealised", "unrealized", "m2m"):
+            if column not in row:
+                continue
+            raw_value = row.get(column)
+            numeric = _safe_float(raw_value)
+''',
+    '''        for column in ("unrealised", "unrealized", "m2m"):
+            if column not in row:
+                continue
+            raw_unrealized_value = row.get(column)
+            numeric = _safe_float(raw_unrealized_value)
+''',
+    "unrealized reconciliation temporary",
+)
+position = replace_once(
+    position,
+    '''        for column in ("realised", "realized"):
+            if column not in row:
+                continue
+            raw_value = row.get(column)
+            numeric = _safe_float(raw_value)
+''',
+    '''        for column in ("realised", "realized"):
+            if column not in row:
+                continue
+            raw_realized_value = row.get(column)
+            numeric = _safe_float(raw_realized_value)
+''',
+    "realized reconciliation temporary",
+)
+position_path.write_text(position, encoding="utf-8")
+
 identity_path = Path("src/nifty_scalper_bot/execution/position_identity_extension.py")
 identity = identity_path.read_text(encoding="utf-8")
 identity = replace_once(
