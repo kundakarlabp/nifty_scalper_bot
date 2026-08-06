@@ -1,0 +1,30 @@
+name: P0 P1 Position Source Capture
+
+on:
+  push:
+    branches:
+      - fix/p0-p1-runtime-hardening-final-20260806
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/p0-p1-runtime-hardening-final-20260806
+      - name: Apply reconciliation generation patch
+        run: |
+          python scripts/apply_reconcile.py
+          python scripts/fix_reconcile_wrappers_final.py
+          python -m black src/nifty_scalper_bot/execution/position_manager.py
+          python -m py_compile src/nifty_scalper_bot/execution/position_manager.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p0-p1-generated-position-${{ github.run_id }}
+          path: src/nifty_scalper_bot/execution/position_manager.py
+          retention-days: 3
