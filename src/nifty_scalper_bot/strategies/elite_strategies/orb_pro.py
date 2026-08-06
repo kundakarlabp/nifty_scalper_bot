@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,9 +45,6 @@ class ORBProStrategy(EliteStrategy):
     def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
-        if str(os.getenv('ENABLE_ORB_STRATEGY', 'false')).strip().lower() not in {'1','true','yes','on'}:
-            self._no_vote('strategy_disabled_by_env')
-            return None
         try:
             self._no_vote("stale_or_invalid_data")
             or_complete = bool(indicators.get('orb_ready'))
