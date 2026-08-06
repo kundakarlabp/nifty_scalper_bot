@@ -4317,6 +4317,14 @@ class OrderManager:
 
     def _active_contract_for_trade_plan(self, plan: TradePlan) -> dict[str, Any] | None:
         symbol = normalize_symbol(plan.symbol)
+        provenance = (
+            plan.trade_provenance
+            if isinstance(plan.trade_provenance, Mapping)
+            else {}
+        )
+        approved_replacement = normalize_symbol(
+            str(provenance.get("runner_approved_replacement_symbol") or "")
+        )
         sources = (
             getattr(self, "_active_contract_basket", None),
             getattr(getattr(self, "_data_hub", None), "_active_contract_basket", None),
@@ -4339,7 +4347,13 @@ class OrderManager:
                         str(getattr(selection_obj, "selected_pe", "") or "")
                     ),
                 }
-                if symbol not in selected:
+                option_symbols = {
+                    normalize_symbol(str(item))
+                    for item in (getattr(selection_obj, "option_symbols", ()) or ())
+                }
+                if symbol not in selected and not (
+                    symbol == approved_replacement and symbol in option_symbols
+                ):
                     continue
                 token_by_symbol = getattr(selection_obj, "token_by_symbol", None) or {}
                 token = None
@@ -4365,11 +4379,18 @@ class OrderManager:
             if not isinstance(source, Mapping):
                 continue
             token_map = dict(source.get("token_by_symbol") or {})
-            selected = [source.get("selected_ce"), source.get("selected_pe")]
-            symbols = list(source.get("option_symbols") or source.get("symbols") or [])
-            if symbol not in {
-                normalize_symbol(str(x)) for x in [*selected, *symbols] if x
-            }:
+            selected = {
+                normalize_symbol(str(item))
+                for item in (source.get("selected_ce"), source.get("selected_pe"))
+                if item
+            }
+            option_symbols = {
+                normalize_symbol(str(item))
+                for item in (source.get("option_symbols") or source.get("symbols") or [])
+            }
+            if symbol not in selected and not (
+                symbol == approved_replacement and symbol in option_symbols
+            ):
                 continue
             token = token_map.get(symbol) or token_map.get(symbol.split(":", 1)[-1])
             if symbol == normalize_symbol(str(source.get("selected_ce") or "")):

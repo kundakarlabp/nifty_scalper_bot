@@ -6,6 +6,7 @@ import nifty_scalper_bot.execution  # noqa: F401 - applies runtime safety patche
 from nifty_scalper_bot.execution import order_manager_core as core
 
 GOOD_SYMBOL = "NFO:NIFTY2670724250PE"
+ALTERNATIVE_SYMBOL = "NFO:NIFTY2670724200PE"
 BAD_SYMBOL = "NFO:NIFTY2670724300PE"
 
 
@@ -199,6 +200,86 @@ def test_live_trade_plan_requires_active_basket_before_broker_attempt(
     assert result.allowed is False
     assert result.reason == "active_contract_unavailable"
     assert result.details["broker_attempted"] is False
+
+
+def test_live_trade_plan_allows_runner_approved_active_basket_replacement() -> None:
+    manager = _Manager(
+        {"tradingsymbol": "NIFTY2670724200PE"},
+        active_basket={
+            "selected_pe": "NIFTY2670724250PE",
+            "option_symbols": [GOOD_SYMBOL, ALTERNATIVE_SYMBOL],
+            "basket_version": "7",
+            "expiry": "2026-07-30",
+            "token_by_symbol": {GOOD_SYMBOL: 12345, ALTERNATIVE_SYMBOL: 54321},
+        },
+    )
+    plan = _plan(ALTERNATIVE_SYMBOL)
+    plan.instrument_token = 54321
+    plan.trade_provenance["runner_approved_replacement_symbol"] = ALTERNATIVE_SYMBOL
+
+    result = core.OrderManager._validate_trade_plan(manager, plan)
+
+    assert result.allowed is True
+
+
+def test_live_trade_plan_rejects_unapproved_active_basket_replacement() -> None:
+    manager = _Manager(
+        {"tradingsymbol": "NIFTY2670724200PE"},
+        active_basket={
+            "selected_pe": "NIFTY2670724250PE",
+            "option_symbols": [GOOD_SYMBOL, ALTERNATIVE_SYMBOL],
+            "basket_version": "7",
+            "expiry": "2026-07-30",
+            "token_by_symbol": {GOOD_SYMBOL: 12345, ALTERNATIVE_SYMBOL: 54321},
+        },
+    )
+    plan = _plan(ALTERNATIVE_SYMBOL)
+    plan.instrument_token = 54321
+
+    result = core.OrderManager._validate_trade_plan(manager, plan)
+
+    assert result.allowed is False
+    assert result.reason == "active_contract_unavailable"
+
+
+def test_approved_replacement_reaches_order_adapter() -> None:
+    manager = _Manager(
+        {"tradingsymbol": "NIFTY2670724200PE"},
+        active_basket={
+            "selected_pe": "NIFTY2670724250PE",
+            "option_symbols": [GOOD_SYMBOL, ALTERNATIVE_SYMBOL],
+            "basket_version": "7",
+            "expiry": "2026-07-30",
+            "token_by_symbol": {GOOD_SYMBOL: 12345, ALTERNATIVE_SYMBOL: 54321},
+        },
+    )
+    manager.is_kill_switch_active = lambda: False  # type: ignore[attr-defined]
+    manager._validate_trade_plan = lambda plan: core.OrderManager._validate_trade_plan(  # type: ignore[attr-defined]
+        manager, plan
+    )
+    manager._protected_limit_price = lambda _plan: 88.25  # type: ignore[attr-defined]
+    manager._reanchor_bracket_to_price = lambda plan, _price: plan  # type: ignore[attr-defined]
+    captured: dict[str, Any] = {}
+    manager.place_managed_order = lambda **_kwargs: None  # type: ignore[attr-defined]
+    manager.place_managed_order_result = lambda **kwargs: (  # type: ignore[attr-defined]
+        captured.update(kwargs)
+        or core.ManagedOrderResult(
+            accepted=True,
+            order_id="OID-REPLACEMENT",
+            reason="accepted",
+            broker_attempted=True,
+        )
+    )
+    plan = _plan(ALTERNATIVE_SYMBOL)
+    plan.instrument_token = 54321
+    plan.trade_provenance["runner_approved_replacement_symbol"] = ALTERNATIVE_SYMBOL
+
+    result = core.OrderManager.submit_trade_plan_result(manager, plan)
+
+    assert result.accepted is True
+    assert result.order_id == "OID-REPLACEMENT"
+    assert captured["symbol"] == ALTERNATIVE_SYMBOL
+    assert captured["instrument_token"] == 54321
 
 
 def test_live_trade_plan_rejects_more_than_one_lot_when_runtime_max_is_one(
