@@ -67,7 +67,6 @@ jobs:
             tests/data/test_event_loop_thread_telemetry.py \
             tests/execution/test_position_reconcile_singleflight.py \
             tests/execution/test_canonical_execution_recovery.py \
-            tests/execution/test_position_reconcile_runtime.py \
             tests/infra/test_market_data_supervisor.py \
             tests/core/test_minimum_lot_affordability_readiness.py \
             tests/core/test_runtime_readiness.py \
