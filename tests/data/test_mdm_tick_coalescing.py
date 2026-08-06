@@ -149,6 +149,37 @@ async def test_direct_push_tick_uses_bounded_drain(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_slow_tick_processing_does_not_block_event_loop(monkeypatch):
+    """An indivisible tick must not execute on the asyncio owner thread."""
+    mdm = _make_mdm()
+    owner_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    processed = threading.Event()
+
+    def _slow_tick(_raw):
+        worker_threads.append(threading.get_ident())
+        time.sleep(0.12)
+        processed.set()
+
+    monkeypatch.setattr(mdm, "_process_queued_tick", _slow_tick)
+    mdm.set_event_loop(asyncio.get_running_loop())
+    mdm._enqueue_tick_threadsafe(
+        {"instrument_token": 1, "last_price": 10, "timestamp": 1}
+    )
+
+    started = time.monotonic()
+    await asyncio.sleep(0.01)
+    loop_delay = time.monotonic() - started
+    await mdm.drain_pending_ticks(timeout=2.0)
+
+    assert loop_delay < 0.06
+    assert worker_threads
+    assert worker_threads[0] != owner_thread
+    assert processed.is_set()
+    await _stop_mdm(mdm)
+
+
+@pytest.mark.asyncio
 async def test_malformed_ticks_are_bounded_and_accounted(monkeypatch):
     mdm = _make_mdm()
     mdm.set_event_loop(asyncio.get_running_loop())
@@ -2109,4 +2140,3 @@ def test_optional_context_option_is_not_recovery_critical():
     assert selected_ce in required
     assert selected_pe in required
     assert optional_ce not in required
-

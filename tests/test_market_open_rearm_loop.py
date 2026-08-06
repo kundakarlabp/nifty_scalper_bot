@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -113,6 +114,59 @@ async def test_live_rearm_loop_uses_readiness_state_snapshot(monkeypatch: pytest
     with pytest.raises(asyncio.CancelledError):
         await app._live_readiness_rearm_loop(ctx)
     assert called['snapshot'] == 0
+
+
+@pytest.mark.asyncio
+async def test_live_rearm_skips_unchanged_healthy_full_recompute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep_calls = 0
+    recomputes: list[str] = []
+
+    async def _stop_after_one_iteration(_secs: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    async def _recompute(_ctx: object, *, reason: str) -> None:
+        recomputes.append(reason)
+
+    monkeypatch.setattr(app.asyncio, "sleep", _stop_after_one_iteration)
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    monkeypatch.setattr(app, "_runner_is_running", lambda _r: True)
+    monkeypatch.setattr(app, "_recompute_and_push_runtime_readiness", _recompute)
+
+    symbols = ["NSE:NIFTY", "NFO:NIFTY26AUGFUT", "NFO:CE", "NFO:PE"]
+    mdm = SimpleNamespace(
+        pipeline_overloaded=False,
+        has_fresh_ws_ltp=lambda requested, max_age_seconds=60.0: bool(
+            requested and requested[0] in symbols
+        ),
+    )
+    ctx = SimpleNamespace(
+        settings=SimpleNamespace(execution_mode="LIVE"),
+        market_data_manager=mdm,
+        strategy_runner=object(),
+        live_orders_armed=True,
+        trading_ready=True,
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+        position_reconciliation_failed=False,
+        active_contract_basket={
+            "spot_symbol": symbols[0],
+            "futures_symbol": symbols[1],
+            "selected_ce": symbols[2],
+            "selected_pe": symbols[3],
+        },
+        runtime_readiness_fingerprint=tuple(symbols),
+        runtime_readiness_recomputed_mono=time.monotonic(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await app._live_readiness_rearm_loop(ctx)
+
+    assert recomputes == []
 
 
 @pytest.mark.asyncio

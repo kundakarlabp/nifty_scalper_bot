@@ -160,6 +160,8 @@ BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
     "last_hydration_tracking_log_at": None,
     "_runtime_readiness_log_key": None,
     "last_runtime_readiness_log_at": None,
+    "runtime_readiness_recomputed_mono": 0.0,
+    "runtime_readiness_fingerprint": None,
     "_bot_context_runtime_fields_patch_logged": False,
     "history_hydration_attempt_mono_by_symbol": dict,
     "history_hydration_requirement_by_symbol": dict,
@@ -3070,6 +3072,8 @@ class BotContext:
     minimum_lot_affordability_by_symbol: dict[str, dict[str, object]] = field(
         default_factory=dict
     )
+    runtime_readiness_recomputed_mono: float = 0.0
+    runtime_readiness_fingerprint: tuple[str, str, str, str] | None = None
     broker_auth_invalid: bool = False
     broker_auth_error: str | None = None
     broker_auth_invalid_at: datetime | None = None
@@ -8473,6 +8477,112 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                 await asyncio.sleep(max(0.0, post_close - float(interval_seconds)))
                 continue
             rearm_sleep_logged = False
+            mdm = getattr(ctx, "market_data_manager", None)
+            basket = (
+                getattr(ctx, "active_contract_basket", None)
+                or getattr(ctx, "active_trading_universe", {})
+                or {}
+            )
+
+            def _basket_value(key: str) -> str:
+                value = (
+                    basket.get(key)
+                    if isinstance(basket, Mapping)
+                    else getattr(basket, key, None)
+                )
+                return str(value or "")
+
+            current_fingerprint = (
+                _basket_value("spot_symbol") or "NSE:NIFTY",
+                _basket_value("futures_symbol"),
+                _basket_value("selected_ce")
+                or _basket_value("atm_ce")
+                or str(getattr(ctx, "selected_ce", "") or ""),
+                _basket_value("selected_pe")
+                or _basket_value("atm_pe")
+                or str(getattr(ctx, "selected_pe", "") or ""),
+            )
+            refresh_seconds = max(
+                30.0,
+                parse_float_env(
+                    os.getenv("LIVE_READINESS_FULL_REFRESH_SECONDS"), 300.0
+                ),
+            )
+            last_recompute = float(
+                getattr(ctx, "runtime_readiness_recomputed_mono", 0.0) or 0.0
+            )
+            freshness_check = getattr(mdm, "has_fresh_ws_ltp", None)
+            bracket_manager = getattr(ctx, "bracket_manager", None)
+            has_unresolved_exit = getattr(
+                bracket_manager, "has_unresolved_exit", None
+            )
+            try:
+                unresolved_exit = bool(
+                    callable(has_unresolved_exit) and has_unresolved_exit()
+                )
+            except Exception:
+                unresolved_exit = True
+            selected_feeds_fresh = all(current_fingerprint) and callable(
+                freshness_check
+            )
+            if selected_feeds_fresh:
+                for symbol in current_fingerprint:
+                    try:
+                        fresh = bool(
+                            freshness_check([symbol], max_age_seconds=60.0)
+                        )
+                    except TypeError:
+                        fresh = bool(freshness_check([symbol]))
+                    except Exception:
+                        fresh = False
+                    if not fresh:
+                        selected_feeds_fresh = False
+                        break
+            healthy_unchanged = bool(
+                getattr(ctx, "live_orders_armed", False)
+                and current_fingerprint
+                == getattr(ctx, "runtime_readiness_fingerprint", None)
+                and selected_feeds_fresh
+                and not bool(getattr(mdm, "pipeline_overloaded", False))
+                and _runner_is_running(getattr(ctx, "strategy_runner", None))
+                and not bool(getattr(ctx, "position_reconciliation_failed", False))
+                and not bool(getattr(ctx, "broker_auth_invalid", False))
+                and not bool(getattr(ctx, "broker_session_invalid", False))
+                and not bool(getattr(ctx, "emergency_stop_active", False))
+                and not bool(getattr(ctx, "kill_switch_active", False))
+                and not bool(getattr(ctx, "risk_halt", False))
+                and not bool(getattr(ctx, "daily_loss_limit_hit", False))
+                and not bool(getattr(ctx, "unprotected_broker_position", False))
+                and not bool(
+                    getattr(ctx, "unprotected_broker_positions", set())
+                )
+                and not bool(
+                    getattr(ctx, "unresolved_reconciliation_symbols", set())
+                )
+                and not unresolved_exit
+                and (
+                    not hasattr(ctx, "position_reconciliation_completed")
+                    or bool(getattr(ctx, "position_reconciliation_completed", False))
+                )
+                and (
+                    not hasattr(ctx, "broker_balance_valid")
+                    or bool(getattr(ctx, "broker_balance_valid", False))
+                )
+                and last_recompute > 0.0
+                and time_module.monotonic() - last_recompute < refresh_seconds
+            )
+            if healthy_unchanged:
+                LOGGER.debug(
+                    "LIVE_READINESS_REARM_FAST_PATH age_s=%.1f refresh_s=%.1f",
+                    time_module.monotonic() - last_recompute,
+                    refresh_seconds,
+                    extra={
+                        "event": "LIVE_READINESS_REARM_FAST_PATH",
+                        "age_s": time_module.monotonic() - last_recompute,
+                        "refresh_s": refresh_seconds,
+                    },
+                )
+                continue
             runner = getattr(ctx, "strategy_runner", None)
             active_symbols = len(getattr(runner, "_active_symbols", set()) or [])
             if active_symbols == 0:
@@ -9597,6 +9707,7 @@ async def _recompute_and_push_runtime_readiness(
     broker_ready = bool(
         getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)
     )
+    pipeline_overloaded = bool(getattr(mdm, "pipeline_overloaded", False))
     ce_market_exec_ready = bool(ce_exec_ready)
     pe_market_exec_ready = bool(pe_exec_ready)
     affordability_by_symbol: dict[str, dict[str, object]] = {}
@@ -9664,8 +9775,11 @@ async def _recompute_and_push_runtime_readiness(
         and context_exec_ready
         and broker_ready
         and all_selected_options_exec_ready
+        and not pipeline_overloaded
     )
     missing = []
+    if pipeline_overloaded:
+        missing.append("data_pipeline_overloaded")
     if (
         live_mode
         and selected_options_data_exec_ready
@@ -9794,6 +9908,7 @@ async def _recompute_and_push_runtime_readiness(
         execution_ready=all_selected_options_exec_ready
         and context_exec_ready
         and broker_ready
+        and not pipeline_overloaded
         and (
             not hasattr(ctx, "broker_balance_valid")
             or bool(getattr(ctx, "broker_balance_valid", False))
@@ -9831,6 +9946,13 @@ async def _recompute_and_push_runtime_readiness(
     ctx.broker_ready = bool(broker_ready)
     ctx.execution_capacity_ready = bool(execution_capacity_ready)
     ctx.minimum_lot_affordability_by_symbol = dict(affordability_by_symbol)
+    ctx.runtime_readiness_recomputed_mono = time_module.monotonic()
+    ctx.runtime_readiness_fingerprint = (
+        str(spot_symbol or ""),
+        str(futures_symbol or ""),
+        str(selected_ce or ""),
+        str(selected_pe or ""),
+    )
     LOGGER.info(
         "EXECUTION_CAPACITY_READINESS ready=%s selected_ce=%s selected_pe=%s ce_affordable=%s pe_affordable=%s affordability=%s",
         bool(execution_capacity_ready),
