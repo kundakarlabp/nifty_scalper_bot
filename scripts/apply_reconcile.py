@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from textwrap import dedent
+from textwrap import dedent, indent
 
 ROOT = Path.cwd()
 
@@ -66,153 +66,156 @@ text = replace_once(
     """            self._broker_snapshot_local_generation = self._local_position_generation\n            if reconcile_generation is not None:\n                self._last_applied_reconcile_generation = reconcile_generation\n            self._last_broker_position_snapshot_source = snapshot.source\n""",
     label="applied generation record",
 )
+replacement = indent(
+    dedent(
+        '''\
+        def reconcile_now(self) -> bool:
+            """Fetch and apply one authoritative broker snapshot, single-flight."""
+            if not self._reconcile_inflight_lock.acquire(blocking=False):
+                with self._reconcile_state_lock:
+                    self._reconcile_coalesced_requests += 1
+                    coalesced = self._reconcile_coalesced_requests
+                self._logger.info(
+                    "POSITION_RECONCILE_COALESCED count=%s",
+                    coalesced,
+                    extra={
+                        "event": "POSITION_RECONCILE_COALESCED",
+                        "coalesced_requests": coalesced,
+                    },
+                )
+                return True
+
+            payload_count = 0
+            with self._reconcile_state_lock:
+                self._reconcile_request_generation += 1
+                generation = self._reconcile_request_generation
+            with self._lock:
+                expected_local_generation = self._local_position_generation
+            fetcher = self._resolve_broker_position_fetcher()
+            try:
+                if fetcher is None:
+                    self._handle_reconcile_failure(
+                        reason=canonical("fetcher_missing"),
+                        error=None,
+                        payload_count=0,
+                        previous_positions=None,
+                    )
+                    return False
+                fetch_started = time.monotonic()
+                try:
+                    response = fetcher()
+                    snapshot = decode_position_snapshot(response)
+                except Exception as exc:  # noqa: BLE001
+                    reason = canonical(
+                        "payload_invalid"
+                        if isinstance(exc, PositionSnapshotError)
+                        else "fetch_error"
+                    )
+                    self._logger.warning(
+                        "Position reconciliation snapshot failed: %s",
+                        exc,
+                        extra={
+                            "event": "position_reconcile_failed",
+                            "reason": reason,
+                            "generation": generation,
+                        },
+                        exc_info=exc,
+                    )
+                    self._handle_reconcile_failure(
+                        reason=reason,
+                        error=exc,
+                        payload_count=0,
+                        previous_positions=None,
+                    )
+                    return False
+                finally:
+                    self._last_reconcile_fetch_latency_s = max(
+                        0.0, time.monotonic() - fetch_started
+                    )
+
+                payloads = snapshot.raw_rows()
+                payload_count = len(payloads)
+                apply_started = time.monotonic()
+                try:
+                    self.synchronize_with_broker(
+                        payloads,
+                        expected_local_generation=expected_local_generation,
+                        reconcile_generation=generation,
+                    )
+                except StaleReconciliationSnapshot as exc:
+                    self._logger.warning(
+                        "POSITION_RECONCILE_STALE_REJECTED generation=%s local_generation=%s error=%s",
+                        generation,
+                        expected_local_generation,
+                        exc,
+                        extra={
+                            "event": "POSITION_RECONCILE_STALE_REJECTED",
+                            "generation": generation,
+                            "expected_local_generation": expected_local_generation,
+                            "error": str(exc),
+                        },
+                    )
+                    self._handle_reconcile_failure(
+                        reason=canonical("stale_snapshot"),
+                        error=exc,
+                        payload_count=payload_count,
+                        previous_positions=None,
+                    )
+                    return False
+                except Exception as exc:  # noqa: BLE001
+                    reason = canonical("apply_error")
+                    self._logger.warning(
+                        "Position reconciliation apply failed: %s",
+                        exc,
+                        extra={
+                            "event": "position_reconcile_failed",
+                            "reason": reason,
+                            "generation": generation,
+                        },
+                        exc_info=exc,
+                    )
+                    self._handle_reconcile_failure(
+                        reason=reason,
+                        error=exc,
+                        payload_count=payload_count,
+                        previous_positions=None,
+                    )
+                    return False
+                finally:
+                    self._last_reconcile_apply_latency_s = max(
+                        0.0, time.monotonic() - apply_started
+                    )
+
+                self._logger.info(
+                    "POSITION_RECONCILE_OK count=%s source=%s generation=%s fetch_ms=%.1f apply_ms=%.1f",
+                    payload_count,
+                    snapshot.source,
+                    generation,
+                    self._last_reconcile_fetch_latency_s * 1000.0,
+                    self._last_reconcile_apply_latency_s * 1000.0,
+                    extra={
+                        "event": "position_reconcile_ok",
+                        "count": payload_count,
+                        "source": snapshot.source,
+                        "generation": generation,
+                        "fetch_latency_seconds": self._last_reconcile_fetch_latency_s,
+                        "apply_latency_seconds": self._last_reconcile_apply_latency_s,
+                    },
+                )
+                self._handle_reconcile_success(payload_count)
+                return True
+            finally:
+                self._reconcile_inflight_lock.release()
+
+        def reconcile_periodic('''
+    ),
+    "    ",
+)
 text = regex_once(
     text,
     r"    def reconcile_now\(self\) -> bool:\n.*?\n    def reconcile_periodic\(",
-    dedent(
-        '''\
-            def reconcile_now(self) -> bool:
-                """Fetch and apply one authoritative broker snapshot, single-flight."""
-                if not self._reconcile_inflight_lock.acquire(blocking=False):
-                    with self._reconcile_state_lock:
-                        self._reconcile_coalesced_requests += 1
-                        coalesced = self._reconcile_coalesced_requests
-                    self._logger.info(
-                        "POSITION_RECONCILE_COALESCED count=%s",
-                        coalesced,
-                        extra={
-                            "event": "POSITION_RECONCILE_COALESCED",
-                            "coalesced_requests": coalesced,
-                        },
-                    )
-                    return True
-
-                payload_count = 0
-                with self._reconcile_state_lock:
-                    self._reconcile_request_generation += 1
-                    generation = self._reconcile_request_generation
-                with self._lock:
-                    expected_local_generation = self._local_position_generation
-                fetcher = self._resolve_broker_position_fetcher()
-                try:
-                    if fetcher is None:
-                        self._handle_reconcile_failure(
-                            reason=canonical("fetcher_missing"),
-                            error=None,
-                            payload_count=0,
-                            previous_positions=None,
-                        )
-                        return False
-                    fetch_started = time.monotonic()
-                    try:
-                        response = fetcher()
-                        snapshot = decode_position_snapshot(response)
-                    except Exception as exc:  # noqa: BLE001
-                        reason = canonical(
-                            "payload_invalid"
-                            if isinstance(exc, PositionSnapshotError)
-                            else "fetch_error"
-                        )
-                        self._logger.warning(
-                            "Position reconciliation snapshot failed: %s",
-                            exc,
-                            extra={
-                                "event": "position_reconcile_failed",
-                                "reason": reason,
-                                "generation": generation,
-                            },
-                            exc_info=exc,
-                        )
-                        self._handle_reconcile_failure(
-                            reason=reason,
-                            error=exc,
-                            payload_count=0,
-                            previous_positions=None,
-                        )
-                        return False
-                    finally:
-                        self._last_reconcile_fetch_latency_s = max(
-                            0.0, time.monotonic() - fetch_started
-                        )
-
-                    payloads = snapshot.raw_rows()
-                    payload_count = len(payloads)
-                    apply_started = time.monotonic()
-                    try:
-                        self.synchronize_with_broker(
-                            payloads,
-                            expected_local_generation=expected_local_generation,
-                            reconcile_generation=generation,
-                        )
-                    except StaleReconciliationSnapshot as exc:
-                        self._logger.warning(
-                            "POSITION_RECONCILE_STALE_REJECTED generation=%s local_generation=%s error=%s",
-                            generation,
-                            expected_local_generation,
-                            exc,
-                            extra={
-                                "event": "POSITION_RECONCILE_STALE_REJECTED",
-                                "generation": generation,
-                                "expected_local_generation": expected_local_generation,
-                                "error": str(exc),
-                            },
-                        )
-                        self._handle_reconcile_failure(
-                            reason=canonical("stale_snapshot"),
-                            error=exc,
-                            payload_count=payload_count,
-                            previous_positions=None,
-                        )
-                        return False
-                    except Exception as exc:  # noqa: BLE001
-                        reason = canonical("apply_error")
-                        self._logger.warning(
-                            "Position reconciliation apply failed: %s",
-                            exc,
-                            extra={
-                                "event": "position_reconcile_failed",
-                                "reason": reason,
-                                "generation": generation,
-                            },
-                            exc_info=exc,
-                        )
-                        self._handle_reconcile_failure(
-                            reason=reason,
-                            error=exc,
-                            payload_count=payload_count,
-                            previous_positions=None,
-                        )
-                        return False
-                    finally:
-                        self._last_reconcile_apply_latency_s = max(
-                            0.0, time.monotonic() - apply_started
-                        )
-
-                    self._logger.info(
-                        "POSITION_RECONCILE_OK count=%s source=%s generation=%s fetch_ms=%.1f apply_ms=%.1f",
-                        payload_count,
-                        snapshot.source,
-                        generation,
-                        self._last_reconcile_fetch_latency_s * 1000.0,
-                        self._last_reconcile_apply_latency_s * 1000.0,
-                        extra={
-                            "event": "position_reconcile_ok",
-                            "count": payload_count,
-                            "source": snapshot.source,
-                            "generation": generation,
-                            "fetch_latency_seconds": self._last_reconcile_fetch_latency_s,
-                            "apply_latency_seconds": self._last_reconcile_apply_latency_s,
-                        },
-                    )
-                    self._handle_reconcile_success(payload_count)
-                    return True
-                finally:
-                    self._reconcile_inflight_lock.release()
-
-            def reconcile_periodic('''
-    ),
+    replacement,
     label="replace reconcile_now",
     flags=re.S,
 )
 write(path, text)
-
