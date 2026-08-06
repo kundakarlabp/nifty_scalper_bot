@@ -7348,10 +7348,15 @@ class MarketDataManager:
                     return
                 for index, raw in enumerate(batch):
                     try:
-                        self._process_queued_tick(raw)
+                        # A tick can synchronously finalize a candle and fan
+                        # out through DataHub/Runner. Keep strict serial order,
+                        # but move that indivisible work off the asyncio owner.
+                        await asyncio.to_thread(self._process_queued_tick, raw)
                         self._tick_processed_total += 1
                     except asyncio.CancelledError:
-                        self._requeue_unprocessed_ticks([raw, *batch[index + 1 :]])
+                        # A running worker cannot be cancelled. Requeueing raw
+                        # here could therefore apply the same tick twice.
+                        self._requeue_unprocessed_ticks(batch[index + 1 :])
                         raise
                     except Exception as exc:
                         self._record_tick_drop(
@@ -7409,7 +7414,10 @@ class MarketDataManager:
             with self._pending_tick_lock:
                 pending = self._pending_count_locked()
                 task = self._tick_drain_task
-            if pending <= 0:
+                active_drains = self._tick_active_drains
+            if pending <= 0 and active_drains <= 0 and (
+                task is None or task.done()
+            ):
                 return
             if task is not None and not task.done():
                 remaining = max(0.0, deadline - time.monotonic())

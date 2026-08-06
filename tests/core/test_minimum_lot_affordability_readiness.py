@@ -18,6 +18,7 @@ class _MDM:
 
     def __init__(self, asks: dict[str, float]):
         self.asks = asks
+        self.pipeline_overloaded = False
 
     def hydrate_active_contract_basket(self, basket=None):
         return {"hard_ready": True, "missing": [], "symbols": {}}
@@ -135,3 +136,19 @@ async def test_one_affordable_side_keeps_global_arming_and_side_gate(
     assert ctx.live_block_reason is None
     assert calls[-1]["execution_ready_by_symbol"] == {CE: True, PE: False}
     assert calls[-1]["live_orders_armed"] is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_overload_disarms_canonical_runtime_readiness(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    ctx, calls = _context({CE: 100.0, PE: 110.0}, 10_000.0)
+    ctx.market_data_manager.pipeline_overloaded = True
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason="overload_test")
+
+    assert ctx.evaluation_ready is True
+    assert ctx.live_orders_armed is False
+    assert ctx.live_block_reason == "execution_not_armed:data_pipeline_overloaded"
+    assert calls[-1]["live_orders_armed"] is False

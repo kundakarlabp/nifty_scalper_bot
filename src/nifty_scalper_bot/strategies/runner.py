@@ -6059,19 +6059,23 @@ class StrategyRunner:
             self._last_system_heartbeat_log = now
 
         if now - self._last_strategy_status_log >= 150.0:
+            positions_active = len(
+                getattr(self._position_manager, "get_all_positions", lambda: [])()
+                or []
+            )
             self._logger.info(
-                "STRATEGY_STATUS_REPORT",
+                "STRATEGY_STATUS_REPORT symbols_evaluated=%d "
+                "signals_generated=%d trailing_updates=%d positions_active=%d",
+                len(self._strategy_window_symbols),
+                int(self._strategy_window_signals),
+                int(self._strategy_window_trailing_updates),
+                positions_active,
                 extra={
                     "event": "strategy_status_report",
                     "symbols_evaluated": len(self._strategy_window_symbols),
                     "signals_generated": int(self._strategy_window_signals),
                     "trailing_updates": int(self._strategy_window_trailing_updates),
-                    "positions_active": len(
-                        getattr(
-                            self._position_manager, "get_all_positions", lambda: []
-                        )()
-                        or []
-                    ),
+                    "positions_active": positions_active,
                 },
             )
             self._strategy_window_symbols.clear()
@@ -8049,7 +8053,13 @@ class StrategyRunner:
             self._emit_composite_reports()
             if now - self._last_summary_log >= 60.0:
                 self._logger.info(
-                    "ENGINE_SUMMARY",
+                    "ENGINE_SUMMARY evals=%d signals=%d regime_blocks=%d "
+                    "capital_blocks=%d runner_state=%s",
+                    self._eval_counter,
+                    self._signal_counter,
+                    self._regime_block_counter,
+                    self._capital_block_counter,
+                    str(self._runner_state),
                     extra={
                         "evals": self._eval_counter,
                         "signals": self._signal_counter,
