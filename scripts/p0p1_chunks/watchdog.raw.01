@@ -1,0 +1,78 @@
+mode()).upper()
+            return "OPEN" in token and "POST" not in token
+        except Exception:
+            return True
+
+
+    def _age_seconds(raw: object, now: float) -> float | None:
+        try:
+            value = float(raw or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return max(0.0, now - value)
+
+
+    class MarketDataSupervisor:
+        """One deterministic owner for restart policy and latency degradation."""
+
+        def __init__(
+            self,
+            market_data_manager: Any,
+            *,
+            market_open_getter: Callable[[], bool] = _default_market_open,
+            exit_process: Callable[[int], Any] = os._exit,
+            interval_s: float | None = None,
+        ) -> None:
+            self.mdm = market_data_manager
+            self.market_open_getter = market_open_getter
+            self.exit_process = exit_process
+            self.interval_s = interval_s or _float_env(
+                "MARKET_DATA_SUPERVISOR_INTERVAL_SECONDS", 1.0, 0.1
+            )
+            self.stale_restart_s = _float_env(
+                "MARKET_DATA_RESTART_STALE_SECONDS", 15.0, 1.0
+            )
+            self.fatal_stale_s = _float_env(
+                "MARKET_DATA_FATAL_STALE_SECONDS", 180.0, 10.0
+            )
+            self.restart_base_s = _float_env(
+                "MARKET_DATA_RESTART_BACKOFF_SECONDS", 5.0, 0.1
+            )
+            self.restart_max_s = _float_env(
+                "MARKET_DATA_RESTART_BACKOFF_MAX_SECONDS", 120.0, 1.0
+            )
+            self.fatal_confirm_samples = _int_env(
+                "MARKET_DATA_FATAL_CONFIRM_SAMPLES", 3
+            )
+            self.latency_critical_samples = _int_env(
+                "MARKET_DATA_LATENCY_CRITICAL_SAMPLES", 3
+            )
+            self.latency_recovery_samples = _int_env(
+                "MARKET_DATA_LATENCY_RECOVERY_SAMPLES", 5
+            )
+            self.event_loop_critical_ms = _float_env(
+                "EVENT_LOOP_LAG_CRITICAL_MS", 500.0, 1.0
+            )
+            self.tick_p99_critical_ms = _float_env(
+                "TICK_P99_CRITICAL_MS", 250.0, 1.0
+            )
+            self.queue_age_critical_ms = _float_env(
+                "TICK_QUEUE_AGE_CRITICAL_MS", 1000.0, 1.0
+            )
+            self.queue_utilization_critical = min(
+                _float_env("TICK_QUEUE_UTILIZATION_CRITICAL", 0.85, 0.01), 1.0
+            )
+            self.open_quote_age_critical_s = _float_env(
+                "OPEN_POSITION_QUOTE_AGE_CRITICAL_SECONDS", 2.0, 0.1
+            )
+            self._stop = threading.Event()
+            self._thread: threading.Thread | None = None
+            self._lock = threading.RLock()
+            self._restart_lock = threading.Lock()
+            self._state = SupervisorState.STARTING
+            self._consecutive_failures = 0
+            self._restart_count = 0
+            self._next_restart_mono = 0.0
+            self._fatal_stale_sam

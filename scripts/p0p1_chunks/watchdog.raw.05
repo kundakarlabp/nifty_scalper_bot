@@ -1,0 +1,67 @@
++= 1
+            else:
+                self._fatal_stale_samples = 0
+                if not restarted:
+                    self._consecutive_failures = 0
+            if self._fatal_stale_samples >= self.fatal_confirm_samples:
+                self._transition(SupervisorState.FAILED, "fatal_tick_staleness")
+                LOGGER.critical(
+                    "MARKET_DATA_FATAL_STALE tick_age_s=%.1f samples=%s exiting=1",
+                    tick_age,
+                    self._fatal_stale_samples,
+                    extra={"event": "MARKET_DATA_FATAL_STALE"},
+                )
+                self.exit_process(1)
+            elif restarted:
+                self._transition(SupervisorState.RECONNECTING, "stale_transport")
+            elif any(age is not None and age >= self.stale_restart_s for age in (poll_age, ws_age, tick_age)):
+                self._transition(SupervisorState.DEGRADED, "stale_transport")
+            else:
+                self._transition(SupervisorState.HEALTHY, "transport_fresh")
+            self._sample_latency()
+            return self._snapshot  # type: ignore[return-value]
+
+        def _run(self) -> None:
+            LOGGER.info("MARKET_DATA_SUPERVISOR_STARTED")
+            while not self._stop.wait(self.interval_s):
+                try:
+                    self.sample_once()
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.error(
+                        "MARKET_DATA_SUPERVISOR_SAMPLE_FAILED error=%s",
+                        exc,
+                        extra={
+                            "event": "MARKET_DATA_SUPERVISOR_SAMPLE_FAILED",
+                            "error": str(exc),
+                        },
+                    )
+            self._transition(SupervisorState.STOPPED, "stop_requested")
+
+
+    def start_watchdog(market_data_manager: Any) -> threading.Thread:
+        """Start or reuse the sole market-data supervisor thread."""
+        existing = getattr(market_data_manager, "_market_data_supervisor", None)
+        if isinstance(existing, MarketDataSupervisor):
+            return existing.start()
+        supervisor = MarketDataSupervisor(market_data_manager)
+        market_data_manager._market_data_supervisor = supervisor
+        return supervisor.start()
+
+
+    def stop_watchdog(market_data_manager: Any, timeout: float = 3.0) -> bool:
+        supervisor = getattr(market_data_manager, "_market_data_supervisor", None)
+        if not isinstance(supervisor, MarketDataSupervisor):
+            return True
+        return supervisor.stop(timeout=timeout)
+
+
+    __all__ = [
+        "MarketDataSupervisor",
+        "SupervisorSnapshot",
+        "SupervisorState",
+        "start_watchdog",
+        "stop_watchdog",
+    ]
+''')
+write("src/nifty_scalper_bot/infra/watchdog.py", watchdog)
+

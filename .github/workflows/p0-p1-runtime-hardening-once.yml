@@ -33,7 +33,7 @@ jobs:
       - name: Reconstruct and verify patch units
         run: |
           cat scripts/p0p1_chunks/worker.part.* | base64 -d > /tmp/apply_worker.py
-          cat scripts/p0p1_chunks/watchdog.part.* | base64 -d > /tmp/apply_watchdog.py
+          cat scripts/p0p1_chunks/watchdog.raw.* > /tmp/apply_watchdog.py
           cat scripts/p0p1_chunks/app_main.part.* | base64 -d > /tmp/apply_app_main.py
           cat scripts/p0p1_chunks/tests.part.* | base64 -d > /tmp/apply_tests.py
           echo 'ca9ac8d76e2caf6a0aa42fdf28d255fd26da137f5e6c6bb402d171fc5c299f58  /tmp/apply_worker.py' | sha256sum -c -

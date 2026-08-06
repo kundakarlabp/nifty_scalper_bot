@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from textwrap import dedent
+
+ROOT = Path.cwd()
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def write(path: str, text: str) -> None:
+    target = ROOT / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
+def replace_once(text: str, old: str, new: str, *, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected exactly one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+def regex_once(text: str, pattern: str, replacement: str, *, label: str, flags: int = 0) -> str:
+    updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected exactly one regex match, found {count}")
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# P1: one market-aware supervisor with restart backoff and latency SLO state.
+# ---------------------------------------------------------------------------
+watchdog = dedent('''\
+    """Single-owner market-data supervision and latency SLO enforcement."""
+
+    from __future__ import annotations
+
+    from dataclasses import asdict, dataclass
+    from enum import Enum
+    import logging
+    import os
+    import threading
+    import time
+    from typing import Any, Callable, Mapping
+
+    LOGGER = logging.getLogger("nifty_scalper_bot.market_data_supervisor")
+
+
+    class SupervisorState(str, Enum):
+        STARTING = "STARTING"
+        HEALTHY = "HEALTHY"
+        DEGRADED = "DEGRADED"
+        RECONNECTING = "RECONNECTING"
+        MARKET_CLOSED = "MARKET_CLOSED"
+        FAILED = "FAILED"
+        STOPPING = "STOPPING"
+        STOPPED = "STOPPED"
+
+
+    @dataclass(frozen=True, slots=True)
+    class SupervisorSnapshot:
+        state: str
+        latency_degraded: bool
+        event_loop_lag_ms: float
+        tick_p99_ms: float
+        queue_age_ms: float
+        queue_utilization: float
+        open_position_quote_age_s: float
+        consecutive_failures: int
+        restart_count: int
+        fatal_stale_samples: int
+
+        def to_dict(self) -> dict[str, object]:
+            return asdict(self)
+
+
+    def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
+        try:
+            value = float(os.getenv(name, str(default)) or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(value, minimum)
+
+
+    def _int_env(name: str, default: int, minimum: int = 1) -> int:
+        try:
+            value = int(os.getenv(name, str(default)) or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(value, minimum)
+
+
+    def _default_market_open() -> bool:
+        try:
+            from nifty_scalper_bot.utils.market_hours import get_runtime_market_mode
+
+            token = str(get_runtime_market_
