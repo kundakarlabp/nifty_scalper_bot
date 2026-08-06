@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -10,38 +11,28 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 position_path = Path("src/nifty_scalper_bot/execution/position_manager.py")
 position = position_path.read_text(encoding="utf-8")
-position = replace_once(
-    position,
-    '''        for column in ("unrealised", "unrealized", "m2m"):
-            if column not in row:
-                continue
-            raw_value = row.get(column)
-            numeric = _safe_float(raw_value)
-''',
-    '''        for column in ("unrealised", "unrealized", "m2m"):
-            if column not in row:
-                continue
-            raw_unrealized_value = row.get(column)
-            numeric = _safe_float(raw_unrealized_value)
-''',
-    "unrealized reconciliation temporary",
+value_pattern = re.compile(
+    r"(?m)^(?P<indent>\s*)raw_value = row\.get\(column\)\n"
+    r"(?P=indent)numeric = _safe_float\(raw_value\)$"
 )
-position = replace_once(
-    position,
-    '''        for column in ("realised", "realized"):
-            if column not in row:
-                continue
-            raw_value = row.get(column)
-            numeric = _safe_float(raw_value)
-''',
-    '''        for column in ("realised", "realized"):
-            if column not in row:
-                continue
-            raw_realized_value = row.get(column)
-            numeric = _safe_float(raw_realized_value)
-''',
-    "realized reconciliation temporary",
-)
+matches = list(value_pattern.finditer(position))
+if len(matches) != 2:
+    raise SystemExit(
+        f"reconciliation numeric temporary count={len(matches)}"
+    )
+replacement_names = iter(("raw_unrealized_value", "raw_realized_value"))
+
+
+def rename_numeric_temporary(match: re.Match[str]) -> str:
+    name = next(replacement_names)
+    indent = match.group("indent")
+    return (
+        f"{indent}{name} = row.get(column)\n"
+        f"{indent}numeric = _safe_float({name})"
+    )
+
+
+position = value_pattern.sub(rename_numeric_temporary, position)
 position_path.write_text(position, encoding="utf-8")
 
 identity_path = Path("src/nifty_scalper_bot/execution/position_identity_extension.py")
