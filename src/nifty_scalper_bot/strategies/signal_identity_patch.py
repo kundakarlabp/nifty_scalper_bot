@@ -171,10 +171,15 @@ def _install_elite_signal_observability() -> None:
         if raw_score is None:
             raw_score = metadata.get("strategy_score") or metadata.get("context_score")
         role = str(metadata.get("role") or "trigger").lower()
+        vote_event = (
+            "STRATEGY_CONTEXT_VOTE"
+            if role == "context"
+            else "STRATEGY_TRIGGER_VOTE"
+        )
         LOGGER.log(
             logging.DEBUG if role == "context" else logging.INFO,
             (
-                "ELITE_SIGNAL_GENERATED strategy=%s symbol=%s side=%s "
+                f"{vote_event} strategy=%s symbol=%s side=%s "
                 "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "
                 "quote_update_version=%s evaluation_snapshot_id=%s"
             ),
@@ -188,7 +193,7 @@ def _install_elite_signal_observability() -> None:
             metadata.get("quote_update_version"),
             metadata.get("evaluation_snapshot_id"),
             extra={
-                "event": "ELITE_SIGNAL_GENERATED",
+                "event": vote_event,
                 "strategy": strategy,
                 "symbol": getattr(signal, "symbol", symbol),
                 "side": side or None,
