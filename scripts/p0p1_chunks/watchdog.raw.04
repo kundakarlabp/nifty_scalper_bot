@@ -1,0 +1,63 @@
+
+                open_position_quote_age_s=open_age,
+                consecutive_failures=self._consecutive_failures,
+                restart_count=self._restart_count,
+                fatal_stale_samples=self._fatal_stale_samples,
+            )
+            self.mdm.market_data_supervisor_snapshot = self._snapshot.to_dict()
+
+        def _restart(self, name: str, now_mono: float) -> bool:
+            if now_mono < self._next_restart_mono:
+                return False
+            if not self._restart_lock.acquire(blocking=False):
+                return False
+            try:
+                restart = getattr(self.mdm, name, None)
+                if not callable(restart):
+                    return False
+                self._transition(SupervisorState.RECONNECTING, name)
+                restart()
+                self._restart_count += 1
+                self._consecutive_failures += 1
+                backoff = min(
+                    self.restart_base_s * (2 ** max(self._consecutive_failures - 1, 0)),
+                    self.restart_max_s,
+                )
+                self._next_restart_mono = now_mono + backoff
+                return True
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error(
+                    "MARKET_DATA_RESTART_FAILED component=%s error=%s",
+                    name,
+                    exc,
+                    extra={
+                        "event": "MARKET_DATA_RESTART_FAILED",
+                        "component": name,
+                        "error": str(exc),
+                    },
+                )
+                return False
+            finally:
+                self._restart_lock.release()
+
+        def sample_once(self, *, now_wall: float | None = None, now_mono: float | None = None) -> SupervisorSnapshot:
+            now_wall = time.time() if now_wall is None else now_wall
+            now_mono = time.monotonic() if now_mono is None else now_mono
+            if not self.market_open_getter():
+                self._fatal_stale_samples = 0
+                self._consecutive_failures = 0
+                self._transition(SupervisorState.MARKET_CLOSED, "market_closed")
+                self._sample_latency()
+                return self._snapshot  # type: ignore[return-value]
+
+            poll_age = _age_seconds(getattr(self.mdm, "last_poll_heartbeat", 0.0), now_wall)
+            ws_age = _age_seconds(getattr(self.mdm, "last_ws_heartbeat", 0.0), now_wall)
+            tick_age = _age_seconds(getattr(self.mdm, "last_tick_time", 0.0), now_wall)
+            restarted = False
+            if poll_age is not None and poll_age >= self.stale_restart_s:
+                restarted = self._restart("restart_polling", now_mono) or restarted
+            if ws_age is not None and ws_age >= self.stale_restart_s:
+                restarted = self._restart("restart_websocket", now_mono) or restarted
+
+            if tick_age is not None and tick_age >= self.fatal_stale_s:
+                self._fatal_stale_samples 

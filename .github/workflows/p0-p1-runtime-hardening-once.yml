@@ -1,0 +1,152 @@
+name: P0 P1 Runtime Hardening Once
+
+on:
+  push:
+    branches:
+      - fix/p0-p1-runtime-hardening-20260806
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      BRACKET_AUTO_RESTORE: "false"
+      NSB_TEST_MODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/p0-p1-runtime-hardening-20260806
+          fetch-depth: 50
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Reconstruct and verify patch units
+        run: |
+          cat scripts/p0p1_chunks/worker.part.* | base64 -d > /tmp/apply_worker.py
+          cat scripts/p0p1_chunks/watchdog.raw.* > /tmp/apply_watchdog.py
+          cat scripts/p0p1_chunks/app_main.part.* | base64 -d > /tmp/apply_app_main.py
+          cat scripts/p0p1_chunks/tests.part.* | base64 -d > /tmp/apply_tests.py
+          echo 'ca9ac8d76e2caf6a0aa42fdf28d255fd26da137f5e6c6bb402d171fc5c299f58  /tmp/apply_worker.py' | sha256sum -c -
+          echo 'c49d3238888eb7a532b48ebad2f7bd34452ef29254d36dd4335dd04fd7e1dc23  /tmp/apply_app_main.py' | sha256sum -c -
+          echo 'e35286ba58dae12743e9acb4162fe7f17d845b7f5ad96cf267488936461b0404  /tmp/apply_tests.py' | sha256sum -c -
+          python -m py_compile /tmp/apply_worker.py scripts/apply_reconcile.py scripts/fix_worker_stop_wakeup.py /tmp/apply_watchdog.py /tmp/apply_app_main.py /tmp/apply_tests.py
+      - name: Apply P0 and P1 corrections
+        run: |
+          python /tmp/apply_worker.py
+          python scripts/fix_worker_stop_wakeup.py
+          python scripts/apply_reconcile.py
+          python /tmp/apply_watchdog.py
+          python /tmp/apply_app_main.py
+          python /tmp/apply_tests.py
+      - name: Format changed Python files
+        run: |
+          python -m black \
+            src/nifty_scalper_bot/data/market_data_hardening.py \
+            src/nifty_scalper_bot/execution/position_manager.py \
+            src/nifty_scalper_bot/infra/watchdog.py \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/main.py \
+            tests/data/test_fallback_tick_worker_lifecycle.py \
+            tests/execution/test_position_reconcile_singleflight.py \
+            tests/infra/test_market_data_supervisor.py \
+            tests/core/test_minimum_lot_affordability_readiness.py
+      - name: Focused and adjacent regressions
+        run: |
+          set +e
+          python -m pytest -q \
+            tests/data/test_fallback_tick_worker_lifecycle.py \
+            tests/data/test_mdm_tick_coalescing.py \
+            tests/data/test_event_loop_thread_telemetry.py \
+            tests/execution/test_position_reconcile_singleflight.py \
+            tests/execution/test_canonical_execution_recovery.py \
+            tests/infra/test_market_data_supervisor.py \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/core/test_runtime_readiness.py \
+            tests/e2e/live_sim/test_live_runtime_startup_contract.py \
+            2>&1 | tee /tmp/p0-p1-focused.log
+          rc=${PIPESTATUS[0]}
+          exit $rc
+      - name: Upload focused failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-p1-focused-failure-${{ github.run_id }}
+          path: /tmp/p0-p1-focused.log
+          if-no-files-found: error
+          retention-days: 3
+      - name: Compile and changed-file quality
+        run: |
+          python -m compileall -q src dashboard scripts
+          python -m ruff check \
+            src/nifty_scalper_bot/data/market_data_hardening.py \
+            src/nifty_scalper_bot/execution/position_manager.py \
+            src/nifty_scalper_bot/infra/watchdog.py \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/main.py \
+            tests/data/test_fallback_tick_worker_lifecycle.py \
+            tests/execution/test_position_reconcile_singleflight.py \
+            tests/infra/test_market_data_supervisor.py \
+            tests/core/test_minimum_lot_affordability_readiness.py
+          python -m black --check \
+            src/nifty_scalper_bot/data/market_data_hardening.py \
+            src/nifty_scalper_bot/execution/position_manager.py \
+            src/nifty_scalper_bot/infra/watchdog.py \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/main.py \
+            tests/data/test_fallback_tick_worker_lifecycle.py \
+            tests/execution/test_position_reconcile_singleflight.py \
+            tests/infra/test_market_data_supervisor.py \
+            tests/core/test_minimum_lot_affordability_readiness.py
+      - name: Full repository suite
+        run: python -m pytest -q
+      - name: Clean generated artifacts and temporary implementation files
+        run: |
+          git checkout -- positions.json 2>/dev/null || true
+          rm -rf .pytest-data-dir .pytest_cache
+          rm -f scripts/apply_reconcile.py scripts/fix_worker_stop_wakeup.py scripts/apply_p0_p1_runtime_hardening.py
+          rm -rf scripts/p0p1_chunks
+          rm -f .github/workflows/p0-p1-runtime-hardening-once.yml
+      - name: Verify production diff scope
+        run: |
+          git status --short
+          python - <<'PY'
+          import subprocess
+          allowed = {
+              'src/nifty_scalper_bot/data/market_data_hardening.py',
+              'src/nifty_scalper_bot/execution/position_manager.py',
+              'src/nifty_scalper_bot/infra/watchdog.py',
+              'src/nifty_scalper_bot/core/app.py',
+              'src/nifty_scalper_bot/main.py',
+              'tests/data/test_fallback_tick_worker_lifecycle.py',
+              'tests/execution/test_position_reconcile_singleflight.py',
+              'tests/infra/test_market_data_supervisor.py',
+              'tests/core/test_minimum_lot_affordability_readiness.py',
+              '.github/workflows/p0-p1-runtime-hardening-once.yml',
+              'scripts/apply_p0_p1_runtime_hardening.py',
+              'scripts/apply_reconcile.py',
+              'scripts/fix_worker_stop_wakeup.py',
+          }
+          lines = subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines()
+          changed = {line[3:] for line in lines if len(line) > 3}
+          unexpected = sorted(path for path in changed if path not in allowed and not path.startswith('scripts/p0p1_chunks/'))
+          if unexpected:
+              raise SystemExit(f'unexpected files: {unexpected}')
+          print('validated files:', sorted(changed))
+          PY
+      - name: Commit validated correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(runtime): harden worker reconciliation and feed supervision [skip ci]'
+          git push origin HEAD:fix/p0-p1-runtime-hardening-20260806

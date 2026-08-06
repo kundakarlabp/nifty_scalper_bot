@@ -1,0 +1,68 @@
+        or getattr(self.mdm, "tick_p99_ms", 0.0)
+                or 0.0
+            )
+            queue_age = float(
+                pressure.get("oldest_pending_tick_age_ms")
+                or pressure.get("queue_age_ms")
+                or 0.0
+            )
+            depth = float(pressure.get("pending_ticks") or presssure.get("queue_depth") or 0.0)
+            capacity = float(
+                pressure.get("queue_capacity")
+                or getattr(self.mdm, "_tick_queue_maxsize", 0.0)
+                or 0.0
+            )
+            utilization = depth / capacity if capacity > 0 else 0.0
+            open_age = float(
+                presssure.get("oldest_open_position_quote_age_s")
+                or getattr(self.mdm, "oldest_open_position_quote_age_s", 0.0)
+                or 0.0
+            )
+            return event_loop, tick_p99, queue_age, utilization, open_age
+
+        def _sample_latency(self) -> None:
+            event_loop, tick_p99, queue_age, utilization, open_age = self._latency_values()
+            critical = bool(
+                event_loop >= self.event_loop_critical_ms
+                or tick_p99 >= self.tick_p99_critical_ms
+                or queue_age >= self.queue_age_critical_ms
+                or utilization >= self.queue_utilization_critical
+                or open_age >= self.open_quote_age_critical_s
+            )
+            if critical:
+                self._critical_latency_samples += 1
+                self._healthy_latency_samples = 0
+            else:
+                self._healthy_latency_samples += 1
+                self._critical_latency_samples = 0
+            if (
+                not self._latency_degraded
+                and self._critical_latency_samples >= self.latency_critical_samples
+            ):
+                self._latency_degraded = True
+                LOGGER.critical(
+                    "MARKET_DATA_LATENCY_CRITICAL event_loop_ms=%.1f tick_p99_ms=%.1f queue_age_ms=%.1f queue_utilization=%.3f open_quote_age_s=%.3f",
+                    event_loop,
+                    tick_p99,
+                    queue_age,
+                    utilization,
+                    open_age,
+                    extra={"event": "MARKET_DATA_LATENCY_CRITICAL"},
+                )
+            elif (
+                self._latency_degraded
+                and self._healthy_latency_samples >= self.latency_recovery_samples
+            ):
+                self._latency_degraded = False
+                LOGGER.info(
+                    "MARKET_DATA_LATENCY_RECOVERED",
+                    extra={"event": "MARKET_DATA_LATENCY_RECOVERED"},
+                )
+            self.mdm.latency_degraded = self._latency_degraded
+            self._snapshot = SupervisorSnapshot(
+                state=self._state.value,
+                latency_degraded=self._latency_degraded,
+                event_loop_lag_ms=event_loop,
+                tick_p99_ms=tick_p99,
+                queue_age_ms=queue_age,
+                queue_utilization=utilization,
