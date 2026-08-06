@@ -4688,6 +4688,27 @@ class StrategyManager(_BaseStrategyManager):
         metadata["approval_path"] = approval_path
         metadata["is_approved"] = True
         log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
+        log.info(
+            "SIGNAL_APPROVED symbol=%s strategy=%s side=%s approval_path=%s "
+            "final_score=%.2f trade_quality_score=%.2f",
+            symbol_norm,
+            best_vote.strategy,
+            best_vote.side,
+            approval_path,
+            final_score,
+            quality_score,
+            extra={
+                "event": "SIGNAL_APPROVED",
+                "symbol": symbol_norm,
+                "strategy": best_vote.strategy,
+                "side": best_vote.side,
+                "approval_path": approval_path,
+                "final_score": final_score,
+                "trade_quality_score": quality_score,
+                "trigger_vote_count": len(trigger_votes),
+                "context_vote_count": len(context_votes),
+            },
+        )
         record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=True, reason=str(approval_path), score=final_score)
         maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
         self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)

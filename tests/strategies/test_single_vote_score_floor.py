@@ -7,6 +7,7 @@ combined score clears the same conservative floor.
 
 from __future__ import annotations
 
+import logging
 import os
 
 
@@ -306,8 +307,10 @@ async def test_selected_smc_trigger_uses_fresh_same_side_orderflow_confirmation(
 
 async def test_range_vwap_trigger_uses_separate_context_confirmed_floor(
     monkeypatch,
+    caplog,
 ) -> None:
     """A valid context-confirmed trigger must not reuse the unconfirmed 9.0 floor."""
+    caplog.set_level(logging.INFO)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
@@ -330,6 +333,14 @@ async def test_range_vwap_trigger_uses_separate_context_confirmed_floor(
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
     assert result.metadata["context_confirmation_score_min"] == 7.0
     assert result.metadata["final_trade_score"] == 7.5
+    approvals = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "SIGNAL_APPROVED"
+    ]
+    assert len(approvals) == 1
+    assert approvals[0].symbol == "NFO:NIFTY2670724050CE"
+    assert approvals[0].approval_path == "single_trigger_context_confirmed"
 
 
 async def test_weak_range_vwap_trigger_stays_blocked_with_context(

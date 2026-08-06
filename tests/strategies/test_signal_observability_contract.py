@@ -91,7 +91,7 @@ def test_elite_signal_log_contains_structural_identity(caplog) -> None:
     records = [
         record
         for record in caplog.records
-        if getattr(record, "event", None) == "ELITE_SIGNAL_GENERATED"
+        if getattr(record, "event", None) == "STRATEGY_TRIGGER_VOTE"
     ]
     assert len(records) == 1
     record = records[0]
@@ -106,6 +106,10 @@ def test_elite_signal_log_contains_structural_identity(caplog) -> None:
     )
     assert record.setup_signal_id == signal.deterministic_id
     assert record.evaluation_snapshot_id == signal.metadata["evaluation_snapshot_id"]
+    assert not any(
+        getattr(record, "event", None) == "ELITE_SIGNAL_GENERATED"
+        for record in caplog.records
+    )
 
 
 def test_elite_evaluation_snapshot_identity_tracks_quote_version() -> None:
