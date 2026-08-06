@@ -21,7 +21,6 @@ jobs:
         run: |
           python scripts/apply_reconcile.py
           python scripts/fix_reconcile_wrappers_final.py
-          python -m black src/nifty_scalper_bot/execution/position_manager.py
           python -m py_compile src/nifty_scalper_bot/execution/position_manager.py
       - uses: actions/upload-artifact@v4
         with:
