@@ -30,5 +30,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: p0-p1-generated-position-${{ github.run_id }}
-          path: src/nifty_scalper_bot/data/../execution/position_manager.py
+          path: src/nifty_scalper_bot/execution/position_manager.py
           retention-days: 3
