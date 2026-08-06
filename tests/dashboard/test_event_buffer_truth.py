@@ -67,6 +67,20 @@ def test_event_buffer_none_failure_reason_is_not_error():
     assert event["type"] == "SYSTEM"
 
 
+def test_no_combined_signal_is_a_system_decision_not_a_signal() -> None:
+    line = (
+        "[2026-08-06 14:40:38 IST] "
+        "strategy_manager_no_combined_signal symbol=NFO:NIFTY2681124650CE "
+        "no_vote_reason_counts={'orb_not_ready':1}"
+    )
+
+    event = MODULE.parse_event(line)
+    superlite_event = SUPERLITE.parse_event(line)
+
+    assert event is not None and event["type"] == "SYSTEM"
+    assert superlite_event is not None and superlite_event["type"] == "SYSTEM"
+
+
 def test_non_gating_option_context_history_miss_is_system_not_error():
     line = (
         "[2026-07-08 01:13:00 IST] ✅ CANONICAL_HISTORY_RESULT "
