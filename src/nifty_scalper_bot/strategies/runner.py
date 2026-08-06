@@ -5314,7 +5314,7 @@ class StrategyRunner:
                 "runner_state": str(self._runner_state),
                 "active_symbols": sorted(self._active_symbols),
                 "symbols": symbols,
-                "signal_count": getattr(self, "_signal_counter", 0),
+                "approved_candidate_count": getattr(self, "_signal_counter", 0),
                 "tick_count": getattr(self, "_eval_counter", 0),
                 "last_tick_age_sec": (
                     round(time.monotonic() - self._last_tick_seen_ts, 1)
@@ -8152,7 +8152,7 @@ class StrategyRunner:
             self._emit_composite_reports()
             if now - self._last_summary_log >= 60.0:
                 self._logger.info(
-                    "ENGINE_SUMMARY evals=%d signals=%d regime_blocks=%d "
+                    "ENGINE_SUMMARY evals=%d approved_candidates=%d regime_blocks=%d "
                     "capital_blocks=%d runner_state=%s",
                     self._eval_counter,
                     self._signal_counter,
@@ -8161,7 +8161,7 @@ class StrategyRunner:
                     str(self._runner_state),
                     extra={
                         "evals": self._eval_counter,
-                        "signals": self._signal_counter,
+                        "approved_candidates": self._signal_counter,
                         "regime_blocks": self._regime_block_counter,
                         "capital_blocks": self._capital_block_counter,
                         "runner_state": str(self._runner_state),

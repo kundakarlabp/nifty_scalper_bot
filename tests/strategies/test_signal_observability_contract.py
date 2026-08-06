@@ -228,3 +228,15 @@ def test_orderflow_prefers_existing_quote_version(monkeypatch) -> None:
 
     assert result.metadata["quote_update_version"] == 42
     assert result.metadata["quote_update_version_source"] == "quote_update_version"
+
+
+def test_runner_candidate_counter_is_not_exposed_as_a_trade_signal_count() -> None:
+    import inspect
+
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    source = inspect.getsource(StrategyRunner)
+    assert '"approved_candidate_count": getattr(self, "_signal_counter", 0)' in source
+    assert "ENGINE_SUMMARY evals=%d approved_candidates=%d" in source
+    assert '"signal_count": getattr(self, "_signal_counter", 0)' not in source
+    assert '"signals": self._signal_counter' not in source
