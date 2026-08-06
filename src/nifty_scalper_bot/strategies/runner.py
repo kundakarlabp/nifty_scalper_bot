@@ -20231,6 +20231,15 @@ class StrategyRunner:
                     "entry_quote_ask": selected_snapshot.get("ask"),
                     "decision_ts": now_epoch,
                     "entry_submit_ts": _entry_submit_ts,
+                    **(
+                        {
+                            "runner_approved_replacement_symbol": metadata[
+                                "_runner_approved_replacement_symbol"
+                            ]
+                        }
+                        if metadata.get("_runner_approved_replacement_symbol")
+                        else {}
+                    ),
                 },
             )
             self._logger.info(

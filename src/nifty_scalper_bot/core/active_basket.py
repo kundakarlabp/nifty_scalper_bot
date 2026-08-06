@@ -30,6 +30,7 @@ class ActiveContractSelection:
     option_symbols: tuple[str, ...] = ()
     token_by_symbol: Mapping[str, int] | None = None
     basket_version: str | None = None
+    expiry: str | None = None
     selected_at: str | None = None
     source: str = "active_contract_basket"
 
@@ -85,6 +86,12 @@ def active_contract_selection_from_basket(
         option_symbols=option_symbols,
         token_by_symbol=token_by_symbol,
         basket_version=str(_basket_get(basket, "basket_version", None) or _basket_get(basket, "version", None) or "") or None,
+        expiry=str(
+            _basket_get(basket, "expiry", None)
+            or _basket_get(basket, "contract_expiry", None)
+            or ""
+        )
+        or None,
         selected_at=str(_basket_get(basket, "selected_at", None) or _basket_get(basket, "committed_at", None) or "") or None,
         source="active_contract_basket",
     )
