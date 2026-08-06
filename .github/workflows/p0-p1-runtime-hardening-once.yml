@@ -30,8 +30,25 @@ jobs:
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
+      - name: Reconstruct and verify patch units
+        run: |
+          cat scripts/p0p1_chunks/worker.part.* | base64 -d > /tmp/apply_worker.py
+          cat scripts/p0p1_chunks/watchdog.part.* | base64 -d > /tmp/apply_watchdog.py
+          cat scripts/p0p1_chunks/app_main.part.* | base64 -d > /tmp/apply_app_main.py
+          cat scripts/p0p1_chunks/tests.part.* | base64 -d > /tmp/apply_tests.py
+          echo 'ca9ac8d76e2caf6a0aa42fdf28d255fd26da137f5e6c6bb402d171fc5c299f58  /tmp/apply_worker.py' | sha256sum -c -
+          echo '6910ba47622091ab7eaa12b755e7f9191af4f8125e9eeff4aaeb220083a5d4ae  scripts/apply_reconcile.py' | sha256sum -c -
+          echo 'c5737d13409fa106d97ce389d1cb7ebc677ecba0a65e11b64e4da3b1500fd414  /tmp/apply_watchdog.py' | sha256sum -c -
+          echo 'c49d3238888eb7a532b48ebad2f7bd34452ef29254d36dd4335dd04fd7e1dc23  /tmp/apply_app_main.py' | sha256sum -c -
+          echo 'e35286ba58dae12743e9acb4162fe7f17d845b7f5ad96cf267488936461b0404  /tmp/apply_tests.py' | sha256sum -c -
+          python -m py_compile /tmp/apply_worker.py scripts/apply_reconcile.py /tmp/apply_watchdog.py /tmp/apply_app_main.py /tmp/apply_tests.py
       - name: Apply P0 and P1 corrections
-        run: python scripts/apply_p0_p1_runtime_hardening.py
+        run: |
+          python /tmp/apply_worker.py
+          python scripts/apply_reconcile.py
+          python /tmp/apply_watchdog.py
+          python /tmp/apply_app_main.py
+          python /tmp/apply_tests.py
       - name: Format changed Python files
         run: |
           python -m black \
@@ -86,7 +103,8 @@ jobs:
         run: |
           git checkout -- positions.json 2>/dev/null || true
           rm -rf .pytest-data-dir .pytest_cache
-          rm -f scripts/apply_p0_p1_runtime_hardening.py
+          rm -f scripts/apply_reconcile.py scripts/apply_p0_p1_runtime_hardening.py
+          rm -rf scripts/p0p1_chunks
           rm -f .github/workflows/p0-p1-runtime-hardening-once.yml
       - name: Verify production diff scope
         run: |
@@ -105,10 +123,11 @@ jobs:
               'tests/core/test_minimum_lot_affordability_readiness.py',
               '.github/workflows/p0-p1-runtime-hardening-once.yml',
               'scripts/apply_p0_p1_runtime_hardening.py',
+              'scripts/apply_reconcile.py',
           }
           lines = subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines()
           changed = {line[3:] for line in lines if len(line) > 3}
-          unexpected = sorted(changed - allowed)
+          unexpected = sorted(path for path in changed if path not in allowed and not path.startswith('scripts/p0p1_chunks/'))
           if unexpected:
               raise SystemExit(f'unexpected files: {unexpected}')
           print('validated files:', sorted(changed))
