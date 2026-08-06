@@ -1,7 +1,8 @@
 """Minimum executable-lot affordability for live readiness.
 
-This module deliberately evaluates only the already-selected contract. It must
-never choose a cheaper strike or bypass the strategy/liquidity selection policy.
+This module evaluates one supplied contract and never chooses a strike. Callers
+may use the result only after strategy, side, expiry and liquidity ranking; the
+authoritative order-manager margin gate still runs immediately before submission.
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ def evaluate_minimum_lot_affordability(
     data_hub: Any | None = None,
     fallback_balance: Any | None = None,
 ) -> MinimumLotAffordability:
-    """Evaluate whether one selected BUY option lot is executable.
+    """Evaluate whether one supplied BUY option lot is executable.
 
     The estimate mirrors the MarginEngine fallback path: ask premium × lot size ×
     margin factor, while the configured margin buffer reserves cash by reducing

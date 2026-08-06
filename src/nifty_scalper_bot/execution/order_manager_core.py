@@ -4979,8 +4979,9 @@ class OrderManager:
             new_sl = round(price + sl_dist, 2)
             new_tp = max(0.05, round(price - tp_dist, 2))
 
-        self._logger.warning(
-            "BRACKET_REANCHORED symbol=%s side=%s entry=%.2f price=%.2f "
+        self._logger.info(
+            "TRADE_PLAN_BRACKET_REANCHORED stage=pre_submit "
+            "broker_attempted=False symbol=%s side=%s entry=%.2f price=%.2f "
             "sl=%.2f->%.2f tp=%.2f->%.2f trace_id=%s",
             plan.symbol,
             plan.side,
@@ -4991,6 +4992,13 @@ class OrderManager:
             tp,
             new_tp,
             plan.trace_id,
+            extra={
+                "event": "TRADE_PLAN_BRACKET_REANCHORED",
+                "stage": "pre_submit",
+                "broker_attempted": False,
+                "symbol": plan.symbol,
+                "trace_id": plan.trace_id,
+            },
         )
         return replace(plan, stop_loss=new_sl, take_profit=new_tp)
 

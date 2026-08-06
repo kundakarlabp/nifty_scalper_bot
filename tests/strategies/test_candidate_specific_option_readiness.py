@@ -464,3 +464,119 @@ def test_entry_path_uses_one_readiness_snapshot_for_candidate_decision(monkeypat
     assert calls["gate"] == 1
     assert snapshot_calls["count"] == 1
     assert len(runner._order_manager.plans) == 1
+
+
+def test_live_candidate_selection_skips_unaffordable_ranked_contract() -> None:
+    """A valid cheaper same-side candidate must survive the capital screen."""
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = SimpleNamespace(
+        _margin_factor=1.1,
+        _margin_buffer=0.9,
+        resolve_lot_size=lambda _symbol: 65,
+    )
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 11_381.0
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=11_381.0)
+    runner._is_symbol_execution_ready = lambda _symbol: False
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
+    expensive = SimpleNamespace(symbol="NFO:NIFTY2681124650CE")
+    affordable = SimpleNamespace(symbol="NFO:NIFTY2681124700CE")
+    snapshots = [
+        {
+            "symbol": expensive.symbol,
+            "bid": 146.75,
+            "ask": 147.10,
+            "ltp": 147.00,
+        },
+        {
+            "symbol": affordable.symbol,
+            "bid": 120.80,
+            "ask": 121.10,
+            "ltp": 121.00,
+        },
+    ]
+
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[expensive, affordable],
+        candidate_snapshots=snapshots,
+        is_live_mode=True,
+        trace_id="trace-capital",
+    )
+
+    assert selected is affordable
+    assert decisions[expensive.symbol]["reason"] == "minimum_lot_unaffordable"
+    assert decisions[expensive.symbol]["affordable"] is False
+    assert decisions[affordable.symbol]["affordable"] is True
+
+
+def test_live_candidate_selection_fails_closed_when_capacity_is_unknown() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = SimpleNamespace(
+        _margin_factor=1.1,
+        _margin_buffer=0.9,
+        resolve_lot_size=lambda _symbol: 65,
+    )
+    runner._data_hub = None
+    runner._risk_manager = SimpleNamespace(available_balance=None)
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
+    candidate = SimpleNamespace(symbol="NFO:NIFTY2681124700CE")
+
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[candidate],
+        candidate_snapshots=[
+            {"symbol": candidate.symbol, "bid": 120.80, "ask": 121.10}
+        ],
+        is_live_mode=True,
+        trace_id="trace-unknown-capital",
+    )
+
+    assert selected is None
+    assert decisions[candidate.symbol]["reason"] == "available_balance_unavailable"
+    assert decisions[candidate.symbol]["determinate"] is False
+
+
+def test_final_contract_gate_accepts_only_runner_approved_replacement() -> None:
+    runner = object.__new__(StrategyRunner)
+    selected_ce = "NFO:NIFTY2681124650CE"
+    selected_pe = "NFO:NIFTY2681124650PE"
+    replacement = "NFO:NIFTY2681124700CE"
+    runner._market_data = SimpleNamespace(
+        _token_by_symbol={selected_ce: 1, selected_pe: 2, replacement: 3}
+    )
+    snapshot = {
+        "CE": OptionSideReadiness(
+            "CE", selected_ce, 1, True, True, True, 50, 50, True, True, ()
+        ),
+        "PE": OptionSideReadiness(
+            "PE", selected_pe, 2, True, True, True, 50, 50, True, True, ()
+        ),
+    }
+
+    assert (
+        runner._candidate_contract_mismatch_details(replacement, snapshot=snapshot)
+        is not None
+    )
+    assert (
+        runner._candidate_contract_mismatch_details(
+            replacement,
+            snapshot=snapshot,
+            approved_replacement_symbol=replacement,
+        )
+        is None
+    )
+    assert (
+        runner._candidate_contract_mismatch_details(
+            "NFO:NIFTY2681124750CE",
+            snapshot=snapshot,
+            approved_replacement_symbol=replacement,
+        )
+        is not None
+    )
