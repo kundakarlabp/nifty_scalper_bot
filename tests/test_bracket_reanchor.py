@@ -75,6 +75,22 @@ async def test_distance_bracket_reanchors_even_while_old_levels_remain_valid() -
     assert out.take_profit == 141.0
 
 
+async def test_reanchor_is_labelled_as_pre_submit_plan_adjustment(caplog) -> None:
+    plan = _plan("BUY", entry=130.0, sl=125.0, tp=140.0)
+
+    with caplog.at_level(logging.INFO, logger="reanchor-test"):
+        _reanchor(plan, 131.0)
+
+    record = next(
+        item
+        for item in caplog.records
+        if "TRADE_PLAN_BRACKET_REANCHORED" in item.getMessage()
+    )
+    assert record.levelno == logging.INFO
+    assert "stage=pre_submit" in record.getMessage()
+    assert "broker_attempted=False" in record.getMessage()
+
+
 async def test_absolute_invalidation_passes_through_unchanged() -> None:
     plan = _plan(
         "BUY",

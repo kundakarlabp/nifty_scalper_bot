@@ -107,6 +107,9 @@ from nifty_scalper_bot.data.source import (
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
+from nifty_scalper_bot.execution.affordability import (
+    evaluate_minimum_lot_affordability,
+)
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
 from nifty_scalper_bot.execution.quote_readiness import (
     evaluate_execution_quote,
@@ -4443,6 +4446,89 @@ class StrategyRunner:
         reject_key = f"{normalize_symbol(symbol)}:{reason_key}:{reject_reason}"
         self._execution_reject_cooldown_ts[reject_key] = now_epoch
         return reject_reason
+
+    def _select_capital_eligible_candidate(
+        self,
+        *,
+        ranked_candidates: Sequence[Any],
+        candidate_snapshots: Sequence[Mapping[str, Any]],
+        is_live_mode: bool,
+        trace_id: str | None,
+    ) -> tuple[Any | None, dict[str, dict[str, object]]]:
+        """Return the first ranked, ready candidate that can fund one live lot."""
+        snapshots_by_symbol = {
+            normalize_symbol(str(snapshot.get("symbol") or "")): snapshot
+            for snapshot in candidate_snapshots
+            if snapshot.get("symbol")
+        }
+        decisions: dict[str, dict[str, object]] = {}
+        fallback_balance = getattr(
+            getattr(self, "_risk_manager", None), "available_balance", None
+        )
+        for ranked in ranked_candidates:
+            ranked_symbol = normalize_symbol(str(ranked.symbol))
+            ready_before = self._is_symbol_execution_ready(ranked_symbol)
+            ready_after = bool(
+                ready_before
+                or (
+                    is_live_mode
+                    and self._ensure_symbol_execution_ready_for_order(
+                        ranked_symbol, trace_id=trace_id
+                    )
+                )
+            )
+            if not ready_after:
+                decisions[ranked_symbol] = {
+                    "symbol": ranked_symbol,
+                    "reason": "execution_not_ready",
+                    "execution_ready_before": bool(ready_before),
+                    "execution_ready_after": False,
+                }
+                continue
+            if not is_live_mode:
+                decisions[ranked_symbol] = {
+                    "symbol": ranked_symbol,
+                    "reason": "capacity_not_required",
+                    "execution_ready_before": bool(ready_before),
+                    "execution_ready_after": True,
+                }
+                return ranked, decisions
+
+            capacity = evaluate_minimum_lot_affordability(
+                symbol=ranked_symbol,
+                quote=snapshots_by_symbol.get(ranked_symbol),
+                order_manager=getattr(self, "_order_manager", None),
+                data_hub=getattr(self, "_data_hub", None),
+                fallback_balance=fallback_balance,
+            )
+            capacity_details = capacity.to_dict()
+            capacity_details.update(
+                {
+                    "execution_ready_before": bool(ready_before),
+                    "execution_ready_after": True,
+                    "trace_id": trace_id,
+                }
+            )
+            decisions[ranked_symbol] = capacity_details
+            self._logger.info(
+                "CANDIDATE_CAPACITY_DECISION symbol=%s affordable=%s "
+                "determinate=%s reason=%s required=%s executable_capacity=%s "
+                "trace_id=%s",
+                ranked_symbol,
+                capacity.affordable,
+                capacity.determinate,
+                capacity.reason,
+                capacity.required,
+                capacity.executable_capacity,
+                trace_id,
+                extra={
+                    "event": "CANDIDATE_CAPACITY_DECISION",
+                    **capacity_details,
+                },
+            )
+            if capacity.determinate and capacity.affordable:
+                return ranked, decisions
+        return None, decisions
 
     def get_runtime_readiness_snapshot(self) -> dict[str, object]:
         """Return runtime readiness snapshot. Args: none. Returns: readiness map. Raises: none."""
@@ -10405,8 +10491,13 @@ class StrategyRunner:
         candidate_symbol: str | None,
         *,
         snapshot: Mapping[str, OptionSideReadiness] | None = None,
+        approved_replacement_symbol: str | None = None,
     ) -> dict[str, Any] | None:
         if not candidate_symbol or not is_nifty_option_symbol(str(candidate_symbol)):
+            return None
+        if approved_replacement_symbol and self._symbol_match_keys(
+            candidate_symbol
+        ) & self._symbol_match_keys(approved_replacement_symbol):
             return None
         snap = snapshot or self._option_side_readiness_snapshot()
         selected = {"CE": snap["CE"], "PE": snap["PE"]}
@@ -18185,6 +18276,9 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
             metadata = dict(signal.metadata or {})
+            # Signal metadata is external to the runner; only this invocation may
+            # stamp a replacement after every strict replacement guard passes.
+            metadata.pop("_runner_approved_replacement_symbol", None)
             quality = None
             reject_cooldown_result = self._execution_reject_cooldown_result(
                 base_symbol, reason_key, now_epoch, trace_id
@@ -18712,27 +18806,25 @@ class StrategyRunner:
                             snapshots=valid_snapshots,
                         )
                     )
-                    candidate = None
-                    for ranked in ranked_candidates:
-                        ranked_symbol = normalize_symbol(ranked.symbol)
-                        selected_candidate_trace = ranked_symbol
-                        candidate_ready_before = self._is_symbol_execution_ready(
-                            ranked_symbol
+                    candidate, candidate_capacity_decisions = (
+                        self._select_capital_eligible_candidate(
+                            ranked_candidates=ranked_candidates,
+                            candidate_snapshots=valid_snapshots,
+                            is_live_mode=is_live_mode,
+                            trace_id=trace_id,
                         )
-                        if candidate_ready_before:
-                            candidate_ready_after = True
-                            candidate = ranked
-                            break
-                        if (
-                            is_live_mode
-                            and self._ensure_symbol_execution_ready_for_order(
-                                ranked_symbol, trace_id=trace_id
-                            )
-                        ):
-                            candidate_ready_after = True
-                            candidate = ranked
-                            break
-                        candidate_ready_after = False
+                    )
+                    if candidate is not None:
+                        selected_candidate_trace = normalize_symbol(candidate.symbol)
+                        selected_decision = candidate_capacity_decisions.get(
+                            selected_candidate_trace, {}
+                        )
+                        candidate_ready_before = selected_decision.get(
+                            "execution_ready_before"
+                        )
+                        candidate_ready_after = selected_decision.get(
+                            "execution_ready_after"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in trade candidate selection: %s",
@@ -18759,11 +18851,25 @@ class StrategyRunner:
                         },
                     )
                 if candidate is None:
+                    capacity_blocked = any(
+                        decision.get("reason")
+                        in {
+                            "minimum_lot_unaffordable",
+                            "available_balance_unavailable",
+                            "executable_quote_unavailable",
+                            "lot_size_unresolved",
+                        }
+                        for decision in candidate_capacity_decisions.values()
+                    )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
                         symbol=base_symbol,
                         trace_id=trace_id,
-                        reason="no_execution_ready_candidate",
+                        reason=(
+                            "no_affordable_execution_candidate"
+                            if capacity_blocked
+                            else "no_execution_ready_candidate"
+                        ),
                         details={
                             "candidate_total": len(valid_snapshots),
                             "candidate_ranked": len(ranked_candidates),
@@ -18772,8 +18878,15 @@ class StrategyRunner:
                             ),
                             "direction": option_side,
                             "atm": atm_strike,
-                            "min_option_premium": self._trade_candidate_selector.min_option_premium,
-                            "max_option_premium": self._trade_candidate_selector.max_option_premium,
+                            "min_option_premium": (
+                                self._trade_candidate_selector.min_option_premium
+                            ),
+                            "max_option_premium": (
+                                self._trade_candidate_selector.max_option_premium
+                            ),
+                            "candidate_capacity_decisions": (
+                                candidate_capacity_decisions
+                            ),
                         },
                     )
                 selected_symbol = normalize_symbol(candidate.symbol)
@@ -18782,7 +18895,7 @@ class StrategyRunner:
                 replacement_blocked_reason: str | None = None
                 if selected_symbol != original_symbol:
                     allow_replace = _env_flag(
-                        "ALLOW_CANDIDATE_REPLACEMENT", default=False
+                        "ALLOW_CANDIDATE_REPLACEMENT", default=True
                     )
                     strict_replace = _env_flag(
                         "STRICT_CANDIDATE_REPLACEMENT", default=True
@@ -18818,9 +18931,17 @@ class StrategyRunner:
                         replacement_blocked_reason = "side_mismatch"
 
                     def _expiry_key(sym: str) -> str | None:
+                        normalized = normalize_symbol(sym).split(":", 1)[-1]
+                        side = self._contract_side_from_symbol(normalized)
+                        strike = self._extract_strike_from_symbol(normalized)
+                        if side in {"CE", "PE"} and strike is not None:
+                            strike_text = str(int(strike))
+                            suffix = f"{strike_text}{side}"
+                            if normalized.endswith(suffix):
+                                return normalized[: -len(suffix)]
                         match = re.search(
                             r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$",
-                            normalize_symbol(sym),
+                            normalized,
                         )
                         return match.group(1) if match else None
 
@@ -18908,6 +19029,10 @@ class StrategyRunner:
                             },
                         )
                         selected_symbol = original_symbol
+                    else:
+                        metadata["_runner_approved_replacement_symbol"] = (
+                            selected_symbol
+                        )
 
                 # The final order symbol, candidate, quote snapshot and premium plan
                 # are one atomic decision. A rejected replacement must never leak
@@ -19867,7 +19992,11 @@ class StrategyRunner:
             order_symbol = trade_symbol or signal.symbol or base_symbol
             readiness_snapshot = self._option_side_readiness_snapshot()
             contract_mismatch = self._candidate_contract_mismatch_details(
-                order_symbol, snapshot=readiness_snapshot
+                order_symbol,
+                snapshot=readiness_snapshot,
+                approved_replacement_symbol=metadata.get(
+                    "_runner_approved_replacement_symbol"
+                ),
             )
             if contract_mismatch is not None:
                 self._logger.warning(
