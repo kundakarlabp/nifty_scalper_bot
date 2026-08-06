@@ -55,10 +55,10 @@ class _ObservableStrategy(EliteStrategy):
         )
 
 
-def test_disabled_orb_has_explicit_no_vote_reason(monkeypatch) -> None:
-    monkeypatch.setenv("ENABLE_ORB_STRATEGY", "false")
+def test_disabled_orb_config_stays_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_ORB_STRATEGY", "true")
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(enabled=True, quantity=1), indicator_engine=None
+        ORBProStrategyConfig(enabled=False, quantity=1), indicator_engine=None
     )
 
     signal = strategy.generate_signal(
@@ -68,7 +68,6 @@ def test_disabled_orb_has_explicit_no_vote_reason(monkeypatch) -> None:
     )
 
     assert signal is None
-    assert strategy.last_no_vote_reason == "strategy_disabled_by_env"
 
 
 def test_elite_signal_log_contains_structural_identity(caplog) -> None:

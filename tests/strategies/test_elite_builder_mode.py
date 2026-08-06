@@ -42,7 +42,9 @@ def test_directional_mode_disables_gamma_theta_and_context(monkeypatch) -> None:
 def test_orb_setup_identity_is_runner_owned_and_stable(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("ENABLE_ORB_STRATEGY", "true")
+    # ORB_ENABLED is resolved into config by settings; a legacy second env
+    # switch must not silently disable an already-enabled strategy instance.
+    monkeypatch.setenv("ENABLE_ORB_STRATEGY", "false")
     strategy = ORBProStrategy(
         ORBProStrategyConfig(min_confidence=0.0),
         indicator_engine=None,
