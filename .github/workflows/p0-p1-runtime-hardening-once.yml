@@ -39,10 +39,11 @@ jobs:
           echo 'ca9ac8d76e2caf6a0aa42fdf28d255fd26da137f5e6c6bb402d171fc5c299f58  /tmp/apply_worker.py' | sha256sum -c -
           echo 'c49d3238888eb7a532b48ebad2f7bd34452ef29254d36dd4335dd04fd7e1dc23  /tmp/apply_app_main.py' | sha256sum -c -
           echo 'e35286ba58dae12743e9acb4162fe7f17d845b7f5ad96cf267488936461b0404  /tmp/apply_tests.py' | sha256sum -c -
-          python -m py_compile /tmp/apply_worker.py scripts/apply_reconcile.py /tmp/apply_watchdog.py /tmp/apply_app_main.py /tmp/apply_tests.py
+          python -m py_compile /tmp/apply_worker.py scripts/apply_reconcile.py scripts/fix_worker_stop_wakeup.py /tmp/apply_watchdog.py /tmp/apply_app_main.py /tmp/apply_tests.py
       - name: Apply P0 and P1 corrections
         run: |
           python /tmp/apply_worker.py
+          python scripts/fix_worker_stop_wakeup.py
           python scripts/apply_reconcile.py
           python /tmp/apply_watchdog.py
           python /tmp/apply_app_main.py
@@ -112,7 +113,7 @@ jobs:
         run: |
           git checkout -- positions.json 2>/dev/null || true
           rm -rf .pytest-data-dir .pytest_cache
-          rm -f scripts/apply_reconcile.py scripts/apply_p0_p1_runtime_hardening.py
+          rm -f scripts/apply_reconcile.py scripts/fix_worker_stop_wakeup.py scripts/apply_p0_p1_runtime_hardening.py
           rm -rf scripts/p0p1_chunks
           rm -f .github/workflows/p0-p1-runtime-hardening-once.yml
       - name: Verify production diff scope
@@ -133,6 +134,7 @@ jobs:
               '.github/workflows/p0-p1-runtime-hardening-once.yml',
               'scripts/apply_p0_p1_runtime_hardening.py',
               'scripts/apply_reconcile.py',
+              'scripts/fix_worker_stop_wakeup.py',
           }
           lines = subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines()
           changed = {line[3:] for line in lines if len(line) > 3}
