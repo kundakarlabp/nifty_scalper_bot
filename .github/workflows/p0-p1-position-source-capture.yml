@@ -17,13 +17,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fix/p0-p1-runtime-hardening-final-20260806
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install black -q
       - name: Apply reconciliation generation patch
         run: |
           python scripts/apply_reconcile.py
           python scripts/fix_reconcile_wrappers_final.py
+          python -m black src/nifty_scalper_bot/execution/position_manager.py
           python -m py_compile src/nifty_scalper_bot/execution/position_manager.py
       - uses: actions/upload-artifact@v4
         with:
           name: p0-p1-generated-position-${{ github.run_id }}
-          path: src/nifty_scalper_bot/execution/position_manager.py
+          path: src/nifty_scalper_bot/data/../execution/position_manager.py
           retention-days: 3
