@@ -61,6 +61,7 @@ jobs:
             tests/core/test_minimum_lot_affordability_readiness.py
       - name: Focused and adjacent regressions
         run: |
+          set +e
           python -m pytest -q \
             tests/data/test_fallback_tick_worker_lifecycle.py \
             tests/data/test_mdm_tick_coalescing.py \
@@ -70,7 +71,18 @@ jobs:
             tests/infra/test_market_data_supervisor.py \
             tests/core/test_minimum_lot_affordability_readiness.py \
             tests/core/test_runtime_readiness.py \
-            tests/e2e/live_sim/test_live_runtime_startup_contract.py
+            tests/e2e/live_sim/test_live_runtime_startup_contract.py \
+            2>&1 | tee /tmp/p0-p1-focused.log
+          rc=${PIPESTATUS[0]}
+          exit $rc
+      - name: Upload focused failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-p1-focused-failure-${{ github.run_id }}
+          path: /tmp/p0-p1-focused.log
+          if-no-files-found: error
+          retention-days: 3
       - name: Compile and changed-file quality
         run: |
           python -m compileall -q src dashboard scripts
