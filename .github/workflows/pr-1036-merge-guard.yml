@@ -1,0 +1,171 @@
+name: PR 1036 Merge Guard
+
+on:
+  push:
+    branches:
+      - ops/pr-1036-merge-guard
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  checks: read
+
+jobs:
+  guard-merge-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: '1036'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ops/pr-1036-merge-guard
+      - name: Require immutable green PR head
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
+          state=$(jq -r '.state' <<<"$pr_json")
+          merged=$(jq -r '.merged' <<<"$pr_json")
+          head_sha=$(jq -r '.head.sha' <<<"$pr_json")
+          if [[ "$state" != "open" || "$merged" != "false" ]]; then
+            echo "PR ${PR_NUMBER} is not an open unmerged PR"
+            exit 1
+          fi
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          required=(
+            "Live Exit Safety CI"
+            "Validate Market-Aware Optimisations"
+            "E2E live simulation"
+          )
+
+          for attempt in $(seq 1 90); do
+            runs=$(gh api "repos/${REPO}/actions/runs?head_sha=${head_sha}&event=pull_request&per_page=100")
+            all_green=true
+            for workflow in "${required[@]}"; do
+              row=$(jq -r --arg workflow "$workflow" '
+                [.workflow_runs[] | select(.name == $workflow)]
+                | sort_by(.created_at)
+                | last
+                | if . == null then "missing\t\t"
+                  else [.status, (.conclusion // ""), (.id|tostring)] | @tsv end
+              ' <<<"$runs")
+              IFS=$'\t' read -r status conclusion run_id <<<"$row"
+              echo "PR head=${head_sha:0:12} workflow=${workflow} status=${status} conclusion=${conclusion} run=${run_id}"
+              if [[ "$status" == "completed" && "$conclusion" != "success" ]]; then
+                echo "Required workflow failed: ${workflow} conclusion=${conclusion}"
+                exit 1
+              fi
+              if [[ "$status" != "completed" || "$conclusion" != "success" ]]; then
+                all_green=false
+              fi
+            done
+            current_head=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')
+            if [[ "$current_head" != "$head_sha" ]]; then
+              echo "PR head moved from $head_sha to $current_head"
+              exit 1
+            fi
+            if [[ "$all_green" == "true" ]]; then
+              echo "All required PR workflows are green on immutable head $head_sha"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for required PR workflows"
+          exit 1
+      - name: Squash merge with pinned head SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha='${{ steps.guard.outputs.head_sha }}'
+          current_head=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')
+          if [[ "$current_head" != "$head_sha" ]]; then
+            echo "PR head moved before merge"
+            exit 1
+          fi
+          gh pr merge "$PR_NUMBER" \
+            --repo "$REPO" \
+            --squash \
+            --match-head-commit "$head_sha" \
+            --subject "fix(runtime): harden worker reconciliation and feed supervision (#1036)" \
+            --body "Fix fallback tick-worker single-owner shutdown, reconciliation single-flight and stale-result rejection, unified market-data supervision, and latency-SLO live arming."
+      - name: Verify merged main and post-merge workflows
+        id: postmerge
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
+          merged=$(jq -r '.merged' <<<"$pr_json")
+          merge_sha=$(jq -r '.merge_commit_sha' <<<"$pr_json")
+          main_sha=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$merged" != "true" ]]; then
+            echo "PR did not merge"
+            exit 1
+          fi
+          if [[ "$main_sha" != "$merge_sha" ]]; then
+            echo "main SHA $main_sha differs from merge SHA $merge_sha"
+            exit 1
+          fi
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+          required=(
+            "Live Exit Safety CI"
+            "E2E live simulation"
+          )
+          for attempt in $(seq 1 100); do
+            runs=$(gh api "repos/${REPO}/actions/runs?head_sha=${merge_sha}&event=push&per_page=100")
+            all_green=true
+            for workflow in "${required[@]}"; do
+              row=$(jq -r --arg workflow "$workflow" '
+                [.workflow_runs[] | select(.name == $workflow)]
+                | sort_by(.created_at)
+                | last
+                | if . == null then "missing\t\t"
+                  else [.status, (.conclusion // ""), (.id|tostring)] | @tsv end
+              ' <<<"$runs")
+              IFS=$'\t' read -r status conclusion run_id <<<"$row"
+              echo "main=${merge_sha:0:12} workflow=${workflow} status=${status} conclusion=${conclusion} run=${run_id}"
+              if [[ "$status" == "completed" && "$conclusion" != "success" ]]; then
+                echo "Post-merge workflow failed: ${workflow} conclusion=${conclusion}"
+                exit 1
+              fi
+              if [[ "$status" != "completed" || "$conclusion" != "success" ]]; then
+                all_green=false
+              fi
+            done
+            main_now=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+            if [[ "$main_now" != "$merge_sha" ]]; then
+              echo "main moved during post-merge verification: $main_now"
+              exit 1
+            fi
+            if [[ "$all_green" == "true" ]]; then
+              echo "Post-merge workflows are green for $merge_sha"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for post-merge workflows"
+          exit 1
+      - name: Record verified result
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          jq -n \
+            --arg pr "$PR_NUMBER" \
+            --arg head '${{ steps.guard.outputs.head_sha }}' \
+            --arg merge '${{ steps.postmerge.outputs.merge_sha }}' \
+            --arg verified_at "$(date -u +%FT%TZ)" \
+            '{pr_number: ($pr|tonumber), head_sha: $head, merge_sha: $merge, pr_workflows: "success", post_merge_workflows: "success", verified_at: $verified_at}' \
+            > ops/pr-1036-result.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ops/pr-1036-result.json
+          git commit -m 'ops: record verified PR 1036 merge [skip ci]'
+          git push origin HEAD:ops/pr-1036-merge-guard
