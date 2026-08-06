@@ -14730,7 +14730,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                         is_market_open as _imo,
                     )
 
-                    await asyncio.sleep(15 if _imo() else 120)
+                    await asyncio.sleep(
+                        _reconciliation_sleep_seconds(ctx, market_open=_imo())
+                    )
 
             asyncio.create_task(_sync_loop())
             asyncio.create_task(_live_readiness_rearm_loop(ctx))
@@ -15127,6 +15129,35 @@ def _should_reconcile_now(ctx: BotContext) -> bool:
         return False
     except Exception:  # noqa: BLE001 - never let the guard break the loop
         return True
+
+
+def _reconciliation_sleep_seconds(ctx: BotContext, *, market_open: bool) -> float:
+    """Use a relaxed cadence only for a proven flat, settled live state."""
+    if not market_open:
+        return 120.0
+    if (
+        bool(getattr(ctx, "position_reconciliation_failed", False))
+        or bool(getattr(ctx, "unresolved_reconciliation_symbols", set()))
+        or bool(getattr(ctx, "unprotected_broker_positions", set()))
+        or bool(getattr(ctx, "unprotected_broker_position", False))
+    ):
+        return 15.0
+    try:
+        manager = ctx.position_manager
+        if manager is None or list(manager.get_open_positions()):
+            return 15.0
+        pending_getter = getattr(manager, "get_pending_orders", None)
+        if not callable(pending_getter) or list(pending_getter()):
+            return 15.0
+    except Exception:  # noqa: BLE001 - uncertainty retains the safety cadence
+        return 15.0
+    try:
+        configured = float(os.getenv("HEALTH_FLAT_RECONCILE_INTERVAL_SEC", "60"))
+    except (TypeError, ValueError):
+        configured = 60.0
+    max_age = _reconciliation_max_age_seconds()
+    freshness_cap = max_age / 2.0 if max_age > 0 else 60.0
+    return max(15.0, min(configured, freshness_cap))
 
 
 def _reconcile_flat_exit_brackets(ctx: BotContext) -> int:
