@@ -88,6 +88,60 @@ def test_orb_setup_identity_is_runner_owned_and_stable(
     assert first.metadata["liquidity_score"] == 2.0
 
 
+def test_orb_pe_premium_breakout_uses_contract_side() -> None:
+    strategy = ORBProStrategy(
+        ORBProStrategyConfig(min_confidence=0.0), indicator_engine=None
+    )
+    indicators = {
+        "orb_ready": True,
+        "orb_high": 105.0,
+        "orb_low": 95.0,
+        "open": 104.0,
+        "high": 111.0,
+        "low": 103.0,
+        "close": 110.0,
+        "atr": 5.0,
+        "volume": 1000.0,
+        "avg_volume": 900.0,
+        "underlying_direction_bias": "PE",
+        "regime": "TREND_DOWN",
+        "latest_bar_ts": 1_785_000_000.0,
+        "session_date": "2026-08-03",
+    }
+
+    signal = strategy.generate_signal("NFO:NIFTY2680724500PE", indicators, 110.0)
+
+    assert signal is not None
+    assert signal.metadata["contract_side"] == "PE"
+    assert signal.metadata["breakout_side"] == "PE"
+    assert signal.stop_loss == 95.0
+
+
+def test_orb_option_premium_breakdown_does_not_create_buy_vote() -> None:
+    strategy = ORBProStrategy(
+        ORBProStrategyConfig(min_confidence=0.0), indicator_engine=None
+    )
+    indicators = {
+        "orb_ready": True,
+        "orb_high": 105.0,
+        "orb_low": 95.0,
+        "open": 96.0,
+        "high": 97.0,
+        "low": 89.0,
+        "close": 90.0,
+        "atr": 5.0,
+        "volume": 1000.0,
+        "avg_volume": 900.0,
+        "underlying_direction_bias": "PE",
+        "regime": "TREND_DOWN",
+        "latest_bar_ts": 1_785_000_000.0,
+    }
+
+    signal = strategy.generate_signal("NFO:NIFTY2680724500PE", indicators, 90.0)
+
+    assert signal is None
+
+
 def test_production_profile_is_stable_and_changes_with_material_settings(
     monkeypatch,
 ) -> None:

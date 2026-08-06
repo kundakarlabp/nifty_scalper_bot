@@ -13580,7 +13580,45 @@ class MarketDataManager:
                     min_rows=requested_bars,
                 )
                 fetched_rows = len(rows or [])
-                rows = list(rows or [])[-requested_bars:]
+                rows = list(rows or [])
+                recent_rows = rows[-requested_bars:]
+                # A mid-session tail cannot reconstruct the 09:15-09:45 range.
+                # Retain that small anchor alongside the normal recent window.
+                if (
+                    normalized.endswith(("CE", "PE"))
+                    and normalized_interval == "minute"
+                    and str(os.getenv("ORB_ENABLED", "true")).strip().lower()
+                    in {"1", "true", "yes", "on"}
+                    and rows
+                ):
+                    timestamped_rows = [
+                        (parsed[0], row)
+                        for row in rows
+                        if isinstance(row, Mapping)
+                        and (parsed := self._normalize_bar_timestamp(row)) is not None
+                    ]
+                    if timestamped_rows:
+                        latest_local = pd.Timestamp(timestamped_rows[-1][0]).tz_convert(
+                            "Asia/Kolkata"
+                        )
+                        session_open = latest_local.normalize() + pd.Timedelta(
+                            hours=9, minutes=15
+                        )
+                        cutoff = session_open + pd.Timedelta(minutes=30)
+                        opening_rows = [
+                            (timestamp, row)
+                            for timestamp, row in timestamped_rows
+                            if session_open
+                            <= pd.Timestamp(timestamp).tz_convert("Asia/Kolkata")
+                            <= cutoff
+                        ]
+                        recent_timestamped = timestamped_rows[-requested_bars:]
+                        retained = dict([*opening_rows, *recent_timestamped])
+                        rows = [retained[key] for key in sorted(retained)]
+                    else:
+                        rows = recent_rows
+                else:
+                    rows = recent_rows
                 import_reason: HistoryImportReason = (
                     "startup_bootstrap" if reason == "startup" else "hydration"
                 )
