@@ -4253,7 +4253,14 @@ class StrategyManager(_BaseStrategyManager):
             # trigger through the existing context-bonus path. Require the actual
             # selected option, the normal trigger thresholds, a current timestamped
             # context vote, usable depth/tradable quote, and the same conservative
-            # final-score floor used by selected-option single votes.
+            # final-score floor. This is deliberately separate from the 9.0
+            # unconfirmed selected-option floor: confirmed triggers already
+            # require fresh, strong, same-side microstructure evidence and
+            # still pass the downstream mode-specific trade-quality gate.
+            context_confirmed_final_min = self._env_float(
+                "STRATEGY_SINGLE_TRIGGER_CONTEXT_FINAL_MIN",
+                float(mode_profile.get("min_trade_quality", 5.0)),
+            )
             context_confirm_min_score = self._env_float(
                 "STRATEGY_SINGLE_TRIGGER_CONTEXT_MIN_SCORE", 8.0
             )
@@ -4314,7 +4321,7 @@ class StrategyManager(_BaseStrategyManager):
                 and threshold_passed
                 and selected_option
                 and qualifying_context_votes
-                and context_confirmed_final_score >= selected_single_min
+                and context_confirmed_final_score >= context_confirmed_final_min
             )
             if qualifying_context_votes:
                 log.info(
@@ -4330,7 +4337,7 @@ class StrategyManager(_BaseStrategyManager):
                     confirmed_context_bonus,
                     context_penalty,
                     context_confirmed_final_score,
-                    selected_single_min,
+                    context_confirmed_final_min,
                     context_confirmed_single_allowed,
                     extra={
                         "event": "SINGLE_TRIGGER_CONTEXT_SCORE",
@@ -4342,7 +4349,7 @@ class StrategyManager(_BaseStrategyManager):
                         "context_bonus": confirmed_context_bonus,
                         "context_penalty": context_penalty,
                         "final_score": context_confirmed_final_score,
-                        "final_min": selected_single_min,
+                        "final_min": context_confirmed_final_min,
                         "allowed": context_confirmed_single_allowed,
                         "qualifying_context_strategies": [
                             vote.strategy for vote in qualifying_context_votes
@@ -4385,7 +4392,8 @@ class StrategyManager(_BaseStrategyManager):
                     blocked_reason = "single_trigger_context_confirmation_invalid"
                 elif (
                     qualifying_context_votes
-                    and context_confirmed_final_score < selected_single_min
+                    and context_confirmed_final_score
+                    < context_confirmed_final_min
                 ):
                     blocked_reason = "single_trigger_context_score_below_min"
                 elif threshold_passed and not allow_scalp_single:
@@ -4466,7 +4474,7 @@ class StrategyManager(_BaseStrategyManager):
                     confirmed_positive_context, 3
                 )
                 metadata["context_confirmation_score_min"] = round(
-                    selected_single_min, 3
+                    context_confirmed_final_min, 3
                 )
             elif scalp_fallback_allowed:
                 metadata_stage = "single_vote_scalp_controlled"
@@ -4513,7 +4521,8 @@ class StrategyManager(_BaseStrategyManager):
                         blocked_reason = "single_trigger_context_confirmation_invalid"
                     elif (
                         qualifying_context_votes
-                        and context_confirmed_final_score < selected_single_min
+                        and context_confirmed_final_score
+                        < context_confirmed_final_min
                     ):
                         blocked_reason = "single_trigger_context_score_below_min"
                     elif not allow_scalp_single:

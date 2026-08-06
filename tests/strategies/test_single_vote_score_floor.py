@@ -304,6 +304,57 @@ async def test_selected_smc_trigger_uses_fresh_same_side_orderflow_confirmation(
     assert result.metadata["final_trade_score"] >= 9.0
 
 
+async def test_range_vwap_trigger_uses_separate_context_confirmed_floor(
+    monkeypatch,
+) -> None:
+    """A valid context-confirmed trigger must not reuse the unconfirmed 9.0 floor."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    monkeypatch.delenv("STRATEGY_SINGLE_TRIGGER_CONTEXT_FINAL_MIN", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="VWAPPro", raw_score=7.5, weighted_score=6.0
+    )
+    context_signal, context_vote = _context_vote(score=8.0, confidence=0.80)
+    context_vote.metadata["context_bonus_score"] = 4.0
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, (context_signal, context_vote)],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["context_confirmation_score_min"] == 7.0
+    assert result.metadata["final_trade_score"] == 7.5
+
+
+async def test_weak_range_vwap_trigger_stays_blocked_with_context(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="VWAPPro", raw_score=6.0, weighted_score=4.8
+    )
+    context_signal, context_vote = _context_vote(score=10.0, confidence=0.90)
+    context_vote.metadata["context_bonus_score"] = 4.0
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, (context_signal, context_vote)],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
+    assert decision.reason == "raw_score_below_min"
+
+
 async def test_stale_orderflow_context_cannot_unlock_single_trigger(
     monkeypatch,
 ) -> None:
@@ -346,9 +397,9 @@ async def test_stale_context_cannot_inflate_fresh_confirmation_score(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "single_trigger_context_score_below_min"
+    assert result is not None
+    assert result.metadata["context_confirmation_raw_score"] == 2.0
+    assert result.metadata["final_trade_score"] == 8.9
 
 
 async def test_unapproved_context_strategy_cannot_unlock_single_trigger(
@@ -407,8 +458,9 @@ async def test_regime_downweighted_context_cannot_unlock_single_trigger(
     monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
     monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
     manager = _manager_probe()
-    trigger = _signal_vote(strategy="SMC", raw_score=8.6, weighted_score=8.6)
-    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
+    trigger = _signal_vote(
+        strategy="VWAPPro", raw_score=7.5, weighted_score=6.0
+    )
     context_signal, context_vote = _context_vote(score=10.0, confidence=0.85)
     context_vote.score = 2.5
     context_vote.metadata["regime_weight"] = 0.25
@@ -450,6 +502,6 @@ async def test_context_confirmation_applies_regime_weight_exactly_once(
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
     assert result.metadata["context_confirmation_raw_score"] == 3.0
     assert result.metadata["context_confirmation_regime_weighted_score"] == 1.5
-    assert result.metadata["context_confirmation_score_min"] == 9.0
+    assert result.metadata["context_confirmation_score_min"] == 7.0
     assert result.metadata["context_bonus"] == 0.675
     assert result.metadata["final_trade_score"] == 9.475
