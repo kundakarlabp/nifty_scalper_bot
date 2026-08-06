@@ -510,6 +510,38 @@ async def test_selected_option_with_canonical_source_warm_indicator_short_reseed
     assert result.indicator_bars >= 30
 
 
+async def test_option_sync_carries_retained_opening_range_into_indicators(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ORB_ENABLED", "true")
+    rows = _bars(106)
+    session_open = datetime(2026, 8, 6, 3, 45, tzinfo=timezone.utc)
+    for index, row in enumerate(rows):
+        row["timestamp"] = session_open + timedelta(minutes=index)
+    r = _runner(rows)
+    r._market_data = SimpleNamespace(
+        get_ohlc_bars=lambda _symbol, **_kwargs: list(rows)
+    )
+    r._data_hub = None
+    r._get_mdm_bars = StrategyRunner._get_mdm_bars.__get__(r, StrategyRunner)
+
+    result = r.sync_history_from_mdm(
+        "NFO:NIFTY26JUN24000CE",
+        required_bars=75,
+        reason="mid_session_restart",
+        role="selected_option",
+        request_if_short=False,
+    )
+
+    assert result.success is True
+    assert result.mdm_bars == 106
+    assert result.indicator_bars == 106
+    indicators = r._indicator_engine.get_indicators(
+        "NFO:NIFTY26JUN24000CE", {"orb_ready", "orb_high", "orb_low"}
+    )
+    assert indicators["orb_ready"] is True
+
+
 async def test_indicator_equal_to_short_source_remains_not_ready_without_false_success() -> (
     None
 ):

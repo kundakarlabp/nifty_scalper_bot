@@ -108,6 +108,45 @@ async def test_minimum_met_but_target_cold_fetches_target() -> None:
 
 
 @pytest.mark.asyncio
+async def test_option_hydration_retains_opening_range_after_mid_session_restart(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ORB_ENABLED", "true")
+    mdm = _mdm([])
+    session_open = datetime(2026, 8, 6, 3, 45, tzinfo=timezone.utc)
+    rows = [
+        {
+            "timestamp": session_open + timedelta(minutes=i),
+            "open": 100.0,
+            "high": 101.0 + i,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 10,
+        }
+        for i in range(321)
+    ]
+    async def fetch(*_a, **_k):
+        return rows
+
+    mdm.fetch_history = fetch
+
+    result = await mdm.ensure_history(
+        "NFO:NIFTY2680624500CE",
+        required_bars=50,
+        target_bars=75,
+        reason="mid_session_restart",
+    )
+    retained = mdm._test_store["rows"]
+
+    assert result.minimum_ready is True
+    assert retained[0]["timestamp"] == session_open
+    assert any(
+        row["timestamp"] == session_open + timedelta(minutes=30) for row in retained
+    )
+    assert retained[-1]["timestamp"] == rows[-1]["timestamp"]
+
+
+@pytest.mark.asyncio
 async def test_minimum_only_skips_when_minimum_met() -> None:
     mdm = _mdm(_rows(30))
 

@@ -11,7 +11,7 @@ LOGGER = get_logger(__name__)
 
 
 class ORBProStrategy(EliteStrategy):
-    """Opening range breakout strategy returning scored vote metadata."""
+    """Option-premium opening-range breakout returning scored vote metadata."""
 
     MIN_BARS_REQUIRED = 5
 
@@ -74,10 +74,18 @@ class ORBProStrategy(EliteStrategy):
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=choppy_regime')
                 return None
 
-            breakout_side = 'CE' if close > orb_high else 'PE' if close < orb_low else 'UNKNOWN'
-            if breakout_side == 'UNKNOWN':
+            contract_side = (
+                'CE'
+                if symbol.upper().endswith('CE')
+                else 'PE' if symbol.upper().endswith('PE') else ''
+            )
+            if not contract_side:
+                self._no_vote('invalid_option_contract_side')
+                return None
+            if close <= orb_high:
                 self._no_vote('no_breakout')
                 return None
+            breakout_side = contract_side
 
             candle_range = max(abs(float(indicators.get('high') or close) - float(indicators.get('low') or close)), 1e-9)
             breakout_body_pct = abs(close - open_price) / candle_range
@@ -88,7 +96,7 @@ class ORBProStrategy(EliteStrategy):
 
             retest_confirmed = bool(indicators.get('retest_confirmed'))
             if not retest_confirmed:
-                retest_confirmed = abs(close - (orb_high if breakout_side == 'CE' else orb_low)) <= 0.35 * atr
+                retest_confirmed = abs(close - orb_high) <= 0.35 * atr
 
             score = 1.0 + 2.0
             reasons = ['opening_range_complete', 'breakout_close_beyond_range']
@@ -102,7 +110,7 @@ class ORBProStrategy(EliteStrategy):
             if vol_tick:
                 score += 1.0
                 reasons.append('volume_or_tick_confirmation')
-            stop_level = orb_low if breakout_side == 'CE' else orb_high
+            stop_level = orb_low
             risk = abs(close - stop_level)
             rr = (2.0 * atr) / risk if risk > 1e-9 else 0.0
             if rr >= 1.8:

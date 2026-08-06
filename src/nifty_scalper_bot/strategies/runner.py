@@ -1870,6 +1870,12 @@ class StrategyRunner:
 
     def _get_mdm_bars(self, symbol: str, limit: int) -> list[dict[str, Any]]:
         """Fetch cached bars from MDM/DataHub only. Args: symbol, limit. Returns: rows. Raises: None."""
+        # MDM retains only the opening-range anchor beyond the recent tail.
+        # Keep it when ORB is enabled so IndicatorEngine can restore ORB state.
+        retain_orb_anchor = bool(
+            normalize_symbol(symbol).endswith(("CE", "PE"))
+            and _env_bool("ORB_ENABLED", True)
+        )
         for source in (self._market_data, self._data_hub):
             if source is None:
                 continue
@@ -1879,11 +1885,18 @@ class StrategyRunner:
                     continue
                 try:
                     try:
-                        bars = fn(symbol, limit=limit)
+                        bars = (
+                            fn(symbol)
+                            if retain_orb_anchor
+                            else fn(symbol, limit=limit)
+                        )
                     except TypeError:
                         bars = fn(symbol)
                     if bars:
-                        return [dict(row) for row in list(bars)[-limit:]]
+                        selected = (
+                            list(bars) if retain_orb_anchor else list(bars)[-limit:]
+                        )
+                        return [dict(row) for row in selected]
                 except Exception:
                     continue
         return []
