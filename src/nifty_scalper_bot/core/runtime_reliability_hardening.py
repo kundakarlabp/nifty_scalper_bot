@@ -2,22 +2,25 @@
 
 No trading threshold, order path, risk control, market-hours guard, or strategy
 permission is changed here. The adapters correct overload age attribution,
-bounded consensus-quality evidence, and runtime diagnostics while preserving
-fail-closed behavior for entry-critical queues.
+bounded consensus-quality evidence, tick hot-path duplication, and runtime
+diagnostics while preserving fail-closed behavior for entry-critical queues.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
+from functools import wraps
 import logging
 import time
 from typing import Any, Mapping
 
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _LOG = get_logger(__name__)
 _PATCH_ATTR = "_runtime_reliability_hardening_installed"
+_UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
 
 
 def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
@@ -45,8 +48,6 @@ def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
             continue
         timestamp = tick.get("_mdm_enqueued_mono")
         if not isinstance(timestamp, (int, float)):
-            # Unknown age/role on normal queued work is uncertainty: preserve
-            # fail-closed behavior rather than silently treating it as context.
             return float(
                 getattr(mdm, "_overload_enter_oldest_ms", 2000.0) or 2000.0
             )
@@ -125,6 +126,110 @@ def _install_mdm_overload_patch() -> bool:
     return True
 
 
+def _runtime_tick_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
+    """Return MDM runtime timestamp milliseconds without pandas reparsing."""
+
+    timestamp_ms = payload.get("timestamp_ms")
+    if isinstance(timestamp_ms, (int, float)) and not isinstance(timestamp_ms, bool):
+        value = float(timestamp_ms)
+        return value if value > 0 else None
+    timestamp = payload.get("timestamp")
+    if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
+        value = float(timestamp.timestamp() * 1000.0)
+        return value if value > 0 else None
+    return None
+
+
+def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
+    """Return whether MDM already produced the complete live-tick contract."""
+
+    symbol = str(payload.get("symbol") or "").strip()
+    if not symbol or normalize_symbol(symbol) != symbol:
+        return False
+    token = payload.get("instrument_token") or payload.get("token")
+    price = payload.get("ltp") or payload.get("last_price")
+    timestamp_ms = _runtime_tick_timestamp_ms(payload)
+    try:
+        if int(token) <= 0 or float(price) <= 0 or timestamp_ms is None:
+            return False
+    except (TypeError, ValueError):
+        return False
+    source = str(payload.get("source") or "").strip().lower()
+    if source not in {
+        "ws",
+        "ws_full",
+        "websocket",
+        "stream",
+        "poll",
+        "rest",
+        "rest_poll",
+        "fallback",
+        "quote",
+        "rest_quote",
+    }:
+        return False
+    explicit_quality = str(payload.get("timestamp_quality") or "").strip().lower()
+    if explicit_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+        return False
+    if payload.get("source_timestamp_valid") is not True:
+        return False
+    return all(
+        key in payload
+        for key in (
+            "timestamp",
+            "timestamp_source",
+            "received_at",
+            "depth_available",
+            "tradable_quote",
+        )
+    )
+
+
+def _install_datahub_tick_hotpath_patch() -> bool:
+    """Avoid rebuilding MDM's already-canonical tick before Runner dispatch."""
+
+    from nifty_scalper_bot.data.data_hub import DataHub
+
+    attr = "_mdm_tick_hotpath_hardening_installed"
+    if bool(getattr(DataHub, attr, False)):
+        return True
+    original = DataHub._canonicalize_tick_payload
+
+    @wraps(original)
+    def _canonicalize_tick_payload(
+        self: Any, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        if _is_canonical_runtime_tick(payload):
+            tick = dict(payload)
+            symbol = str(tick["symbol"])
+            timestamp_ms = _runtime_tick_timestamp_ms(tick)
+            if timestamp_ms is None:
+                return original(self, payload)
+            timestamp = tick.get("timestamp")
+            if isinstance(timestamp, datetime):
+                tick["timestamp"] = timestamp.isoformat()
+            tick["timestamp_ms"] = timestamp_ms
+            timestamp_source = str(tick.get("timestamp_source") or "").lower()
+            timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
+            if not timestamp_quality:
+                timestamp_quality = (
+                    "exchange" if "exchange" in timestamp_source else "broker"
+                )
+                tick["timestamp_quality"] = timestamp_quality
+            tick.setdefault("hard_readiness_eligible", True)
+            tick.setdefault("quote_source", tick.get("source"))
+            tick.setdefault("exchange_symbol", symbol)
+            tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
+            return tick
+        return original(self, payload)
+
+    DataHub._canonicalize_tick_payload = (  # type: ignore[method-assign]
+        _canonicalize_tick_payload
+    )
+    setattr(DataHub, attr, True)
+    return True
+
+
 def _trigger_confirmation_details(
     signals: list[tuple[Any, Any]],
 ) -> tuple[bool, list[str]]:
@@ -192,8 +297,6 @@ def _install_trade_quality_patch() -> bool:
         components = dict(details.get("trade_quality_components") or {})
         confirmation = bool(indicators.get("independent_trigger_confirmation"))
         already_blocked = bool(details.get("already_blocked_by_strategy"))
-        # Exactly one capped 0.5-point contribution. Multiple trigger votes do
-        # not stack, and an already-invalid best trigger receives no rescue.
         bonus = 0.5 if confirmation and not already_blocked else 0.0
         components["independent_trigger_confirmation"] = bonus
         adjusted = max(0.0, min(10.0, float(score) + bonus))
@@ -266,11 +369,9 @@ def _install_strategy_reason_patch() -> bool:
             raw_score = float(self._extract_raw_score(vote))
             weighted_score = float(getattr(vote, "score", 0.0) or 0.0)
             score_min = float(self._single_vote_thresholds(vote.strategy)[0])
-        except Exception:  # noqa: BLE001 - never rewrite a reason on uncertainty
+        except Exception:
             return result
 
-        # Rewrite only the mathematically-proven logging defect. The rejected
-        # result and every trading threshold remain unchanged.
         if raw_score < score_min or weighted_score >= score_min:
             return result
         corrected_reason = "regime_weighted_score_below_min"
@@ -280,7 +381,7 @@ def _install_strategy_reason_patch() -> bool:
                 reason=corrected_reason,
                 final_block_reason=corrected_reason,
             )
-        except Exception:  # noqa: BLE001 - diagnostic correction must be non-fatal
+        except Exception:
             return result
         _LOG.info(
             "STRATEGY_REJECTION_REASON_CORRECTED symbol=%s strategy=%s raw_score=%.2f "
@@ -362,14 +463,62 @@ def _install_runner_cpu_telemetry_patch() -> bool:
     return True
 
 
+def _install_runner_tick_latency_telemetry_patch() -> bool:
+    """Expose whether remaining DataHub callback latency is inside Runner."""
+
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    attr = "_datahub_tick_latency_telemetry_installed"
+    if bool(getattr(StrategyRunner, attr, False)):
+        return True
+    original = StrategyRunner.on_datahub_tick
+
+    @wraps(original)
+    def on_datahub_tick(self: Any, tick: dict[str, Any]) -> None:
+        started = time.perf_counter()
+        try:
+            original(self, tick)
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            if duration_ms >= 50.0:
+                symbol = normalize_symbol(str(tick.get("symbol") or ""))
+                try:
+                    route = self._entry_evaluation_route(symbol)
+                    route_value = str(getattr(route, "value", route))
+                except Exception:
+                    route_value = "unknown"
+                log_throttled(
+                    self._logger,
+                    f"runner_datahub_tick_slow:{symbol}:{route_value}",
+                    "RUNNER_DATAHUB_TICK_SLOW symbol=%s route=%s duration_ms=%.1f",
+                    symbol,
+                    route_value,
+                    duration_ms,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "RUNNER_DATAHUB_TICK_SLOW",
+                        "symbol": symbol,
+                        "route": route_value,
+                        "duration_ms": duration_ms,
+                    },
+                )
+
+    StrategyRunner.on_datahub_tick = on_datahub_tick  # type: ignore[method-assign]
+    setattr(StrategyRunner, attr, True)
+    return True
+
+
 def apply_patches() -> dict[str, bool]:
     """Install focused reliability adapters idempotently."""
 
     state = {
         "mdm_overload": _install_mdm_overload_patch(),
+        "datahub_tick_hotpath": _install_datahub_tick_hotpath_patch(),
         "trade_quality": _install_trade_quality_patch(),
         "strategy_reason": _install_strategy_reason_patch(),
         "runner_cpu_telemetry": _install_runner_cpu_telemetry_patch(),
+        "runner_tick_latency_telemetry": _install_runner_tick_latency_telemetry_patch(),
     }
     if not all(state.values()):
         raise RuntimeError(f"runtime_reliability_hardening_incomplete state={state}")
@@ -384,5 +533,7 @@ def apply_patches() -> dict[str, bool]:
 __all__ = [
     "apply_patches",
     "_critical_oldest_pending_age_ms_locked",
+    "_is_canonical_runtime_tick",
+    "_runtime_tick_timestamp_ms",
     "_trigger_confirmation_details",
 ]
