@@ -138,12 +138,18 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
     _install_market_data_runtime_hardening()
 
     from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
+    from nifty_scalper_bot.core.off_market_basket_safety import (
+        apply_app_patch as _off_market_app_adapter,
+        apply_patches as _off_market_controller_adapter,
+    )
     from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
     from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import (
         apply_patches as _dynamic_universe_adapter,
     )
 
     _dynamic_universe_adapter()
+    _off_market_controller_adapter()
+    _off_market_app_adapter(app_module)
     _ready_adapter(app_module)
     _polling_adapter(app_module)
 
