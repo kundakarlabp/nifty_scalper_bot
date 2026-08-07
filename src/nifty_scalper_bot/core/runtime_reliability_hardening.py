@@ -18,6 +18,7 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _LOG = get_logger(__name__)
 _PATCH_ATTR = "_runtime_reliability_hardening_installed"
+_UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
 
 
 def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
@@ -45,6 +46,8 @@ def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
             continue
         timestamp = tick.get("_mdm_enqueued_mono")
         if not isinstance(timestamp, (int, float)):
+            # Unknown age/role on normal queued work is uncertainty: preserve
+            # fail-closed behavior rather than silently treating it as context.
             return float(
                 getattr(mdm, "_overload_enter_oldest_ms", 2000.0) or 2000.0
             )
@@ -151,6 +154,9 @@ def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
         "rest_quote",
     }:
         return False
+    explicit_quality = str(payload.get("timestamp_quality") or "").strip().lower()
+    if explicit_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+        return False
     # These fields are owned by MDM's _normalize_ws_tick/normalize_live_tick
     # contract. Requiring source timestamp proof prevents an arbitrary raw tick
     # with a caller-supplied timestamp_ms from bypassing DataHub validation.
@@ -183,16 +189,24 @@ def _install_datahub_tick_hotpath_patch() -> bool:
     ) -> dict[str, Any] | None:
         if _is_canonical_runtime_tick(payload):
             tick = dict(payload)
+            symbol = str(tick["symbol"])
             timestamp_source = str(tick.get("timestamp_source") or "").lower()
-            tick.setdefault(
-                "timestamp_quality",
-                "exchange" if "exchange" in timestamp_source else "broker",
-            )
+            timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
+            if not timestamp_quality:
+                timestamp_quality = (
+                    "exchange" if "exchange" in timestamp_source else "broker"
+                )
+                tick["timestamp_quality"] = timestamp_quality
+            tick.setdefault("hard_readiness_eligible", True)
             tick.setdefault("quote_source", tick.get("source"))
+            tick.setdefault("exchange_symbol", symbol)
+            tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
             return tick
         return original(self, payload)
 
-    DataHub._canonicalize_tick_payload = _canonicalize_tick_payload  # type: ignore[method-assign]
+    DataHub._canonicalize_tick_payload = (  # type: ignore[method-assign]
+        _canonicalize_tick_payload
+    )
     setattr(DataHub, attr, True)
     return True
 
@@ -264,6 +278,8 @@ def _install_trade_quality_patch() -> bool:
         components = dict(details.get("trade_quality_components") or {})
         confirmation = bool(indicators.get("independent_trigger_confirmation"))
         already_blocked = bool(details.get("already_blocked_by_strategy"))
+        # Exactly one capped 0.5-point contribution. Multiple trigger votes do
+        # not stack, and an already-invalid best trigger receives no rescue.
         bonus = 0.5 if confirmation and not already_blocked else 0.0
         components["independent_trigger_confirmation"] = bonus
         adjusted = max(0.0, min(10.0, float(score) + bonus))
@@ -339,6 +355,8 @@ def _install_strategy_reason_patch() -> bool:
         except Exception:  # noqa: BLE001 - never rewrite a reason on uncertainty
             return result
 
+        # Rewrite only the mathematically-proven logging defect. The rejected
+        # result and every trading threshold remain unchanged.
         if raw_score < score_min or weighted_score >= score_min:
             return result
         corrected_reason = "regime_weighted_score_below_min"
