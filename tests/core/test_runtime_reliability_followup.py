@@ -200,8 +200,8 @@ def test_cpu_summary_counts_dynamic_active_options_when_whitelist_is_empty() -> 
     assert kwargs["extra"]["active_option_symbols_count"] == 2
 
 
-def test_actual_mdm_normalized_live_tick_matches_datahub_fastpath_contract() -> None:
-    """Guard the fast-path predicate against drifting away from MDM's real shape."""
+def test_actual_mdm_subscriber_payload_matches_datahub_fastpath_contract() -> None:
+    """Guard the predicate against drifting from the exact payload DataHub receives."""
     mdm, selected, _far = _wire_mdm()
     raw = {
         "instrument_token": 1,
@@ -219,7 +219,16 @@ def test_actual_mdm_normalized_live_tick_matches_datahub_fastpath_contract() -> 
     assert normalized["symbol"] == selected
     live = mdm.normalize_live_tick(normalized, source=str(normalized["source"]))
     assert live is not None
-    assert _is_canonical_runtime_tick(live) is True
+
+    delivered: list[dict[str, object]] = []
+    mdm.subscribe(selected, delivered.append)
+    mdm._emit_tick(selected, live, source=str(live.get("source") or "ws"))
+
+    assert delivered
+    payload = delivered[-1]
+    assert payload["symbol"] == selected
+    assert isinstance(payload.get("timestamp_ms"), (int, float))
+    assert _is_canonical_runtime_tick(payload) is True
 
 
 def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypatch) -> None:
