@@ -2,8 +2,8 @@
 
 No trading threshold, order path, risk control, market-hours guard, or strategy
 permission is changed here. The adapters correct overload age attribution,
-bounded consensus-quality evidence, and runtime diagnostics while preserving
-fail-closed behavior for entry-critical queues.
+bounded consensus-quality evidence, tick hot-path duplication, and runtime
+diagnostics while preserving fail-closed behavior for entry-critical queues.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import logging
 import time
 from typing import Any, Mapping
 
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _LOG = get_logger(__name__)
@@ -122,6 +122,71 @@ def _install_mdm_overload_patch() -> bool:
         _update_pipeline_overload_locked
     )
     setattr(MarketDataManager, _PATCH_ATTR, True)
+    return True
+
+
+def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
+    """Return whether MDM has already produced the full DataHub runtime contract."""
+
+    symbol = str(payload.get("symbol") or "").strip()
+    if not symbol or normalize_symbol(symbol) != symbol:
+        return False
+    token = payload.get("instrument_token") or payload.get("token")
+    price = payload.get("ltp") or payload.get("last_price")
+    timestamp_ms = payload.get("timestamp_ms")
+    try:
+        if int(token) <= 0 or float(price) <= 0 or float(timestamp_ms) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    source = str(payload.get("source") or "").strip().lower()
+    if source not in {"ws", "websocket", "stream", "poll", "rest"}:
+        return False
+    # These are the quote/readiness fields MDM's normalized live tick owns.
+    # Requiring them prevents a merely timestamped raw caller from entering
+    # this fast path and preserves the generic canonicalizer for partial input.
+    return all(
+        key in payload
+        for key in (
+            "timestamp",
+            "received_at",
+            "depth_available",
+            "tradable_quote",
+            "hard_readiness_eligible",
+        )
+    )
+
+
+def _install_datahub_tick_hotpath_patch() -> bool:
+    """Avoid rebuilding MDM's already-canonical tick before Runner dispatch."""
+
+    from nifty_scalper_bot.data.data_hub import DataHub
+
+    attr = "_mdm_tick_hotpath_hardening_installed"
+    if bool(getattr(DataHub, attr, False)):
+        return True
+    original = DataHub._canonicalize_tick_payload
+
+    def _canonicalize_tick_payload(
+        self: Any, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        if _is_canonical_runtime_tick(payload):
+            tick = dict(payload)
+            quality = str(tick.get("timestamp_quality") or "").strip().lower()
+            if not quality:
+                if tick.get("exchange_timestamp") not in (None, ""):
+                    quality = "exchange"
+                elif tick.get("timestamp") not in (None, ""):
+                    quality = "broker"
+                else:
+                    quality = "received_at"
+                tick["timestamp_quality"] = quality
+            tick.setdefault("quote_source", tick.get("source"))
+            return tick
+        return original(self, payload)
+
+    DataHub._canonicalize_tick_payload = _canonicalize_tick_payload  # type: ignore[method-assign]
+    setattr(DataHub, attr, True)
     return True
 
 
@@ -362,14 +427,62 @@ def _install_runner_cpu_telemetry_patch() -> bool:
     return True
 
 
+def _install_runner_tick_latency_telemetry_patch() -> bool:
+    """Expose whether remaining DataHub callback latency is inside Runner."""
+
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    attr = "_datahub_tick_latency_telemetry_installed"
+    if bool(getattr(StrategyRunner, attr, False)):
+        return True
+    original = StrategyRunner.on_datahub_tick
+
+    def on_datahub_tick(self: Any, tick: dict[str, Any]) -> None:
+        started = time.perf_counter()
+        try:
+            return original(self, tick)
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            if duration_ms < 50.0:
+                return
+            symbol = normalize_symbol(str(tick.get("symbol") or ""))
+            try:
+                route = self._entry_evaluation_route(symbol)
+                route_value = str(getattr(route, "value", route))
+            except Exception:  # noqa: BLE001 - telemetry only
+                route_value = "unknown"
+            log_throttled(
+                self._logger,
+                f"runner_datahub_tick_slow:{symbol}:{route_value}",
+                "RUNNER_DATAHUB_TICK_SLOW symbol=%s route=%s duration_ms=%.1f",
+                symbol,
+                route_value,
+                duration_ms,
+                interval_sec=30.0,
+                level=logging.WARNING,
+                extra={
+                    "event": "RUNNER_DATAHUB_TICK_SLOW",
+                    "symbol": symbol,
+                    "route": route_value,
+                    "duration_ms": duration_ms,
+                },
+            )
+
+    StrategyRunner.on_datahub_tick = on_datahub_tick  # type: ignore[method-assign]
+    setattr(StrategyRunner, attr, True)
+    return True
+
+
 def apply_patches() -> dict[str, bool]:
     """Install focused reliability adapters idempotently."""
 
     state = {
         "mdm_overload": _install_mdm_overload_patch(),
+        "datahub_tick_hotpath": _install_datahub_tick_hotpath_patch(),
         "trade_quality": _install_trade_quality_patch(),
         "strategy_reason": _install_strategy_reason_patch(),
         "runner_cpu_telemetry": _install_runner_cpu_telemetry_patch(),
+        "runner_tick_latency_telemetry": _install_runner_tick_latency_telemetry_patch(),
     }
     if not all(state.values()):
         raise RuntimeError(f"runtime_reliability_hardening_incomplete state={state}")
@@ -384,5 +497,6 @@ def apply_patches() -> dict[str, bool]:
 __all__ = [
     "apply_patches",
     "_critical_oldest_pending_age_ms_locked",
+    "_is_canonical_runtime_tick",
     "_trigger_confirmation_details",
 ]
