@@ -197,7 +197,7 @@ def test_cpu_summary_counts_dynamic_active_options_when_whitelist_is_empty() -> 
 
 
 def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypatch) -> None:
-    """MDM already emits canonical JSON-safe ticks; DataHub must not rebuild them."""
+    """MDM's real normalized WS shape must not be rebuilt inside DataHub."""
     mdm = types.SimpleNamespace(attach_tick_bus=lambda _bus: None)
     hub = DataHub(mdm)
     symbol = "NFO:NIFTY26AUG24550CE"
@@ -210,17 +210,21 @@ def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypat
         "last_price": 123.45,
         "timestamp": "2026-08-07T09:45:00+00:00",
         "timestamp_ms": 1786095900000.0,
-        "timestamp_quality": "exchange",
+        "timestamp_source": "exchange_timestamp",
+        "source_timestamp_valid": True,
         "received_at": now,
-        "source": "ws",
+        "source": "ws_full",
         "bid": 123.40,
         "ask": 123.50,
         "best_bid": 123.40,
         "best_ask": 123.50,
-        "spread_pct": 0.081,
+        "spread": 0.10,
+        "depth": {"buy": [{"price": 123.40}], "sell": [{"price": 123.50}]},
         "depth_available": True,
         "tradable_quote": True,
-        "hard_readiness_eligible": True,
+        "bid_missing": False,
+        "ask_missing": False,
+        "bid_ask_source": "ws_full",
     }
 
     def _should_not_restamp(*_args, **_kwargs):
@@ -231,6 +235,7 @@ def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypat
 
     assert hub._quotes[symbol]["ltp"] == 123.45
     assert hub._quotes[symbol]["timestamp_ms"] == 1786095900000.0
+    assert hub._quotes[symbol]["source_timestamp_valid"] is True
 
 
 def test_datahub_generic_tick_still_uses_full_canonicalization(monkeypatch) -> None:
