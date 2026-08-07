@@ -7,6 +7,9 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import (
+    apply_patches,
+)
 from nifty_scalper_bot.strategies.runner import (
     EntryEvaluationRoute,
     SymbolRuntimeState,
@@ -39,6 +42,7 @@ def _wait_until(predicate, *, timeout=3.0):
 
 def test_live_selected_option_tick_reaches_strategy_manager_after_atm_switch(monkeypatch):
     """A dynamically selected option must not be blocked by the startup snapshot."""
+    apply_patches()
     runner, strategy_manager, risk_manager, order_manager, old_ce = (
         _build_phase9_runner(monkeypatch)
     )
