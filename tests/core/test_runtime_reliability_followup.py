@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from nifty_scalper_bot.core.app import _reconciliation_sleep_seconds
 from nifty_scalper_bot.core.strategy_manager import Signal, StrategyManager, StrategyVote
+from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -193,3 +194,66 @@ def test_cpu_summary_counts_dynamic_active_options_when_whitelist_is_empty() -> 
 
     _args, kwargs = runner._logger.info.call_args
     assert kwargs["extra"]["active_option_symbols_count"] == 2
+
+
+def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypatch) -> None:
+    """MDM already emits canonical JSON-safe ticks; DataHub must not rebuild them."""
+    mdm = types.SimpleNamespace(attach_tick_bus=lambda _bus: None)
+    hub = DataHub(mdm)
+    symbol = "NFO:NIFTY26AUG24550CE"
+    now = time.time()
+    tick = {
+        "symbol": symbol,
+        "instrument_token": 101,
+        "token": 101,
+        "ltp": 123.45,
+        "last_price": 123.45,
+        "timestamp": "2026-08-07T09:45:00+00:00",
+        "timestamp_ms": 1786095900000.0,
+        "timestamp_quality": "exchange",
+        "received_at": now,
+        "source": "ws",
+        "bid": 123.40,
+        "ask": 123.50,
+        "best_bid": 123.40,
+        "best_ask": 123.50,
+        "spread_pct": 0.081,
+        "depth_available": True,
+        "tradable_quote": True,
+        "hard_readiness_eligible": True,
+    }
+
+    def _should_not_restamp(*_args, **_kwargs):
+        raise AssertionError("canonical MDM tick was redundantly restamped")
+
+    monkeypatch.setattr(hub, "_stamp_quote_identity", _should_not_restamp)
+    hub.ingest_tick_sync(tick)
+
+    assert hub._quotes[symbol]["ltp"] == 123.45
+    assert hub._quotes[symbol]["timestamp_ms"] == 1786095900000.0
+
+
+def test_datahub_generic_tick_still_uses_full_canonicalization(monkeypatch) -> None:
+    """The optimisation must not weaken validation for non-MDM/raw tick callers."""
+    mdm = types.SimpleNamespace(attach_tick_bus=lambda _bus: None)
+    hub = DataHub(mdm)
+    original = hub._stamp_quote_identity
+    stamp_calls = 0
+
+    def _stamp(*args, **kwargs):
+        nonlocal stamp_calls
+        stamp_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(hub, "_stamp_quote_identity", _stamp)
+    hub.ingest_tick(
+        {
+            "symbol": "NFO:NIFTY26AUG24550PE",
+            "instrument_token": 102,
+            "last_price": 110.0,
+            "timestamp": "2026-08-07T09:45:00+00:00",
+            "source": "ws",
+        }
+    )
+
+    assert stamp_calls >= 1
