@@ -187,7 +187,7 @@ async def test_regime_weighted_score_selects_trigger_winner(monkeypatch) -> None
     assert result.metadata["final_trade_score"] == 8.4
 
 
-async def test_regime_downweighted_single_vote_cannot_pass_raw_score_gate(
+async def test_regime_downweighted_single_vote_cannot_pass_weighted_score_gate(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
@@ -203,7 +203,7 @@ async def test_regime_downweighted_single_vote_cannot_pass_raw_score_gate(
 
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "raw_score_below_min"
+    assert decision.reason == "regime_weighted_score_below_min"
 
 
 async def test_option_entry_fails_closed_without_underlying_direction() -> None:
@@ -363,7 +363,7 @@ async def test_weak_range_vwap_trigger_stays_blocked_with_context(
 
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "raw_score_below_min"
+    assert decision.reason == "regime_weighted_score_below_min"
 
 
 async def test_stale_orderflow_context_cannot_unlock_single_trigger(

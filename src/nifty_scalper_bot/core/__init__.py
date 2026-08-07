@@ -143,6 +143,9 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
         apply_patches as _off_market_controller_adapter,
     )
     from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
+    from nifty_scalper_bot.core.runtime_reliability_hardening import (
+        apply_patches as _runtime_reliability_adapter,
+    )
     from nifty_scalper_bot.core.session_boundary_rearm import (
         apply_app_patch as _session_boundary_adapter,
     )
@@ -151,6 +154,7 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
     )
 
     _dynamic_universe_adapter()
+    _runtime_reliability_adapter()
     _off_market_controller_adapter()
     _off_market_app_adapter(app_module)
     _session_boundary_adapter(app_module)
