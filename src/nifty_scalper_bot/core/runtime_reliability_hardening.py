@@ -1,13 +1,8 @@
-"""Focused runtime hardening for live-path reliability defects seen on 2026-08-07.
+"""Focused runtime hardening for reliability defects observed on 2026-08-07.
 
-The adapters in this module intentionally do not change trading thresholds,
-order placement, risk controls, market-hours checks, or strategy permissions.
-They only:
-- prevent stale non-entry/far-context work from tripping the *age* overload gate;
-- keep the global pending-count overload fail-safe intact;
-- correct single-vote rejection observability when the compared score is the
-  regime-weighted score rather than the raw setup score; and
-- make CPU telemetry reflect the authoritative dynamic option universe.
+No trading threshold, order path, risk control, market-hours guard, or strategy
+permission is changed here.  The adapters only correct overload age attribution
+and runtime diagnostics while preserving fail-closed behavior for normal queues.
 """
 
 from __future__ import annotations
@@ -25,32 +20,24 @@ _PATCH_ATTR = "_runtime_reliability_hardening_installed"
 
 
 def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
-    """Return oldest pending age for entry-critical queues only.
+    """Return oldest age from normal queues, excluding latest-only far context.
 
-    MarketDataManager already routes priorities 0..2 (open position, selected
-    option, spot/futures context and near-ATM context) into
-    ``_pending_tick_queues`` while priority-3/far context is latest-only in
-    ``_pending_far_ticks``.  A far-context tick must not globally disarm fresh,
-    executable selected options merely because that optional work is old.
+    MarketDataManager deliberately stores priority-3/far-context work in
+    ``_pending_far_ticks`` and all normal/entry-critical work in
+    ``_pending_tick_queues``.  A stale latest-only far-context item must not
+    disarm fresh executable selected options merely because it is old, while
+    every normal queued tick remains age-critical exactly as before.
     """
 
     oldest_mono: float | None = None
-    queues = getattr(mdm, "_pending_tick_queues", {}) or {}
-    for symbol, queue in list(queues.items()):
+    for queue in (getattr(mdm, "_pending_tick_queues", {}) or {}).values():
         if not queue:
-            continue
-        try:
-            priority, _bucket = mdm._tick_priority(symbol)
-        except Exception:  # noqa: BLE001 - uncertainty stays fail-closed
-            priority = 0
-        if int(priority) > 2:
             continue
         tick = queue[0]
         timestamp = tick.get("_mdm_enqueued_mono") if isinstance(tick, Mapping) else None
         if not isinstance(timestamp, (int, float)):
-            # A critical pending tick without age provenance is uncertainty.  By
-            # treating it as old enough to trip the age gate we preserve the
-            # existing fail-closed contract.
+            # Unknown age on normal queued work is uncertainty: preserve the
+            # existing fail-closed overload behavior.
             return float(getattr(mdm, "_overload_enter_oldest_ms", 2000.0) or 2000.0)
         candidate = float(timestamp)
         oldest_mono = candidate if oldest_mono is None else min(oldest_mono, candidate)
@@ -169,27 +156,23 @@ def _install_strategy_reason_patch() -> bool:
         try:
             raw_score = float(self._extract_raw_score(vote))
             weighted_score = float(getattr(vote, "score", 0.0) or 0.0)
-            score_min, _confidence_min = self._single_vote_thresholds(vote.strategy)
-            score_min = float(score_min)
+            score_min = float(self._single_vote_thresholds(vote.strategy)[0])
         except Exception:  # noqa: BLE001 - never rewrite a reason on uncertainty
             return result
 
-        # Relabel only the exact mathematically-proven case from the live logs:
-        # raw setup clears the floor, but regime weighting puts the score below
-        # the floor that the code actually compares. Trading outcome is unchanged.
+        # Rewrite only the mathematically-proven logging defect.  The rejected
+        # result and every trading threshold remain unchanged.
         if raw_score < score_min or weighted_score >= score_min:
             return result
-
         corrected_reason = "regime_weighted_score_below_min"
         try:
-            corrected = replace(
+            decision_map[symbol_norm] = replace(
                 decision,
                 reason=corrected_reason,
                 final_block_reason=corrected_reason,
             )
-        except Exception:  # noqa: BLE001 - frozen dataclass contract may evolve
+        except Exception:  # noqa: BLE001 - diagnostic correction must be non-fatal
             return result
-        decision_map[symbol_norm] = corrected
         _LOG.info(
             "STRATEGY_REJECTION_REASON_CORRECTED symbol=%s strategy=%s raw_score=%.2f "
             "weighted_score=%.2f score_min=%.2f reason=%s",
@@ -217,8 +200,7 @@ def _install_strategy_reason_patch() -> bool:
 
 
 def _is_dynamic_option_symbol(symbol: object) -> bool:
-    normalized = normalize_symbol(str(symbol or ""))
-    upper = normalized.upper()
+    upper = normalize_symbol(str(symbol or "")).upper()
     return upper.startswith("NFO:NIFTY") and upper.endswith(("CE", "PE"))
 
 
@@ -240,14 +222,12 @@ def _install_runner_cpu_telemetry_patch() -> bool:
 
         whitelist = getattr(self, "_eval_option_whitelist", None) or set()
         if whitelist:
-            active_option_count = len(whitelist)
-            active_option_count_source = "eval_option_whitelist"
+            option_count = len(whitelist)
+            count_source = "eval_option_whitelist"
         else:
-            active_symbols = getattr(self, "_active_symbols", None) or set()
-            active_option_count = sum(
-                1 for symbol in active_symbols if _is_dynamic_option_symbol(symbol)
-            )
-            active_option_count_source = "dynamic_active_symbols"
+            active = getattr(self, "_active_symbols", None) or set()
+            option_count = sum(1 for symbol in active if _is_dynamic_option_symbol(symbol))
+            count_source = "dynamic_active_symbols"
 
         self._logger.info(
             "CPU_OPTIMIZATION_SUMMARY evaluated_symbols_count=%s skipped_by_midday_pause=%s "
@@ -256,12 +236,12 @@ def _install_runner_cpu_telemetry_patch() -> bool:
             metrics.get("skipped_by_midday_pause", 0),
             metrics.get("skipped_by_eval_throttle", 0),
             metrics.get("skipped_by_option_cap", 0),
-            active_option_count,
+            option_count,
             extra={
                 "event": "CPU_OPTIMIZATION_SUMMARY",
                 **{name: int(value) for name, value in metrics.items()},
-                "active_option_symbols_count": active_option_count,
-                "active_option_count_source": active_option_count_source,
+                "active_option_symbols_count": option_count,
+                "active_option_count_source": count_source,
             },
         )
         metrics.clear()
@@ -272,7 +252,7 @@ def _install_runner_cpu_telemetry_patch() -> bool:
 
 
 def apply_patches() -> dict[str, bool]:
-    """Install the focused reliability adapters idempotently."""
+    """Install focused reliability adapters idempotently."""
 
     state = {
         "mdm_overload": _install_mdm_overload_patch(),
