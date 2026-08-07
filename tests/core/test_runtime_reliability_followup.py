@@ -80,7 +80,21 @@ def test_stale_selected_option_tick_still_trips_overload_fail_closed() -> None:
     assert mdm.pipeline_overloaded is True
 
 
-def test_flat_reconciliation_cadence_not_collapsed_by_readiness_max_age(monkeypatch) -> None:
+def test_large_far_context_backlog_still_trips_global_count_fail_closed() -> None:
+    mdm, _selected, far = _wire_mdm()
+    mdm._overload_enter_pending = 1
+    tick = _pending_tick(far, age_s=0.01)
+    with mdm._pending_tick_lock:
+        mdm._pending_far_ticks[far] = tick
+        mdm._pending_tick_count = 1
+        mdm._pending_heap_push_locked(tick, far)
+        mdm._update_pipeline_overload_locked()
+
+    assert mdm.pipeline_overloaded is True
+
+
+def test_reconciliation_freshness_cap_remains_fail_closed(monkeypatch) -> None:
+    """A 30 s max-age intentionally requires a <=15 s refresh while market is open."""
     monkeypatch.setenv("HEALTH_FLAT_RECONCILE_INTERVAL_SEC", "60")
     monkeypatch.setenv("POSITION_RECONCILE_MAX_AGE_SECONDS", "30")
     ctx = types.SimpleNamespace(
@@ -93,7 +107,7 @@ def test_flat_reconciliation_cadence_not_collapsed_by_readiness_max_age(monkeypa
         ),
     )
 
-    assert _reconciliation_sleep_seconds(ctx, market_open=True) == 60.0
+    assert _reconciliation_sleep_seconds(ctx, market_open=True) == 15.0
 
 
 def _manager_probe() -> StrategyManager:
@@ -137,7 +151,8 @@ def _downweighted_trigger() -> tuple[Signal, StrategyVote]:
 
 
 def test_weighted_score_rejection_is_not_mislabeled_as_raw_score_failure(monkeypatch) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
     manager = _manager_probe()
 
