@@ -139,7 +139,11 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
 
     from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
     from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
+    from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import (
+        apply_patches as _dynamic_universe_adapter,
+    )
 
+    _dynamic_universe_adapter()
     _ready_adapter(app_module)
     _polling_adapter(app_module)
 
