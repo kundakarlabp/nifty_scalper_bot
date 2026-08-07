@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import time
 import types
 from unittest.mock import MagicMock
 
 from nifty_scalper_bot.core.app import _reconciliation_sleep_seconds
+from nifty_scalper_bot.core.runtime_reliability_hardening import (
+    _is_canonical_runtime_tick,
+)
 from nifty_scalper_bot.core.strategy_manager import Signal, StrategyManager, StrategyVote
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
@@ -196,6 +200,28 @@ def test_cpu_summary_counts_dynamic_active_options_when_whitelist_is_empty() -> 
     assert kwargs["extra"]["active_option_symbols_count"] == 2
 
 
+def test_actual_mdm_normalized_live_tick_matches_datahub_fastpath_contract() -> None:
+    """Guard the fast-path predicate against drifting away from MDM's real shape."""
+    mdm, selected, _far = _wire_mdm()
+    raw = {
+        "instrument_token": 1,
+        "last_price": 123.45,
+        "exchange_timestamp": datetime.now(timezone.utc),
+        "source": "ws",
+        "depth": {
+            "buy": [{"price": 123.40, "quantity": 65}],
+            "sell": [{"price": 123.50, "quantity": 65}],
+        },
+    }
+
+    normalized = mdm._normalize_ws_tick(raw)
+    assert normalized is not None
+    assert normalized["symbol"] == selected
+    live = mdm.normalize_live_tick(normalized, source=str(normalized["source"]))
+    assert live is not None
+    assert _is_canonical_runtime_tick(live) is True
+
+
 def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypatch) -> None:
     """MDM's real normalized WS shape must not be rebuilt inside DataHub."""
     mdm = types.SimpleNamespace(attach_tick_bus=lambda _bus: None)
@@ -233,9 +259,13 @@ def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypat
     monkeypatch.setattr(hub, "_stamp_quote_identity", _should_not_restamp)
     hub.ingest_tick_sync(tick)
 
-    assert hub._quotes[symbol]["ltp"] == 123.45
-    assert hub._quotes[symbol]["timestamp_ms"] == 1786095900000.0
-    assert hub._quotes[symbol]["source_timestamp_valid"] is True
+    quote = hub._quotes[symbol]
+    assert quote["ltp"] == 123.45
+    assert quote["timestamp_ms"] == 1786095900000.0
+    assert quote["source_timestamp_valid"] is True
+    assert quote["hard_readiness_eligible"] is True
+    assert quote["exchange_symbol"] == symbol
+    assert quote["quote_identity_timestamp_source"] == "exchange"
 
 
 def test_datahub_generic_tick_still_uses_full_canonicalization(monkeypatch) -> None:
