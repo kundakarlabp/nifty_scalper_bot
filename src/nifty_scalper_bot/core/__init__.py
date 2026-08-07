@@ -24,7 +24,9 @@ def _core_env_true(name: str) -> bool:
 
 def _real_live_mode_requested() -> bool:
     mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
-    live_enabled = _core_env_true("ENABLE_LIVE") or _core_env_true("ENABLE_LIVE_TRADING")
+    live_enabled = _core_env_true("ENABLE_LIVE") or _core_env_true(
+        "ENABLE_LIVE_TRADING"
+    )
     paper_shadow = (
         _core_env_true("PAPER_MODE")
         or _core_env_true("PAPER__ENABLED")
@@ -43,7 +45,10 @@ except Exception as exc:  # noqa: BLE001 - non-live tooling imports should remai
     get_logger(__name__).error(
         "STRATEGY_LIVE_SAFETY_PATCH_FAILED error=%s",
         exc,
-        extra={"event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED", "error_type": type(exc).__name__},
+        extra={
+            "event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED",
+            "error_type": type(exc).__name__,
+        },
     )
     if _real_live_mode_requested():
         raise RuntimeError("strategy_live_safety_patch_failed") from exc
@@ -74,7 +79,10 @@ except Exception as exc:  # noqa: BLE001 - non-live tooling imports should remai
     get_logger(__name__).error(
         "STRATEGY_SETUP_SCORE_GATE_PATCH_FAILED error=%s",
         exc,
-        extra={"event": "STRATEGY_SETUP_SCORE_GATE_PATCH_FAILED", "error_type": type(exc).__name__},
+        extra={
+            "event": "STRATEGY_SETUP_SCORE_GATE_PATCH_FAILED",
+            "error_type": type(exc).__name__,
+        },
     )
     if _real_live_mode_requested():
         raise RuntimeError("strategy_setup_score_gate_patch_failed") from exc
@@ -89,7 +97,10 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
     get_logger(__name__).error(
         "BOOT_LOG_RATE_CONTROL_FAILED error=%s",
         exc,
-        extra={"event": "BOOT_LOG_RATE_CONTROL_FAILED", "error_type": type(exc).__name__},
+        extra={
+            "event": "BOOT_LOG_RATE_CONTROL_FAILED",
+            "error_type": type(exc).__name__,
+        },
     )
 
 __all__ = ["NiftyScalperApp", "canonical_price_source"]
@@ -131,15 +142,22 @@ def _install_market_data_runtime_hardening() -> dict[str, bool]:
     return state
 
 
-
 def _apply_app_runtime_patches(app_module: Any) -> None:
     # The production app import is the single authoritative installation point.
     # Do not require tests or callers to invoke market-data hardening manually.
     _install_market_data_runtime_hardening()
 
-    from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
-    from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
+    from nifty_scalper_bot.core.boot_readiness_safety import (
+        apply_app_patch as _ready_adapter,
+    )
+    from nifty_scalper_bot.core.polling_failover_runtime import (
+        apply_app_patch as _polling_adapter,
+    )
+    from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import (
+        apply_patches as _dynamic_universe_adapter,
+    )
 
+    _dynamic_universe_adapter()
     _ready_adapter(app_module)
     _polling_adapter(app_module)
 
@@ -177,14 +195,18 @@ class _CoreAppPatchFinder(importlib.abc.MetaPathFinder):
         if fullname != _APP_MODULE_NAME:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is None or spec.loader is None or isinstance(spec.loader, _CoreAppPatchLoader):
+        if spec is None or spec.loader is None or isinstance(
+            spec.loader, _CoreAppPatchLoader
+        ):
             return spec
         spec.loader = _CoreAppPatchLoader(spec.loader)
         return spec
 
 
 def _install_core_app_patch_import_hook() -> None:
-    if any(getattr(finder, _APP_IMPORT_HOOK_ATTR, False) for finder in sys.meta_path):
+    if any(
+        getattr(finder, _APP_IMPORT_HOOK_ATTR, False) for finder in sys.meta_path
+    ):
         return
     finder = _CoreAppPatchFinder()
     setattr(finder, _APP_IMPORT_HOOK_ATTR, True)
