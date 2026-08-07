@@ -6,6 +6,16 @@ from types import SimpleNamespace
 from nifty_scalper_bot.core import app
 
 
+def _base_commit_active_dynamic_basket(ctx: SimpleNamespace, **kwargs: object):
+    """Exercise basket-commit semantics independent of runtime market-hour safety."""
+    commit = getattr(
+        app,
+        "_off_market_basket_commit_original",
+        app._commit_active_dynamic_basket,
+    )
+    return commit(ctx, **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_build_live_basket_does_not_double_hydrate_when_hydrate_false(monkeypatch: pytest.MonkeyPatch) -> None:
     called = {'fetch_history': 0}
@@ -45,7 +55,7 @@ def test_commit_active_dynamic_basket_persists_context_fields() -> None:
         "pe_symbols": ["NFO:NIFTY26MAY25000PE"],
         "atm_strike": 25000,
     }
-    app._commit_active_dynamic_basket(
+    _base_commit_active_dynamic_basket(
         ctx,
         basket=basket,
         option_symbols=basket["option_symbols"],
@@ -76,7 +86,7 @@ def test_commit_active_dynamic_basket_repairs_stale_selected_pair_after_atm_shif
         strategy_runner=None,
     )
 
-    committed_ce, committed_pe = app._commit_active_dynamic_basket(
+    committed_ce, committed_pe = _base_commit_active_dynamic_basket(
         ctx,
         basket=ctx.active_trading_universe,
         option_symbols=option_symbols,
