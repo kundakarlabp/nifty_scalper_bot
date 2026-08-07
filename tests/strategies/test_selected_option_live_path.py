@@ -38,13 +38,19 @@ def _wait_until(predicate, *, timeout=3.0):
 
 
 def test_live_selected_option_tick_reaches_strategy_manager_after_atm_switch(monkeypatch):
-    """A ready option promoted from context to selected must remain evaluable."""
+    """A dynamically selected option must not be blocked by the startup snapshot."""
     runner, strategy_manager, risk_manager, order_manager, old_ce = (
         _build_phase9_runner(monkeypatch)
     )
     old_pe = "NFO:NIFTY26JUN24000PE"
     selected_ce = "NFO:NIFTY26JUN24100CE"
     selected_pe = "NFO:NIFTY26JUN24100PE"
+
+    # Production starts with a frozen startup snapshot. Dynamic ATM selection
+    # later makes a previously contextual contract active; the startup snapshot
+    # must not veto that authoritative dynamic universe update.
+    runner._universe_dynamic_mode = True
+    runner._frozen_universe = {"NSE:NIFTY", old_ce, old_pe}
 
     for symbol in (old_pe, selected_ce, selected_pe):
         runner._active_symbols.add(symbol)
