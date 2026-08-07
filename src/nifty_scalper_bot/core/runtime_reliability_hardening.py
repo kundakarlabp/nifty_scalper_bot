@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from functools import wraps
 import logging
 import time
 from typing import Any, Mapping
@@ -47,8 +48,6 @@ def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
             continue
         timestamp = tick.get("_mdm_enqueued_mono")
         if not isinstance(timestamp, (int, float)):
-            # Unknown age/role on normal queued work is uncertainty: preserve
-            # fail-closed behavior rather than silently treating it as context.
             return float(
                 getattr(mdm, "_overload_enter_oldest_ms", 2000.0) or 2000.0
             )
@@ -172,9 +171,6 @@ def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
     explicit_quality = str(payload.get("timestamp_quality") or "").strip().lower()
     if explicit_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
         return False
-    # These fields are owned by MDM's _normalize_ws_tick/normalize_live_tick
-    # contract. Requiring source timestamp proof prevents arbitrary raw callers
-    # from bypassing DataHub's generic canonicalizer.
     if payload.get("source_timestamp_valid") is not True:
         return False
     return all(
@@ -199,6 +195,7 @@ def _install_datahub_tick_hotpath_patch() -> bool:
         return True
     original = DataHub._canonicalize_tick_payload
 
+    @wraps(original)
     def _canonicalize_tick_payload(
         self: Any, payload: Mapping[str, Any]
     ) -> dict[str, Any] | None:
@@ -206,7 +203,7 @@ def _install_datahub_tick_hotpath_patch() -> bool:
             tick = dict(payload)
             symbol = str(tick["symbol"])
             timestamp_ms = _runtime_tick_timestamp_ms(tick)
-            if timestamp_ms is None:  # defensive; predicate above already proved it
+            if timestamp_ms is None:
                 return original(self, payload)
             timestamp = tick.get("timestamp")
             if isinstance(timestamp, datetime):
@@ -300,8 +297,6 @@ def _install_trade_quality_patch() -> bool:
         components = dict(details.get("trade_quality_components") or {})
         confirmation = bool(indicators.get("independent_trigger_confirmation"))
         already_blocked = bool(details.get("already_blocked_by_strategy"))
-        # Exactly one capped 0.5-point contribution. Multiple trigger votes do
-        # not stack, and an already-invalid best trigger receives no rescue.
         bonus = 0.5 if confirmation and not already_blocked else 0.0
         components["independent_trigger_confirmation"] = bonus
         adjusted = max(0.0, min(10.0, float(score) + bonus))
@@ -374,11 +369,9 @@ def _install_strategy_reason_patch() -> bool:
             raw_score = float(self._extract_raw_score(vote))
             weighted_score = float(getattr(vote, "score", 0.0) or 0.0)
             score_min = float(self._single_vote_thresholds(vote.strategy)[0])
-        except Exception:  # noqa: BLE001 - never rewrite a reason on uncertainty
+        except Exception:
             return result
 
-        # Rewrite only the mathematically-proven logging defect. The rejected
-        # result and every trading threshold remain unchanged.
         if raw_score < score_min or weighted_score >= score_min:
             return result
         corrected_reason = "regime_weighted_score_below_min"
@@ -388,7 +381,7 @@ def _install_strategy_reason_patch() -> bool:
                 reason=corrected_reason,
                 final_block_reason=corrected_reason,
             )
-        except Exception:  # noqa: BLE001 - diagnostic correction must be non-fatal
+        except Exception:
             return result
         _LOG.info(
             "STRATEGY_REJECTION_REASON_CORRECTED symbol=%s strategy=%s raw_score=%.2f "
@@ -480,6 +473,7 @@ def _install_runner_tick_latency_telemetry_patch() -> bool:
         return True
     original = StrategyRunner.on_datahub_tick
 
+    @wraps(original)
     def on_datahub_tick(self: Any, tick: dict[str, Any]) -> None:
         started = time.perf_counter()
         try:
@@ -491,7 +485,7 @@ def _install_runner_tick_latency_telemetry_patch() -> bool:
                 try:
                     route = self._entry_evaluation_route(symbol)
                     route_value = str(getattr(route, "value", route))
-                except Exception:  # noqa: BLE001 - telemetry only
+                except Exception:
                     route_value = "unknown"
                 log_throttled(
                     self._logger,
