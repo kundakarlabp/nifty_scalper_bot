@@ -1,8 +1,9 @@
 """Focused runtime hardening for reliability defects observed on 2026-08-07.
 
 No trading threshold, order path, risk control, market-hours guard, or strategy
-permission is changed here.  The adapters only correct overload age attribution
-and runtime diagnostics while preserving fail-closed behavior for normal queues.
+permission is changed here. The adapters correct overload age attribution,
+bounded consensus-quality evidence, and runtime diagnostics while preserving
+fail-closed behavior for entry-critical queues.
 """
 
 from __future__ import annotations
@@ -20,13 +21,14 @@ _PATCH_ATTR = "_runtime_reliability_hardening_installed"
 
 
 def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
-    """Return oldest age from normal queues, excluding latest-only far context.
+    """Return oldest entry-critical queue age.
 
-    MarketDataManager deliberately stores priority-3/far-context work in
-    ``_pending_far_ticks`` and all normal/entry-critical work in
-    ``_pending_tick_queues``.  A stale latest-only far-context item must not
-    disarm fresh executable selected options merely because it is old, while
-    every normal queued tick remains age-critical exactly as before.
+    Non-selected active-basket ``near_atm`` options remain in normal FIFO
+    queues so every tick still reaches CandleEngine/OHLC processing. Their age
+    is optional strategy context, however, and must not by itself disarm fresh
+    selected CE/PE execution. Selected options, spot/future context, open
+    positions, and any unclassified normal queue remain age-critical. Global
+    pending-count overload remains unchanged and still covers every lane.
     """
 
     oldest_mono: float | None = None
@@ -34,13 +36,24 @@ def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
         if not queue:
             continue
         tick = queue[0]
-        timestamp = tick.get("_mdm_enqueued_mono") if isinstance(tick, Mapping) else None
+        if not isinstance(tick, Mapping):
+            return float(
+                getattr(mdm, "_overload_enter_oldest_ms", 2000.0) or 2000.0
+            )
+        bucket = str(tick.get("_mdm_priority_bucket") or "").strip().lower()
+        if bucket == "near_atm":
+            continue
+        timestamp = tick.get("_mdm_enqueued_mono")
         if not isinstance(timestamp, (int, float)):
-            # Unknown age on normal queued work is uncertainty: preserve the
-            # existing fail-closed overload behavior.
-            return float(getattr(mdm, "_overload_enter_oldest_ms", 2000.0) or 2000.0)
+            # Unknown age/role on normal queued work is uncertainty: preserve
+            # fail-closed behavior rather than silently treating it as context.
+            return float(
+                getattr(mdm, "_overload_enter_oldest_ms", 2000.0) or 2000.0
+            )
         candidate = float(timestamp)
-        oldest_mono = candidate if oldest_mono is None else min(oldest_mono, candidate)
+        oldest_mono = (
+            candidate if oldest_mono is None else min(oldest_mono, candidate)
+        )
     if oldest_mono is None:
         return 0.0
     return max(0.0, (time.monotonic() - oldest_mono) * 1000.0)
@@ -105,8 +118,97 @@ def _install_mdm_overload_patch() -> bool:
                 },
             )
 
-    MarketDataManager._update_pipeline_overload_locked = _update_pipeline_overload_locked  # type: ignore[method-assign]
+    MarketDataManager._update_pipeline_overload_locked = (  # type: ignore[method-assign]
+        _update_pipeline_overload_locked
+    )
     setattr(MarketDataManager, _PATCH_ATTR, True)
+    return True
+
+
+def _trigger_confirmation_details(
+    signals: list[tuple[Any, Any]],
+) -> tuple[bool, list[str]]:
+    """Return bounded independent same-side trigger confirmation evidence."""
+
+    trigger_votes = [
+        vote
+        for signal, vote in signals
+        if str((getattr(vote, "metadata", {}) or {}).get("role") or "trigger").lower()
+        != "context"
+        and str(getattr(signal, "action", "")) not in {"CLOSE_LONG", "CLOSE_SHORT"}
+    ]
+    if len(trigger_votes) < 2:
+        return False, []
+    try:
+        best = max(trigger_votes, key=lambda vote: float(getattr(vote, "score", 0.0) or 0.0))
+    except Exception:  # noqa: BLE001 - uncertainty never creates confirmation
+        return False, []
+    best_side = str(getattr(best, "side", "") or "").upper()
+    best_strategy = str(getattr(best, "strategy", "") or "").strip().lower()
+    if best_side not in {"CE", "PE"} or not best_strategy:
+        return False, []
+    confirming = sorted(
+        {
+            str(getattr(vote, "strategy", "") or "").strip()
+            for vote in trigger_votes
+            if str(getattr(vote, "side", "") or "").upper() == best_side
+            and str(getattr(vote, "strategy", "") or "").strip().lower()
+            not in {"", best_strategy}
+        }
+    )
+    return bool(confirming), confirming
+
+
+def _install_trade_quality_patch() -> bool:
+    """Credit one bounded independent trigger before the unchanged quality gate."""
+
+    from nifty_scalper_bot.core.strategy_manager import StrategyManager
+
+    attr = "_independent_trigger_quality_hardening_installed"
+    if bool(getattr(StrategyManager, attr, False)):
+        return True
+    original = StrategyManager._compute_trade_quality_score
+
+    def _compute_trade_quality_score(
+        self: Any,
+        vote: Any,
+        indicators: Mapping[str, Any],
+        *,
+        symbol: str,
+        selected_ok: bool,
+        near_atm_ok: bool,
+        context_votes: list[Any],
+    ) -> tuple[float, dict[str, Any]]:
+        score, metadata = original(
+            self,
+            vote,
+            indicators,
+            symbol=symbol,
+            selected_ok=selected_ok,
+            near_atm_ok=near_atm_ok,
+            context_votes=context_votes,
+        )
+        details = dict(metadata or {})
+        components = dict(details.get("trade_quality_components") or {})
+        confirmation = bool(indicators.get("independent_trigger_confirmation"))
+        already_blocked = bool(details.get("already_blocked_by_strategy"))
+        # Exactly one capped 0.5-point contribution. Multiple trigger votes do
+        # not stack, and an already-invalid best trigger receives no rescue.
+        bonus = 0.5 if confirmation and not already_blocked else 0.0
+        components["independent_trigger_confirmation"] = bonus
+        adjusted = max(0.0, min(10.0, float(score) + bonus))
+        details["trade_quality_components"] = components
+        details["trade_quality_score"] = round(adjusted, 3)
+        details["independent_trigger_confirmation"] = bool(bonus)
+        details["independent_trigger_confirmation_strategies"] = list(
+            indicators.get("independent_trigger_confirmation_strategies") or []
+        )
+        return adjusted, details
+
+    StrategyManager._compute_trade_quality_score = (  # type: ignore[method-assign]
+        _compute_trade_quality_score
+    )
+    setattr(StrategyManager, attr, True)
     return True
 
 
@@ -126,11 +228,18 @@ def _install_strategy_reason_patch() -> bool:
         indicators: Mapping[str, Any],
         no_vote_reason_counts: Mapping[str, int] | None = None,
     ) -> Any:
+        confirmation, confirmation_strategies = _trigger_confirmation_details(signals)
+        effective_indicators = dict(indicators or {})
+        if confirmation:
+            effective_indicators["independent_trigger_confirmation"] = True
+            effective_indicators["independent_trigger_confirmation_strategies"] = (
+                confirmation_strategies
+            )
         result = original(
             self,
             symbol=symbol,
             signals=signals,
-            indicators=indicators,
+            indicators=effective_indicators,
             no_vote_reason_counts=no_vote_reason_counts,
         )
         if result is not None:
@@ -160,7 +269,7 @@ def _install_strategy_reason_patch() -> bool:
         except Exception:  # noqa: BLE001 - never rewrite a reason on uncertainty
             return result
 
-        # Rewrite only the mathematically-proven logging defect.  The rejected
+        # Rewrite only the mathematically-proven logging defect. The rejected
         # result and every trading threshold remain unchanged.
         if raw_score < score_min or weighted_score >= score_min:
             return result
@@ -226,7 +335,9 @@ def _install_runner_cpu_telemetry_patch() -> bool:
             count_source = "eval_option_whitelist"
         else:
             active = getattr(self, "_active_symbols", None) or set()
-            option_count = sum(1 for symbol in active if _is_dynamic_option_symbol(symbol))
+            option_count = sum(
+                1 for symbol in active if _is_dynamic_option_symbol(symbol)
+            )
             count_source = "dynamic_active_symbols"
 
         self._logger.info(
@@ -256,6 +367,7 @@ def apply_patches() -> dict[str, bool]:
 
     state = {
         "mdm_overload": _install_mdm_overload_patch(),
+        "trade_quality": _install_trade_quality_patch(),
         "strategy_reason": _install_strategy_reason_patch(),
         "runner_cpu_telemetry": _install_runner_cpu_telemetry_patch(),
     }
@@ -269,4 +381,8 @@ def apply_patches() -> dict[str, bool]:
     return state
 
 
-__all__ = ["apply_patches", "_critical_oldest_pending_age_ms_locked"]
+__all__ = [
+    "apply_patches",
+    "_critical_oldest_pending_age_ms_locked",
+    "_trigger_confirmation_details",
+]
