@@ -218,3 +218,74 @@ def test_quote_versions_do_not_advance_candle_version_or_starve_same_bar_evaluat
     assert runner._candle_versions.get(selected_ce, 0) == 0
     assert first_tick["version"] == 1
     assert second_tick["data_version"] == 22
+
+
+def test_mark_live_records_authoritative_bar_when_phase_was_already_live(monkeypatch):
+    """A pre-set LIVE phase must not prevent the first real bar from being recorded."""
+    apply_patches()
+    runner, _strategy_manager, _risk_manager, _order_manager, selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    runner._data_phase[selected_ce] = "LIVE"
+    runner._live_bar_seen.discard(selected_ce)
+
+    runner._mark_live(selected_ce)
+
+    assert selected_ce in runner._live_bar_seen
+    assert runner._data_phase[selected_ce] == "LIVE"
+
+
+def test_hydrated_selected_ce_and_pe_both_reach_strategy_manager_on_new_candle_version(monkeypatch):
+    """Hydration-only bar timestamps must not silently starve either selected leg."""
+    apply_patches()
+    runner, strategy_manager, _risk_manager, _order_manager, selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    selected_pe = runner._active_selected_pe
+    fixed_bar_ts = datetime.now(timezone.utc)
+    runner._refresh_underlying_context_snapshots = lambda **_kwargs: None
+    runner._get_cached_quote_for_live_entry = lambda _symbol: {
+        "symbol": _symbol,
+        "ltp": 100.0,
+        "last_price": 100.0,
+        "bid": 99.5,
+        "ask": 100.5,
+        "timestamp": time.time(),
+    }
+
+    for symbol in (selected_ce, selected_pe):
+        runner._active_symbols.add(symbol)
+        runner._tracked_symbols.add(symbol)
+        runner._history_ready_by_symbol[symbol] = True
+        runner._data_phase[symbol] = "LIVE"
+        runner._symbol_history[symbol] = [{"timestamp": fixed_bar_ts}]
+        runner._last_bar_ts[symbol] = fixed_bar_ts
+        runner._symbol_state[symbol] = SymbolRuntimeState(symbol, 100)
+        runner._symbol_state[symbol].active = True
+        runner._symbol_state[symbol]._last_eval_bar_ts = fixed_bar_ts
+        runner._symbol_states[symbol] = SymbolState.READY
+        runner._active_basket_token_by_symbol[symbol] = 1
+        runner._symbol_has_completed_strategy_eval.add(symbol)
+        runner._candle_versions[symbol] = 2
+        runner._last_strategy_versions[symbol] = 1
+        runner._live_bar_seen.discard(symbol)
+
+    for index, symbol in enumerate((selected_ce, selected_pe), start=1):
+        strategy_manager.generate_signal.reset_mock()
+        runner._on_tick(
+            symbol,
+            {
+                "symbol": symbol,
+                "last_price": 100.0,
+                "ltp": 100.0,
+                "bid": 99.5,
+                "ask": 100.5,
+                "timestamp": time.time(),
+                "source": "ws",
+                "trace_id": f"selected-leg-{index}",
+            },
+        )
+        assert any(
+            call.args and call.args[0] == symbol
+            for call in strategy_manager.generate_signal.call_args_list
+        )
