@@ -1,7 +1,8 @@
-"""Keep StrategyRunner's frozen gate aligned with its dynamic active universe."""
+"""Keep StrategyRunner's dynamic universe and live evaluation state safe."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Callable
 
@@ -9,15 +10,17 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 
 def apply_patches() -> None:
-    """Install the dynamic-universe admission fix once."""
+    """Install the dynamic-universe and selected-option evaluation fixes once."""
     from nifty_scalper_bot.strategies.runner import StrategyRunner
 
     if getattr(StrategyRunner, "_dynamic_universe_safety_installed", False):
         return
 
-    original: Callable[..., bool] = StrategyRunner._validate_symbol_for_cycle
+    original_validate: Callable[..., bool] = StrategyRunner._validate_symbol_for_cycle
+    original_sync = StrategyRunner._sync_active_selection_from_basket
+    original_on_tick = StrategyRunner._on_tick
 
-    @wraps(original)
+    @wraps(original_validate)
     def validate_symbol_for_cycle(self: Any, symbol: str) -> bool:
         normalized = normalize_symbol(str(symbol or ""))
         admitted = False
@@ -40,10 +43,51 @@ def apply_patches() -> None:
                     "reason": "active_universe_authority",
                 },
             )
-        return original(self, normalized or symbol)
+        return original_validate(self, normalized or symbol)
 
-    StrategyRunner._dynamic_universe_safety_original_validate = original
+    @wraps(original_sync)
+    def sync_active_selection_from_basket(self: Any, selection: Any) -> None:
+        """Do not promote a newly selected CE/PE pair before its indicator history is warm."""
+        new_ce = normalize_symbol(str(getattr(selection, "selected_ce", None) or "")) or None
+        new_pe = normalize_symbol(str(getattr(selection, "selected_pe", None) or "")) or None
+        runtime_ready = hasattr(self, "_option_required_bars") and hasattr(
+            self, "_indicator_engine"
+        )
+        if new_ce and new_pe and runtime_ready:
+            required = int(getattr(self, "_option_required_bars", 1) or 1)
+            try:
+                pair_ready = all(
+                    self._history_count_for_symbol(symbol) >= required
+                    for symbol in (new_ce, new_pe)
+                )
+            except Exception:  # noqa: BLE001 - readiness must fail closed
+                pair_ready = False
+            if not pair_ready:
+                self.set_active_option_context(
+                    selected_ce=new_ce,
+                    selected_pe=new_pe,
+                    atm_strike=getattr(selection, "atm_strike", None),
+                    option_symbols=getattr(selection, "option_symbols", None),
+                )
+                return
+        original_sync(self, selection)
+
+    @wraps(original_on_tick)
+    def on_tick(self: Any, symbol: str, tick: Mapping[str, Any]) -> Any:
+        """Keep quote/data sequence versions out of the candle-version state machine."""
+        clean_tick = tick
+        if isinstance(tick, Mapping) and ("version" in tick or "data_version" in tick):
+            clean_tick = dict(tick)
+            clean_tick.pop("version", None)
+            clean_tick.pop("data_version", None)
+        return original_on_tick(self, symbol, clean_tick)
+
+    StrategyRunner._dynamic_universe_safety_original_validate = original_validate
+    StrategyRunner._dynamic_universe_safety_original_sync = original_sync
+    StrategyRunner._dynamic_universe_safety_original_on_tick = original_on_tick
     StrategyRunner._validate_symbol_for_cycle = validate_symbol_for_cycle
+    StrategyRunner._sync_active_selection_from_basket = sync_active_selection_from_basket
+    StrategyRunner._on_tick = on_tick
     StrategyRunner._dynamic_universe_safety_installed = True
 
 
