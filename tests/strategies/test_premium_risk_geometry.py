@@ -4,6 +4,8 @@ import inspect
 import subprocess
 import sys
 
+import pytest
+
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
     apply_premium_risk_contract,
@@ -172,10 +174,11 @@ def test_replacement_candidate_geometry_beats_stale_original_distance() -> None:
         atr=25.0,
     )
 
-    assert result.stop_loss == 112.746
-    assert result.take_profit == 142.158
+    assert result.stop_loss == pytest.approx(112.746)
+    assert result.take_profit == pytest.approx(142.158)
     assert result.metadata["premium_risk_source"] == "selected_candidate_geometry"
-    assert (result.take_profit - 122.55) / (122.55 - result.stop_loss) == 2.0
+    rr = (result.take_profit - 122.55) / (122.55 - result.stop_loss)
+    assert rr == pytest.approx(2.0)
 
 
 def test_candidate_metadata_does_not_override_uncopied_strategy_geometry() -> None:
@@ -200,7 +203,7 @@ def test_candidate_metadata_does_not_override_uncopied_strategy_geometry() -> No
         atr=25.0,
     )
 
-    assert result.stop_loss == 122.55 - 2.8457142857
+    assert result.stop_loss == pytest.approx(122.55 - 2.8457142857)
     assert result.metadata["premium_risk_source"] == "premium_stop_distance"
 
 
