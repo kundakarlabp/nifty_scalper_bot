@@ -1,6 +1,9 @@
+from threading import RLock
 from types import SimpleNamespace
 
+from nifty_scalper_bot.execution import order_entry_guard_patch as guard_patch
 from nifty_scalper_bot.execution.order_entry_guard_patch import _entry_geometry_block_reason
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 
 def test_entry_geometry_blocks_low_reward_to_risk():
@@ -45,3 +48,56 @@ def test_entry_geometry_does_not_block_protective_exit():
     )
 
     assert reason is None
+
+
+def test_explicit_prebroker_rejection_releases_entry_reservation(monkeypatch):
+    symbol = "NFO:NIFTY2681124600CE"
+    normalized = normalize_symbol(symbol)
+    manager = SimpleNamespace(
+        is_live_mode=lambda: True,
+        _lock=RLock(),
+        _entries_in_flight={normalized: 1.0},
+        _last_order_decision={"allowed": False, "broker_attempted": False},
+    )
+    monkeypatch.setattr(
+        guard_patch,
+        "_ORIGINAL_PLACE_ORDER",
+        lambda _self, *args, **kwargs: None,
+    )
+
+    result = guard_patch._patched_place_order(
+        manager,
+        symbol=symbol,
+        side="BUY",
+        quantity=65,
+        intent="ENTRY",
+    )
+
+    assert result is None
+    assert normalized not in manager._entries_in_flight
+
+
+def test_broker_attempted_rejection_keeps_entry_reservation(monkeypatch):
+    symbol = "NFO:NIFTY2681124600CE"
+    normalized = normalize_symbol(symbol)
+    manager = SimpleNamespace(
+        is_live_mode=lambda: True,
+        _lock=RLock(),
+        _entries_in_flight={normalized: 1.0},
+        _last_order_decision={"allowed": False, "broker_attempted": True},
+    )
+    monkeypatch.setattr(
+        guard_patch,
+        "_ORIGINAL_PLACE_ORDER",
+        lambda _self, *args, **kwargs: None,
+    )
+
+    guard_patch._patched_place_order(
+        manager,
+        symbol=symbol,
+        side="BUY",
+        quantity=65,
+        intent="ENTRY",
+    )
+
+    assert normalized in manager._entries_in_flight
