@@ -51,9 +51,6 @@ def test_live_selected_option_tick_reaches_strategy_manager_after_atm_switch(mon
     selected_ce = "NFO:NIFTY26JUN24100CE"
     selected_pe = "NFO:NIFTY26JUN24100PE"
 
-    # Production starts with a frozen startup snapshot. Dynamic ATM selection
-    # later makes a previously contextual contract active; the startup snapshot
-    # must not veto that authoritative dynamic universe update.
     runner._universe_dynamic_mode = True
     runner._frozen_universe = {"NSE:NIFTY", old_ce, old_pe}
 
@@ -266,25 +263,27 @@ def test_hydrated_selected_ce_and_pe_both_reach_strategy_manager_on_new_candle_v
         runner._symbol_states[symbol] = SymbolState.READY
         runner._active_basket_token_by_symbol[symbol] = 1
         runner._symbol_has_completed_strategy_eval.add(symbol)
-        runner._candle_versions[symbol] = 2
         runner._last_strategy_versions[symbol] = 1
         runner._live_bar_seen.discard(symbol)
 
+    runner._candle_versions[selected_ce] = 2
+    runner._candle_versions[selected_pe] = 1
+
     for index, symbol in enumerate((selected_ce, selected_pe), start=1):
         strategy_manager.generate_signal.reset_mock()
-        runner._on_tick(
-            symbol,
-            {
-                "symbol": symbol,
-                "last_price": 100.0,
-                "ltp": 100.0,
-                "bid": 99.5,
-                "ask": 100.5,
-                "timestamp": time.time(),
-                "source": "ws",
-                "trace_id": f"selected-leg-{index}",
-            },
-        )
+        tick = {
+            "symbol": symbol,
+            "last_price": 100.0,
+            "ltp": 100.0,
+            "bid": 99.5,
+            "ask": 100.5,
+            "timestamp": time.time(),
+            "source": "ws",
+            "trace_id": f"selected-leg-{index}",
+        }
+        if symbol == selected_pe:
+            tick["candle_version"] = 2
+        runner._on_tick(symbol, tick)
         assert any(
             call.args and call.args[0] == symbol
             for call in strategy_manager.generate_signal.call_args_list
