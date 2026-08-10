@@ -7,8 +7,19 @@ from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Awaitable, Callable, TypeVar
 
+from nifty_scalper_bot.utils.logging import log_throttled
+
 _LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 _T = TypeVar("_T")
+_OPTION_DIRECTION_CONTEXT_KEYS = {
+    "direction_bias",
+    "underlying_direction_bias",
+    "underlying_direction_confidence",
+    "context_age_seconds",
+    "context_fresh",
+    "direction_context_source",
+    "direction_context_reasons",
+}
 
 
 def adapt_compute_live_readiness(
@@ -246,6 +257,79 @@ def adapt_mdm_pipeline_overload(original: Callable[..., Any]) -> Callable[..., A
     return wrapped
 
 
+def adapt_indicator_get_history(original: Callable[..., list[Any]]) -> Callable[..., list[Any]]:
+    """Short-circuit missing histories before duplicate INFO instrumentation runs."""
+
+    @wraps(original)
+    def wrapped(self: Any, symbol: str, *args: Any, **kwargs: Any) -> list[Any]:
+        histories = getattr(self, "_histories", None)
+        lock = getattr(self, "_lock", None)
+        if not isinstance(histories, dict):
+            return original(self, symbol, *args, **kwargs)
+        if lock is not None:
+            with lock:
+                missing = symbol not in histories
+        else:
+            missing = symbol not in histories
+        if not missing:
+            return original(self, symbol, *args, **kwargs)
+
+        market_open = True
+        try:
+            from nifty_scalper_bot.utils.market_hours import is_market_open_now
+
+            market_open = bool(is_market_open_now())
+        except Exception:  # noqa: BLE001 - diagnostics must not affect data access
+            pass
+        logger = getattr(
+            self,
+            "_logger",
+            logging.getLogger("nifty_scalper_bot.strategies.indicators"),
+        )
+        log_throttled(
+            logger,
+            (
+                f"indicator_history_missing:{symbol}"
+                if market_open
+                else f"indicator_history_missing_offmarket:{symbol}"
+            ),
+            (
+                "Condition met: indicator_history_missing"
+                if market_open
+                else "Condition met: indicator_history_missing (market_closed)"
+            ),
+            interval_sec=60.0 if market_open else 900.0,
+            level=logging.INFO if market_open else logging.DEBUG,
+            extra={
+                "event": "indicator_engine_history_missing",
+                "symbol": symbol,
+                "market_session_state": "open" if market_open else "closed",
+            },
+        )
+        return []
+
+    return wrapped
+
+
+def adapt_option_indicator_direction_context(
+    original: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Keep option indicators free of inherited direction; context snapshots own it."""
+
+    @wraps(original)
+    def wrapped(self: Any, symbol: str, *args: Any, **kwargs: Any) -> Any:
+        result = original(self, symbol, *args, **kwargs)
+        normalized = str(symbol or "").strip().upper().replace(" ", "")
+        if not normalized.endswith(("CE", "PE")) or not isinstance(result, Mapping):
+            return result
+        cleaned = dict(result)
+        for key in _OPTION_DIRECTION_CONTEXT_KEYS:
+            cleaned.pop(key, None)
+        return cleaned
+
+    return wrapped
+
+
 def _patch_function(
     target: Any,
     name: str,
@@ -320,10 +404,34 @@ def apply_app_patch(app_module: Any) -> None:
             "_active_drain_overload_recovery_guarded",
         )
 
+    indicator_cls = getattr(app_module, "IndicatorEngine", None)
+    if indicator_cls is None:
+        try:
+            from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+
+            indicator_cls = IndicatorEngine
+        except Exception:  # noqa: BLE001 - optional import compatibility
+            indicator_cls = None
+    if indicator_cls is not None:
+        _patch_function(
+            indicator_cls,
+            "get_history",
+            adapt_indicator_get_history,
+            "_missing_history_single_log_adapted",
+        )
+        _patch_function(
+            indicator_cls,
+            "get_indicators",
+            adapt_option_indicator_direction_context,
+            "_option_direction_context_authority_adapted",
+        )
+
 
 __all__ = [
     "adapt_compute_live_readiness",
+    "adapt_indicator_get_history",
     "adapt_mdm_pipeline_overload",
+    "adapt_option_indicator_direction_context",
     "adapt_register_and_subscribe_live_symbol",
     "adapt_replay_latest_mdm_ticks_to_bus",
     "adapt_sync_history_from_mdm",
