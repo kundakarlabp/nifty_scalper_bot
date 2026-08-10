@@ -36,6 +36,9 @@ ORDERFLOW_EVENTS = {
     "ORDERFLOW_TRIGGER_DECISION",
     "ORDERFLOW_DIRECTION_BIAS_CONFLICT",
 }
+INDICATOR_EVENTS = {
+    "indicator_engine_history_missing",
+}
 
 
 THROTTLED_EVENTS = (
@@ -44,6 +47,7 @@ THROTTLED_EVENTS = (
     | BOOTSTRAP_EVENTS
     | READINESS_EVENTS
     | ORDERFLOW_EVENTS
+    | INDICATOR_EVENTS
 )
 
 
@@ -169,6 +173,7 @@ def apply_filters() -> None:
         "nifty_scalper_bot.core.app",
         "nifty_scalper_bot.execution.readiness",
         "nifty_scalper_bot.strategies.runner",
+        "nifty_scalper_bot.strategies.indicators",
         "nifty_scalper_bot.strategies.elite_strategies.base_elite",
         "nifty_scalper_bot.strategies.elite_strategies.order_flow",
     ):

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from nifty_scalper_bot.core.boot_log_safety import BootLogRateControl
 from nifty_scalper_bot.core.boot_readiness_safety import (
     adapt_compute_live_readiness,
+    adapt_mdm_pipeline_overload,
     adapt_register_and_subscribe_live_symbol,
     adapt_replay_latest_mdm_ticks_to_bus,
     adapt_sync_history_from_mdm,
@@ -137,6 +138,26 @@ def test_rate_control_covers_live_validation_checklist() -> None:
     assert control.filter(changed) is True
 
 
+def test_rate_control_covers_indicator_history_missing_noise() -> None:
+    control = BootLogRateControl(interval_seconds=30.0)
+    first = _record(
+        "indicator_engine_history_missing",
+        symbol="NFO:NIFTY2681124600PE",
+    )
+    same = _record(
+        "indicator_engine_history_missing",
+        symbol="NFO:NIFTY2681124600PE",
+    )
+    other = _record(
+        "indicator_engine_history_missing",
+        symbol="NFO:NIFTY2681124600CE",
+    )
+
+    assert control.filter(first) is True
+    assert control.filter(same) is False
+    assert control.filter(other) is True
+
+
 def test_live_validation_checklist_log_contains_primary_gate(caplog) -> None:
     caplog.set_level(logging.INFO, logger="nifty_scalper_bot.execution.readiness")
 
@@ -188,6 +209,29 @@ def test_session_readiness_adapter_removes_option_details_outside_session() -> N
     )
 
     assert reasons == ["market_closed"]
+
+
+def test_live_readiness_adapter_never_returns_unknown_empty_blocker() -> None:
+    adapted = adapt_compute_live_readiness(lambda **_kwargs: (False, []))
+
+    armed, reasons = adapted(
+        live_mode=True,
+        hard_ready=True,
+        quote_available=True,
+        ws_quote_proof=True,
+        market_open=True,
+        runner_running=True,
+        selected_ce="NFO:NIFTY2681124600CE",
+        selected_pe="NFO:NIFTY2681124600PE",
+        ce_bars=105,
+        pe_bars=105,
+        option_exec_min_bars=30,
+        ce_quote_ready=True,
+        pe_quote_ready=True,
+    )
+
+    assert armed is False
+    assert reasons == ["readiness_inconsistent"]
 
 
 def test_cached_tick_replay_skips_when_message_bus_is_inactive() -> None:
@@ -408,3 +452,23 @@ def test_history_sync_adapter_corrects_futures_role_only() -> None:
         ("NFO:NIFTY26AUGFUT", "futures_context"),
         ("NFO:NIFTY2680424750CE", "selected_option"),
     ]
+
+
+def test_active_tick_drain_keeps_pipeline_overload_fail_closed() -> None:
+    calls: list[str] = []
+
+    def original(state):
+        calls.append("original")
+        state._pipeline_overloaded = False
+
+    adapted = adapt_mdm_pipeline_overload(original)
+    state = SimpleNamespace(_pipeline_overloaded=True, _tick_active_drains=1)
+
+    adapted(state)
+    assert state._pipeline_overloaded is True
+    assert calls == []
+
+    state._tick_active_drains = 0
+    adapted(state)
+    assert state._pipeline_overloaded is False
+    assert calls == ["original"]

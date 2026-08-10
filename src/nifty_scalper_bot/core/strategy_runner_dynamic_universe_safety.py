@@ -18,6 +18,7 @@ def apply_patches() -> None:
 
     original_validate: Callable[..., bool] = StrategyRunner._validate_symbol_for_cycle
     original_sync = StrategyRunner._sync_active_selection_from_basket
+    original_mark_live = StrategyRunner._mark_live
     original_on_tick = StrategyRunner._on_tick
 
     @wraps(original_validate)
@@ -72,21 +73,64 @@ def apply_patches() -> None:
                 return
         original_sync(self, selection)
 
+    @wraps(original_mark_live)
+    def mark_live(self: Any, symbol: str) -> Any:
+        """Record authoritative live evidence even when phase was already set LIVE."""
+        normalized = normalize_symbol(str(symbol or "")) or symbol
+        result = original_mark_live(self, normalized)
+        live_seen = getattr(self, "_live_bar_seen", None)
+        if isinstance(live_seen, set) and normalized:
+            live_seen.add(normalized)
+        return result
+
     @wraps(original_on_tick)
     def on_tick(self: Any, symbol: str, tick: Mapping[str, Any]) -> Any:
-        """Keep quote/data sequence versions out of the candle-version state machine."""
+        """Keep quote versions and hydration-only bar state out of candle gating."""
+        normalized = normalize_symbol(str(symbol or "")) or symbol
+        selected = {
+            normalize_symbol(str(item or ""))
+            for item in (
+                getattr(self, "_active_selected_ce", None),
+                getattr(self, "_active_selected_pe", None),
+            )
+            if item
+        }
+        live_seen = getattr(self, "_live_bar_seen", set())
+        stored_version = int(
+            (getattr(self, "_candle_versions", {}) or {}).get(normalized, 0) or 0
+        )
+        try:
+            incoming_version = int(tick.get("candle_version") or 0)
+        except (TypeError, ValueError):
+            incoming_version = 0
+        current_version = max(stored_version, incoming_version)
+        last_version = int(
+            (getattr(self, "_last_strategy_versions", {}) or {}).get(normalized, 0)
+            or 0
+        )
+        if (
+            normalized in selected
+            and normalized not in live_seen
+            and current_version > last_version
+        ):
+            state = (getattr(self, "_symbol_state", {}) or {}).get(normalized)
+            if state is not None:
+                state._last_eval_bar_ts = None
+
         clean_tick = tick
         if isinstance(tick, Mapping) and ("version" in tick or "data_version" in tick):
             clean_tick = dict(tick)
             clean_tick.pop("version", None)
             clean_tick.pop("data_version", None)
-        return original_on_tick(self, symbol, clean_tick)
+        return original_on_tick(self, normalized, clean_tick)
 
     StrategyRunner._dynamic_universe_safety_original_validate = original_validate
     StrategyRunner._dynamic_universe_safety_original_sync = original_sync
+    StrategyRunner._dynamic_universe_safety_original_mark_live = original_mark_live
     StrategyRunner._dynamic_universe_safety_original_on_tick = original_on_tick
     StrategyRunner._validate_symbol_for_cycle = validate_symbol_for_cycle
     StrategyRunner._sync_active_selection_from_basket = sync_active_selection_from_basket
+    StrategyRunner._mark_live = mark_live
     StrategyRunner._on_tick = on_tick
     StrategyRunner._dynamic_universe_safety_installed = True
 

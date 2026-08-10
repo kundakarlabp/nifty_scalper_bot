@@ -14,19 +14,46 @@ _T = TypeVar("_T")
 def adapt_compute_live_readiness(
     original: Callable[..., tuple[bool, list[str]]],
 ) -> Callable[..., tuple[bool, list[str]]]:
-    """Return an adapter that keeps option quote checks quiet outside session."""
+    """Keep session details quiet and every live refusal diagnostically explicit."""
 
     @wraps(original)
     def wrapped(**kwargs: Any) -> tuple[bool, list[str]]:
-        if bool(kwargs.get("live_mode")) and not bool(kwargs.get("market_open")):
-            min_bars = int(kwargs.get("option_exec_min_bars") or 1)
-            adjusted = dict(kwargs)
+        adjusted = dict(kwargs)
+        if bool(adjusted.get("live_mode")) and not bool(adjusted.get("market_open")):
+            min_bars = int(adjusted.get("option_exec_min_bars") or 1)
             adjusted["ce_quote_ready"] = True
             adjusted["pe_quote_ready"] = True
             adjusted["ce_bars"] = max(int(adjusted.get("ce_bars") or 0), min_bars)
             adjusted["pe_bars"] = max(int(adjusted.get("pe_bars") or 0), min_bars)
-            return original(**adjusted)
-        return original(**kwargs)
+
+        armed, reasons = original(**adjusted)
+        normalized_reasons = list(reasons or [])
+        if bool(adjusted.get("live_mode")) and not armed and not normalized_reasons:
+            minimum = int(adjusted.get("option_exec_min_bars") or 1)
+            if not bool(adjusted.get("hard_ready")):
+                normalized_reasons.append("startup_pipeline_incomplete")
+            elif not bool(adjusted.get("market_open")):
+                normalized_reasons.append("market_closed")
+            elif not bool(adjusted.get("runner_running")):
+                normalized_reasons.append("runner_not_running")
+            elif not adjusted.get("selected_ce") or not adjusted.get("selected_pe"):
+                normalized_reasons.append("selected_options_missing")
+            elif int(adjusted.get("ce_bars") or 0) < minimum:
+                normalized_reasons.append("ce_exec_bars_missing")
+            elif int(adjusted.get("pe_bars") or 0) < minimum:
+                normalized_reasons.append("pe_exec_bars_missing")
+            elif not bool(adjusted.get("ce_quote_ready", True)):
+                normalized_reasons.append("selected_ce_quote_missing")
+            elif not bool(adjusted.get("pe_quote_ready", True)):
+                normalized_reasons.append("selected_pe_quote_missing")
+            elif not (
+                bool(adjusted.get("quote_available"))
+                or bool(adjusted.get("ws_quote_proof"))
+            ):
+                normalized_reasons.append("market_data_proof_unavailable")
+            else:
+                normalized_reasons.append("readiness_inconsistent")
+        return bool(armed), normalized_reasons
 
     return wrapped
 
@@ -205,6 +232,20 @@ def adapt_sync_history_from_mdm(original: Callable[..., _T]) -> Callable[..., _T
     return wrapped
 
 
+def adapt_mdm_pipeline_overload(original: Callable[..., Any]) -> Callable[..., Any]:
+    """Do not report overload recovery while a tick batch is still in flight."""
+
+    @wraps(original)
+    def wrapped(self: Any) -> Any:
+        if bool(getattr(self, "_pipeline_overloaded", False)) and int(
+            getattr(self, "_tick_active_drains", 0) or 0
+        ) > 0:
+            return None
+        return original(self)
+
+    return wrapped
+
+
 def _patch_function(
     target: Any,
     name: str,
@@ -263,9 +304,26 @@ def apply_app_patch(app_module: Any) -> None:
             "_history_role_corrected",
         )
 
+    mdm_cls = getattr(app_module, "MarketDataManager", None)
+    if mdm_cls is None:
+        try:
+            from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+
+            mdm_cls = MarketDataManager
+        except Exception:  # noqa: BLE001 - optional import compatibility
+            mdm_cls = None
+    if mdm_cls is not None:
+        _patch_function(
+            mdm_cls,
+            "_update_pipeline_overload_locked",
+            adapt_mdm_pipeline_overload,
+            "_active_drain_overload_recovery_guarded",
+        )
+
 
 __all__ = [
     "adapt_compute_live_readiness",
+    "adapt_mdm_pipeline_overload",
     "adapt_register_and_subscribe_live_symbol",
     "adapt_replay_latest_mdm_ticks_to_bus",
     "adapt_sync_history_from_mdm",
