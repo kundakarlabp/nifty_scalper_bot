@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import nifty_scalper_bot.execution as execution
@@ -149,3 +150,127 @@ def test_identical_entry_fill_callback_does_not_reactivate_bracket(
 def test_tick_epoch_uses_explicit_receipt_time_when_exchange_time_missing() -> None:
     received_at = datetime(2026, 7, 27, 7, 49, tzinfo=timezone.utc)
     assert bracket_core.tick_exchange_epoch({"received_at": received_at}) == received_at.timestamp()
+
+
+class _ExitBroker:
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+        self.statuses: dict[str, dict[str, Any]] = {}
+        self.positions: list[dict[str, Any]] = [
+            {"symbol": symbol, "quantity": 65, "average_price": 100.0}
+        ]
+
+    def get_order_status(self, order_id: str) -> dict[str, Any]:
+        return dict(self.statuses.get(order_id, {"status": ""}))
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        return list(self.positions)
+
+
+class _ExitOrderManager(_OrderManager):
+    def __init__(self, broker: _ExitBroker) -> None:
+        super().__init__()
+        self._broker = broker
+
+
+def _exit_manager(tmp_path, monkeypatch):
+    symbol = "NFO:NIFTY2681124500CE"
+    monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "exit-correlation.db"))
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    broker = _ExitBroker(symbol)
+    manager = bracket_manager.BracketManager(order_manager=_ExitOrderManager(broker))
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager._filled_position_sync_grace_seconds = 0.0
+    manager.register_virtual_bracket(
+        order_id="ENTRY-1",
+        symbol=symbol,
+        side="BUY",
+        qty=65,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("ENTRY-1", 100.0)
+    return manager, broker, symbol
+
+
+def test_managed_filled_exit_terminalizes_linked_bracket(tmp_path, monkeypatch) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    bracket.exit_reason = "HARD_SL_BREACH"
+    broker.statuses["EXIT-1"] = {"status": "COMPLETE", "average_price": 95.0}
+    broker.positions = []
+    order = SimpleNamespace(
+        order_id="EXIT-1",
+        symbol=symbol,
+        side="SELL",
+        quantity=65,
+        filled_quantity=65,
+        fill_price=95.0,
+        intent="EXIT",
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+
+    assert manager.reconcile_filled_exit_order(order, broker.statuses["EXIT-1"]) is True
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.CLOSED.value
+    assert bracket.exit_reason == "HARD_SL_BREACH"
+    assert bracket.exit_order_id == "EXIT-1"
+    assert "EXIT-1" in bracket.linked_exit_order_ids
+    assert manager.has_unresolved_exit() is False
+
+
+def test_external_flatten_closes_only_unique_flat_bracket(tmp_path, monkeypatch) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    broker.statuses["MANUAL-1"] = {"status": "COMPLETE", "average_price": 97.0}
+    broker.positions = []
+    order = SimpleNamespace(
+        order_id="MANUAL-1",
+        symbol=symbol,
+        side="SELL",
+        quantity=65,
+        filled_quantity=65,
+        fill_price=97.0,
+        intent="EXIT",
+        bracket_id=None,
+        linked_entry_order_id=None,
+        trade_lifecycle_id=None,
+    )
+
+    assert manager.reconcile_filled_exit_order(order, broker.statuses["MANUAL-1"]) is True
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.CLOSED.value
+    assert bracket.exit_reason == "BROKER_EXTERNAL"
+    assert bracket.close_source == "broker_fill"
+
+
+def test_external_exit_does_not_steal_bracket_while_broker_nonflat(
+    tmp_path, monkeypatch
+) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    broker.statuses["MANUAL-1"] = {"status": "COMPLETE", "average_price": 97.0}
+    order = SimpleNamespace(
+        order_id="MANUAL-1",
+        symbol=symbol,
+        side="SELL",
+        quantity=65,
+        filled_quantity=65,
+        fill_price=97.0,
+        intent="EXIT",
+        bracket_id=None,
+        linked_entry_order_id=None,
+        trade_lifecycle_id=None,
+    )
+
+    assert manager.reconcile_filled_exit_order(order, broker.statuses["MANUAL-1"]) is False
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exit_order_id is None
+    assert bracket.exit_reason is None

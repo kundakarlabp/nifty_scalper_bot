@@ -226,6 +226,202 @@ class RuntimeBracketManager(LedgerBracketManager):
             )
         return True
 
+    def _active_brackets_for_exit_symbol(self, symbol: str) -> list[Any]:
+        """Return non-terminal brackets for one canonical symbol."""
+
+        key = _legacy.normalize_symbol(symbol)
+        terminal = {
+            _legacy.BracketExitLifecycle.CLOSED.value,
+            _legacy.BracketExitLifecycle.EXIT_FILLED.value,
+            _legacy.BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
+        }
+        with self._lock:
+            return [
+                bracket
+                for bracket in self._brackets.values()
+                if _legacy.normalize_symbol(bracket.symbol) == key
+                and int(bracket.remaining_quantity or 0) > 0
+                and str(bracket.exit_state or "") not in terminal
+            ]
+
+    @staticmethod
+    def _exit_side_matches(bracket: Any, order: Any) -> bool:
+        side = str(getattr(order, "side", "") or "").strip().upper()
+        expected = "SELL" if str(bracket.side).upper() == "BUY" else "BUY"
+        return side == expected
+
+    def _resolve_exit_bracket(self, order: Any) -> tuple[Any | None, str]:
+        """Resolve an exit fill to a bracket without guessing across exposures."""
+
+        symbol = _legacy.normalize_symbol(getattr(order, "symbol", ""))
+        identity = [
+            str(getattr(order, name, "") or "").strip()
+            for name in ("bracket_id", "linked_entry_order_id", "trade_lifecycle_id")
+        ]
+        explicit = [value for value in identity if value]
+        for value in explicit:
+            bracket = self._find_bracket_by_id(value)
+            if bracket is None:
+                bracket = self.get_bracket(value)
+            if (
+                bracket is not None
+                and _legacy.normalize_symbol(bracket.symbol) == symbol
+                and self._exit_side_matches(bracket, order)
+            ):
+                return bracket, "managed_identity"
+        if explicit:
+            return None, "identity_mismatch"
+
+        # External/manual broker orders have no lifecycle id.  They can own the
+        # local bracket only after authoritative flat proof and only when there is
+        # exactly one same-symbol bracket, preventing accidental cross-trade binds.
+        residual = self._broker_position_quantity(symbol)
+        if residual != 0:
+            return None, "broker_nonflat_or_unknown"
+        candidates = [
+            bracket
+            for bracket in self._active_brackets_for_exit_symbol(symbol)
+            if self._exit_side_matches(bracket, order)
+        ]
+        if len(candidates) != 1:
+            return None, "external_exit_ambiguous"
+        return candidates[0], "broker_external"
+
+    def reconcile_filled_exit_order(
+        self,
+        order: Any,
+        payload: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Correlate a confirmed reducing fill and converge its canonical bracket.
+
+        This never closes optimistically.  It only restores order/bracket identity
+        and delegates terminal authority to the existing broker-status, broker-flat
+        and fill-ledger reconciliation state machine.
+        """
+
+        order_id = str(getattr(order, "order_id", "") or "").strip()
+        symbol = _legacy.normalize_symbol(getattr(order, "symbol", ""))
+        if not order_id or not symbol:
+            return False
+        bracket, source = self._resolve_exit_bracket(order)
+        if bracket is None:
+            _legacy.LOGGER.warning(
+                "EXIT_ORDER_CORRELATION_DEFERRED order_id=%s symbol=%s source=%s",
+                order_id,
+                symbol,
+                source,
+                extra={
+                    "event": "EXIT_ORDER_CORRELATION_DEFERRED",
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "source": source,
+                },
+            )
+            return False
+
+        quantity = int(
+            getattr(order, "filled_quantity", 0)
+            or getattr(order, "quantity", 0)
+            or bracket.remaining_quantity
+            or 0
+        )
+        fill_price = getattr(order, "fill_price", None)
+        if fill_price is None and isinstance(payload, Mapping):
+            fill_price = payload.get("average_price") or payload.get("fill_price")
+        now = time.time()
+        with self._lock:
+            if order_id not in bracket.linked_exit_order_ids:
+                bracket.linked_exit_order_ids.append(order_id)
+            bracket.exit_order_id = order_id
+            bracket.pending_exit_order_id = order_id
+            bracket.exit_intent = "EXIT"
+            bracket.expected_exit_side = str(getattr(order, "side", "") or "").upper()
+            bracket.expected_exit_qty = quantity
+            bracket.exit_pending = True
+            bracket.exit_in_progress = False
+            bracket.exit_submission_inflight = False
+            bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+            bracket.entry_status = bracket.exit_state
+            bracket.exit_submitted_at = bracket.exit_submitted_at or now
+            bracket.last_exit_attempt_at = bracket.last_exit_attempt_at or now
+            if bracket.exit_reason is None:
+                bracket.exit_reason = (
+                    "BROKER_EXTERNAL" if source == "broker_external" else "BROKER_EXIT"
+                )
+            if fill_price is not None:
+                with suppress(TypeError, ValueError):
+                    bracket.exit_price = float(fill_price)
+            bracket.updated_at = now
+
+        with suppress(Exception):
+            self.save_state()
+        _legacy.LOGGER.info(
+            "EXIT_ORDER_CORRELATED bracket_id=%s order_id=%s symbol=%s source=%s reason=%s qty=%s fill_price=%s",
+            bracket.bracket_id,
+            order_id,
+            symbol,
+            source,
+            bracket.exit_reason,
+            quantity,
+            fill_price,
+            extra={
+                "event": "EXIT_ORDER_CORRELATED",
+                "bracket_id": bracket.bracket_id,
+                "order_id": order_id,
+                "symbol": symbol,
+                "source": source,
+                "exit_reason": bracket.exit_reason,
+                "quantity": quantity,
+                "fill_price": fill_price,
+            },
+        )
+        return bool(
+            self._reconcile_exit_state(
+                bracket,
+                requested_by="order_manager_fill_callback",
+            )
+        )
+
+    def trailing_status_snapshot(self, bracket_or_symbol: Any) -> dict[str, Any] | None:
+        """Return truthful trailing activation state for operator diagnostics."""
+
+        bracket = bracket_or_symbol
+        if not hasattr(bracket, "entry_price"):
+            matches = self._active_brackets_for_exit_symbol(str(bracket_or_symbol))
+            bracket = matches[0] if len(matches) == 1 else None
+        if bracket is None:
+            return None
+        if not bool(getattr(bracket, "trailing_enabled", False)):
+            return {
+                "state": "DISABLED",
+                "mfe_r": 0.0,
+                "activation_r": self._trail_activation_r(bracket),
+            }
+        entry = float(bracket.entry_price or 0.0)
+        initial_sl = float(
+            bracket.initial_sl_trigger_price or bracket.sl_trigger_price or 0.0
+        )
+        initial_risk = abs(entry - initial_sl)
+        if bracket.side == "BUY":
+            mfe = max(0.0, float(bracket.highest_ltp or entry) - entry)
+        else:
+            mfe = max(0.0, entry - float(bracket.lowest_ltp or entry))
+        mfe_r = mfe / initial_risk if initial_risk > 0 else 0.0
+        activation = float(self._trail_activation_r(bracket))
+        moved = int(getattr(bracket, "trail_revision", 0) or 0) > 0
+        state = "TRAILING" if moved else (
+            "ACTIVE" if mfe_r >= activation else "WAITING_ACTIVATION"
+        )
+        return {
+            "state": state,
+            "mfe_r": round(mfe_r, 4),
+            "activation_r": activation,
+            "current_sl": float(bracket.sl_trigger_price or 0.0),
+            "initial_sl": initial_sl,
+            "highest_ltp": float(bracket.highest_ltp or 0.0),
+            "lowest_ltp": float(bracket.lowest_ltp or 0.0),
+        }
+
     def _close_bracket(
         self,
         bracket: Any,
