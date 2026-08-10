@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from nifty_scalper_bot.execution import bracket_ownership_extension as bracket_owner
 from nifty_scalper_bot.execution import position_identity_extension as position_owner
 from nifty_scalper_bot.execution import position_manager as position_module
+from nifty_scalper_bot.strategies.orchestrator import StrategyAllocation, StrategyOrchestrator
 
 
 def test_broker_sync_missing_average_price_is_unresolved_not_ltp_cost_basis():
@@ -137,29 +138,35 @@ def test_reversed_broker_position_does_not_inherit_prior_entry_identity():
     assert reversed_position.order_id is None
 
 
-def test_position_order_identity_exposes_bot_managed_ownership_to_orchestrator():
-    opened_at = datetime(2026, 8, 10, 9, 22, 13, tzinfo=timezone.utc)
-    managed = position_module.Position(
+def _position(*, order_id: str | None) -> position_module.Position:
+    return position_module.Position(
         symbol="NFO:NIFTY2681124500CE",
         side="LONG",
         quantity=65,
         entry_price=133.50,
-        entry_time=opened_at,
-        current_price=134.00,
-        order_id="ENTRY-1",
-    )
-    broker_only = position_module.Position(
-        symbol="NFO:NIFTY2681124550PE",
-        side="LONG",
-        quantity=65,
-        entry_price=60.0,
-        entry_time=opened_at,
-        current_price=61.0,
-        order_id=None,
+        entry_time=datetime(2026, 8, 10, 9, 22, 13, tzinfo=timezone.utc),
+        current_price=133.50,
+        order_id=order_id,
     )
 
-    assert managed.strategy_name == "BotManaged"
-    assert broker_only.strategy_name == ""
+
+def test_position_order_identity_exposes_bot_managed_ownership_to_orchestrator():
+    assert _position(order_id="ENTRY-1").strategy_name == "BotManaged"
+    assert _position(order_id=None).strategy_name == ""
+
+
+def test_bot_managed_position_counts_toward_strategy_capital_headroom():
+    orchestrator = StrategyOrchestrator(
+        risk_manager=SimpleNamespace(current_balance=11381.0),
+    )
+    allocation = StrategyAllocation(capital_fraction=0.15, tags=())
+    managed = _position(order_id="ENTRY-1")
+    position_manager = SimpleNamespace(get_all_positions=lambda: [managed])
+
+    assert orchestrator._has_capital_headroom(allocation, position_manager) is False
+
+    managed.order_id = None
+    assert orchestrator._has_capital_headroom(allocation, position_manager) is True
 
 
 def test_existing_nonterminal_bracket_owns_canonical_symbol():
