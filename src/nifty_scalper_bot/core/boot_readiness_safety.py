@@ -14,19 +14,46 @@ _T = TypeVar("_T")
 def adapt_compute_live_readiness(
     original: Callable[..., tuple[bool, list[str]]],
 ) -> Callable[..., tuple[bool, list[str]]]:
-    """Return an adapter that keeps option quote checks quiet outside session."""
+    """Keep session details quiet and every live refusal diagnostically explicit."""
 
     @wraps(original)
     def wrapped(**kwargs: Any) -> tuple[bool, list[str]]:
-        if bool(kwargs.get("live_mode")) and not bool(kwargs.get("market_open")):
-            min_bars = int(kwargs.get("option_exec_min_bars") or 1)
-            adjusted = dict(kwargs)
+        adjusted = dict(kwargs)
+        if bool(adjusted.get("live_mode")) and not bool(adjusted.get("market_open")):
+            min_bars = int(adjusted.get("option_exec_min_bars") or 1)
             adjusted["ce_quote_ready"] = True
             adjusted["pe_quote_ready"] = True
             adjusted["ce_bars"] = max(int(adjusted.get("ce_bars") or 0), min_bars)
             adjusted["pe_bars"] = max(int(adjusted.get("pe_bars") or 0), min_bars)
-            return original(**adjusted)
-        return original(**kwargs)
+
+        armed, reasons = original(**adjusted)
+        normalized_reasons = list(reasons or [])
+        if bool(adjusted.get("live_mode")) and not armed and not normalized_reasons:
+            minimum = int(adjusted.get("option_exec_min_bars") or 1)
+            if not bool(adjusted.get("hard_ready")):
+                normalized_reasons.append("startup_pipeline_incomplete")
+            elif not bool(adjusted.get("market_open")):
+                normalized_reasons.append("market_closed")
+            elif not bool(adjusted.get("runner_running")):
+                normalized_reasons.append("runner_not_running")
+            elif not adjusted.get("selected_ce") or not adjusted.get("selected_pe"):
+                normalized_reasons.append("selected_options_missing")
+            elif int(adjusted.get("ce_bars") or 0) < minimum:
+                normalized_reasons.append("ce_exec_bars_missing")
+            elif int(adjusted.get("pe_bars") or 0) < minimum:
+                normalized_reasons.append("pe_exec_bars_missing")
+            elif not bool(adjusted.get("ce_quote_ready", True)):
+                normalized_reasons.append("selected_ce_quote_missing")
+            elif not bool(adjusted.get("pe_quote_ready", True)):
+                normalized_reasons.append("selected_pe_quote_missing")
+            elif not (
+                bool(adjusted.get("quote_available"))
+                or bool(adjusted.get("ws_quote_proof"))
+            ):
+                normalized_reasons.append("market_data_proof_unavailable")
+            else:
+                normalized_reasons.append("readiness_inconsistent")
+        return bool(armed), normalized_reasons
 
     return wrapped
 
