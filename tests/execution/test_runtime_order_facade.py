@@ -208,3 +208,81 @@ print(json.dumps({
     assert payload["before_class"] == payload["after_class"] == payload["package_class"]
     assert payload["before_method"] == payload["after_method"]
     assert payload["module"] == "nifty_scalper_bot.execution.runtime_order_manager"
+
+
+def test_exit_identity_reaches_core_place_order(monkeypatch) -> None:
+    manager = _manager(None)
+    captured: dict[str, Any] = {}
+
+    def core_place_order(self: Any, *args: Any, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "EXIT-1"
+
+    monkeypatch.setattr(order_manager_core.OrderManager, "place_order", core_place_order)
+
+    result = manager.place_order(
+        symbol="NFO:NIFTY2681124500CE",
+        side="SELL",
+        quantity=65,
+        intent="EXIT",
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+        tag="exit_test",
+        check_risk=False,
+    )
+
+    assert result == "EXIT-1"
+    assert captured["bracket_id"] == "ENTRY-1"
+    assert captured["linked_entry_order_id"] == "ENTRY-1"
+    assert captured["trade_lifecycle_id"] == "ENTRY-1"
+
+
+def test_filled_exit_update_notifies_runtime_bracket_owner(monkeypatch) -> None:
+    class _ExitProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__(False)
+            self.calls: list[tuple[Any, dict[str, Any]]] = []
+
+        def reconcile_filled_exit_order(
+            self, order: Any, payload: dict[str, Any]
+        ) -> bool:
+            self.calls.append((order, dict(payload)))
+            return True
+
+    provider = _ExitProvider()
+    manager = _manager(provider)
+    manager._bracket_manager = provider
+    filled = SimpleNamespace(
+        order_id="EXIT-1",
+        symbol="NFO:NIFTY2681124500CE",
+        side="SELL",
+        quantity=65,
+        filled_quantity=65,
+        fill_price=95.0,
+        status=order_manager_core.OrderStatus.FILLED,
+        intent="EXIT",
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+
+    def core_apply(self: Any, payload: dict[str, Any]) -> Any:
+        return filled
+
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "_apply_broker_order_update",
+        core_apply,
+    )
+
+    payload = {
+        "order_id": "EXIT-1",
+        "status": "COMPLETE",
+        "average_price": 95.0,
+        "filled_quantity": 65,
+    }
+    result = RuntimeOrderManager._apply_broker_order_update(manager, payload)
+
+    assert result is filled
+    assert provider.calls == [(filled, payload)]
