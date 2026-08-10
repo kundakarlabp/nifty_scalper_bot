@@ -8,6 +8,7 @@ import os
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import order_manager_core as _core
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _PATCH_APPLIED = False
 _ORIGINAL_PLACE_ORDER: Any = None
@@ -133,6 +134,29 @@ def _live_mode(self: Any) -> bool:
     return str(os.getenv("EXECUTION_MODE", "")).strip().upper() == "LIVE"
 
 
+def _release_prebroker_entry_reservation(self: Any, values: Mapping[str, Any]) -> bool:
+    """Release only an explicitly rejected entry that never reached the broker."""
+    intent = getattr(values.get("intent"), "value", values.get("intent"))
+    if str(intent or "").strip().upper() not in _ENTRY_INTENTS:
+        return False
+    decision = getattr(self, "_last_order_decision", None)
+    if not isinstance(decision, Mapping) or decision.get("allowed") is not False:
+        return False
+    if bool(decision.get("broker_attempted")):
+        return False
+    symbol = normalize_symbol(str(values.get("symbol") or ""))
+    reservations = getattr(self, "_entries_in_flight", None)
+    if not symbol or not isinstance(reservations, dict) or symbol not in reservations:
+        return False
+    lock = getattr(self, "_lock", None)
+    if lock is None:
+        reservations.pop(symbol, None)
+    else:
+        with lock:
+            reservations.pop(symbol, None)
+    return True
+
+
 def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
     if not _live_mode(self):
         return _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
@@ -173,7 +197,10 @@ def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
                 extra={"event": "ENTRY_GEOMETRY_BLOCKED", **reason},
             )
         return None
-    return _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
+    result = _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
+    if result is None:
+        _release_prebroker_entry_reservation(self, values)
+    return result
 
 
 def apply_patches() -> None:
@@ -191,4 +218,8 @@ def apply_patches() -> None:
     _PATCH_APPLIED = True
 
 
-__all__ = ["apply_patches", "_entry_geometry_block_reason"]
+__all__ = [
+    "apply_patches",
+    "_entry_geometry_block_reason",
+    "_release_prebroker_entry_reservation",
+]
