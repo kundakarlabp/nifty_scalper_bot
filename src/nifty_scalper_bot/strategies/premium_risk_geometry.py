@@ -63,6 +63,10 @@ def _side_geometry_valid(side: str, entry: float, stop: float, target: float) ->
     return 0.0 < target < entry < stop
 
 
+def _same_price(left: float | None, right: float | None) -> bool:
+    return left is not None and right is not None and abs(left - right) <= _TICK_SIZE
+
+
 def _risk_distance(
     signal: Any,
     *,
@@ -74,6 +78,18 @@ def _risk_distance(
     spread = _spread_distance(metadata, entry_price)
     trusted = _premium_domain(metadata)
     stop = _positive_float(getattr(signal, "stop_loss", None))
+    target = _positive_float(getattr(signal, "take_profit", None))
+    candidate_stop = _positive_float(metadata.get("candidate_stop_loss"))
+    candidate_target = _positive_float(metadata.get("candidate_target"))
+    candidate_symbol = str(metadata.get("candidate_symbol") or "").strip().upper()
+    signal_symbol = str(getattr(signal, "symbol", "") or "").strip().upper()
+    copied_candidate_geometry = bool(
+        metadata.get("candidate_selected")
+        and candidate_symbol
+        and candidate_symbol == signal_symbol
+        and _same_price(stop, candidate_stop)
+        and _same_price(target, candidate_target)
+    )
     explicit_stop = _positive_float(
         metadata.get("setup_invalidation_premium")
         or metadata.get("premium_stop_price")
@@ -88,7 +104,17 @@ def _risk_distance(
 
     source = "premium_percent_fallback"
     distance: float | None = None
-    if explicit_stop is not None and trusted:
+    if copied_candidate_geometry and candidate_stop is not None:
+        candidate = (
+            entry_price - candidate_stop
+            if entry_side == "BUY"
+            else candidate_stop - entry_price
+        )
+        if candidate > 0.0:
+            distance = candidate
+            source = "selected_candidate_geometry"
+            trusted = True
+    if distance is None and explicit_stop is not None and trusted:
         candidate = (
             entry_price - explicit_stop
             if entry_side == "BUY"
