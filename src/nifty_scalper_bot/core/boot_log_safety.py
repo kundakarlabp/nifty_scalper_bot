@@ -31,6 +31,7 @@ READINESS_EVENTS = {
     "READINESS_BLOCKER_SUMMARY",
     "LIVE_READINESS_COMPUTED",
     "LIVE_VALIDATION_CHECKLIST",
+    "LIVE_ORDER_ARM_BLOCKED",
 }
 ORDERFLOW_EVENTS = {
     "ORDERFLOW_TRIGGER_DECISION",
@@ -78,6 +79,33 @@ def _normalize_role_telemetry(record: logging.LogRecord) -> None:
         record.context_only = True
         if not getattr(record, "contract_side", None):
             record.contract_side = getattr(record, "side", None)
+
+
+def _normalize_readiness_telemetry(record: logging.LogRecord) -> None:
+    """Replace legacy unknown arm telemetry with the visible orchestration blocker."""
+    if _event(record) != "LIVE_ORDER_ARM_BLOCKED":
+        return
+    args = record.args if isinstance(record.args, tuple) else ()
+    if len(args) < 6 or str(args[0] or "").strip().lower() != "unknown":
+        return
+    try:
+        ce_bars, pe_bars, required = int(args[1]), int(args[2]), int(args[3])
+    except (TypeError, ValueError):
+        ce_bars = pe_bars = required = 0
+    indicators_ready = bool(args[4])
+    quote_ready = bool(args[5])
+    if not indicators_ready:
+        reason = "evaluation_not_ready"
+    elif not quote_ready:
+        reason = "selected_option_quote_not_ready"
+    elif ce_bars < required or pe_bars < required:
+        reason = "selected_option_history_not_ready"
+    else:
+        reason = "startup_orchestration_guard"
+    normalized_args = list(args)
+    normalized_args[0] = reason
+    record.args = tuple(normalized_args)
+    record.reason = reason
 
 
 def _entity(record: logging.LogRecord) -> tuple[Any, ...]:
@@ -148,6 +176,7 @@ class BootLogRateControl(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         _normalize_role_telemetry(record)
+        _normalize_readiness_telemetry(record)
         event = _event(record)
         if event not in THROTTLED_EVENTS:
             return True
