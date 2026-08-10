@@ -25,6 +25,14 @@ _SYMBOL_FIELDS = ("symbol", "tradingsymbol", "trading_symbol")
 _AVG_PRICE_FIELDS = ("average_price", "avg_price", "buy_price", "price")
 _QTY_FIELDS = ("quantity", "net_qty", "net_quantity", "netQuantity", "net")
 _QUARANTINE_INTENTS = {"", "UNKNOWN", "BROKER_IMPORTED_ORDER", "MANUAL_ORDER_QUARANTINED"}
+_LOCAL_LIFECYCLE_FIELDS = (
+    "entry_time",
+    "order_id",
+    "stop_loss",
+    "take_profit",
+    "trailing_stop_distance",
+    "state",
+)
 
 
 def _canonical_key(symbol: object) -> str:
@@ -118,6 +126,71 @@ def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any,
                 unresolved.add(symbol)
         prepared.append(cloned)
     return prepared, unresolved
+
+
+def _snapshot_owned_position_lifecycle(manager: Any) -> dict[str, dict[str, Any]]:
+    """Capture local-only lifecycle identity for positions already owned by the bot."""
+
+    positions = getattr(manager, "_positions", None)
+    if not isinstance(positions, dict):
+        return {}
+    snapshot: dict[str, dict[str, Any]] = {}
+    for raw_key, position in list(positions.items()):
+        order_id = str(getattr(position, "order_id", "") or "").strip()
+        if not order_id:
+            continue
+        symbol = _canonical_key(getattr(position, "symbol", raw_key))
+        if not symbol:
+            continue
+        values = {field: getattr(position, field, None) for field in _LOCAL_LIFECYCLE_FIELDS}
+        values["side"] = str(getattr(position, "side", "") or "").strip().upper()
+        snapshot[symbol] = values
+    return snapshot
+
+
+def _restore_owned_position_lifecycle(
+    manager: Any,
+    snapshot: dict[str, dict[str, Any]],
+) -> int:
+    """Restore local lifecycle fields only when broker truth still shows the same side."""
+
+    if not snapshot:
+        return 0
+    positions = getattr(manager, "_positions", None)
+    if not isinstance(positions, dict):
+        return 0
+    restored = 0
+    for symbol, values in snapshot.items():
+        position = positions.get(symbol)
+        if position is None:
+            continue
+        saved_side = str(values.get("side") or "").strip().upper()
+        current_side = str(getattr(position, "side", "") or "").strip().upper()
+        if saved_side and current_side and saved_side != current_side:
+            continue
+        try:
+            if int(getattr(position, "quantity", 0) or 0) == 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        for field in _LOCAL_LIFECYCLE_FIELDS:
+            with suppress(Exception):
+                setattr(position, field, values.get(field))
+        restored += 1
+    return restored
+
+
+def _install_position_ownership_property() -> None:
+    """Expose durable bot ownership to existing orphan/capital diagnostics."""
+
+    position_cls = getattr(_position_manager, "Position", None)
+    if position_cls is None or hasattr(position_cls, "strategy_name"):
+        return
+
+    def strategy_name(position: Any) -> str:
+        return "BotManaged" if str(getattr(position, "order_id", "") or "").strip() else ""
+
+    position_cls.strategy_name = property(strategy_name)
 
 
 def _canonicalize_position_store(manager: Any) -> None:
@@ -218,6 +291,7 @@ def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
         return
+    _install_position_ownership_property()
     cls = getattr(_position_manager, "PositionManager", None)
     if cls is None or getattr(cls, "_canonical_position_ingress_patch", False):
         _PATCH_APPLIED = True
@@ -295,6 +369,7 @@ def apply_patches() -> None:
         )
 
     def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
+        lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
         if unresolved and isinstance(prepared, list):
@@ -304,6 +379,11 @@ def apply_patches() -> None:
             prepared,
         )
         _canonicalize_position_store(self)
+        restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)
+        if restored:
+            save_state = getattr(self, "save_state", None)
+            if callable(save_state):
+                save_state()
         return result
 
     def apply_broker_order_update(
