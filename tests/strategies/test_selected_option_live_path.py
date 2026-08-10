@@ -206,6 +206,7 @@ def test_quote_versions_do_not_advance_candle_version_or_starve_same_bar_evaluat
     }
 
     runner._on_tick(selected_ce, first_tick)
+    runner._last_periodic_eval_at_by_symbol[selected_ce] = time.monotonic() - 11.0
     runner._on_tick(selected_ce, second_tick)
 
     calls = [
