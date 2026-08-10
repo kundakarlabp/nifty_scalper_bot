@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.boot_log_safety import BootLogRateControl
 from nifty_scalper_bot.core.boot_readiness_safety import (
     adapt_compute_live_readiness,
+    adapt_indicator_get_history,
     adapt_mdm_pipeline_overload,
+    adapt_option_indicator_direction_context,
     adapt_register_and_subscribe_live_symbol,
     adapt_replay_latest_mdm_ticks_to_bus,
     adapt_sync_history_from_mdm,
@@ -156,6 +159,72 @@ def test_rate_control_covers_indicator_history_missing_noise() -> None:
     assert control.filter(first) is True
     assert control.filter(same) is False
     assert control.filter(other) is True
+
+
+def test_live_order_arm_unknown_is_replaced_by_visible_orchestration_reason() -> None:
+    record = logging.LogRecord(
+        name="nifty_scalper_bot.core.app",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=(
+            "LIVE_ORDER_ARM_BLOCKED reason=%s ce_bars=%s pe_bars=%s required=%s "
+            "indicators_ready=%s quote_ready=%s"
+        ),
+        args=("unknown", 105, 105, 30, True, True),
+        exc_info=None,
+    )
+
+    assert BootLogRateControl(interval_seconds=30.0).filter(record) is True
+    assert record.reason == "startup_orchestration_guard"
+    assert "reason=startup_orchestration_guard" in record.getMessage()
+    assert "reason=unknown" not in record.getMessage()
+
+
+def test_missing_indicator_history_short_circuits_duplicate_instrumentation() -> None:
+    calls: list[str] = []
+    symbol = "NFO:NIFTY2681124600PE"
+
+    def original(_self, resolved_symbol: str, *args, **kwargs):
+        del args, kwargs
+        calls.append(resolved_symbol)
+        return [1.0]
+
+    state = SimpleNamespace(
+        _histories={},
+        _lock=threading.RLock(),
+        _logger=logging.getLogger("nifty_scalper_bot.strategies.indicators"),
+    )
+    adapted = adapt_indicator_get_history(original)
+
+    assert adapted(state, symbol) == []
+    assert calls == []
+
+    state._histories[symbol] = object()
+    assert adapted(state, symbol) == [1.0]
+    assert calls == [symbol]
+
+
+def test_option_indicator_direction_is_rederived_from_underlying_context() -> None:
+    def original(_self, _symbol: str, *args, **kwargs):
+        del args, kwargs
+        return {
+            "close": 85.0,
+            "direction_bias": "CE",
+            "underlying_direction_bias": "CE",
+            "underlying_direction_confidence": 0.95,
+            "context_age_seconds": 0.01,
+            "context_fresh": True,
+            "direction_context_source": "stale_option_payload",
+        }
+
+    adapted = adapt_option_indicator_direction_context(original)
+    option_payload = adapted(object(), "NFO:NIFTY2681124600PE")
+    spot_payload = adapted(object(), "NSE:NIFTY")
+
+    assert option_payload == {"close": 85.0}
+    assert spot_payload["direction_bias"] == "CE"
+    assert spot_payload["context_fresh"] is True
 
 
 def test_live_validation_checklist_log_contains_primary_gate(caplog) -> None:
