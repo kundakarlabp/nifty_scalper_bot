@@ -37,20 +37,15 @@ _EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket
 def _strip_exit_identity_kwargs(
     kwargs: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Remove exit identity metadata unsupported by core.place_order.
+    """Return core-compatible kwargs while retaining supported exit identity.
 
-    The live bracket safety layer attaches immutable exit metadata to protective
-    order requests. The native entry gate needs to see the original kwargs to
-    classify the request as protective, but the base OrderManager.place_order
-    currently does not accept these metadata-only fields. Strip them only at the
-    delegation boundary so exits cannot fail with a TypeError before reaching the
-    broker.
+    Older core ``place_order`` signatures did not accept these lifecycle fields,
+    so this compatibility helper used to remove them.  The canonical core now
+    accepts and persists them; keep the helper/API but stop discarding identity.
     """
 
     cleaned = dict(kwargs)
-    identity = {
-        key: cleaned.pop(key) for key in list(_EXIT_IDENTITY_KWARGS) if key in cleaned
-    }
+    identity = {key: cleaned[key] for key in _EXIT_IDENTITY_KWARGS if key in cleaned}
     return cleaned, identity
 
 
@@ -276,6 +271,48 @@ class RuntimeOrderManager(_core.OrderManager):
             self._last_exit_identity_kwargs = dict(identity)
         return super().place_order(*args, **cleaned_kwargs)
 
+    def _sync_filled_exit_bracket(
+        self,
+        order: Any,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Ask the canonical bracket owner to converge a confirmed reducing fill."""
+
+        if order is None:
+            return
+        status = getattr(order, "status", None)
+        status_name = str(getattr(status, "name", status) or "").strip().upper()
+        intent = str(getattr(order, "intent", "") or "").strip().upper()
+        if status_name != "FILLED" or intent not in {"EXIT", "REDUCE"}:
+            return
+        bracket_manager = getattr(self, "_bracket_manager", None)
+        reconcile = getattr(bracket_manager, "reconcile_filled_exit_order", None)
+        if not callable(reconcile):
+            return
+        try:
+            reconcile(order, dict(payload or {}))
+        except Exception as exc:  # noqa: BLE001 - fill is already broker truth
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "error", None)
+            if callable(log):
+                log(
+                    "EXIT_BRACKET_TERMINAL_RECONCILE_FAILED order_id=%s symbol=%s error=%s",
+                    getattr(order, "order_id", ""),
+                    getattr(order, "symbol", ""),
+                    exc,
+                    extra={
+                        "event": "EXIT_BRACKET_TERMINAL_RECONCILE_FAILED",
+                        "order_id": getattr(order, "order_id", ""),
+                        "symbol": getattr(order, "symbol", ""),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+    def _apply_broker_order_update(self, order_update: dict[str, Any]) -> Any:
+        updated = super()._apply_broker_order_update(order_update)
+        self._sync_filled_exit_bracket(updated, order_update)
+        return updated
+
     def _update_from_response(
         self,
         order: Any,
@@ -298,6 +335,7 @@ class RuntimeOrderManager(_core.OrderManager):
                         "error_type": type(exc).__name__,
                     },
                 )
+        self._sync_filled_exit_bracket(updated, payload)
         return updated
 
 
