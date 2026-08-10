@@ -205,6 +205,20 @@ def adapt_sync_history_from_mdm(original: Callable[..., _T]) -> Callable[..., _T
     return wrapped
 
 
+def adapt_mdm_pipeline_overload(original: Callable[..., Any]) -> Callable[..., Any]:
+    """Do not report overload recovery while a tick batch is still in flight."""
+
+    @wraps(original)
+    def wrapped(self: Any) -> Any:
+        if bool(getattr(self, "_pipeline_overloaded", False)) and int(
+            getattr(self, "_tick_active_drains", 0) or 0
+        ) > 0:
+            return None
+        return original(self)
+
+    return wrapped
+
+
 def _patch_function(
     target: Any,
     name: str,
@@ -263,9 +277,26 @@ def apply_app_patch(app_module: Any) -> None:
             "_history_role_corrected",
         )
 
+    mdm_cls = getattr(app_module, "MarketDataManager", None)
+    if mdm_cls is None:
+        try:
+            from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+
+            mdm_cls = MarketDataManager
+        except Exception:  # noqa: BLE001 - optional import compatibility
+            mdm_cls = None
+    if mdm_cls is not None:
+        _patch_function(
+            mdm_cls,
+            "_update_pipeline_overload_locked",
+            adapt_mdm_pipeline_overload,
+            "_active_drain_overload_recovery_guarded",
+        )
+
 
 __all__ = [
     "adapt_compute_live_readiness",
+    "adapt_mdm_pipeline_overload",
     "adapt_register_and_subscribe_live_symbol",
     "adapt_replay_latest_mdm_ticks_to_bus",
     "adapt_sync_history_from_mdm",
