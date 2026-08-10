@@ -96,7 +96,18 @@ def apply_patches() -> None:
             if item
         }
         live_seen = getattr(self, "_live_bar_seen", set())
-        if normalized in selected and normalized not in live_seen:
+        current_version = int(
+            (getattr(self, "_candle_versions", {}) or {}).get(normalized, 0) or 0
+        )
+        last_version = int(
+            (getattr(self, "_last_strategy_versions", {}) or {}).get(normalized, 0)
+            or 0
+        )
+        if (
+            normalized in selected
+            and normalized not in live_seen
+            and current_version > last_version
+        ):
             state = (getattr(self, "_symbol_state", {}) or {}).get(normalized)
             if state is not None:
                 state._last_eval_bar_ts = None
