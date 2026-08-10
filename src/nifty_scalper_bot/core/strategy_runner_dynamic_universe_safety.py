@@ -50,7 +50,10 @@ def apply_patches() -> None:
         """Do not promote a newly selected CE/PE pair before its indicator history is warm."""
         new_ce = normalize_symbol(str(getattr(selection, "selected_ce", None) or "")) or None
         new_pe = normalize_symbol(str(getattr(selection, "selected_pe", None) or "")) or None
-        if new_ce and new_pe:
+        runtime_ready = hasattr(self, "_option_required_bars") and hasattr(
+            self, "_indicator_engine"
+        )
+        if new_ce and new_pe and runtime_ready:
             required = int(getattr(self, "_option_required_bars", 1) or 1)
             try:
                 pair_ready = all(
