@@ -211,6 +211,29 @@ def test_session_readiness_adapter_removes_option_details_outside_session() -> N
     assert reasons == ["market_closed"]
 
 
+def test_live_readiness_adapter_never_returns_unknown_empty_blocker() -> None:
+    adapted = adapt_compute_live_readiness(lambda **_kwargs: (False, []))
+
+    armed, reasons = adapted(
+        live_mode=True,
+        hard_ready=True,
+        quote_available=True,
+        ws_quote_proof=True,
+        market_open=True,
+        runner_running=True,
+        selected_ce="NFO:NIFTY2681124600CE",
+        selected_pe="NFO:NIFTY2681124600PE",
+        ce_bars=105,
+        pe_bars=105,
+        option_exec_min_bars=30,
+        ce_quote_ready=True,
+        pe_quote_ready=True,
+    )
+
+    assert armed is False
+    assert reasons == ["readiness_inconsistent"]
+
+
 def test_cached_tick_replay_skips_when_message_bus_is_inactive() -> None:
     calls: list[str] = []
 
