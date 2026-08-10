@@ -4,6 +4,8 @@ import inspect
 import subprocess
 import sys
 
+import pytest
+
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
     apply_premium_risk_contract,
@@ -149,6 +151,62 @@ def test_premium_target_rr_remains_authoritative() -> None:
     assert result.take_profit == 112.0
 
 
+def test_replacement_candidate_geometry_beats_stale_original_distance() -> None:
+    signal = _signal(
+        stop_loss=112.746,
+        take_profit=138.2364,
+        candidate_selected=True,
+        candidate_symbol="NFO:NIFTY2680424400PE",
+        candidate_entry_price=122.55,
+        candidate_stop_loss=112.746,
+        candidate_target=138.2364,
+        premium_stop_distance=2.8457142857,
+        premium_target_rr=2.0,
+        premium_risk_reference_price=92.65,
+        invalidation_level_domain="option_premium",
+    )
+
+    result = validate_option_premium_geometry(
+        None,
+        signal,
+        entry_price=122.55,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result.stop_loss == pytest.approx(112.746)
+    assert result.take_profit == pytest.approx(142.158)
+    assert result.metadata["premium_risk_source"] == "selected_candidate_geometry"
+    rr = (result.take_profit - 122.55) / (122.55 - result.stop_loss)
+    assert rr == pytest.approx(2.0)
+
+
+def test_candidate_metadata_does_not_override_uncopied_strategy_geometry() -> None:
+    signal = _signal(
+        stop_loss=119.7042857143,
+        take_profit=128.2414285714,
+        candidate_selected=True,
+        candidate_symbol="NFO:NIFTY2680424400PE",
+        candidate_entry_price=122.55,
+        candidate_stop_loss=112.746,
+        candidate_target=138.2364,
+        premium_stop_distance=2.8457142857,
+        premium_target_rr=2.0,
+        invalidation_level_domain="option_premium",
+    )
+
+    result = validate_option_premium_geometry(
+        None,
+        signal,
+        entry_price=122.55,
+        entry_side="BUY",
+        atr=25.0,
+    )
+
+    assert result.stop_loss == pytest.approx(122.55 - 2.8457142857)
+    assert result.metadata["premium_risk_source"] == "premium_stop_distance"
+
+
 def test_execution_anchor_preserves_valid_geometry_instead_of_widening() -> None:
     signal = _signal(stop_loss=92.0, take_profit=116.0)
 
@@ -200,7 +258,6 @@ def test_absolute_invalidation_is_not_moved_by_anchor() -> None:
     assert result is signal
     assert result.stop_loss == 92.0
     assert result.take_profit == 116.0
-
 
 
 def test_runner_geometry_is_owned_at_definition_site() -> None:
