@@ -10,25 +10,19 @@ from nifty_scalper_bot.execution.runtime_order_manager import (
 )
 
 
-def test_strip_exit_identity_kwargs_preserves_core_order_kwargs() -> None:
-    cleaned, identity = _strip_exit_identity_kwargs(
-        {
-            "symbol": "NFO:NIFTY2671424250PE",
-            "side": "SELL",
-            "quantity": 65,
-            "intent": "EXIT",
-            "linked_entry_order_id": "2074702520085045248",
-            "trade_lifecycle_id": "2074702520085045248",
-            "bracket_id": "2074702520085045248",
-        }
-    )
-
-    assert cleaned == {
+def test_exit_identity_helper_preserves_current_core_order_kwargs() -> None:
+    payload = {
         "symbol": "NFO:NIFTY2671424250PE",
         "side": "SELL",
         "quantity": 65,
         "intent": "EXIT",
+        "linked_entry_order_id": "2074702520085045248",
+        "trade_lifecycle_id": "2074702520085045248",
+        "bracket_id": "2074702520085045248",
     }
+    cleaned, identity = _strip_exit_identity_kwargs(payload)
+
+    assert cleaned == payload
     assert identity == {
         "linked_entry_order_id": "2074702520085045248",
         "trade_lifecycle_id": "2074702520085045248",
@@ -36,16 +30,23 @@ def test_strip_exit_identity_kwargs_preserves_core_order_kwargs() -> None:
     }
 
 
-def test_runtime_place_order_strips_exit_identity_only_after_native_gate(monkeypatch) -> None:
+def test_runtime_place_order_preserves_exit_identity_after_native_gate(monkeypatch) -> None:
     manager = object.__new__(RuntimeOrderManager)
     blocked_kwargs: dict[str, Any] = {}
     core_kwargs: dict[str, Any] = {}
 
-    def fake_blocked(self: RuntimeOrderManager, method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    def fake_blocked(
+        self: RuntimeOrderManager,
+        method_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         blocked_kwargs.update(kwargs)
         return NO_BLOCK
 
-    def fake_core_place_order(self: RuntimeOrderManager, *args: Any, **kwargs: Any) -> str:
+    def fake_core_place_order(
+        self: RuntimeOrderManager, *args: Any, **kwargs: Any
+    ) -> str:
         core_kwargs.update(kwargs)
         return "exit_order_1"
 
@@ -71,7 +72,7 @@ def test_runtime_place_order_strips_exit_identity_only_after_native_gate(monkeyp
     assert blocked_kwargs["intent"] == "EXIT"
     assert blocked_kwargs["linked_entry_order_id"] == "2074702520085045248"
     assert core_kwargs["intent"] == "EXIT"
-    assert "linked_entry_order_id" not in core_kwargs
-    assert "trade_lifecycle_id" not in core_kwargs
-    assert "bracket_id" not in core_kwargs
+    assert core_kwargs["linked_entry_order_id"] == "2074702520085045248"
+    assert core_kwargs["trade_lifecycle_id"] == "2074702520085045248"
+    assert core_kwargs["bracket_id"] == "2074702520085045248"
     assert manager._last_exit_identity_kwargs["bracket_id"] == "2074702520085045248"
