@@ -240,6 +240,9 @@ def test_hydrated_selected_ce_and_pe_both_reach_strategy_manager_on_new_candle_v
     )
     selected_pe = runner._active_selected_pe
     fixed_bar_ts = datetime.now(timezone.utc)
+    runner._universe_dynamic_mode = True
+    runner._frozen_universe.update({selected_ce, selected_pe})
+    runner._active_option_symbols.update({selected_ce, selected_pe})
     runner._refresh_underlying_context_snapshots = lambda **_kwargs: None
     runner._get_cached_quote_for_live_entry = lambda _symbol: {
         "symbol": _symbol,
