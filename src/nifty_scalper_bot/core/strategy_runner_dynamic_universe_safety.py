@@ -96,9 +96,14 @@ def apply_patches() -> None:
             if item
         }
         live_seen = getattr(self, "_live_bar_seen", set())
-        current_version = int(
+        stored_version = int(
             (getattr(self, "_candle_versions", {}) or {}).get(normalized, 0) or 0
         )
+        try:
+            incoming_version = int(tick.get("candle_version") or 0)
+        except (TypeError, ValueError):
+            incoming_version = 0
+        current_version = max(stored_version, incoming_version)
         last_version = int(
             (getattr(self, "_last_strategy_versions", {}) or {}).get(normalized, 0)
             or 0
