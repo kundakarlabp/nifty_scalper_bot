@@ -273,6 +273,15 @@ def test_hydrated_selected_ce_and_pe_both_reach_strategy_manager_on_new_candle_v
     runner._candle_versions[selected_pe] = 1
 
     for index, symbol in enumerate((selected_ce, selected_pe), start=1):
+        bias = "CE" if symbol.endswith("CE") else "PE"
+        runner._underlying_context_from_strategy_manager = lambda bias=bias: {
+            "direction_bias": bias,
+            "underlying_direction_bias": bias,
+            "spot_fresh": True,
+            "fut_fresh": True,
+            "context_fresh": True,
+            "underlying_direction_confidence": 0.9,
+        }
         strategy_manager.generate_signal.reset_mock()
         tick = {
             "symbol": symbol,
