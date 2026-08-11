@@ -39,6 +39,7 @@ def _vwap_setup_signal(symbol: str, setup_epoch: float) -> SimpleNamespace:
         "role": "trigger",
         "contract_side": "PE",
         "setup_id": f"vwap:PE:{anchor}",
+        "setup_candle_timestamp": anchor,
     }
     return SimpleNamespace(symbol=symbol, action="BUY", metadata=metadata)
 
