@@ -149,12 +149,16 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
     from nifty_scalper_bot.core.session_boundary_rearm import (
         apply_app_patch as _session_boundary_adapter,
     )
+    from nifty_scalper_bot.core.strategy_context_fast_path import (
+        apply_patches as _strategy_context_fast_path_adapter,
+    )
     from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import (
         apply_patches as _dynamic_universe_adapter,
     )
 
     _dynamic_universe_adapter()
     _runtime_reliability_adapter()
+    _strategy_context_fast_path_adapter()
     _off_market_controller_adapter()
     _off_market_app_adapter(app_module)
     _session_boundary_adapter(app_module)
