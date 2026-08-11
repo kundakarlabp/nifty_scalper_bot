@@ -67,7 +67,10 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
     if bool(getattr(manager_cls, _INSTALLED_ATTR, False)):
         return
 
-    original_process_tick = manager_cls._process_queued_tick
+    original_process_tick: Any = getattr(manager_cls, "_process_queued_tick", None)
+    has_tick_queue = callable(original_process_tick) and callable(
+        getattr(manager_cls, "_pop_pending_tick_batch", None)
+    )
 
     def _process_queued_tick(self: Any, raw: Mapping[str, Any]) -> Any:
         symbol = str(raw.get("symbol") or "")
@@ -289,8 +292,9 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                 )
         return flushed
 
-    manager_cls._process_queued_tick = _process_queued_tick
-    manager_cls._pop_pending_tick_batch = _pop_pending_tick_batch
+    if has_tick_queue:
+        manager_cls._process_queued_tick = _process_queued_tick
+        manager_cls._pop_pending_tick_batch = _pop_pending_tick_batch
     manager_cls.flush_due_candles = flush_due_candles
     setattr(manager_cls, _INSTALLED_ATTR, True)
 
