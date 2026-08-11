@@ -30,6 +30,7 @@ from nifty_scalper_bot.execution.native_entry_gate import (
     block_result,
     configure_provider,
 )
+from nifty_scalper_bot.strategies.signal_identity_patch import order_setup_context
 
 _EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket_id"}
 
@@ -269,7 +270,11 @@ class RuntimeOrderManager(_core.OrderManager):
         cleaned_kwargs, identity = _strip_exit_identity_kwargs(effective_kwargs)
         if identity:
             self._last_exit_identity_kwargs = dict(identity)
-        return super().place_order(*args, **cleaned_kwargs)
+        # Keep setup freshness exact and call-scoped. Core still receives the
+        # unchanged order kwargs; the structural stop guard can recover the
+        # strategy setup only while this specific signal is under risk review.
+        with order_setup_context(cleaned_kwargs.get("signal_id")):
+            return super().place_order(*args, **cleaned_kwargs)
 
     def _sync_filled_exit_bracket(
         self,

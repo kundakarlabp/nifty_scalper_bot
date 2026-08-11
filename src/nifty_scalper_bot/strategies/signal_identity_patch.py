@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
 import hashlib
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Any, Mapping
+import threading
+from typing import Any, Iterator, Mapping
 
 from nifty_scalper_bot.strategies.quote_update_identity import (
     build_evaluation_snapshot_id,
@@ -29,6 +33,20 @@ _ANCHOR_KEYS = (
     "latest_bar_ts",
     "signal_timestamp",
     "timestamp",
+)
+_SETUP_TIMESTAMP_KEYS = (
+    "setup_candle_timestamp",
+    "bar_timestamp",
+    "latest_bar_ts",
+    "signal_timestamp",
+    "timestamp",
+)
+_SETUP_METADATA_LIMIT = 2048
+_SETUP_METADATA_LOCK = threading.Lock()
+_SETUP_METADATA_BY_SIGNAL_ID: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_CURRENT_ORDER_SETUP_METADATA: ContextVar[dict[str, Any] | None] = ContextVar(
+    "current_order_setup_metadata",
+    default=None,
 )
 
 
@@ -74,6 +92,60 @@ def _anchor_value(metadata: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _remember_setup_metadata(signal_id: str, metadata: Mapping[str, Any]) -> None:
+    """Bind only the strategy's stamped setup-candle time to its stable id."""
+    if str(metadata.get("role") or "trigger").strip().lower() == "context":
+        return
+    timestamp = next(
+        (
+            metadata.get(key)
+            for key in _SETUP_TIMESTAMP_KEYS
+            if metadata.get(key) not in (None, "")
+        ),
+        None,
+    )
+    if timestamp is None:
+        return
+    payload: dict[str, Any] = {"setup_candle_timestamp": timestamp}
+    setup_id = metadata.get("setup_id")
+    if setup_id not in (None, ""):
+        payload["setup_id"] = setup_id
+    with _SETUP_METADATA_LOCK:
+        _SETUP_METADATA_BY_SIGNAL_ID.pop(signal_id, None)
+        _SETUP_METADATA_BY_SIGNAL_ID[signal_id] = payload
+        while len(_SETUP_METADATA_BY_SIGNAL_ID) > _SETUP_METADATA_LIMIT:
+            _SETUP_METADATA_BY_SIGNAL_ID.popitem(last=False)
+
+
+def setup_metadata_for_signal_id(signal_id: object) -> dict[str, Any]:
+    """Return setup metadata previously bound to this deterministic signal id."""
+    key = str(signal_id or "").strip()
+    if not key:
+        return {}
+    with _SETUP_METADATA_LOCK:
+        payload = _SETUP_METADATA_BY_SIGNAL_ID.get(key)
+        if payload is None:
+            return {}
+        _SETUP_METADATA_BY_SIGNAL_ID.move_to_end(key)
+        return dict(payload)
+
+
+def current_order_setup_metadata() -> dict[str, Any]:
+    """Return setup metadata scoped to the currently evaluated order call."""
+    return dict(_CURRENT_ORDER_SETUP_METADATA.get() or {})
+
+
+@contextmanager
+def order_setup_context(signal_id: object) -> Iterator[dict[str, Any]]:
+    """Scope exact setup metadata to one synchronous order/risk evaluation."""
+    payload = setup_metadata_for_signal_id(signal_id)
+    token = _CURRENT_ORDER_SETUP_METADATA.set(payload or None)
+    try:
+        yield payload
+    finally:
+        _CURRENT_ORDER_SETUP_METADATA.reset(token)
+
+
 def _anchor(metadata: Mapping[str, Any]) -> str:
     value = _anchor_value(metadata)
     if value is not None:
@@ -103,7 +175,9 @@ def _deterministic_id(signal: Any) -> str:
     setup_anchor = _anchor(metadata)
     action = str(getattr(signal, "action", ""))
     raw = f"{strategy}:{underlying}:{option_side}:{action}:{setup_anchor}"
-    return hashlib.md5(raw.encode()).hexdigest()[:16]
+    signal_id = hashlib.md5(raw.encode()).hexdigest()[:16]
+    _remember_setup_metadata(signal_id, metadata)
+    return signal_id
 
 
 def _stamp_evaluation_identity(signal: Any, indicators: Mapping[str, Any]) -> Any:
@@ -237,5 +311,8 @@ __all__ = [
     "_deterministic_id",
     "_option_thesis",
     "_stamp_evaluation_identity",
+    "current_order_setup_metadata",
     "has_setup_anchor",
+    "order_setup_context",
+    "setup_metadata_for_signal_id",
 ]
