@@ -44,6 +44,7 @@ def test_runtime_order_scopes_exact_setup_identity_to_core_call(monkeypatch) -> 
             "role": "trigger",
             "contract_side": "PE",
             "setup_id": f"vwap:PE:{setup_timestamp}",
+            "setup_candle_timestamp": setup_timestamp,
         },
     )
     signal_id = _deterministic_id(signal)
