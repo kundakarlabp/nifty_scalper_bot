@@ -92,43 +92,18 @@ def _anchor_value(metadata: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _setup_timestamp_value(metadata: Mapping[str, Any]) -> Any | None:
-    """Return the actual setup candle time, never a wall-clock retry time."""
-    for key in _SETUP_TIMESTAMP_KEYS:
-        value = metadata.get(key)
-        if value not in (None, ""):
-            return value
-
-    # VWAPPro's structural setup_id intentionally embeds the finalized thesis
-    # anchor (``vwap:<side>:<bar timestamp>``). Recover only a timestamp-shaped
-    # suffix; price/structure IDs such as ``smc:PE:66.65`` must not re-arm time.
-    setup_id = str(metadata.get("setup_id") or "").strip()
-    parts = setup_id.split(":", 2)
-    if len(parts) != 3:
-        return None
-    candidate = parts[2].strip()
-    if not candidate:
-        return None
-    if re.fullmatch(r"\d+(?:\.\d+)?", candidate):
-        try:
-            numeric = float(candidate)
-        except ValueError:
-            return None
-        return candidate if numeric >= 1_000_000_000 else None
-    if not re.match(r"^\d{4}-\d{2}-\d{2}[ T]", candidate):
-        return None
-    try:
-        datetime.fromisoformat(candidate.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return candidate
-
-
 def _remember_setup_metadata(signal_id: str, metadata: Mapping[str, Any]) -> None:
-    role = str(metadata.get("role") or "trigger").strip().lower()
-    if role == "context":
+    """Bind only the strategy's stamped setup-candle time to its stable id."""
+    if str(metadata.get("role") or "trigger").strip().lower() == "context":
         return
-    timestamp = _setup_timestamp_value(metadata)
+    timestamp = next(
+        (
+            metadata.get(key)
+            for key in _SETUP_TIMESTAMP_KEYS
+            if metadata.get(key) not in (None, "")
+        ),
+        None,
+    )
     if timestamp is None:
         return
     payload: dict[str, Any] = {"setup_candle_timestamp": timestamp}
