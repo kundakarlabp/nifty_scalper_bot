@@ -27,10 +27,120 @@ def _coerce_ist_timestamp(value: Any) -> pd.Timestamp | None:
     return timestamp.tz_convert(_IST_TZ)
 
 
+def _raw_tick_minute(tick: Mapping[str, Any]) -> pd.Timestamp | None:
+    for key in ("exchange_timestamp", "timestamp", "last_trade_time"):
+        value = tick.get(key)
+        if value in (None, ""):
+            continue
+        parsed = _coerce_ist_timestamp(value)
+        if parsed is not None:
+            return parsed.floor("1min")
+    return None
+
+
+def _has_unapplied_tick_for_minute(
+    manager: Any, symbol: str, expected_minute: pd.Timestamp
+) -> bool:
+    """Return whether an already-received same-minute tick is not applied yet."""
+    canonicalize = getattr(manager, "_canonical_symbol", None)
+    canonical = canonicalize(symbol) if callable(canonicalize) else symbol
+    lock = getattr(manager, "_pending_tick_lock", None)
+    if lock is None:
+        return False
+    with lock:
+        if getattr(manager, "_candle_tick_inflight_symbol", None) == canonical:
+            return True
+        queues = getattr(manager, "_pending_tick_queues", {}) or {}
+        queue = list(queues.get(canonical, ()))
+        far = (getattr(manager, "_pending_far_ticks", {}) or {}).get(canonical)
+        if isinstance(far, Mapping):
+            queue.append(far)
+    return any(
+        isinstance(tick, Mapping)
+        and _raw_tick_minute(tick) == expected_minute
+        for tick in queue
+    )
+
+
 def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
-    """Replace clock flush with an expected-minute, race-safe implementation."""
+    """Install race-safe clock flush and critical-context queue fairness."""
     if bool(getattr(manager_cls, _INSTALLED_ATTR, False)):
         return
+
+    original_process_tick: Any = getattr(manager_cls, "_process_queued_tick", None)
+    has_tick_queue = callable(original_process_tick) and callable(
+        getattr(manager_cls, "_pop_pending_tick_batch", None)
+    )
+
+    def _process_queued_tick(self: Any, raw: Mapping[str, Any]) -> Any:
+        symbol = str(raw.get("symbol") or "")
+        if not symbol:
+            try:
+                token = int(raw.get("instrument_token") or raw.get("token") or 0)
+            except (TypeError, ValueError):
+                token = 0
+            symbol = str((getattr(self, "_symbol_by_token", {}) or {}).get(token) or "")
+        canonicalize = getattr(self, "_canonical_symbol", None)
+        canonical = canonicalize(symbol) if callable(canonicalize) and symbol else symbol
+        lock = getattr(self, "_pending_tick_lock", None)
+        if lock is not None:
+            with lock:
+                self._candle_tick_inflight_symbol = canonical or None
+        try:
+            return original_process_tick(self, raw)
+        finally:
+            if lock is not None:
+                with lock:
+                    if getattr(self, "_candle_tick_inflight_symbol", None) == canonical:
+                        self._candle_tick_inflight_symbol = None
+
+    def _pop_pending_tick_batch(self: Any) -> list[dict[str, Any]]:
+        """Preserve FIFO but prefer critical spot/future context on priority ties."""
+        batch: list[dict[str, Any]] = []
+        with self._pending_tick_lock:
+            if self._pending_count_locked() <= 0:
+                self._tick_drain_scheduled = False
+                return []
+            for _ in range(self._tick_drain_batch_size):
+                selected_key: str | None = None
+                selected_rank: tuple[int, int, float] | None = None
+                for key, queue in self._pending_tick_queues.items():
+                    if not queue:
+                        continue
+                    head = queue[0]
+                    priority = int(head.get("_mdm_priority", 99))
+                    bucket = str(head.get("_mdm_priority_bucket") or "")
+                    # Near-ATM options intentionally remain FIFO so CandleEngine
+                    # still sees every tick, but they must not tie-starve the
+                    # futures/spot context that drives direction/readiness.
+                    bucket_rank = 1 if bucket == "near_atm" else 0
+                    enqueued = head.get("_mdm_enqueued_mono")
+                    age_rank = (
+                        float(enqueued)
+                        if isinstance(enqueued, (int, float))
+                        else float("inf")
+                    )
+                    rank = (priority, bucket_rank, age_rank)
+                    if selected_rank is None or rank < selected_rank:
+                        selected_key = key
+                        selected_rank = rank
+                if selected_key is not None:
+                    queue = self._pending_tick_queues[selected_key]
+                    batch.append(queue.popleft())
+                    self._pending_decrement_locked(1)
+                    if not queue:
+                        self._pending_tick_queues.pop(selected_key, None)
+                    continue
+                if self._pending_far_ticks:
+                    _key, tick = self._pending_far_ticks.popitem()
+                    self._pending_decrement_locked(1)
+                    batch.append(tick)
+                    continue
+                break
+            prune = getattr(self, "_pending_heap_prune_locked", None)
+            if callable(prune):
+                prune()
+        return batch
 
     def flush_due_candles(
         self: Any,
@@ -63,6 +173,11 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
             if expected_minute is None:
                 continue
             if now_ts < expected_minute + pd.Timedelta(minutes=1, seconds=grace):
+                continue
+            # A tick already received before the clock flush must be incorporated
+            # before this minute becomes immutable. This covers both queued and
+            # currently-processing ticks without allowing finalized OHLC mutation.
+            if _has_unapplied_tick_for_minute(self, symbol, expected_minute):
                 continue
 
             # Completed history is authoritative, and tick-driven rollover can
@@ -177,6 +292,9 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                 )
         return flushed
 
+    if has_tick_queue:
+        manager_cls._process_queued_tick = _process_queued_tick
+        manager_cls._pop_pending_tick_batch = _pop_pending_tick_batch
     manager_cls.flush_due_candles = flush_due_candles
     setattr(manager_cls, _INSTALLED_ATTR, True)
 
