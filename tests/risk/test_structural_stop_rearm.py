@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import time
 from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.strategies.signal_identity_patch import (
+    _deterministic_id,
+    order_setup_context,
+)
 
 
 def _signal(symbol: str, **metadata):
@@ -25,6 +30,17 @@ def _stopped_manager(monkeypatch, tmp_path) -> PositionManager:
         reason="STOP_LOSS",
     )
     return pm
+
+
+def _vwap_setup_signal(symbol: str, setup_epoch: float) -> SimpleNamespace:
+    anchor = datetime.fromtimestamp(setup_epoch, tz=timezone.utc).isoformat()
+    metadata = {
+        "strategy": "VWAPPro",
+        "role": "trigger",
+        "contract_side": "PE",
+        "setup_id": f"vwap:PE:{anchor}",
+    }
+    return SimpleNamespace(symbol=symbol, action="BUY", metadata=metadata)
 
 
 def test_time_alone_does_not_rearm_stopped_thesis(monkeypatch, tmp_path) -> None:
@@ -81,6 +97,28 @@ def test_new_setup_cannot_bypass_minimum_cooldown(monkeypatch, tmp_path) -> None
     )
 
     assert "stop-loss thesis cooldown active" in reason
+
+
+def test_runtime_setup_context_rearms_only_after_minimum_cooldown(
+    monkeypatch, tmp_path
+) -> None:
+    pm = _stopped_manager(monkeypatch, tmp_path)
+    stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
+    setup = _vwap_setup_signal("NFO:NIFTY2680424350PE", stopped_at + 60)
+    signal_id = _deterministic_id(setup)
+    minimal_risk_signal = SimpleNamespace(symbol=setup.symbol)
+
+    with order_setup_context(signal_id):
+        reason = pm.stop_reentry_block_reason(minimal_risk_signal)
+    assert reason is not None
+    assert "stop-loss thesis cooldown active" in reason
+
+    pm._recent_stop_thesis["expires_epoch"] = time.time() - 1
+    with order_setup_context(signal_id):
+        reason = pm.stop_reentry_block_reason(minimal_risk_signal)
+
+    assert reason is None
+    assert pm._recent_stop_thesis is None
 
 
 def test_opposite_option_side_is_not_blocked(monkeypatch, tmp_path) -> None:
