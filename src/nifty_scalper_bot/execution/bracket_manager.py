@@ -167,6 +167,13 @@ def _confirm_entry_fill_once(self, order_id, fill_price, filled_qty=None):
 
 
 BoundBracketManager.confirm_entry_fill = _confirm_entry_fill_once
+
+from nifty_scalper_bot.execution.market_aware_profit_extension import (  # noqa: E402
+    apply_patches as _apply_market_aware_profit_extension,
+)
+
+_apply_market_aware_profit_extension(BoundBracketManager)
+
 BracketManager = BoundBracketManager
 
 __all__ = sorted(
