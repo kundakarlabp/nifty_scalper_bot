@@ -54,15 +54,33 @@ def _to_epoch(value: Any) -> float | None:
     return None
 
 
-def _signal_setup_epoch(signal: Any) -> float | None:
-    metadata = getattr(signal, "metadata", {})
-    if not isinstance(metadata, Mapping):
-        return None
+def _metadata_setup_epoch(metadata: Mapping[str, Any]) -> float | None:
     for key in _ANCHOR_KEYS:
         anchor = _to_epoch(metadata.get(key))
         if anchor is not None:
             return anchor
     return None
+
+
+def _signal_setup_epoch(signal: Any) -> float | None:
+    metadata = getattr(signal, "metadata", {})
+    if isinstance(metadata, Mapping):
+        anchor = _metadata_setup_epoch(metadata)
+        if anchor is not None:
+            return anchor
+
+    # The final risk layer evaluates a deliberately minimal OrderSignal. The
+    # runtime order facade scopes the exact deterministic strategy setup to this
+    # synchronous call, so recover that identity without using wall-clock time.
+    try:
+        from nifty_scalper_bot.strategies.signal_identity_patch import (
+            current_order_setup_metadata,
+        )
+
+        scoped = current_order_setup_metadata()
+    except Exception:  # noqa: BLE001 - unavailable context must fail closed
+        return None
+    return _metadata_setup_epoch(scoped) if isinstance(scoped, Mapping) else None
 
 
 def _load_persisted_stop(owner: Any) -> dict[str, Any] | None:
