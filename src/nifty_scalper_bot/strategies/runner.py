@@ -10095,6 +10095,15 @@ class StrategyRunner:
                 getattr(self, "_active_selected_ce", None),
                 getattr(self, "_active_selected_pe", None),
             )
+            tick_age_s = None
+            time_since_last_tick = getattr(mdm, "time_since_last_tick", None)
+            if sym and callable(time_since_last_tick):
+                try:
+                    age = time_since_last_tick(sym)
+                    if age is not None:
+                        tick_age_s = round(max(0.0, float(age)), 3)
+                except (TypeError, ValueError, RuntimeError):
+                    pass
             state_key = (
                 sym,
                 token_int,
@@ -10116,7 +10125,7 @@ class StrategyRunner:
                     desired,
                     subscription_ready,
                     current_generation_fresh_tick,
-                    None,
+                    tick_age_s,
                 ),
                 reminder_seconds=float(
                     os.getenv("RUNNER_BOOTSTRAP_LOG_REMINDER_SECONDS", "600") or "600"
@@ -10130,7 +10139,7 @@ class StrategyRunner:
                     "subscribed": subscription_ready,
                     "subscription_requested": desired,
                     "fresh_tick": current_generation_fresh_tick,
-                    "tick_age_s": None,
+                    "tick_age_s": tick_age_s,
                     "selected_ce": selected_pair[0],
                     "selected_pe": selected_pair[1],
                     "market_mode": get_runtime_market_mode(),

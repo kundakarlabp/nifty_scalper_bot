@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from datetime import datetime, timezone
@@ -173,6 +174,29 @@ def test_dynamic_readd_preserves_newer_canonical_history(monkeypatch):
     runner.add_symbol(symbol)
 
     assert runner._symbol_history[symbol] == canonical_history
+
+
+def test_selected_option_subscription_state_reports_tick_age(monkeypatch, caplog):
+    """Selected-option telemetry must report the MDM's observed tick age."""
+    runner, _strategy_manager, _risk_manager, _order_manager, selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    runner._logger = logging.getLogger("test.selected_option_subscription_state")
+    runner._market_data.time_since_last_tick = (
+        lambda symbol: 2.5 if symbol == selected_ce else None
+    )
+
+    with caplog.at_level(logging.INFO):
+        runner._emit_live_universe_bootstrap_status(symbol=selected_ce)
+
+    record = next(
+        item
+        for item in caplog.records
+        if getattr(item, "event", None) == "SELECTED_OPTION_SUBSCRIPTION_STATE"
+        and getattr(item, "symbol", None) == selected_ce
+    )
+    assert record.tick_age_s == 2.5
+    assert "tick_age_s=2.5" in record.message
 
 
 def test_quote_versions_do_not_advance_candle_version_or_starve_same_bar_evaluation(monkeypatch):
