@@ -13,6 +13,7 @@ from nifty_scalper_bot.data.candle_state_hardening import reconcile_stale_curren
 _IST_TZ = "Asia/Kolkata"
 _INSTALLED_ATTR = "_candle_clock_flush_hardening_installed"
 _RESERVED_MINUTES_ATTR = "_candle_tick_reserved_minutes"
+_RESERVED_TICKS_ATTR = "_candle_tick_reserved_ids"
 _LAST_PUBLISHED: dict[int, dict[str, pd.Timestamp]] = defaultdict(dict)
 
 
@@ -62,6 +63,15 @@ def _tick_reservation_key(
 
 def _reserve_popped_tick_locked(manager: Any, tick: Mapping[str, Any]) -> None:
     """Keep a local-batch tick visible to the clock finalization guard."""
+    tick_id = id(tick)
+    reserved_ids = getattr(manager, _RESERVED_TICKS_ATTR, None)
+    if not isinstance(reserved_ids, dict):
+        reserved_ids = {}
+        setattr(manager, _RESERVED_TICKS_ATTR, reserved_ids)
+    # Budget exhaustion may requeue the same dict and pop it again later. That
+    # must remain one reservation, not increment the minute count twice.
+    if tick_id in reserved_ids:
+        return
     key = _tick_reservation_key(manager, tick)
     if key is None:
         return
@@ -70,11 +80,15 @@ def _reserve_popped_tick_locked(manager: Any, tick: Mapping[str, Any]) -> None:
         reservations = {}
         setattr(manager, _RESERVED_MINUTES_ATTR, reservations)
     reservations[key] = int(reservations.get(key, 0) or 0) + 1
+    reserved_ids[tick_id] = key
 
 
 def _release_popped_tick_locked(manager: Any, tick: Mapping[str, Any]) -> None:
     """Release one local-batch reservation after its processing attempt ends."""
-    key = _tick_reservation_key(manager, tick)
+    reserved_ids = getattr(manager, _RESERVED_TICKS_ATTR, None)
+    if not isinstance(reserved_ids, dict):
+        return
+    key = reserved_ids.pop(id(tick), None)
     if key is None:
         return
     reservations = getattr(manager, _RESERVED_MINUTES_ATTR, None)
@@ -163,9 +177,6 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                     head = queue[0]
                     priority = int(head.get("_mdm_priority", 99))
                     bucket = str(head.get("_mdm_priority_bucket") or "")
-                    # Near-ATM options intentionally remain FIFO so CandleEngine
-                    # still sees every tick, but they must not tie-starve the
-                    # futures/spot context that drives direction/readiness.
                     bucket_rank = 1 if bucket == "near_atm" else 0
                     enqueued = head.get("_mdm_enqueued_mono")
                     age_rank = (
@@ -220,8 +231,6 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
         engines = list(getattr(self, "_engines", {}).items())
         flushed = 0
         for symbol, engine in engines:
-            # Snapshot is only a cheap pre-filter. The same minute is rechecked
-            # under the per-engine lock immediately before finalization.
             current = getattr(engine, "current_candle", None)
             if not isinstance(current, Mapping):
                 continue
@@ -230,17 +239,11 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                 continue
             if now_ts < expected_minute + pd.Timedelta(minutes=1, seconds=grace):
                 continue
-            # A tick already received before the clock flush must be incorporated
-            # before this minute becomes immutable. This covers queued, popped
-            # local-batch, and currently-processing ticks without allowing
-            # finalized OHLC mutation.
+            # An already-received tick remains visible across queue -> local
+            # batch -> processing transitions, including a budget requeue cycle.
             if _has_unapplied_tick_for_minute(self, symbol, expected_minute):
                 continue
 
-            # Completed history is authoritative, and tick-driven rollover can
-            # race this clock path after the due snapshot. Delegate the final
-            # recheck and finalization to CandleEngine under its native lock so
-            # a newer current minute is never flushed using this stale decision.
             flush_expected = getattr(engine, "flush_if_current_minute", None)
             try:
                 if callable(flush_expected):
