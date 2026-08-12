@@ -23,7 +23,15 @@ def test_flat_to_same_symbol_reentry_fill_repairs_day_aggregate_broker_basis(tmp
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     order_id = "2087403339074953216"
 
-    manager.add_pending_order(order_id, SYMBOL, "BUY", 65, intent="ENTRY")
+    manager.add_pending_order(
+        order_id,
+        SYMBOL,
+        "BUY",
+        65,
+        124.45,
+        "LIMIT",
+        intent="ENTRY",
+    )
     assert manager._orders[order_id].pre_order_quantity == 0
 
     # Reproduce 12-Aug live race: periodic broker sync lands after the new buy
@@ -57,7 +65,15 @@ def test_scale_in_broker_sync_race_keeps_broker_weighted_basis(tmp_path) -> None
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.open_position(SYMBOL, "LONG", 65, 100.0, order_id="entry-old")
     order_id = "scale-1"
-    manager.add_pending_order(order_id, SYMBOL, "BUY", 65, intent="SCALE_IN")
+    manager.add_pending_order(
+        order_id,
+        SYMBOL,
+        "BUY",
+        65,
+        120.0,
+        "LIMIT",
+        intent="SCALE_IN",
+    )
     assert manager._orders[order_id].pre_order_quantity == 65
 
     manager.synchronize_with_broker(
