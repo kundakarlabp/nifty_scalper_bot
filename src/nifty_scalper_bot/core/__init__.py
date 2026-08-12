@@ -6,6 +6,7 @@ import importlib.abc
 import importlib.machinery
 import os
 import sys
+from functools import wraps
 from types import ModuleType
 from typing import Any
 
@@ -131,6 +132,35 @@ def _install_market_data_runtime_hardening() -> dict[str, bool]:
     return state
 
 
+def _install_runner_candle_engine_cache_patch() -> bool:
+    """Avoid reacquiring two shared registry locks for every steady-state tick.
+
+    MDM owns one stable CandleEngine object per canonical symbol. Runner only
+    mirrors that object for compatibility, so after first resolution the same
+    reference can be returned directly. Concurrent first use still delegates to
+    the original locked MDM/Runner path and therefore preserves SSOT identity.
+    """
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    attr = "_candle_engine_mirror_cache_patch_installed"
+    if bool(getattr(StrategyRunner, attr, False)):
+        return True
+    original = StrategyRunner._mirror_authoritative_candle_engine
+
+    @wraps(original)
+    def _mirror_authoritative_candle_engine(self: Any, symbol: str) -> Any | None:
+        normalized = self._normalize_symbol(symbol)
+        cached = getattr(self, "_candle_engines", {}).get(normalized)
+        if cached is not None:
+            return cached
+        return original(self, symbol)
+
+    StrategyRunner._mirror_authoritative_candle_engine = (  # type: ignore[method-assign]
+        _mirror_authoritative_candle_engine
+    )
+    setattr(StrategyRunner, attr, True)
+    return True
+
 
 def _apply_app_runtime_patches(app_module: Any) -> None:
     # The production app import is the single authoritative installation point.
@@ -158,6 +188,7 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
 
     _dynamic_universe_adapter()
     _runtime_reliability_adapter()
+    _install_runner_candle_engine_cache_patch()
     _strategy_context_fast_path_adapter()
     _off_market_controller_adapter()
     _off_market_app_adapter(app_module)

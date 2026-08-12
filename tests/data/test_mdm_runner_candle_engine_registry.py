@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from nifty_scalper_bot.core import _install_runner_candle_engine_cache_patch
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -84,6 +85,28 @@ def test_runner_resolves_same_authoritative_engine_as_mdm() -> None:
 
     assert engine_from_runner is mdm.get_candle_engine(SYMBOL)
     assert runner._candle_engines[SYMBOL] is engine_from_runner
+
+
+def test_runner_reuses_mirrored_engine_without_reentering_mdm_registry() -> None:
+    """Steady-state ticks must not reacquire registry locks for the same engine."""
+    _install_runner_candle_engine_cache_patch()
+    mdm = _mdm()
+    runner = _runner(mdm)
+    calls = 0
+    original = mdm.get_candle_engine
+
+    def counted(symbol: str):
+        nonlocal calls
+        calls += 1
+        return original(symbol)
+
+    mdm.get_candle_engine = counted  # type: ignore[method-assign]
+
+    first = runner._mirror_authoritative_candle_engine("NIFTY")
+    second = runner._mirror_authoritative_candle_engine("nse:nifty")
+
+    assert first is second
+    assert calls == 1
 
 
 def test_history_imported_through_mdm_is_visible_to_runner_engine() -> None:
