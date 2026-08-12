@@ -127,6 +127,41 @@ def test_set_event_loop_off_thread_claims_no_ownership() -> None:
         loop.close()
 
 
+def test_running_loop_attachment_records_owner_on_loop_thread() -> None:
+    """Off-thread wiring must establish ownership from the scheduled callback."""
+    mdm = _mdm()
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    callback_ran = threading.Event()
+    try:
+        mdm.set_event_loop(loop)
+        loop.call_soon_threadsafe(callback_ran.set)
+        assert callback_ran.wait(timeout=1.0)
+        assert mdm._event_loop_thread_id == thread.ident
+    finally:
+        asyncio.run_coroutine_threadsafe(mdm.async_stop(), loop).result(timeout=1.0)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=1.0)
+        loop.close()
+
+
+def test_async_stop_detaches_event_loop_owner() -> None:
+    """Shutdown must not retain ownership of a loop that is no longer attached."""
+
+    async def _run() -> None:
+        mdm = _mdm()
+        mdm.set_event_loop(asyncio.get_running_loop())
+        assert mdm._event_loop_thread_id == threading.get_ident()
+
+        await mdm.async_stop()
+
+        assert mdm._event_loop_thread_id is None
+        assert mdm._main_loop is None
+
+    asyncio.run(_run())
+
+
 def test_message_renders_unknown_rather_than_none(caplog) -> None:
     """Operators must read 'unknown', not the literal None."""
     import logging
