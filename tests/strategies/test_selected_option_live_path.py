@@ -156,6 +156,25 @@ def test_basket_sync_defers_cold_selected_pair_until_indicator_history_is_ready(
     assert runner._pending_selected_pe is None
 
 
+def test_dynamic_readd_preserves_newer_canonical_history(monkeypatch):
+    """A stale removal cache must not rewind history already synced from MDM."""
+    runner, _strategy_manager, _risk_manager, _order_manager, _selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    symbol = "NFO:NIFTY26JUN24100CE"
+    canonical_history = [{"timestamp": index} for index in range(100)]
+    stale_removal_cache = canonical_history[:20]
+    runner._running = False
+    runner._symbol_history[symbol] = list(canonical_history)
+    runner._recent_history_cache[symbol] = list(stale_removal_cache)
+    runner._mirror_authoritative_candle_engine = lambda _symbol: None
+    runner._hydrate_from_mdm_cache = lambda _symbol: 0
+
+    runner.add_symbol(symbol)
+
+    assert runner._symbol_history[symbol] == canonical_history
+
+
 def test_quote_versions_do_not_advance_candle_version_or_starve_same_bar_evaluation(monkeypatch):
     """Quote/data sequence counters are not candle identity and must not suppress a leg."""
     apply_patches()
