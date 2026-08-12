@@ -41,8 +41,6 @@ def test_equal_priority_context_batch_prefers_spot_future_over_near_atm() -> Non
         enqueued=2.0,
         timestamp="2026-08-11T12:22:59+05:30",
     )
-    # Reproduce the live tie: near-ATM queue was inserted first, so the old
-    # dict-order tie breaker drained it ahead of critical futures context.
     mdm._pending_tick_queues[near] = deque([near_tick])
     mdm._pending_tick_queues[future] = deque([future_tick])
     mdm._pending_tick_count = 2
@@ -136,13 +134,7 @@ def test_clock_flush_waits_while_same_symbol_tick_is_inflight() -> None:
     )
 
 
-def test_clock_flush_waits_for_tick_popped_into_drain_batch() -> None:
-    """A received tick stays visible to the clock guard after queue pop."""
-    install_candle_clock_flush_hardening(MarketDataManager)
-    mdm = MarketDataManager(kite=None)
-    mdm._tick_drain_batch_size = 1
-    symbol = "NFO:NIFTY2681824250PE"
-    minute = pd.Timestamp("2026-08-12T15:26:00+05:30")
+def _engine_for(symbol: str, minute: pd.Timestamp) -> CandleEngine:
     engine = CandleEngine(symbol=symbol)
     engine.current_candle = {
         "timestamp": minute,
@@ -152,6 +144,17 @@ def test_clock_flush_waits_for_tick_popped_into_drain_batch() -> None:
         "close": 100.5,
         "volume": 100,
     }
+    return engine
+
+
+def test_clock_flush_waits_for_tick_popped_into_drain_batch() -> None:
+    """A received tick stays visible to the clock guard after queue pop."""
+    install_candle_clock_flush_hardening(MarketDataManager)
+    mdm = MarketDataManager(kite=None)
+    mdm._tick_drain_batch_size = 1
+    symbol = "NFO:NIFTY2681824250PE"
+    minute = pd.Timestamp("2026-08-12T15:26:00+05:30")
+    engine = _engine_for(symbol, minute)
     mdm._engines[symbol] = engine
     pending = _tick(
         symbol,
@@ -166,8 +169,6 @@ def test_clock_flush_waits_for_tick_popped_into_drain_batch() -> None:
     assert batch == [pending]
     assert symbol not in mdm._pending_tick_queues
 
-    # This was the live race: the queue is empty, but the already-received tick
-    # has not yet reached CandleEngine because it is waiting in the local batch.
     assert (
         mdm.flush_due_candles(
             now=pd.Timestamp("2026-08-12T15:27:02+05:30"),
@@ -179,6 +180,47 @@ def test_clock_flush_waits_for_tick_popped_into_drain_batch() -> None:
     assert engine.latest_finalized_minute() is None
 
     mdm._process_queued_tick(batch[0])
+    assert (
+        mdm.flush_due_candles(
+            now=pd.Timestamp("2026-08-12T15:27:03+05:30"),
+            grace_seconds=1.5,
+        )
+        == 1
+    )
+    assert engine.latest_finalized_minute() == minute
+
+
+def test_requeued_popped_tick_reservation_is_not_double_counted() -> None:
+    """Budget requeue/pop cycles retain one reservation, then release cleanly."""
+    install_candle_clock_flush_hardening(MarketDataManager)
+    mdm = MarketDataManager(kite=None)
+    mdm._tick_drain_batch_size = 1
+    symbol = "NFO:NIFTY2681824250CE"
+    minute = pd.Timestamp("2026-08-12T15:26:00+05:30")
+    engine = _engine_for(symbol, minute)
+    mdm._engines[symbol] = engine
+    pending = _tick(
+        symbol,
+        bucket="near_atm",
+        enqueued=1.0,
+        timestamp="2026-08-12T15:26:59+05:30",
+    )
+    mdm._pending_tick_queues[symbol] = deque([pending])
+    mdm._pending_tick_count = 1
+
+    first_batch = mdm._pop_pending_tick_batch()
+    mdm._requeue_unprocessed_ticks(first_batch)
+    second_batch = mdm._pop_pending_tick_batch()
+    assert second_batch == [pending]
+    assert (
+        mdm.flush_due_candles(
+            now=pd.Timestamp("2026-08-12T15:27:02+05:30"),
+            grace_seconds=1.5,
+        )
+        == 0
+    )
+
+    mdm._process_queued_tick(second_batch[0])
     assert (
         mdm.flush_due_candles(
             now=pd.Timestamp("2026-08-12T15:27:03+05:30"),
