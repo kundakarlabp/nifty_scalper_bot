@@ -1852,7 +1852,7 @@ class StrategyRunner:
             self._subscribe_symbol(normalized)
 
         cached = self._recent_history_cache.get(normalized) or []
-        if cached:
+        if cached and not self._symbol_history.get(normalized):
             self._symbol_history[normalized] = list(cached)
             self._restored_from_cache_symbols.add(normalized)
             self._logger.info(
