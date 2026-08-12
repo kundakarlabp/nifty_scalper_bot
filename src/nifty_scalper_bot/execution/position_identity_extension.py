@@ -116,10 +116,29 @@ def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any,
         if symbol:
             cloned["tradingsymbol"] = symbol
             cloned["symbol"] = symbol
+        net_qty = _net_quantity(cloned)
         avg_price = _positive_float(cloned, _AVG_PRICE_FIELDS)
-        if _net_quantity(cloned) != 0 and avg_price <= 0.0:
-            existing = positions.get(symbol) if isinstance(positions, dict) else None
-            existing_entry = float(getattr(existing, "entry_price", 0.0) or 0.0) if existing else 0.0
+        existing = positions.get(symbol) if isinstance(positions, dict) else None
+        existing_entry = (
+            float(getattr(existing, "entry_price", 0.0) or 0.0) if existing else 0.0
+        )
+        existing_qty = int(getattr(existing, "quantity", 0) or 0) if existing else 0
+        existing_side = str(getattr(existing, "side", "") or "").strip().upper()
+        owned_same_exposure = bool(
+            existing
+            and str(getattr(existing, "order_id", "") or "").strip()
+            and abs(net_qty) == existing_qty
+            and (
+                (net_qty > 0 and existing_side == "LONG")
+                or (net_qty < 0 and existing_side == "SHORT")
+            )
+        )
+        if net_qty != 0 and owned_same_exposure and existing_entry > 0.0:
+            # Zerodha's day-position average can span earlier closed trades in the
+            # same contract. Once this exact exposure is locally owned, the
+            # broker-confirmed order fill is the authoritative lifecycle basis.
+            cloned["average_price"] = existing_entry
+        elif net_qty != 0 and avg_price <= 0.0:
             if existing_entry > 0.0:
                 cloned["average_price"] = existing_entry
             else:
@@ -373,7 +392,9 @@ def apply_patches() -> None:
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
         if unresolved and isinstance(prepared, list):
-            prepared = [row for row in prepared if _prepared_row_symbol(row) not in unresolved]
+            prepared = [
+                row for row in prepared if _prepared_row_symbol(row) not in unresolved
+            ]
         result = _ORIGINALS["PositionManager.synchronize_with_broker"](
             self,
             prepared,
@@ -397,8 +418,12 @@ def apply_patches() -> None:
             _canonicalize_payload_symbol(broker_payload),
         )
 
-    def current_entry_protection_blocker(self: Any, symbol: str | None = None) -> str | None:
-        unresolved = set(getattr(self, "_cost_basis_unresolved_symbols", set()) or set())
+    def current_entry_protection_blocker(
+        self: Any, symbol: str | None = None
+    ) -> str | None:
+        unresolved = set(
+            getattr(self, "_cost_basis_unresolved_symbols", set()) or set()
+        )
         if unresolved and (symbol is None or _canonical_key(symbol) in unresolved):
             return "cost_basis_unresolved"
         original = _ORIGINALS.get("PositionManager.current_entry_protection_blocker")
@@ -454,7 +479,9 @@ def apply_patches() -> None:
                             "reason": broker_error,
                         },
                     )
-                return _position_manager.FillApplicationResult(reason="broker_state_unverified")
+                return _position_manager.FillApplicationResult(
+                    reason="broker_state_unverified"
+                )
 
             if callable(log_warning):
                 log_warning(
@@ -475,7 +502,48 @@ def apply_patches() -> None:
             return _position_manager.FillApplicationResult(
                 reason="broker_position_unowned_or_cost_basis_unresolved"
             )
-        return _ORIGINALS["PositionManager._handle_filled_order"](self, order)
+
+        result = _ORIGINALS["PositionManager._handle_filled_order"](self, order)
+        if (
+            intent == "ENTRY"
+            and int(getattr(order, "pre_order_quantity", 0) or 0) == 0
+            and getattr(result, "reason", "")
+            == "entry_fill_already_reflected_by_broker_sync"
+        ):
+            symbol = _canonical_key(getattr(order, "symbol", None))
+            positions = getattr(self, "_positions", {})
+            position = positions.get(symbol) if isinstance(positions, dict) else None
+            basis = float(
+                getattr(order, "last_cumulative_average_price", 0.0)
+                or getattr(order, "fill_price", 0.0)
+                or 0.0
+            )
+            if (
+                position is not None
+                and str(getattr(position, "order_id", "") or "").strip()
+                == str(getattr(order, "order_id", "") or "").strip()
+                and basis > 0.0
+            ):
+                broker_day_basis = float(getattr(position, "entry_price", 0.0) or 0.0)
+                position.entry_price = basis
+                logger = getattr(self, "_logger", None)
+                log_info = getattr(logger, "info", None)
+                if callable(log_info):
+                    log_info(
+                        "ENTRY_LIFECYCLE_BASIS_RESTORED order_id=%s symbol=%s broker_day_basis=%.2f fill_basis=%.2f",
+                        getattr(order, "order_id", None),
+                        symbol,
+                        broker_day_basis,
+                        basis,
+                        extra={
+                            "event": "ENTRY_LIFECYCLE_BASIS_RESTORED",
+                            "order_id": getattr(order, "order_id", None),
+                            "symbol": symbol,
+                            "broker_day_basis": broker_day_basis,
+                            "fill_basis": basis,
+                        },
+                    )
+        return result
 
     if "PositionManager.__init__" in _ORIGINALS:
         cls.__init__ = __init__
