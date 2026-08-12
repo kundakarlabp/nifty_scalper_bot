@@ -134,3 +134,56 @@ def test_clock_flush_waits_while_same_symbol_tick_is_inflight() -> None:
         )
         == 1
     )
+
+
+def test_clock_flush_waits_for_tick_popped_into_drain_batch() -> None:
+    """A received tick stays visible to the clock guard after queue pop."""
+    install_candle_clock_flush_hardening(MarketDataManager)
+    mdm = MarketDataManager(kite=None)
+    mdm._tick_drain_batch_size = 1
+    symbol = "NFO:NIFTY2681824250PE"
+    minute = pd.Timestamp("2026-08-12T15:26:00+05:30")
+    engine = CandleEngine(symbol=symbol)
+    engine.current_candle = {
+        "timestamp": minute,
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 100,
+    }
+    mdm._engines[symbol] = engine
+    pending = _tick(
+        symbol,
+        bucket="near_atm",
+        enqueued=1.0,
+        timestamp="2026-08-12T15:26:59+05:30",
+    )
+    mdm._pending_tick_queues[symbol] = deque([pending])
+    mdm._pending_tick_count = 1
+
+    batch = mdm._pop_pending_tick_batch()
+    assert batch == [pending]
+    assert symbol not in mdm._pending_tick_queues
+
+    # This was the live race: the queue is empty, but the already-received tick
+    # has not yet reached CandleEngine because it is waiting in the local batch.
+    assert (
+        mdm.flush_due_candles(
+            now=pd.Timestamp("2026-08-12T15:27:02+05:30"),
+            grace_seconds=1.5,
+        )
+        == 0
+    )
+    assert engine.current_candle is not None
+    assert engine.latest_finalized_minute() is None
+
+    mdm._process_queued_tick(batch[0])
+    assert (
+        mdm.flush_due_candles(
+            now=pd.Timestamp("2026-08-12T15:27:03+05:30"),
+            grace_seconds=1.5,
+        )
+        == 1
+    )
+    assert engine.latest_finalized_minute() == minute
