@@ -12,6 +12,7 @@ from nifty_scalper_bot.data.candle_state_hardening import reconcile_stale_curren
 
 _IST_TZ = "Asia/Kolkata"
 _INSTALLED_ATTR = "_candle_clock_flush_hardening_installed"
+_RESERVED_MINUTES_ATTR = "_candle_tick_reserved_minutes"
 _LAST_PUBLISHED: dict[int, dict[str, pd.Timestamp]] = defaultdict(dict)
 
 
@@ -38,6 +39,54 @@ def _raw_tick_minute(tick: Mapping[str, Any]) -> pd.Timestamp | None:
     return None
 
 
+def _tick_reservation_key(
+    manager: Any, tick: Mapping[str, Any]
+) -> tuple[str, pd.Timestamp] | None:
+    """Return canonical symbol/minute identity for a popped-but-unapplied tick."""
+    symbol = str(tick.get("symbol") or "")
+    if not symbol:
+        try:
+            token = int(tick.get("instrument_token") or tick.get("token") or 0)
+        except (TypeError, ValueError):
+            token = 0
+        symbol = str((getattr(manager, "_symbol_by_token", {}) or {}).get(token) or "")
+    if not symbol:
+        return None
+    canonicalize = getattr(manager, "_canonical_symbol", None)
+    canonical = canonicalize(symbol) if callable(canonicalize) else symbol
+    minute = _raw_tick_minute(tick)
+    if not canonical or minute is None:
+        return None
+    return canonical, minute
+
+
+def _reserve_popped_tick_locked(manager: Any, tick: Mapping[str, Any]) -> None:
+    """Keep a local-batch tick visible to the clock finalization guard."""
+    key = _tick_reservation_key(manager, tick)
+    if key is None:
+        return
+    reservations = getattr(manager, _RESERVED_MINUTES_ATTR, None)
+    if not isinstance(reservations, dict):
+        reservations = {}
+        setattr(manager, _RESERVED_MINUTES_ATTR, reservations)
+    reservations[key] = int(reservations.get(key, 0) or 0) + 1
+
+
+def _release_popped_tick_locked(manager: Any, tick: Mapping[str, Any]) -> None:
+    """Release one local-batch reservation after its processing attempt ends."""
+    key = _tick_reservation_key(manager, tick)
+    if key is None:
+        return
+    reservations = getattr(manager, _RESERVED_MINUTES_ATTR, None)
+    if not isinstance(reservations, dict):
+        return
+    remaining = int(reservations.get(key, 0) or 0) - 1
+    if remaining > 0:
+        reservations[key] = remaining
+    else:
+        reservations.pop(key, None)
+
+
 def _has_unapplied_tick_for_minute(
     manager: Any, symbol: str, expected_minute: pd.Timestamp
 ) -> bool:
@@ -49,6 +98,9 @@ def _has_unapplied_tick_for_minute(
         return False
     with lock:
         if getattr(manager, "_candle_tick_inflight_symbol", None) == canonical:
+            return True
+        reservations = getattr(manager, _RESERVED_MINUTES_ATTR, {}) or {}
+        if int(reservations.get((canonical, expected_minute), 0) or 0) > 0:
             return True
         queues = getattr(manager, "_pending_tick_queues", {}) or {}
         queue = list(queues.get(canonical, ()))
@@ -93,6 +145,7 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                 with lock:
                     if getattr(self, "_candle_tick_inflight_symbol", None) == canonical:
                         self._candle_tick_inflight_symbol = None
+                    _release_popped_tick_locked(self, raw)
 
     def _pop_pending_tick_batch(self: Any) -> list[dict[str, Any]]:
         """Preserve FIFO but prefer critical spot/future context on priority ties."""
@@ -126,13 +179,16 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                         selected_rank = rank
                 if selected_key is not None:
                     queue = self._pending_tick_queues[selected_key]
-                    batch.append(queue.popleft())
+                    tick = queue.popleft()
+                    _reserve_popped_tick_locked(self, tick)
+                    batch.append(tick)
                     self._pending_decrement_locked(1)
                     if not queue:
                         self._pending_tick_queues.pop(selected_key, None)
                     continue
                 if self._pending_far_ticks:
                     _key, tick = self._pending_far_ticks.popitem()
+                    _reserve_popped_tick_locked(self, tick)
                     self._pending_decrement_locked(1)
                     batch.append(tick)
                     continue
@@ -175,8 +231,9 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
             if now_ts < expected_minute + pd.Timedelta(minutes=1, seconds=grace):
                 continue
             # A tick already received before the clock flush must be incorporated
-            # before this minute becomes immutable. This covers both queued and
-            # currently-processing ticks without allowing finalized OHLC mutation.
+            # before this minute becomes immutable. This covers queued, popped
+            # local-batch, and currently-processing ticks without allowing
+            # finalized OHLC mutation.
             if _has_unapplied_tick_for_minute(self, symbol, expected_minute):
                 continue
 
