@@ -1842,6 +1842,8 @@ class MarketDataManager:
         self._tick_consumer_task = None
         if hasattr(self, "_candle_flush_task"):
             self._candle_flush_task = None
+        self._event_loop_thread_id = None
+        self._main_loop = None
         stop_fallback_worker = getattr(self, "_stop_fallback_tick_worker", None)
         if callable(stop_fallback_worker):
             stop_fallback_worker()
@@ -1912,6 +1914,8 @@ class MarketDataManager:
             )
         self._tick_drain_task = None
         self._tick_consumer_task = None
+        self._event_loop_thread_id = None
+        self._main_loop = None
         if should_stop:
             self._stop_worker_threads_for_shutdown()
 
@@ -6254,6 +6258,9 @@ class MarketDataManager:
             return
 
         def _start() -> None:
+            if self._main_loop is not loop:
+                return
+            self._event_loop_thread_id = threading.get_ident()
             task = getattr(self, "_tick_consumer_task", None)
             if task is None or task.done():
                 self._tick_consumer_task = loop.create_task(self._consume_ticks())
