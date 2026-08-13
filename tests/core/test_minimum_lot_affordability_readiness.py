@@ -152,3 +152,43 @@ async def test_pipeline_overload_disarms_canonical_runtime_readiness(
     assert ctx.live_orders_armed is False
     assert ctx.live_block_reason == "execution_not_armed:data_pipeline_overloaded"
     assert calls[-1]["live_orders_armed"] is False
+
+
+@pytest.mark.asyncio
+async def test_authoritative_risk_breaker_disarms_runtime_readiness(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    ctx, calls = _context({CE: 100.0, PE: 110.0}, 10_000.0)
+    ctx.risk_manager = SimpleNamespace(
+        is_circuit_breaker_tripped=lambda: (True, "Consecutive loss limit reached")
+    )
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason="risk_breaker_test")
+
+    assert ctx.live_orders_armed is False
+    assert ctx.live_block_reason == "execution_not_armed:risk_halt"
+    assert calls[-1]["live_orders_armed"] is False
+
+    ctx.risk_manager.is_circuit_breaker_tripped = lambda: (False, "")
+    await app._recompute_and_push_runtime_readiness(ctx, reason="risk_reset_test")
+
+    assert ctx.risk_halt is False
+    assert ctx.live_orders_armed is True
+
+
+@pytest.mark.asyncio
+async def test_risk_breaker_read_failure_keeps_runtime_disarmed(monkeypatch) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    ctx, _calls = _context({CE: 100.0, PE: 110.0}, 10_000.0)
+
+    def _failed_breaker_read():
+        raise RuntimeError("risk state unavailable")
+
+    ctx.risk_manager = SimpleNamespace(is_circuit_breaker_tripped=_failed_breaker_read)
+
+    await app._recompute_and_push_runtime_readiness(ctx, reason="risk_error_test")
+
+    assert ctx.risk_halt is True
+    assert ctx.live_orders_armed is False
+    assert ctx.live_block_reason == "execution_not_armed:risk_halt"
