@@ -1209,6 +1209,13 @@ class RiskManager:
         if callable(resolver):
             with suppress(Exception):
                 today = str(resolver())
+        if not session_date:
+            circuit_reader = getattr(manager, "get_risk_circuit_state", None)
+            if callable(circuit_reader):
+                with suppress(Exception):
+                    circuit_state = circuit_reader() or {}
+                    if isinstance(circuit_state, Mapping):
+                        session_date = circuit_state.get("trading_date")
         if not session_date or not today or str(session_date) != today:
             self._logger.warning(
                 "DAY_PNL_SEED_SKIPPED realized=%.2f session_date=%s today=%s",
