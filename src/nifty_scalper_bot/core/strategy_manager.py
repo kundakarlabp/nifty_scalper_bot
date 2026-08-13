@@ -4409,7 +4409,7 @@ class StrategyManager(_BaseStrategyManager):
             blocked_reason = None
             if not final_allowed:
                 if not score_ok:
-                    blocked_reason = "raw_score_below_min"
+                    blocked_reason = "regime_weighted_score_below_min"
                 elif not conf_ok:
                     blocked_reason = "confidence_below_min"
                 elif not selected_ok:
@@ -4536,7 +4536,7 @@ class StrategyManager(_BaseStrategyManager):
                     metadata["candidate_switch_reason"] = "high_score_nearby_option_candidate"
                 else:
                     if not score_ok:
-                        blocked_reason = "raw_score_below_min"
+                        blocked_reason = "regime_weighted_score_below_min"
                     elif not conf_ok:
                         blocked_reason = "confidence_below_min"
                     elif not selected_ok:
