@@ -184,15 +184,15 @@ class RiskManager:
             reset_hour_utc=self.settings.trading_day_reset_hour_utc,
             max_day_profit=day_profit_cap,
         )
+        self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
+        self._m_cooldown = Gauge(
+            "risk_cooldown_seconds", "Seconds remaining on enforced cooldown"
+        )
         # Must run after _switches exists: the seed writes into the day-loss
         # circuit, so calling it earlier raised AttributeError on any restart
         # that carried non-zero persisted realised P&L.
         self._seed_day_pnl_from_persisted_state()
         self._restore_risk_circuit_from_persisted_state()
-        self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
-        self._m_cooldown = Gauge(
-            "risk_cooldown_seconds", "Seconds remaining on enforced cooldown"
-        )
         self._risk_state = self.risk_state
         self._lot_size_lookup = None
         self._lot_size_symbol = None

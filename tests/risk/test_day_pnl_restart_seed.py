@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import MethodType, SimpleNamespace
 
+from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.risk.limits import RiskSwitches
 from nifty_scalper_bot.risk.risk_manager import RiskManager
 
@@ -135,3 +136,21 @@ def test_completed_trade_persists_the_circuit_state() -> None:
     assert saved and saved[-1]["completed_trade_costs_today"] == 60.0
     assert saved[-1]["consecutive_losses"] == 1
     assert saved[-1]["loss_cooldown_until_epoch"] > 0.0
+
+
+def test_constructor_restores_breached_loss_streak_without_startup_failure() -> None:
+    position_manager = SimpleNamespace(
+        get_realized_pnl=lambda: 0.0,
+        get_risk_circuit_state=lambda: {"consecutive_losses": 3},
+    )
+
+    risk = RiskManager(
+        settings=RiskSettings(max_consecutive_losses=3),
+        position_manager=position_manager,
+        account_balance=50_000.0,
+    )
+
+    assert risk.is_circuit_breaker_tripped() == (
+        True,
+        "Consecutive loss limit reached (3/3)",
+    )
