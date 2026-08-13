@@ -360,16 +360,6 @@ class HardenedBracketManager(_LegacyBracketManager):
                 self._log_exit_pending_summary_locked(bracket, now)
             return
 
-        if self._reconcile_exit_state(bracket, requested_by="pre_submit_hardened"):
-            return
-        with self._lock:
-            if (
-                bracket.exit_state
-                == _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
-                and not self._exit_continue_retry_after_escalation
-            ):
-                self._log_exit_pending_summary_locked(bracket, now)
-                return
         _LegacyBracketManager._process_exit_state(self, bracket, action, now=now)
 
     def _rescue_stale_exit_order(
