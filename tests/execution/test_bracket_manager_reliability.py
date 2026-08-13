@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Mapping
 from unittest.mock import Mock
@@ -728,6 +729,23 @@ def _watchdog_bracket(manager, order_id, symbol, side, sl):
     bracket = manager.get_bracket(order_id)
     assert bracket is not None
     return bracket
+
+
+def test_watchdog_ignores_closed_brackets() -> None:
+    manager = BracketManager(order_manager=Mock())
+    closed = _watchdog_bracket(manager, "wd-closed", "NFO:NIFTYCLOSEDCE", "BUY", 99.0)
+    _watchdog_bracket(manager, "wd-probe", "NFO:NIFTYPROBECE", "BUY", 99.0)
+    manager._close_bracket(closed, close_source="unit_test")
+    closed_seen = threading.Event()
+    cycle_seen = threading.Event()
+    manager._log_throttled = lambda _level, key, *_args: (
+        closed_seen.set()
+        if key == "watchdog_skip_wd-closed"
+        else cycle_seen.set() if key == "watchdog_skip_wd-probe" else None
+    )
+
+    assert cycle_seen.wait(timeout=1.0)
+    assert not closed_seen.is_set()
 
 
 def test_watchdog_stop_uses_bid_for_a_long_position() -> None:
