@@ -3049,6 +3049,7 @@ class BotContext:
     background_tasks_started: bool = False
     data_hub_listeners_registered: bool = False
     live_orders_armed: bool = False
+    risk_halt: bool = False
     trading_ready: bool = False
     data_observation_ready: bool = False
     data_pipeline_ready: bool = False
@@ -6946,6 +6947,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         return flattened
 
     def _handle_risk_breaker(reason: str, snapshot: RiskSnapshot) -> None:
+        ctx.risk_halt = True
+        ctx.live_orders_armed = False
+        ctx.execution_armed = False
+        ctx.live_block_reason = "execution_not_armed:risk_halt"
+        ctx.execution_block_reason = ctx.live_block_reason
         ctx.shadow_mode_enabled = True
         safe_order_manager.set_live_enabled(False)
         risk_manager.force_shadow(True)
@@ -9707,6 +9713,14 @@ async def _recompute_and_push_runtime_readiness(
     broker_ready = bool(
         getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None)
     )
+    risk_manager = getattr(ctx, "risk_manager", None)
+    risk_halt = bool(getattr(ctx, "risk_halt", False))
+    if risk_manager is not None:
+        try:
+            risk_halt = bool(risk_manager.is_circuit_breaker_tripped()[0])
+        except Exception:
+            risk_halt = True
+    ctx.risk_halt = risk_halt
     pipeline_overloaded = bool(getattr(mdm, "pipeline_overloaded", False))
     ce_market_exec_ready = bool(ce_exec_ready)
     pe_market_exec_ready = bool(pe_exec_ready)
@@ -9900,7 +9914,7 @@ async def _recompute_and_push_runtime_readiness(
             and not bool(getattr(ctx, "broker_balance_valid", False)),
         },
         risk_state={
-            "risk_halt": bool(getattr(ctx, "risk_halt", False)),
+            "risk_halt": risk_halt,
             "daily_loss_limit": bool(getattr(ctx, "daily_loss_limit_hit", False)),
         },
         live_mode=live_mode,
