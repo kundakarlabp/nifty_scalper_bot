@@ -854,6 +854,8 @@ class BracketManager:
                 reconcile_candidates: list[BracketState] = []
                 with self._lock:
                     for bracket in self._brackets.values():
+                        if bracket.exit_state == BracketExitLifecycle.CLOSED.value:
+                            continue
                         reconcile_candidates.append(bracket)
                         ltp = float(bracket.last_ltp or 0.0)
                         if bracket.exit_pending and bracket.remaining_quantity > 0:
