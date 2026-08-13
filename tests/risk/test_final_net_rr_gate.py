@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from nifty_scalper_bot.risk.entry_guard_patch import (
     _net_rr_block_reason,
     _real_broker_live,
 )
 from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
+from nifty_scalper_bot.risk.risk_manager import OrderSignal
 
 
 def _signal(*, target: float, stop: float = 92.0, **metadata):
@@ -78,6 +81,25 @@ def test_wider_spread_reduces_net_reward_risk(monkeypatch) -> None:
     assert tight is not None and wide is not None
     assert wide.net_rr < tight.net_rr
     assert wide.target_cost > tight.target_cost
+
+
+def test_order_signal_uses_final_live_quote_spread(monkeypatch) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    signal = OrderSignal(
+        symbol="NFO:NIFTY2681824300PE",
+        side="BUY",
+        quantity=65,
+        price=76.2,
+        stop_loss=70.1,
+        take_profit=88.4,
+        metadata={"bid": 76.15, "ask": 76.25},
+    )
+
+    result = evaluate_final_net_rr(signal)
+
+    assert result is not None
+    assert result.allowed is True
+    assert result.half_spread == pytest.approx(0.05)
 
 
 def test_malformed_minimum_uses_safe_default_instead_of_bypassing(monkeypatch) -> None:
