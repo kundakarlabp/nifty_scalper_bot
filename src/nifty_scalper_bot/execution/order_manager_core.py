@@ -3327,6 +3327,10 @@ class OrderManager:
                 )
                 check_risk = False
         if check_risk and self._risk_manager:
+            risk_quote = self._extract_quote_diagnostics(
+                self._get_latest_quote_safe(normalized_symbol) or {}
+            )
+            bid, ask = risk_quote.get("bid", 0.0), risk_quote.get("ask", 0.0)
             signal = OrderSignal(
                 symbol=normalized_symbol,
                 side=side,
@@ -3334,6 +3338,7 @@ class OrderManager:
                 price=price or 0.0,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
+                metadata={"bid": bid, "ask": ask} if bid > 0 and ask >= bid else {},
             )
             is_live = False
             if hasattr(self, "_enable_live_getter") and self._enable_live_getter:

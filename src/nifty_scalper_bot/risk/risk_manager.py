@@ -62,6 +62,7 @@ class OrderSignal:
     price: float
     stop_loss: float | None
     take_profit: float | None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def notional(self) -> float:
         return abs(self.price * self.quantity)
