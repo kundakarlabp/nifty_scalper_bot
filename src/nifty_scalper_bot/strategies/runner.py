@@ -9412,7 +9412,8 @@ class StrategyRunner:
                 os.getenv("VWAP_HIGH_VOL_MAX_SPREAD_PCT", "0.75") or "0.75"
             )
             min_rr = float(os.getenv("VWAP_HIGH_VOL_MIN_RR", "1.6") or "1.6")
-            if selected and spread_pct <= max_spread and rr >= min_rr:
+            rr_allowed = rr >= min_rr - 1e-9
+            if selected and spread_pct <= max_spread and rr_allowed:
                 return True, "vwap_high_vol_execution_quality_soft_allow"
             return False, "vwap_high_vol_execution_quality_failed"
         return False, "regime_not_allowed"
