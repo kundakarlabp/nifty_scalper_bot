@@ -9,7 +9,12 @@ from nifty_scalper_bot.risk.limits import RiskSwitches
 from nifty_scalper_bot.risk.risk_manager import RiskManager
 
 
-def _manager(realized: float, session_date: str | None, today: str = "2026-08-03"):
+def _manager(
+    realized: float,
+    session_date: str | None,
+    today: str = "2026-08-03",
+    circuit_date: str | None = None,
+):
     switches = RiskSwitches(
         max_day_loss=1000.0,
         max_consecutive_losses=3,
@@ -25,6 +30,9 @@ def _manager(realized: float, session_date: str | None, today: str = "2026-08-03
         _trip_breaker=lambda reason: tripped.append(reason),
         position_manager=SimpleNamespace(
             get_realized_pnl=lambda: realized,
+            get_risk_circuit_state=lambda: (
+                {"trading_date": circuit_date} if circuit_date else {}
+            ),
             _pnl_trading_date=session_date,
             _trading_date_ist=lambda: today,
         ),
@@ -61,6 +69,27 @@ def test_previous_session_pnl_is_not_seeded() -> None:
 
 def test_unknown_session_date_is_not_seeded() -> None:
     stub, switches, _ = _manager(-400.0, None)
+    stub._seed_day_pnl_from_persisted_state()
+
+    assert switches.day_loss() == 0.0
+
+
+def test_same_day_risk_circuit_recovers_missing_pnl_session_date() -> None:
+    stub, switches, tripped = _manager(
+        -400.0,
+        None,
+        circuit_date="2026-08-03",
+    )
+
+    stub._seed_day_pnl_from_persisted_state()
+
+    assert switches.day_loss() == 400.0
+    assert tripped == []
+
+
+def test_previous_risk_circuit_date_does_not_recover_missing_session_date() -> None:
+    stub, switches, _ = _manager(-400.0, None, circuit_date="2026-08-01")
+
     stub._seed_day_pnl_from_persisted_state()
 
     assert switches.day_loss() == 0.0
