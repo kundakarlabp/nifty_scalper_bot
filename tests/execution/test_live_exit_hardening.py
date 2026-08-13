@@ -152,6 +152,29 @@ def test_canonical_imports_use_hardened_implementations() -> None:
     assert AdaptiveTrailingController is HardenedAdaptiveTrailingController
 
 
+def test_first_exit_submission_reconciles_position_once(monkeypatch) -> None:
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    reconcile_requests: list[str] = []
+    original = manager._reconcile_exit_state
+
+    def _tracked(target, *, requested_by):
+        reconcile_requests.append(requested_by)
+        return original(target, requested_by=requested_by)
+
+    monkeypatch.setattr(manager, "_reconcile_exit_state", _tracked)
+
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": "HARD_SL_BREACH"},
+        now=time.time(),
+    )
+
+    assert len(order_manager.place_calls) == 1
+    assert reconcile_requests == ["pre_submit", "post_submit"]
+
+
 def test_stale_open_protective_exit_is_cancelled_then_replaced_once() -> None:
     manager, order_manager, broker = _manager()
     bracket = _make_stale_exit(manager)
