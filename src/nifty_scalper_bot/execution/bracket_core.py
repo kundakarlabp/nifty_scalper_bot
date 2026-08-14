@@ -434,6 +434,7 @@ class BracketState:
             "exit_order_id": self.exit_order_id or self.pending_exit_order_id,
             "exit_correlation_id": self.exit_correlation_id,
             "entry_fill_price": self.entry_fill_price,
+            "entry_fill_ts": self.entry_fill_ts,
             "exit_reason": self.exit_reason,
             "exit_triggered_at": self.exit_triggered_at,
             "exit_submitted_at": self.exit_submitted_at,
@@ -1835,6 +1836,7 @@ class BracketManager:
 
         for bracket in candidates:
             tick_id = f"{symbol}:{exchange_ts:.6f}" if exchange_ts is not None else None
+            time_stop_progress_crossed = False
             # Keep all bracket field mutations atomic against watchdog reads.
             with self._lock:
                 if tick_id is not None and bracket.last_processed_tick_id == tick_id:
@@ -1850,11 +1852,29 @@ class BracketManager:
 
                 # Update high/low water marks (atomic operations)
                 if bracket.side == "BUY":
+                    old_watermark = float(bracket.highest_ltp or bracket.entry_price)
                     if ltp > bracket.highest_ltp:
                         bracket.highest_ltp = ltp
                 else:
+                    old_watermark = float(bracket.lowest_ltp or bracket.entry_price)
                     if ltp < bracket.lowest_ltp:
                         bracket.lowest_ltp = ltp
+                initial_risk = abs(
+                    float(bracket.entry_price)
+                    - float(bracket.initial_sl_trigger_price or old_committed_sl)
+                )
+                if initial_risk > 0:
+                    threshold = initial_risk * self._time_stop_min_progress_r
+                    if bracket.side == "BUY":
+                        time_stop_progress_crossed = (
+                            old_watermark - bracket.entry_price < threshold
+                            <= bracket.highest_ltp - bracket.entry_price
+                        )
+                    else:
+                        time_stop_progress_crossed = (
+                            bracket.entry_price - old_watermark < threshold
+                            <= bracket.entry_price - bracket.lowest_ltp
+                        )
 
             if bracket.exit_pending:
                 exits_to_fire.append(
@@ -1893,6 +1913,15 @@ class BracketManager:
 
             if trail_updated:
                 continue
+            if time_stop_progress_crossed:
+                try:
+                    self.save_state()
+                except Exception as exc:  # noqa: BLE001 - exit checks must continue
+                    LOGGER.error(
+                        "BRACKET_PROGRESS_PERSIST_FAILED symbol=%s error=%s",
+                        bracket.symbol,
+                        exc,
+                    )
 
         # ═══════════════════════════════════════════════════════════
         # FIRE EXITS: Batch processing (takes lock once)
@@ -4768,6 +4797,11 @@ class BracketManager:
             or payload.get("pending_exit_order_id"),
             exit_correlation_id=payload.get("exit_correlation_id"),
             entry_fill_price=payload.get("entry_fill_price"),
+            entry_fill_ts=(
+                finite_float("entry fill ts", payload.get("entry_fill_ts"))
+                if payload.get("entry_fill_ts") is not None
+                else None
+            ),
             exit_reason=payload.get("exit_reason"),
             exit_triggered_at=payload.get("exit_triggered_at"),
             exit_submitted_at=payload.get("exit_submitted_at"),
