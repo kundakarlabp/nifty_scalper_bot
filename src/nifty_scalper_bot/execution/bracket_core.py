@@ -2916,6 +2916,7 @@ class BracketManager:
                                 "profit_pct": round(profit_pct, 2),
                             },
                         )
+                    self.save_state()
                     return True
             else:  # SELL
                 current_sl = bracket.sl_trigger_price  # authoritative read under lock
@@ -2951,6 +2952,7 @@ class BracketManager:
                                 "profit_pct": round(profit_pct, 2),
                             },
                         )
+                    self.save_state()
                     return True
         return False
 
