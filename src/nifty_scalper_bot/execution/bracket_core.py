@@ -1512,6 +1512,7 @@ class BracketManager:
                         bracket.sl_trigger_price = _round_to_tick(
                             bracket.sl_trigger_price * (1 + price_diff_pct)
                         )
+                        bracket.initial_sl_trigger_price = bracket.sl_trigger_price
 
                     # Adjust TP proportionally
                     if bracket.tp_trigger_price > 0:

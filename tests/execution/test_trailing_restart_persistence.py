@@ -13,6 +13,20 @@ def _manager() -> BracketManager:
     return manager
 
 
+def test_confirmed_fill_reanchors_initial_risk_to_activated_stop() -> None:
+    manager = _manager()
+    manager.register_virtual_bracket(
+        "fill-risk", "NFO:NIFTY2681824400PE", "BUY", 65, 114.10, 105.00, 132.35
+    )
+
+    manager.confirm_entry_fill("fill-risk", 113.55)
+
+    bracket = manager.get_bracket("fill-risk")
+    assert bracket is not None
+    assert bracket.sl_trigger_price == 104.50
+    assert bracket.initial_sl_trigger_price == bracket.sl_trigger_price
+
+
 def test_fallback_trail_revision_survives_restart(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     symbol = "NFO:NIFTY2681824400PE"
