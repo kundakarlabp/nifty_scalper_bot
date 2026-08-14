@@ -10075,6 +10075,29 @@ async def _recompute_and_push_runtime_readiness(
         )
 
 
+def _dynamic_symbol_removal_blocker(ctx: BotContext, symbol: str) -> str | None:
+    """Return the execution owner that requires a symbol's live feed."""
+
+    for manager_name, method_name, blocker in (
+        ("bracket_manager", "is_symbol_managed", "active_bracket"),
+        ("position_manager", "has_open_position", "open_position"),
+    ):
+        manager = getattr(ctx, manager_name, None)
+        if manager is None:
+            continue
+        try:
+            if bool(getattr(manager, method_name)(symbol)):
+                return blocker
+        except Exception:
+            LOGGER.exception(
+                "DYNAMIC_SYMBOL_OWNERSHIP_CHECK_FAILED symbol=%s manager=%s",
+                symbol,
+                manager_name,
+            )
+            return f"{manager_name.removesuffix('_manager')}_state_unknown"
+    return None
+
+
 def _commit_active_dynamic_basket(
     ctx: BotContext,
     *,
@@ -13410,6 +13433,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
 
                         for sym in drop_symbols:
+                            removal_blocker = _dynamic_symbol_removal_blocker(ctx, sym)
+                            if removal_blocker is not None:
+                                LOGGER.info(
+                                    "EXECUTION_UNIVERSE_POSITION_KEEP symbol=%s blocker=%s",
+                                    sym,
+                                    removal_blocker,
+                                )
+                                continue
                             lock_ts = ctx.execution_lock_timestamps.get(sym)
                             lock_age_s = (
                                 (datetime.now(timezone.utc) - lock_ts).total_seconds()
