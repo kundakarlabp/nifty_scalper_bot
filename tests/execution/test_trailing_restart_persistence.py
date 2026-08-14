@@ -36,7 +36,9 @@ def test_fallback_trail_revision_survives_restart(monkeypatch, tmp_path) -> None
     assert trailed.highest_ltp == 110.0
     assert trailed.trail_revision == 1
 
-    restored = _manager().get_bracket("restart-trail")
+    restarted_manager = _manager()
+    assert restarted_manager.load_state() is True
+    restored = restarted_manager.get_bracket("restart-trail")
     assert restored is not None
     assert restored.sl_trigger_price == trailed.sl_trigger_price
     assert restored.highest_ltp == trailed.highest_ltp
