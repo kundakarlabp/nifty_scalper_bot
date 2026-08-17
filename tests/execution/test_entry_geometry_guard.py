@@ -2,7 +2,10 @@ from threading import RLock
 from types import SimpleNamespace
 
 from nifty_scalper_bot.execution import order_entry_guard_patch as guard_patch
-from nifty_scalper_bot.execution.order_entry_guard_patch import _entry_geometry_block_reason
+from nifty_scalper_bot.execution.order_entry_guard_patch import (
+    _entry_geometry_block_reason,
+    _entry_identity_block_reason,
+)
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 
@@ -48,6 +51,43 @@ def test_entry_geometry_does_not_block_protective_exit():
     )
 
     assert reason is None
+
+
+def test_explicit_sell_entry_without_stop_is_blocked():
+    reason = _entry_geometry_block_reason(
+        SimpleNamespace(),
+        symbol="NFO:NIFTY24JUL24000CE",
+        side="SELL",
+        price=140.0,
+        stop_loss=None,
+        take_profit=125.0,
+        intent="ENTRY",
+    )
+
+    assert reason is not None
+    assert reason["block_reason"] == "entry_stop_loss_required"
+
+
+def test_explicit_entry_with_exit_like_tag_is_blocked():
+    reason = _entry_identity_block_reason(
+        intent="ENTRY",
+        tag="strategy_exit_probe",
+        symbol="NFO:NIFTY24JUL24000CE",
+    )
+
+    assert reason is not None
+    assert reason["block_reason"] == "entry_exit_tag_conflict"
+
+
+def test_exit_intent_is_not_blocked_by_entry_identity_guard():
+    assert (
+        _entry_identity_block_reason(
+            intent="EXIT",
+            tag="strategy_exit_probe",
+            symbol="NFO:NIFTY24JUL24000CE",
+        )
+        is None
+    )
 
 
 def test_explicit_prebroker_rejection_releases_entry_reservation(monkeypatch):
