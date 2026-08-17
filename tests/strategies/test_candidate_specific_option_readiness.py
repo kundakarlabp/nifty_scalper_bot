@@ -580,3 +580,95 @@ def test_final_contract_gate_accepts_only_runner_approved_replacement() -> None:
         )
         is not None
     )
+
+
+def test_live_candidate_selection_prefers_signal_contract_when_affordable() -> None:
+    """Do not replace an executable affordable strategy contract just for rank."""
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = SimpleNamespace(
+        _margin_factor=1.1,
+        _margin_buffer=0.9,
+        resolve_lot_size=lambda _symbol: 65,
+    )
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 9_170.0
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=9_170.0)
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
+    signal_contract = SimpleNamespace(symbol="NFO:NIFTY2681824300CE")
+    higher_ranked_neighbor = SimpleNamespace(symbol="NFO:NIFTY2681824350CE")
+    snapshots = [
+        {
+            "symbol": higher_ranked_neighbor.symbol,
+            "bid": 49.0,
+            "ask": 49.15,
+            "ltp": 49.10,
+        },
+        {
+            "symbol": signal_contract.symbol,
+            "bid": 73.55,
+            "ask": 73.70,
+            "ltp": 73.65,
+        },
+    ]
+
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[higher_ranked_neighbor, signal_contract],
+        candidate_snapshots=snapshots,
+        is_live_mode=True,
+        trace_id="trace-prefer-signal",
+        preferred_symbol=signal_contract.symbol,
+    )
+
+    assert selected is signal_contract
+    assert decisions[signal_contract.symbol]["affordable"] is True
+
+
+def test_live_candidate_selection_still_falls_back_when_signal_contract_unaffordable() -> None:
+    """Preserve capital-aware replacement when the original cannot fund one lot."""
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = SimpleNamespace(
+        _margin_factor=1.1,
+        _margin_buffer=0.9,
+        resolve_lot_size=lambda _symbol: 65,
+    )
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 8_500.0
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=8_500.0)
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
+    signal_contract = SimpleNamespace(symbol="NFO:NIFTY2681824250CE")
+    affordable_neighbor = SimpleNamespace(symbol="NFO:NIFTY2681824300CE")
+    snapshots = [
+        {
+            "symbol": affordable_neighbor.symbol,
+            "bid": 73.55,
+            "ask": 73.70,
+            "ltp": 73.65,
+        },
+        {
+            "symbol": signal_contract.symbol,
+            "bid": 141.8,
+            "ask": 142.0,
+            "ltp": 141.9,
+        },
+    ]
+
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[affordable_neighbor, signal_contract],
+        candidate_snapshots=snapshots,
+        is_live_mode=True,
+        trace_id="trace-fallback",
+        preferred_symbol=signal_contract.symbol,
+    )
+
+    assert decisions[signal_contract.symbol]["affordable"] is False
+    assert selected is affordable_neighbor
