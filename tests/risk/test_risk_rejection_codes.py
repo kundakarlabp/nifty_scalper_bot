@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from nifty_scalper_bot.config.settings import RiskSettings
-from nifty_scalper_bot.risk.risk_manager import RiskManager
+from nifty_scalper_bot.risk.risk_manager import OrderSignal, RiskManager
 
 
 class DummyPositionManager:
@@ -90,6 +90,99 @@ def test_suggest_position_size_never_uses_minimum_risk_floor_to_breach_percent_c
 
     # 1% of ₹30,000 = ₹300. One lot risks 25 * ₹16 = ₹400, so it must be rejected.
     assert quantity == 0
+
+
+def test_suggest_position_size_respects_remaining_daily_loss_budget(monkeypatch) -> None:
+    settings = RiskSettings(
+        per_trade_risk_pct=1.0,
+        daily_loss_pct=2.0,
+        cooldown_on_reject_seconds=0.0,
+    )
+    risk = RiskManager(
+        settings=settings,
+        position_manager=DummyPositionManager(realized=0.0),
+        account_balance=50_000.0,
+    )
+    risk.set_lot_size_provider(lambda _symbol: 25)
+    monkeypatch.setenv("MIN_RISK_PER_TRADE", "500")
+    risk._switches.record_pnl(-750.0)
+
+    quantity = risk.suggest_position_size(
+        side="BUY",
+        price=100.0,
+        stop_loss=88.0,
+        atr=None,
+        requested_quantity=25,
+        confidence=1.0,
+        symbol="NFO:NIFTY2681824400CE",
+    )
+
+    # Daily cap is ₹1,000 and ₹750 is already consumed, leaving ₹250.
+    # One lot risks 25 * ₹12 = ₹300, so sizing must fail closed before entry.
+    assert quantity == 0
+
+
+def test_suggest_position_size_allows_lot_within_remaining_daily_loss_budget(
+    monkeypatch,
+) -> None:
+    settings = RiskSettings(
+        per_trade_risk_pct=1.0,
+        daily_loss_pct=2.0,
+        cooldown_on_reject_seconds=0.0,
+    )
+    risk = RiskManager(
+        settings=settings,
+        position_manager=DummyPositionManager(realized=0.0),
+        account_balance=50_000.0,
+    )
+    risk.set_lot_size_provider(lambda _symbol: 25)
+    monkeypatch.setenv("MIN_RISK_PER_TRADE", "500")
+    risk._switches.record_pnl(-750.0)
+
+    quantity = risk.suggest_position_size(
+        side="BUY",
+        price=100.0,
+        stop_loss=92.0,
+        atr=None,
+        requested_quantity=25,
+        confidence=1.0,
+        symbol="NFO:NIFTY2681824400CE",
+    )
+
+    # Remaining daily budget is ₹250; one lot risks ₹200 and remains admissible.
+    assert quantity == 25
+
+
+def test_final_order_gate_blocks_stop_risk_above_remaining_daily_budget(
+    monkeypatch,
+) -> None:
+    settings = RiskSettings(
+        per_trade_risk_pct=1.0,
+        daily_loss_pct=2.0,
+        cooldown_on_reject_seconds=0.0,
+    )
+    risk = RiskManager(
+        settings=settings,
+        position_manager=DummyPositionManager(realized=0.0),
+        account_balance=50_000.0,
+    )
+    risk._switches.record_pnl(-750.0)
+    monkeypatch.setenv("PAPER_MODE", "true")
+    signal = OrderSignal(
+        symbol="NFO:NIFTY2681824400CE",
+        side="BUY",
+        quantity=25,
+        price=100.0,
+        stop_loss=88.0,
+        take_profit=130.0,
+    )
+
+    allowed, reason = risk.check_order(signal, live_enabled=True)
+
+    assert allowed is False
+    assert reason == "remaining daily loss budget insufficient: 300.00/250.00"
+    assert risk._last_rejection == "DAILY_RISK_BUDGET"
+    assert risk._breaker_tripped is False
 
 
 def test_suggest_position_size_zero_or_invalid_confidence_fails_closed() -> None:
