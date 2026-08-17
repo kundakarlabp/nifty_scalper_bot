@@ -125,7 +125,7 @@ def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
 
 
 def _reanchor_confirmed_fill_geometry(bracket, fill_price):
-    """Preserve the bracket's configured anchor policy at the broker fill price."""
+    """Preserve an explicit bracket anchor policy at the broker fill price."""
     if bracket is None:
         return
     try:
@@ -137,9 +137,18 @@ def _reanchor_confirmed_fill_geometry(bracket, fill_price):
         return
 
     provenance = getattr(bracket, "trade_provenance", {}) or {}
-    anchor_mode = str(provenance.get("bracket_anchor_mode", "distance") or "distance").strip().lower()
+    raw_anchor_mode = provenance.get("bracket_anchor_mode")
+    if raw_anchor_mode is None:
+        # Direct/legacy registrations never declared an anchor contract. Keep
+        # their historical percentage-rescale behavior; the production
+        # TradePlan path always persists an explicit mode before registration.
+        return
+    anchor_mode = str(raw_anchor_mode).strip().lower()
+    if anchor_mode not in {"distance", "absolute_level"}:
+        return
+
     delta = price - old_entry
-    if anchor_mode != "absolute_level":
+    if anchor_mode == "distance":
         if float(bracket.sl_trigger_price or 0.0) > 0.0:
             bracket.sl_trigger_price = _core._round_to_tick(
                 float(bracket.sl_trigger_price) + delta
@@ -153,7 +162,7 @@ def _reanchor_confirmed_fill_geometry(bracket, fill_price):
                 level.price = _core._round_to_tick(float(level.price) + delta)
 
     # Pre-setting entry makes the legacy core fill handler see no entry delta, so
-    # it cannot percentage-rescale the levels a second time.
+    # it cannot percentage-rescale explicitly anchored levels a second time.
     bracket.entry_price = price
     bracket.initial_sl_trigger_price = float(bracket.sl_trigger_price or 0.0)
     _core.LOGGER.info(
