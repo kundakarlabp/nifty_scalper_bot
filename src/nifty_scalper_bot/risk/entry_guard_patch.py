@@ -382,42 +382,6 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
                 )
             return False, reentry_reason
 
-    if live_enabled:
-        remaining_day_budget, current_day_loss, max_day_loss = _daily_risk_budget_state(
-            self
-        )
-        prospective_stop_risk = _signal_stop_risk(signal)
-        if (
-            remaining_day_budget is not None
-            and prospective_stop_risk is not None
-            and prospective_stop_risk > remaining_day_budget
-        ):
-            reason = (
-                "remaining daily loss budget insufficient: "
-                f"{prospective_stop_risk:.2f}/{remaining_day_budget:.2f}"
-            )
-            self._last_rejection = "DAILY_RISK_BUDGET"
-            logger = getattr(self, "_logger", None)
-            log = getattr(logger, "warning", None)
-            if callable(log):
-                log(
-                    "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
-                    reason,
-                    getattr(signal, "symbol", None),
-                    extra={
-                        "event": "RISK_FINAL_GATE_BLOCK",
-                        "reason": reason,
-                        "code": "DAILY_RISK_BUDGET",
-                        "symbol": getattr(signal, "symbol", None),
-                        "final_order_gate": True,
-                        "prospective_stop_risk": prospective_stop_risk,
-                        "remaining_day_budget": remaining_day_budget,
-                        "current_day_loss": current_day_loss,
-                        "max_day_loss": max_day_loss,
-                    },
-                )
-            return False, reason
-
     if _real_broker_live(live_enabled):
         net_rr_block = _net_rr_block_reason(signal)
         if net_rr_block is not None:
@@ -474,7 +438,47 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
                     },
                 )
             return False, reason
-    return _ORIGINAL_CHECK_ORDER(self, signal, live_enabled)
+
+    allowed, reason = _ORIGINAL_CHECK_ORDER(self, signal, live_enabled)
+    if not allowed:
+        return allowed, reason
+
+    if live_enabled:
+        remaining_day_budget, current_day_loss, max_day_loss = _daily_risk_budget_state(
+            self
+        )
+        prospective_stop_risk = _signal_stop_risk(signal)
+        if (
+            remaining_day_budget is not None
+            and prospective_stop_risk is not None
+            and prospective_stop_risk > remaining_day_budget
+        ):
+            reason = (
+                "remaining daily loss budget insufficient: "
+                f"{prospective_stop_risk:.2f}/{remaining_day_budget:.2f}"
+            )
+            self._last_rejection = "DAILY_RISK_BUDGET"
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "warning", None)
+            if callable(log):
+                log(
+                    "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
+                    reason,
+                    getattr(signal, "symbol", None),
+                    extra={
+                        "event": "RISK_FINAL_GATE_BLOCK",
+                        "reason": reason,
+                        "code": "DAILY_RISK_BUDGET",
+                        "symbol": getattr(signal, "symbol", None),
+                        "final_order_gate": True,
+                        "prospective_stop_risk": prospective_stop_risk,
+                        "remaining_day_budget": remaining_day_budget,
+                        "current_day_loss": current_day_loss,
+                        "max_day_loss": max_day_loss,
+                    },
+                )
+            return False, reason
+    return allowed, reason
 
 
 def apply_patches() -> None:
