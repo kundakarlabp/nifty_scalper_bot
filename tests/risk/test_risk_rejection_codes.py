@@ -92,6 +92,67 @@ def test_suggest_position_size_never_uses_minimum_risk_floor_to_breach_percent_c
     assert quantity == 0
 
 
+def test_suggest_position_size_respects_remaining_daily_loss_budget(monkeypatch) -> None:
+    settings = RiskSettings(
+        per_trade_risk_pct=1.0,
+        daily_loss_pct=2.0,
+        cooldown_on_reject_seconds=0.0,
+    )
+    risk = RiskManager(
+        settings=settings,
+        position_manager=DummyPositionManager(realized=0.0),
+        account_balance=50_000.0,
+    )
+    risk.set_lot_size_provider(lambda _symbol: 25)
+    monkeypatch.setenv("MIN_RISK_PER_TRADE", "500")
+    risk._switches.record_pnl(-750.0)
+
+    quantity = risk.suggest_position_size(
+        side="BUY",
+        price=100.0,
+        stop_loss=88.0,
+        atr=None,
+        requested_quantity=25,
+        confidence=1.0,
+        symbol="NFO:NIFTY2681824400CE",
+    )
+
+    # Daily cap is ₹1,000 and ₹750 is already consumed, leaving ₹250.
+    # One lot risks 25 * ₹12 = ₹300, so sizing must fail closed before entry.
+    assert quantity == 0
+
+
+def test_suggest_position_size_allows_lot_within_remaining_daily_loss_budget(
+    monkeypatch,
+) -> None:
+    settings = RiskSettings(
+        per_trade_risk_pct=1.0,
+        daily_loss_pct=2.0,
+        cooldown_on_reject_seconds=0.0,
+    )
+    risk = RiskManager(
+        settings=settings,
+        position_manager=DummyPositionManager(realized=0.0),
+        account_balance=50_000.0,
+    )
+    risk.set_lot_size_provider(lambda _symbol: 25)
+    monkeypatch.setenv("MIN_RISK_PER_TRADE", "500")
+    risk._switches.record_pnl(-750.0)
+
+    quantity = risk.suggest_position_size(
+        side="BUY",
+        price=100.0,
+        stop_loss=92.0,
+        atr=None,
+        requested_quantity=25,
+        confidence=1.0,
+        symbol="NFO:NIFTY2681824400CE",
+    )
+
+    # Remaining daily budget is ₹250; one lot risks ₹200 and remains admissible.
+    assert quantity == 25
+
+
 def test_suggest_position_size_zero_or_invalid_confidence_fails_closed() -> None:
     risk = _make_risk_manager()
     risk.set_lot_size_provider(lambda _symbol: 25)
