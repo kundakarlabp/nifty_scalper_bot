@@ -348,7 +348,7 @@ def test_restart_with_partially_filled_unprotected_position_no_reapply(
 
 
 def test_authoritative_broker_realized_overrides_divergent_local_ledger(tmp_path) -> None:
-    """Broker-confirmed session P&L must win once the snapshot is authoritative."""
+    """Broker-confirmed session P&L must rebase the durable local ledger."""
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.establish_pnl_session_baseline(0.0)
     with manager._lock:
@@ -370,10 +370,10 @@ def test_authoritative_broker_realized_overrides_divergent_local_ledger(tmp_path
     snapshot = manager.pnl_reconciliation_snapshot()
     assert manager.get_realized_pnl() == pytest.approx(-234.0)
     assert snapshot["broker_session_realized"] == pytest.approx(-234.0)
-    assert snapshot["local_confirmed_realized"] == pytest.approx(-1200.67)
+    assert snapshot["local_confirmed_realized"] == pytest.approx(-234.0)
     assert snapshot["authoritative_realized"] == pytest.approx(-234.0)
     assert snapshot["pnl_authority"] == "validated_broker_positions"
-    assert snapshot["pnl_reconciliation_status"] == "broker_authoritative_mismatch"
+    assert snapshot["pnl_reconciliation_status"] == "broker_authoritative_reconciled"
     assert manager.current_pnl_reconciliation_blocker() is None
 
 
