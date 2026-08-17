@@ -18,10 +18,31 @@ for _name in dir(_core):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_core, _name)
 
-from nifty_scalper_bot.execution.runtime_order_manager import (  # noqa: E402
-    RuntimeOrderManager,
-)
+from nifty_scalper_bot.execution import runtime_order_manager as _runtime  # noqa: E402
 
+
+_original_enrich_trade_plan_exit_provenance = _runtime._enrich_trade_plan_exit_provenance
+
+
+def _enrich_trade_plan_exit_provenance(plan):
+    """Carry the TradePlan bracket anchor contract into durable provenance."""
+    plan = _original_enrich_trade_plan_exit_provenance(plan)
+    try:
+        provenance = dict(getattr(plan, "trade_provenance", {}) or {})
+    except (TypeError, ValueError):
+        provenance = {}
+    provenance.setdefault(
+        "bracket_anchor_mode",
+        str(getattr(plan, "bracket_anchor_mode", "distance") or "distance"),
+    )
+    setattr(plan, "trade_provenance", provenance)
+    return plan
+
+
+# RuntimeOrderManager methods resolve this module-global helper at call time.
+# Patch that one helper rather than introducing a second submission path.
+_runtime._enrich_trade_plan_exit_provenance = _enrich_trade_plan_exit_provenance
+RuntimeOrderManager = _runtime.RuntimeOrderManager
 OrderManager = RuntimeOrderManager
 
 __all__ = sorted(
