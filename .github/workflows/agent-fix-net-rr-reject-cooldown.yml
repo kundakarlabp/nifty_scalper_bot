@@ -1,0 +1,82 @@
+name: TDD Net RR Reject Cooldown Fix
+
+on:
+  push:
+    branches:
+      - fix/live-20260817-net-rr-reject-cooldown
+
+permissions:
+  contents: write
+
+jobs:
+  tdd-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Add live regression first
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/strategies/test_runner_cooldowns.py')
+          text = path.read_text()
+          old = '''        ("entry_rr_below_floor", "entry_rr_below_floor"),\n        ("MARGIN no_qty_after_risk", "risk_capacity_unavailable"),'''
+          new = '''        ("entry_rr_below_floor", "entry_rr_below_floor"),\n        ("net reward-risk insufficient: 1.24/1.50", "entry_rr_below_floor"),\n        ("MARGIN no_qty_after_risk", "risk_capacity_unavailable"),'''
+          if old not in text:
+              raise SystemExit('test parameter anchor mismatch')
+          text = text.replace(old, new, 1)
+          marker = 'def test_net_rr_local_reject_stamps_existing_rr_cooldown_cache()'
+          if marker not in text:
+              text += '''\n\ndef test_net_rr_local_reject_stamps_existing_rr_cooldown_cache() -> None:\n    runner = object.__new__(StrategyRunner)\n    runner._execution_reject_cooldown_ts = {}\n\n    marked = runner._mark_deterministic_execution_reject_cooldown(\n        symbol="NFO:NIFTY2681824300CE",\n        reason_key="NIFTY:CE:VWAPPro",\n        reason="net reward-risk insufficient: 1.24/1.50",\n        now_epoch=100.0,\n        broker_attempted=False,\n    )\n\n    assert marked == "entry_rr_below_floor"\n    assert runner._execution_reject_cooldown_ts == {\n        "NFO:NIFTY2681824300CE:NIFTY:CE:VWAPPro:entry_rr_below_floor": 100.0\n    }\n\n\ndef test_net_rr_broker_attempt_does_not_latch_cooldown() -> None:\n    runner = object.__new__(StrategyRunner)\n    runner._execution_reject_cooldown_ts = {}\n\n    marked = runner._mark_deterministic_execution_reject_cooldown(\n        symbol="NFO:NIFTY2681824300CE",\n        reason_key="NIFTY:CE:VWAPPro",\n        reason="net reward-risk insufficient: 1.24/1.50",\n        now_epoch=100.0,\n        broker_attempted=True,\n    )\n\n    assert marked is None\n    assert runner._execution_reject_cooldown_ts == {}\n'''
+          path.write_text(text)
+          PY
+      - name: Prove regression is red before correction
+        run: |
+          if pytest -q tests/strategies/test_runner_cooldowns.py -k 'deterministic_execution_reject_reason_families or net_rr_local_reject'; then
+            echo 'Expected pre-fix net-RR regression failure did not occur'
+            exit 1
+          fi
+      - name: Apply minimal reason alias correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/nifty_scalper_bot/strategies/runner.py')
+          text = path.read_text()
+          old = '''        if "entry_rr_below_floor" in normalized:\n            return "entry_rr_below_floor"'''
+          new = '''        if any(\n            marker in normalized\n            for marker in (\n                "entry_rr_below_floor",\n                "net reward-risk insufficient",\n                "net_rr_insufficient",\n            )\n        ):\n            return "entry_rr_below_floor"'''
+          if text.count(old) != 1:
+              raise SystemExit('runner RR classifier anchor mismatch')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+      - name: Focused cooldown regressions
+        run: pytest -q tests/strategies/test_runner_cooldowns.py
+      - name: Strategy suite
+        run: pytest -q tests/strategies
+      - name: Risk and execution suites
+        run: pytest -q tests/risk tests/execution
+      - name: Compile
+        run: python -m compileall -q src tests
+      - name: Full repository suite
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: pytest -q
+      - name: Commit validated change
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/strategies/runner.py tests/strategies/test_runner_cooldowns.py
+          git diff --cached --check
+          git commit -m 'Fix net RR rejection cooldown classification'
+          git push origin HEAD:fix/live-20260817-net-rr-reject-cooldown
