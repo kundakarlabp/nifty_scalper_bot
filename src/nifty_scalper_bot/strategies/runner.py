@@ -4422,7 +4422,14 @@ class StrategyRunner:
     @staticmethod
     def _deterministic_execution_reject_reason(reason: object) -> str | None:
         normalized = str(reason or "").strip().lower()
-        if "entry_rr_below_floor" in normalized:
+        if any(
+            marker in normalized
+            for marker in (
+                "entry_rr_below_floor",
+                "net reward-risk insufficient",
+                "net_rr_insufficient",
+            )
+        ):
             return "entry_rr_below_floor"
         if any(
             marker in normalized

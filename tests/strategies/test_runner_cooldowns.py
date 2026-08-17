@@ -47,6 +47,7 @@ def test_candidate_enrichment_raises_rr_and_option_score() -> None:
     ("reason", "expected"),
     [
         ("entry_rr_below_floor", "entry_rr_below_floor"),
+        ("net reward-risk insufficient: 1.24/1.50", "entry_rr_below_floor"),
         ("MARGIN no_qty_after_risk", "risk_capacity_unavailable"),
         ("insufficient_margin", "risk_capacity_unavailable"),
         ("available_balance_unavailable", "risk_capacity_unavailable"),
@@ -91,3 +92,37 @@ def test_deterministic_local_reject_stamps_existing_cooldown_cache() -> None:
     assert runner._execution_reject_cooldown_ts == {
         "NFO:NIFTY26AUG25000CE:orderflow:risk_capacity_unavailable": 100.0
     }
+
+
+def test_net_rr_local_reject_stamps_existing_rr_cooldown_cache() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._execution_reject_cooldown_ts = {}
+
+    marked = runner._mark_deterministic_execution_reject_cooldown(
+        symbol="NFO:NIFTY2681824300CE",
+        reason_key="NIFTY:CE:VWAPPro",
+        reason="net reward-risk insufficient: 1.24/1.50",
+        now_epoch=100.0,
+        broker_attempted=False,
+    )
+
+    assert marked == "entry_rr_below_floor"
+    assert runner._execution_reject_cooldown_ts == {
+        "NFO:NIFTY2681824300CE:NIFTY:CE:VWAPPro:entry_rr_below_floor": 100.0
+    }
+
+
+def test_net_rr_broker_attempt_does_not_latch_cooldown() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._execution_reject_cooldown_ts = {}
+
+    marked = runner._mark_deterministic_execution_reject_cooldown(
+        symbol="NFO:NIFTY2681824300CE",
+        reason_key="NIFTY:CE:VWAPPro",
+        reason="net reward-risk insufficient: 1.24/1.50",
+        now_epoch=100.0,
+        broker_attempted=True,
+    )
+
+    assert marked is None
+    assert runner._execution_reject_cooldown_ts == {}
