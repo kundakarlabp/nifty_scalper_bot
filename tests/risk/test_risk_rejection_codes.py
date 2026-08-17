@@ -153,7 +153,9 @@ def test_suggest_position_size_allows_lot_within_remaining_daily_loss_budget(
     assert quantity == 25
 
 
-def test_final_order_gate_blocks_stop_risk_above_remaining_daily_budget() -> None:
+def test_final_order_gate_blocks_stop_risk_above_remaining_daily_budget(
+    monkeypatch,
+) -> None:
     settings = RiskSettings(
         per_trade_risk_pct=1.0,
         daily_loss_pct=2.0,
@@ -165,6 +167,7 @@ def test_final_order_gate_blocks_stop_risk_above_remaining_daily_budget() -> Non
         account_balance=50_000.0,
     )
     risk._switches.record_pnl(-750.0)
+    monkeypatch.setenv("PAPER_MODE", "true")
     signal = OrderSignal(
         symbol="NFO:NIFTY2681824400CE",
         side="BUY",
