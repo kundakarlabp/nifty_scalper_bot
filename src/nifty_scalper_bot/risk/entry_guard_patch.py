@@ -208,6 +208,38 @@ def _sizing_risk_distance(
     return 0.0
 
 
+def _daily_risk_budget_state(manager: Any) -> tuple[float | None, float, float]:
+    """Return remaining day-loss budget, current day loss and configured cap."""
+    switches = getattr(manager, "_switches", None)
+    if switches is None:
+        return None, 0.0, 0.0
+    with suppress(TypeError, ValueError):
+        max_day_loss = max(float(getattr(switches, "max_day_loss", 0.0) or 0.0), 0.0)
+        if max_day_loss <= 0.0:
+            return None, 0.0, 0.0
+        day_loss_reader = getattr(switches, "day_loss", None)
+        if not callable(day_loss_reader):
+            return 0.0, 0.0, max_day_loss
+        try:
+            current_day_loss = max(float(day_loss_reader() or 0.0), 0.0)
+        except Exception:
+            return 0.0, 0.0, max_day_loss
+        return max(max_day_loss - current_day_loss, 0.0), current_day_loss, max_day_loss
+    return None, 0.0, 0.0
+
+
+def _signal_stop_risk(signal: Any) -> float | None:
+    """Return deterministic stop-risk for a normalized entry signal."""
+    with suppress(TypeError, ValueError):
+        quantity = abs(int(float(getattr(signal, "quantity", 0) or 0)))
+        price = float(getattr(signal, "price", 0.0) or 0.0)
+        stop_loss = getattr(signal, "stop_loss", None)
+        if quantity <= 0 or price <= 0.0 or stop_loss is None:
+            return None
+        return abs(price - float(stop_loss)) * quantity
+    return None
+
+
 def _patched_suggest_position_size(
     self: Any,
     *,
@@ -219,7 +251,7 @@ def _patched_suggest_position_size(
     confidence: float | None = None,
     symbol: str | None = None,
 ) -> int:
-    """Preserve existing sizing, then enforce the canonical percentage cap."""
+    """Preserve existing sizing, then enforce percentage and remaining-day caps."""
     confidence_value = _confidence_value(confidence)
     if confidence_value <= 0.0:
         logger = getattr(self, "_logger", None)
@@ -257,8 +289,17 @@ def _patched_suggest_position_size(
         balance = float(getattr(self, "account_balance", 0.0) or 0.0)
         if balance <= 0.0:
             balance = float(getattr(self, "_cached_balance", 0.0) or 0.0)
-        risk_pct = float(getattr(getattr(self, "settings", None), "per_trade_risk_pct", 0.0) or 0.0)
+        risk_pct = float(
+            getattr(getattr(self, "settings", None), "per_trade_risk_pct", 0.0)
+            or 0.0
+        )
         allowed_risk = balance * (risk_pct / 100.0)
+        remaining_day_budget, current_day_loss, max_day_loss = _daily_risk_budget_state(
+            self
+        )
+        effective_allowed_risk = allowed_risk
+        if remaining_day_budget is not None:
+            effective_allowed_risk = min(allowed_risk, remaining_day_budget)
         distance = _sizing_risk_distance(
             side=side,
             price=float(price),
@@ -272,27 +313,42 @@ def _patched_suggest_position_size(
                 lot_size = int(os.getenv("DEFAULT_LOT_SIZE", "25"))
             if lot_size <= 0:
                 return 0
-            max_lots = int(allowed_risk // (distance * lot_size))
+            max_lots = int(effective_allowed_risk // (distance * lot_size))
             safe_quantity = max(0, max_lots * lot_size)
             if quantity > safe_quantity:
                 logger = getattr(self, "_logger", None)
                 log = getattr(logger, "warning", None)
+                daily_budget_tighter = (
+                    remaining_day_budget is not None
+                    and remaining_day_budget < allowed_risk
+                )
+                event = (
+                    "RISK_SIZING_CLAMPED_TO_REMAINING_DAY_BUDGET"
+                    if daily_budget_tighter
+                    else "RISK_SIZING_CLAMPED_TO_PERCENT_CAP"
+                )
                 if callable(log):
                     log(
-                        "RISK_SIZING_CLAMPED_TO_PERCENT_CAP symbol=%s requested_sized=%s safe_qty=%s allowed_risk=%.2f risk_distance=%.4f",
+                        "%s symbol=%s requested_sized=%s safe_qty=%s allowed_risk=%.2f effective_risk=%.2f risk_distance=%.4f",
+                        event,
                         symbol,
                         quantity,
                         safe_quantity,
                         allowed_risk,
+                        effective_allowed_risk,
                         distance,
                         extra={
-                            "event": "RISK_SIZING_CLAMPED_TO_PERCENT_CAP",
+                            "event": event,
                             "symbol": symbol,
                             "sized_quantity": quantity,
                             "safe_quantity": safe_quantity,
                             "allowed_risk": allowed_risk,
+                            "effective_allowed_risk": effective_allowed_risk,
                             "risk_distance": distance,
                             "per_trade_risk_pct": risk_pct,
+                            "remaining_day_budget": remaining_day_budget,
+                            "current_day_loss": current_day_loss,
+                            "max_day_loss": max_day_loss,
                         },
                     )
                 return safe_quantity
@@ -325,6 +381,42 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
                     },
                 )
             return False, reentry_reason
+
+    if live_enabled:
+        remaining_day_budget, current_day_loss, max_day_loss = _daily_risk_budget_state(
+            self
+        )
+        prospective_stop_risk = _signal_stop_risk(signal)
+        if (
+            remaining_day_budget is not None
+            and prospective_stop_risk is not None
+            and prospective_stop_risk > remaining_day_budget
+        ):
+            reason = (
+                "remaining daily loss budget insufficient: "
+                f"{prospective_stop_risk:.2f}/{remaining_day_budget:.2f}"
+            )
+            self._last_rejection = "DAILY_RISK_BUDGET"
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "warning", None)
+            if callable(log):
+                log(
+                    "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
+                    reason,
+                    getattr(signal, "symbol", None),
+                    extra={
+                        "event": "RISK_FINAL_GATE_BLOCK",
+                        "reason": reason,
+                        "code": "DAILY_RISK_BUDGET",
+                        "symbol": getattr(signal, "symbol", None),
+                        "final_order_gate": True,
+                        "prospective_stop_risk": prospective_stop_risk,
+                        "remaining_day_budget": remaining_day_budget,
+                        "current_day_loss": current_day_loss,
+                        "max_day_loss": max_day_loss,
+                    },
+                )
+            return False, reason
 
     if _real_broker_live(live_enabled):
         net_rr_block = _net_rr_block_reason(signal)
@@ -406,10 +498,12 @@ __all__ = [
     "apply_patches",
     "_confidence_value",
     "_daily_limit_block_reason",
+    "_daily_risk_budget_state",
     "_is_reducing_order",
     "_net_rr_block_reason",
     "_patched_suggest_position_size",
     "_real_broker_live",
+    "_signal_stop_risk",
     "_sizing_risk_distance",
     "_stop_reentry_block_reason",
 ]
