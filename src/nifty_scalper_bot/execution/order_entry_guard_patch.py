@@ -14,6 +14,7 @@ _PATCH_APPLIED = False
 _ORIGINAL_PLACE_ORDER: Any = None
 _CORE_PLACE_ORDER_SIGNATURE = inspect.signature(_core.OrderManager.place_order)
 _ENTRY_INTENTS = {"ENTRY", "SCALE_IN", "REVERSAL"}
+_EXIT_TAG_TOKENS = ("exit", "stop", "target", "square", "guard")
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -34,6 +35,26 @@ def _env_float(names: tuple[str, ...], default: float) -> float:
     return default
 
 
+def _entry_identity_block_reason(
+    *, intent: Any, tag: Any, symbol: Any
+) -> dict[str, Any] | None:
+    """Reject explicit entries whose legacy tag would masquerade as an exit."""
+    normalized_intent = str(intent or "").strip().upper()
+    if normalized_intent not in _ENTRY_INTENTS:
+        return None
+    normalized_tag = str(tag or "").strip().lower()
+    matched = next((token for token in _EXIT_TAG_TOKENS if token in normalized_tag), None)
+    if matched is None:
+        return None
+    return {
+        "block_reason": "entry_exit_tag_conflict",
+        "symbol": symbol,
+        "intent": normalized_intent,
+        "tag": tag,
+        "matched_exit_token": matched,
+    }
+
+
 def _entry_geometry_block_reason(
     manager: Any,
     *,
@@ -52,10 +73,23 @@ def _entry_geometry_block_reason(
     if normalized_side not in {"BUY", "SELL"}:
         return None
 
-    entry = _float_or_none(price)
     sl = _float_or_none(stop_loss)
+    if sl is None:
+        return {
+            "block_reason": "entry_stop_loss_required",
+            "symbol": symbol,
+            "entry": _float_or_none(price),
+            "stop_loss": stop_loss,
+            "take_profit": _float_or_none(take_profit),
+            "rr": 0.0,
+            "rr_floor": _env_float(
+                ("ENTRY_MIN_RR", "MIN_ENTRY_RR", "MIN_BRACKET_RR"), 1.5
+            ),
+        }
+
+    entry = _float_or_none(price)
     tp = _float_or_none(take_profit)
-    if entry is None or sl is None or tp is None:
+    if entry is None or tp is None:
         return None
 
     if normalized_side == "BUY":
@@ -157,10 +191,59 @@ def _release_prebroker_entry_reservation(self: Any, values: Mapping[str, Any]) -
     return True
 
 
+def _record_entry_block(self: Any, reason: Mapping[str, Any]) -> None:
+    setter = getattr(self, "set_last_skip_reason", None)
+    if callable(setter):
+        with suppress(Exception):
+            setter(str(reason["block_reason"]))
+    self._last_order_decision = {
+        "allowed": False,
+        "block_reason": reason["block_reason"],
+        "details": dict(reason),
+        "broker_attempted": False,
+        "final_order_gate": True,
+    }
+    logger = getattr(self, "_logger", None)
+    log = getattr(logger, "critical", None)
+    if not callable(log):
+        return
+    if reason.get("block_reason") == "entry_exit_tag_conflict":
+        log(
+            "ENTRY_IDENTITY_BLOCKED symbol=%s reason=%s intent=%s tag=%s",
+            reason.get("symbol"),
+            reason.get("block_reason"),
+            reason.get("intent"),
+            reason.get("tag"),
+            extra={"event": "ENTRY_IDENTITY_BLOCKED", **dict(reason)},
+        )
+        return
+    log(
+        "ENTRY_GEOMETRY_BLOCKED symbol=%s reason=%s entry=%s sl=%s tp=%s rr=%s floor=%s",
+        reason.get("symbol"),
+        reason.get("block_reason"),
+        reason.get("entry"),
+        reason.get("stop_loss"),
+        reason.get("take_profit"),
+        round(float(reason.get("rr") or 0.0), 3),
+        reason.get("rr_floor"),
+        extra={"event": "ENTRY_GEOMETRY_BLOCKED", **dict(reason)},
+    )
+
+
 def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
     if not _live_mode(self):
         return _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
     values = _bind_place_order(args, kwargs) or dict(kwargs)
+    identity_reason = _entry_identity_block_reason(
+        intent=values.get("intent"),
+        tag=values.get("tag"),
+        symbol=values.get("symbol"),
+    )
+    if identity_reason is not None:
+        _record_entry_block(self, identity_reason)
+        _release_prebroker_entry_reservation(self, values)
+        return None
+
     reason = _entry_geometry_block_reason(
         self,
         symbol=values.get("symbol"),
@@ -171,31 +254,8 @@ def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
         intent=values.get("intent"),
     )
     if reason is not None:
-        setter = getattr(self, "set_last_skip_reason", None)
-        if callable(setter):
-            with suppress(Exception):
-                setter(str(reason["block_reason"]))
-        self._last_order_decision = {
-            "allowed": False,
-            "block_reason": reason["block_reason"],
-            "details": reason,
-            "broker_attempted": False,
-            "final_order_gate": True,
-        }
-        logger = getattr(self, "_logger", None)
-        log = getattr(logger, "critical", None)
-        if callable(log):
-            log(
-                "ENTRY_GEOMETRY_BLOCKED symbol=%s reason=%s entry=%s sl=%s tp=%s rr=%s floor=%s",
-                reason.get("symbol"),
-                reason.get("block_reason"),
-                reason.get("entry"),
-                reason.get("stop_loss"),
-                reason.get("take_profit"),
-                round(float(reason.get("rr") or 0.0), 3),
-                reason.get("rr_floor"),
-                extra={"event": "ENTRY_GEOMETRY_BLOCKED", **reason},
-            )
+        _record_entry_block(self, reason)
+        _release_prebroker_entry_reservation(self, values)
         return None
     result = _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
     if result is None:
@@ -221,5 +281,7 @@ def apply_patches() -> None:
 __all__ = [
     "apply_patches",
     "_entry_geometry_block_reason",
+    "_entry_identity_block_reason",
+    "_record_entry_block",
     "_release_prebroker_entry_reservation",
 ]

@@ -70,6 +70,44 @@ def test_record_rejection_margin_is_soft() -> None:
     assert risk._last_rejection == "MARGIN"
 
 
+def test_suggest_position_size_never_uses_minimum_risk_floor_to_breach_percent_cap(
+    monkeypatch,
+) -> None:
+    risk = _make_risk_manager()
+    risk.account_balance = 30_000.0
+    risk.set_lot_size_provider(lambda _symbol: 25)
+    monkeypatch.setenv("MIN_RISK_PER_TRADE", "500")
+
+    quantity = risk.suggest_position_size(
+        side="BUY",
+        price=100.0,
+        stop_loss=84.0,
+        atr=None,
+        requested_quantity=25,
+        confidence=1.0,
+        symbol="NFO:NIFTY2681824400CE",
+    )
+
+    # 1% of ₹30,000 = ₹300. One lot risks 25 * ₹16 = ₹400, so it must be rejected.
+    assert quantity == 0
+
+
+def test_suggest_position_size_zero_or_invalid_confidence_fails_closed() -> None:
+    risk = _make_risk_manager()
+    risk.set_lot_size_provider(lambda _symbol: 25)
+
+    common = dict(
+        side="BUY",
+        price=100.0,
+        stop_loss=95.0,
+        atr=None,
+        requested_quantity=25,
+        symbol="NFO:NIFTY2681824400CE",
+    )
+    assert risk.suggest_position_size(confidence=0.0, **common) == 0
+    assert risk.suggest_position_size(confidence="invalid", **common) == 0
+
+
 def test_risk_config_max_concurrent_positions_matches_enforced_single_position() -> None:
     """Slice-4: the second (dead-code) RiskManager's config default must not
     silently disagree with the single-position policy enforced at the
