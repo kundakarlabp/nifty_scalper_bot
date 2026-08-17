@@ -1,12 +1,15 @@
-"""Persist entry-risk state and block immediate same-thesis stop re-entry.
+"""Persist entry-risk state and keep PositionManager risk state restart-safe.
 
 This patch stays deliberately narrow:
 * persist the existing PositionManager daily-entry counter in its existing JSON
   state file so an intraday process restart cannot reset max_trades_per_day;
 * after a stop-loss exit, temporarily block a new option entry for the same
-  underlying and option side, including a strike change.
+  underlying and option side, including a strike change;
+* when a validated broker position snapshot explicitly contains realised P&L,
+  make that session-normalised broker value authoritative over a divergent local
+  ledger while retaining local P&L as the fallback for positions-only snapshots.
 
-Protective/reducing orders remain outside this entry-only guard.
+Protective/reducing orders remain outside the entry-only guard.
 """
 
 from __future__ import annotations
@@ -18,7 +21,9 @@ import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
+
+from nifty_scalper_bot.utils.symbols import is_strategy_instrument, normalize_symbol
 
 # Standalone "SL" token (SL Hit, HARD_SL_BREACH, FORCED_SL_EXIT, WATCHDOG_HARD_SL)
 # or an explicit STOP LOSS / STOP_LOSS phrase. "SLIPPAGE" must not match.
@@ -27,6 +32,8 @@ _PATCH_APPLIED = False
 _ORIGINAL_INIT: Any = None
 _ORIGINAL_SAVE_STATE: Any = None
 _ORIGINAL_CLOSE_POSITION: Any = None
+_ORIGINAL_REFRESH_REALIZED_PNL: Any = None
+_ORIGINAL_SYNCHRONIZE_WITH_BROKER: Any = None
 _RISK_KEY = "_risk_runtime"
 
 
@@ -117,6 +124,10 @@ def _restore_risk_state(owner: Any) -> None:
 
 
 def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+    # The original initializer can load persisted P&L and therefore invoke the
+    # patched refresh before it returns. Default to local fallback until a fresh
+    # validated broker snapshot explicitly proves realised-P&L authority.
+    self._broker_realized_authoritative = False
     _ORIGINAL_INIT(self, *args, **kwargs)
     self._recent_stop_thesis = None
     self._risk_circuit_state = {}
@@ -129,6 +140,62 @@ def _patched_save_state(self: Any, *args: Any, **kwargs: Any) -> Any:
     with getattr(self, "_lock"):
         _write_risk_state(self)
     return result
+
+
+def _snapshot_has_authoritative_realized(
+    broker_positions: Sequence[Mapping[str, object]],
+) -> bool:
+    """Return True only when a managed MIS row explicitly carries realised P&L."""
+    for record in broker_positions:
+        if not isinstance(record, Mapping):
+            continue
+        product = str(record.get("product") or "").strip().upper()
+        if product != "MIS":
+            continue
+        raw_symbol = record.get("symbol") or record.get("tradingsymbol")
+        symbol = normalize_symbol(str(raw_symbol or ""))
+        if not symbol or not is_strategy_instrument(symbol):
+            continue
+        if "realised" in record or "realized" in record:
+            return True
+    return False
+
+
+def _patched_synchronize_with_broker(
+    self: Any, broker_positions: Sequence[Mapping[str, object]]
+) -> Any:
+    """Carry explicit broker P&L authority into the existing reconciliation path."""
+    rows = list(broker_positions)
+    previous_authority = bool(getattr(self, "_broker_realized_authoritative", False))
+    self._broker_realized_authoritative = _snapshot_has_authoritative_realized(rows)
+    try:
+        return _ORIGINAL_SYNCHRONIZE_WITH_BROKER(self, rows)
+    except Exception:
+        # A rejected/invalid broker snapshot must never change P&L authority.
+        self._broker_realized_authoritative = previous_authority
+        raise
+
+
+def _patched_refresh_realized_pnl_locked(self: Any) -> None:
+    """Prefer validated broker session P&L only when the latest snapshot proves it."""
+    _ORIGINAL_REFRESH_REALIZED_PNL(self)
+    if not bool(getattr(self, "_broker_realized_authoritative", False)):
+        return
+    broker_realized = getattr(self, "_broker_realized_pnl", None)
+    baseline = getattr(self, "_session_opening_realized_baseline", None)
+    if broker_realized is None or baseline is None:
+        return
+    with suppress(TypeError, ValueError):
+        broker_confirmed = float(broker_realized) - float(baseline)
+        local_confirmed = float(getattr(self, "_local_realized_pnl", 0.0) or 0.0)
+        self._authoritative_realized_pnl = broker_confirmed
+        self._daily_realized_pnl = broker_confirmed
+        self._pnl_authority = "validated_broker_positions"
+        self._pnl_reconciliation_status = (
+            "broker_authoritative_mismatch"
+            if abs(local_confirmed - broker_confirmed) > 1.0
+            else "matched"
+        )
 
 
 def _is_stop_reason(reason: object) -> bool:
@@ -215,7 +282,9 @@ def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
 
 
 def apply_patches() -> None:
-    global _PATCH_APPLIED, _ORIGINAL_INIT, _ORIGINAL_SAVE_STATE, _ORIGINAL_CLOSE_POSITION
+    global _PATCH_APPLIED
+    global _ORIGINAL_INIT, _ORIGINAL_SAVE_STATE, _ORIGINAL_CLOSE_POSITION
+    global _ORIGINAL_REFRESH_REALIZED_PNL, _ORIGINAL_SYNCHRONIZE_WITH_BROKER
     if _PATCH_APPLIED:
         return
     from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -226,9 +295,13 @@ def apply_patches() -> None:
     _ORIGINAL_INIT = PositionManager.__init__
     _ORIGINAL_SAVE_STATE = PositionManager.save_state
     _ORIGINAL_CLOSE_POSITION = PositionManager.close_position
+    _ORIGINAL_REFRESH_REALIZED_PNL = PositionManager._refresh_realized_pnl_locked
+    _ORIGINAL_SYNCHRONIZE_WITH_BROKER = PositionManager.synchronize_with_broker
     PositionManager.__init__ = _patched_init
     PositionManager.save_state = _patched_save_state
     PositionManager.close_position = _patched_close_position
+    PositionManager._refresh_realized_pnl_locked = _patched_refresh_realized_pnl_locked
+    PositionManager.synchronize_with_broker = _patched_synchronize_with_broker
     PositionManager.stop_reentry_block_reason = stop_reentry_block_reason
     PositionManager.get_risk_circuit_state = get_risk_circuit_state
     PositionManager.persist_risk_circuit_state = persist_risk_circuit_state
@@ -242,4 +315,5 @@ __all__ = [
     "get_risk_circuit_state",
     "persist_risk_circuit_state",
     "_option_thesis",
+    "_snapshot_has_authoritative_realized",
 ]
