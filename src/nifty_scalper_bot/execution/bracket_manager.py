@@ -124,6 +124,58 @@ def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
     return True
 
 
+def _reanchor_confirmed_fill_geometry(bracket, fill_price):
+    """Preserve the bracket's configured anchor policy at the broker fill price."""
+    if bracket is None:
+        return
+    try:
+        price = float(fill_price)
+        old_entry = float(bracket.entry_price or 0.0)
+    except (TypeError, ValueError):
+        return
+    if price <= 0.0 or old_entry <= 0.0 or abs(price - old_entry) < 1e-12:
+        return
+
+    provenance = getattr(bracket, "trade_provenance", {}) or {}
+    anchor_mode = str(provenance.get("bracket_anchor_mode", "distance") or "distance").strip().lower()
+    delta = price - old_entry
+    if anchor_mode != "absolute_level":
+        if float(bracket.sl_trigger_price or 0.0) > 0.0:
+            bracket.sl_trigger_price = _core._round_to_tick(
+                float(bracket.sl_trigger_price) + delta
+            )
+        if float(bracket.tp_trigger_price or 0.0) > 0.0:
+            bracket.tp_trigger_price = _core._round_to_tick(
+                float(bracket.tp_trigger_price) + delta
+            )
+        for level in getattr(bracket, "tp_levels", ()):
+            if not getattr(level, "executed", False):
+                level.price = _core._round_to_tick(float(level.price) + delta)
+
+    # Pre-setting entry makes the legacy core fill handler see no entry delta, so
+    # it cannot percentage-rescale the levels a second time.
+    bracket.entry_price = price
+    bracket.initial_sl_trigger_price = float(bracket.sl_trigger_price or 0.0)
+    _core.LOGGER.info(
+        "BRACKET_FILL_REANCHORED order_id=%s symbol=%s mode=%s old_entry=%.2f fill=%.2f sl=%.2f tp=%.2f",
+        bracket.entry_order_id,
+        bracket.symbol,
+        anchor_mode,
+        old_entry,
+        price,
+        float(bracket.sl_trigger_price or 0.0),
+        float(bracket.tp_trigger_price or 0.0),
+        extra={
+            "event": "BRACKET_FILL_REANCHORED",
+            "order_id": str(bracket.entry_order_id),
+            "symbol": bracket.symbol,
+            "anchor_mode": anchor_mode,
+            "old_entry": old_entry,
+            "fill_price": price,
+        },
+    )
+
+
 def _confirm_entry_fill_once(self, order_id, fill_price, filled_qty=None):
     """Keep repeated COMPLETE callbacks idempotent while accepting smaller fills."""
     bracket = self.get_bracket(order_id)
@@ -163,6 +215,7 @@ def _confirm_entry_fill_once(self, order_id, fill_price, filled_qty=None):
             },
         )
         return True
+    _reanchor_confirmed_fill_geometry(bracket, fill_price)
     return _original_confirm_entry_fill(self, order_id, fill_price, filled_qty)
 
 
