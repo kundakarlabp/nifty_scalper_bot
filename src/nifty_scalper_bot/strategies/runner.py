@@ -4467,8 +4467,9 @@ class StrategyRunner:
         candidate_snapshots: Sequence[Mapping[str, Any]],
         is_live_mode: bool,
         trace_id: str | None,
+        preferred_symbol: str | None = None,
     ) -> tuple[Any | None, dict[str, dict[str, object]]]:
-        """Return the first ranked, ready candidate that can fund one live lot."""
+        """Prefer the signal contract; use ranked alternatives only as fallback."""
         snapshots_by_symbol = {
             normalize_symbol(str(snapshot.get("symbol") or "")): snapshot
             for snapshot in candidate_snapshots
@@ -4478,7 +4479,13 @@ class StrategyRunner:
         fallback_balance = getattr(
             getattr(self, "_risk_manager", None), "available_balance", None
         )
-        for ranked in ranked_candidates:
+        preferred = normalize_symbol(str(preferred_symbol or ""))
+        ordered_candidates = list(ranked_candidates)
+        if preferred:
+            ordered_candidates.sort(
+                key=lambda ranked: normalize_symbol(str(ranked.symbol)) != preferred
+            )
+        for ranked in ordered_candidates:
             ranked_symbol = normalize_symbol(str(ranked.symbol))
             ready_before = self._is_symbol_execution_ready(ranked_symbol)
             ready_after = bool(
@@ -18835,6 +18842,7 @@ class StrategyRunner:
                             candidate_snapshots=valid_snapshots,
                             is_live_mode=is_live_mode,
                             trace_id=trace_id,
+                            preferred_symbol=signal.symbol,
                         )
                     )
                     if candidate is not None:
