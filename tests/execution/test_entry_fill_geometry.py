@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
-from nifty_scalper_bot.execution.runtime_order_manager import (
+from nifty_scalper_bot.execution.order_manager import (
     _enrich_trade_plan_exit_provenance,
 )
 
@@ -26,7 +26,7 @@ def test_buy_fill_preserves_absolute_stop_and_target_distances() -> None:
         price=100.0,
         sl=90.0,
         tp=120.0,
-        trade_provenance={"bracket_anchor_mode": "distance_from_entry"},
+        trade_provenance={"bracket_anchor_mode": "distance"},
     )
 
     manager.confirm_entry_fill("buy-fill", 110.0)
@@ -49,7 +49,7 @@ def test_sell_fill_preserves_absolute_stop_and_target_distances() -> None:
         price=100.0,
         sl=110.0,
         tp=80.0,
-        trade_provenance={"bracket_anchor_mode": "distance_from_entry"},
+        trade_provenance={"bracket_anchor_mode": "distance"},
     )
 
     manager.confirm_entry_fill("sell-fill", 90.0)
@@ -60,6 +60,29 @@ def test_sell_fill_preserves_absolute_stop_and_target_distances() -> None:
     assert bracket.sl_trigger_price == 100.0
     assert bracket.initial_sl_trigger_price == 100.0
     assert bracket.tp_trigger_price == 70.0
+
+
+def test_distance_fill_reanchors_unexecuted_tp1() -> None:
+    manager = _manager()
+    manager.register_virtual_bracket(
+        order_id="tp1-fill",
+        symbol="NFO:NIFTYTP1CE",
+        side="BUY",
+        qty=130,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+        tp1_price=110.0,
+        tp1_qty=65,
+        resolved_lot_size=65,
+        trade_provenance={"bracket_anchor_mode": "distance"},
+    )
+
+    manager.confirm_entry_fill("tp1-fill", 105.0)
+
+    bracket = manager.get_bracket("tp1-fill")
+    assert bracket is not None
+    assert [(level.price, level.quantity) for level in bracket.tp_levels] == [(115.0, 65)]
 
 
 def test_absolute_level_bracket_does_not_move_levels_on_fill() -> None:
