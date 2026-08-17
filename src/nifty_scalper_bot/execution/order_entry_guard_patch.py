@@ -205,15 +205,29 @@ def _record_entry_block(self: Any, reason: Mapping[str, Any]) -> None:
     }
     logger = getattr(self, "_logger", None)
     log = getattr(logger, "critical", None)
-    if callable(log):
+    if not callable(log):
+        return
+    if reason.get("block_reason") == "entry_exit_tag_conflict":
         log(
-            "ENTRY_GUARD_BLOCKED symbol=%s reason=%s intent=%s tag=%s",
+            "ENTRY_IDENTITY_BLOCKED symbol=%s reason=%s intent=%s tag=%s",
             reason.get("symbol"),
             reason.get("block_reason"),
             reason.get("intent"),
             reason.get("tag"),
-            extra={"event": "ENTRY_GUARD_BLOCKED", **dict(reason)},
+            extra={"event": "ENTRY_IDENTITY_BLOCKED", **dict(reason)},
         )
+        return
+    log(
+        "ENTRY_GEOMETRY_BLOCKED symbol=%s reason=%s entry=%s sl=%s tp=%s rr=%s floor=%s",
+        reason.get("symbol"),
+        reason.get("block_reason"),
+        reason.get("entry"),
+        reason.get("stop_loss"),
+        reason.get("take_profit"),
+        round(float(reason.get("rr") or 0.0), 3),
+        reason.get("rr_floor"),
+        extra={"event": "ENTRY_GEOMETRY_BLOCKED", **dict(reason)},
+    )
 
 
 def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
