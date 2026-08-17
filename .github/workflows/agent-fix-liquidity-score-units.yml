@@ -1,0 +1,76 @@
+name: TDD Liquidity Score Unit Fix
+
+on:
+  push:
+    branches:
+      - fix/live-20260817-liquidity-score-units
+
+permissions:
+  contents: write
+
+jobs:
+  tdd-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Add spread-scoring regression first
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/strategies/test_trade_selector_quality.py')
+          text = path.read_text()
+          marker = 'def test_tighter_spread_scores_higher_liquidity()'
+          if marker not in text:
+              text += '''\n\ndef test_tighter_spread_scores_higher_liquidity():\n    selector = TradeCandidateSelector(max_option_spread_pct=1.0)\n    tight = selector.select_ranked_candidates(\n        direction_bias='CE',\n        atm_strike=22000,\n        snapshots=[base(symbol='NFO:NIFTYTIGHTCE', bid=119.88, ask=120.12)],\n    )\n    wide = selector.select_ranked_candidates(\n        direction_bias='CE',\n        atm_strike=22000,\n        snapshots=[base(symbol='NFO:NIFTYWIDECE', bid=119.64, ask=120.36)],\n    )\n\n    assert tight and wide\n    assert tight[0].liquidity_score is not None\n    assert wide[0].liquidity_score is not None\n    assert 0.0 <= tight[0].liquidity_score <= 10.0\n    assert 0.0 <= wide[0].liquidity_score <= 10.0\n    assert tight[0].liquidity_score > wide[0].liquidity_score\n    assert tight[0].final_score > wide[0].final_score\n'''
+              path.write_text(text)
+          PY
+      - name: Prove regression is red before correction
+        run: |
+          if pytest -q tests/strategies/test_trade_selector_quality.py -k tighter_spread_scores_higher_liquidity; then
+            echo 'Expected pre-fix liquidity-score regression failure did not occur'
+            exit 1
+          fi
+      - name: Apply one-line unit correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/nifty_scalper_bot/strategies/trade_selector.py')
+          text = path.read_text()
+          old = "liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct * 100.0)"
+          new = "liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct)"
+          if text.count(old) != 1:
+              raise SystemExit('trade-selector liquidity anchor mismatch')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Focused selector regressions
+        run: pytest -q tests/strategies/test_trade_selector_quality.py
+      - name: Strategy suite
+        run: pytest -q tests/strategies
+      - name: Risk and execution suites
+        run: pytest -q tests/risk tests/execution
+      - name: Compile
+        run: python -m compileall -q src tests
+      - name: Full repository suite
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: pytest -q
+      - name: Commit validated change
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/strategies/trade_selector.py tests/strategies/test_trade_selector_quality.py
+          git diff --cached --check
+          git commit -m 'Fix candidate liquidity spread units'
+          git push origin HEAD:fix/live-20260817-liquidity-score-units
