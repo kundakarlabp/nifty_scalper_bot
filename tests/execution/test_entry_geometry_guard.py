@@ -110,6 +110,9 @@ def test_explicit_prebroker_rejection_releases_entry_reservation(monkeypatch):
         symbol=symbol,
         side="BUY",
         quantity=65,
+        price=140.0,
+        stop_loss=135.0,
+        take_profit=151.0,
         intent="ENTRY",
     )
 
@@ -137,6 +140,9 @@ def test_broker_attempted_rejection_keeps_entry_reservation(monkeypatch):
         symbol=symbol,
         side="BUY",
         quantity=65,
+        price=140.0,
+        stop_loss=135.0,
+        take_profit=151.0,
         intent="ENTRY",
     )
 
