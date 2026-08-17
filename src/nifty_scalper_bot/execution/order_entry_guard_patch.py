@@ -241,6 +241,7 @@ def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
     )
     if reason is not None:
         _record_entry_block(self, reason)
+        _release_prebroker_entry_reservation(self, values)
         return None
     result = _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
     if result is None:
