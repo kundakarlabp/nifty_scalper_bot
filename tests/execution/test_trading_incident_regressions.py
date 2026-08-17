@@ -345,3 +345,81 @@ def test_restart_with_partially_filled_unprotected_position_no_reapply(
     position = restarted.get_position(SYMBOL)
     assert position is not None and position.quantity == 65
     assert restarted._orders[ENTRY_ID].applied_filled_quantity == 65
+
+
+def test_authoritative_broker_realized_overrides_divergent_local_ledger(tmp_path) -> None:
+    """Broker-confirmed session P&L must win once the snapshot is authoritative."""
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.establish_pnl_session_baseline(0.0)
+    with manager._lock:
+        manager._local_realized_pnl = -1200.67
+        manager._refresh_realized_pnl_locked()
+    assert manager.get_realized_pnl() == pytest.approx(-1200.67)
+
+    manager.synchronize_with_broker(
+        [
+            {
+                "symbol": SYMBOL,
+                "product": "MIS",
+                "quantity": 0,
+                "realised": -234.0,
+            }
+        ]
+    )
+
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert manager.get_realized_pnl() == pytest.approx(-234.0)
+    assert snapshot["broker_session_realized"] == pytest.approx(-234.0)
+    assert snapshot["local_confirmed_realized"] == pytest.approx(-1200.67)
+    assert snapshot["authoritative_realized"] == pytest.approx(-234.0)
+    assert snapshot["pnl_authority"] == "validated_broker_positions"
+    assert snapshot["pnl_reconciliation_status"] == "broker_authoritative_mismatch"
+    assert manager.current_pnl_reconciliation_blocker() is None
+
+
+def test_snapshot_without_realized_field_preserves_local_pnl_authority(tmp_path) -> None:
+    """Do not manufacture broker P&L authority from a positions-only snapshot."""
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.establish_pnl_session_baseline(0.0)
+    with manager._lock:
+        manager._local_realized_pnl = -150.0
+        manager._refresh_realized_pnl_locked()
+
+    manager.synchronize_with_broker(
+        [
+            {
+                "symbol": SYMBOL,
+                "product": "MIS",
+                "quantity": 0,
+            }
+        ]
+    )
+
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert manager.get_realized_pnl() == pytest.approx(-150.0)
+    assert snapshot["pnl_authority"] == "local_confirmed_ledger"
+    assert snapshot["broker_session_realized"] == pytest.approx(0.0)
+
+
+def test_repeated_authoritative_broker_pnl_sync_is_idempotent(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.establish_pnl_session_baseline(0.0)
+    with manager._lock:
+        manager._local_realized_pnl = -1200.67
+        manager._refresh_realized_pnl_locked()
+
+    payload = [
+        {
+            "symbol": SYMBOL,
+            "product": "MIS",
+            "quantity": 0,
+            "realised": -234.0,
+        }
+    ]
+    manager.synchronize_with_broker(payload)
+    first = manager.get_realized_pnl()
+    manager.synchronize_with_broker(payload)
+    second = manager.get_realized_pnl()
+
+    assert first == pytest.approx(-234.0)
+    assert second == pytest.approx(-234.0)
