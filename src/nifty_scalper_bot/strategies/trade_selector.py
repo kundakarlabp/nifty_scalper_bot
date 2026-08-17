@@ -261,7 +261,7 @@ class TradeCandidateSelector:
                 self._log_reject("cost_edge_insufficient", symbol, throttle_key_parts=("cost_edge_insufficient", symbol), entry=entry, target=target, edge_multiple=round(edge_multiple, 2), round_trip_cost=round(cost.total, 2), cost_per_unit=round(cost.cost_per_unit, 3))
                 continue
             reasons.append(f'cost_edge_{edge_multiple:.1f}x')
-            liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct * 100.0)
+            liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct)
             micro = min(10.0, real_ticks * 3.0)
             score = 6.0 + liquidity * 0.2 + micro * 0.2 - atm_distance * 0.5 - score_penalty
             dq = self.evaluate_data_quality(s)
