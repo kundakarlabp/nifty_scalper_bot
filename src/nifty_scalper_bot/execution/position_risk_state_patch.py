@@ -1,12 +1,15 @@
-"""Persist entry-risk state and block immediate same-thesis stop re-entry.
+"""Persist entry-risk state and keep PositionManager risk state restart-safe.
 
 This patch stays deliberately narrow:
 * persist the existing PositionManager daily-entry counter in its existing JSON
   state file so an intraday process restart cannot reset max_trades_per_day;
 * after a stop-loss exit, temporarily block a new option entry for the same
-  underlying and option side, including a strike change.
+  underlying and option side, including a strike change;
+* when a validated broker position snapshot explicitly contains realised P&L,
+  reconcile the local session ledger to that broker value so future local fill
+  deltas continue from broker-confirmed truth.
 
-Protective/reducing orders remain outside this entry-only guard.
+Protective/reducing orders remain outside the entry-only guard.
 """
 
 from __future__ import annotations
@@ -16,9 +19,13 @@ import os
 import re
 import tempfile
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+
+from nifty_scalper_bot.execution.position_snapshot import decode_position_snapshot
+from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 
 # Standalone "SL" token (SL Hit, HARD_SL_BREACH, FORCED_SL_EXIT, WATCHDOG_HARD_SL)
 # or an explicit STOP LOSS / STOP_LOSS phrase. "SLIPPAGE" must not match.
@@ -27,6 +34,8 @@ _PATCH_APPLIED = False
 _ORIGINAL_INIT: Any = None
 _ORIGINAL_SAVE_STATE: Any = None
 _ORIGINAL_CLOSE_POSITION: Any = None
+_ORIGINAL_REFRESH_REALIZED_PNL: Any = None
+_ORIGINAL_SYNCHRONIZE_WITH_BROKER: Any = None
 _RISK_KEY = "_risk_runtime"
 
 
@@ -131,6 +140,77 @@ def _patched_save_state(self: Any, *args: Any, **kwargs: Any) -> Any:
     return result
 
 
+def _materialize_broker_positions(payload: Any) -> Any:
+    """Materialize one-shot iterables while preserving broker mapping payloads."""
+    if isinstance(payload, Mapping) or isinstance(payload, Sequence):
+        return payload
+    try:
+        return list(payload)
+    except TypeError:
+        return payload
+
+
+def _snapshot_has_authoritative_realized(payload: Any) -> bool:
+    """Return True only when a managed MIS row explicitly carries realised P&L."""
+    try:
+        snapshot = decode_position_snapshot(payload)
+    except Exception:
+        return False
+    for row in snapshot.rows:
+        record = row.raw
+        if not is_strategy_instrument(row.symbol):
+            continue
+        product = str(record.get("product") or "").strip().upper()
+        if product != "MIS":
+            continue
+        if "realised" in record or "realized" in record:
+            return True
+    return False
+
+
+def _patched_synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
+    """Reconcile local session P&L to explicit broker truth after a valid sync."""
+    payload = _materialize_broker_positions(broker_positions)
+    broker_realized_authoritative = _snapshot_has_authoritative_realized(payload)
+    result = _ORIGINAL_SYNCHRONIZE_WITH_BROKER(self, payload)
+    if not broker_realized_authoritative:
+        return result
+
+    mismatch = False
+    local_before = 0.0
+    broker_session = 0.0
+    with getattr(self, "_lock"):
+        broker_realized = getattr(self, "_broker_realized_pnl", None)
+        baseline = getattr(self, "_session_opening_realized_baseline", None)
+        if broker_realized is None or baseline is None:
+            return result
+        broker_session = float(broker_realized) - float(baseline)
+        local_before = float(getattr(self, "_local_realized_pnl", 0.0) or 0.0)
+        mismatch = abs(local_before - broker_session) > 1.0
+        self._local_realized_pnl = broker_session
+        _ORIGINAL_REFRESH_REALIZED_PNL(self)
+        self._pnl_authority = "validated_broker_positions"
+        self._pnl_reconciliation_status = (
+            "broker_authoritative_reconciled" if mismatch else "matched"
+        )
+
+    if mismatch:
+        self._logger.warning(
+            "PNL_BROKER_AUTHORITY_RECONCILED local_before=%.2f broker_session=%.2f adjustment=%.2f",
+            local_before,
+            broker_session,
+            broker_session - local_before,
+            extra={
+                "event": "PNL_BROKER_AUTHORITY_RECONCILED",
+                "local_before": local_before,
+                "broker_session": broker_session,
+                "adjustment": broker_session - local_before,
+            },
+        )
+    self.save_state()
+    return result
+
+
 def _is_stop_reason(reason: object) -> bool:
     """Classify an exit reason as a stop-loss exit.
 
@@ -215,7 +295,9 @@ def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
 
 
 def apply_patches() -> None:
-    global _PATCH_APPLIED, _ORIGINAL_INIT, _ORIGINAL_SAVE_STATE, _ORIGINAL_CLOSE_POSITION
+    global _PATCH_APPLIED
+    global _ORIGINAL_INIT, _ORIGINAL_SAVE_STATE, _ORIGINAL_CLOSE_POSITION
+    global _ORIGINAL_REFRESH_REALIZED_PNL, _ORIGINAL_SYNCHRONIZE_WITH_BROKER
     if _PATCH_APPLIED:
         return
     from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -226,9 +308,12 @@ def apply_patches() -> None:
     _ORIGINAL_INIT = PositionManager.__init__
     _ORIGINAL_SAVE_STATE = PositionManager.save_state
     _ORIGINAL_CLOSE_POSITION = PositionManager.close_position
+    _ORIGINAL_REFRESH_REALIZED_PNL = PositionManager._refresh_realized_pnl_locked
+    _ORIGINAL_SYNCHRONIZE_WITH_BROKER = PositionManager.synchronize_with_broker
     PositionManager.__init__ = _patched_init
     PositionManager.save_state = _patched_save_state
     PositionManager.close_position = _patched_close_position
+    PositionManager.synchronize_with_broker = _patched_synchronize_with_broker
     PositionManager.stop_reentry_block_reason = stop_reentry_block_reason
     PositionManager.get_risk_circuit_state = get_risk_circuit_state
     PositionManager.persist_risk_circuit_state = persist_risk_circuit_state
@@ -242,4 +327,5 @@ __all__ = [
     "get_risk_circuit_state",
     "persist_risk_circuit_state",
     "_option_thesis",
+    "_snapshot_has_authoritative_realized",
 ]
