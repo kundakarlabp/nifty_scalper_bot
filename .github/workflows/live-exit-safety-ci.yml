@@ -84,6 +84,7 @@ jobs:
             tests/execution/test_live_exit_hardening.py \
             tests/execution/test_virtual_bracket_safety.py \
             tests/execution/test_ledger_bracket_runtime.py \
+            tests/execution/test_live_ledger_pnl_invariants.py \
             tests/execution/test_runtime_bracket_facade.py \
             tests/architecture/test_canonical_bo_ownership.py
 
