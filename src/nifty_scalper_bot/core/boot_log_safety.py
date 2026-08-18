@@ -40,6 +40,16 @@ ORDERFLOW_EVENTS = {
 INDICATOR_EVENTS = {
     "indicator_engine_history_missing",
 }
+RECONCILE_EVENTS = {
+    "POSITION_RECONCILE_SUCCESS",
+}
+ROUTINE_DEBUG_EVENTS = {
+    "POSITION_RECONCILE_STARTED",
+    "POSITION_RECONCILE_COALESCED",
+    "strategy_manager_no_combined_signal",
+    "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",
+    "ORDERFLOW_TRIGGER_SCORE",
+}
 
 
 THROTTLED_EVENTS = (
@@ -49,6 +59,7 @@ THROTTLED_EVENTS = (
     | READINESS_EVENTS
     | ORDERFLOW_EVENTS
     | INDICATOR_EVENTS
+    | RECONCILE_EVENTS
 )
 
 
@@ -164,6 +175,24 @@ def _fingerprint(record: logging.LogRecord) -> tuple[Any, ...]:
     )
 
 
+def _downgrade_routine_diagnostic(record: logging.LogRecord) -> None:
+    """Move expected high-frequency diagnostics to DEBUG without hiding warnings."""
+    event = _event(record)
+    reason = str(getattr(record, "reason", "") or "")
+    routine = event in ROUTINE_DEBUG_EVENTS
+    if (
+        event == "RUNNER_EVAL_PREGATE_SKIPPED"
+        and reason == "same_bar_periodic_eval_throttled"
+    ):
+        routine = True
+    if event == "STRATEGY_NO_VOTE" and record.levelno < logging.WARNING:
+        routine = True
+    if routine and record.levelno < logging.WARNING:
+        record.levelno = logging.DEBUG
+        record.levelname = logging.getLevelName(logging.DEBUG)
+        record.routine_diagnostic = True
+
+
 class BootLogRateControl(logging.Filter):
     """Allow state changes and periodic unchanged-state heartbeats."""
 
@@ -177,7 +206,13 @@ class BootLogRateControl(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         _normalize_role_telemetry(record)
         _normalize_readiness_telemetry(record)
+        _downgrade_routine_diagnostic(record)
         event = _event(record)
+        if event == "POSITION_RECONCILE_FAILED":
+            for key in tuple(self._last):
+                if key[0] == "POSITION_RECONCILE_SUCCESS":
+                    self._last.pop(key, None)
+            return True
         if event not in THROTTLED_EVENTS:
             return True
         fp = _fingerprint(record)
@@ -200,11 +235,21 @@ def apply_filters() -> None:
     for name in (
         "nifty_scalper_bot.core.instrument_manager",
         "nifty_scalper_bot.core.app",
+        "nifty_scalper_bot.core.strategy_manager",
         "nifty_scalper_bot.execution.readiness",
         "nifty_scalper_bot.strategies.runner",
         "nifty_scalper_bot.strategies.indicators",
         "nifty_scalper_bot.strategies.elite_strategies.base_elite",
+        "nifty_scalper_bot.strategies.elite_strategies.bb_squeeze",
+        "nifty_scalper_bot.strategies.elite_strategies.cpr_breakout",
+        "nifty_scalper_bot.strategies.elite_strategies.gamma_scalping",
+        "nifty_scalper_bot.strategies.elite_strategies.orb_pro",
         "nifty_scalper_bot.strategies.elite_strategies.order_flow",
+        "nifty_scalper_bot.strategies.elite_strategies.rsi_divergence",
+        "nifty_scalper_bot.strategies.elite_strategies.smc_liquidity",
+        "nifty_scalper_bot.strategies.elite_strategies.straddle_theta",
+        "nifty_scalper_bot.strategies.elite_strategies.vwap_pro",
+        "nifty_scalper_bot.strategies.elite_tuesday_gamma_buyer",
     ):
         logger = logging.getLogger(name)
         if not _installed(logger):
