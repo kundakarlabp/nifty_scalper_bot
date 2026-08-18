@@ -39,9 +39,10 @@ def test_failed_auth_reprobe_keeps_latch_and_never_logs_restored(monkeypatch, ca
     assert client.authentication_status_snapshot()["generation"] == 1
     assert calls["count"] == 1
 
-    # The latch intentionally permits one bounded reprobe. That reprobe also
-    # fails authentication, so the original invalid generation must remain
-    # latched and no false RESTORED event may be emitted.
+    # Force the bounded reprobe window open. That reprobe also fails
+    # authentication, so the original invalid generation must remain latched
+    # and no false RESTORED event may be emitted.
+    client._auth_reprobe_next = 0.0
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         with pytest.raises(BrokerAuthenticationError):
