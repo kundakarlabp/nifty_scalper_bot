@@ -25,7 +25,7 @@ EXPECTED_REJECTIONS = ("CANDIDATE_REJECTED", "SIGNAL_REJECTED", "SIGNAL_EXECUTIO
 HARD_ERRORS = ("TRACEBACK", "CRITICAL", "UNHANDLED EXCEPTION", "RUNNER_ON_TICK_ERROR", "ORDER_FAILED", "STARTUP_FAILED", "HANDLER CRASHED", "FATAL")
 NULLS = {"", "none", "null", "nil", "false", "0", "unknown", "n/a", "na"}
 SOFT_HISTORY_ROLES = {"option_context"}
-SOFT_HISTORY_FAILURE_REASONS = {"broker_fetch_not_allowed"}
+SOFT_HISTORY_FAILURE_REASONS = {"broker_fetch_not_allowed", "source_history_short"}
 
 
 def fields(message: str) -> dict[str, str]:
@@ -48,7 +48,7 @@ def _soft_non_gating_history_message(upper: str, values: dict[str, str]) -> bool
     role = values.get("role", "").strip().lower()
     failure = values.get("failure_reason", "").strip().lower()
     return (
-        "CANONICAL_HISTORY_RESULT" in upper
+        _history_diagnostic(upper)
         and role in SOFT_HISTORY_ROLES
         and failure in SOFT_HISTORY_FAILURE_REASONS
     )
