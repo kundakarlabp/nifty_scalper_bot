@@ -278,7 +278,7 @@ def log_throttled(logger: logging.Logger, level: int, event: str, key: str, inte
             logger.log(level, message, *args, extra=extra, **kwargs)
             enabled = os.getenv("LOG_THROTTLE_SUMMARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
             if enabled:
-                throttle.maybe_emit_summary(logger, interval_seconds=float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "120") or "120"), top_n=int(os.getenv("LOG_THROTTLE_SUMMARY_TOP_N", "10") or "10"))
+                throttle.maybe_emit_summary(logger, interval_seconds=float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "300") or "300"), top_n=int(os.getenv("LOG_THROTTLE_SUMMARY_TOP_N", "10") or "10"))
             return True
         throttle.record_suppressed(key)
         return False

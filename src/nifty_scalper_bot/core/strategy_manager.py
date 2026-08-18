@@ -2297,17 +2297,23 @@ class StrategyManager(_BaseStrategyManager):
             "vwap_slope_source": vwap_slope_source,
         }
         self._latest_context_snapshots[role] = snapshot
-        if derived_direction not in {"CE", "PE"}:
-            log_throttled(
-                log,
-                f"context_direction_unavailable:{role}:{symbol}",
-                "CONTEXT_DIRECTION_UNAVAILABLE role=%s symbol=%s",
-                role,
-                symbol,
-                interval_sec=30.0,
-                level=logging.INFO,
-                extra={"event": "CONTEXT_DIRECTION_UNAVAILABLE", "role": role, "symbol": symbol},
-            )
+        direction_available = derived_direction in {"CE", "PE"}
+        log_state_change(
+            log,
+            f"context_direction_state:{role}:{symbol}",
+            (direction_available, derived_direction if direction_available else None),
+            msg=(
+                f"CONTEXT_DIRECTION_STATE role={role} symbol={symbol} "
+                f"available={direction_available} direction={derived_direction}"
+            ),
+            extra={
+                "event": "CONTEXT_DIRECTION_STATE",
+                "role": role,
+                "symbol": symbol,
+                "available": direction_available,
+                "direction": derived_direction,
+            },
+        )
 
     def _derive_context_direction(
         self, indicators: t.Mapping[str, t.Any], *, role: str
