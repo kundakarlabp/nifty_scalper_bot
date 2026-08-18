@@ -1,0 +1,59 @@
+name: Temporary targeted Zerodha auth reprobe patch
+
+on:
+  push:
+    branches:
+      - fix/zerodha-auth-reprobe-latch
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/zerodha-auth-reprobe-latch
+          fetch-depth: 50
+      - name: Apply exact auth-state edit and remove temporary workflow
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/nifty_scalper_bot/data/rest/zerodha_client.py')
+          text = path.read_text()
+
+          old_method = '''    def _reset_transient_state(self) -> None:\n        with self._resilience_lock:\n            self._transient_error_streak = 0\n            self._breaker_open_until = 0.0\n        if self._auth_invalid:\n'''
+          new_method = '''    def _reset_transient_state(\n        self, *, authenticated_success: bool = True\n    ) -> None:\n        with self._resilience_lock:\n            self._transient_error_streak = 0\n            self._breaker_open_until = 0.0\n        if authenticated_success and self._auth_invalid:\n'''
+          if text.count(old_method) != 1:
+              raise SystemExit(f'expected one _reset_transient_state definition, found {text.count(old_method)}')
+          text = text.replace(old_method, new_method, 1)
+
+          pattern = re.compile(
+              r'(?m)^(?P<indent>[ ]*)self\._reset_transient_state\(\)\n'
+              r'(?P=indent)self\._raise_for_status\(response, expect_order_response\)$'
+          )
+          matches = list(pattern.finditer(text))
+          if len(matches) != 2:
+              raise SystemExit(f'expected two failed-response reset/raise sites, found {len(matches)}')
+          text = pattern.sub(
+              lambda m: (
+                  f"{m.group('indent')}self._reset_transient_state(authenticated_success=False)\n"
+                  f"{m.group('indent')}self._raise_for_status(response, expect_order_response)"
+              ),
+              text,
+          )
+
+          path.write_text(text)
+          Path('.github/workflows/tmp-zerodha-auth-reprobe-patch.yml').unlink()
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/nifty_scalper_bot/data/rest/zerodha_client.py .github/workflows/tmp-zerodha-auth-reprobe-patch.yml
+          git diff --cached --check
+          git commit -m "fix: preserve auth latch across failed Zerodha reprobes"
+          git push origin HEAD:fix/zerodha-auth-reprobe-latch
