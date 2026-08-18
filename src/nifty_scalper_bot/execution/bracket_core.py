@@ -1657,6 +1657,31 @@ class BracketManager:
         except (TypeError, ValueError):
             return 0.75
 
+    def _trailing_executable_state(
+        self, bracket: BracketState, ltp: float
+    ) -> tuple[float, float]:
+        """Return executable trail price and a monotonic persisted watermark."""
+        price, _source = self._executable_exit_price(bracket, ltp)
+        entry = float(bracket.entry_price or price or ltp)
+        config = bracket.trailing_config
+        key = (
+            "_highest_executable_exit_price"
+            if bracket.side == "BUY"
+            else "_lowest_executable_exit_price"
+        )
+        try:
+            previous = float(config.get(key, entry) or entry)
+        except (TypeError, ValueError):
+            previous = entry
+        if not math.isfinite(previous) or previous <= 0:
+            previous = entry
+        if bracket.side == "BUY":
+            watermark = max(entry, previous, float(price))
+        else:
+            watermark = min(entry, previous, float(price))
+        config[key] = _round_to_tick(watermark)
+        return float(price), float(config[key])
+
     def _is_trail_candidate_allowed(
         self, bracket: BracketState, candidate_sl: float, ltp: float
     ) -> bool:
@@ -1669,19 +1694,20 @@ class BracketManager:
         initial_sl = float(bracket.initial_sl_trigger_price or current_sl or 0.0)
         initial_risk = abs(entry - initial_sl)
         activation_r = self._trail_activation_r(bracket)
+        ltp, trail_watermark = self._trailing_executable_state(bracket, ltp)
 
         if bracket.side == "BUY":
             if candidate <= current_sl or candidate >= ltp:
                 return False
             if candidate >= entry:
-                mfe = max(float(bracket.highest_ltp or entry), ltp) - entry
+                mfe = max(float(trail_watermark or entry), ltp) - entry
                 return initial_risk > 0 and mfe >= (initial_risk * activation_r)
             return True
 
         if candidate >= current_sl or candidate <= ltp:
             return False
         if candidate <= entry:
-            low_water = float(bracket.lowest_ltp or entry)
+            low_water = float(trail_watermark or entry)
             mfe = entry - min(low_water, ltp)
             return initial_risk > 0 and mfe >= (initial_risk * activation_r)
         return True
@@ -2868,6 +2894,7 @@ class BracketManager:
         entry = bracket.entry_price
         if entry <= 0:
             return False
+        ltp, high_water = self._trailing_executable_state(bracket, float(ltp))
 
         current_sl = bracket.sl_trigger_price
 
@@ -2887,14 +2914,13 @@ class BracketManager:
             # which disables the stop-loss entirely → unlimited loss exposure.
             atr = bracket.entry_price * 0.02 if bracket.entry_price > 0 else 1.0
 
-        # Calculate profit metrics
+        # Calculate profit metrics from executable price; LTP watermarks remain
+        # informational and are not allowed to tighten live protection.
         if bracket.side == "BUY":
             profit_pct = ((ltp - entry) / entry) * 100
-            high_water = bracket.highest_ltp
             profit_points = ltp - entry
         else:
             profit_pct = ((entry - ltp) / entry) * 100
-            high_water = bracket.lowest_ltp
             profit_points = entry - ltp
 
         # Calculate new SL based on tiered system
@@ -3117,9 +3143,9 @@ class BracketManager:
         initial_sl = float(bracket.initial_sl_trigger_price or current_sl or 0.0)
         initial_risk = abs(entry - initial_sl)
         if bracket.side == "BUY":
-            mfe = float(bracket.highest_ltp or ltp or entry) - entry
+            mfe = float(high_water or ltp or entry) - entry
         else:
-            mfe = entry - float(bracket.lowest_ltp or ltp or entry)
+            mfe = entry - float(high_water or ltp or entry)
         activation_r = float(
             bracket.trailing_config.get(
                 "breakeven_activation_r",
