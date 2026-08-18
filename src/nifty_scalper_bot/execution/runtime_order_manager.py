@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from contextlib import suppress
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from nifty_scalper_bot.execution import order_manager_core as _core
@@ -30,6 +31,7 @@ from nifty_scalper_bot.execution.native_entry_gate import (
     block_result,
     configure_provider,
 )
+from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
 from nifty_scalper_bot.strategies.signal_identity_patch import order_setup_context
 
 _EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket_id"}
@@ -64,6 +66,109 @@ def _positive_int(value: Any) -> int:
         if parsed > 0:
             return parsed
     return 0
+
+
+def _cost_adjust_entry_target(manager: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Raise only a distance-anchored BUY option target enough to preserve net RR.
+
+    The stop, entry, quantity and final risk gate are never changed. Explicit
+    technical/absolute targets are immutable. If transaction costs require more
+    than the bounded uplift allowed by ``minimum_target_for_net_rr``, this helper
+    returns the order unchanged so the final risk gate still rejects it.
+    """
+    if not bool(kwargs.get("check_risk", True)):
+        return kwargs
+    if str(kwargs.get("intent") or "ENTRY").strip().upper() != "ENTRY":
+        return kwargs
+    if str(kwargs.get("side") or "").strip().upper() != "BUY":
+        return kwargs
+    symbol = str(kwargs.get("symbol") or "").strip().upper()
+    if not symbol.endswith(("CE", "PE")):
+        return kwargs
+
+    provenance_raw = kwargs.get("trade_provenance")
+    if not isinstance(provenance_raw, Mapping):
+        return kwargs
+    provenance = dict(provenance_raw)
+    if str(provenance.get("bracket_anchor_mode") or "").strip().lower() != "distance":
+        return kwargs
+    if bool(provenance.get("net_rr_target_adjusted")):
+        return kwargs
+
+    entry = _positive_float(kwargs.get("price"))
+    stop = _positive_float(kwargs.get("stop_loss"))
+    target = _positive_float(kwargs.get("take_profit"))
+    quantity = _positive_int(kwargs.get("quantity"))
+    if entry is None or stop is None or target is None or quantity <= 0:
+        return kwargs
+    if not (stop < entry < target):
+        return kwargs
+
+    metadata: dict[str, Any] = {}
+    quote_getter = getattr(manager, "_get_latest_quote_safe", None)
+    diagnostics = getattr(manager, "_extract_quote_diagnostics", None)
+    if callable(quote_getter):
+        with suppress(Exception):
+            quote = quote_getter(symbol) or {}
+            quote_info = diagnostics(quote) if callable(diagnostics) else quote
+            if isinstance(quote_info, Mapping):
+                bid = _positive_float(quote_info.get("bid"))
+                ask = _positive_float(quote_info.get("ask"))
+                if bid is not None:
+                    metadata["bid"] = bid
+                if ask is not None:
+                    metadata["ask"] = ask
+
+    signal = SimpleNamespace(
+        symbol=symbol,
+        action="BUY",
+        quantity=quantity,
+        entry_price=entry,
+        stop_loss=stop,
+        take_profit=target,
+        metadata=metadata,
+    )
+    adjusted_target = minimum_target_for_net_rr(signal)
+    if adjusted_target is None or adjusted_target <= target + 1e-9:
+        return kwargs
+
+    risk_points = entry - stop
+    old_rr = (target - entry) / risk_points
+    new_rr = (adjusted_target - entry) / risk_points
+    adjusted_provenance = dict(provenance)
+    adjusted_provenance["net_rr_target_adjusted"] = True
+    adjusted_provenance.setdefault("original_take_profit", float(target))
+    adjusted_provenance["cost_adjusted_take_profit"] = float(adjusted_target)
+    adjusted_provenance["net_rr_target_adjustment_r"] = float(new_rr - old_rr)
+
+    adjusted = dict(kwargs)
+    adjusted["take_profit"] = float(adjusted_target)
+    adjusted["trade_provenance"] = adjusted_provenance
+
+    logger = getattr(manager, "_logger", None)
+    log = getattr(logger, "info", None)
+    if callable(log):
+        log(
+            "NET_RR_TARGET_ADJUSTED symbol=%s entry=%.2f stop=%.2f old_tp=%.2f new_tp=%.2f old_gross_rr=%.3f new_gross_rr=%.3f",
+            symbol,
+            entry,
+            stop,
+            target,
+            adjusted_target,
+            old_rr,
+            new_rr,
+            extra={
+                "event": "NET_RR_TARGET_ADJUSTED",
+                "symbol": symbol,
+                "entry": entry,
+                "stop_loss": stop,
+                "original_take_profit": target,
+                "adjusted_take_profit": adjusted_target,
+                "old_gross_rr": old_rr,
+                "new_gross_rr": new_rr,
+            },
+        )
+    return adjusted
 
 
 def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
@@ -267,6 +372,7 @@ class RuntimeOrderManager(_core.OrderManager):
         blocked = self._blocked("place_order", args, effective_kwargs)
         if blocked is not NO_BLOCK:
             return blocked
+        effective_kwargs = _cost_adjust_entry_target(self, effective_kwargs)
         cleaned_kwargs, identity = _strip_exit_identity_kwargs(effective_kwargs)
         if identity:
             self._last_exit_identity_kwargs = dict(identity)
@@ -346,6 +452,7 @@ class RuntimeOrderManager(_core.OrderManager):
 
 __all__ = [
     "RuntimeOrderManager",
+    "_cost_adjust_entry_target",
     "_enrich_trade_plan_exit_provenance",
     "_strip_exit_identity_kwargs",
     "_submit_core_with_exit_provenance",

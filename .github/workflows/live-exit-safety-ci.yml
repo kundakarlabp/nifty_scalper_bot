@@ -84,6 +84,7 @@ jobs:
             tests/execution/test_explicit_exit_intent_safety.py \
             tests/execution/test_executable_tp_semantics.py \
             tests/execution/test_executable_trailing_watermark.py \
+            tests/execution/test_cost_aware_live_entry_target.py \
             tests/execution/test_live_exit_hardening.py \
             tests/execution/test_virtual_bracket_safety.py \
             tests/execution/test_ledger_bracket_runtime.py \
