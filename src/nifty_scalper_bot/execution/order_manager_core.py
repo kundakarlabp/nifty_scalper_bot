@@ -2711,7 +2711,7 @@ class OrderManager:
         normalized_symbol = normalize_symbol(symbol)
         normalized_side = str(side).strip().upper()
         normalized_tag = (tag or "").lower()
-        is_system_exit = any(
+        is_system_exit = normalized_intent in {"EXIT", "REDUCE"} or any(
             x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
         )
 
