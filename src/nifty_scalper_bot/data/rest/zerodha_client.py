@@ -2827,7 +2827,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 if response.is_success:
                     self._reset_transient_state()
                     return response
-                self._reset_transient_state()
+                self._reset_transient_state(authenticated_success=False)
                 self._raise_for_status(response, expect_order_response)
 
             if response.is_success:
@@ -2895,7 +2895,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     ),
                 )
 
-            self._reset_transient_state()
+            self._reset_transient_state(authenticated_success=False)
             self._raise_for_status(response, expect_order_response)
 
         if not with_retry:
@@ -3041,11 +3041,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
             ),
         )
 
-    def _reset_transient_state(self) -> None:
+    def _reset_transient_state(
+        self, *, authenticated_success: bool = True
+    ) -> None:
         with self._resilience_lock:
             self._transient_error_streak = 0
             self._breaker_open_until = 0.0
-        if self._auth_invalid:
+        if authenticated_success and self._auth_invalid:
             # An authenticated request just succeeded: the console/token was
             # fixed. Clear the latch so trading re-arms without a restart.
             self._auth_invalid = False
