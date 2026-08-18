@@ -39,14 +39,19 @@ def test_failed_auth_reprobe_keeps_latch_and_never_logs_restored(monkeypatch, ca
     assert client.authentication_status_snapshot()["generation"] == 1
     assert calls["count"] == 1
 
-    # Force the bounded reprobe window open. That reprobe also fails
-    # authentication, so the original invalid generation must remain latched
-    # and no false RESTORED event may be emitted.
+    # Force the bounded reprobe window open and exercise the request boundary
+    # directly. Higher-level balance helpers intentionally have additional
+    # fail-fast guards; the defect itself is response classification inside
+    # _make_request after a permitted reprobe reaches Zerodha.
     client._auth_reprobe_next = 0.0
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         with pytest.raises(BrokerAuthenticationError):
-            client.get_available_balance("equity")
+            client._make_request(
+                "GET",
+                "/user/margins/equity",
+                operation_label="auth.reprobe.regression",
+            )
 
     assert calls["count"] == 2
     assert client.auth_invalid is True
