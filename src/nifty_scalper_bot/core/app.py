@@ -348,6 +348,20 @@ def _should_skip_post_market_basket_refresh(
     return True, remaining
 
 
+_READINESS_MISSING_DIAGNOSTIC_LABELS = {
+    "options_ce": "ce_live_tick_readiness_insufficient",
+    "options_pe": "pe_live_tick_readiness_insufficient",
+}
+
+
+def _readiness_missing_diagnostics(missing: Iterable[object]) -> list[str]:
+    """Describe legacy MDM readiness keys without implying contracts are absent."""
+    return [
+        _READINESS_MISSING_DIAGNOSTIC_LABELS.get(str(item), str(item))
+        for item in missing
+    ]
+
+
 def _as_bool(value: object, default: bool = False) -> bool:
     """Coerce mixed readiness values to bool. Args: value/default. Returns: bool. Raises: none."""
     if value is None:
@@ -13990,10 +14004,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     except Exception:
                                         pass
                                 LOGGER.info(
-                                    "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing=%s",
+                                    "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing_live_tick=%s",
                                     hard_ready,
                                     spot_ready,
-                                    missing_hard,
+                                    _readiness_missing_diagnostics(missing_hard),
                                     extra={
                                         "event": "DATA_PIPELINE_NOT_READY",
                                         "hard_ready": hard_ready,
@@ -14032,9 +14046,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     )
                                 else:
                                     LOGGER.error(
-                                        "startup_pipeline_incomplete missing=%s",
+                                        "startup_pipeline_incomplete missing_live_tick=%s",
                                         (
-                                            ",".join(missing_hard)
+                                            ",".join(
+                                                _readiness_missing_diagnostics(missing_hard)
+                                            )
                                             if missing_hard
                                             else "unknown"
                                         ),
@@ -14541,8 +14557,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 )
                                 if "startup_pipeline_incomplete" in data_warmup_reasons:
                                     LOGGER.error(
-                                        "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
-                                        missing_hard,
+                                        "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing_live_tick=%s",
+                                        _readiness_missing_diagnostics(missing_hard),
                                         extra={
                                             "event": "LIVE_TRADING_BLOCKED",
                                             "reason": "startup_pipeline_incomplete",
