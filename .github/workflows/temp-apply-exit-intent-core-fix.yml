@@ -25,12 +25,8 @@ jobs:
 
           path = Path('src/nifty_scalper_bot/execution/order_manager_core.py')
           text = path.read_text(encoding='utf-8')
-          old = '''        is_system_exit = any(
-              x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
-          )'''
-          new = '''        is_system_exit = normalized_intent in {"EXIT", "REDUCE"} or any(
-              x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
-          )'''
+          old = "        is_system_exit = any(\n            x in normalized_tag for x in [\"exit\", \"stop\", \"target\", \"square\", \"guard\"]\n        )"
+          new = "        is_system_exit = normalized_intent in {\"EXIT\", \"REDUCE\"} or any(\n            x in normalized_tag for x in [\"exit\", \"stop\", \"target\", \"square\", \"guard\"]\n        )"
           if text.count(old) != 1:
               raise SystemExit(f'expected exactly one target expression, found {text.count(old)}')
           path.write_text(text.replace(old, new), encoding='utf-8')
