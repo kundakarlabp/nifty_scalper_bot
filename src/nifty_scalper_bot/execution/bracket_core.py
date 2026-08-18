@@ -2090,15 +2090,20 @@ class BracketManager:
                     ),
                 }
 
+        # Profit targets use the same executable liquidation price as hard SL.
+        # For a long/BUY bracket that is the bid; for a short/SELL bracket it is
+        # the ask. Missing/stale depth retains the existing LTP fallback.
+        target_exit_px, target_exit_src = self._executable_exit_price(bracket, ltp)
+
         # Check partial targets (TP1, TP2, etc.)
         for target in bracket.tp_levels:
             if target.executed:
                 continue
 
             triggered = False
-            if bracket.side == "BUY" and ltp >= target.price:
+            if bracket.side == "BUY" and target_exit_px >= target.price:
                 triggered = True
-            elif bracket.side == "SELL" and ltp <= target.price:
+            elif bracket.side == "SELL" and target_exit_px <= target.price:
                 triggered = True
 
             if triggered:
@@ -2108,15 +2113,16 @@ class BracketManager:
                     "target": target,
                     "price": ltp,
                     "qty": min(target.quantity, bracket.remaining_quantity),
+                    "trigger_price_source": target_exit_src,
                     "reason": f"{target.name} Hit ({ltp:.2f})",
                 }
 
         # Hard TP breach must take precedence to guarantee immediate exit.
         if bracket.tp_trigger_price > 0:
             triggered = False
-            if bracket.side == "BUY" and ltp >= bracket.tp_trigger_price:
+            if bracket.side == "BUY" and target_exit_px >= bracket.tp_trigger_price:
                 triggered = True
-            elif bracket.side == "SELL" and ltp <= bracket.tp_trigger_price:
+            elif bracket.side == "SELL" and target_exit_px <= bracket.tp_trigger_price:
                 triggered = True
 
             if triggered:
@@ -2125,6 +2131,7 @@ class BracketManager:
                     "type": "FINAL_TP",
                     "price": ltp,
                     "qty": bracket.remaining_quantity,
+                    "trigger_price_source": target_exit_src,
                     "reason": "HARD_TP_BREACH",
                 }
 
