@@ -1,0 +1,101 @@
+name: Apply production log-spam reduction once
+
+on:
+  push:
+    branches:
+      - chore/reduce-production-log-spam
+    paths:
+      - .github/workflows/apply-log-spam-reduction-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chore/reduce-production-log-spam
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Apply exact observability-only patches
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str, expected: int = 1) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} matches, got {count} for {old[:120]!r}")
+              p.write_text(text.replace(old, new), encoding="utf-8")
+
+          boot = "src/nifty_scalper_bot/core/boot_log_safety.py"
+          replace_exact(
+              boot,
+              '''INDICATOR_EVENTS = {\n    "indicator_engine_history_missing",\n}\n\n\nTHROTTLED_EVENTS = (\n    CONTRACT_EVENTS\n    | RUNNER_EVENTS\n    | BOOTSTRAP_EVENTS\n    | READINESS_EVENTS\n    | ORDERFLOW_EVENTS\n    | INDICATOR_EVENTS\n)''',
+              '''INDICATOR_EVENTS = {\n    "indicator_engine_history_missing",\n}\nRECONCILE_EVENTS = {\n    "POSITION_RECONCILE_SUCCESS",\n}\nROUTINE_DEBUG_EVENTS = {\n    "POSITION_RECONCILE_STARTED",\n    "POSITION_RECONCILE_COALESCED",\n    "strategy_manager_no_combined_signal",\n    "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",\n    "ORDERFLOW_TRIGGER_SCORE",\n}\n\n\nTHROTTLED_EVENTS = (\n    CONTRACT_EVENTS\n    | RUNNER_EVENTS\n    | BOOTSTRAP_EVENTS\n    | READINESS_EVENTS\n    | ORDERFLOW_EVENTS\n    | INDICATOR_EVENTS\n    | RECONCILE_EVENTS\n)''',
+          )
+          replace_exact(
+              boot,
+              '''\n\nclass BootLogRateControl(logging.Filter):\n    """Allow state changes and periodic unchanged-state heartbeats."""''',
+              '''\n\ndef _downgrade_routine_diagnostic(record: logging.LogRecord) -> None:\n    """Move expected high-frequency diagnostics to DEBUG without hiding warnings."""\n    event = _event(record)\n    reason = str(getattr(record, "reason", "") or "")\n    routine = event in ROUTINE_DEBUG_EVENTS\n    if (\n        event == "RUNNER_EVAL_PREGATE_SKIPPED"\n        and reason == "same_bar_periodic_eval_throttled"\n    ):\n        routine = True\n    if event == "STRATEGY_NO_VOTE" and record.levelno < logging.WARNING:\n        routine = True\n    if routine and record.levelno < logging.WARNING:\n        record.levelno = logging.DEBUG\n        record.levelname = logging.getLevelName(logging.DEBUG)\n        record.routine_diagnostic = True\n\n\nclass BootLogRateControl(logging.Filter):\n    """Allow state changes and periodic unchanged-state heartbeats."""''',
+          )
+          replace_exact(
+              boot,
+              '''        _normalize_role_telemetry(record)\n        _normalize_readiness_telemetry(record)\n        event = _event(record)\n        if event not in THROTTLED_EVENTS:\n            return True''',
+              '''        _normalize_role_telemetry(record)\n        _normalize_readiness_telemetry(record)\n        _downgrade_routine_diagnostic(record)\n        event = _event(record)\n        if event == "POSITION_RECONCILE_FAILED":\n            for key in tuple(self._last):\n                if key[0] == "POSITION_RECONCILE_SUCCESS":\n                    self._last.pop(key, None)\n            return True\n        if event not in THROTTLED_EVENTS:\n            return True''',
+          )
+          replace_exact(
+              boot,
+              '''        "nifty_scalper_bot.core.instrument_manager",\n        "nifty_scalper_bot.core.app",\n        "nifty_scalper_bot.execution.readiness",\n        "nifty_scalper_bot.strategies.runner",\n        "nifty_scalper_bot.strategies.indicators",\n        "nifty_scalper_bot.strategies.elite_strategies.base_elite",\n        "nifty_scalper_bot.strategies.elite_strategies.order_flow",''',
+              '''        "nifty_scalper_bot.core.instrument_manager",\n        "nifty_scalper_bot.core.app",\n        "nifty_scalper_bot.core.strategy_manager",\n        "nifty_scalper_bot.execution.readiness",\n        "nifty_scalper_bot.strategies.runner",\n        "nifty_scalper_bot.strategies.indicators",\n        "nifty_scalper_bot.strategies.elite_strategies.base_elite",\n        "nifty_scalper_bot.strategies.elite_strategies.bb_squeeze",\n        "nifty_scalper_bot.strategies.elite_strategies.cpr_breakout",\n        "nifty_scalper_bot.strategies.elite_strategies.gamma_scalping",\n        "nifty_scalper_bot.strategies.elite_strategies.orb_pro",\n        "nifty_scalper_bot.strategies.elite_strategies.order_flow",\n        "nifty_scalper_bot.strategies.elite_strategies.rsi_divergence",\n        "nifty_scalper_bot.strategies.elite_strategies.smc_liquidity",\n        "nifty_scalper_bot.strategies.elite_strategies.straddle_theta",\n        "nifty_scalper_bot.strategies.elite_strategies.vwap_pro",\n        "nifty_scalper_bot.strategies.elite_tuesday_gamma_buyer",''',
+          )
+
+          strategy = "src/nifty_scalper_bot/core/strategy_manager.py"
+          replace_exact(
+              strategy,
+              '''        self._latest_context_snapshots[role] = snapshot\n        if derived_direction not in {"CE", "PE"}:\n            log_throttled(\n                log,\n                f"context_direction_unavailable:{role}:{symbol}",\n                "CONTEXT_DIRECTION_UNAVAILABLE role=%s symbol=%s",\n                role,\n                symbol,\n                interval_sec=30.0,\n                level=logging.INFO,\n                extra={"event": "CONTEXT_DIRECTION_UNAVAILABLE", "role": role, "symbol": symbol},\n            )''',
+              '''        self._latest_context_snapshots[role] = snapshot\n        direction_available = derived_direction in {"CE", "PE"}\n        log_state_change(\n            log,\n            f"context_direction_state:{role}:{symbol}",\n            (direction_available, derived_direction if direction_available else None),\n            msg=(\n                f"CONTEXT_DIRECTION_STATE role={role} symbol={symbol} "\n                f"available={direction_available} direction={derived_direction}"\n            ),\n            extra={\n                "event": "CONTEXT_DIRECTION_STATE",\n                "role": role,\n                "symbol": symbol,\n                "available": direction_available,\n                "direction": derived_direction,\n            },\n        )''',
+          )
+
+          throttle = "src/nifty_scalper_bot/utils/log_throttle.py"
+          replace_exact(
+              throttle,
+              'float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "120") or "120")',
+              'float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "300") or "300")',
+          )
+
+          test_path = Path("tests/core/test_production_log_noise_control.py")
+          test_path.write_text('''from __future__ import annotations\n\nimport logging\nfrom pathlib import Path\n\nfrom nifty_scalper_bot.core.boot_log_safety import BootLogRateControl\nfrom nifty_scalper_bot.utils.log_throttle import event_is_never_throttled\n\n\ndef _record(event: str, *, level: int = logging.INFO, **extra: object) -> logging.LogRecord:\n    record = logging.LogRecord(\n        name="nifty_scalper_bot.core.app",\n        level=level,\n        pathname=__file__,\n        lineno=1,\n        msg=event,\n        args=(),\n        exc_info=None,\n    )\n    record.event = event\n    for key, value in extra.items():\n        setattr(record, key, value)\n    return record\n\n\ndef test_reconcile_started_is_debug_only() -> None:\n    control = BootLogRateControl(interval_seconds=300.0)\n    record = _record("POSITION_RECONCILE_STARTED")\n    assert control.filter(record) is True\n    assert record.levelno == logging.DEBUG\n\n\ndef test_reconcile_success_is_state_throttled_and_failure_forces_recovery_visibility() -> None:\n    control = BootLogRateControl(interval_seconds=300.0)\n    first = _record("POSITION_RECONCILE_SUCCESS")\n    duplicate = _record("POSITION_RECONCILE_SUCCESS")\n    failed = _record("POSITION_RECONCILE_FAILED", level=logging.ERROR)\n    recovered = _record("POSITION_RECONCILE_SUCCESS")\n\n    assert control.filter(first) is True\n    assert control.filter(duplicate) is False\n    assert control.filter(failed) is True\n    assert failed.levelno == logging.ERROR\n    assert control.filter(recovered) is True\n\n\ndef test_same_bar_periodic_skip_is_debug_but_real_pregate_block_stays_info() -> None:\n    control = BootLogRateControl(interval_seconds=300.0)\n    routine = _record(\n        "RUNNER_EVAL_PREGATE_SKIPPED",\n        reason="same_bar_periodic_eval_throttled",\n    )\n    actionable = _record(\n        "RUNNER_EVAL_PREGATE_SKIPPED",\n        reason="option_bid_ask_missing_or_invalid",\n    )\n\n    assert control.filter(routine) is True\n    assert routine.levelno == logging.DEBUG\n    assert control.filter(actionable) is True\n    assert actionable.levelno == logging.INFO\n\n\ndef test_routine_strategy_rejection_is_debug_but_warning_is_preserved() -> None:\n    control = BootLogRateControl(interval_seconds=300.0)\n    routine = _record("STRATEGY_NO_VOTE", reason="smc_quality_gate_failed")\n    readiness_warning = _record(\n        "STRATEGY_NO_VOTE",\n        level=logging.WARNING,\n        reason="smc_history_count_missing",\n    )\n\n    assert control.filter(routine) is True\n    assert routine.levelno == logging.DEBUG\n    assert control.filter(readiness_warning) is True\n    assert readiness_warning.levelno == logging.WARNING\n\n\ndef test_context_only_and_no_combined_diagnostics_are_debug_only() -> None:\n    control = BootLogRateControl(interval_seconds=300.0)\n    for event in (\n        "strategy_manager_no_combined_signal",\n        "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",\n        "ORDERFLOW_TRIGGER_SCORE",\n        "POSITION_RECONCILE_COALESCED",\n    ):\n        record = _record(event)\n        assert control.filter(record) is True\n        assert record.levelno == logging.DEBUG\n\n\ndef test_trade_and_safety_events_remain_unthrottled() -> None:\n    for event in (\n        "ORDER_SUBMITTED",\n        "ORDER_FILLED",\n        "POSITION_OPENED",\n        "POSITION_CLOSED",\n        "POSITION_RECONCILE_FAILED",\n        "RISK_LIMIT_BREACHED",\n        "AUTHENTICATION_FAILED",\n        "WEBSOCKET_DISCONNECTED",\n    ):\n        assert event_is_never_throttled(event) is True\n\n\ndef test_context_direction_logging_is_state_based() -> None:\n    source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(encoding="utf-8")\n    assert "CONTEXT_DIRECTION_STATE" in source\n    assert "context_direction_state:{role}:{symbol}" in source\n    assert "CONTEXT_DIRECTION_UNAVAILABLE role=%s symbol=%s" not in source\n\n\ndef test_throttle_summary_default_is_five_minutes() -> None:\n    source = Path("src/nifty_scalper_bot/utils/log_throttle.py").read_text(encoding="utf-8")\n    assert 'LOG_THROTTLE_SUMMARY_SECONDS", "300"' in source\n''', encoding="utf-8")
+          PY
+
+      - name: Focused regression tests
+        run: |
+          python -m pip install -q pytest
+          PYTHONPATH=src:. pytest -q \
+            tests/core/test_production_log_noise_control.py \
+            tests/core/test_boot_log_role_telemetry.py \
+            tests/core/test_boot_log_safety.py \
+            tests/utils/test_log_throttle_pending_regressions.py
+
+      - name: Remove one-shot workflow and commit
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-log-spam-reduction-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/nifty_scalper_bot/core/boot_log_safety.py \
+                  src/nifty_scalper_bot/core/strategy_manager.py \
+                  src/nifty_scalper_bot/utils/log_throttle.py \
+                  tests/core/test_production_log_noise_control.py \
+                  .github/workflows/apply-log-spam-reduction-once.yml
+          git commit -m "chore: reduce steady-state production log noise"
+          git push origin HEAD:chore/reduce-production-log-spam
