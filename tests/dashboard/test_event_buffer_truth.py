@@ -100,6 +100,39 @@ def test_non_gating_option_context_history_miss_is_system_not_error():
     assert superlite_event["failure_reason"] == "broker_fetch_not_allowed"
 
 
+def test_non_gating_runner_history_short_is_system_not_error():
+    line = (
+        "[2026-08-18 18:16:19 IST] ✅ RUNNER_HISTORY_SYNC_RESULT "
+        "symbol=NFO:NIFTY2681824100CE role=option_context reason=startup_hydration "
+        "required_bars=50 mdm_after=1 runner_after=1 indicator_after=1 "
+        "success=False failure_reason=source_history_short"
+    )
+
+    event = MODULE.parse_event(line)
+    assert event is not None
+    assert event["type"] == "SYSTEM"
+
+    superlite_event = SUPERLITE.parse_event(line)
+    assert superlite_event is not None
+    assert superlite_event["type"] == "SYSTEM"
+    assert superlite_event["failure_reason"] == "source_history_short"
+
+
+def test_selected_option_runner_history_short_remains_error():
+    line = (
+        "[2026-08-18 18:16:19 IST] RUNNER_HISTORY_SYNC_RESULT "
+        "symbol=NFO:NIFTY2681824150CE role=selected_option reason=startup_hydration "
+        "required_bars=75 mdm_after=1 runner_after=1 indicator_after=1 "
+        "success=False failure_reason=source_history_short"
+    )
+
+    event = MODULE.parse_event(line)
+    superlite_event = SUPERLITE.parse_event(line)
+
+    assert event is not None and event["type"] == "ERROR"
+    assert superlite_event is not None and superlite_event["type"] == "ERROR"
+
+
 def test_selected_option_history_failure_remains_error():
     line = (
         "[2026-07-08 01:13:00 IST] CANONICAL_HISTORY_RESULT "
