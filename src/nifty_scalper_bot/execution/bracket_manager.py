@@ -12,6 +12,8 @@ Operational constraints:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from nifty_scalper_bot.execution import bracket_core as _core
 
 for _name in dir(_core):
@@ -235,6 +237,60 @@ from nifty_scalper_bot.execution.market_aware_profit_extension import (  # noqa:
 )
 
 _apply_market_aware_profit_extension(BoundBracketManager)
+
+_original_on_tick = BoundBracketManager.on_tick
+
+
+def _capture_same_tick_cached_quote(self, symbol, ltp, exchange_ts):
+    """Recover executable depth from the cached SSOT without mixing tick identities."""
+    source = getattr(self, "_market_data", None)
+    getter = getattr(source, "get_latest_tick", None) if source is not None else None
+    if not callable(getter):
+        return
+    try:
+        cached = getter(symbol)
+    except Exception:
+        return
+    if not isinstance(cached, Mapping):
+        return
+    try:
+        cached_ltp = float(
+            cached.get("ltp")
+            or cached.get("last_price")
+            or cached.get("price")
+            or 0.0
+        )
+        current_ltp = float(ltp)
+    except (TypeError, ValueError):
+        return
+    if cached_ltp <= 0.0 or current_ltp <= 0.0 or abs(cached_ltp - current_ltp) > 1e-9:
+        return
+    if exchange_ts is not None:
+        cached_ts = tick_exchange_epoch(cached)
+        try:
+            current_ts = float(exchange_ts)
+        except (TypeError, ValueError):
+            return
+        if cached_ts is None or abs(float(cached_ts) - current_ts) > 0.001:
+            return
+    self._capture_exit_quote(_core.normalize_symbol(symbol), cached)
+
+
+def _on_tick_with_cached_executable_quote(
+    self, symbol, ltp, exchange_ts=None, *, defer_submission=False
+):
+    """Preserve executable bid/ask when legacy callers forward only LTP."""
+    _capture_same_tick_cached_quote(self, symbol, ltp, exchange_ts)
+    return _original_on_tick(
+        self,
+        symbol,
+        ltp,
+        exchange_ts,
+        defer_submission=defer_submission,
+    )
+
+
+BoundBracketManager.on_tick = _on_tick_with_cached_executable_quote
 
 BracketManager = BoundBracketManager
 
