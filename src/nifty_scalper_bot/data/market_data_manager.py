@@ -567,6 +567,7 @@ class MarketDataManager:
         self._tick_submitted_total = 0
         self._tick_processed_total = 0
         self._tick_dropped_total = 0
+        self._slow_tick_stage_stats: dict[str, dict[str, Any]] = {}
         self._tick_coalesced_by_priority: dict[str, int] = defaultdict(int)
         self._tick_dropped_by_reason: dict[str, int] = defaultdict(int)
         self._tick_dropped_by_priority: dict[str, int] = defaultdict(int)
@@ -7285,10 +7286,22 @@ class MarketDataManager:
             if callable(callback)
             else (str(callback) if callback else None)
         )
+        metric_key = stage if callback_name is None else f"{stage}:{callback_name}"
         pending_ticks = 0
         oldest_pending_age_ms = None
         drain_active = 0
         with self._pending_tick_lock:
+            stage_stats = self._slow_tick_stage_stats.setdefault(
+                metric_key,
+                {"count": 0, "max_duration_ms": 0.0, "worst_symbol": None},
+            )
+            stage_stats["count"] = int(stage_stats["count"]) + 1
+            if duration_ms > float(stage_stats["max_duration_ms"]):
+                stage_stats["max_duration_ms"] = duration_ms
+                stage_stats["worst_symbol"] = symbol
+            occurrence_count = int(stage_stats["count"])
+            max_duration_ms = float(stage_stats["max_duration_ms"])
+            worst_symbol = stage_stats["worst_symbol"]
             pending_ticks = self._pending_count_locked()
             oldest_pending_age_ms = (
                 self._oldest_pending_age_ms_locked() if pending_ticks else None
@@ -7302,16 +7315,19 @@ class MarketDataManager:
         # wrong field this telemetry was fixed to stop producing.
         _loop_owner = getattr(self, "_event_loop_thread_id", None)
         event_loop_thread = None if _loop_owner is None else thread_id == _loop_owner
-        key = f"tick_stage_slow:{stage}:{callback_name or ''}:{symbol or ''}"
+        key = f"tick_stage_slow:{id(self)}:{metric_key}"
         log_throttled(
             self._logger,
             key,
-            "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s duration_ms=%.3f pending_ticks=%d oldest_pending_age_ms=%s drain_active=%d source=%s thread_id=%s event_loop_thread=%s"
+            "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s duration_ms=%.3f occurrence_count=%d max_duration_ms=%.3f worst_symbol=%s pending_ticks=%d oldest_pending_age_ms=%s drain_active=%d source=%s thread_id=%s event_loop_thread=%s"
             % (
                 stage,
                 callback_name,
                 symbol,
                 duration_ms,
+                occurrence_count,
+                max_duration_ms,
+                worst_symbol,
                 pending_ticks,
                 (
                     None
@@ -7323,7 +7339,7 @@ class MarketDataManager:
                 thread_id,
                 "unknown" if event_loop_thread is None else event_loop_thread,
             ),
-            interval_sec=10.0,
+            interval_sec=60.0,
             level=logging.WARNING,
             extra={
                 "event": "TICK_STAGE_SLOW",
@@ -7331,6 +7347,9 @@ class MarketDataManager:
                 "callback": callback_name,
                 "symbol": symbol,
                 "duration_ms": duration_ms,
+                "occurrence_count": occurrence_count,
+                "max_duration_ms": max_duration_ms,
+                "worst_symbol": worst_symbol,
                 "pending_ticks": pending_ticks,
                 "oldest_pending_age_ms": oldest_pending_age_ms,
                 "drain_active": drain_active,
@@ -7558,6 +7577,10 @@ class MarketDataManager:
                 "coalesced_by_priority": dict(self._tick_coalesced_by_priority),
                 "dropped_by_reason": dict(self._tick_dropped_by_reason),
                 "dropped_by_priority": dict(self._tick_dropped_by_priority),
+                "slow_tick_stages": {
+                    key: dict(value)
+                    for key, value in self._slow_tick_stage_stats.items()
+                },
                 "drain_callbacks_scheduled": self._tick_drain_callbacks_scheduled,
                 "drain_callbacks_completed": self._tick_drain_callbacks_completed,
                 "drain_task_done": (
