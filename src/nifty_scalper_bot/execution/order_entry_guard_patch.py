@@ -1,18 +1,14 @@
-"""Pre-entry geometry guard at the final RuntimeOrderManager choke point."""
+"""Compatibility exports for the native entry-geometry guard."""
 
 from __future__ import annotations
 
 from contextlib import suppress
-import inspect
 import os
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import order_manager_core as _core
+from nifty_scalper_bot.risk.cost_model import minimum_net_reward_risk
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
-_PATCH_APPLIED = False
-_ORIGINAL_PLACE_ORDER: Any = None
-_CORE_PLACE_ORDER_SIGNATURE = inspect.signature(_core.OrderManager.place_order)
 _ENTRY_INTENTS = {"ENTRY", "SCALE_IN", "REVERSAL"}
 _EXIT_TAG_TOKENS = ("exit", "stop", "target", "square", "guard")
 
@@ -82,9 +78,7 @@ def _entry_geometry_block_reason(
             "stop_loss": stop_loss,
             "take_profit": _float_or_none(take_profit),
             "rr": 0.0,
-            "rr_floor": _env_float(
-                ("ENTRY_MIN_RR", "MIN_ENTRY_RR", "MIN_BRACKET_RR"), 1.5
-            ),
+            "rr_floor": minimum_net_reward_risk(),
         }
 
     entry = _float_or_none(price)
@@ -99,7 +93,7 @@ def _entry_geometry_block_reason(
         risk = sl - entry
         reward = entry - tp
 
-    rr_floor = _env_float(("ENTRY_MIN_RR", "MIN_ENTRY_RR", "MIN_BRACKET_RR"), 1.5)
+    rr_floor = minimum_net_reward_risk()
     min_sl_pct = max(
         0.0,
         _env_float(("ENTRY_MIN_SL_DISTANCE_PCT", "MIN_ENTRY_SL_DISTANCE_PCT"), 0.10),
@@ -150,22 +144,6 @@ def _entry_geometry_block_reason(
             "min_sl_distance_pct": min_sl_pct,
         }
     return None
-
-
-def _bind_place_order(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any] | None:
-    try:
-        bound = _CORE_PLACE_ORDER_SIGNATURE.bind_partial(None, *args, **dict(kwargs))
-        return {key: value for key, value in bound.arguments.items() if key != "self"}
-    except Exception:
-        return None
-
-
-def _live_mode(self: Any) -> bool:
-    checker = getattr(self, "is_live_mode", None)
-    if callable(checker):
-        with suppress(Exception):
-            return bool(checker())
-    return str(os.getenv("EXECUTION_MODE", "")).strip().upper() == "LIVE"
 
 
 def _release_prebroker_entry_reservation(self: Any, values: Mapping[str, Any]) -> bool:
@@ -230,52 +208,8 @@ def _record_entry_block(self: Any, reason: Mapping[str, Any]) -> None:
     )
 
 
-def _patched_place_order(self: Any, *args: Any, **kwargs: Any) -> Any:
-    if not _live_mode(self):
-        return _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
-    values = _bind_place_order(args, kwargs) or dict(kwargs)
-    identity_reason = _entry_identity_block_reason(
-        intent=values.get("intent"),
-        tag=values.get("tag"),
-        symbol=values.get("symbol"),
-    )
-    if identity_reason is not None:
-        _record_entry_block(self, identity_reason)
-        _release_prebroker_entry_reservation(self, values)
-        return None
-
-    reason = _entry_geometry_block_reason(
-        self,
-        symbol=values.get("symbol"),
-        side=values.get("side"),
-        price=values.get("price"),
-        stop_loss=values.get("stop_loss"),
-        take_profit=values.get("take_profit"),
-        intent=values.get("intent"),
-    )
-    if reason is not None:
-        _record_entry_block(self, reason)
-        _release_prebroker_entry_reservation(self, values)
-        return None
-    result = _ORIGINAL_PLACE_ORDER(self, *args, **kwargs)
-    if result is None:
-        _release_prebroker_entry_reservation(self, values)
-    return result
-
-
 def apply_patches() -> None:
-    global _PATCH_APPLIED, _ORIGINAL_PLACE_ORDER
-    if _PATCH_APPLIED:
-        return
-    from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
-
-    if getattr(RuntimeOrderManager, "_order_entry_geometry_patch", False):
-        _PATCH_APPLIED = True
-        return
-    _ORIGINAL_PLACE_ORDER = RuntimeOrderManager.place_order
-    RuntimeOrderManager.place_order = _patched_place_order
-    RuntimeOrderManager._order_entry_geometry_patch = True
-    _PATCH_APPLIED = True
+    """Compatibility no-op; OrderManager.place_order owns the guard natively."""
 
 
 __all__ = [

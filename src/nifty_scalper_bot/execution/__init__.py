@@ -19,7 +19,6 @@ from nifty_scalper_bot.execution.live_safety_identity import apply_patches as _a
 from nifty_scalper_bot.execution.position_identity_extension import apply_patches as _apply_position_identity_extension_patches
 from nifty_scalper_bot.execution.operator_control_patch import apply_patches as _apply_operator_control_patches
 from nifty_scalper_bot.execution.protective_order_intent_patch import apply_patches as _apply_protective_order_intent_patches
-from nifty_scalper_bot.execution.order_entry_guard_patch import apply_patches as _apply_order_entry_guard_patches
 from nifty_scalper_bot.execution.position_risk_state_patch import apply_patches as _apply_position_risk_state_patches
 from nifty_scalper_bot.execution.stop_rearm_contract_patch import apply_patches as _apply_stop_rearm_contract_patches
 import nifty_scalper_bot.data.quote_identity_extension as _quote_identity_extension
@@ -32,7 +31,6 @@ _apply_live_safety_identity_patches()
 _apply_position_identity_extension_patches()
 _apply_operator_control_patches()
 _apply_protective_order_intent_patches()
-_apply_order_entry_guard_patches()
 _apply_position_risk_state_patches()
 _apply_stop_rearm_contract_patches()
 _quote_identity_extension.apply_patches()

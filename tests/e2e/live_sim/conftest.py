@@ -562,7 +562,7 @@ def live_sim_system(monkeypatch, tmp_path) -> LiveSimSystem:
     monkeypatch.setenv("NSB_TEST_MODE", "true")
     monkeypatch.setenv("RUNNER_OPTION_MIN_BARS", "50")
     monkeypatch.setenv("REGIME_GATE_ENABLED", "false")
-    monkeypatch.setenv("MIN_BRACKET_RR", "0.1")
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "0.1")
     monkeypatch.setenv("BROKER_API_KEY", "live-sim-key")
     monkeypatch.setenv("BROKER_API_SECRET", "live-sim-secret")
     monkeypatch.setenv("BROKER_ACCESS_TOKEN", "live-sim-token")

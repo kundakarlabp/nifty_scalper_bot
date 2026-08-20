@@ -68,6 +68,11 @@ from nifty_scalper_bot.execution import exceptions as execution_exceptions
 from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
 from nifty_scalper_bot.execution.broker_rejects import BrokerReject
 from nifty_scalper_bot.execution.execution_policy import ExecutionPolicy
+from nifty_scalper_bot.execution.entry_geometry import (
+    entry_geometry_block_reason,
+    entry_identity_block_reason,
+    release_prebroker_entry_reservation,
+)
 from nifty_scalper_bot.execution.exit_router import plan_and_send_exit
 from nifty_scalper_bot.execution.margin_engine import (
     MarginDecision,
@@ -2714,6 +2719,51 @@ class OrderManager:
         is_system_exit = normalized_intent in {"EXIT", "REDUCE"} or any(
             x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
         )
+
+        if self.is_live_mode():
+            entry_block_reason = entry_identity_block_reason(
+                intent=normalized_intent,
+                tag=tag,
+                symbol=normalized_symbol,
+            ) or entry_geometry_block_reason(
+                symbol=normalized_symbol,
+                side=normalized_side,
+                price=price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                intent=normalized_intent,
+            )
+            if entry_block_reason is not None:
+                reason = str(entry_block_reason["block_reason"])
+                self.set_last_skip_reason(reason)
+                self._logger.critical(
+                    "ENTRY_NATIVE_GUARD_BLOCKED symbol=%s reason=%s entry=%s sl=%s tp=%s rr=%s floor=%s",
+                    normalized_symbol,
+                    reason,
+                    entry_block_reason.get("entry"),
+                    entry_block_reason.get("stop_loss"),
+                    entry_block_reason.get("take_profit"),
+                    entry_block_reason.get("rr"),
+                    entry_block_reason.get("rr_floor"),
+                    extra={
+                        "event": "ENTRY_NATIVE_GUARD_BLOCKED",
+                        **entry_block_reason,
+                    },
+                )
+                _log_order_decision(
+                    allowed=False,
+                    block_reason=reason,
+                    details=entry_block_reason,
+                    broker_attempted=False,
+                )
+                release_prebroker_entry_reservation(
+                    self,
+                    {
+                        "symbol": normalized_symbol,
+                        "intent": normalized_intent,
+                    },
+                )
+                return None
 
         entry_blocker = getattr(self, "current_entry_blocker", None)
         entry_block = (

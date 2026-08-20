@@ -59,7 +59,10 @@ def _rate(name: str, default: float) -> float:
 def minimum_net_reward_risk() -> float:
     """Return the single finite, non-negative net-R:R threshold."""
 
-    raw = os.getenv("MIN_NET_REWARD_RISK", "1.5")
+    raw = os.getenv(
+        "MIN_NET_REWARD_RISK",
+        os.getenv("RISK_MIN_RISK_REWARD_RATIO", "1.5"),
+    )
     try:
         parsed = float(raw or 1.5)
     except (TypeError, ValueError):
