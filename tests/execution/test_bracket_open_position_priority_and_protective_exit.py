@@ -17,6 +17,7 @@ def _active_bracket(manager: BracketManager, *, side: str = "BUY") -> BracketSta
         remaining_quantity=10,
         active=False,
         entry_confirmed=False,
+        product="NRML",
     )
     manager._brackets[bracket.entry_order_id] = bracket
     return bracket
@@ -71,6 +72,7 @@ def test_hard_sl_protective_exit_defaults_to_market(monkeypatch) -> None:
 
     assert result.accepted is True
     assert order_manager.place_order.call_args.kwargs["order_type"] == "MARKET"
+    assert order_manager.place_order.call_args.kwargs["product"] == "NRML"
     assert "price" not in order_manager.place_order.call_args.kwargs
 
 
@@ -85,6 +87,7 @@ def test_eod_flatten_protective_exit_defaults_to_market(monkeypatch) -> None:
     manager.submit_exit_order("NFO:TEST", 10, "EOD_FLATTEN", "entry-1", preferred_order_type="LIMIT")
 
     assert order_manager.place_order.call_args.kwargs["order_type"] == "MARKET"
+    assert order_manager.place_order.call_args.kwargs["product"] == "NRML"
 
 
 def test_aggressive_limit_sell_exit_prices_below_bid(monkeypatch) -> None:

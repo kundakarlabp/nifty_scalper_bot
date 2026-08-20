@@ -475,7 +475,6 @@ def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
         return
-    _patch_bracket_manager()
     _patch_position_manager()
     _PATCH_APPLIED = True
 
