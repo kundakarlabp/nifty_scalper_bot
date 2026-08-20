@@ -73,6 +73,38 @@ def test_identical_duplicate_callback_remains_idempotent(monkeypatch, tmp_path) 
     assert entry.quantity == 65
 
 
+def test_later_cumulative_fill_grows_protection_up_to_original_request(
+    monkeypatch, tmp_path
+) -> None:
+    manager = _manager(monkeypatch, tmp_path)
+    manager.confirm_entry_fill("entry-partial", 100.0, 30)
+
+    manager.confirm_entry_fill("entry-partial", 100.0, 65)
+
+    bracket, entry = _entry_fill(manager)
+    assert bracket.requested_entry_quantity == 130
+    assert bracket.quantity == 65
+    assert bracket.remaining_quantity == 65
+    assert entry.quantity == 65
+
+
+def test_cumulative_fill_growth_preserves_already_exited_quantity(
+    monkeypatch, tmp_path
+) -> None:
+    manager = _manager(monkeypatch, tmp_path)
+    manager.confirm_entry_fill("entry-partial", 100.0, 30)
+    bracket = manager.get_bracket("entry-partial")
+    assert bracket is not None
+    bracket.remaining_quantity = 20
+
+    manager.confirm_entry_fill("entry-partial", 100.0, 65)
+
+    bracket, entry = _entry_fill(manager)
+    assert bracket.quantity == 65
+    assert bracket.remaining_quantity == 55
+    assert entry.quantity == 65
+
+
 def test_overreported_quantity_never_grows_bracket_or_ledger(monkeypatch, tmp_path) -> None:
     manager = _manager(monkeypatch, tmp_path)
     manager.confirm_entry_fill("entry-partial", 100.0, 260)
