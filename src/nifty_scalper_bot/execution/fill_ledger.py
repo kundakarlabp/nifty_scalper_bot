@@ -272,22 +272,36 @@ class BracketFillLedgerStore:
             raise FillLedgerError(f"unable to persist fill {leg.fill_id}: {exc}") from exc
         return True
 
-    def reconcile_entry_quantity(self, fill_id: str, filled_qty: int) -> bool:
-        """Shrink an existing ENTRY fill to a later authoritative broker quantity.
+    def reconcile_entry_quantity(
+        self,
+        fill_id: str,
+        filled_qty: int,
+        *,
+        maximum_quantity: int | None = None,
+    ) -> bool:
+        """Set an ENTRY fill to an authoritative cumulative broker quantity.
 
         Fill rows stay immutable except for this explicit partial-fill correction.
-        The method can never grow exposure or alter price, side, fees, or identity.
+        Growth is allowed only up to the caller-supplied original order quantity;
+        price, side, fees and identity remain immutable.
         """
         quantity = int(filled_qty or 0)
         if quantity <= 0:
             raise FillValidationError("reconciled entry quantity must be positive")
+        maximum = int(maximum_quantity or 0)
+        if maximum_quantity is not None and (maximum <= 0 or quantity > maximum):
+            raise FillValidationError(
+                "reconciled entry quantity exceeds original order quantity"
+            )
         key = str(fill_id or "").strip()
         existing = self.get_fill(key)
         if existing is None:
             return False
         if existing.kind != "ENTRY":
             raise FillConflictError(f"fill_id {key!r} is not an entry fill")
-        if quantity >= existing.quantity:
+        if quantity == existing.quantity:
+            return False
+        if quantity > existing.quantity and maximum_quantity is None:
             return False
         try:
             with self._connect() as connection:
@@ -295,7 +309,7 @@ class BracketFillLedgerStore:
                     """
                     UPDATE bracket_fill_legs
                     SET quantity = ?
-                    WHERE fill_id = ? AND kind = 'ENTRY' AND quantity > ?
+                    WHERE fill_id = ? AND kind = 'ENTRY' AND quantity != ?
                     """,
                     (quantity, key, quantity),
                 )
@@ -305,7 +319,7 @@ class BracketFillLedgerStore:
                 f"unable to reconcile entry fill {key}: {exc}"
             ) from exc
         current = self.get_fill(key)
-        if current is None or current.kind != "ENTRY" or current.quantity > quantity:
+        if current is None or current.kind != "ENTRY" or current.quantity != quantity:
             raise FillConflictError(
                 f"entry fill {key!r} quantity reconciliation was not durable"
             )

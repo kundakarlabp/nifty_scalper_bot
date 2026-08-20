@@ -67,7 +67,7 @@ def _positive_filled_quantity(value):
 
 
 def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
-    """Shrink bracket and durable entry fill to a later authoritative quantity."""
+    """Reconcile bracket and ledger to cumulative fills within the request."""
     reported = _positive_filled_quantity(filled_qty)
     if bracket is None or reported is None:
         return False
@@ -76,15 +76,24 @@ def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
         return False
     try:
         registered = int(getattr(bracket, "quantity", 0) or 0)
+        requested = int(
+            getattr(bracket, "requested_entry_quantity", 0) or registered
+        )
     except (TypeError, ValueError):
         return False
-    if registered <= 0 or reported >= registered:
+    if (
+        registered <= 0
+        or requested <= 0
+        or reported > requested
+        or reported == registered
+    ):
         return False
 
     reconciler = getattr(self, "_reconcile_entry_fill_quantity", None)
     if not callable(reconciler):
         return False
-    reconciler(bracket, reported)
+    if not bool(reconciler(bracket, reported)):
+        return False
 
     # On the first callback the ledger has not been written yet; pre-shrinking
     # makes the existing ledger layer record the actual quantity. On a later
@@ -95,7 +104,11 @@ def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
         fill_id_builder = getattr(self, "_entry_fill_id", None)
         if callable(ledger_reconcile) and callable(fill_id_builder):
             try:
-                ledger_reconcile(fill_id_builder(str(order_id)), reported)
+                ledger_reconcile(
+                    fill_id_builder(str(order_id)),
+                    reported,
+                    maximum_quantity=requested,
+                )
             except Exception as exc:  # noqa: BLE001 - block release on accounting drift
                 blocker = getattr(self, "_block_ledger_release", None)
                 if callable(blocker):
@@ -110,16 +123,18 @@ def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
                     )
                 raise
         _core.LOGGER.warning(
-            "FILL_LEDGER_ENTRY_QTY_RECONCILED order_id=%s symbol=%s requested=%s filled=%s",
+            "FILL_LEDGER_ENTRY_QTY_RECONCILED order_id=%s symbol=%s requested=%s previous=%s filled=%s",
             order_id,
             bracket.symbol,
+            requested,
             registered,
             reported,
             extra={
                 "event": "FILL_LEDGER_ENTRY_QTY_RECONCILED",
                 "order_id": str(order_id),
                 "symbol": bracket.symbol,
-                "requested_qty": registered,
+                "requested_qty": requested,
+                "previous_filled_qty": registered,
                 "filled_qty": reported,
             },
         )

@@ -257,6 +257,7 @@ class BracketState:
     sl_trigger_price: float
     tp_trigger_price: float  # Final/Ultimate TP
     initial_sl_trigger_price: float = 0.0
+    requested_entry_quantity: int = 0
 
     # Multi-Target & Scaling State (NEW)
     remaining_quantity: int = 0
@@ -385,6 +386,8 @@ class BracketState:
 
     def __post_init__(self):
         self.side = _normalize_bracket_side(self.side)
+        if self.requested_entry_quantity <= 0:
+            self.requested_entry_quantity = self.quantity
         # Auto-initialize state fields if not set
         if self.remaining_quantity == 0:
             self.remaining_quantity = self.quantity
@@ -406,6 +409,7 @@ class BracketState:
             "symbol": self.symbol,
             "side": self.side,
             "quantity": self.quantity,
+            "requested_entry_quantity": self.requested_entry_quantity,
             "entry_price": self.entry_price,
             "sl_trigger_price": self.sl_trigger_price,
             "tp_trigger_price": self.tp_trigger_price,
@@ -1272,6 +1276,7 @@ class BracketManager:
                     existing.tp_trigger_price = tp
                 # Reset quantity if re-registering (e.g. scale-in)
                 existing.quantity = abs(qty)
+                existing.requested_entry_quantity = abs(qty)
                 existing.remaining_quantity = abs(qty)
                 existing.exit_state = BracketExitLifecycle.OPEN_PENDING_FILL.value
                 existing.exit_pending = False
@@ -1326,6 +1331,7 @@ class BracketManager:
                 symbol=symbol,
                 side=side,
                 quantity=abs(qty),
+                requested_entry_quantity=abs(qty),
                 remaining_quantity=abs(qty),
                 entry_price=price,
                 sl_trigger_price=sl,
@@ -1411,47 +1417,59 @@ class BracketManager:
 
     def _reconcile_entry_fill_quantity(
         self, bracket: BracketState, filled_qty: int | None
-    ) -> None:
-        """Shrink a bracket to the quantity the broker actually filled.
+    ) -> bool:
+        """Match protection to cumulative broker fills within the entry request.
 
         Exits must never be sized above the held position: an oversized exit is
-        either rejected (leaving the position unprotected while it retries) or
-        fills into a naked opposite exposure. Only shrinking is permitted -- a
-        reported quantity above the registered size is a data fault, not an
-        instruction to trade more.
+        either rejected or fills into a naked opposite exposure. Broker fill
+        updates are cumulative, so a later 30 -> 65 sequence must also grow
+        protection, but never above the immutable requested entry quantity.
         """
         if filled_qty is None:
-            return
+            return False
         try:
             filled = int(filled_qty)
         except (TypeError, ValueError):
-            return
+            return False
         registered = int(bracket.quantity or 0)
-        if filled <= 0 or registered <= 0 or filled >= registered:
-            return
+        requested = int(bracket.requested_entry_quantity or registered or 0)
+        if filled <= 0 or registered <= 0 or requested <= 0:
+            return False
+        if filled > requested or filled == registered:
+            return False
+        already_exited = max(0, registered - int(bracket.remaining_quantity or 0))
+        if filled < already_exited:
+            LOGGER.critical(
+                "BRACKET_QTY_RECONCILE_REJECTED order_id=%s symbol=%s requested=%s current=%s filled=%s already_exited=%s",
+                bracket.entry_order_id,
+                bracket.symbol,
+                requested,
+                registered,
+                filled,
+                already_exited,
+            )
+            return False
         bracket.quantity = filled
-        bracket.remaining_quantity = filled
-        # A partial-target slice at or above the whole position is no longer a
-        # scale-out; drop it rather than exit the entire position at TP1.
-        bracket.tp_levels = [
-            level
-            for level in bracket.tp_levels
-            if level.executed or int(level.quantity) < filled
-        ]
+        bracket.remaining_quantity = max(0, filled - already_exited)
         LOGGER.warning(
-            "BRACKET_QTY_RECONCILED order_id=%s symbol=%s requested=%s filled=%s",
+            "BRACKET_QTY_RECONCILED order_id=%s symbol=%s requested=%s previous=%s filled=%s remaining=%s",
             bracket.entry_order_id,
             bracket.symbol,
+            requested,
             registered,
             filled,
+            bracket.remaining_quantity,
             extra={
                 "event": "BRACKET_QTY_RECONCILED",
                 "order_id": bracket.entry_order_id,
                 "symbol": bracket.symbol,
-                "requested_qty": registered,
+                "requested_qty": requested,
+                "previous_filled_qty": registered,
                 "filled_qty": filled,
+                "remaining_qty": bracket.remaining_quantity,
             },
         )
+        return True
 
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
@@ -2124,6 +2142,8 @@ class BracketManager:
         # Check partial targets (TP1, TP2, etc.)
         for target in bracket.tp_levels:
             if target.executed:
+                continue
+            if int(target.quantity) >= int(bracket.remaining_quantity):
                 continue
 
             triggered = False
@@ -4737,8 +4757,16 @@ class BracketManager:
         if not symbol:
             raise ValueError(f"{entry_id}: symbol missing")
         quantity = int(payload.get("quantity") or 0)
+        requested_quantity = int(
+            payload.get("requested_entry_quantity", quantity) or 0
+        )
         remaining = int(payload.get("remaining_quantity", quantity) or 0)
-        if quantity <= 0 or remaining < 0 or remaining > quantity:
+        if (
+            quantity <= 0
+            or requested_quantity < quantity
+            or remaining < 0
+            or remaining > quantity
+        ):
             raise ValueError(f"{entry_id}: invalid quantity state")
         trailing_config = payload.get("trailing_config") or {}
         if not isinstance(trailing_config, Mapping):
@@ -4768,6 +4796,7 @@ class BracketManager:
             symbol=symbol,
             side=str(payload.get("side") or ""),
             quantity=quantity,
+            requested_entry_quantity=requested_quantity,
             entry_price=entry_price,
             sl_trigger_price=finite_float(
                 "stop loss", payload.get("sl_trigger_price", 0.0)

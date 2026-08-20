@@ -851,7 +851,19 @@ def test_overreported_fill_quantity_never_grows_the_bracket() -> None:
     assert bracket.remaining_quantity == 65
 
 
-def test_partial_fill_drops_a_now_oversized_scale_out_level() -> None:
+def test_later_cumulative_fill_can_grow_to_original_registered_quantity() -> None:
+    manager = BracketManager(order_manager=Mock())
+    bracket = _pending_bracket(manager, "pf-grow", "NFO:NIFTYPFGROWCE", 130)
+
+    manager.confirm_entry_fill("pf-grow", 100.0, 30)
+    manager.confirm_entry_fill("pf-grow", 100.0, 130)
+
+    assert bracket.requested_entry_quantity == 130
+    assert bracket.quantity == 130
+    assert bracket.remaining_quantity == 130
+
+
+def test_partial_fill_suspends_a_now_oversized_scale_out_level() -> None:
     manager = BracketManager(order_manager=Mock())
     from nifty_scalper_bot.execution.bracket_core import TargetLevel
 
@@ -861,4 +873,7 @@ def test_partial_fill_drops_a_now_oversized_scale_out_level() -> None:
     manager.confirm_entry_fill("pf-5", 100.0, 75)
 
     assert bracket.quantity == 75
-    assert [lvl for lvl in bracket.tp_levels if not lvl.executed] == []
+    assert bracket.tp_levels[0].executed is False
+    decision = manager._evaluate_exit_fast(bracket, 111.0)
+    assert decision is not None
+    assert decision["type"] == "FINAL_TP"
