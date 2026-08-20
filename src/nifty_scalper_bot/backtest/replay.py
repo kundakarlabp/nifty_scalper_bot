@@ -32,6 +32,7 @@ class ReplayResult:
     trades: list[dict[str, Any]]
     orders: list[dict[str, Any]]
     fill_calibration: Mapping[str, float | int | None] | None = None
+    execution_costs: float = 0.0
 
     def format_summary(self) -> str:
         """Return a human-readable summary suitable for Telegram."""
@@ -152,6 +153,7 @@ class ReplayHarness:
             bars += 1
         trades = _collect_trade_history(self._runner)
         orders = self._paper.get_orders() if hasattr(self._paper, "get_orders") else []
+        execution_costs = sum(float(order.get("fees") or 0.0) for order in orders)
         return ReplayResult(
             bars,
             start_ts,
@@ -159,6 +161,7 @@ class ReplayHarness:
             trades,
             orders,
             fill_calibration=self._fill_calibration,
+            execution_costs=execution_costs,
         )
 
     def run_file(self, path: Path) -> ReplayResult:

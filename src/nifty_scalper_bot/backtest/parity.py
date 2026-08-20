@@ -38,6 +38,7 @@ class SinglePipelineParity:
         runner_factory: Callable[[], Any],
         reference_runner_factory: Callable[[], Any] | None = None,
         paper_factory: Callable[[], PaperFillEngine],
+        reference_paper_factory: Callable[[], PaperFillEngine] | None = None,
         option_symbol: str,
         index_symbol: str | None = None,
         contract_catalog: HistoricalContractCatalog | None = None,
@@ -60,6 +61,7 @@ class SinglePipelineParity:
         self._runner_factory = runner_factory
         self._reference_runner_factory = reference_runner_factory
         self._paper_factory = paper_factory
+        self._reference_paper_factory = reference_paper_factory or paper_factory
         self._option_symbol = option_symbol
         self._index_symbol = index_symbol
         self._contract_catalog = contract_catalog
@@ -100,7 +102,7 @@ class SinglePipelineParity:
             live_result = live_harness.run_dataframe(frame)
 
             back_runner = self._reference_runner_factory()
-            back_paper = self._paper_factory()
+            back_paper = self._reference_paper_factory()
             back_harness = ReplayHarness(
                 back_runner,
                 back_paper,
@@ -116,7 +118,7 @@ class SinglePipelineParity:
                 extra={"event": "single_pipeline_parity_run_error"},
             )
             raise
-        diff = self._diff_trades(live_result.trades, back_result.trades)
+        diff = self._diff_results(live_result, back_result)
         if diff:
             self._logger.error(
                 "Condition met: pipeline_parity_mismatch",
@@ -130,31 +132,27 @@ class SinglePipelineParity:
         return PipelineParityResult(live=live_result, backtest=back_result, diff=diff)
 
     @staticmethod
-    def _diff_trades(live: list[dict[str, Any]], back: list[dict[str, Any]]) -> str:
-        """Return unified diff for two trade logs, or ``""`` if identical.
+    def _diff_results(live: ReplayResult, back: ReplayResult) -> str:
+        """Return a unified diff including decisions and executed orders."""
 
-        Args:
-            live: Trade log captured from the live-style replay.
-            back: Trade log captured from the backtest replay.
-
-        Returns:
-            Diff string describing mismatches, or an empty string on parity.
-
-        Raises:
-            None.
-        """
-
-        live_json = json.dumps(live, sort_keys=True, default=str, ensure_ascii=False)
-        back_json = json.dumps(back, sort_keys=True, default=str, ensure_ascii=False)
+        live_payload = {"trades": live.trades, "orders": live.orders}
+        back_payload = {"trades": back.trades, "orders": back.orders}
+        live_json = json.dumps(
+            live_payload, sort_keys=True, default=str, ensure_ascii=False, indent=2
+        )
+        back_json = json.dumps(
+            back_payload, sort_keys=True, default=str, ensure_ascii=False, indent=2
+        )
         if live_json == back_json:
             return ""
-        diff_lines = difflib.unified_diff(
-            live_json.splitlines(),
-            back_json.splitlines(),
-            fromfile="live",
-            tofile="back",
+        return "\n".join(
+            difflib.unified_diff(
+                live_json.splitlines(),
+                back_json.splitlines(),
+                fromfile="live",
+                tofile="backtest",
+            )
         )
-        return "\n".join(diff_lines)
 
 
 __all__ = ["PipelineParityResult", "SinglePipelineParity"]

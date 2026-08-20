@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import pytest
+
 from nifty_scalper_bot.risk.cost_model import (
-    evaluate_net_reward_risk,
+    estimate_order_cost,
     estimate_round_trip_cost,
+    evaluate_net_reward_risk,
     minimum_net_reward_risk,
     passes_cost_edge_gate,
 )
+
+
+def test_one_way_execution_fees_reconcile_to_round_trip_model() -> None:
+    entry = 120.0
+    exit_price = 135.0
+    quantity = 65
+    one_way = estimate_order_cost(
+        turnover=entry * quantity, side="BUY"
+    ) + estimate_order_cost(turnover=exit_price * quantity, side="SELL")
+    round_trip = estimate_round_trip_cost(
+        entry_price=entry,
+        exit_price=exit_price,
+        quantity=quantity,
+    )
+
+    assert one_way == pytest.approx(round_trip.total)
 
 
 def test_cost_breakdown_components_positive() -> None:

@@ -70,6 +70,26 @@ def minimum_net_reward_risk() -> float:
     return max(0.0, parsed) if math.isfinite(parsed) else 1.5
 
 
+def estimate_order_cost(*, turnover: float, side: str) -> float:
+    """Return canonical fees for one executed option order."""
+
+    value = max(0.0, float(turnover))
+    normalized_side = str(side).strip().upper()
+    brokerage = _rate("COST_BROKERAGE_PER_ORDER", 20.0)
+    exchange_txn = value * _rate("COST_EXCH_TXN_PCT", 0.0003553)
+    sebi = value * _rate("COST_SEBI_PCT", 0.000001)
+    gst = (brokerage + exchange_txn + sebi) * _rate("COST_GST_PCT", 0.18)
+    stt = (
+        value * _rate("COST_STT_SELL_PCT", 0.0015) if normalized_side == "SELL" else 0.0
+    )
+    stamp = (
+        value * _rate("COST_STAMP_BUY_PCT", 0.00003)
+        if normalized_side == "BUY"
+        else 0.0
+    )
+    return brokerage + stt + exchange_txn + sebi + gst + stamp
+
+
 def estimate_round_trip_cost(
     *,
     entry_price: float,

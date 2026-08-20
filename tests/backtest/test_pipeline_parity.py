@@ -37,6 +37,11 @@ class _ParityRunner:
         return {"symbols": {"OPT": {"trade_history": list(self._trades)}}}
 
 
+class _OrderMutatingPaper(PaperFillEngine):
+    def get_orders(self) -> list[dict[str, Any]]:
+        return [{"order_id": "different-fill", "fees": 99.0}]
+
+
 def _sample_frame() -> pd.DataFrame:
     index = pd.date_range(datetime(2024, 1, 1, 9, 30), periods=4, freq="T")
     return pd.DataFrame(
@@ -88,3 +93,20 @@ def test_single_pipeline_parity_requires_independent_reference() -> None:
         assert "reference_runner_factory" in str(exc)
     else:  # pragma: no cover - explicit contract failure
         raise AssertionError("parity must not compare a pipeline with itself")
+
+
+def test_single_pipeline_parity_detects_execution_drift() -> None:
+    parity = SinglePipelineParity(
+        runner_factory=_runner_factory,
+        reference_runner_factory=_runner_factory,
+        paper_factory=_paper_factory,
+        reference_paper_factory=lambda: _OrderMutatingPaper(
+            _StubDataHub(), _StubResolver()
+        ),
+        option_symbol="OPT",
+    )
+
+    result = parity.run_frame(_sample_frame())
+
+    assert result.diff
+    assert "different-fill" in result.diff
