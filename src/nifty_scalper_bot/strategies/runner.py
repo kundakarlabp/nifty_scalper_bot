@@ -3201,6 +3201,7 @@ class StrategyRunner:
                         "ask_missing": snap.ask_missing,
                         "bid_ask_source": snap.bid_ask_source,
                         "tradable_quote": snap.tradable_quote,
+                        "depth_available": bool(snap.depth_available),
                         "refresh_pending": symbol_refresh_pending,
                         "atr_option": float(getattr(snap, "atr_option", 0.0) or 0.0),
                         "history_bars": int(getattr(snap, "history_bars", 0) or 0),
