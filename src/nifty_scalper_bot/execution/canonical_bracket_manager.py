@@ -67,88 +67,8 @@ class CanonicalBracketManager(HardenedBracketManager):
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
     ) -> None:
-        """Activate a confirmed entry and re-anchor every outstanding target.
-
-        The legacy implementation already re-anchors SL and the final TP. This
-        wrapper captures planned partial targets before that call and applies the
-        same proportional re-anchor exactly once.
-        """
-
-        before = self.get_bracket(order_id)
-        planned_entry = 0.0
-        planned_targets: list[float] = []
-        if before is not None:
-            with self._lock:
-                planned_entry = float(before.entry_price or 0.0)
-                planned_targets = [
-                    float(target.price or 0.0) for target in before.tp_levels
-                ]
-
+        """Delegate fill activation to the single canonical geometry owner."""
         super().confirm_entry_fill(order_id, fill_price, filled_qty)
-
-        bracket = self.get_bracket(order_id)
-        if bracket is None:
-            return
-        try:
-            confirmed_fill = float(fill_price or 0.0)
-        except (TypeError, ValueError):
-            return
-        if planned_entry <= 0 or confirmed_fill <= 0 or confirmed_fill == planned_entry:
-            return
-
-        ratio = confirmed_fill / planned_entry
-        changed: list[dict[str, object]] = []
-        with self._lock:
-            for index, target in enumerate(bracket.tp_levels):
-                if target.executed or index >= len(planned_targets):
-                    continue
-                old_price = planned_targets[index]
-                if old_price <= 0:
-                    continue
-                new_price = _legacy._round_to_tick(old_price * ratio)
-                if new_price <= 0 or new_price == float(target.price):
-                    continue
-                target.price = new_price
-                changed.append(
-                    {
-                        "name": str(target.name),
-                        "old_price": old_price,
-                        "new_price": new_price,
-                    }
-                )
-            if changed:
-                bracket.updated_at = time.time()
-
-        if not changed:
-            return
-        with suppress(Exception):
-            self.save_state()
-        _legacy.LOGGER.info(
-            "BRACKET_TARGETS_REANCHORED bracket_id=%s symbol=%s planned_entry=%.2f fill_price=%.2f targets=%s",
-            bracket.bracket_id,
-            bracket.symbol,
-            planned_entry,
-            confirmed_fill,
-            changed,
-            extra={
-                "event": "BRACKET_TARGETS_REANCHORED",
-                "bracket_id": bracket.bracket_id,
-                "symbol": bracket.symbol,
-                "planned_entry": planned_entry,
-                "fill_price": confirmed_fill,
-                "targets": changed,
-            },
-        )
-        with suppress(Exception):
-            self._notify_event(
-                "BRACKET_TARGETS_REANCHORED",
-                {
-                    "symbol": bracket.symbol,
-                    "planned_entry": round(planned_entry, 2),
-                    "fill_price": round(confirmed_fill, 2),
-                    "targets": changed,
-                },
-            )
 
     def _broker_position_quantity(self, symbol: str) -> int | None:
         """Return absolute broker quantity, or ``None`` when exposure is unknown."""

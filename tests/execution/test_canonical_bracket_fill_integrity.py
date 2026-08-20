@@ -139,10 +139,10 @@ def test_confirmed_fill_reanchors_sl_final_tp_and_tp1() -> None:
 
     assert bracket is not None
     assert bracket.entry_price == 102.0
-    assert bracket.sl_trigger_price == 91.8
-    assert bracket.tp_trigger_price == 122.4
+    assert bracket.sl_trigger_price == 92.0
+    assert bracket.tp_trigger_price == 122.0
     assert len(bracket.tp_levels) == 1
-    assert bracket.tp_levels[0].price == 112.2
+    assert bracket.tp_levels[0].price == 112.0
 
 
 def test_confirmed_tp1_fill_keeps_residual_position_open_and_protected() -> None:

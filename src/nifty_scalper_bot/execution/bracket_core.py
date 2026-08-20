@@ -1524,27 +1524,38 @@ class BracketManager:
                 old_price = bracket.entry_price
                 bracket.entry_price = fill_price
 
-                # Adjust SL/TP if they were calculated from expected price
+                # Distance-anchored plans preserve their absolute risk/reward
+                # distances at the broker fill. Absolute technical levels do
+                # not move. This is the sole post-fill geometry transform.
                 if old_price > 0 and old_price != fill_price:
-                    price_diff_pct = (fill_price - old_price) / old_price
+                    provenance = bracket.trade_provenance or {}
+                    anchor_mode = str(
+                        provenance.get("bracket_anchor_mode") or "distance"
+                    ).lower()
+                    if anchor_mode == "distance":
+                        delta = fill_price - old_price
+                        if bracket.sl_trigger_price > 0:
+                            bracket.sl_trigger_price = _round_to_tick(
+                                bracket.sl_trigger_price + delta
+                            )
+                        if bracket.tp_trigger_price > 0:
+                            bracket.tp_trigger_price = _round_to_tick(
+                                bracket.tp_trigger_price + delta
+                            )
+                        for level in bracket.tp_levels:
+                            if not level.executed and level.price > 0:
+                                level.price = _round_to_tick(level.price + delta)
 
-                    # Adjust SL proportionally (tick-rounded: round(x, 2) put
-                    # SL/TP on the 0.01 grid, e.g. 143.99 — invalid NSE tick)
-                    if bracket.sl_trigger_price > 0:
-                        bracket.sl_trigger_price = _round_to_tick(
-                            bracket.sl_trigger_price * (1 + price_diff_pct)
-                        )
-                        bracket.initial_sl_trigger_price = bracket.sl_trigger_price
-
-                    # Adjust TP proportionally
-                    if bracket.tp_trigger_price > 0:
-                        bracket.tp_trigger_price = _round_to_tick(
-                            bracket.tp_trigger_price * (1 + price_diff_pct)
-                        )
+                    bracket.initial_sl_trigger_price = bracket.sl_trigger_price
 
                     LOGGER.info(
-                        f"📊 Bracket adjusted for fill price: Entry={fill_price:.2f} "
-                        f"SL={bracket.sl_trigger_price:.2f} TP={bracket.tp_trigger_price:.2f}"
+                        "BRACKET_FILL_GEOMETRY_APPLIED symbol=%s mode=%s old_entry=%.2f fill=%.2f sl=%.2f tp=%.2f",
+                        bracket.symbol,
+                        anchor_mode,
+                        old_price,
+                        fill_price,
+                        bracket.sl_trigger_price,
+                        bracket.tp_trigger_price,
                     )
 
             # ✅ Activate only after explicit fill confirmation
