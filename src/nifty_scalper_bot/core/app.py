@@ -12925,7 +12925,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 len(sorted(set(active_symbols))),
             )
             subscribed_symbols = sorted({sym for sym in targets})
-            LOGGER.critical(
+            LOGGER.info(
                 "📊 STRATEGY SUBSCRIBED SYMBOLS: %s",
                 subscribed_symbols,
             )

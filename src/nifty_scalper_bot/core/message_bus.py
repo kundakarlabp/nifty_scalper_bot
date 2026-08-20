@@ -208,7 +208,7 @@ class MessageBus:
         if self._running:
             return True
         if not any(self.subscribers.values()):
-            LOGGER.warning("MESSAGE_BUS_START_SKIPPED reason=no_subscribers")
+            LOGGER.info("MESSAGE_BUS_START_SKIPPED reason=no_subscribers")
             return False
         self._running = True
 
