@@ -1923,6 +1923,39 @@ def test_slow_tick_subscriber_is_identified_without_tick_accounting_loss(caplog)
     assert any(getattr(r, "stage", None) == "one_tick" for r in records)
 
 
+def test_slow_tick_telemetry_aggregates_symbols_and_preserves_worst_sample(caplog):
+    mdm = _make_mdm()
+
+    with caplog.at_level("WARNING"):
+        mdm._log_slow_tick_stage(
+            stage="one_tick",
+            symbol="NFO:NIFTY26JUN24000CE",
+            duration_ms=120.0,
+            source="ws",
+        )
+        mdm._log_slow_tick_stage(
+            stage="one_tick",
+            symbol="NFO:NIFTY26JUN24100CE",
+            duration_ms=240.0,
+            source="ws",
+        )
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(record, "stage", None) == "one_tick"
+    ]
+    assert len(records) == 1
+
+    stage_stats = mdm.get_tick_pressure_stats()["slow_tick_stages"]["one_tick"]
+    assert stage_stats == {
+        "count": 2,
+        "max_duration_ms": 240.0,
+        "worst_symbol": "NFO:NIFTY26JUN24100CE",
+    }
+
+
 @pytest.mark.asyncio
 async def test_slow_subscriber_exception_isolated_and_drain_continues(caplog):
     mdm = _make_mdm()
