@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
@@ -86,3 +88,43 @@ def test_rsi_edge_cases_are_preserved(monkeypatch) -> None:
 
     rising = [100.0 + i for i in range(20)]
     assert engine._calculate_rsi(rising, 14) == pytest.approx(100.0)
+
+
+def test_adx_uses_wilder_directional_movement() -> None:
+    engine = IndicatorEngine()
+    closes = [100.0 + index for index in range(28)]
+    highs = [value + 1.0 for value in closes]
+    lows = [value - 1.0 for value in closes]
+
+    assert engine._calculate_adx(highs, lows, closes, 14) == pytest.approx(100.0)
+
+
+def test_adx_requires_two_wilder_windows() -> None:
+    engine = IndicatorEngine()
+    closes = [100.0 + index for index in range(15)]
+    highs = [value + 1.0 for value in closes]
+    lows = [value - 1.0 for value in closes]
+
+    with pytest.raises(ValueError):
+        engine._calculate_adx(highs, lows, closes, 14)
+
+
+def test_adx_is_exposed_by_canonical_indicator_snapshots() -> None:
+    engine = IndicatorEngine()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(31):
+        close = 100.0 + index
+        engine.update_price(
+            "NIFTY",
+            {
+                "open": close - 0.5,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+            },
+            timestamp=start + timedelta(minutes=index),
+        )
+
+    assert engine.get_adx("NIFTY") == pytest.approx(100.0)
+    assert engine.get_indicators("NIFTY")["adx"] == pytest.approx(100.0)
+    assert engine.get_latest("NIFTY")["adx"] == pytest.approx(100.0)

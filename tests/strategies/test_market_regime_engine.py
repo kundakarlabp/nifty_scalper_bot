@@ -58,3 +58,18 @@ def test_market_regime_low_activity_classification() -> None:
         }
     )
     assert snapshot.regime == MarketRegime.LOW_ACTIVITY
+
+
+def test_market_regime_missing_adx_is_unknown_not_range() -> None:
+    snapshot = MarketRegimeEngine().classify(
+        {
+            "adx": None,
+            "atr": 8.0,
+            "atr_average": 8.5,
+            "vwap_slope": 0.001,
+            "volume_expansion": 1.0,
+        }
+    )
+
+    assert snapshot.regime == MarketRegime.UNKNOWN
+    assert snapshot.adx is None
