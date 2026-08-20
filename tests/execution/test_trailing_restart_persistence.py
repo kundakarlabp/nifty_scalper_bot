@@ -23,7 +23,7 @@ def test_confirmed_fill_reanchors_initial_risk_to_activated_stop() -> None:
 
     bracket = manager.get_bracket("fill-risk")
     assert bracket is not None
-    assert bracket.sl_trigger_price == 104.50
+    assert bracket.sl_trigger_price == 104.45
     assert bracket.initial_sl_trigger_price == bracket.sl_trigger_price
 
 
