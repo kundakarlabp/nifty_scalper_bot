@@ -59,7 +59,9 @@ def _price(signal: Any, *names: str) -> float | None:
     return None
 
 
-def _half_spread(signal: Any, entry: float) -> float:
+def estimate_half_spread(signal: Any, entry: float) -> float:
+    """Return per-unit half-spread using the final gate's quote fallback rules."""
+
     metadata = _metadata(signal)
     bid = _positive(metadata.get("bid") or metadata.get("best_bid"))
     ask = _positive(metadata.get("ask") or metadata.get("best_ask"))
@@ -134,7 +136,7 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
     if not (stop < entry < target):
         return None
 
-    half_spread = _half_spread(signal, entry)
+    half_spread = estimate_half_spread(signal, entry)
     target_cost = estimate_round_trip_cost(
         entry_price=entry,
         exit_price=target,
@@ -206,7 +208,7 @@ def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float 
     if max_tick_target <= target:
         return None
 
-    half_spread = _half_spread(signal, entry)
+    half_spread = estimate_half_spread(signal, entry)
     stop_cost = estimate_round_trip_cost(
         entry_price=entry,
         exit_price=stop,
@@ -249,4 +251,94 @@ def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float 
     return candidate
 
 
-__all__ = ["NetRRResult", "evaluate_final_net_rr", "minimum_target_for_net_rr"]
+def minimum_risk_distance_for_net_rr(
+    *,
+    entry_price: float,
+    gross_rr: float,
+    quantity: int,
+    half_spread: float,
+    tick_size: float = 0.05,
+    maximum_distance: float | None = None,
+) -> float | None:
+    """Return the smallest stop distance whose target clears the final net-RR gate.
+
+    Both target and stop outcomes use :func:`estimate_round_trip_cost`, so the
+    geometry floor and final entry gate cannot drift onto different economics.
+    ``None`` means no viable long-option distance exists inside the supplied cap.
+    """
+
+    try:
+        entry = float(entry_price)
+        rr = float(gross_rr)
+        qty = int(quantity)
+        spread = max(0.0, float(half_spread))
+        tick = float(tick_size)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in (entry, rr, spread, tick)):
+        return None
+    if entry <= tick or rr <= 0.0 or qty <= 0 or tick <= 0.0:
+        return None
+
+    maximum = entry - tick
+    if maximum_distance is not None:
+        try:
+            configured_maximum = float(maximum_distance)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(configured_maximum):
+            return None
+        maximum = min(maximum, configured_maximum)
+    maximum = math.floor((maximum + 1e-12) / tick) * tick
+    if maximum < tick:
+        return None
+
+    minimum = _minimum_net_rr()
+
+    def _net_rr_at(distance: float) -> float:
+        stop = entry - distance
+        target = entry + distance * rr
+        if stop <= 0.0 or target <= entry:
+            return 0.0
+        target_cost = estimate_round_trip_cost(
+            entry_price=entry,
+            exit_price=target,
+            quantity=qty,
+            half_spread=spread,
+        ).total
+        stop_cost = estimate_round_trip_cost(
+            entry_price=entry,
+            exit_price=stop,
+            quantity=qty,
+            half_spread=spread,
+        ).total
+        net_reward = distance * rr * qty - target_cost
+        net_risk = distance * qty + stop_cost
+        return net_reward / net_risk if net_reward > 0.0 and net_risk > 0.0 else 0.0
+
+    if _net_rr_at(maximum) + 1e-12 < minimum:
+        return None
+
+    low = 0.0
+    high = maximum
+    for _ in range(60):
+        midpoint = (low + high) / 2.0
+        if _net_rr_at(midpoint) >= minimum:
+            high = midpoint
+        else:
+            low = midpoint
+
+    candidate = math.ceil((high - 1e-12) / tick) * tick
+    candidate = min(candidate, maximum)
+    if _net_rr_at(candidate) + 1e-12 < minimum:
+        return None
+    return round(candidate, 10)
+
+
+__all__ = [
+    "NetRRResult",
+    "estimate_half_spread",
+    "evaluate_final_net_rr",
+    "minimum_risk_distance_for_net_rr",
+    "minimum_target_for_net_rr",
+]

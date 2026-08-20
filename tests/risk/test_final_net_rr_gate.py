@@ -8,7 +8,10 @@ from nifty_scalper_bot.risk.entry_guard_patch import (
     _net_rr_block_reason,
     _real_broker_live,
 )
-from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
+from nifty_scalper_bot.risk.net_rr_gate import (
+    evaluate_final_net_rr,
+    minimum_risk_distance_for_net_rr,
+)
 from nifty_scalper_bot.risk.risk_manager import OrderSignal
 
 
@@ -34,6 +37,67 @@ def test_final_net_rr_accepts_economic_trade(monkeypatch) -> None:
     assert result.net_rr >= 1.5
     assert result.net_reward < result.gross_reward
     assert result.net_risk > result.gross_risk
+
+
+@pytest.mark.parametrize(
+    ("entry", "gross_rr", "expected_distance"),
+    (
+        (60.0, 2.0, 5.40),
+        (120.0, 2.0, 6.10),
+        (250.0, 2.0, 7.65),
+        (60.0, 1.8, 8.95),
+        (120.0, 1.8, 10.15),
+        (250.0, 1.8, 12.70),
+    ),
+)
+def test_minimum_risk_distance_uses_same_cost_integral_as_final_gate(
+    monkeypatch, entry: float, gross_rr: float, expected_distance: float
+) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    distance = minimum_risk_distance_for_net_rr(
+        entry_price=entry,
+        gross_rr=gross_rr,
+        quantity=65,
+        half_spread=0.1,
+    )
+
+    assert distance is not None
+    assert distance == pytest.approx(expected_distance)
+    viable = _signal(
+        target=entry + distance * gross_rr,
+        stop=entry - distance,
+        bid=entry - 0.1,
+        ask=entry + 0.1,
+    )
+    viable.entry_price = entry
+    result = evaluate_final_net_rr(viable)
+    assert result is not None and result.allowed is True
+
+    one_tick_tighter = _signal(
+        target=entry + (distance - 0.05) * gross_rr,
+        stop=entry - (distance - 0.05),
+        bid=entry - 0.1,
+        ask=entry + 0.1,
+    )
+    one_tick_tighter.entry_price = entry
+    tighter_result = evaluate_final_net_rr(one_tick_tighter)
+    assert tighter_result is not None and tighter_result.allowed is False
+
+
+def test_minimum_risk_distance_fails_when_gross_rr_cannot_clear_net_threshold(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+
+    assert (
+        minimum_risk_distance_for_net_rr(
+            entry_price=100.0,
+            gross_rr=1.5,
+            quantity=65,
+            half_spread=0.0,
+        )
+        is None
+    )
 
 
 def test_final_net_rr_rejects_grossly_valid_but_net_weak_trade(monkeypatch) -> None:

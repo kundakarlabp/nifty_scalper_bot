@@ -147,6 +147,7 @@ from nifty_scalper_bot.strategies.market_regime_engine import (
 )
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
+    apply_cost_aware_risk_floor,
     apply_premium_risk_contract,
     validate_option_premium_geometry,
 )
@@ -19915,6 +19916,64 @@ class StrategyRunner:
                     price = None
             if not price or price <= 0:
                 price = trade_price if trade_price > 0 else None
+
+            if price is not None and price > 0:
+                try:
+                    quote_bid = float(selected_snapshot.get("bid") or 0.0)
+                    quote_ask = float(selected_snapshot.get("ask") or 0.0)
+                except (TypeError, ValueError):
+                    quote_bid = quote_ask = 0.0
+                quote_half_spread = (
+                    (quote_ask - quote_bid) / 2.0
+                    if quote_bid > 0.0 and quote_ask >= quote_bid
+                    else None
+                )
+                signal = apply_cost_aware_risk_floor(
+                    signal,
+                    entry_price=price,
+                    quantity=qty,
+                    half_spread=quote_half_spread,
+                )
+                metadata = dict(signal.metadata or {})
+                if metadata.get("premium_cost_floor_viable") is False:
+                    return _reject_after_dedup(
+                        reason="premium_cost_geometry_unviable",
+                        details={
+                            "entry_price": price,
+                            "quantity": qty,
+                            "gross_rr": metadata.get("premium_target_rr"),
+                            "maximum_risk_distance": price * 0.60,
+                        },
+                    )
+                if metadata.get("premium_cost_floor_applied"):
+                    self._logger.info(
+                        "PREMIUM_COST_FLOOR_APPLIED symbol=%s entry=%.2f quantity=%s original_distance=%.2f viable_distance=%.2f half_spread=%.4f",
+                        trade_symbol or base_symbol,
+                        price,
+                        qty,
+                        float(
+                            metadata.get("premium_cost_floor_original_distance")
+                            or 0.0
+                        ),
+                        float(metadata.get("premium_cost_floor_distance") or 0.0),
+                        float(metadata.get("premium_cost_floor_half_spread") or 0.0),
+                        extra={
+                            "event": "PREMIUM_COST_FLOOR_APPLIED",
+                            "symbol": trade_symbol or base_symbol,
+                            "entry_price": price,
+                            "quantity": qty,
+                            "gross_rr": metadata.get("premium_target_rr"),
+                            "original_distance": metadata.get(
+                                "premium_cost_floor_original_distance"
+                            ),
+                            "viable_distance": metadata.get(
+                                "premium_cost_floor_distance"
+                            ),
+                            "half_spread": metadata.get(
+                                "premium_cost_floor_half_spread"
+                            ),
+                        },
+                    )
 
             # Stop-loss is mandatory for all intraday entries
             stop_loss = signal.stop_loss

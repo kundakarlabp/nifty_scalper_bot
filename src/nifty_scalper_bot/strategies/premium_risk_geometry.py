@@ -11,6 +11,11 @@ import dataclasses
 from contextlib import suppress
 from typing import Any, Mapping
 
+from nifty_scalper_bot.risk.net_rr_gate import (
+    estimate_half_spread,
+    minimum_risk_distance_for_net_rr,
+)
+
 _TICK_SIZE = 0.05
 
 
@@ -204,6 +209,78 @@ def apply_premium_risk_contract(signal: Any, premium: float) -> Any:
     )
 
 
+def apply_cost_aware_risk_floor(
+    signal: Any,
+    *,
+    entry_price: float,
+    quantity: int,
+    half_spread: float | None = None,
+) -> Any:
+    """Apply the minimum viable distance to distance-anchored long options."""
+
+    entry = float(entry_price or 0.0)
+    action = str(getattr(signal, "action", "") or "").upper()
+    symbol = str(getattr(signal, "symbol", "") or "").upper()
+    contract = symbol.split(":", 1)[-1]
+    resolved_contract = bool(
+        contract.endswith(("CE", "PE")) and any(char.isdigit() for char in contract[:-2])
+    )
+    metadata = _metadata(signal)
+    if (
+        entry <= 0.0
+        or int(quantity or 0) <= 0
+        or action != "BUY"
+        or not resolved_contract
+        or str(metadata.get("bracket_anchor_mode") or "distance").lower()
+        != "distance"
+    ):
+        return signal
+
+    stop = _positive_float(getattr(signal, "stop_loss", None))
+    target = _positive_float(getattr(signal, "take_profit", None))
+    if stop is None or target is None or not (0.0 < stop < entry < target):
+        return signal
+    current_distance = entry - stop
+    rr = _positive_float(metadata.get("premium_target_rr"))
+    if rr is None:
+        rr = (target - entry) / current_distance
+    spread = (
+        max(0.0, float(half_spread))
+        if half_spread is not None
+        else estimate_half_spread(signal, entry)
+    )
+    floor = minimum_risk_distance_for_net_rr(
+        entry_price=entry,
+        gross_rr=rr,
+        quantity=int(quantity),
+        half_spread=spread,
+        maximum_distance=entry * 0.60,
+    )
+    updated = dict(metadata)
+    updated["premium_cost_floor_distance"] = floor
+    updated["premium_cost_floor_quantity"] = int(quantity)
+    updated["premium_cost_floor_half_spread"] = spread
+    if floor is None:
+        updated["premium_cost_floor_viable"] = False
+        return dataclasses.replace(signal, metadata=updated)
+    updated["premium_cost_floor_viable"] = True
+    if current_distance + 1e-9 >= floor:
+        updated["premium_cost_floor_applied"] = False
+        return dataclasses.replace(signal, metadata=updated)
+
+    updated["premium_cost_floor_applied"] = True
+    updated["premium_cost_floor_original_distance"] = current_distance
+    updated["premium_stop_distance"] = floor
+    updated["premium_risk_distance"] = floor
+    updated["premium_risk_source"] = "cost_aware_minimum"
+    return dataclasses.replace(
+        signal,
+        stop_loss=max(_TICK_SIZE, entry - floor),
+        take_profit=entry + floor * rr,
+        metadata=updated,
+    )
+
+
 def validate_option_premium_geometry(
     self: Any,
     signal: Any,
@@ -369,6 +446,7 @@ def anchor_option_geometry_to_execution(
 
 __all__ = [
     "anchor_option_geometry_to_execution",
+    "apply_cost_aware_risk_floor",
     "apply_premium_risk_contract",
     "validate_option_premium_geometry",
 ]
