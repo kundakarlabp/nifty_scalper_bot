@@ -471,6 +471,7 @@ def _storage_mdm() -> MarketDataManager:
     mdm._last_tick_wallclock = {}
     mdm._last_quote_ts_ms = {}
     mdm._tick_wallclock = lambda tick: tick.get("timestamp")
+    mdm._ltp_stale_threshold_for_symbol = lambda _symbol: 5.0
     mdm._now_ms = lambda: 1
     mdm._dedupe_symbol_history = lambda *_a, **_k: None
     mdm._refresh_ohlc_from_tick = lambda *_a, **_k: None
@@ -586,6 +587,129 @@ def test_live_tick_writes_raw_tick_history_without_implying_ohlc_ready() -> None
     assert mdm.is_tick_ready("NSE:NIFTY") is True
     assert mdm.is_ohlc_ready("NSE:NIFTY") is False
     assert mdm.is_market_data_ready("NSE:NIFTY") is False
+
+
+def test_fresh_websocket_quote_is_not_overwritten_by_rest_ltp() -> None:
+    mdm = _storage_mdm()
+    now = time.time()
+    ws_tick = {
+        "symbol": "NFO:NIFTY26AUG25000CE",
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "depth": {"buy": [{"price": 99.9}], "sell": [{"price": 100.1}]},
+        "tradable_quote": True,
+        "timestamp": now,
+        "received_at": now,
+        "source": "ws_full",
+    }
+    rest_tick = {
+        "symbol": ws_tick["symbol"],
+        "ltp": 100.2,
+        "timestamp": now + 0.1,
+        "received_at": now + 0.1,
+        "source": "rest_poll",
+    }
+
+    mdm._store_tick(ws_tick["symbol"], ws_tick)
+    mdm._store_tick(ws_tick["symbol"], rest_tick)
+
+    assert mdm._latest_ticks[ws_tick["symbol"]] == ws_tick
+    assert mdm._tick_cache[ws_tick["symbol"]] == ws_tick
+    assert len(mdm._raw_tick_history[ws_tick["symbol"]]) == 1
+
+
+def test_stale_websocket_quote_yields_to_rest_fallback() -> None:
+    mdm = _storage_mdm()
+    now = time.time()
+    symbol = "NFO:NIFTY26AUG25000CE"
+    mdm._store_tick(
+        symbol,
+        {
+            "symbol": symbol,
+            "ltp": 100.0,
+            "bid": 99.9,
+            "ask": 100.1,
+            "depth": {"buy": [{"price": 99.9}], "sell": [{"price": 100.1}]},
+            "tradable_quote": True,
+            "timestamp": now - 120.0,
+            "received_at": now - 120.0,
+            "source": "ws_full",
+        },
+    )
+    rest_tick = {
+        "symbol": symbol,
+        "ltp": 100.2,
+        "timestamp": now,
+        "received_at": now,
+        "source": "rest_poll",
+    }
+
+    mdm._store_tick(symbol, rest_tick)
+
+    assert mdm._latest_ticks[symbol] == rest_tick
+    assert len(mdm._raw_tick_history[symbol]) == 2
+
+
+def test_websocket_quote_reclaims_cache_from_rest_fallback() -> None:
+    mdm = _storage_mdm()
+    now = time.time()
+    symbol = "NFO:NIFTY26AUG25000CE"
+    mdm._store_tick(
+        symbol,
+        {
+            "symbol": symbol,
+            "ltp": 100.0,
+            "timestamp": now,
+            "received_at": now,
+            "source": "rest_poll",
+        },
+    )
+    ws_tick = {
+        "symbol": symbol,
+        "ltp": 100.1,
+        "bid": 100.0,
+        "ask": 100.2,
+        "depth_available": True,
+        "tradable_quote": True,
+        "timestamp": now + 0.1,
+        "received_at": now + 0.1,
+        "source": "ws_full",
+    }
+
+    mdm._store_tick(symbol, ws_tick)
+
+    assert mdm._latest_ticks[symbol] == ws_tick
+    assert len(mdm._raw_tick_history[symbol]) == 2
+
+
+def test_out_of_order_tick_does_not_replace_newer_cache_value() -> None:
+    mdm = _storage_mdm()
+    now = time.time()
+    symbol = "NFO:NIFTY26AUG25000CE"
+    current = {
+        "symbol": symbol,
+        "ltp": 100.1,
+        "timestamp": now,
+        "received_at": now,
+        "source": "ws",
+    }
+    mdm._store_tick(symbol, current)
+
+    accepted = mdm._store_tick(
+        symbol,
+        {
+            "symbol": symbol,
+            "ltp": 99.8,
+            "timestamp": now - 1.0,
+            "received_at": now + 0.1,
+            "source": "ws",
+        },
+    )
+
+    assert accepted is False
+    assert mdm._latest_ticks[symbol] == current
+    assert len(mdm._raw_tick_history[symbol]) == 1
 
 
 def _fetch_history_mdm(historical_data) -> MarketDataManager:

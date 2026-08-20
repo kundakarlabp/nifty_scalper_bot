@@ -9028,8 +9028,8 @@ class MarketDataManager:
             "circuit_open": False,
         }
 
-    def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
-        """Persist normalized *tick* for *symbol* and refresh derived series."""
+    def _store_tick(self, symbol: str, tick: dict[str, Any]) -> bool:
+        """Persist a current authoritative tick; return whether it was accepted."""
 
         tick.setdefault("received_at", time.time())
         wallclock = self._tick_wallclock(tick) or time.time()
@@ -9043,6 +9043,22 @@ class MarketDataManager:
         now_wall = time.time()
         exchange_ts = self._tick_wallclock(cached_tick) or now_wall
         with self._lock:
+            current_tick = self._latest_ticks.get(symbol)
+            if current_tick is not None and not self._should_replace_cached_tick(
+                symbol, current_tick, cached_tick, now_wall=now_wall
+            ):
+                if hasattr(self, "_candle_metrics"):
+                    self._candle_metrics["tick_cache_authority_reject_total"] += 1
+                self._logger.debug(
+                    "TICK_CACHE_WRITE_REJECTED",
+                    extra={
+                        "event": "tick_cache_write_rejected",
+                        "symbol": symbol,
+                        "current_source": current_tick.get("source"),
+                        "incoming_source": cached_tick.get("source"),
+                    },
+                )
+                return False
             if token_int is not None:
                 self._set_symbol_token_mapping(symbol, token_int, source="store_tick")
             self._latest_ticks[symbol] = cached_tick
@@ -9053,7 +9069,7 @@ class MarketDataManager:
                     "Condition met: mdm_history_append_rejected",
                     extra={"event": "mdm_history_append_rejected", "symbol": symbol},
                 )
-                return
+                return True
             self._raw_tick_history[symbol].append(cached_tick)
             self._ticks_received_per_symbol[symbol] += 1
             self._symbols_with_tick.add(symbol)
@@ -9079,6 +9095,76 @@ class MarketDataManager:
                     "symbol": symbol,
                 },
             )
+        return True
+
+    @staticmethod
+    def _tick_event_wallclock(tick: Mapping[str, Any]) -> float | None:
+        """Return the market-event timestamp used to reject out-of-order writes."""
+
+        for key in (
+            "exchange_timestamp",
+            "last_trade_time",
+            "broker_timestamp",
+            "timestamp",
+            "timestamp_ms",
+            "received_at",
+        ):
+            parsed = MarketDataManager._parse_wallclock(tick.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _is_full_websocket_quote(tick: Mapping[str, Any]) -> bool:
+        source = str(tick.get("source") or "").strip().lower()
+        websocket_source = source in {"ws", "ws_full", "full", "websocket"}
+        full_quote = (
+            bool(tick.get("depth_available"))
+            or bool(tick.get("depth"))
+            or str(tick.get("bid_ask_source") or "").lower()
+            in {"market_depth", "ws_full"}
+        )
+        return websocket_source and full_quote
+
+    @staticmethod
+    def _is_rest_tick(tick: Mapping[str, Any]) -> bool:
+        return str(tick.get("source") or "").strip().lower() in {
+            "poll",
+            "rest",
+            "rest_poll",
+            "fallback",
+            "quote",
+            "rest_quote",
+            "rest_ltp",
+            "ltp",
+        }
+
+    def _should_replace_cached_tick(
+        self,
+        symbol: str,
+        current: Mapping[str, Any],
+        incoming: Mapping[str, Any],
+        *,
+        now_wall: float,
+    ) -> bool:
+        """Enforce timestamp and transport authority at the canonical cache writer."""
+
+        current_event = self._tick_event_wallclock(current)
+        incoming_event = self._tick_event_wallclock(incoming)
+        if (
+            current_event is not None
+            and incoming_event is not None
+            and incoming_event < current_event
+        ):
+            return False
+
+        if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):
+            current_received = self._tick_wallclock(current)
+            if current_received is not None:
+                threshold = self._ltp_stale_threshold_for_symbol(symbol)
+                if max(now_wall - current_received, 0.0) <= threshold:
+                    return False
+        return True
 
     async def _publish_tick_message_with_priority(
         self, bus: Any, msg: Message, *, symbol: str, priority: int, bucket: str
@@ -9454,7 +9540,8 @@ class MarketDataManager:
                     )
             except Exception:
                 pass
-        self._store_tick(symbol, tick)
+        if not self._store_tick(symbol, tick):
+            return
         callbacks: list[TickCallback]
         tick_payload = to_json_safe(dict(tick))
         ts_payload = pd.to_datetime(
