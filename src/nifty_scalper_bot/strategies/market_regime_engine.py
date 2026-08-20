@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
@@ -10,10 +11,11 @@ from typing import Mapping
 class MarketRegime(str, Enum):
     """Supported market regime labels."""
 
-    TREND = 'TREND'
-    RANGE = 'RANGE'
-    VOLATILE = 'VOLATILE'
-    LOW_ACTIVITY = 'LOW_ACTIVITY'
+    TREND = "TREND"
+    RANGE = "RANGE"
+    VOLATILE = "VOLATILE"
+    LOW_ACTIVITY = "LOW_ACTIVITY"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass(slots=True)
@@ -21,7 +23,7 @@ class RegimeSnapshot:
     """Container for calculated regime inputs and output."""
 
     regime: MarketRegime
-    adx: float
+    adx: float | None
     atr: float
     atr_average: float
     vwap_slope: float
@@ -34,14 +36,16 @@ class MarketRegimeEngine:
     def classify(self, indicators: Mapping[str, float | int | None]) -> RegimeSnapshot:
         """Classify regime. Args: indicators; Returns: RegimeSnapshot; Raises: none."""
 
-        adx = self._as_float(indicators.get('adx'))
-        atr = self._as_float(indicators.get('atr'))
-        atr_average = max(self._as_float(indicators.get('atr_average')), 1e-6)
-        vwap_slope = self._as_float(indicators.get('vwap_slope'))
-        volume_expansion = self._as_float(indicators.get('volume_expansion'))
+        adx = self._as_optional_float(indicators.get("adx"))
+        atr = self._as_float(indicators.get("atr"))
+        atr_average = max(self._as_float(indicators.get("atr_average")), 1e-6)
+        vwap_slope = self._as_float(indicators.get("vwap_slope"))
+        volume_expansion = self._as_float(indicators.get("volume_expansion"))
 
-        regime = MarketRegime.LOW_ACTIVITY
-        if adx > 25.0 and abs(vwap_slope) > 0.01:
+        regime = MarketRegime.UNKNOWN
+        if adx is None:
+            pass
+        elif adx > 25.0 and abs(vwap_slope) > 0.01:
             regime = MarketRegime.TREND
         elif atr > 1.8 * atr_average:
             regime = MarketRegime.VOLATILE
@@ -66,3 +70,13 @@ class MarketRegimeEngine:
         if isinstance(value, (int, float)):
             return float(value)
         return 0.0
+
+    @staticmethod
+    def _as_optional_float(value: float | int | None) -> float | None:
+        """Return a finite numeric input or None when the indicator is missing."""
+
+        if isinstance(value, (int, float)):
+            resolved = float(value)
+            if math.isfinite(resolved) and 0.0 <= resolved <= 100.0:
+                return resolved
+        return None

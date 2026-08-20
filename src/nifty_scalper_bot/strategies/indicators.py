@@ -635,6 +635,7 @@ class IndicatorEngine:
             with self._lock:
                 indicators: dict[str, float | tuple[float, float, float] | None] = {}
                 indicators["rsi"] = self.get_rsi(symbol)
+                indicators["adx"] = self.get_adx(symbol)
                 indicators["ema"] = self.get_ema(symbol)
                 indicators["sma"] = self.get_sma(symbol)
             macd = self.get_macd(symbol)
@@ -695,6 +696,7 @@ class IndicatorEngine:
                 "volume",
                 "avg_volume",
                 "rsi",
+                "adx",
                 "high",
                 "low",
                 "close",
@@ -901,6 +903,27 @@ class IndicatorEngine:
             lows = history.get_lows(period + 1)
             closes = history.get_closes(period + 1)
             value = self._calculate_atr(highs, lows, closes, period)
+            self._set_cache(symbol, cache_key, value, last_timestamp)
+            return value
+
+    def get_adx(self, symbol: str, period: int = 14) -> float | None:
+        """Calculate Wilder ADX, returning None until two windows are ready."""
+
+        with self._lock:
+            history = self._histories.get(symbol)
+            if history is None or len(history) < 2 * period:
+                return None
+            last_timestamp = history.last_timestamp
+            if last_timestamp is None:
+                return None
+            cache_key = f"adx_{period}"
+            cached = self._get_cached(symbol, cache_key, last_timestamp)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+            highs = history.get_highs()
+            lows = history.get_lows()
+            closes = history.get_closes()
+            value = self._calculate_adx(highs, lows, closes, period)
             self._set_cache(symbol, cache_key, value, last_timestamp)
             return value
 
@@ -1807,6 +1830,69 @@ class IndicatorEngine:
         for value in true_ranges[period:]:
             atr += (float(value) - atr) / float(period)
         return float(atr)
+
+    def _calculate_adx(
+        self,
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        period: int,
+    ) -> float:
+        """Return Wilder's Average Directional Index on a 0-100 scale."""
+
+        if period <= 0 or min(len(highs), len(lows), len(closes)) < 2 * period:
+            raise ValueError("Insufficient data for ADX calculation")
+        high_arr = np.asarray(highs, dtype=float)
+        low_arr = np.asarray(lows, dtype=float)
+        close_arr = np.asarray(closes, dtype=float)
+        true_ranges: list[float] = []
+        positive_dm: list[float] = []
+        negative_dm: list[float] = []
+        for index in range(1, len(close_arr)):
+            upward = high_arr[index] - high_arr[index - 1]
+            downward = low_arr[index - 1] - low_arr[index]
+            positive_dm.append(
+                float(upward) if upward > downward and upward > 0 else 0.0
+            )
+            negative_dm.append(
+                float(downward) if downward > upward and downward > 0 else 0.0
+            )
+            true_ranges.append(
+                float(
+                    max(
+                        high_arr[index] - low_arr[index],
+                        abs(high_arr[index] - close_arr[index - 1]),
+                        abs(low_arr[index] - close_arr[index - 1]),
+                    )
+                )
+            )
+
+        smoothed_tr = sum(true_ranges[:period])
+        smoothed_positive = sum(positive_dm[:period])
+        smoothed_negative = sum(negative_dm[:period])
+
+        def _dx() -> float:
+            if smoothed_tr <= 0.0:
+                return 0.0
+            positive_di = 100.0 * smoothed_positive / smoothed_tr
+            negative_di = 100.0 * smoothed_negative / smoothed_tr
+            total = positive_di + negative_di
+            return (
+                0.0 if total <= 0.0 else 100.0 * abs(positive_di - negative_di) / total
+            )
+
+        dx_values = [_dx()]
+        for index in range(period, len(true_ranges)):
+            smoothed_tr += true_ranges[index] - smoothed_tr / period
+            smoothed_positive += positive_dm[index] - smoothed_positive / period
+            smoothed_negative += negative_dm[index] - smoothed_negative / period
+            dx_values.append(_dx())
+        if len(dx_values) < period:
+            raise ValueError("Insufficient data for ADX calculation")
+        adx = sum(dx_values[:period]) / period
+        for value in dx_values[period:]:
+            adx += (value - adx) / period
+        return float(adx)
 
     def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
         """Internal VWAP calculation.
