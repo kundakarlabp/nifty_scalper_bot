@@ -66,6 +66,37 @@ def test_atr_still_raises_on_insufficient_history() -> None:
         engine._calculate_atr(highs, lows, closes, 14)
 
 
+def test_signal_and_bracket_atr_share_canonical_wilder_value() -> None:
+    engine = IndicatorEngine()
+    ranges = [1.0] * 13 + [20.0] + [1.0] * 14
+    highs, lows, closes = _bars(ranges)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, (high, low, close) in enumerate(zip(highs, lows, closes, strict=True)):
+        engine.update_price(
+            "NIFTY",
+            {"open": close, "high": high, "low": low, "close": close},
+            timestamp=start + timedelta(minutes=index),
+        )
+
+    expected = _wilder_reference(ranges, 14)
+    assert engine.get_atr("NIFTY") == pytest.approx(expected)
+    assert engine.compute_atr("NIFTY") == pytest.approx(expected)
+
+
+def test_compute_atr_does_not_invent_percentage_fallback() -> None:
+    engine = IndicatorEngine()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, close in enumerate((100.0, 101.0)):
+        engine.update_price(
+            "NIFTY",
+            {"open": close, "high": close, "low": close, "close": close},
+            timestamp=start + timedelta(minutes=index),
+        )
+
+    assert engine.get_atr("NIFTY") is None
+    assert engine.compute_atr("NIFTY") is None
+
+
 def test_rsi_wilder_mode_is_opt_in(monkeypatch) -> None:
     engine = IndicatorEngine()
     prices = [100.0 + i for i in range(10)] + [110.0 - i for i in range(15)]
