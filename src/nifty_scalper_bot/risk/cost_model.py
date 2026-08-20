@@ -15,6 +15,7 @@ COST_SEBI_PCT, COST_GST_PCT, COST_STAMP_BUY_PCT, MIN_EDGE_MULTIPLE.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -36,8 +37,34 @@ class CostBreakdown:
     cost_per_unit: float  # total cost expressed in option-premium points per unit
 
 
+@dataclass(slots=True, frozen=True)
+class NetRewardRiskBreakdown:
+    """Cost-adjusted reward/risk across both target and stop outcomes."""
+
+    allowed: bool
+    net_rr: float
+    minimum: float
+    gross_reward: float
+    gross_risk: float
+    net_reward: float
+    net_risk: float
+    target_cost: CostBreakdown
+    stop_cost: CostBreakdown
+
+
 def _rate(name: str, default: float) -> float:
     return parse_float_env(os.getenv(name), default)
+
+
+def minimum_net_reward_risk() -> float:
+    """Return the single finite, non-negative net-R:R threshold."""
+
+    raw = os.getenv("MIN_NET_REWARD_RISK", "1.5")
+    try:
+        parsed = float(raw or 1.5)
+    except (TypeError, ValueError):
+        return 1.5
+    return max(0.0, parsed) if math.isfinite(parsed) else 1.5
 
 
 def estimate_round_trip_cost(
@@ -105,3 +132,48 @@ def passes_cost_edge_gate(
     min_multiple = _rate("MIN_EDGE_MULTIPLE", 2.0)
     edge_multiple = (gross_profit / breakdown.total) if breakdown.total > 0 else 0.0
     return edge_multiple >= min_multiple, edge_multiple, breakdown
+
+
+def evaluate_net_reward_risk(
+    *,
+    entry_price: float,
+    stop_price: float,
+    target_price: float,
+    quantity: int,
+    half_spread: float = 0.0,
+) -> NetRewardRiskBreakdown:
+    """Evaluate long-option target reward against stop risk after both costs."""
+
+    entry = float(entry_price)
+    stop = float(stop_price)
+    target = float(target_price)
+    qty = max(1, int(quantity))
+    target_cost = estimate_round_trip_cost(
+        entry_price=entry,
+        exit_price=target,
+        quantity=qty,
+        half_spread=half_spread,
+    )
+    stop_cost = estimate_round_trip_cost(
+        entry_price=entry,
+        exit_price=stop,
+        quantity=qty,
+        half_spread=half_spread,
+    )
+    gross_reward = max(0.0, target - entry) * qty
+    gross_risk = max(0.0, entry - stop) * qty
+    net_reward = gross_reward - target_cost.total
+    net_risk = gross_risk + stop_cost.total
+    net_rr = net_reward / net_risk if net_reward > 0.0 and net_risk > 0.0 else 0.0
+    minimum = minimum_net_reward_risk()
+    return NetRewardRiskBreakdown(
+        allowed=net_rr >= minimum,
+        net_rr=net_rr,
+        minimum=minimum,
+        gross_reward=gross_reward,
+        gross_risk=gross_risk,
+        net_reward=net_reward,
+        net_risk=net_risk,
+        target_cost=target_cost,
+        stop_cost=stop_cost,
+    )

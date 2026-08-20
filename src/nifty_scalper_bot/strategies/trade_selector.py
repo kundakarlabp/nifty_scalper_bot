@@ -12,8 +12,9 @@ from nifty_scalper_bot.execution.quote_readiness import (
     resolve_real_tick_count,
     resolve_tick_age_ms,
 )
-from nifty_scalper_bot.risk.cost_model import passes_cost_edge_gate
+from nifty_scalper_bot.risk.cost_model import evaluate_net_reward_risk
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
+from nifty_scalper_bot.risk.net_rr_gate import minimum_risk_distance_for_net_rr
 from nifty_scalper_bot.strategies.option_signal import score_option_candidate
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
@@ -110,7 +111,7 @@ class TradeCandidateSelector:
             return 7.0, 15.0, 1
         return 5.0, 10.0, 1
 
-    def select_ranked_candidates(self, *, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> list[TradeCandidate]:
+    def select_ranked_candidates(self, *, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]], gross_rr: float = 2.0) -> list[TradeCandidate]:
         blocked, gate_reason = expiry_theta_block()
         if not blocked:
             blocked, gate_reason = midday_pause_block()
@@ -139,7 +140,7 @@ class TradeCandidateSelector:
             min_ticks = max(min_ticks, parse_int_env(os.getenv('LIVE_CANDIDATE_MIN_REAL_TICKS_60S'), 2))
         allow_ltp_only = (not is_live) and os.getenv('ALLOW_LTP_ONLY_CANDIDATE', 'false').lower() in {'1', 'true', 'yes', 'on'}
         ranked: list[TradeCandidate] = []
-        rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'live_bid_ask_required': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0, 'cost_edge_insufficient': 0}
+        rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'live_bid_ask_required': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0, 'net_rr_insufficient': 0}
         ltp_only_used = 0
         for s in snapshots:
             side = str(s.get('side') or s.get('option_type') or '').upper()
@@ -242,25 +243,32 @@ class TradeCandidateSelector:
                 ltp_only_used += 1
                 reasons.append('ltp_only_fallback')
             atr = self._f(s.get('atr_option')) or max(entry * 0.012, max((ask or 0.0) - (bid or 0.0), 0.0) * 1.5, 1.0)
+            half_spread = (((ask or 0.0) - (bid or 0.0)) / 2.0) if has_bid_ask else entry * 0.003
+            strategy_rr = max(0.0, float(gross_rr or 0.0))
+            economic_floor = minimum_risk_distance_for_net_rr(entry_price=entry, gross_rr=strategy_rr, quantity=parse_int_env(os.getenv('NIFTY_LOT_SIZE'), 65), half_spread=max(0.0, half_spread), maximum_distance=entry * 0.60)
+            if economic_floor is None:
+                rejects['net_rr_insufficient'] += 1
+                self._log_reject("net_rr_insufficient", symbol, throttle_key_parts=("net_rr_insufficient", symbol), entry=entry, gross_rr=strategy_rr, reason="no_viable_distance")
+                continue
             risk = max(atr * 0.8, entry * 0.08, 5.0)
             risk = min(18.0, max(4.0, risk))
+            risk = max(risk, economic_floor)
             sl = entry - risk
             if sl <= 0:
                 continue
-            target = entry + max(1.6 * risk, atr * 1.2)
+            target = entry + strategy_rr * risk
             rr = (target - entry) / (entry - sl)
             if rr < 1.5:
                 rejects['invalid_rr'] += 1
                 self._log_reject("invalid_rr", symbol, throttle_key_parts=("invalid_rr", symbol), entry=entry, stop_loss=sl, target=target, rr=rr, min_rr=1.5)
                 continue
-            half_spread = (((ask or 0.0) - (bid or 0.0)) / 2.0) if has_bid_ask else entry * 0.003
             lot_size = parse_int_env(os.getenv('NIFTY_LOT_SIZE'), 65)
-            cost_ok, edge_multiple, cost = passes_cost_edge_gate(entry_price=entry, target_price=target, quantity=lot_size, half_spread=max(0.0, half_spread))
-            if not cost_ok:
-                rejects['cost_edge_insufficient'] += 1
-                self._log_reject("cost_edge_insufficient", symbol, throttle_key_parts=("cost_edge_insufficient", symbol), entry=entry, target=target, edge_multiple=round(edge_multiple, 2), round_trip_cost=round(cost.total, 2), cost_per_unit=round(cost.cost_per_unit, 3))
+            economics = evaluate_net_reward_risk(entry_price=entry, stop_price=sl, target_price=target, quantity=lot_size, half_spread=max(0.0, half_spread))
+            if not economics.allowed:
+                rejects['net_rr_insufficient'] += 1
+                self._log_reject("net_rr_insufficient", symbol, throttle_key_parts=("net_rr_insufficient", symbol), entry=entry, stop_loss=sl, target=target, net_rr=round(economics.net_rr, 2), min_net_rr=economics.minimum, target_cost=round(economics.target_cost.total, 2), stop_cost=round(economics.stop_cost.total, 2))
                 continue
-            reasons.append(f'cost_edge_{edge_multiple:.1f}x')
+            reasons.append(f'net_rr_{economics.net_rr:.1f}x')
             liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct)
             micro = min(10.0, real_ticks * 3.0)
             score = 6.0 + liquidity * 0.2 + micro * 0.2 - atm_distance * 0.5 - score_penalty

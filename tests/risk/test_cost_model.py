@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from nifty_scalper_bot.risk.cost_model import (
+    evaluate_net_reward_risk,
     estimate_round_trip_cost,
+    minimum_net_reward_risk,
     passes_cost_edge_gate,
 )
 
@@ -55,3 +57,43 @@ def test_env_override_min_edge(monkeypatch) -> None:
         entry_price=120, target_price=124, quantity=65, half_spread=0.3
     )
     assert ok
+
+
+def test_cost_adjusted_rr_counts_both_win_and_stop_outcomes(monkeypatch) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    legacy_ok, legacy_edge, _ = passes_cost_edge_gate(
+        entry_price=100.0,
+        target_price=103.6,
+        quantity=65,
+        half_spread=0.1,
+    )
+
+    result = evaluate_net_reward_risk(
+        entry_price=100.0,
+        stop_price=98.0,
+        target_price=103.6,
+        quantity=65,
+        half_spread=0.1,
+    )
+
+    assert legacy_ok is True and legacy_edge > 2.0
+    assert result.allowed is False
+    assert result.net_rr < 1.5
+    assert result.net_reward < result.gross_reward
+    assert result.net_risk > result.gross_risk
+
+
+def test_cost_adjusted_rr_and_threshold_share_one_owner(monkeypatch) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.25")
+
+    result = evaluate_net_reward_risk(
+        entry_price=100.0,
+        stop_price=90.0,
+        target_price=120.0,
+        quantity=65,
+        half_spread=0.1,
+    )
+
+    assert minimum_net_reward_risk() == 1.25
+    assert result.minimum == 1.25
+    assert result.allowed is (result.net_rr >= 1.25)
