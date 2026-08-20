@@ -6,6 +6,7 @@ import os
 from types import SimpleNamespace
 import subprocess
 import sys
+import threading
 from typing import Any
 
 import nifty_scalper_bot.execution as execution
@@ -16,6 +17,15 @@ from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManage
 
 
 class _Logger:
+    def debug(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def info(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def warning(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
     def critical(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
@@ -286,3 +296,98 @@ def test_filled_exit_update_notifies_runtime_bracket_owner(monkeypatch) -> None:
 
     assert result is filled
     assert provider.calls == [(filled, payload)]
+
+
+def test_real_broker_update_returns_order_and_reconciles_filled_exit() -> None:
+    class _ExitProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__(False)
+            self.calls: list[tuple[Any, dict[str, Any]]] = []
+
+        def reconcile_filled_exit_order(
+            self, order: Any, payload: dict[str, Any]
+        ) -> bool:
+            self.calls.append((order, dict(payload)))
+            return True
+
+    provider = _ExitProvider()
+    manager = _manager(provider)
+    manager._bracket_manager = provider
+    manager._lock = threading.RLock()
+    exit_order = order_manager_core.OrderDetails(
+        order_id="EXIT-1",
+        symbol="NFO:NIFTY2681124500CE",
+        side="SELL",
+        quantity=65,
+        order_type=order_manager_core.OrderType.MARKET,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        intent="EXIT",
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+    manager._orders = {exit_order.order_id: exit_order}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    manager.save_orders = lambda: None
+
+    payload = {
+        "order_id": "EXIT-1",
+        "status": "COMPLETE",
+        "average_price": 95.0,
+        "filled_quantity": 65,
+    }
+    result = RuntimeOrderManager._apply_broker_order_update(manager, payload)
+
+    assert result is exit_order
+    assert exit_order.status is order_manager_core.OrderStatus.FILLED
+    assert provider.calls == [(exit_order, payload)]
+
+
+def test_real_broker_update_supplies_order_to_partial_fill_reconciler(
+    monkeypatch,
+) -> None:
+    reconciled: list[tuple[Any, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda manager, order, payload: reconciled.append((order, dict(payload))),
+    )
+    manager = _manager(None)
+    manager._bracket_manager = None
+    manager._lock = threading.RLock()
+    entry_order = order_manager_core.OrderDetails(
+        order_id="ENTRY-1",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        intent="ENTRY",
+        requested_lots=2,
+        resolved_lot_size=65,
+    )
+    manager._orders = {entry_order.order_id: entry_order}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    manager.save_orders = lambda: None
+
+    payload = {
+        "order_id": "ENTRY-1",
+        "status": "PARTIALLY FILLED",
+        "average_price": 100.0,
+        "filled_quantity": 65,
+        "pending_quantity": 65,
+    }
+    result = RuntimeOrderManager._apply_broker_order_update(manager, payload)
+
+    assert result is entry_order
+    assert entry_order.status is order_manager_core.OrderStatus.PARTIALLY_FILLED
+    assert reconciled == [(entry_order, payload)]

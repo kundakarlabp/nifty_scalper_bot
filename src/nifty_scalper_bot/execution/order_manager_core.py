@@ -7399,14 +7399,17 @@ class OrderManager:
             return
         self.apply_broker_order_update(str(order_id), order_update)
 
-    def _apply_broker_order_update(self, order_update: dict) -> None:
+    def _apply_broker_order_update(
+        self, order_update: dict[str, Any]
+    ) -> OrderDetails | None:
         """Handle broker order updates and follow-up workflows.
 
         Args:
             order_update: Raw broker order update payload.
 
         Returns:
-            None.
+            The updated canonical order, or ``None`` when the payload cannot be
+            associated with an order.
 
         Raises:
             None.
@@ -7417,7 +7420,7 @@ class OrderManager:
         )
         order_id = order_update.get("order_id")
         if not order_id:
-            return
+            return None
 
         # Normalize status to uppercase string
         status_raw = str(order_update.get("status", "")).upper()
@@ -7435,7 +7438,7 @@ class OrderManager:
                 # If a manual/ghost order is already finished (Rejected/Cancelled),
                 # we don't need to track it. Just return silently.
                 if status_raw in ["REJECTED", "CANCELLED", "CANCELED"]:
-                    return
+                    return None
 
                 # B. ADOPT ACTIVE ORDERS (Manual Trades you are holding)
                 try:
@@ -7505,7 +7508,7 @@ class OrderManager:
                 except Exception as e:
                     # Log as DEBUG so it doesn't spam your console if adoption fails
                     self._logger.debug(f"⚠️ Failed to adopt order {order_id}: {e}")
-                    return
+                    return None
 
             # -----------------------------------------------------
             # 🔄 STATE SYNCHRONIZATION
@@ -7629,6 +7632,8 @@ class OrderManager:
                 except Exception:
                     self._logger.exception("Unhandled exception", exc_info=True)
                     raise
+
+            return order
 
     def place_atomic_entry(
         self,

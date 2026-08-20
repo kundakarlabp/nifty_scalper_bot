@@ -421,6 +421,23 @@ class RuntimeOrderManager(_core.OrderManager):
 
     def _apply_broker_order_update(self, order_update: dict[str, Any]) -> Any:
         updated = super()._apply_broker_order_update(order_update)
+        if updated is not None:
+            try:
+                _finalize_partial_entry(self, updated, order_update)
+            except Exception as exc:
+                logger = getattr(self, "_logger", None)
+                log = getattr(logger, "error", None)
+                if callable(log):
+                    log(
+                        "ENTRY_PARTIAL_FILL_RECONCILE_FAILED order_id=%s error=%s",
+                        getattr(updated, "order_id", ""),
+                        exc,
+                        extra={
+                            "event": "ENTRY_PARTIAL_FILL_RECONCILE_FAILED",
+                            "order_id": getattr(updated, "order_id", ""),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
         self._sync_filled_exit_bracket(updated, order_update)
         return updated
 
