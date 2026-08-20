@@ -27,15 +27,24 @@ class TradeSample:
     decay: float = 0.0
 
     @property
-    def pnl(self) -> float:
-        """Return the net profit/loss of the trade in currency units."""
-
+    def gross_pnl(self) -> float:
+        """Return direction-adjusted price P&L before execution costs."""
         sign = 1.0 if self.direction.upper().startswith("L") else -1.0
         return (self.exit_price - self.entry_price) * sign * float(self.quantity)
 
     @property
+    def execution_cost(self) -> float:
+        """Return non-negative spread and slippage costs in currency units."""
+        return max(float(self.spread_cost), 0.0) + max(float(self.slippage), 0.0)
+
+    @property
+    def pnl(self) -> float:
+        """Return execution-cost-inclusive profit/loss in currency units."""
+        return self.gross_pnl - self.execution_cost
+
+    @property
     def return_pct(self) -> float:
-        """Return the percentage return relative to entry notional."""
+        """Return the cost-inclusive return relative to entry notional."""
 
         notional = self.entry_price * float(self.quantity)
         if notional == 0:
