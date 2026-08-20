@@ -899,9 +899,9 @@ class IndicatorEngine:
             cached = self._get_cached(symbol, cache_key, last_timestamp)
             if cached is not None:
                 return cached  # type: ignore[return-value]
-            highs = history.get_highs(period + 1)
-            lows = history.get_lows(period + 1)
-            closes = history.get_closes(period + 1)
+            highs = history.get_highs()
+            lows = history.get_lows()
+            closes = history.get_closes()
             value = self._calculate_atr(highs, lows, closes, period)
             self._set_cache(symbol, cache_key, value, last_timestamp)
             return value
@@ -1962,102 +1962,10 @@ class IndicatorEngine:
             symbol_cache = self._cache.setdefault(symbol, {})
             symbol_cache[key] = (value, timestamp)
 
-    def compute_atr(self, symbol: str, period: int = 14) -> object | None:
-        """
-        Compute ATR for volatility-adaptive trailing.
+    def compute_atr(self, symbol: str, period: int = 14) -> float | None:
+        """Compatibility alias for the canonical Wilder ATR calculation."""
 
-        ✅ PRODUCTION FIX:
-        - Reduced minimum bars from 25 to 10
-        - Added fallback ATR calculation (1.5% of price)
-        """
-        # Lazy import to avoid circular dependency
-
-        hist = self._histories.get(symbol)
-
-        # ✅ FIX: Reduced minimum bars requirement
-        min_bars = max(period + 2, 10)  # Reduced from 25 to 10
-
-        if not hist:
-            return None
-
-        # ✅ FIX: Fallback for insufficient bars
-        if len(hist) < min_bars:
-            # Try to estimate ATR from available data
-            try:
-                closes = hist.get_closes()
-                if closes and len(closes) >= 2:
-                    # Use recent price volatility as proxy
-                    recent_closes = closes[-min(len(closes), 5) :]
-                    if len(recent_closes) >= 2:
-                        price_range = max(recent_closes) - min(recent_closes)
-                        avg_price = sum(recent_closes) / len(recent_closes)
-                        if avg_price > 0:
-                            # Estimate ATR as price range or 1.5% of price
-                            estimated_atr = max(price_range, avg_price * 0.015)
-                            self._logger.debug(
-                                f"ATR estimated for {symbol}: {estimated_atr:.2f} "
-                                f"(bars={len(hist)}, min_needed={min_bars})"
-                            )
-                            return estimated_atr
-            except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
-                raise
-            return None
-
-        try:
-            lookback = period + 20
-            closes = np.array(hist.get_closes(lookback), dtype=float)
-            highs = np.array(hist.get_highs(lookback), dtype=float)
-            lows = np.array(hist.get_lows(lookback), dtype=float)
-
-            if len(closes) < period:
-                # ✅ FIX: Fallback to percentage-based ATR
-                if len(closes) > 0:
-                    avg_price = float(np.mean(closes[-5:]))
-                    return avg_price * 0.015 if avg_price > 0 else None
-                return None
-
-            # Calculate True Range (TR)
-            tr_values = []
-            for i in range(1, len(closes)):
-                tr = max(
-                    highs[i] - lows[i],
-                    abs(highs[i] - closes[i - 1]),
-                    abs(lows[i] - closes[i - 1]),
-                )
-                tr_values.append(max(tr, 0.01))
-
-            if not tr_values:
-                return None
-
-            tr_array = np.array(tr_values)
-
-            # Current ATR
-            current_atr = float(np.mean(tr_array[-period:]))
-
-            # ✅ FIX: Ensure ATR is reasonable (at least 0.5% of price)
-            if current_atr <= 0 and len(closes) > 0:
-                current_atr = float(closes[-1]) * 0.015
-
-            return current_atr
-
-        except Exception as e:
-            self._logger.error(f"ATR Compute Failed for {symbol}: {e}")
-            # ✅ FIX: Return fallback instead of None
-            try:
-                hist = self._histories.get(symbol)
-                if hist:
-                    closes = hist.get_closes(5)
-                    if closes:
-                        return float(closes[-1]) * 0.015
-            except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
-                raise
-            return None
+        return self.get_atr(symbol, period=period)
 
     def calculate_slope(
         self, symbol: str, indicator_name: str = "close", period: int = 5
