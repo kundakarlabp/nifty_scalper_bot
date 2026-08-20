@@ -11887,9 +11887,8 @@ class StrategyRunner:
                 health_fn = lambda: health_attr
                 health_source = "health"
         if not callable(health_fn):
-            details["broker_ready"] = True
-            details["broker_ready_assumed"] = True
-            return True, "broker_health_unknown_assumed_ready", details
+            details["broker_health_block_reason"] = "broker_health_unavailable"
+            return False, "broker_health_unknown", details
 
         try:
             raw_health = health_fn()
@@ -11897,14 +11896,12 @@ class StrategyRunner:
             details["broker_health_source"] = health_source
             details["broker_health_error_type"] = type(exc).__name__
             details["broker_health_error"] = str(exc)
-            details["broker_ready"] = True
-            details["broker_ready_assumed"] = True
-            return True, "broker_health_unknown_assumed_ready", details
+            details["broker_health_block_reason"] = "broker_health_check_failed"
+            return False, "broker_health_unknown", details
         if not isinstance(raw_health, Mapping):
             details["broker_health_source"] = health_source
-            details["broker_ready"] = True
-            details["broker_ready_assumed"] = True
-            return True, "broker_health_unknown_assumed_ready", details
+            details["broker_health_block_reason"] = "broker_health_invalid"
+            return False, "broker_health_unknown", details
 
         health = dict(raw_health)
         details["broker_health_source"] = health_source
@@ -11965,6 +11962,18 @@ class StrategyRunner:
             if key in health and health.get(key) is False:
                 details["broker_health_block_reason"] = reason
                 return False, "broker_health_live_orders_blocked", details
+        affirmative_health = any(
+            health.get(key) is True
+            for key in (
+                "ready",
+                "order_api_ready",
+                "order_api_available",
+                "broker_connected",
+            )
+        )
+        if not affirmative_health:
+            details["broker_health_block_reason"] = "broker_health_not_affirmative"
+            return False, "broker_health_unknown", details
         details["broker_ready"] = True
         details["broker_ready_assumed"] = False
         return True, "broker_health_ready", details
