@@ -1955,6 +1955,7 @@ def test_slow_tick_telemetry_aggregates_symbols_and_preserves_worst_sample(caplo
         "worst_symbol": "NFO:NIFTY26JUN24100CE",
     }
 
+
 @pytest.mark.asyncio
 async def test_slow_subscriber_exception_isolated_and_drain_continues(caplog):
     mdm = _make_mdm()
