@@ -141,6 +141,47 @@ def _next_eod_flatten_time_ist(now_ist: datetime) -> datetime | None:
     return None
 
 
+def _schedule_next_eod_flatten(
+    loop: asyncio.AbstractEventLoop,
+    bracket_manager: Any,
+    *,
+    now_provider: Callable[[], datetime] | None = None,
+) -> asyncio.TimerHandle | None:
+    """Schedule one EOD flatten and re-arm after it runs."""
+    clock = now_provider or (lambda: datetime.now(ZoneInfo("Asia/Kolkata")))
+    now_ist = clock()
+    target_ist = _next_eod_flatten_time_ist(now_ist)
+    if target_ist is None:
+        LOGGER.error("EOD bracket flatten not scheduled: no trading day found")
+        return None
+    normalized_now = (
+        now_ist.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        if now_ist.tzinfo is None
+        else now_ist.astimezone(ZoneInfo("Asia/Kolkata"))
+    )
+    delay = max(0.0, (target_ist - normalized_now).total_seconds())
+
+    def _flatten_and_rearm() -> None:
+        try:
+            bracket_manager.eod_flatten_all()
+        except Exception as exc:  # noqa: BLE001 - next-day protection must survive
+            LOGGER.exception("EOD bracket flatten failed: %s", exc)
+        finally:
+            _schedule_next_eod_flatten(
+                loop,
+                bracket_manager,
+                now_provider=clock,
+            )
+
+    handle = loop.call_later(delay, _flatten_and_rearm)
+    LOGGER.info(
+        "EOD bracket flatten scheduled for %s IST (in %.1fs)",
+        target_ist.isoformat(),
+        delay,
+    )
+    return handle
+
+
 BOT_CONTEXT_RUNTIME_FIELD_DEFAULTS: dict[str, Any] = {
     "canonical_history_ensurer_injection_failed": False,
     "hydration_status_by_symbol": dict,
@@ -14931,18 +14972,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     if ctx.bracket_manager:
         try:
-            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-            eod_target_ist = _next_eod_flatten_time_ist(now_ist)
-            if eod_target_ist is None:
-                LOGGER.info("EOD bracket flatten not scheduled: no trading day found")
-            else:
-                seconds_to_15h24 = max(0.0, (eod_target_ist - now_ist).total_seconds())
-                loop.call_later(seconds_to_15h24, ctx.bracket_manager.eod_flatten_all)
-                LOGGER.info(
-                    "EOD bracket flatten scheduled for %s IST (in %.1fs)",
-                    eod_target_ist.isoformat(),
-                    seconds_to_15h24,
-                )
+            _schedule_next_eod_flatten(loop, ctx.bracket_manager)
         except Exception as e:
             LOGGER.error("Failed to schedule EOD flatten: %s", e)
 
