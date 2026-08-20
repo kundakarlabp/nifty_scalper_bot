@@ -221,12 +221,16 @@ def apply_cost_aware_risk_floor(
     entry = float(entry_price or 0.0)
     action = str(getattr(signal, "action", "") or "").upper()
     symbol = str(getattr(signal, "symbol", "") or "").upper()
+    contract = symbol.split(":", 1)[-1]
+    resolved_contract = bool(
+        contract.endswith(("CE", "PE")) and any(char.isdigit() for char in contract[:-2])
+    )
     metadata = _metadata(signal)
     if (
         entry <= 0.0
         or int(quantity or 0) <= 0
         or action != "BUY"
-        or not symbol.endswith(("CE", "PE"))
+        or not resolved_contract
         or str(metadata.get("bracket_anchor_mode") or "distance").lower()
         != "distance"
     ):
