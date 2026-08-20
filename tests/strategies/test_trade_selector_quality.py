@@ -1,3 +1,4 @@
+from nifty_scalper_bot.risk.cost_model import evaluate_net_reward_risk
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 
 
@@ -20,6 +21,19 @@ def test_wide_spread_rejected():
 def test_valid_selected_and_rr():
     r = TradeCandidateSelector().select_ranked_candidates(direction_bias='CE', atm_strike=22000, snapshots=[base()])
     assert r and r[0].rr and r[0].rr >= 1.5
+
+    candidate = r[0]
+    assert candidate.entry_price is not None
+    assert candidate.stop_loss is not None
+    assert candidate.target is not None
+    economics = evaluate_net_reward_risk(
+        entry_price=candidate.entry_price,
+        stop_price=candidate.stop_loss,
+        target_price=candidate.target,
+        quantity=65,
+        half_spread=1.0,
+    )
+    assert economics.allowed is True
 
 
 def test_far_otm_rejected():

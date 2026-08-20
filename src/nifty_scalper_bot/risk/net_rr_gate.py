@@ -8,7 +8,11 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.risk.cost_model import (
+    estimate_round_trip_cost,
+    evaluate_net_reward_risk,
+    minimum_net_reward_risk,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -85,15 +89,9 @@ def estimate_half_spread(signal: Any, entry: float) -> float:
 
 
 def _minimum_net_rr() -> float:
-    """Return a finite non-negative threshold; malformed config never bypasses."""
-    raw = os.getenv("MIN_NET_REWARD_RISK", "1.5")
-    try:
-        parsed = float(raw or 1.5)
-    except (TypeError, ValueError):
-        return 1.5
-    if not math.isfinite(parsed):
-        return 1.5
-    return max(0.0, parsed)
+    """Compatibility wrapper for the canonical cost-model threshold owner."""
+
+    return minimum_net_reward_risk()
 
 
 def _max_target_uplift_r() -> float:
@@ -137,34 +135,23 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
         return None
 
     half_spread = estimate_half_spread(signal, entry)
-    target_cost = estimate_round_trip_cost(
+    economics = evaluate_net_reward_risk(
         entry_price=entry,
-        exit_price=target,
+        stop_price=stop,
+        target_price=target,
         quantity=quantity,
         half_spread=half_spread,
-    ).total
-    stop_cost = estimate_round_trip_cost(
-        entry_price=entry,
-        exit_price=stop,
-        quantity=quantity,
-        half_spread=half_spread,
-    ).total
-    gross_reward = (target - entry) * quantity
-    gross_risk = (entry - stop) * quantity
-    net_reward = gross_reward - target_cost
-    net_risk = gross_risk + stop_cost
-    net_rr = net_reward / net_risk if net_reward > 0.0 and net_risk > 0.0 else 0.0
-    minimum = _minimum_net_rr()
+    )
     return NetRRResult(
-        allowed=net_rr >= minimum,
-        net_rr=net_rr,
-        minimum=minimum,
-        gross_reward=gross_reward,
-        gross_risk=gross_risk,
-        net_reward=net_reward,
-        net_risk=net_risk,
-        target_cost=target_cost,
-        stop_cost=stop_cost,
+        allowed=economics.allowed,
+        net_rr=economics.net_rr,
+        minimum=economics.minimum,
+        gross_reward=economics.gross_reward,
+        gross_risk=economics.gross_risk,
+        net_reward=economics.net_reward,
+        net_risk=economics.net_risk,
+        target_cost=economics.target_cost.total,
+        stop_cost=economics.stop_cost.total,
         half_spread=half_spread,
     )
 

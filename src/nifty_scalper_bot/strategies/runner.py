@@ -18843,6 +18843,9 @@ class StrategyRunner:
                             direction_bias=option_side,
                             atm_strike=atm_strike,
                             snapshots=valid_snapshots,
+                            gross_rr=float(
+                                metadata.get("premium_target_rr") or 2.0
+                            ),
                         )
                     )
                     candidate, candidate_capacity_decisions = (
