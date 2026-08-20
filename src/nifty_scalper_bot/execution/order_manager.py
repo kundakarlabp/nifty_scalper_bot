@@ -21,10 +21,13 @@ for _name in dir(_core):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_core, _name)
 
-from nifty_scalper_bot.execution import runtime_order_manager as _runtime  # noqa: E402
+from nifty_scalper_bot.execution import (  # noqa: E402,I001
+    runtime_order_manager as _runtime,
+)
 
-
-_original_enrich_trade_plan_exit_provenance = _runtime._enrich_trade_plan_exit_provenance
+_original_enrich_trade_plan_exit_provenance = (
+    _runtime._enrich_trade_plan_exit_provenance
+)
 
 
 def _enrich_trade_plan_exit_provenance(plan):
@@ -64,11 +67,29 @@ def _quote_age_ms(manager, quote):
     return parsed
 
 
+def _quote_execution_rank(manager, quote):
+    """Rank cached quote evidence without treating LTP-only data as executable."""
+    if not isinstance(quote, Mapping):
+        return 0
+    try:
+        diagnostics = manager._extract_quote_diagnostics(quote)
+        bid = float(diagnostics.get("bid") or 0.0)
+        ask = float(diagnostics.get("ask") or 0.0)
+        bid_qty = int(diagnostics.get("bid_qty") or 0)
+        ask_qty = int(diagnostics.get("ask_qty") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+    if bid <= 0.0 or ask < bid:
+        return 0
+    return 2 if bid_qty > 0 and ask_qty > 0 else 1
+
+
 def _get_latest_quote_freshest_cached(self, symbol):
-    """Prefer the freshest already-cached quote without weakening stale guards."""
+    """Prefer executable cached evidence, then freshness, preserving stale guards."""
     primary = _original_get_latest_quote_safe(self, symbol)
     best = primary if isinstance(primary, Mapping) else None
     best_age = _quote_age_ms(self, best)
+    best_rank = _quote_execution_rank(self, best)
     normalized_symbol = _core.normalize_symbol(symbol)
     seen_providers: set[int] = set()
 
@@ -108,9 +129,18 @@ def _get_latest_quote_freshest_cached(self, symbol):
         candidate_age = _quote_age_ms(self, candidate)
         if candidate_age is None:
             continue
-        if best is None or best_age is None or candidate_age < best_age:
+        candidate_rank = _quote_execution_rank(self, candidate)
+        if (
+            best is None
+            or candidate_rank > best_rank
+            or (
+                candidate_rank == best_rank
+                and (best_age is None or candidate_age < best_age)
+            )
+        ):
             best = candidate
             best_age = candidate_age
+            best_rank = candidate_rank
 
     return dict(best) if isinstance(best, Mapping) else None
 
