@@ -26,7 +26,7 @@ class TradingSwitch:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._enabled = True
+        self._enabled = False
         self._resume_at = 0.0
 
     def pause(self) -> None:

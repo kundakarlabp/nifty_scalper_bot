@@ -7,7 +7,14 @@ import types
 import pytest
 
 from nifty_scalper_bot.core import trading_switch as switch_module
-from nifty_scalper_bot.core.trading_switch import trading_switch
+from nifty_scalper_bot.core.trading_switch import TradingSwitch, trading_switch
+
+
+def test_new_trading_switch_starts_disabled() -> None:
+    switch = TradingSwitch()
+
+    assert switch.can_trade() is False
+    assert switch.snapshot().enabled is False
 
 
 def test_trading_switch_pause_blocks_until_resume() -> None:
