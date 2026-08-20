@@ -12,6 +12,7 @@ from nifty_scalper_bot.backtest.replay import (
     ReplayHarness,
 )
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
+from nifty_scalper_bot.risk.cost_model import estimate_order_cost
 
 
 class _DummyDataHub:
@@ -183,6 +184,11 @@ def test_replay_market_order_consumes_historical_depth_across_ticks() -> None:
     assert order["status"] == "complete"
     assert order["filled_quantity"] == 10
     assert order["remaining_quantity"] == 0
+    assert order["fees"] > 0.0
+    assert order["fees"] == pytest.approx(
+        estimate_order_cost(turnover=order["filled_turnover"], side="BUY")
+    )
+    assert result.execution_costs == pytest.approx(order["fees"])
     assert order["first_fill_timestamp"] < order["last_fill_timestamp"]
 
 

@@ -8,9 +8,10 @@ import statistics
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, cast
+from typing import Any, Dict, Literal, Mapping, cast
 
 from nifty_scalper_bot.data.data_hub import DataHub
+from nifty_scalper_bot.execution.execution_simulator import ExecutionSimulator
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -47,7 +48,13 @@ class _QuoteMetrics:
 class PaperFillEngine:
     """Simulate broker order placement using cached market data."""
 
-    def __init__(self, data_hub: DataHub, resolver: Any) -> None:
+    def __init__(
+        self,
+        data_hub: DataHub,
+        resolver: Any,
+        *,
+        execution_simulator: ExecutionSimulator | None = None,
+    ) -> None:
         self.hub = data_hub
         self.resolver = resolver
         self.orders: Dict[str, dict[str, Any]] = {}
@@ -62,6 +69,7 @@ class PaperFillEngine:
         self._calibrated_slippage_bps: float | None = None
         self._calibrated_fill_latency_s: float | None = None
         self._slippage_model = SlippageModel()
+        self._execution_simulator = execution_simulator or ExecutionSimulator()
 
     # ------------------------------------------------------------------
     def set_clock(self, clock: Callable[[], float]) -> None:
@@ -168,6 +176,7 @@ class PaperFillEngine:
             "timestamp": self._clock(),
             "parent_order_id": parent_id,
             "remaining_quantity": quantity,
+            "fees": 0.0,
         }
 
         if parent_id:
@@ -342,26 +351,59 @@ class PaperFillEngine:
             order["status"] = "open"
             order["remaining_quantity"] = remaining
             return
-        base_price = metrics.mid or metrics.ltp
-        if base_price <= 0:
-            base_price = metrics.bid if side == "BUY" else metrics.ask
         if self._calibrated_slippage_bps is not None:
+            base_price = metrics.mid or metrics.ltp
+            if base_price <= 0:
+                base_price = metrics.bid if side == "BUY" else metrics.ask
             total_adjustment = max(
                 metrics.spread / 2.0,
                 self._calibrated_slippage_bps / 10000.0 * base_price,
             )
+            fill_price = (
+                base_price + total_adjustment
+                if side == "BUY"
+                else max(0.05, base_price - total_adjustment)
+            )
         else:
-            spread_component = metrics.spread * (1.0 + abs(metrics.momentum))
-            slip_component = self._slip_bps / 10000.0 * base_price
-            model_adjustment = self._slippage_model.estimate(
-                symbol=str(order.get("symbol") or ""),
-                side=side,
-                quantity=fill_quantity,
-                base_price=base_price,
+            base_price = metrics.mid or metrics.ltp
+            market_spread = max(metrics.spread, self._execution_simulator.tick_size)
+            market_bid = (
+                metrics.bid if metrics.bid > 0 else base_price - market_spread / 2.0
             )
-            total_adjustment = max(spread_component, slip_component) + abs(
-                model_adjustment
+            market_ask = (
+                metrics.ask if metrics.ask > 0 else base_price + market_spread / 2.0
             )
+            minimum_impact = abs(
+                self._slippage_model.estimate(
+                    symbol=str(order.get("symbol") or ""),
+                    side=side,
+                    quantity=fill_quantity,
+                    base_price=base_price,
+                )
+            )
+            result = self._execution_simulator.simulate_market_order(
+                side=cast(Literal["BUY", "SELL"], side),
+                qty=remaining,
+                bid=market_bid,
+                ask=market_ask,
+                size_at_best=fill_quantity,
+                ts_ns=int(self._clock() * 1_000_000_000),
+                minimum_slippage_bps=self._slip_bps,
+                minimum_impact=minimum_impact,
+            )
+            if not result.fills:
+                order["status"] = "open"
+                order["remaining_quantity"] = remaining
+                return
+            fill_quantity = sum(fill.qty for fill in result.fills)
+            fill_price = result.average_price
+        prior_turnover = _safe_float(order.get("filled_turnover"), 0.0)
+        filled_turnover = prior_turnover + fill_price * fill_quantity
+        total_fees = self._execution_simulator.commission_model.calculate(
+            filled_turnover,
+            side=cast(Literal["BUY", "SELL"], side),
+        )
+        fill_fees = max(total_fees - _safe_float(order.get("fees"), 0.0), 0.0)
         LOGGER.debug(
             "paper_fill_market_slippage",
             extra={
@@ -369,14 +411,10 @@ class PaperFillEngine:
                 "symbol": order.get("symbol"),
                 "side": side,
                 "quantity": quantity,
-                "base_price": base_price,
-                "adjustment": total_adjustment,
+                "fill_price": fill_price,
+                "fees": fill_fees,
             },
         )
-        if side == "BUY":
-            fill_price = base_price + total_adjustment
-        else:
-            fill_price = max(0.05, base_price - total_adjustment)
         new_total = previous_fill + fill_quantity
         previous_average = _safe_float(order.get("average_price"), fill_price)
         order["average_price"] = (
@@ -384,6 +422,8 @@ class PaperFillEngine:
         ) / new_total
         order["filled_quantity"] = new_total
         order["remaining_quantity"] = max(quantity - new_total, 0)
+        order["fees"] = _safe_float(order.get("fees"), 0.0) + fill_fees
+        order["filled_turnover"] = filled_turnover
         order["status"] = "complete" if new_total >= quantity else "open"
         latency = self._calibrated_fill_latency_s or 0.0
         order.setdefault("first_fill_timestamp", self._clock() + latency)
