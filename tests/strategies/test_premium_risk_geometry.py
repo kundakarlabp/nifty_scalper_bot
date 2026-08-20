@@ -6,8 +6,10 @@ import sys
 
 import pytest
 
+from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
+    apply_cost_aware_risk_floor,
     apply_premium_risk_contract,
     validate_option_premium_geometry,
 )
@@ -39,6 +41,58 @@ def test_absolute_premium_distance_builds_buy_geometry() -> None:
     assert result.stop_loss == 92.0
     assert result.take_profit == 116.0
     assert result.metadata["premium_risk_source"] == "premium_stop_distance"
+
+
+def test_cost_floor_replaces_unviable_percentage_geometry(monkeypatch) -> None:
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    signal = apply_premium_risk_contract(
+        _signal(
+            premium_stop_distance=1.2,
+            premium_target_rr=1.8,
+            invalidation_level_domain="option_premium",
+            bracket_anchor_mode="distance",
+            bid=59.9,
+            ask=60.1,
+        ),
+        60.0,
+    )
+
+    result = apply_cost_aware_risk_floor(
+        signal,
+        entry_price=60.0,
+        quantity=65,
+        half_spread=0.1,
+    )
+
+    assert 8.4 < 60.0 - result.stop_loss < 9.6
+    assert (result.take_profit - 60.0) / (60.0 - result.stop_loss) == pytest.approx(
+        1.8
+    )
+    assert result.metadata["premium_cost_floor_applied"] is True
+    assert result.metadata["premium_cost_floor_original_distance"] == pytest.approx(
+        1.2
+    )
+    net_rr = evaluate_final_net_rr(result)
+    assert net_rr is not None and net_rr.allowed is True
+
+
+def test_cost_floor_does_not_move_absolute_technical_geometry() -> None:
+    signal = _signal(
+        stop_loss=55.0,
+        take_profit=70.0,
+        bracket_anchor_mode="absolute_level",
+        premium_target_rr=2.0,
+        invalidation_level_domain="option_premium",
+    )
+
+    result = apply_cost_aware_risk_floor(
+        signal,
+        entry_price=60.0,
+        quantity=65,
+        half_spread=0.0,
+    )
+
+    assert result is signal
 
 
 def test_absolute_distance_is_not_replaced_by_legacy_percentage() -> None:
