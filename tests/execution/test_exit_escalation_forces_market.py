@@ -46,6 +46,7 @@ def _bracket(mgr: BracketManager):
         price=157.0,
         sl=150.0,
         tp=170.0,
+        product="NRML",
     )
     return next(iter(mgr._brackets.values()))
 
@@ -69,6 +70,11 @@ async def test_escalation_cancels_stuck_order_and_fires_market_exit():
     assert mkt["order_type"] == "MARKET"
     assert mkt["side"] == "SELL"
     assert mkt["quantity"] == 65
+    assert mkt["product"] == "NRML"
+    assert mkt["intent"] == "EXIT"
+    assert mkt["linked_entry_order_id"] == "entry-1"
+    assert mkt["trade_lifecycle_id"] == "entry-1"
+    assert mkt["bracket_id"] == "entry-1"
     # new exit order id recorded
     assert b.exit_order_id == "mkt-exit-1"
 

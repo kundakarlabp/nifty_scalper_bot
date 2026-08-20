@@ -246,6 +246,7 @@ class OrderDetails:
     resolved_lot_size: int = 0
     entry_lifecycle_state: dict[str, Any] | None = None
     trade_provenance: dict[str, Any] = field(default_factory=dict)
+    product: str = "MIS"
 
 
 @dataclass(slots=True)
@@ -3757,6 +3758,7 @@ class OrderManager:
                         stop_loss=stop_loss,
                         take_profit=take_profit,
                         tag=tag,
+                        product=product,
                         average_price=0.0,
                         intent=cast(OrderIntent, normalized_intent),
                         intended_position_side=intended_position_side,
@@ -3835,6 +3837,7 @@ class OrderManager:
                             tp=float(take_profit) if take_profit else 0.0,
                             tag=tag or "auto",
                             intent=normalized_intent,
+                            product=product,
                             activate_immediately=False,
                             trade_provenance=trade_provenance,
                         )
@@ -5967,6 +5970,7 @@ class OrderManager:
                 sl=stop_loss,
                 tp=take_profit,
                 tag=tag or "virtual_bracket",
+                product=product or "MIS",
                 tp1_price=tp1_price,
                 tp1_qty=tp1_qty,
                 trailing_atr_mult=trailing_atr_mult,
@@ -6300,6 +6304,7 @@ class OrderManager:
                     tp=tp_price,
                     tag=order.tag or source,
                     intent=str(getattr(order, "intent", "ENTRY") or "ENTRY"),
+                    product=str(getattr(order, "product", "MIS") or "MIS"),
                     trade_provenance=order.trade_provenance,
                     **exit_fields,
                 )
@@ -7349,6 +7354,7 @@ class OrderManager:
                         sl=sl_price,
                         tp=tp_price,
                         tag=order.tag,
+                        product=order.product,
                     )
                     self._logger.info(
                         f"✅ Handed off {order.symbol} to Virtual Sniper (SL: {sl_price}, TP: {tp_price})",
@@ -7580,6 +7586,7 @@ class OrderManager:
                         status=self._parse_status(status_raw),
                         timestamp=datetime.now(timezone.utc),
                         tag="adopted_manual_trade",
+                        product=str(order_update.get("product") or "MIS"),
                         intent="UNKNOWN",
                     )
 

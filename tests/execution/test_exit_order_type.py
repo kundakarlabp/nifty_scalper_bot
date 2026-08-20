@@ -23,6 +23,7 @@ def _manager_with_bracket(monkeypatch, *, reason_mode: str | None = None) -> tup
         sl_trigger_price=95.0,
         tp_trigger_price=110.0,
         remaining_quantity=10,
+        product="NRML",
     )
     bracket.last_ltp = 98.0
     manager._brackets[bracket.entry_order_id] = bracket
@@ -42,6 +43,11 @@ def test_exit_order_type_uses_market_for_sl(monkeypatch) -> None:
 
     kwargs = order_manager.place_order.call_args.kwargs
     assert kwargs["order_type"] == "MARKET"
+    assert kwargs["product"] == "NRML"
+    assert kwargs["intent"] == "EXIT"
+    assert kwargs["linked_entry_order_id"] == "entry-1"
+    assert kwargs["trade_lifecycle_id"] == "entry-1"
+    assert kwargs["bracket_id"] == "entry-1"
     assert "price" not in kwargs
 
 

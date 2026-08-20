@@ -351,6 +351,7 @@ class BracketState:
     last_processed_tick_id: str | None = None
     last_trail_price: float | None = None
     trail_revision: int = 0
+    product: str = "MIS"
 
     @property
     def bracket_id(self) -> str:
@@ -390,6 +391,7 @@ class BracketState:
 
     def __post_init__(self):
         self.side = _normalize_bracket_side(self.side)
+        self.product = str(self.product or "MIS").strip().upper()
         if self.requested_entry_quantity <= 0:
             self.requested_entry_quantity = self.quantity
         # Auto-initialize state fields if not set
@@ -428,6 +430,7 @@ class BracketState:
             "lowest_ltp": self.lowest_ltp,
             "last_ltp": self.last_ltp,
             "tag": self.tag,
+            "product": self.product,
             "trade_provenance": dict(self.trade_provenance),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -1219,6 +1222,7 @@ class BracketManager:
         trailing_atr_mult: float | None = None,
         activate_immediately: bool = False,
         intent: str | None = None,
+        product: str = "MIS",
         resolved_lot_size: int | None = None,
         trade_provenance: Mapping[str, Any] | None = None,
     ) -> None:
@@ -1237,6 +1241,7 @@ class BracketManager:
             tp1_qty: Optional first profit target quantity.
             trailing_atr_mult: Optional ATR-based trailing multiplier.
             activate_immediately: Whether the bracket is active on registration.
+            product: Broker product inherited from the entry order.
             resolved_lot_size: Authoritative instrument lot size for TP allocation.
 
         Returns:
@@ -1284,6 +1289,7 @@ class BracketManager:
                 existing.remaining_quantity = abs(qty)
                 existing.exit_state = BracketExitLifecycle.OPEN_PENDING_FILL.value
                 existing.exit_pending = False
+                existing.product = str(product or "MIS").strip().upper()
                 existing.trade_provenance.update(dict(trade_provenance or {}))
                 self.save_state()  # Persist updates
                 self._sync_active_bracket_symbols_to_mdm()
@@ -1353,6 +1359,7 @@ class BracketManager:
                 ),
                 entry_fill_price=price if activate_immediately else None,
                 tag=tag,
+                product=product,
                 trade_provenance=dict(trade_provenance or {}),
                 entry_order_intent=normalized_intent or "ENTRY",
                 trade_lifecycle_id=order_id,
@@ -2826,7 +2833,13 @@ class BracketManager:
                     order_type="MARKET",
                     tag=f"EXIT_MKT_{bracket.bracket_id[:8]}",
                     check_risk=False,
-                    product="MIS",
+                    product=bracket.product,
+                    intent="EXIT",
+                    linked_entry_order_id=bracket.entry_order_id,
+                    trade_lifecycle_id=(
+                        bracket.trade_lifecycle_id or bracket.entry_order_id
+                    ),
+                    bracket_id=bracket.bracket_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.critical(
@@ -3797,9 +3810,17 @@ class BracketManager:
                 "order_type": order_type,
                 "tag": correlation_tag or f"exit_{reason[:3]}_{bracket_id[:8]}",
                 "check_risk": False,
-                "product": "MIS",
+                "product": bracket.product if bracket is not None else "MIS",
                 "intent": "EXIT",
                 "bracket_id": bracket_id,
+                "linked_entry_order_id": (
+                    bracket.entry_order_id if bracket is not None else None
+                ),
+                "trade_lifecycle_id": (
+                    bracket.trade_lifecycle_id or bracket.entry_order_id
+                    if bracket is not None
+                    else None
+                ),
             }
             if price is not None:
                 kwargs["price"] = price
@@ -4309,7 +4330,13 @@ class BracketManager:
                 order_type="MARKET",
                 tag=f"mkt_exit_{reason[:3]}",
                 check_risk=False,
-                product="MIS",
+                product=bracket.product,
+                intent="EXIT",
+                linked_entry_order_id=bracket.entry_order_id,
+                trade_lifecycle_id=(
+                    bracket.trade_lifecycle_id or bracket.entry_order_id
+                ),
+                bracket_id=bracket.bracket_id,
             )
             if not order_id:
                 LOGGER.critical(
@@ -4849,6 +4876,7 @@ class BracketManager:
                 payload.get("previous_ltp", payload.get("last_ltp", entry_price)),
             ),
             tag=payload.get("tag"),
+            product=str(payload.get("product") or "MIS"),
             trade_provenance=dict(payload.get("trade_provenance") or {}),
             created_at=finite_float(
                 "created at", payload.get("created_at", time.time())
