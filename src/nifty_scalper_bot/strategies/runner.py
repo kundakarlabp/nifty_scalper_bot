@@ -16017,7 +16017,7 @@ class StrategyRunner:
                                 resolved_bias == "PE" and upper_sym.endswith("CE")
                             ) or (resolved_bias == "CE" and upper_sym.endswith("PE"))
                             if opposite:
-                                self._logger.warning(
+                                self._logger.debug(
                                     "TRIGGER_EVAL_SKIPPED symbol=%s reason=opposite_side_trigger_suppressed underlying_bias=%s confidence=%.2f",
                                     symbol,
                                     resolved_bias,
