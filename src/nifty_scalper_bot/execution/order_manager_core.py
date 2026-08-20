@@ -3845,14 +3845,56 @@ class OrderManager:
                             normalized_symbol,
                         )
 
-                    # Keep the short entry confirmation used to activate protection.
-                    # System exits are confirmed by the order monitor/reconciliation;
-                    # polling here would block the synchronous protection callback.
-                    fill_confirmed = (
-                        False
-                        if is_system_exit
-                        else self._confirm_fill_fast(order_id, timeout_ms=300)
+                    # A protected entry has one bounded fill owner.  The bracket
+                    # must exist before polling so an observed partial can be
+                    # protected before its remainder is cancelled.  Exit orders
+                    # stay asynchronous: blocking their protection callback can
+                    # deadlock the exit state machine.
+                    protected_entry = (
+                        normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"}
+                        and self.is_live_mode()
+                        and self._bracket_manager is not None
+                        and bool(stop_loss or take_profit)
+                        and not _caller_manages_bracket
                     )
+                    if protected_entry:
+                        awaited_entry = self._await_entry_fill(
+                            details,
+                            timeout=self.BRACKET_ENTRY_TIMEOUT_SEC,
+                        )
+                        fill_confirmed = bool(
+                            awaited_entry is not None
+                            and int(awaited_entry.filled_quantity or 0) > 0
+                        )
+                        if not fill_confirmed:
+                            current = self._orders.get(order_id, details)
+                            cancel_confirmed = current.status in {
+                                OrderStatus.CANCELLED,
+                                OrderStatus.REJECTED,
+                                OrderStatus.EXPIRED,
+                            }
+                            reason = (
+                                "entry_fill_timeout_cancelled"
+                                if cancel_confirmed
+                                else "entry_fill_cancel_unconfirmed"
+                            )
+                            if not cancel_confirmed and details.client_order_id:
+                                self._mark_order_uncertain(details.client_order_id)
+                            _log_order_decision(
+                                allowed=False,
+                                block_reason=reason,
+                                order_id=order_id,
+                                broker_attempted=True,
+                            )
+                            if signal_id:
+                                self._clear_pending_signal(signal_id)
+                            return None
+                    else:
+                        fill_confirmed = (
+                            False
+                            if is_system_exit
+                            else self._confirm_fill_fast(order_id, timeout_ms=300)
+                        )
                     if fill_confirmed and self._bracket_manager:
                         bracket = self._bracket_manager.get_bracket(order_id)
                         if bracket:
@@ -6016,6 +6058,16 @@ class OrderManager:
             )
             return updated
 
+        if updated.status in self.FINAL_STATUSES:
+            if updated.filled_quantity > 0:
+                return updated
+            if (
+                self._bracket_manager is not None
+                and self._bracket_manager.get_bracket(entry.order_id) is not None
+            ):
+                self._bracket_manager.unregister_bracket(entry.order_id)
+            return None
+
         if updated.filled_quantity > 0:
             self._logger.info(
                 "Condition met: entry partially filled; cancelling remainder",
@@ -6035,7 +6087,10 @@ class OrderManager:
             )
 
         try:
-            self.cancel_order(entry.order_id)
+            cancel = getattr(self._broker, "cancel_order", None)
+            if cancel is None:
+                raise NotImplementedError("Broker does not support order cancellation")
+            self._call_broker(cancel, entry.order_id)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in _await_entry_fill cancel: %s",
@@ -6057,6 +6112,13 @@ class OrderManager:
                 },
             )
             return refreshed
+        if (
+            refreshed.status
+            in {OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED}
+            and self._bracket_manager is not None
+            and self._bracket_manager.get_bracket(entry.order_id) is not None
+        ):
+            self._bracket_manager.unregister_bracket(entry.order_id)
         return None
 
     def set_notifier(self, notifier: TelegramEnhancedNotifier | None) -> None:

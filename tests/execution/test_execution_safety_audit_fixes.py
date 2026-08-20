@@ -1275,6 +1275,15 @@ def test_live_entry_registers_pending_order_with_position_manager(
     bm = BracketManager(order_manager=om)
     bm._running = False
     om.set_bracket_manager(bm)
+    monkeypatch.setattr(om, "is_live_mode", lambda: True)
+    awaited: list[tuple[str, float]] = []
+
+    def _filled_entry(entry, *, timeout):
+        awaited.append((entry.order_id, timeout))
+        entry.filled_quantity = entry.quantity
+        return entry
+
+    monkeypatch.setattr(om, "_await_entry_fill", _filled_entry)
     try:
         oid = om.place_order(
             symbol="NFO:NIFTY2671424100CE",
@@ -1297,6 +1306,7 @@ def test_live_entry_registers_pending_order_with_position_manager(
         # skip condition (entry_confirmed False) must hold for it.
         bracket = bm.get_bracket(oid)
         assert bracket is not None and bracket.entry_confirmed is False
+        assert awaited == [(oid, om.BRACKET_ENTRY_TIMEOUT_SEC)]
     finally:
         bm._running = False
 
@@ -1332,6 +1342,13 @@ def test_system_exit_does_not_poll_for_fill_on_protection_path(
             AssertionError("system exit must not synchronously poll")
         ),
     )
+    monkeypatch.setattr(
+        manager,
+        "_await_entry_fill",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("system exit must not enter bounded entry wait")
+        ),
+    )
 
     order_id = manager.place_order(
         symbol="NFO:NIFTY2671424100CE",
@@ -1344,6 +1361,69 @@ def test_system_exit_does_not_poll_for_fill_on_protection_path(
     )
 
     assert order_id == "SYSTEM-EXIT-1"
+
+
+def test_bounded_entry_wait_cancels_partial_remainder_without_removing_protection(
+) -> None:
+    from nifty_scalper_bot.execution.order_manager import (
+        OrderDetails,
+        OrderManager,
+        OrderStatus,
+        OrderType,
+    )
+
+    entry = OrderDetails(
+        order_id="ENTRY-PARTIAL-1",
+        symbol="NFO:NIFTY2671424100CE",
+        side="BUY",
+        quantity=130,
+        order_type=OrderType.LIMIT,
+        status=OrderStatus.SUBMITTED,
+        filled_quantity=0,
+        intent="ENTRY",
+    )
+    partial = entry
+    partial.status = OrderStatus.PARTIALLY_FILLED
+    partial.filled_quantity = 65
+    cancelled = OrderDetails(
+        order_id=entry.order_id,
+        symbol=entry.symbol,
+        side=entry.side,
+        quantity=entry.quantity,
+        order_type=entry.order_type,
+        status=OrderStatus.CANCELLED,
+        filled_quantity=65,
+        intent="ENTRY",
+    )
+    refreshes = iter((partial, cancelled))
+    cancelled_at_broker: list[str] = []
+    unregistered: list[str] = []
+    bracket_manager = SimpleNamespace(
+        get_bracket=lambda _order_id: object(),
+        unregister_bracket=unregistered.append,
+    )
+    logger = SimpleNamespace(
+        debug=lambda *_args, **_kwargs: None,
+        info=lambda *_args, **_kwargs: None,
+        error=lambda *_args, **_kwargs: None,
+    )
+    manager = SimpleNamespace(
+        _logger=logger,
+        _broker=SimpleNamespace(
+            cancel_order=lambda order_id: cancelled_at_broker.append(order_id) or True
+        ),
+        _bracket_manager=bracket_manager,
+        wait_for_fill=lambda *_args, **_kwargs: False,
+        _refresh_order=lambda _order_id: next(refreshes),
+        _call_broker=lambda callback, order_id: callback(order_id),
+        FINAL_STATUSES=OrderManager.FINAL_STATUSES,
+    )
+
+    result = OrderManager._await_entry_fill(manager, entry, timeout=5.0)
+
+    assert result is cancelled
+    assert cancelled_at_broker == [entry.order_id]
+    assert unregistered == []
 
 
 def test_non_incremental_fill_warning_dedupes_per_snapshot(tmp_path) -> None:
