@@ -69,9 +69,13 @@ from nifty_scalper_bot.execution.position_snapshot import (
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 
 try:
-    from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+    from nifty_scalper_bot.risk.cost_model import (
+        estimate_round_trip_cost,
+        minimum_net_reward_risk,
+    )
 except ImportError:  # pragma: no cover - cost model is always present in prod
     estimate_round_trip_cost = None  # type: ignore[assignment]
+    minimum_net_reward_risk = None  # type: ignore[assignment]
 
 # --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
 try:
@@ -1553,7 +1557,11 @@ class BracketManager:
                 rr_risk = abs(fill_price - bracket.sl_trigger_price)
                 rr_reward = abs(bracket.tp_trigger_price - fill_price)
                 rr = (rr_reward / rr_risk) if rr_risk > 0 else 0.0
-                rr_floor = parse_float_env(os.getenv("MIN_BRACKET_RR"), 1.5)
+                rr_floor = (
+                    minimum_net_reward_risk()
+                    if minimum_net_reward_risk is not None
+                    else 1.5
+                )
                 if rr_risk <= 0 or rr_reward <= 0 or rr < rr_floor:
                     LOGGER.critical(
                         "BRACKET_RR_BELOW_FLOOR symbol=%s entry=%.2f sl=%.2f tp=%.2f risk=%.2f reward=%.2f rr=%.2f floor=%.2f",
