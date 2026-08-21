@@ -1,0 +1,74 @@
+name: TDD Futures Cache Authority Recovery
+
+on:
+  push:
+    branches:
+      - fix/futures-live-tick-recovery-deadlock
+
+permissions:
+  contents: write
+
+jobs:
+  tdd-cache-authority:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install repository dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+
+      - name: Prove stale-ws authority regression is red
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q \
+            tests/streaming/test_futures_live_tick_recovery_deadlock.py::test_stale_ws_market_event_with_fresh_arrival_yields_to_newer_rest_quote
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo 'Expected cache-authority regression to fail before source fix.'
+            exit 1
+          fi
+          echo "Red phase reproduced as expected (pytest exit $status)."
+
+      - name: Apply focused cache-authority correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/data/market_data_manager.py')
+          text = path.read_text()
+          old = '''        if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):\n            current_received = self._tick_wallclock(current)\n            if current_received is not None:\n                threshold = self._ltp_stale_threshold_for_symbol(symbol)\n                if max(now_wall - current_received, 0.0) <= threshold:\n                    return False\n'''
+          new = '''        if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):\n            current_received = self._tick_wallclock(current)\n            if current_received is not None and current_event is not None:\n                threshold = self._ltp_stale_threshold_for_symbol(symbol)\n                arrival_fresh = max(now_wall - current_received, 0.0) <= threshold\n                event_fresh = max(now_wall - current_event, 0.0) <= threshold\n                if arrival_fresh and event_fresh:\n                    return False\n'''
+          if text.count(old) != 1:
+              raise SystemExit('market_data_manager cache-authority patch anchor mismatch')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Green recovery and cache-authority regressions
+        run: |
+          python -m pytest -q \
+            tests/streaming/test_futures_live_tick_recovery_deadlock.py \
+            tests/data/test_canonical_history_hydration.py \
+            tests/streaming/test_stream_supervisor_fallback.py \
+            tests/core/test_polling_failover_runtime_installation.py
+          python -m compileall -q src tests
+          git diff --check
+
+      - name: Commit cache-authority correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/data/market_data_manager.py
+          git commit -m 'fix: allow rest repair of stale ws market event'
+          git push origin HEAD:fix/futures-live-tick-recovery-deadlock
