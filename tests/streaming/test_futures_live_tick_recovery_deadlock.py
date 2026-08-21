@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from nifty_scalper_bot.core import polling_failover_runtime as runtime
+from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.streaming import polling_streamer as polling_module
 from nifty_scalper_bot.streaming.polling_streamer import PollingStreamer
 from nifty_scalper_bot.utils.market_hours import MarketState
@@ -112,3 +114,38 @@ def test_websocket_standby_still_skips_fresh_ws_symbols(
     fetch = _run_one_poll_cycle(monkeypatch, websocket_mode_enabled=True)
 
     fetch.assert_not_called()
+
+
+def test_stale_ws_market_event_with_fresh_arrival_yields_to_newer_rest_quote() -> None:
+    """Arrival freshness alone must not block repair of stale market-event data."""
+    mdm = MarketDataManager.__new__(MarketDataManager)
+    mdm._ltp_stale_threshold_for_symbol = lambda _symbol: 5.0
+    now = time.time()
+    symbol = "NFO:NIFTY26AUGFUT"
+    current_ws = {
+        "symbol": symbol,
+        "ltp": 25_000.0,
+        "bid": 24_999.0,
+        "ask": 25_001.0,
+        "depth_available": True,
+        "timestamp": now - 120.0,
+        "received_at": now,
+        "source": "ws_full",
+    }
+    recovery_rest = {
+        "symbol": symbol,
+        "ltp": 25_005.0,
+        "timestamp": now,
+        "received_at": now,
+        "source": "rest_poll",
+    }
+
+    assert (
+        mdm._should_replace_cached_tick(
+            symbol,
+            current_ws,
+            recovery_rest,
+            now_wall=now,
+        )
+        is True
+    )
