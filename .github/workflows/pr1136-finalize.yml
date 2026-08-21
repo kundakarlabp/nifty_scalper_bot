@@ -1,0 +1,141 @@
+name: PR1136 Finalize Readiness Quote Ownership
+
+on:
+  push:
+    branches:
+      - fix/readiness-freshest-cached-quote
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/readiness-freshest-cached-quote
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply focused source correction
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/core/history_readiness.py')
+          text = path.read_text()
+          start = text.index('def _get_cached_quote(ctx: "BotContext", symbol: str) -> Mapping[str, Any]:')
+          end = text.index('\n\ndef _basket_get', start)
+          replacement = '''def _get_cached_quote(ctx: "BotContext", symbol: str) -> Mapping[str, Any]:
+              """Return the canonical MDM cached quote with readiness identity metadata."""
+              mdm = getattr(ctx, "market_data_manager", None)
+              for name in ("get_latest_tick", "get_last_tick"):
+                  fn = getattr(mdm, name, None)
+                  if not callable(fn):
+                      continue
+                  try:
+                      quote = fn(symbol)
+                  except Exception:
+                      quote = None
+                  if not isinstance(quote, Mapping) or not quote:
+                      continue
+
+                  # MDM owns the quote, while DataHub already owns the canonical
+                  # quote-identity/market-event age contract consumed by readiness.
+                  # Stamp this MDM snapshot without reading or pulling DataHub's
+                  # potentially older cached copy.
+                  for provider in (
+                      getattr(ctx, "data_hub", None),
+                      getattr(ctx, "datahub", None),
+                  ):
+                      stamper = getattr(provider, "_stamp_quote_identity", None)
+                      if not callable(stamper):
+                          continue
+                      try:
+                          stamped = stamper(symbol, quote)
+                      except Exception:
+                          continue
+                      if isinstance(stamped, Mapping) and stamped:
+                          return stamped
+                  # Fail closed if no identity stamper is available: callers will
+                  # reject a raw quote whose age cannot be proven.
+                  return quote
+
+              # Compatibility fallback when MDM has no cached tick.  DataHub is
+              # read cache only here; broker pulls remain forbidden in readiness.
+              for provider in (
+                  getattr(ctx, "data_hub", None),
+                  getattr(ctx, "datahub", None),
+              ):
+                  if provider is None:
+                      continue
+                  fn = getattr(provider, "get_quote", None)
+                  if callable(fn):
+                      try:
+                          quote = fn(symbol, allow_pull=False)
+                      except TypeError:
+                          try:
+                              quote = fn(symbol)
+                          except Exception:
+                              quote = None
+                      except Exception:
+                          quote = None
+                      if isinstance(quote, Mapping):
+                          return quote
+
+              snap_fn = getattr(mdm, "get_symbol_snapshot", None)
+              if callable(snap_fn):
+                  try:
+                      snap = snap_fn(symbol)
+                      if snap is not None:
+                          return {
+                              "ltp": getattr(snap, "ltp", None),
+                              "bid": getattr(snap, "bid", None),
+                              "ask": getattr(snap, "ask", None),
+                              "spread_pct": getattr(snap, "spread_pct", None),
+                              "depth_available": getattr(snap, "depth_available", None),
+                              "depth": getattr(snap, "depth", None),
+                              "tradable_quote": getattr(snap, "tradable_quote", None),
+                              "tick_age_s": getattr(snap, "tick_age_s", None),
+                          }
+                  except Exception:
+                      return {}
+              return {}
+          '''
+          # Dedent only the accidental script indentation while preserving function body.
+          import textwrap
+          replacement = textwrap.dedent(replacement)
+          path.write_text(text[:start] + replacement + text[end:])
+
+          test = Path('tests/core/test_history_readiness_cached_quote_priority.py')
+          test.write_text('''from __future__ import annotations\n\nfrom types import SimpleNamespace\n\nfrom nifty_scalper_bot.core.history_readiness import _get_cached_quote\nfrom nifty_scalper_bot.execution.readiness import resolve_quote_age_seconds\n\n\ndef test_readiness_uses_canonical_mdm_tick_with_datahub_identity_stamp() -> None:\n    symbol = "NFO:NIFTY26AUGFUT"\n    stale_datahub = {\n        "symbol": symbol,\n        "ltp": 25000.0,\n        "tick_age_ms": 120_000.0,\n        "marker": "stale_datahub",\n    }\n    fresh_mdm = {\n        "symbol": symbol,\n        "ltp": 25005.0,\n        "timestamp": "2026-08-21T06:52:00+00:00",\n        "marker": "fresh_mdm",\n    }\n    stamp_calls: list[str] = []\n\n    def stamp(_symbol: str, quote: dict) -> dict:\n        stamp_calls.append(_symbol)\n        return {**quote, "tick_age_ms": 25.0, "quote_identity_source": "test"}\n\n    ctx = SimpleNamespace(\n        data_hub=SimpleNamespace(\n            get_quote=lambda _symbol, allow_pull=False: dict(stale_datahub),\n            _stamp_quote_identity=stamp,\n        ),\n        market_data_manager=SimpleNamespace(\n            get_latest_tick=lambda _symbol: dict(fresh_mdm)\n        ),\n    )\n\n    quote = _get_cached_quote(ctx, symbol)\n\n    assert quote["marker"] == "fresh_mdm"\n    assert stamp_calls == [symbol]\n    assert resolve_quote_age_seconds(quote) == 0.025\n\n\ndef test_readiness_does_not_call_mdm_get_quote_broker_surface() -> None:\n    symbol = "NFO:NIFTY26AUGFUT"\n\n    def forbidden_get_quote(_symbol: str) -> dict:\n        raise AssertionError("readiness must remain cache-only")\n\n    ctx = SimpleNamespace(\n        data_hub=None,\n        market_data_manager=SimpleNamespace(\n            get_latest_tick=lambda _symbol: {\n                "symbol": symbol,\n                "ltp": 25005.0,\n                "tick_age_s": 0.1,\n            },\n            get_quote=forbidden_get_quote,\n        ),\n    )\n\n    quote = _get_cached_quote(ctx, symbol)\n\n    assert quote["ltp"] == 25005.0\n\n\ndef test_readiness_falls_back_to_datahub_when_mdm_has_no_cached_tick() -> None:\n    symbol = "NFO:NIFTY26AUGFUT"\n    datahub_quote = {\n        "symbol": symbol,\n        "ltp": 25000.0,\n        "tick_age_ms": 25.0,\n        "marker": "datahub_fallback",\n    }\n    ctx = SimpleNamespace(\n        data_hub=SimpleNamespace(\n            get_quote=lambda _symbol, allow_pull=False: dict(datahub_quote)\n        ),\n        market_data_manager=SimpleNamespace(get_latest_tick=lambda _symbol: None),\n    )\n\n    quote = _get_cached_quote(ctx, symbol)\n\n    assert quote["marker"] == "datahub_fallback"\n''')
+          PY
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Focused red-green regressions
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+          ALLOW_NETWORK: 'false'
+          ALLOW_REAL_BROKER: 'false'
+          BROKER_SIMULATION: 'true'
+          EXECUTION_MODE: 'LIVE_SIMULATION'
+        run: |
+          python -m pytest -q tests/core/test_history_readiness_cached_quote_priority.py
+          python -m pytest -q -m live_runtime_e2e tests/e2e/live_sim/test_live_runtime_startup_contract.py::test_live_runtime_bullish_spot_future_selects_ce_and_exits_target
+          python -m compileall -q src
+      - name: Commit clean final patch
+        shell: bash
+        run: |
+          rm .github/workflows/pr1136-finalize.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/core/history_readiness.py tests/core/test_history_readiness_cached_quote_priority.py .github/workflows/pr1136-finalize.yml
+          git diff --cached --check
+          git commit -m 'fix: preserve market-event age on canonical readiness quote'
+          git push origin HEAD:fix/readiness-freshest-cached-quote
