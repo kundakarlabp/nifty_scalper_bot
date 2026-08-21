@@ -3157,6 +3157,10 @@ class BotContext:
     effective_mode: str = "SHADOW"
     started_mono: float = field(default_factory=time_module.monotonic)
     live_block_reason: str | None = None
+    # Every readiness blocker for the current evaluation.  ``live_block_reason``
+    # carries only the highest-priority one, which hides lower-priority data
+    # blockers that recovery authorities must still act on.
+    readiness_blockers: tuple[str, ...] = ()
     market_session_state: str | None = None
     quote_api_available: bool = True
     quote_api_error: str | None = None
@@ -9998,6 +10002,10 @@ async def _recompute_and_push_runtime_readiness(
     ctx.live_orders_armed = live_orders_armed
     ctx.trading_ready = evaluation_ready
     ctx.live_block_reason = block_reason
+    # live_block_reason only names the highest-priority blocker.  Recovery
+    # authorities must be able to act on a lower-priority data blocker that a
+    # co-occurring higher-priority one would otherwise hide.
+    ctx.readiness_blockers = tuple(normalized_decision.blocker_list or ())
     ctx.data_ready = bool(data_hard_ready)
     ctx.strategy_evaluation_ready = bool(evaluation_ready)
     ctx.trading_signal_ready = bool(evaluation_ready)
