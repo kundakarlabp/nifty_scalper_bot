@@ -281,8 +281,16 @@ class PollingStreamer:
                                 (quote.get("arrival_time") or 0.0) if quote else 0.0
                             )
 
-                        # Only poll if WS is not fresh (local arrival time)
-                        if not (self._data_hub and self._data_hub.is_ws_fresh(symbol)):
+                        # Standby stays WS-sparse.  Once the supervisor explicitly
+                        # activates polling recovery, do not let recent packet arrival
+                        # cancel the REST repair of stale market-event data.
+                        if (
+                            not self._websocket_mode_enabled
+                            or not (
+                                self._data_hub
+                                and self._data_hub.is_ws_fresh(symbol)
+                            )
+                        ):
                             candidates.append((token, last_arr))
 
                 # 2. Sort by last_arrival (oldest/missing first)
