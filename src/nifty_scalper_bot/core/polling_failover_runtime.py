@@ -243,6 +243,14 @@ async def _polling_failover_supervisor_iteration(
     mdm = getattr(ctx, "market_data_manager", None)
     feed_health = _safe_feed_health(mdm)
     data_age_ms = _safe_data_age_ms(mdm)
+    # Canonical live readiness is stricter than transport-arrival health.  If it
+    # is fail-closed on a stale futures market event, reuse the existing required-
+    # symbol recovery authority instead of allowing recent WS packet arrivals to
+    # suppress REST recovery.
+    live_block_reason = str(getattr(ctx, "live_block_reason", "") or "")
+    if "futures_live_tick_stale" in live_block_reason:
+        feed_health = dict(feed_health)
+        feed_health["required_symbol_recovery_active"] = True
     lagging = bool(
         feed_health.get("lagging")
         or feed_health.get("event_loop_lagging")

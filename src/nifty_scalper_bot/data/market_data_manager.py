@@ -9160,9 +9160,11 @@ class MarketDataManager:
 
         if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):
             current_received = self._tick_wallclock(current)
-            if current_received is not None:
+            if current_received is not None and current_event is not None:
                 threshold = self._ltp_stale_threshold_for_symbol(symbol)
-                if max(now_wall - current_received, 0.0) <= threshold:
+                arrival_fresh = max(now_wall - current_received, 0.0) <= threshold
+                event_fresh = max(now_wall - current_event, 0.0) <= threshold
+                if arrival_fresh and event_fresh:
                     return False
         return True
 
