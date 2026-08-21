@@ -63,6 +63,77 @@ async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path()
     assert fallback.starts == 1
 
 
+@pytest.mark.asyncio
+async def test_futures_stale_below_primary_priority_forces_recovery() -> None:
+    """A higher-priority blocker must not hide stale futures from recovery.
+
+    ``_READINESS_PRIORITY`` ranks twenty blockers above ``futures_live_tick_stale``,
+    so the formatted primary-blocker string silently stops naming it whenever one
+    of them co-occurs. Recovery authority must key on the structured blocker set.
+    """
+    ctx = SimpleNamespace(
+        live_block_reason="execution_not_armed:position_reconciliation_failed",
+        readiness_blockers=(
+            "position_reconciliation_failed",
+            "futures_live_tick_stale",
+            "context_exec_not_ready",
+        ),
+        websocket_manager=SimpleNamespace(is_connected=lambda: True),
+        market_data_manager=SimpleNamespace(
+            trading_feed_health=lambda: {
+                "lagging": False,
+                "futures_fresh": True,
+                "options_fresh": True,
+            },
+            data_age_ms=lambda: 100.0,
+        ),
+    )
+    fallback = _Fallback()
+
+    await runtime._polling_failover_supervisor_iteration(
+        ctx,
+        fallback,
+        quote_stale_ms=120_000.0,
+        degraded_since=0.0,
+        recovered_since=None,
+        activate_after=0.0,
+        _app_module=SimpleNamespace(is_market_open_now=lambda: True),
+    )
+
+    assert fallback.starts == 1
+
+
+@pytest.mark.asyncio
+async def test_healthy_feed_without_futures_blocker_does_not_force_recovery() -> None:
+    """Unrelated blockers must not start REST recovery on a healthy feed."""
+    ctx = SimpleNamespace(
+        live_block_reason="execution_not_armed:strategy_not_ready",
+        readiness_blockers=("strategy_not_ready", "context_exec_not_ready"),
+        websocket_manager=SimpleNamespace(is_connected=lambda: True),
+        market_data_manager=SimpleNamespace(
+            trading_feed_health=lambda: {
+                "lagging": False,
+                "futures_fresh": True,
+                "options_fresh": True,
+            },
+            data_age_ms=lambda: 100.0,
+        ),
+    )
+    fallback = _Fallback()
+
+    await runtime._polling_failover_supervisor_iteration(
+        ctx,
+        fallback,
+        quote_stale_ms=120_000.0,
+        degraded_since=0.0,
+        recovered_since=None,
+        activate_after=0.0,
+        _app_module=SimpleNamespace(is_market_open_now=lambda: True),
+    )
+
+    assert fallback.starts == 0
+
+
 def _run_one_poll_cycle(
     monkeypatch: pytest.MonkeyPatch, *, websocket_mode_enabled: bool
 ) -> MagicMock:

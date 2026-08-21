@@ -199,6 +199,25 @@ def _polling_fallback_degraded(
     ).activate
 
 
+_FUTURES_STALE_BLOCKER = "futures_live_tick_stale"
+
+
+def _futures_live_tick_stale(ctx: Any) -> bool:
+    """Return True when readiness reports a stale futures market event.
+
+    ``live_block_reason`` names only the highest-priority blocker, and
+    ``_READINESS_PRIORITY`` ranks twenty blockers above the futures one, so the
+    formatted string alone silently loses the signal whenever any of them
+    co-occurs. Prefer the structured blocker set published by the readiness
+    owner and fall back to the string for older contexts.
+    """
+    blockers = getattr(ctx, "readiness_blockers", None)
+    if isinstance(blockers, (list, tuple, set, frozenset)):
+        if any(_FUTURES_STALE_BLOCKER == str(item) for item in blockers):
+            return True
+    return _FUTURES_STALE_BLOCKER in str(getattr(ctx, "live_block_reason", "") or "")
+
+
 def _resolve_market_open_callable(ctx: Any, app_module: Any | None = None) -> Any:
     ctx_hook = getattr(ctx, "is_market_open_now", None)
     if ctx_hook is not None:
@@ -247,8 +266,7 @@ async def _polling_failover_supervisor_iteration(
     # is fail-closed on a stale futures market event, reuse the existing required-
     # symbol recovery authority instead of allowing recent WS packet arrivals to
     # suppress REST recovery.
-    live_block_reason = str(getattr(ctx, "live_block_reason", "") or "")
-    if "futures_live_tick_stale" in live_block_reason:
+    if _futures_live_tick_stale(ctx):
         feed_health = dict(feed_health)
         feed_health["required_symbol_recovery_active"] = True
     lagging = bool(

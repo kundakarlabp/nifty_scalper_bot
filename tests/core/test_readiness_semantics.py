@@ -82,3 +82,12 @@ async def test_off_market_data_ready_splits_execution_arming(monkeypatch) -> Non
     assert ctx.live_orders_armed is False
     assert ctx.execution_block_reason == "market_closed"
     assert calls[-1]["evaluation_ready"] is True
+    # Recovery authorities must be able to see every blocker, not only the one
+    # that won primary priority in the formatted live_block_reason string.
+    assert isinstance(ctx.readiness_blockers, tuple)
+    assert "market_closed" in ctx.readiness_blockers
+
+
+def test_bot_context_declares_readiness_blockers_field() -> None:
+    """BotContext restricts attributes, so the blocker set must be a field."""
+    assert "readiness_blockers" in app.BotContext.__dataclass_fields__
