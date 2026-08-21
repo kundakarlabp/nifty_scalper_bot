@@ -366,18 +366,46 @@ def _bar_timestamp(row: Any) -> datetime | None:
 
 
 def _get_cached_quote(ctx: "BotContext", symbol: str) -> Mapping[str, Any]:
-    """Return canonical MDM cached tick; use DataHub only as read-facade fallback."""
+    """Return the canonical MDM cached quote with readiness identity metadata."""
     mdm = getattr(ctx, "market_data_manager", None)
-    for name in ("get_latest_tick", "get_last_tick", "get_quote"):
+    for name in ("get_latest_tick", "get_last_tick"):
         fn = getattr(mdm, name, None)
-        if callable(fn):
+        if not callable(fn):
+            continue
+        try:
+            quote = fn(symbol)
+        except Exception:
+            quote = None
+        if not isinstance(quote, Mapping) or not quote:
+            continue
+
+        # MDM owns the quote, while DataHub already owns the canonical
+        # quote-identity/market-event age contract consumed by readiness.
+        # Stamp this MDM snapshot without reading or pulling DataHub's
+        # potentially older cached copy.
+        for provider in (
+            getattr(ctx, "data_hub", None),
+            getattr(ctx, "datahub", None),
+        ):
+            stamper = getattr(provider, "_stamp_quote_identity", None)
+            if not callable(stamper):
+                continue
             try:
-                quote = fn(symbol)
+                stamped = stamper(symbol, quote)
             except Exception:
-                quote = None
-            if isinstance(quote, Mapping) and quote:
-                return quote
-    for provider in (getattr(ctx, "data_hub", None), getattr(ctx, "datahub", None)):
+                continue
+            if isinstance(stamped, Mapping) and stamped:
+                return stamped
+        # Fail closed if no identity stamper is available: callers will
+        # reject a raw quote whose age cannot be proven.
+        return quote
+
+    # Compatibility fallback when MDM has no cached tick.  DataHub is
+    # read cache only here; broker pulls remain forbidden in readiness.
+    for provider in (
+        getattr(ctx, "data_hub", None),
+        getattr(ctx, "datahub", None),
+    ):
         if provider is None:
             continue
         fn = getattr(provider, "get_quote", None)
@@ -393,6 +421,7 @@ def _get_cached_quote(ctx: "BotContext", symbol: str) -> Mapping[str, Any]:
                 quote = None
             if isinstance(quote, Mapping):
                 return quote
+
     snap_fn = getattr(mdm, "get_symbol_snapshot", None)
     if callable(snap_fn):
         try:
