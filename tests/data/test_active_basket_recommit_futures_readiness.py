@@ -75,17 +75,21 @@ def test_identical_basket_recommit_preserves_active_future_live_readiness() -> N
     )
 
     before = mdm.classify_live_tick_readiness(fut, token, max_age_s=60.0)
-    generation = mdm._symbol_subscription_generation[fut]  # noqa: SLF001
+    generation = mdm._subscription_generation  # noqa: SLF001
     first_tick_generation = mdm._symbol_first_tick_generation[fut]  # noqa: SLF001
     cached = dict(mdm.get_latest_tick(fut) or {})
     assert before["ready"] is True
+    assert before["expected_generation"] == generation
+    assert before["tick_generation"] == first_tick_generation
     assert cached.get("ltp") == 24_350.0
 
     mdm.set_active_contract_basket(basket)
 
     after = mdm.classify_live_tick_readiness(fut, token, max_age_s=60.0)
-    assert mdm._symbol_subscription_generation[fut] == generation  # noqa: SLF001
+    assert mdm._subscription_generation == generation  # noqa: SLF001
     assert mdm._symbol_first_tick_generation[fut] == first_tick_generation  # noqa: SLF001
+    assert after["expected_generation"] == generation
+    assert after["tick_generation"] == first_tick_generation
     assert after["ready"] is True
     assert (mdm.get_latest_tick(fut) or {}).get("ltp") == 24_350.0
     assert token in mdm._desired_tokens  # noqa: SLF001
