@@ -6,17 +6,21 @@ Key responsibilities:
     - Preserve a compatibility fallback for noncanonical external test doubles.
     - Resolve live-mode consistently before durable bracket-state enforcement.
     - Surface position/reconciliation lifecycle blockers to the native entry gate.
+    - Keep active virtual brackets supplied with fresh canonical market data.
 
 Operational constraints:
     - Production wiring must use the native provider contract, not method replacement.
     - Protective exits must remain executable while new entries are blocked.
     - LIVE executions must never persist bracket state to ephemeral storage.
+    - Market-data recovery must reuse MDM freshness policy and fallback ownership.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
 import os
+import threading
+import time
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
@@ -120,6 +124,151 @@ def _synthetic_position_blocker(position_manager: Any) -> dict[str, Any] | None:
 
 class BoundBracketManager(RuntimeBracketManager):
     """Bracket authority that configures the OrderManager native entry gate."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # State is initialized before the inherited exit watchdog starts.  The
+        # dedicated market-data watchdog is started only after canonical bracket
+        # construction is complete.
+        self._bracket_stale_refresh_at: dict[str, float] = {}
+        try:
+            refresh_interval = float(
+                os.getenv("BRACKET_STALE_REFRESH_MIN_INTERVAL_SEC", "1.0") or 1.0
+            )
+        except (TypeError, ValueError):
+            refresh_interval = 1.0
+        self._bracket_stale_refresh_min_interval_seconds = max(
+            0.25, refresh_interval
+        )
+        self._bracket_market_data_thread: threading.Thread | None = None
+        super().__init__(*args, **kwargs)
+        self._bracket_market_data_thread = threading.Thread(
+            target=self._bracket_market_data_watchdog_loop,
+            name="bracket-market-data-watchdog",
+            daemon=True,
+        )
+        self._bracket_market_data_thread.start()
+
+    def shutdown(self) -> None:
+        """Stop canonical bracket workers, including stale-data recovery."""
+        super().shutdown()
+        worker = self._bracket_market_data_thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=1.0)
+
+    def _market_data_freshness_owner(self) -> Any | None:
+        """Return canonical MDM behind the DataHub facade when available."""
+        source = getattr(self, "_market_data", None)
+        if source is None:
+            return None
+        return getattr(source, "_mdm", None) or source
+
+    def _active_bracket_market_data_symbols(self) -> set[str]:
+        """Snapshot symbols whose virtual protection still depends on live price."""
+        with self._lock:
+            symbols = {
+                normalize_symbol(bracket.symbol)
+                for bracket in self._brackets.values()
+                if bool(getattr(bracket, "active", False))
+                and bool(getattr(bracket, "entry_confirmed", False))
+                and not bool(getattr(bracket, "exit_pending", False))
+                and not bool(getattr(bracket, "exit_executed", False))
+                and int(getattr(bracket, "remaining_quantity", 0) or 0) > 0
+            }
+        return {symbol for symbol in symbols if symbol}
+
+    def _refresh_stale_active_brackets_once(self) -> None:
+        """Request non-blocking MDM recovery for stale protected instruments."""
+        mdm = self._market_data_freshness_owner()
+        if mdm is None:
+            return
+        age_getter = getattr(mdm, "time_since_last_tick", None)
+        threshold_getter = getattr(mdm, "_ltp_stale_threshold_for_symbol", None)
+        refresher = getattr(mdm, "request_fallback_refresh", None)
+        if not (
+            callable(age_getter)
+            and callable(threshold_getter)
+            and callable(refresher)
+        ):
+            return
+
+        active_symbols = self._active_bracket_market_data_symbols()
+        for tracked in tuple(self._bracket_stale_refresh_at):
+            if tracked not in active_symbols:
+                self._bracket_stale_refresh_at.pop(tracked, None)
+
+        now = time.monotonic()
+        for symbol in active_symbols:
+            try:
+                age = age_getter(symbol)
+                threshold = float(threshold_getter(symbol) or 0.0)
+            except Exception as exc:  # noqa: BLE001 - watchdog must remain alive
+                with suppress(Exception):
+                    self._log_throttled(
+                        "warning",
+                        f"bracket_ltp_freshness_error_{symbol}",
+                        30.0,
+                        "BRACKET_LTP_FRESHNESS_CHECK_FAILED symbol=%s error=%s",
+                        symbol,
+                        exc,
+                    )
+                continue
+
+            if threshold <= 0.0:
+                continue
+            stale = age is None or float(age) > threshold
+            if not stale:
+                self._bracket_stale_refresh_at.pop(symbol, None)
+                continue
+
+            previous = self._bracket_stale_refresh_at.get(symbol, 0.0)
+            if (
+                previous > 0.0
+                and now - previous < self._bracket_stale_refresh_min_interval_seconds
+            ):
+                continue
+            self._bracket_stale_refresh_at[symbol] = now
+
+            dispatched = False
+            refresh_error: Exception | None = None
+            try:
+                # MDM owns the actual recovery implementation.  In production it
+                # dispatches to the polling streamer or schedules its async REST
+                # refresh; no broker I/O is performed while the bracket lock is held.
+                dispatched = bool(
+                    refresher(symbol, reason="bracket_ltp_stale")
+                )
+            except Exception as exc:  # noqa: BLE001 - retry on the next interval
+                refresh_error = exc
+
+            age_label = "missing" if age is None else f"{float(age):.3f}"
+            with suppress(Exception):
+                self._log_throttled(
+                    "warning",
+                    f"bracket_ltp_stale_{symbol}",
+                    5.0,
+                    "BRACKET_LTP_STALE symbol=%s age_s=%s threshold_s=%.3f fallback_dispatched=%s error=%s",
+                    symbol,
+                    age_label,
+                    threshold,
+                    dispatched,
+                    str(refresh_error) if refresh_error is not None else "none",
+                )
+
+    def _bracket_market_data_watchdog_loop(self) -> None:
+        """Backstop virtual exits when per-symbol market-data delivery goes silent."""
+        while bool(getattr(self, "_running", False)):
+            try:
+                self._refresh_stale_active_brackets_once()
+            except Exception as exc:  # noqa: BLE001 - liveness is safety-critical
+                with suppress(Exception):
+                    self._log_throttled(
+                        "error",
+                        "bracket_market_data_watchdog_error",
+                        30.0,
+                        "BRACKET_MARKET_DATA_WATCHDOG_ERROR error=%s",
+                        exc,
+                    )
+            time.sleep(0.25)
 
     def _is_live_execution(self) -> bool:
         """Return True only when real broker-live order execution is enabled."""
