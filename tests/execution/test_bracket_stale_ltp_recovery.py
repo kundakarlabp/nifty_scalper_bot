@@ -106,3 +106,13 @@ def test_active_bracket_fresh_ltp_does_not_request_fallback_refresh() -> None:
     finally:
         manager.shutdown()
         manager._watchdog_thread.join(timeout=1.0)
+
+
+def test_stale_data_watchdog_not_started_without_recovery_contract() -> None:
+    order_manager = _OrderManager()
+    manager = BracketManager(order_manager=order_manager, market_data=object())
+    try:
+        assert manager._bracket_market_data_thread is None
+    finally:
+        manager.shutdown()
+        manager._watchdog_thread.join(timeout=1.0)
