@@ -17,12 +17,14 @@ Operational constraints:
 
 from __future__ import annotations
 
-from contextlib import suppress
 import os
 import threading
 import time
+from contextlib import suppress
+from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -126,7 +128,7 @@ class BoundBracketManager(RuntimeBracketManager):
     """Bracket authority that configures the OrderManager native entry gate."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        # State is initialized before the inherited exit watchdog starts.  The
+        # State is initialized before the inherited exit watchdog starts. The
         # dedicated market-data watchdog is started only after canonical bracket
         # construction is complete.
         self._bracket_stale_refresh_at: dict[str, float] = {}
@@ -136,9 +138,7 @@ class BoundBracketManager(RuntimeBracketManager):
             )
         except (TypeError, ValueError):
             refresh_interval = 1.0
-        self._bracket_stale_refresh_min_interval_seconds = max(
-            0.25, refresh_interval
-        )
+        self._bracket_stale_refresh_min_interval_seconds = max(0.25, refresh_interval)
         self._bracket_market_data_thread: threading.Thread | None = None
         super().__init__(*args, **kwargs)
         self._bracket_market_data_thread = threading.Thread(
@@ -231,12 +231,10 @@ class BoundBracketManager(RuntimeBracketManager):
             dispatched = False
             refresh_error: Exception | None = None
             try:
-                # MDM owns the actual recovery implementation.  In production it
+                # MDM owns the actual recovery implementation. In production it
                 # dispatches to the polling streamer or schedules its async REST
                 # refresh; no broker I/O is performed while the bracket lock is held.
-                dispatched = bool(
-                    refresher(symbol, reason="bracket_ltp_stale")
-                )
+                dispatched = bool(refresher(symbol, reason="bracket_ltp_stale"))
             except Exception as exc:  # noqa: BLE001 - retry on the next interval
                 refresh_error = exc
 
@@ -246,7 +244,10 @@ class BoundBracketManager(RuntimeBracketManager):
                     "warning",
                     f"bracket_ltp_stale_{symbol}",
                     5.0,
-                    "BRACKET_LTP_STALE symbol=%s age_s=%s threshold_s=%.3f fallback_dispatched=%s error=%s",
+                    (
+                        "BRACKET_LTP_STALE symbol=%s age_s=%s threshold_s=%.3f "
+                        "fallback_dispatched=%s error=%s"
+                    ),
                     symbol,
                     age_label,
                     threshold,
@@ -338,7 +339,9 @@ class BoundBracketManager(RuntimeBracketManager):
                 provider_error=f"{type(exc).__name__}: {exc}",
             )
 
-        position_manager = _order_manager_position_manager(getattr(self, "order_manager", None))
+        position_manager = _order_manager_position_manager(
+            getattr(self, "order_manager", None)
+        )
         if position_manager is None:
             return None
 
@@ -366,11 +369,6 @@ class BoundBracketManager(RuntimeBracketManager):
                     )
 
         return _synthetic_position_blocker(position_manager)
-
-
-__all__ = ["BoundBracketManager"]
-from enum import Enum
-from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 
 
 class SymbolLifecycleClassification(str, Enum):
@@ -432,4 +430,8 @@ def classify_symbol_lifecycle(
     return SymbolLifecycleClassification.UNRESOLVED
 
 
-__all__ = ["BoundBracketManager", "SymbolLifecycleClassification", "classify_symbol_lifecycle"]
+__all__ = [
+    "BoundBracketManager",
+    "SymbolLifecycleClassification",
+    "classify_symbol_lifecycle",
+]
