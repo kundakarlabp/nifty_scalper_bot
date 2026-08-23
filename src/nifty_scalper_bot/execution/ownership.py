@@ -130,7 +130,8 @@ class BoundBracketManager(RuntimeBracketManager):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # State is initialized before the inherited exit watchdog starts. The
         # dedicated market-data watchdog is started only after canonical bracket
-        # construction is complete.
+        # construction is complete and only when the market-data owner exposes
+        # the canonical freshness/recovery contract.
         self._bracket_stale_refresh_at: dict[str, float] = {}
         try:
             refresh_interval = float(
@@ -141,12 +142,13 @@ class BoundBracketManager(RuntimeBracketManager):
         self._bracket_stale_refresh_min_interval_seconds = max(0.25, refresh_interval)
         self._bracket_market_data_thread: threading.Thread | None = None
         super().__init__(*args, **kwargs)
-        self._bracket_market_data_thread = threading.Thread(
-            target=self._bracket_market_data_watchdog_loop,
-            name="bracket-market-data-watchdog",
-            daemon=True,
-        )
-        self._bracket_market_data_thread.start()
+        if self._supports_bracket_market_data_watchdog():
+            self._bracket_market_data_thread = threading.Thread(
+                target=self._bracket_market_data_watchdog_loop,
+                name="bracket-market-data-watchdog",
+                daemon=True,
+            )
+            self._bracket_market_data_thread.start()
 
     def shutdown(self) -> None:
         """Stop canonical bracket workers, including stale-data recovery."""
@@ -161,6 +163,20 @@ class BoundBracketManager(RuntimeBracketManager):
         if source is None:
             return None
         return getattr(source, "_mdm", None) or source
+
+    def _supports_bracket_market_data_watchdog(self) -> bool:
+        """Return whether the bound market-data owner can perform stale recovery."""
+        mdm = self._market_data_freshness_owner()
+        if mdm is None:
+            return False
+        return all(
+            callable(getattr(mdm, name, None))
+            for name in (
+                "time_since_last_tick",
+                "_ltp_stale_threshold_for_symbol",
+                "request_fallback_refresh",
+            )
+        )
 
     def _active_bracket_market_data_symbols(self) -> set[str]:
         """Snapshot symbols whose virtual protection still depends on live price."""
