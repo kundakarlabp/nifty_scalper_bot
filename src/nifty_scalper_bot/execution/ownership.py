@@ -185,9 +185,7 @@ class BoundBracketManager(RuntimeBracketManager):
         threshold_getter = getattr(mdm, "_ltp_stale_threshold_for_symbol", None)
         refresher = getattr(mdm, "request_fallback_refresh", None)
         if not (
-            callable(age_getter)
-            and callable(threshold_getter)
-            and callable(refresher)
+            callable(age_getter) and callable(threshold_getter) and callable(refresher)
         ):
             return
 
