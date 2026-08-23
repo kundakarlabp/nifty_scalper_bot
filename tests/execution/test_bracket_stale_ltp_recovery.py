@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,7 +18,12 @@ def isolated_bracket_store(tmp_path, monkeypatch) -> None:
 
 
 class _MarketDataManager:
-    def __init__(self, *, age_seconds: float | None, stale_after_seconds: float = 2.0) -> None:
+    def __init__(
+        self,
+        *,
+        age_seconds: float | None,
+        stale_after_seconds: float = 2.0,
+    ) -> None:
         self.age_seconds = age_seconds
         self.stale_after_seconds = stale_after_seconds
         self.refresh_calls: list[tuple[str, str]] = []
@@ -85,8 +90,6 @@ def test_active_bracket_stale_ltp_requests_canonical_fallback_refresh() -> None:
     try:
         assert _wait_until(lambda: bool(mdm.refresh_calls))
         assert mdm.refresh_calls[0] == (SYMBOL, "bracket_ltp_stale")
-        # The stale cached LTP itself must not manufacture an exit while recovery
-        # is being requested. A fresh MDM observation remains the price authority.
         assert order_manager.place_calls == []
     finally:
         manager.shutdown()
