@@ -1,0 +1,136 @@
+name: Live Readiness Lifecycle Once
+
+on:
+  push:
+    branches:
+      - fix/live-readiness-lifecycle-20260824
+
+permissions:
+  contents: write
+
+jobs:
+  tdd-validate-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      BRACKET_AUTO_RESTORE: "false"
+      NSB_TEST_MODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/live-readiness-lifecycle-20260824
+          fetch-depth: 50
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Add regression tests first
+        run: |
+          python scripts/add_live_readiness_lifecycle_tests.py
+          python -m py_compile scripts/add_live_readiness_lifecycle_tests.py
+      - name: Prove regression tests fail before fix
+        run: |
+          set +e
+          python -m pytest -q \
+            tests/core/test_reconcile_readiness_lifecycle.py \
+            tests/execution/test_quote_readiness.py \
+            tests/test_main_health_readiness.py \
+            > /tmp/tdd-red.log 2>&1
+          rc=$?
+          cat /tmp/tdd-red.log
+          if [ "$rc" -eq 0 ]; then
+            echo 'TDD red phase unexpectedly passed before source fix'
+            exit 1
+          fi
+          echo 'TDD red phase confirmed'
+      - name: Apply targeted source fixes
+        run: |
+          python scripts/apply_live_readiness_lifecycle_fix.py
+          python -m py_compile scripts/apply_live_readiness_lifecycle_fix.py
+      - name: Format scoped Python files
+        run: |
+          python -m black \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/main.py \
+            src/nifty_scalper_bot/execution/quote_readiness.py \
+            tests/core/test_reconcile_readiness_lifecycle.py \
+            tests/execution/test_quote_readiness.py \
+            tests/test_main_health_readiness.py
+      - name: Focused TDD green phase
+        run: |
+          python -m pytest -q \
+            tests/core/test_reconcile_readiness_lifecycle.py \
+            tests/execution/test_quote_readiness.py \
+            tests/test_main_health_readiness.py
+      - name: Adjacent execution and readiness regressions
+        run: |
+          python -m pytest -q \
+            tests/execution/test_readiness_execution_safety_blockers.py \
+            tests/execution/test_live_readiness_blocker_recovery.py \
+            tests/strategies/test_orderflow_quote_age_contract.py \
+            tests/strategies/test_orderflow_live_context_age.py \
+            tests/e2e/live_sim/test_live_runtime_startup_contract.py
+      - name: Compile and scoped quality checks
+        run: |
+          python -m compileall -q src dashboard scripts
+          python -m ruff check \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/main.py \
+            src/nifty_scalper_bot/execution/quote_readiness.py \
+            tests/core/test_reconcile_readiness_lifecycle.py \
+            tests/execution/test_quote_readiness.py \
+            tests/test_main_health_readiness.py
+          python -m black --check \
+            src/nifty_scalper_bot/core/app.py \
+            src/nifty_scalper_bot/main.py \
+            src/nifty_scalper_bot/execution/quote_readiness.py \
+            tests/core/test_reconcile_readiness_lifecycle.py \
+            tests/execution/test_quote_readiness.py \
+            tests/test_main_health_readiness.py
+      - name: Full repository suite
+        run: python -m pytest -q
+      - name: Remove temporary implementation machinery
+        run: |
+          git checkout -- positions.json 2>/dev/null || true
+          rm -rf .pytest-data-dir .pytest_cache
+          rm -f scripts/add_live_readiness_lifecycle_tests.py
+          rm -f scripts/apply_live_readiness_lifecycle_fix.py
+          rm -f .github/workflows/live-readiness-lifecycle-once.yml
+      - name: Verify final diff scope
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          allowed = {
+              'src/nifty_scalper_bot/core/app.py',
+              'src/nifty_scalper_bot/main.py',
+              'src/nifty_scalper_bot/execution/quote_readiness.py',
+              'tests/core/test_reconcile_readiness_lifecycle.py',
+              'tests/execution/test_quote_readiness.py',
+              'tests/test_main_health_readiness.py',
+          }
+          changed = set(
+              subprocess.check_output(
+                  ['git', 'diff', '--name-only', 'origin/main'], text=True
+              ).splitlines()
+          )
+          unexpected = sorted(changed - allowed)
+          missing = sorted(allowed - changed)
+          if unexpected:
+              raise SystemExit(f'unexpected files in final diff: {unexpected}')
+          if missing:
+              raise SystemExit(f'expected files missing from final diff: {missing}')
+          print('validated final diff scope:', sorted(changed))
+          PY
+      - name: Commit validated correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(runtime): align live readiness lifecycle truth [skip ci]'
+          git push origin HEAD:fix/live-readiness-lifecycle-20260824
