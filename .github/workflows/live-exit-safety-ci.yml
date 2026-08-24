@@ -42,14 +42,18 @@ jobs:
           python -m ruff check \
             src/nifty_scalper_bot/execution/broker_position_evidence.py \
             src/nifty_scalper_bot/execution/order_state.py \
+            src/nifty_scalper_bot/execution/ownership.py \
             tests/core/test_eod_flatten_schedule.py \
+            tests/execution/test_bracket_stale_ltp_recovery.py \
             tests/execution/test_broker_position_and_order_state.py
       - name: Scoped black format check
         run: |
-          python -m black --check \
+          python -m black --check --diff \
             src/nifty_scalper_bot/execution/broker_position_evidence.py \
             src/nifty_scalper_bot/execution/order_state.py \
+            src/nifty_scalper_bot/execution/ownership.py \
             tests/core/test_eod_flatten_schedule.py \
+            tests/execution/test_bracket_stale_ltp_recovery.py \
             tests/execution/test_broker_position_and_order_state.py
       - name: Scoped mypy typecheck
         run: |
@@ -82,6 +86,7 @@ jobs:
             tests/core/test_eod_flatten_schedule.py \
             tests/data/test_zerodha_auth_reprobe_latch.py \
             tests/execution/test_broker_position_and_order_state.py \
+            tests/execution/test_bracket_stale_ltp_recovery.py \
             tests/execution/test_explicit_exit_intent_safety.py \
             tests/execution/test_executable_tp_semantics.py \
             tests/execution/test_executable_trailing_watermark.py \
