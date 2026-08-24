@@ -15809,7 +15809,6 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
             ctx.position_reconciliation_in_progress = False
             ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
             duration_ms = (ctx.position_reconciliation_completed_at - started_at).total_seconds() * 1000.0
-            active_run_ids.discard(reconcile_run_id)
             run_record.update({
                 "completed_at": ctx.position_reconciliation_completed_at.isoformat(),
                 "duration_ms": duration_ms,
@@ -15829,8 +15828,6 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
             )
 
         except Exception as exc:
-            active_run_ids.discard(reconcile_run_id)
-            run_record["active_run_count"] = len(active_run_ids)
             # Leave position_reconciliation_completed untouched: the explicit
             # `failed` flag below is what blocks execution, and it is checked
             # separately by the readiness blockers.
@@ -15854,6 +15851,17 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                 },
                 exc_info=True,
             )
+        finally:
+            # The single-flight slot must be released on every exit, including
+            # asyncio.CancelledError, which is a BaseException and so bypasses
+            # the handler above. A leaked slot coalesces every later run
+            # forever, freezing position_reconciliation_completed_at and
+            # eventually blocking arming on position_reconciliation_stale.
+            active_run_ids.discard(reconcile_run_id)
+            run_record["active_run_count"] = len(active_run_ids)
+    else:
+        # No position manager: the guarded body never runs, so release here.
+        active_run_ids.discard(reconcile_run_id)
 
     _sync_data_hub_positions(getattr(ctx, "data_hub", None), ctx.position_manager)
 
