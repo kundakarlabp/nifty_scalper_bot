@@ -106,21 +106,28 @@ write(path, text)
 
 
 # ---------------------------------------------------------------------------
-# 3) Quote freshness authority: when a real millisecond timestamp is present,
-#    calculate age from it. Cached age fields remain backward-compatible fallback.
+# 3) Quote freshness authority: only the MDM live-receipt timestamp outranks
+#    mutable cached age fields. Generic historical/replay timestamp_ms remains
+#    backward-compatible and is intentionally not treated as live proof.
 # ---------------------------------------------------------------------------
 path = "src/nifty_scalper_bot/execution/quote_readiness.py"
 text = read(path)
 text = replace_once(
     text,
     '''from dataclasses import asdict, dataclass\nfrom typing import Any, Mapping\n''',
-    '''from dataclasses import asdict, dataclass\nimport time\nfrom typing import Any, Mapping\n''',
+    '''import time\nfrom dataclasses import asdict, dataclass\nfrom typing import Any, Mapping\n''',
     label="quote readiness time import",
 )
 text = replace_once(
     text,
+    '''    quote_timestamp_quality_allows_hard_readiness,\n    resolve_quote_bid_ask_spread,\n    resolve_quote_age_seconds,\n''',
+    '''    quote_timestamp_quality_allows_hard_readiness,\n    resolve_quote_age_seconds,\n    resolve_quote_bid_ask_spread,\n''',
+    label="quote readiness import ordering",
+)
+text = replace_once(
+    text,
     '''def resolve_tick_age_ms(payload: Mapping[str, Any] | object | None) -> float | None:\n    age_s = resolve_quote_age_seconds(payload)\n    return None if age_s is None else age_s * 1000.0\n''',
-    '''def resolve_tick_age_ms(payload: Mapping[str, Any] | object | None) -> float | None:\n    timestamp_ms = _float(payload, \"last_tick_ts_ms\", \"timestamp_ms\")\n    if timestamp_ms is not None and timestamp_ms > 10_000_000_000:\n        return max(0.0, time.time() * 1000.0 - timestamp_ms)\n    age_s = resolve_quote_age_seconds(payload)\n    return None if age_s is None else age_s * 1000.0\n''',
-    label="real timestamp precedence over cached quote age",
+    '''def resolve_tick_age_ms(payload: Mapping[str, Any] | object | None) -> float | None:\n    timestamp_ms = _float(payload, \"last_tick_ts_ms\")\n    if timestamp_ms is not None and timestamp_ms > 10_000_000_000:\n        return max(0.0, time.time() * 1000.0 - timestamp_ms)\n    age_s = resolve_quote_age_seconds(payload)\n    return None if age_s is None else age_s * 1000.0\n''',
+    label="live receipt timestamp precedence over cached quote age",
 )
 write(path, text)
