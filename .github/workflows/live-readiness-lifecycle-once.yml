@@ -105,6 +105,7 @@ jobs:
           python - <<'PY'
           import subprocess
 
+          base = 'e6ff19f190af62f0482de1ab515495aead224e69'
           allowed = {
               'src/nifty_scalper_bot/core/app.py',
               'src/nifty_scalper_bot/main.py',
@@ -117,7 +118,7 @@ jobs:
           }
           changed = set(
               subprocess.check_output(
-                  ['git', 'diff', '--name-only', 'origin/main'], text=True
+                  ['git', 'diff', '--name-only', base], text=True
               ).splitlines()
           )
           unexpected = sorted(changed - allowed)
