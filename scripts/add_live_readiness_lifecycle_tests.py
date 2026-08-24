@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# Temporary one-shot TDD patch input; removed by the validation workflow.
 ROOT = Path.cwd()
 
 
