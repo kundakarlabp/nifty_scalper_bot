@@ -1,9 +1,9 @@
 name: Live Readiness Lifecycle Once
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/live-readiness-lifecycle-20260824
+      - ci/live-readiness-validation-base-20260824
 
 permissions:
   contents: write
