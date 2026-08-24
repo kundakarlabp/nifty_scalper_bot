@@ -99,6 +99,7 @@ def _context(asks: dict[str, float], balance: float):
         broker_balance_valid=True,
         last_valid_broker_balance=balance,
         position_reconciliation_completed=True,
+        position_reconciliation_completed_at=datetime.now(UTC),
         position_reconciliation_failed=False,
     )
     return ctx, calls

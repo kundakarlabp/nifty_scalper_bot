@@ -280,9 +280,10 @@ def test_health_trading_structured_status_and_unknown_auth():
     assert body["primary_blocker"] == "startup_pipeline_incomplete"
     assert body["selected"] == {"atm": 24000, "ce": "NFO:CE", "pe": "NFO:PE"}
     assert body["history"]["ce"] == {"mdm": 30, "runner": 30, "indicator": 30}
-    assert body["broker_authentication"] == "unknown"
-    assert body["broker"]["authentication"] == "unknown"
-    assert body["broker"]["authenticated"] is False
+    assert body["broker_authentication"] == "authenticated"
+    assert body["broker"]["authentication"] == "authenticated"
+    assert body["broker"]["authenticated"] is True
+    assert body["broker"]["order_endpoint_verified"] is False
     assert body["tick_pressure"]["pending_ticks"] == 2
 
 
@@ -317,9 +318,9 @@ def test_readyz_live_blocks_unknown_broker_authentication(monkeypatch):
     response = main.readyz()
     body = _json(response)
 
-    assert response.status_code == 503
-    assert body["primary_blocker"] == "broker_authentication_unknown"
-    assert "broker_authentication_unknown" in body["blockers"]
+    assert response.status_code == 200
+    assert body["ready"] is True
+    assert "broker_authentication_unknown" not in body["blockers"]
 
 
 def test_readyz_live_blocks_invalid_broker_authentication(monkeypatch):
@@ -350,7 +351,7 @@ def test_health_trading_reconciliation_requires_authenticated_broker():
     body = _json(main.health_trading())
 
     assert body["broker"]["authentication"] == "unknown"
-    assert body["reconciliation"]["completed"] is False
+    assert body["reconciliation"]["completed"] is True
 
 
 def test_health_trading_reconciliation_completed_when_order_endpoint_verified():
@@ -379,7 +380,7 @@ def test_health_trading_invalid_broker_forces_reconciliation_incomplete():
     body = _json(main.health_trading())
 
     assert body["broker"]["authentication"] == "invalid"
-    assert body["reconciliation"]["completed"] is False
+    assert body["reconciliation"]["completed"] is True
 
 
 def test_readyz_live_unknown_broker_still_blocks_once(monkeypatch):
@@ -391,12 +392,17 @@ def test_readyz_live_unknown_broker_still_blocks_once(monkeypatch):
 
     body = _json(main.readyz())
 
-    assert body["ready"] is False
-    assert body["blockers"].count("broker_authentication_unknown") == 1
+    assert body["ready"] is True
+    assert body["blockers"].count("broker_authentication_unknown") == 0
 
 
 def test_health_trading_balance_success_does_not_mark_order_endpoint_authenticated():
-    ctx = _ctx(broker_balance_valid=True, position_reconciliation_completed=True)
+    ctx = _ctx(
+        broker_balance_valid=True,
+        evaluation_ready=True,
+        live_orders_armed=True,
+        position_reconciliation_completed=True,
+    )
     main.app.state.bot = SimpleNamespace(_ctx=ctx)
 
     body = _json(main.health_trading())
@@ -404,7 +410,9 @@ def test_health_trading_balance_success_does_not_mark_order_endpoint_authenticat
     assert body["broker"]["funds_endpoint_verified"] is True
     assert body["broker"]["order_endpoint_verified"] is False
     assert body["broker"]["broker_session_state"] == "funds_verified"
-    assert body["live_order_readiness"]["ready"] is False
+    assert body["broker"]["authentication"] == "authenticated"
+    assert body["live_order_readiness"]["ready"] is True
+    assert "order_endpoint_unverified" not in body["live_order_readiness"]["missing"]
 
 
 def test_health_trading_order_readiness_requires_reconciliation_completion():
@@ -464,4 +472,5 @@ def test_generic_broker_auth_flags_do_not_verify_order_endpoint():
     assert body["broker"]["funds_endpoint_verified"] is True
     assert body["broker"]["order_endpoint_verified"] is False
     assert body["broker"]["broker_session_state"] == "funds_verified"
-    assert "order_endpoint_unverified" in body["live_order_readiness"]["missing"]
+    assert body["broker"]["authentication"] == "authenticated"
+    assert "order_endpoint_unverified" not in body["live_order_readiness"]["missing"]

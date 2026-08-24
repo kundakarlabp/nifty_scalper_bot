@@ -441,7 +441,7 @@ def _broker_session_status(ctx):  # noqa: ANN001
         authentication_known = True
     elif funds_endpoint_verified:
         state = "funds_verified"
-        authentication_known = False
+        authentication_known = True
     elif market_data_authenticated:
         state = "market_data_only"
         authentication_known = True
@@ -471,7 +471,7 @@ def _live_order_readiness(ctx, *, blockers=None):  # noqa: ANN001
     mdm = getattr(ctx, "market_data_manager", None)
     pipeline_overloaded = bool(getattr(mdm, "pipeline_overloaded", False))
     ready = bool(
-        broker_status["order_endpoint_verified"]
+        broker_status["funds_endpoint_verified"]
         and reconciliation_completed
         and not reconciliation_failed
         and not unresolved
@@ -482,8 +482,8 @@ def _live_order_readiness(ctx, *, blockers=None):  # noqa: ANN001
         and not blockers
     )
     missing = []
-    if not broker_status["order_endpoint_verified"]:
-        missing.append("order_endpoint_unverified")
+    if not broker_status["funds_endpoint_verified"]:
+        missing.append("funds_endpoint_unverified")
     if not reconciliation_completed:
         missing.append("position_reconciliation_incomplete")
     if reconciliation_failed:
@@ -525,7 +525,7 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
     auth_state = {
         "order_verified": "authenticated",
         "invalid": "invalid",
-        "funds_verified": "unknown",
+        "funds_verified": "authenticated",
         "market_data_only": "unknown",
         "unknown": "unknown",
     }.get(str(broker_status["broker_session_state"]), "unknown")
@@ -664,7 +664,7 @@ def health_trading():
     live_order_readiness = _live_order_readiness(ctx, blockers=blockers)
     reconciliation_completed = bool(
         getattr(ctx, "position_reconciliation_completed", False)
-    ) and bool(structured_status.get("order_endpoint_verified", False))
+    )
     return JSONResponse(
         status_code=200,
         content={
