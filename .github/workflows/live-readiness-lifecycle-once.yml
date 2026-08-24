@@ -52,7 +52,8 @@ jobs:
       - name: Apply targeted source fixes
         run: |
           python scripts/apply_live_readiness_lifecycle_fix.py
-          python -m py_compile scripts/apply_live_readiness_lifecycle_fix.py
+          python scripts/narrow_quote_timestamp_precedence.py
+          python -m py_compile scripts/apply_live_readiness_lifecycle_fix.py scripts/narrow_quote_timestamp_precedence.py
       - name: Format scoped Python files
         run: |
           python -m black \
@@ -102,6 +103,7 @@ jobs:
           rm -f scripts/add_live_readiness_lifecycle_tests.py
           rm -f scripts/adjust_live_readiness_test_fixture.py
           rm -f scripts/apply_live_readiness_lifecycle_fix.py
+          rm -f scripts/narrow_quote_timestamp_precedence.py
           rm -f .github/workflows/live-readiness-lifecycle-once.yml
       - name: Verify final diff scope
         run: |
