@@ -69,6 +69,8 @@ jobs:
       - name: Adjacent execution and readiness regressions
         run: |
           python -m pytest -q \
+            tests/core/test_minimum_lot_affordability_readiness.py \
+            tests/test_market_open_rearm_loop.py \
             tests/execution/test_readiness_execution_safety_blockers.py \
             tests/execution/test_live_readiness_blocker_recovery.py \
             tests/strategies/test_orderflow_quote_age_contract.py \
@@ -110,6 +112,8 @@ jobs:
               'tests/core/test_reconcile_readiness_lifecycle.py',
               'tests/execution/test_quote_readiness.py',
               'tests/test_main_health_readiness.py',
+              'tests/core/test_minimum_lot_affordability_readiness.py',
+              'tests/test_market_open_rearm_loop.py',
           }
           changed = set(
               subprocess.check_output(
