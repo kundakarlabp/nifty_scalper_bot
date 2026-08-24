@@ -191,3 +191,17 @@ def test_max_quote_age_seconds_invalid_non_empty_uses_default(monkeypatch):
         )
         == 60.0
     )
+
+
+def test_tick_age_prefers_real_quote_timestamp_over_stale_cached_age(monkeypatch):
+    import nifty_scalper_bot.execution.quote_readiness as quote_readiness
+
+    monkeypatch.setattr(quote_readiness.time, "time", lambda: 1_800_000_000.0)
+    age_ms = resolve_tick_age_ms(
+        {
+            "tick_age_ms": 2_287_265.0,
+            "last_tick_ts_ms": 1_799_999_999_500.0,
+        }
+    )
+
+    assert age_ms == 500.0

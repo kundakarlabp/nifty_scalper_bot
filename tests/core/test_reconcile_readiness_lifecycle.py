@@ -139,3 +139,37 @@ def test_health_loop_is_not_a_second_reconciliation_scheduler() -> None:
 
     assert "_reconcile_state" not in health_loop_source
     assert 'await _reconcile_state(ctx, source="periodic_health")' in app_source
+
+
+def test_runtime_reconciliation_freshness_contract_is_authoritative(
+    monkeypatch,
+) -> None:
+    import inspect
+
+    from nifty_scalper_bot.core import app as app_module
+
+    monkeypatch.setenv("POSITION_RECONCILE_MAX_AGE_SECONDS", "60")
+    fresh = _Ctx(
+        completed=True,
+        completed_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+    stale = _Ctx(
+        completed=True,
+        completed_at=datetime.now(timezone.utc) - timedelta(seconds=300),
+    )
+
+    assert app_module._reconciliation_is_fresh(fresh) is True
+    assert app_module._reconciliation_is_fresh(stale) is False
+
+    checker = app_module.RuntimeSelfChecker(stale)
+    ok, detail, meta = checker._check_position_reconciliation()
+    assert ok is False
+    assert detail == "position_reconciliation_stale"
+    assert meta["blocker"] == "position_reconciliation_stale"
+
+    rearm_source = inspect.getsource(app_module._live_readiness_rearm_loop)
+    recompute_source = inspect.getsource(
+        app_module._recompute_and_push_runtime_readiness
+    )
+    assert "_reconciliation_is_fresh(ctx)" in rearm_source
+    assert "position_reconciliation_stale" in recompute_source

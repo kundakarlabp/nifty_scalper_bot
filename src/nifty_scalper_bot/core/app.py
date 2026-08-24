@@ -2663,6 +2663,25 @@ def _reconciliation_max_age_seconds() -> float:
     return max(0.0, value)
 
 
+def _reconciliation_is_fresh(ctx: Any) -> bool:
+    """Return whether the last successful broker reconciliation is still valid."""
+    if not hasattr(ctx, "position_reconciliation_completed"):
+        return True
+    if not bool(getattr(ctx, "position_reconciliation_completed", False)):
+        return False
+    max_age_s = _reconciliation_max_age_seconds()
+    if max_age_s <= 0:
+        return True
+    completed_at = getattr(ctx, "position_reconciliation_completed_at", None)
+    if completed_at is None:
+        return False
+    try:
+        age_s = (datetime.now(timezone.utc) - completed_at).total_seconds()
+    except Exception:  # noqa: BLE001 - malformed lifecycle state fails closed
+        return False
+    return age_s <= max_age_s
+
+
 def get_http_app() -> FastAPI:
     """Return the FastAPI application exposing inbound Telegram webhook."""
     global _HTTP_APP, _HTTP_NOTIFIER, _HTTP_CONTROLLER
@@ -2834,24 +2853,8 @@ def get_http_app() -> FastAPI:
             blockers.append("position_reconciliation_failed")
         if not bool(getattr(ctx, "position_reconciliation_completed", False)):
             blockers.append("position_reconciliation_incomplete")
-        else:
-            # `completed` now survives an in-flight refresh (last-known-good),
-            # so it must be age-bounded: a permanently stuck or failing
-            # reconciler must not leave execution armed indefinitely.
-            _completed_at = getattr(ctx, "position_reconciliation_completed_at", None)
-            _max_age_s = _reconciliation_max_age_seconds()
-            if _max_age_s > 0:
-                if _completed_at is None:
-                    blockers.append("position_reconciliation_stale")
-                else:
-                    try:
-                        _age = (
-                            datetime.now(timezone.utc) - _completed_at
-                        ).total_seconds()
-                    except Exception:  # noqa: BLE001 - fail closed on bad state
-                        _age = None
-                    if _age is None or _age > _max_age_s:
-                        blockers.append("position_reconciliation_stale")
+        elif not _reconciliation_is_fresh(ctx):
+            blockers.append("position_reconciliation_stale")
         if bool(getattr(ctx, "unprotected_broker_positions", set())) or bool(
             getattr(ctx, "unprotected_broker_position", False)
         ):
@@ -3472,6 +3475,12 @@ class RuntimeSelfChecker:
                 False,
                 "position_reconciliation_incomplete",
                 {"blocker": "position_reconciliation_incomplete"},
+            )
+        if not _reconciliation_is_fresh(self._context):
+            return (
+                False,
+                "position_reconciliation_stale",
+                {"blocker": "position_reconciliation_stale"},
             )
         if bool(getattr(self._context, "unprotected_broker_positions", set())):
             return (
@@ -8611,6 +8620,7 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                 and not bool(getattr(mdm, "pipeline_overloaded", False))
                 and _runner_is_running(getattr(ctx, "strategy_runner", None))
                 and not bool(getattr(ctx, "position_reconciliation_failed", False))
+                and _reconciliation_is_fresh(ctx)
                 and not bool(getattr(ctx, "broker_auth_invalid", False))
                 and not bool(getattr(ctx, "broker_session_invalid", False))
                 and not bool(getattr(ctx, "emergency_stop_active", False))
@@ -9948,6 +9958,12 @@ async def _recompute_and_push_runtime_readiness(
             and not bool(getattr(ctx, "position_reconciliation_completed", False))
         ):
             missing.append("position_reconciliation_incomplete")
+        elif (
+            live_mode
+            and hasattr(ctx, "position_reconciliation_completed")
+            and not _reconciliation_is_fresh(ctx)
+        ):
+            missing.append("position_reconciliation_stale")
         bracket_manager = getattr(ctx, "bracket_manager", None)
         has_unresolved_exit = getattr(bracket_manager, "has_unresolved_exit", None)
         if callable(has_unresolved_exit) and bool(has_unresolved_exit()):
@@ -9988,7 +10004,7 @@ async def _recompute_and_push_runtime_readiness(
         )
         and (
             not hasattr(ctx, "position_reconciliation_completed")
-            or bool(getattr(ctx, "position_reconciliation_completed", False))
+            or _reconciliation_is_fresh(ctx)
         ),
     )
     live_orders_armed = bool(live_mode and normalized_decision.live_orders_armed)

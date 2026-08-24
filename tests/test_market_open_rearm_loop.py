@@ -152,6 +152,7 @@ async def test_live_rearm_skips_unchanged_healthy_full_recompute(
         trading_ready=True,
         broker_balance_valid=True,
         position_reconciliation_completed=True,
+        position_reconciliation_completed_at=app.datetime.now(app.timezone.utc),
         position_reconciliation_failed=False,
         active_contract_basket={
             "spot_symbol": symbols[0],
