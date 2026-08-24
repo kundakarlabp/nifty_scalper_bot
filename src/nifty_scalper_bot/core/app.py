@@ -3344,6 +3344,27 @@ class PersistentHeartbeatFlusher:
         )
 
 
+def _self_check_evidence(meta: Mapping[str, Any]) -> str:
+    """Summarise per-symbol freshness evidence for the failure log line.
+
+    The structured ``meta`` already carries it, but operators read the plain
+    message, so a failed check must name the symbols and ages it judged.
+    """
+    detail = meta.get("critical_detail")
+    if not isinstance(detail, list) or not detail:
+        return "-"
+    parts: list[str] = []
+    for item in detail:
+        if not isinstance(item, Mapping):
+            continue
+        state = "fresh" if item.get("fresh") else "stale"
+        parts.append(
+            f"{item.get('symbol')}:{state}"
+            f"@{item.get('effective_ms')}/{item.get('threshold_ms')}ms"
+        )
+    return ",".join(parts) or "-"
+
+
 class RuntimeSelfChecker:
     """Run runtime self-tests to detect silent subsystem failures."""
 
@@ -3402,16 +3423,19 @@ class RuntimeSelfChecker:
             meta_payload.setdefault("check", name)
             results[name] = {"ok": bool(ok), "detail": detail, "meta": meta_payload}
             if not ok:
+                evidence = _self_check_evidence(meta_payload)
                 self._logger.error(
-                    "RUNTIME_SELF_CHECK_FAILED check=%s detail=%s blocker=%s action=keep_execution_fail_closed",
+                    "RUNTIME_SELF_CHECK_FAILED check=%s detail=%s blocker=%s evidence=%s action=keep_execution_fail_closed",
                     name,
                     detail,
                     meta_payload.get("blocker") or detail,
+                    evidence,
                     extra={
                         "event": "RUNTIME_SELF_CHECK_FAILED",
                         "check": name,
                         "detail": detail,
                         "meta": meta_payload,
+                        "evidence": evidence,
                         "blocker": meta_payload.get("blocker") or detail,
                     },
                 )
@@ -3597,8 +3621,23 @@ class RuntimeSelfChecker:
                 for item in per_symbol
                 if canonical(str(item[0])) in selected_critical
             ] or per_symbol
-            all_critical_stale = not any(item[1] for item in critical)
-            if hard_ready and symbols and stale and not all_critical_stale:
+            fresh_critical = [item for item in critical if item[1]]
+            all_critical_stale = not fresh_critical
+            critical_detail: list[dict[str, object]] = [
+                {
+                    "symbol": canonical(str(item[0])),
+                    "fresh": bool(item[1]),
+                    "threshold_ms": item[3],
+                    "effective_ms": item[2].get("effective_ms"),
+                    "reason": item[2].get("reason"),
+                }
+                for item in critical
+            ]
+            # Partial staleness is tolerated whenever any critical symbol is
+            # still fresh.  This deliberately no longer depends on MDM
+            # hard_ready: an illiquid far strike that has simply not printed
+            # must never be able to pause strategy evaluation.
+            if symbols and stale and not all_critical_stale:
                 return (
                     True,
                     "partial_stale_ignored",
@@ -3607,10 +3646,18 @@ class RuntimeSelfChecker:
                         "stale_symbols": len(stale),
                         "live_symbols": len(symbols),
                         "critical_symbols": len(critical),
+                        "hard_ready": hard_ready,
+                        "critical_detail": critical_detail,
                     },
                 )
 
-            symbol, ok, meta, symbol_threshold_ms = fresh[0] if fresh else per_symbol[0]
+            # The verdict must describe the symbols execution actually arms on.
+            # Taking fresh[0] across every tracked symbol let an unrelated fresh
+            # strike report the whole feed healthy while spot and both selected
+            # contracts were stale.
+            symbol, ok, meta, symbol_threshold_ms = (
+                fresh_critical[0] if fresh_critical else critical[0]
+            )
 
             if hasattr(hub, "is_fresh"):
                 try:
@@ -3633,6 +3680,7 @@ class RuntimeSelfChecker:
                     payload = cast(dict[str, object], dict(meta or {}))
                     payload["symbol_checked"] = canonical(symbol)
                     payload["adaptive_ms"] = symbol_threshold_ms
+                    payload["critical_detail"] = critical_detail
                     self._logger.info(
                         "Condition met: runtime_self_check_data_freshness",
                         extra={
@@ -3678,6 +3726,7 @@ class RuntimeSelfChecker:
             payload = cast(dict[str, object], dict(meta or {}))
             payload["symbol_checked"] = canonical(symbol)
             payload["adaptive_ms"] = adaptive_ms
+            payload["critical_detail"] = critical_detail
 
             self._logger.info(
                 "Condition met: runtime_self_check_data_freshness",
