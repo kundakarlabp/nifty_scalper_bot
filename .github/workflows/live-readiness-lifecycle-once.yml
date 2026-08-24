@@ -32,7 +32,8 @@ jobs:
       - name: Add regression tests first
         run: |
           python scripts/add_live_readiness_lifecycle_tests.py
-          python -m py_compile scripts/add_live_readiness_lifecycle_tests.py
+          python scripts/adjust_live_readiness_test_fixture.py
+          python -m py_compile scripts/add_live_readiness_lifecycle_tests.py scripts/adjust_live_readiness_test_fixture.py
       - name: Prove regression tests fail before fix
         run: |
           set +e
@@ -99,6 +100,7 @@ jobs:
           git checkout -- positions.json 2>/dev/null || true
           rm -rf .pytest-data-dir .pytest_cache
           rm -f scripts/add_live_readiness_lifecycle_tests.py
+          rm -f scripts/adjust_live_readiness_test_fixture.py
           rm -f scripts/apply_live_readiness_lifecycle_fix.py
           rm -f .github/workflows/live-readiness-lifecycle-once.yml
       - name: Verify final diff scope
