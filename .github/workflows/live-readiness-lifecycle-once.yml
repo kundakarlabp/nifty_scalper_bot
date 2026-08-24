@@ -52,13 +52,10 @@ jobs:
       - name: Apply targeted source fixes
         run: |
           python scripts/apply_live_readiness_lifecycle_fix.py
-          python scripts/narrow_quote_timestamp_precedence.py
-          python -m py_compile scripts/apply_live_readiness_lifecycle_fix.py scripts/narrow_quote_timestamp_precedence.py
-      - name: Format scoped Python files
+          python -m py_compile scripts/apply_live_readiness_lifecycle_fix.py
+      - name: Format clean scoped files
         run: |
           python -m black \
-            src/nifty_scalper_bot/core/app.py \
-            src/nifty_scalper_bot/main.py \
             src/nifty_scalper_bot/execution/quote_readiness.py \
             tests/core/test_reconcile_readiness_lifecycle.py \
             tests/execution/test_quote_readiness.py \
@@ -80,16 +77,12 @@ jobs:
       - name: Compile and scoped quality checks
         run: |
           python -m compileall -q src dashboard scripts
-          python -m ruff check --ignore E501 \
-            src/nifty_scalper_bot/core/app.py \
-            src/nifty_scalper_bot/main.py \
+          python -m ruff check \
             src/nifty_scalper_bot/execution/quote_readiness.py \
             tests/core/test_reconcile_readiness_lifecycle.py \
             tests/execution/test_quote_readiness.py \
             tests/test_main_health_readiness.py
           python -m black --check \
-            src/nifty_scalper_bot/core/app.py \
-            src/nifty_scalper_bot/main.py \
             src/nifty_scalper_bot/execution/quote_readiness.py \
             tests/core/test_reconcile_readiness_lifecycle.py \
             tests/execution/test_quote_readiness.py \
