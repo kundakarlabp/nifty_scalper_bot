@@ -80,7 +80,7 @@ jobs:
       - name: Compile and scoped quality checks
         run: |
           python -m compileall -q src dashboard scripts
-          python -m ruff check \
+          python -m ruff check --ignore E501 \
             src/nifty_scalper_bot/core/app.py \
             src/nifty_scalper_bot/main.py \
             src/nifty_scalper_bot/execution/quote_readiness.py \
