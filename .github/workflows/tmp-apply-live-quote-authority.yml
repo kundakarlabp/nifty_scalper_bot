@@ -1,0 +1,57 @@
+name: Temporary Apply Live Quote Authority
+
+on:
+  push:
+    branches:
+      - fix/live-trading-delivery-20260825
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-prove:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/live-trading-delivery-20260825
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Apply exact ownership correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/data/data_hub.py')
+          text = path.read_text()
+          old = '''    def get_quote(self, symbol: str, allow_pull: bool = True) -> Optional[Tick]:\n        lookup = self._canonical_quote_symbol(symbol)\n        with self._lock:\n'''
+          new = '''    def get_quote(self, symbol: str, allow_pull: bool = True) -> Optional[Tick]:\n        lookup = self._canonical_quote_symbol(symbol)\n        # MarketDataManager is the canonical live-quote owner. DataHub is a\n        # facade/cache and must not let an older local snapshot mask the MDM\n        # tick used by canonical readiness and execution. Keep numeric-token\n        # compatibility on the existing local lookup path.\n        raw_symbol = str(symbol).strip()\n        if not raw_symbol.isdigit():\n            mdm_get = getattr(self._mdm, "get_latest_tick", None)\n            if callable(mdm_get):\n                try:\n                    mdm_tick = mdm_get(lookup)\n                except Exception as exc:  # noqa: BLE001 - cache read fallback\n                    LOGGER.debug("get_latest_tick delegate failed for %s: %s", lookup, exc)\n                else:\n                    if isinstance(mdm_tick, Mapping) and mdm_tick:\n                        return self._stamp_quote_identity(symbol, mdm_tick)\n        with self._lock:\n'''
+          if old not in text:
+              raise SystemExit('expected get_quote anchor not found')
+          updated = text.replace(old, new, 1)
+          path.write_text(updated)
+          PY
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Prove focused live-path regressions
+        run: |
+          python -m pytest -q \
+            tests/data/test_datahub_freshness_authority.py \
+            tests/data/test_datahub_single_tick_ingress.py \
+            tests/core/test_history_readiness_cached_quote_priority.py \
+            tests/core/test_runtime_self_checker_freshness.py
+          python -m compileall -q src
+          git diff --check
+      - name: Commit source-only patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/nifty_scalper_bot/data/data_hub.py
+          git commit -m 'fix(data): prefer canonical MDM live quote in DataHub facade'
+          git push origin HEAD:fix/live-trading-delivery-20260825
