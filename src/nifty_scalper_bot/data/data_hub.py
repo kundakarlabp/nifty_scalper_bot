@@ -1370,6 +1370,21 @@ class DataHub:
 
     def get_quote(self, symbol: str, allow_pull: bool = True) -> Optional[Tick]:
         lookup = self._canonical_quote_symbol(symbol)
+        # MarketDataManager is the canonical live-quote owner. DataHub is a
+        # facade/cache and must not let an older local snapshot mask the MDM
+        # tick used by canonical readiness and execution. Keep numeric-token
+        # compatibility on the existing local lookup path.
+        raw_symbol = str(symbol).strip()
+        if not raw_symbol.isdigit():
+            mdm_get = getattr(self._mdm, "get_latest_tick", None)
+            if callable(mdm_get):
+                try:
+                    mdm_tick = mdm_get(lookup)
+                except Exception as exc:  # noqa: BLE001 - cache read fallback
+                    LOGGER.debug("get_latest_tick delegate failed for %s: %s", lookup, exc)
+                else:
+                    if isinstance(mdm_tick, Mapping) and mdm_tick:
+                        return self._stamp_quote_identity(symbol, mdm_tick)
         with self._lock:
             if str(symbol).strip().isdigit():
                 tok = int(str(symbol).strip())
