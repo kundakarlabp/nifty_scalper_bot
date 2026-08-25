@@ -1,0 +1,56 @@
+name: Temporary Apply Reconcile Market State
+
+on:
+  push:
+    branches:
+      - fix/reconcile-market-state-20260825
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-prove:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/reconcile-market-state-20260825
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Apply exact reconciliation self-check correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/core/app.py')
+          text = path.read_text()
+          old = '''    def _check_position_reconciliation(self) -> tuple[bool, str, dict[str, object]]:\n        if bool(getattr(self._context, "position_reconciliation_failed", False)):\n            return (\n                False,\n                "position_reconciliation_failed",\n                {"blocker": "position_reconciliation_failed"},\n            )\n        if not bool(getattr(self._context, "position_reconciliation_completed", False)):\n            return (\n                False,\n                "position_reconciliation_incomplete",\n                {"blocker": "position_reconciliation_incomplete"},\n            )\n        if not _reconciliation_is_fresh(self._context):\n            return (\n                False,\n                "position_reconciliation_stale",\n                {"blocker": "position_reconciliation_stale"},\n            )\n        if bool(getattr(self._context, "unprotected_broker_positions", set())):\n            return (\n                False,\n                "unprotected_broker_position",\n                {"blocker": "unprotected_broker_position"},\n            )\n        return True, "position_reconciliation_ready", {}\n'''
+          new = '''    def _check_position_reconciliation(self) -> tuple[bool, str, dict[str, object]]:\n        if bool(getattr(self._context, "position_reconciliation_failed", False)):\n            return (\n                False,\n                "position_reconciliation_failed",\n                {"blocker": "position_reconciliation_failed"},\n            )\n        if not bool(getattr(self._context, "position_reconciliation_completed", False)):\n            return (\n                False,\n                "position_reconciliation_incomplete",\n                {"blocker": "position_reconciliation_incomplete"},\n            )\n        if bool(getattr(self._context, "unprotected_broker_positions", set())) or bool(\n            getattr(self._context, "unprotected_broker_position", False)\n        ):\n            return (\n                False,\n                "unprotected_broker_position",\n                {"blocker": "unprotected_broker_position"},\n            )\n        if bool(getattr(self._context, "unresolved_reconciliation_symbols", set())):\n            return (\n                False,\n                "position_reconciliation_unresolved",\n                {"blocker": "position_reconciliation_unresolved"},\n            )\n\n        market_state = get_market_state()\n        if market_state != MarketState.OPEN:\n            position_manager = getattr(self._context, "position_manager", None)\n            get_open_positions = getattr(position_manager, "get_open_positions", None)\n            if callable(get_open_positions):\n                try:\n                    open_positions = list(get_open_positions())\n                except Exception:\n                    open_positions = None\n                if open_positions == []:\n                    return (\n                        True,\n                        "position_reconciliation_age_suspended_market_closed",\n                        {\n                            "market_state": market_state.value,\n                            "age_check_suspended": True,\n                        },\n                    )\n\n        if not _reconciliation_is_fresh(self._context):\n            return (\n                False,\n                "position_reconciliation_stale",\n                {"blocker": "position_reconciliation_stale"},\n            )\n        return True, "position_reconciliation_ready", {}\n'''
+          if old not in text:
+              raise SystemExit('expected reconciliation self-check anchor not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Prove focused lifecycle regressions
+        run: |
+          python -m pytest -q \
+            tests/core/test_reconcile_market_state_semantics.py \
+            tests/core/test_reconcile_readiness_lifecycle.py \
+            tests/core/test_should_reconcile_now.py \
+            tests/core/test_self_test_escalation.py
+          python -m compileall -q src
+          git diff --check
+      - name: Commit source-only patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/nifty_scalper_bot/core/app.py
+          git commit -m 'fix(runtime): suspend reconcile age only when closed and provably flat'
+          git push origin HEAD:fix/reconcile-market-state-20260825
