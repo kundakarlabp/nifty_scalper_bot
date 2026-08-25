@@ -2648,6 +2648,34 @@ def _telegram_requires_http_controller(settings: Settings) -> bool:
 
 
 
+def _log_reconciliation_task_exit(task: "asyncio.Task[Any]") -> None:
+    """Report an unexpected end of the periodic reconciliation loop.
+
+    Shutdown cancellation is expected and stays quiet. Any other exit means
+    reconciliation has stopped refreshing, which disarms execution once the age
+    contract lapses, so it must not be silent.
+    """
+    if task.cancelled():
+        LOGGER.info(
+            "POSITION_RECONCILE_LOOP_CANCELLED",
+            extra={"event": "POSITION_RECONCILE_LOOP_CANCELLED"},
+        )
+        return
+    exc = task.exception()
+    LOGGER.error(
+        "POSITION_RECONCILE_LOOP_EXITED error_type=%s error_message=%s",
+        type(exc).__name__ if exc else None,
+        str(exc) if exc else None,
+        extra={
+            "event": "POSITION_RECONCILE_LOOP_EXITED",
+            "blocker": "position_reconciliation_loop_stopped",
+            "error_type": type(exc).__name__ if exc else None,
+            "error_message": str(exc) if exc else None,
+        },
+        exc_info=exc,
+    )
+
+
 def _reconciliation_max_age_seconds() -> float:
     """Max age of a successful reconciliation before it is treated as stale.
 
@@ -3150,6 +3178,9 @@ class BotContext:
     position_reconciliation_error: str | None = None
     position_reconciliation_started_at: datetime | None = None
     position_reconciliation_completed_at: datetime | None = None
+    # Retained so the periodic reconciliation task is neither garbage collected
+    # nor able to die unobserved.
+    position_reconciliation_task: "asyncio.Task[Any] | None" = None
     position_reconciliation_last_run: dict[str, Any] = field(default_factory=dict)
     position_reconciliation_active_run_ids: set[str] = field(default_factory=set)
     unresolved_reconciliation_symbols: set[str] = field(default_factory=set)
@@ -14909,7 +14940,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                         _reconciliation_sleep_seconds(ctx, market_open=_imo())
                     )
 
-            asyncio.create_task(_sync_loop())
+            # Retain and supervise the reconciliation task. Fire-and-forget
+            # tasks can be garbage collected, and _sync_loop re-raises, so an
+            # unexpected death silently ends periodic reconciliation -- which
+            # then blocks arming on position_reconciliation_stale with no
+            # operator signal at all.
+            ctx.position_reconciliation_task = asyncio.create_task(_sync_loop())
+            ctx.position_reconciliation_task.add_done_callback(
+                _log_reconciliation_task_exit
+            )
             asyncio.create_task(_live_readiness_rearm_loop(ctx))
 
         except Exception as e:
@@ -15827,6 +15866,24 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                 },
             )
 
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so the handler below never
+            # sees it. Without an explicit terminal event a cancelled run
+            # leaves STARTED with no outcome, and in_progress asserting a run
+            # that no longer exists. Do not mark failed: cancellation is not a
+            # broker fault, and completed_at is deliberately not advanced, so
+            # the existing age contract still fails closed.
+            LOGGER.warning(
+                "POSITION_RECONCILE_CANCELLED run_id=%s source=%s",
+                reconcile_run_id,
+                source,
+                extra={
+                    "event": "POSITION_RECONCILE_CANCELLED",
+                    "reconcile_run_id": reconcile_run_id,
+                    "source": source,
+                },
+            )
+            raise
         except Exception as exc:
             # Leave position_reconciliation_completed untouched: the explicit
             # `failed` flag below is what blocks execution, and it is checked
@@ -15852,16 +15909,33 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                 exc_info=True,
             )
         finally:
-            # The single-flight slot must be released on every exit, including
-            # asyncio.CancelledError, which is a BaseException and so bypasses
-            # the handler above. A leaked slot coalesces every later run
-            # forever, freezing position_reconciliation_completed_at and
-            # eventually blocking arming on position_reconciliation_stale.
+            # Every exit must release the single-flight slot and retract the
+            # in-progress claim, including asyncio.CancelledError, which is a
+            # BaseException and so bypasses the handlers above. A leaked slot
+            # coalesces every later run forever, freezing
+            # position_reconciliation_completed_at and eventually blocking
+            # arming on position_reconciliation_stale.
+            ctx.position_reconciliation_in_progress = False
             active_run_ids.discard(reconcile_run_id)
             run_record["active_run_count"] = len(active_run_ids)
     else:
-        # No position manager: the guarded body never runs, so release here.
+        # The guarded body never runs without a position manager. Terminate the
+        # claimed run explicitly instead of leaving STARTED with no outcome.
+        # completed_at is not advanced, so the age contract still fails closed.
+        ctx.position_reconciliation_in_progress = False
         active_run_ids.discard(reconcile_run_id)
+        LOGGER.warning(
+            "POSITION_RECONCILE_SKIPPED run_id=%s source=%s reason=%s",
+            reconcile_run_id,
+            source,
+            "position_manager_unavailable",
+            extra={
+                "event": "POSITION_RECONCILE_SKIPPED",
+                "reconcile_run_id": reconcile_run_id,
+                "source": source,
+                "reason": "position_manager_unavailable",
+            },
+        )
 
     _sync_data_hub_positions(getattr(ctx, "data_hub", None), ctx.position_manager)
 
@@ -16389,16 +16463,28 @@ class NiftyScalperApp:
                 current_ok = all(bool(result.get("ok")) for result in results.values())
                 previous_ok = self._last_self_check_ok
                 self._last_self_check_ok = current_ok
-                if previous_ok is not None and current_ok == previous_ok:
-                    continue
+                # Maintain the consecutive-failure counter before the
+                # edge-trigger dedup below. A steady failure used to
+                # short-circuit on `current_ok == previous_ok` and pin the
+                # count at 1, so the three-failure escalation could never fire
+                # for exactly the persistent silent failures it exists for.
                 if current_ok:
                     self._self_test_failure_count = 0
+                else:
+                    self._self_test_failure_count += 1
+                escalating = not current_ok and self._self_test_failure_count == 3
+                if (
+                    previous_ok is not None
+                    and current_ok == previous_ok
+                    and not escalating
+                ):
+                    continue
+                if current_ok:
                     LOGGER.info(
                         "Condition met: runtime self-test recovered",
                         extra={"event": "runtime_self_test_recovered"},
                     )
                     continue
-                self._self_test_failure_count += 1
                 if self._self_test_failure_count < 3:
                     LOGGER.debug(
                         "Condition met: runtime self-test transient failure",
