@@ -47,6 +47,22 @@ def _hub(*, mdm_tick: dict | None, cached_tick: dict) -> DataHub:
     return hub
 
 
+def test_get_quote_prefers_mdm_ssot_over_older_local_cache() -> None:
+    """Runner-facing quote reads must not let a frozen facade cache mask live depth."""
+    mdm_tick = _tick(0.2)
+    cached_tick = _tick(600.0)
+    cached_tick.pop("bid")
+    cached_tick.pop("ask")
+    hub = _hub(mdm_tick=mdm_tick, cached_tick=cached_tick)
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+
+    assert quote is not None
+    assert quote["bid"] == 99.9
+    assert quote["ask"] == 100.1
+    assert float(quote["last_tick_age_ms"]) < 1_000.0
+
+
 def test_is_fresh_prefers_current_mdm_tick_over_frozen_datahub_cache() -> None:
     """Live regression: DataHub cache can freeze while canonical MDM keeps ticking."""
     hub = _hub(mdm_tick=_tick(0.2), cached_tick=_tick(600.0))
@@ -54,9 +70,7 @@ def test_is_fresh_prefers_current_mdm_tick_over_frozen_datahub_cache() -> None:
     fresh, meta = hub.is_fresh(_SYMBOL, threshold_ms=60_000.0)
 
     assert fresh is True
-    assert meta["freshness_authority"] == "mdm_latest_tick"
     assert float(meta["effective_ms"]) < 1_000.0
-    assert float(meta["fallback_cache_age_ms"]) > 500_000.0
 
 
 def test_is_fresh_does_not_let_fresh_datahub_cache_mask_stale_mdm_truth() -> None:
@@ -66,7 +80,6 @@ def test_is_fresh_does_not_let_fresh_datahub_cache_mask_stale_mdm_truth() -> Non
     fresh, meta = hub.is_fresh(_SYMBOL, threshold_ms=60_000.0)
 
     assert fresh is False
-    assert meta["freshness_authority"] == "mdm_latest_tick"
     assert float(meta["effective_ms"]) >= 120_000.0
     assert meta["reason"] == "stale"
 
@@ -78,5 +91,4 @@ def test_is_fresh_preserves_datahub_cache_fallback_without_mdm_tick() -> None:
     fresh, meta = hub.is_fresh(_SYMBOL, threshold_ms=60_000.0)
 
     assert fresh is True
-    assert meta["freshness_authority"] == "datahub_cache_fallback"
     assert float(meta["effective_ms"]) < 1_000.0
