@@ -3531,17 +3531,45 @@ class RuntimeSelfChecker:
                 "position_reconciliation_incomplete",
                 {"blocker": "position_reconciliation_incomplete"},
             )
+        if bool(getattr(self._context, "unprotected_broker_positions", set())) or bool(
+            getattr(self._context, "unprotected_broker_position", False)
+        ):
+            return (
+                False,
+                "unprotected_broker_position",
+                {"blocker": "unprotected_broker_position"},
+            )
+        if bool(getattr(self._context, "unresolved_reconciliation_symbols", set())):
+            return (
+                False,
+                "position_reconciliation_unresolved",
+                {"blocker": "position_reconciliation_unresolved"},
+            )
+
+        market_state = get_market_state()
+        if market_state != MarketState.OPEN:
+            position_manager = getattr(self._context, "position_manager", None)
+            get_open_positions = getattr(position_manager, "get_open_positions", None)
+            if callable(get_open_positions):
+                try:
+                    open_positions = list(get_open_positions())
+                except Exception:
+                    open_positions = None
+                if open_positions == []:
+                    return (
+                        True,
+                        "position_reconciliation_age_suspended_market_closed",
+                        {
+                            "market_state": market_state.value,
+                            "age_check_suspended": True,
+                        },
+                    )
+
         if not _reconciliation_is_fresh(self._context):
             return (
                 False,
                 "position_reconciliation_stale",
                 {"blocker": "position_reconciliation_stale"},
-            )
-        if bool(getattr(self._context, "unprotected_broker_positions", set())):
-            return (
-                False,
-                "unprotected_broker_position",
-                {"blocker": "unprotected_broker_position"},
             )
         return True, "position_reconciliation_ready", {}
 
