@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: tdd-subscription-lifecycle-20260826
+  cancel-in-progress: true
+
 jobs:
   red-green:
     runs-on: ubuntu-latest
