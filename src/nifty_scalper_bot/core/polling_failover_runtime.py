@@ -226,6 +226,34 @@ def _resolve_market_open_callable(ctx: Any, app_module: Any | None = None) -> An
     return getattr(module, "is_market_open_now", None)
 
 
+def _selected_ws_delivery_missing(ctx: Any, mdm: Any) -> tuple[str, ...]:
+    """Return selected options lacking an active broker-WebSocket token."""
+
+    if mdm is None:
+        return ()
+    token_map = dict(getattr(ctx, "active_symbol_tokens", {}) or {})
+    mdm_token_map = dict(getattr(mdm, "_symbol_to_token", {}) or {})
+    active_tokens = set(getattr(mdm, "_subscribed_tokens", set()) or set()) | set(
+        getattr(mdm, "_active_tokens", set()) or set()
+    )
+    missing: list[str] = []
+    for raw_symbol in (
+        getattr(ctx, "selected_ce", None),
+        getattr(ctx, "selected_pe", None),
+    ):
+        symbol = str(raw_symbol or "").strip()
+        if not symbol:
+            continue
+        token = token_map.get(symbol, mdm_token_map.get(symbol))
+        try:
+            token_int = int(token) if token is not None else None
+        except (TypeError, ValueError):
+            token_int = None
+        if token_int is not None and token_int not in active_tokens:
+            missing.append(symbol)
+    return tuple(sorted(set(missing)))
+
+
 async def _polling_failover_supervisor_iteration(
     ctx: Any,
     fallback: Any,
@@ -262,6 +290,19 @@ async def _polling_failover_supervisor_iteration(
     mdm = getattr(ctx, "market_data_manager", None)
     feed_health = _safe_feed_health(mdm)
     data_age_ms = _safe_data_age_ms(mdm)
+    selected_ws_missing = _selected_ws_delivery_missing(ctx, mdm) if ws_ok else ()
+    if selected_ws_missing:
+        # A globally connected WebSocket is not sufficient when the selected
+        # contracts themselves are absent from the active broker token set.
+        # Keep REST recovery running until those exact live-entry contracts are
+        # restored to WebSocket delivery. Fresh REST/direct quotes must not
+        # masquerade as selected-option WebSocket health.
+        feed_health = dict(feed_health)
+        stale_required = set(feed_health.get("stale_required_symbols") or ())
+        stale_required.update(selected_ws_missing)
+        feed_health["stale_required_symbols"] = sorted(stale_required)
+        feed_health["required_symbol_recovery_active"] = True
+        feed_health["selected_ws_delivery_missing_symbols"] = list(selected_ws_missing)
     # Canonical live readiness is stricter than transport-arrival health.  If it
     # is fail-closed on a stale futures market event, reuse the existing required-
     # symbol recovery authority instead of allowing recent WS packet arrivals to

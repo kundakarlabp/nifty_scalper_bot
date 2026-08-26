@@ -361,3 +361,46 @@ async def test_fallback_start_exception_is_nonfatal(
 
     assert "POLLING_FALLBACK_START_FAILED" in caplog.text
     assert "start boom" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_selected_option_missing_active_ws_token_activates_poll_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "is_market_open_now", lambda: True)
+    ce = "NFO:NIFTY2690124300CE"
+    pe = "NFO:NIFTY2690124300PE"
+    mdm = SimpleNamespace(
+        trading_feed_health=MagicMock(
+            return_value={
+                "futures_fresh": True,
+                "options_fresh": True,
+                "selected_ce_age_ms": 50,
+                "selected_pe_age_ms": 60,
+            }
+        ),
+        data_age_ms=MagicMock(return_value=60),
+        _subscribed_tokens=set(),
+        _active_tokens=set(),
+        _symbol_to_token={ce: 101, pe: 102},
+    )
+    ctx = SimpleNamespace(
+        websocket_manager=SimpleNamespace(is_connected=MagicMock(return_value=True)),
+        market_data_manager=mdm,
+        selected_ce=ce,
+        selected_pe=pe,
+        active_symbol_tokens={ce: 101, pe: 102},
+    )
+    fallback = _Fallback(running=False)
+
+    await app._polling_failover_supervisor_iteration(
+        ctx,
+        fallback,
+        quote_stale_ms=120000,
+        degraded_since=0.0,
+        recovered_since=None,
+        activate_after=0.0,
+    )
+
+    fallback.set_websocket_mode.assert_called_once_with(False)
+    fallback.start.assert_called_once()
