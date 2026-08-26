@@ -2883,8 +2883,20 @@ class PositionManager:
                         )
                     continue
                 quantity = row.quantity
+                realized_field_present = "realised" in record or "realized" in record
                 realized_pnl = get_float(record, ("realised", "realized"), default=0.0)
-                if "realised" in record or "realized" in record:
+                if (
+                    quantity == 0
+                    and realized_field_present
+                    and realized_pnl == 0.0
+                    and "pnl" in record
+                ):
+                    # Zerodha can leave `realised` at zero on a fully closed MIS
+                    # row while `pnl` carries the broker's cumulative day P&L.
+                    # Open-position `pnl` includes unrealised P&L and must never
+                    # become realised authority.
+                    realized_pnl = get_float(record, ("pnl",), default=0.0)
+                if realized_field_present:
                     snapshot_realized_seen = True
                     snapshot_realized_pnl += realized_pnl
                 if quantity == 0:
