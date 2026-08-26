@@ -3384,6 +3384,12 @@ class MarketDataManager:
         except Exception:  # pragma: no cover - optional metrics
             pass
 
+    def has_subscription(self, symbol: str, callback: TickCallback) -> bool:
+        """Return whether the exact callback is registered for canonical symbol ticks."""
+        symbol = self._canonical_symbol(symbol)
+        with self._lock:
+            return callback in self._subscribers.get(symbol, set())
+
     def unsubscribe(self, symbol: str, callback: TickCallback) -> None:
         """Remove *callback* from subscribers of *symbol*."""
 

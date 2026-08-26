@@ -130,3 +130,39 @@ def test_tick_ingestion_still_caches_broker_option_metrics(monkeypatch) -> None:
     assert hub.get_iv(symbol) == 0.25
     assert hub.get_greeks(symbol) == {"delta": 0.6}
     assert hub.get_oi(symbol) == 12_345
+
+
+def test_datahub_repairs_stale_mdm_delegate_subscription() -> None:
+    """Stale DataHub bookkeeping must not sever the live MDM -> DataHub bridge."""
+    mdm = MarketDataManager(DummyBroker(), websocket=None)
+    hub = DataHub(mdm)
+    symbol = "NFO:NIFTY26AUG25000CE"
+    token = 123
+    mdm.register_symbol(symbol, token)
+
+    # Reproduce production drift: DataHub remembers a delegate subscription,
+    # while the actual MDM callback set no longer contains DataHub.ingest_tick_sync.
+    hub._mdm_subscribed_symbols.add(symbol)
+    assert hub.ingest_tick_sync not in mdm._subscribers[mdm._canonical_symbol(symbol)]
+
+    seen: list[dict[str, Any]] = []
+
+    def runner_callback(tick: dict[str, Any]) -> None:
+        seen.append(tick)
+
+    hub.subscribe_ticks(symbol, runner_callback, token=token, force_live=True)
+
+    assert hub.ingest_tick_sync in mdm._subscribers[mdm._canonical_symbol(symbol)]
+    mdm._emit_tick(
+        symbol,
+        {
+            "symbol": symbol,
+            "instrument_token": token,
+            "ltp": 101.0,
+            "bid": 100.9,
+            "ask": 101.1,
+        },
+        source="ws",
+    )
+    assert seen
+    assert seen[-1]["ltp"] == 101.0
