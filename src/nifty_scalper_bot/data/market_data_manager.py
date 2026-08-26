@@ -1185,9 +1185,14 @@ class MarketDataManager:
         canonical_latest_ts = (
             pd.Timestamp(engine_latest) if engine_latest is not None else None
         )
-        previous_latest = self._latest_projection_timestamp(previous)
+        previous_latest = self._latest_projection_timestamp(
+            previous, fingerprint=previous_fingerprint
+        )
         lag_before_seconds, lag_before_bars = self._projection_lag(
-            completed, canonical_latest_ts, previous_latest
+            completed,
+            canonical_latest_ts,
+            previous_latest,
+            completed_fingerprint=canonical_fingerprint,
         )
         divergence = bool(
             previous
@@ -1203,9 +1208,15 @@ class MarketDataManager:
             bar["source"] = source or bar.get("source") or "candle_engine"
             projected.append(bar)
 
-        refreshed_latest = self._latest_projection_timestamp(projected)
+        projected_fingerprint = canonical_fingerprint[-self._cache_len :]
+        refreshed_latest = self._latest_projection_timestamp(
+            projected, fingerprint=projected_fingerprint
+        )
         lag_after_seconds, lag_after_bars = self._projection_lag(
-            completed, canonical_latest_ts, refreshed_latest
+            completed,
+            canonical_latest_ts,
+            refreshed_latest,
+            completed_fingerprint=canonical_fingerprint,
         )
         refreshed_at = time.time()
         canonical_latest_value = (
@@ -1279,8 +1290,19 @@ class MarketDataManager:
         return [dict(row) for row in projected]
 
     def _latest_projection_timestamp(
-        self, rows: Iterable[Mapping[str, Any]]
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        fingerprint: (
+            Sequence[tuple[Any, float, float, float, float, float]] | None
+        ) = None,
     ) -> pd.Timestamp | None:
+        if fingerprint is not None:
+            latest_key = max(
+                (item[0] for item in fingerprint if item[0] is not None),
+                default=None,
+            )
+            return pd.Timestamp(latest_key) if latest_key is not None else None
         latest: pd.Timestamp | None = None
         for row in rows:
             normalized_ts = self._normalize_bar_timestamp(row)
@@ -1296,6 +1318,10 @@ class MarketDataManager:
         completed: Sequence[Mapping[str, Any]],
         canonical_latest: pd.Timestamp | None,
         projection_latest: pd.Timestamp | None,
+        *,
+        completed_fingerprint: (
+            Sequence[tuple[Any, float, float, float, float, float]] | None
+        ) = None,
     ) -> tuple[float, float]:
         if canonical_latest is None:
             return 0.0, 0.0
@@ -1304,8 +1330,15 @@ class MarketDataManager:
         lag_seconds = max(0.0, (canonical_latest - projection_latest).total_seconds())
         if lag_seconds <= 0.0:
             return 0.0, 0.0
-        bars = 0
         projection_dt = projection_latest.to_pydatetime()
+        if completed_fingerprint is not None:
+            bars = sum(
+                1
+                for item in completed_fingerprint
+                if item[0] is not None and item[0] > projection_dt
+            )
+            return lag_seconds, float(bars)
+        bars = 0
         for row in completed:
             normalized_ts = self._normalize_bar_timestamp(row)
             if normalized_ts is not None and normalized_ts[0] > projection_dt:

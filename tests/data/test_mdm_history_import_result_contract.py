@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import nifty_scalper_bot.data.market_data_manager as mdm_module
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 SYMBOL = "NSE:NIFTY"
@@ -282,3 +283,44 @@ def test_history_import_new_bar_counter_idempotent_and_rollover() -> None:
     assert same.accepted_rows == 0 and same.idempotent_rows == 1
     assert second.accepted_rows == 1
     assert second.final_cache_rows == 1
+
+
+def test_projection_refresh_reuses_precomputed_timestamp_fingerprints(monkeypatch) -> None:
+    mdm = _mdm()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    completed: list[dict] = []
+    for minute in range(101):
+        row = _bar(close=float(minute + 1))
+        row["timestamp"] = start + timedelta(minutes=minute)
+        row["high"] = float(minute + 1)
+        completed.append(row)
+
+    mdm._ohlc[SYMBOL] = deque(
+        (dict(row) for row in completed[:100]),
+        maxlen=mdm._cache_len,
+    )
+
+    class Engine:
+        def get_completed_bars(self):
+            return [dict(row) for row in completed]
+
+        def latest_finalized_minute(self):
+            return completed[-1]["timestamp"]
+
+    mdm.get_candle_engine = lambda _symbol: Engine()
+    original = mdm_module.coerce_market_timestamp
+    calls = 0
+
+    def counted(value):
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(mdm_module, "coerce_market_timestamp", counted)
+
+    refreshed = mdm._refresh_candle_projection(SYMBOL)
+
+    assert len(refreshed) == 100
+    assert refreshed[-1]["timestamp"] == completed[-1]["timestamp"]
+    assert mdm._candle_metrics["candle_projection_divergence_total"] == 0
+    assert calls <= 220
