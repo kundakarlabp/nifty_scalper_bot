@@ -1,12 +1,12 @@
 name: tmp-flat-row-pnl-tdd
 on:
   push:
-    branches: [fix/flat-row-realized-pnl-20260826]
+    branches:
+      - fix/flat-row-realized-pnl-20260826
 permissions:
   contents: write
 jobs:
   patch-and-test:
-    if: ${{ !contains(github.event.head_commit.message, '[skip flat-pnl-tdd]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,21 +32,7 @@ jobs:
 def test_flat_broker_row_uses_day_pnl_when_realised_zero(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.establish_pnl_session_baseline(0.0)
-
-    manager.synchronize_with_broker(
-        [
-            {
-                "symbol": SYMBOL,
-                "product": "MIS",
-                "quantity": 0,
-                "average_price": 0.0,
-                "last_price": 100.0,
-                "pnl": -234.0,
-                "realised": 0.0,
-            }
-        ]
-    )
-
+    manager.synchronize_with_broker([{"symbol": SYMBOL, "product": "MIS", "quantity": 0, "pnl": -234.0, "realised": 0.0}])
     snapshot = manager.pnl_reconciliation_snapshot()
     assert snapshot["broker_realized_snapshot"] == pytest.approx(-234.0)
     assert manager.get_realized_pnl() == pytest.approx(-234.0)
@@ -55,19 +41,7 @@ def test_flat_broker_row_uses_day_pnl_when_realised_zero(tmp_path) -> None:
 def test_flat_broker_row_preserves_nonzero_realised_over_day_pnl(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.establish_pnl_session_baseline(0.0)
-
-    manager.synchronize_with_broker(
-        [
-            {
-                "symbol": SYMBOL,
-                "product": "MIS",
-                "quantity": 0,
-                "pnl": -234.0,
-                "realised": -210.0,
-            }
-        ]
-    )
-
+    manager.synchronize_with_broker([{"symbol": SYMBOL, "product": "MIS", "quantity": 0, "pnl": -234.0, "realised": -210.0}])
     snapshot = manager.pnl_reconciliation_snapshot()
     assert snapshot["broker_realized_snapshot"] == pytest.approx(-210.0)
     assert manager.get_realized_pnl() == pytest.approx(-210.0)
@@ -76,21 +50,7 @@ def test_flat_broker_row_preserves_nonzero_realised_over_day_pnl(tmp_path) -> No
 def test_open_broker_row_never_promotes_day_pnl_to_realised(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.establish_pnl_session_baseline(0.0)
-
-    manager.synchronize_with_broker(
-        [
-            {
-                "symbol": SYMBOL,
-                "product": "MIS",
-                "quantity": 65,
-                "average_price": 100.0,
-                "last_price": 96.4,
-                "pnl": -234.0,
-                "realised": 0.0,
-            }
-        ]
-    )
-
+    manager.synchronize_with_broker([{"symbol": SYMBOL, "product": "MIS", "quantity": 65, "average_price": 100.0, "last_price": 96.4, "pnl": -234.0, "realised": 0.0}])
     snapshot = manager.pnl_reconciliation_snapshot()
     assert snapshot["broker_realized_snapshot"] == pytest.approx(0.0)
     assert manager.get_realized_pnl() == pytest.approx(0.0)
@@ -102,7 +62,7 @@ def test_open_broker_row_never_promotes_day_pnl_to_realised(tmp_path) -> None:
       - name: Prove regression is red before source fix
         run: |
           set +e
-          python -m pytest -q tests/execution/test_trading_incident_regressions.py -k 'flat_broker_row_uses_day_pnl_when_realised_zero'
+          python -m pytest -q tests/execution/test_trading_incident_regressions.py -k flat_broker_row_uses_day_pnl_when_realised_zero
           rc=$?
           set -e
           if [ "$rc" -eq 0 ]; then
@@ -133,8 +93,8 @@ def test_open_broker_row_never_promotes_day_pnl_to_realised(tmp_path) -> None:
                 ):
                     # Zerodha can leave `realised` at zero on a fully closed MIS
                     # row while `pnl` carries the broker's cumulative day P&L.
-                    # This fallback is flat-row only: open-position `pnl` includes
-                    # unrealised P&L and must never become realised authority.
+                    # Open-position `pnl` includes unrealised P&L and must never
+                    # become realised authority.
                     realized_pnl = get_float(record, ("pnl",), default=0.0)
                 if realized_field_present:
                     snapshot_realized_seen = True
@@ -157,6 +117,6 @@ def test_open_broker_row_never_promotes_day_pnl_to_realised(tmp_path) -> None:
           rm -f .github/workflows/tmp-flat-row-pnl-tdd.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/nifty_scalper_bot/execution/position_manager.py tests/execution/test_trading_incident_regressions.py .github/workflows/tmp-flat-row-pnl-tdd.yml
-          git commit -m 'fix(pnl): derive flat-row realised PnL from broker day PnL [skip flat-pnl-tdd]'
+          git add -A
+          git commit -m 'fix(pnl): derive flat-row realised PnL from broker day PnL'
           git push origin HEAD:fix/flat-row-realized-pnl-20260826
