@@ -119,7 +119,10 @@ def test_active_basket_drift_rebuilds_eval_whitelist_for_new_selected_pair():
     r._eval_option_whitelist = {old_ce, old_pe}
     r._active_selection_drift_log_key = None
     r._active_selection_sync_log_key = None
-    r._logger = SimpleNamespace(warning=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None)
+    r._logger = SimpleNamespace(
+        warning=lambda *args, **kwargs: None,
+        info=lambda *args, **kwargs: None,
+    )
 
     selection = ActiveContractSelection(
         selected_ce=new_ce,
