@@ -65,9 +65,7 @@ def test_unsubscribe_keeps_mdm_delegate_for_token_listener() -> None:
     hub._token_by_symbol[symbol] = token
     hub._symbol_by_token[token] = symbol
     hub._tick_subscribers[symbol].add(leaving_listener)
-    hub._tick_subscribers_by_token[token].update(
-        {leaving_listener, remaining_listener}
-    )
+    hub._tick_subscribers_by_token[token].update({leaving_listener, remaining_listener})
     hub._mdm_subscribed_symbols.add(symbol)
     mdm.subscribe(symbol, hub.ingest_tick_sync)
 
