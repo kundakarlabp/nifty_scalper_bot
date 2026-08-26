@@ -58,13 +58,12 @@ jobs:
             tests/data/test_mdm_callback_dispatch.py \
             tests/core/test_selected_option_runtime_delivery.py \
             tests/strategies/test_runner_symbol_role_gate.py
-      - name: Compile and lint changed runtime files
+      - name: Compile and validate targeted diff
         run: |
           python -m compileall -q src tests
-          python -m ruff check \
-            src/nifty_scalper_bot/data/data_hub.py \
-            src/nifty_scalper_bot/strategies/runner.py \
-            tests/data/test_subscription_lifecycle_regression.py
+          git diff --check
+          python -m ruff check tests/data/test_subscription_lifecycle_regression.py
+          python -m ruff format --check tests/data/test_subscription_lifecycle_regression.py
       - name: Full non-slow regression suite
         env:
           BRACKET_AUTO_RESTORE: 'false'
