@@ -10262,6 +10262,37 @@ async def _recompute_and_push_runtime_readiness(
         )
 
 
+async def _recompute_readiness_after_pipeline_recovery(
+    ctx: BotContext,
+    *,
+    reason: str,
+    timeout_seconds: float = 10.0,
+    poll_seconds: float = 0.1,
+) -> bool:
+    """Refresh readiness promptly after a transient tick-pipeline overload."""
+
+    mdm = getattr(ctx, "market_data_manager", None)
+    if mdm is None:
+        return False
+    deadline = time_module.monotonic() + max(0.0, timeout_seconds)
+    while bool(getattr(mdm, "pipeline_overloaded", False)):
+        remaining = deadline - time_module.monotonic()
+        if remaining <= 0:
+            LOGGER.warning(
+                "LIVE_READINESS_PIPELINE_RECOVERY_TIMEOUT timeout_s=%s",
+                timeout_seconds,
+                extra={
+                    "event": "LIVE_READINESS_PIPELINE_RECOVERY_TIMEOUT",
+                    "timeout_s": timeout_seconds,
+                },
+            )
+            return False
+        await asyncio.sleep(min(max(0.0, poll_seconds), remaining))
+    await _recompute_and_push_runtime_readiness(ctx, reason=reason)
+    LOGGER.info("LIVE_READINESS_PIPELINE_RECOVERED reason=%s", reason)
+    return True
+
+
 def _dynamic_symbol_removal_blocker(ctx: BotContext, symbol: str) -> str | None:
     """Return the execution owner that requires a symbol's live feed."""
 
@@ -13811,6 +13842,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         ctx,
                                         reason="dynamic_basket_committed",
                                     )
+                                    if "data_pipeline_overloaded" in set(
+                                        getattr(ctx, "readiness_blockers", ()) or ()
+                                    ):
+                                        await _recompute_readiness_after_pipeline_recovery(
+                                            ctx,
+                                            reason="dynamic_basket_pipeline_recovered",
+                                        )
                                 else:
                                     LOGGER.info(
                                         "LIVE_READINESS_DEFERRED reason=dynamic_basket_not_committed_yet selected_ce=%s selected_pe=%s",
