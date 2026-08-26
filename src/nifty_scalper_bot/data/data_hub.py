@@ -1447,7 +1447,21 @@ class DataHub:
                 },
             )
             return
-        if symbol in self._mdm_subscribed_symbols:
+        mdm_sub = getattr(self._mdm, "subscribe", None)
+        mdm_has_subscription = getattr(self._mdm, "has_subscription", None)
+        actual_mdm_subscription = False
+        if callable(mdm_has_subscription):
+            try:
+                actual_mdm_subscription = bool(
+                    mdm_has_subscription(symbol, self.ingest_tick_sync)
+                )
+            except Exception:
+                actual_mdm_subscription = False
+        elif symbol in self._mdm_subscribed_symbols:
+            # Compatibility for legacy MDM stubs without an identity probe.
+            actual_mdm_subscription = True
+
+        if symbol in self._mdm_subscribed_symbols and actual_mdm_subscription:
             self._set_subscription_state(
                 symbol,
                 SubscriptionState.QUEUED,
@@ -1466,7 +1480,20 @@ class DataHub:
                 },
             )
             return
-        mdm_sub = getattr(self._mdm, "subscribe", None)
+
+        if symbol in self._mdm_subscribed_symbols and not actual_mdm_subscription:
+            self._mdm_subscribed_symbols.discard(symbol)
+            LOGGER.warning(
+                "DATAHUB_MDM_SUBSCRIPTION_DRIFT_REPAIR symbol=%s action=reassert_delegate",
+                symbol,
+                extra={
+                    "event": "DATAHUB_MDM_SUBSCRIPTION_DRIFT_REPAIR",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "action": "reassert_delegate",
+                },
+            )
+
         if callable(mdm_sub):
             mdm_sub(symbol, self.ingest_tick_sync)
             self._mdm_subscribed_symbols.add(symbol)
