@@ -1,0 +1,28 @@
+name: Temporary MDM Projection TDD
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/nifty_scalper_bot/data/market_data_manager.py'
+      - 'tests/data/test_mdm_history_import_result_contract.py'
+      - '.github/workflows/tmp-mdm-projection-tdd.yml'
+
+jobs:
+  focused-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Run rollover timestamp-normalization regression
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: python -m pytest -q tests/data/test_mdm_history_import_result_contract.py -k 'projection_refresh_reuses_precomputed_timestamp_fingerprints'
