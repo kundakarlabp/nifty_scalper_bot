@@ -57,6 +57,29 @@ env_truthy() {
   case "${value,,}" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac
 }
 
+set_runtime_build_sha() {
+  local sha="$1" tmp
+  if [[ ! "$sha" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+    log "ERROR: refusing invalid runtime build SHA: $sha"
+    return 1
+  fi
+  tmp="$(mktemp "${ENV_FILE}.build-sha.XXXXXX")" || return 1
+  if ! awk -v sha="$sha" '
+    BEGIN { written = 0 }
+    /^GIT_COMMIT_SHA=/ {
+      if (!written) { print "GIT_COMMIT_SHA=" sha; written = 1 }
+      next
+    }
+    { print }
+    END { if (!written) print "GIT_COMMIT_SHA=" sha }
+  ' "$ENV_FILE" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$ENV_FILE"
+}
+
 validate_environment() {
   if [ ! -f "$ENV_FILE" ]; then
     write_status env_missing "environment file missing: $ENV_FILE"
@@ -212,10 +235,19 @@ BEFORE="$(git rev-parse HEAD)"
 write_status fetching "checking origin/main from ${BEFORE:0:7}"
 git fetch --quiet origin main || { write_status fetch_failed "git fetch failed"; exit 1; }
 AFTER="$(git rev-parse origin/main)"
+current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"
 
 if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
-  if service_healthy; then write_status current "running ${BEFORE:0:7}"; exit 0; fi
-  FORCE_RESTART=true
+  if service_healthy; then
+    if [ "$current_runtime_sha" = "$BEFORE" ]; then
+      write_status current "running ${BEFORE:0:7}"
+      exit 0
+    fi
+    log "runtime build SHA missing/mismatched; forcing one provenance restart"
+    FORCE_RESTART=true
+  else
+    FORCE_RESTART=true
+  fi
 fi
 
 CANDIDATE="/tmp/niftybot-candidate-${AFTER:0:12}"
@@ -292,6 +324,14 @@ if [ -x "$STREAMLIT_VENV/bin/python" ] && [ -f dashboard/requirements.txt ]; the
   fi
 fi
 
+if ! set_runtime_build_sha "$AFTER"; then
+  if [ "$BEFORE" != "$AFTER" ]; then
+    git reset --hard --quiet "$BEFORE"
+    "$VENV/bin/python" -m pip install --quiet -e . || true
+  fi
+  write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"
+  exit 1
+fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service; then
   if restart_streamlit; then
@@ -307,6 +347,7 @@ fi
 if [ "$BEFORE" != "$AFTER" ]; then
   git reset --hard --quiet "$BEFORE"
   "$VENV/bin/python" -m pip install --quiet -e . || true
+  set_runtime_build_sha "$BEFORE" || true
   sudo systemctl restart "$SERVICE"
   restart_streamlit || true
   write_status rolled_back "bot health check failed; restored ${BEFORE:0:7}"

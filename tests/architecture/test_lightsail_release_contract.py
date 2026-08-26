@@ -116,3 +116,25 @@ def test_legacy_redeploy_entrypoints_delegate_to_canonical_runner() -> None:
         assert "deploy/lightsail_release.sh" in text
         assert "git reset --hard origin/main" not in text
         assert "docker build" not in text
+
+
+def test_release_runner_publishes_exact_runtime_build_sha() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert "set_runtime_build_sha()" in release
+    assert 'current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA' in release
+
+    deploy = release.index('write_status deploying "deploying ${AFTER:0:7}"')
+    publish_after = release.index('set_runtime_build_sha "$AFTER"', deploy)
+    restart_after = release.index('sudo systemctl restart "$SERVICE"', publish_after)
+    assert deploy < publish_after < restart_after
+
+    rollback = release.index('git reset --hard --quiet "$BEFORE"', restart_after)
+    publish_before = release.index('set_runtime_build_sha "$BEFORE"', rollback)
+    restart_before = release.index('sudo systemctl restart "$SERVICE"', publish_before)
+    assert rollback < publish_before < restart_before
+
+    healthy_no_change = release.index('if [ "$BEFORE" = "$AFTER" ]')
+    candidate = release.index("CANDIDATE=", healthy_no_change)
+    no_change_block = release[healthy_no_change:candidate]
+    assert 'current_runtime_sha' in no_change_block
+    assert 'FORCE_RESTART=true' in no_change_block
