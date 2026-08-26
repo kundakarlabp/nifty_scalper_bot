@@ -7474,7 +7474,9 @@ class MarketDataManager:
                 pending = self._pending_count_locked()
                 task = self._tick_drain_task
                 active_drains = self._tick_active_drains
-            if pending <= 0 and active_drains <= 0 and (task is None or task.done()):
+            if pending <= 0 and active_drains <= 0 and (
+                task is None or task.done()
+            ):
                 return
             if task is not None and not task.done():
                 remaining = max(0.0, deadline - time.monotonic())
@@ -8562,9 +8564,9 @@ class MarketDataManager:
                     "timestamp": incoming_ts,
                     "sequence": incoming_sequence,
                 }
-                getattr(self, "_volume_rebaseline_candidate_by_identity", {}).pop(
-                    identity, None
-                )
+                getattr(
+                    self, "_volume_rebaseline_candidate_by_identity", {}
+                ).pop(identity, None)
         self._last_cumulative_volume_by_symbol[canonical] = float(
             self._volume_baseline_by_identity.get(identity, {"cumulative": cumulative})[
                 "cumulative"
@@ -8606,7 +8608,9 @@ class MarketDataManager:
                 )
             if raw is None:
                 return
-            volume_delta_normalized = bool(raw.pop("_volume_delta_normalized", False))
+            volume_delta_normalized = bool(
+                raw.pop("_volume_delta_normalized", False)
+            )
             enqueued_mono = raw.get("_enqueued_monotonic")
             if isinstance(enqueued_mono, (int, float)):
                 self._event_loop_lag_seconds = max(
@@ -8798,16 +8802,12 @@ class MarketDataManager:
                 _tradable_transition = _cur_tradable and not _prev.get(
                     "tradable_quote", False
                 )
-                _depth_transition = _cur_depth and not _prev.get(
-                    "depth_available", False
-                )
+                _depth_transition = _cur_depth and not _prev.get("depth_available", False)
                 _proof_state[symbol] = {
                     "tradable_quote": _cur_tradable,
                     "depth_available": _cur_depth,
                 }
-                _should_emit_proof = (
-                    _is_first or _tradable_transition or _depth_transition
-                )
+                _should_emit_proof = _is_first or _tradable_transition or _depth_transition
                 if not _should_emit_proof and str(
                     os.getenv("LOG_QUOTE_PROOF_DEBUG", "false")
                 ).lower() in {"1", "true", "yes"}:
@@ -8857,9 +8857,7 @@ class MarketDataManager:
                     "high": float(
                         candle["high"] if isinstance(candle, dict) else candle.high
                     ),
-                    "low": float(
-                        candle["low"] if isinstance(candle, dict) else candle.low
-                    ),
+                    "low": float(candle["low"] if isinstance(candle, dict) else candle.low),
                     "close": float(
                         candle["close"] if isinstance(candle, dict) else candle.close
                     ),
@@ -13509,8 +13507,7 @@ class MarketDataManager:
         observed_at = payload.pop("_local_timestamp", None)
         received_at = (
             float(observed_at)
-            if isinstance(observed_at, (int, float))
-            and not isinstance(observed_at, bool)
+            if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool)
             else time.time()
         )
         payload["source"] = source
@@ -14290,25 +14287,15 @@ class MarketDataManager:
                     }.values()
                 )
                 deduped.sort(key=lambda item: item["timestamp"])
-                if (
-                    min_rows > 0
-                    and len(deduped) < min_rows
-                    and attempt_name != attempt_specs[-1][0]
-                ):
+                if min_rows > 0 and len(deduped) < min_rows and attempt_name != attempt_specs[-1][0]:
                     if len(deduped) > len(best_so_far):
                         best_so_far = deduped
                         best_attempt_meta = (
-                            attempt_name,
-                            from_date,
-                            to_date,
-                            len(rows),
+                            attempt_name, from_date, to_date, len(rows)
                         )
                     self._logger.info(
                         "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING symbol=%s attempt=%s returned_rows=%s min_rows=%s",
-                        symbol,
-                        attempt_name,
-                        len(deduped),
-                        min_rows,
+                        symbol, attempt_name, len(deduped), min_rows,
                         extra={
                             "event": "HYDRATION_ATTEMPT_INSUFFICIENT_WIDENING",
                             "symbol": symbol,
