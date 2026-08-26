@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from types import SimpleNamespace
+from typing import cast
 
 from nifty_scalper_bot.core import app
 from nifty_scalper_bot.data.data_hub import DataHub
@@ -43,6 +44,56 @@ class _RunnerStub:
     def has_datahub_subscription(self, symbol: str, token: int | None = None) -> bool:
         del token
         return symbol in self.subscribed
+
+
+class _DeliveryMdmStub(_MdmStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.callbacks: defaultdict[str, set[object]] = defaultdict(set)
+
+    def subscribe(self, symbol: str, callback: object) -> None:
+        self.callbacks[symbol].add(callback)
+
+    def has_subscription(self, symbol: str, callback: object) -> bool:
+        return callback in self.callbacks[symbol]
+
+
+class _DeliveryHubStub:
+    def __init__(self, mdm: _DeliveryMdmStub) -> None:
+        self._mdm = mdm
+        self.callbacks: defaultdict[str, set[object]] = defaultdict(set)
+        self.subscribe_calls: list[tuple[str, object, int | None, bool]] = []
+
+    def ingest_tick_sync(self, _tick) -> None:
+        return None
+
+    def has_tick_subscription(self, symbol, callback, *, token=None) -> bool:
+        del token
+        return callback in self.callbacks[symbol]
+
+    def subscribe_ticks(self, symbol, callback, *, token=None, force_live=False):
+        self.subscribe_calls.append((symbol, callback, token, force_live))
+        self.callbacks[symbol].add(callback)
+        self._mdm.subscribe(symbol, self.ingest_tick_sync)
+
+
+class _DeliveryRunnerStub:
+    def __init__(self, hub: _DeliveryHubStub) -> None:
+        self._data_hub = hub
+        self._tracked_symbols: set[str] = set()
+        self.subscribe_calls: list[str] = []
+
+    def on_datahub_tick(self, _tick) -> None:
+        return None
+
+    def has_datahub_subscription(self, symbol: str, token: int | None = None) -> bool:
+        return self._data_hub.has_tick_subscription(
+            symbol, self.on_datahub_tick, token=token
+        )
+
+    def _subscribe_symbol(self, symbol: str) -> None:
+        self.subscribe_calls.append(symbol)
+        self._data_hub.subscribe_ticks(symbol, self.on_datahub_tick)
 
 
 def test_datahub_subscription_probe_checks_the_specific_callback() -> None:
@@ -128,3 +179,88 @@ def test_selected_pair_role_promotion_reasserts_live_delivery() -> None:
         (pe, 102, True),
     ]
     assert mdm.requested == [(101, ce), (102, pe)]
+
+
+def test_selected_pair_liveness_noop_when_delivery_edges_exist() -> None:
+    symbol = "NFO:NIFTY26AUG24600CE"
+    token = 101
+    mdm = _DeliveryMdmStub()
+    hub = _DeliveryHubStub(mdm)
+    runner = _DeliveryRunnerStub(hub)
+    runner._tracked_symbols.add(symbol)
+    hub.callbacks[symbol].add(runner.on_datahub_tick)
+    mdm.callbacks[symbol].add(hub.ingest_tick_sync)
+    ctx = SimpleNamespace(
+        active_symbol_tokens={symbol: token},
+        market_data_manager=mdm,
+        strategy_runner=runner,
+        data_hub=hub,
+    )
+
+    result = app._ensure_selected_option_runtime_delivery(
+        cast(app.BotContext, ctx),
+        selected_ce=symbol,
+        selected_pe=None,
+        reason="periodic_liveness",
+    )
+
+    assert result == {symbol: True}
+    assert runner.subscribe_calls == []
+    assert hub.subscribe_calls == []
+    assert mdm.requested == []
+
+
+def test_selected_pair_liveness_repairs_only_missing_mdm_delegate() -> None:
+    symbol = "NFO:NIFTY26AUG24600PE"
+    token = 102
+    mdm = _DeliveryMdmStub()
+    hub = _DeliveryHubStub(mdm)
+    runner = _DeliveryRunnerStub(hub)
+    runner._tracked_symbols.add(symbol)
+    hub.callbacks[symbol].add(runner.on_datahub_tick)
+    ctx = SimpleNamespace(
+        active_symbol_tokens={symbol: token},
+        market_data_manager=mdm,
+        strategy_runner=runner,
+        data_hub=hub,
+    )
+
+    result = app._ensure_selected_option_runtime_delivery(
+        cast(app.BotContext, ctx),
+        selected_ce=None,
+        selected_pe=symbol,
+        reason="periodic_liveness",
+    )
+
+    assert result == {symbol: True}
+    assert runner.subscribe_calls == []
+    assert len(hub.subscribe_calls) == 1
+    assert mdm.has_subscription(symbol, hub.ingest_tick_sync) is True
+
+
+def test_selected_pair_liveness_repairs_only_missing_runner_callback() -> None:
+    symbol = "NFO:NIFTY26AUG24600CE"
+    token = 103
+    mdm = _DeliveryMdmStub()
+    hub = _DeliveryHubStub(mdm)
+    runner = _DeliveryRunnerStub(hub)
+    runner._tracked_symbols.add(symbol)
+    mdm.callbacks[symbol].add(hub.ingest_tick_sync)
+    ctx = SimpleNamespace(
+        active_symbol_tokens={symbol: token},
+        market_data_manager=mdm,
+        strategy_runner=runner,
+        data_hub=hub,
+    )
+
+    result = app._ensure_selected_option_runtime_delivery(
+        cast(app.BotContext, ctx),
+        selected_ce=symbol,
+        selected_pe=None,
+        reason="periodic_liveness",
+    )
+
+    assert result == {symbol: True}
+    assert runner.subscribe_calls == [symbol]
+    assert len(hub.subscribe_calls) == 1
+    assert hub.has_tick_subscription(symbol, runner.on_datahub_tick, token=token)
