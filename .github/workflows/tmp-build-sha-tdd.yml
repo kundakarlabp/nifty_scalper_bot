@@ -8,14 +8,81 @@ on:
       - 'tests/architecture/test_lightsail_release_contract.py'
       - '.github/workflows/tmp-build-sha-tdd.yml'
 
+permissions:
+  contents: write
+
 jobs:
   focused:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install pytest -q
-      - run: python -m pytest -q tests/architecture/test_lightsail_release_contract.py
+          cache: pip
+      - name: Apply exact Lightsail provenance fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('deploy/lightsail_release.sh')
+          text = path.read_text()
+
+          old = '''env_truthy() {\n  local value\n  value="$(first_nonempty_env "$1" 2>/dev/null || true)"\n  case "${value,,}" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac\n}\n\n'''
+          new = '''env_truthy() {\n  local value\n  value="$(first_nonempty_env "$1" 2>/dev/null || true)"\n  case "${value,,}" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac\n}\n\nset_runtime_build_sha() {\n  local sha="$1" tmp\n  if [[ ! "$sha" =~ ^[0-9a-fA-F]{7,64}$ ]]; then\n    log "ERROR: refusing invalid runtime build SHA: $sha"\n    return 1\n  fi\n  tmp="$(mktemp "${ENV_FILE}.build-sha.XXXXXX")" || return 1\n  if ! awk -v sha="$sha" '\n    BEGIN { written = 0 }\n    /^GIT_COMMIT_SHA=/ {\n      if (!written) { print "GIT_COMMIT_SHA=" sha; written = 1 }\n      next\n    }\n    { print }\n    END { if (!written) print "GIT_COMMIT_SHA=" sha }\n  ' "$ENV_FILE" > "$tmp"; then\n    rm -f "$tmp"\n    return 1\n  fi\n  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }\n  mv "$tmp" "$ENV_FILE"\n}\n\n'''
+          if old not in text:
+              if 'set_runtime_build_sha()' not in text:
+                  raise SystemExit('env helper anchor not found')
+          else:
+              text = text.replace(old, new, 1)
+
+          old = '''AFTER="$(git rev-parse origin/main)"\n\nif [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then\n  if service_healthy; then write_status current "running ${BEFORE:0:7}"; exit 0; fi\n  FORCE_RESTART=true\nfi\n'''
+          new = '''AFTER="$(git rev-parse origin/main)"\ncurrent_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"\n\nif [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then\n  if service_healthy; then\n    if [ "$current_runtime_sha" = "$BEFORE" ]; then\n      write_status current "running ${BEFORE:0:7}"\n      exit 0\n    fi\n    log "runtime build SHA missing/mismatched; forcing one provenance restart"\n    FORCE_RESTART=true\n  else\n    FORCE_RESTART=true\n  fi\nfi\n'''
+          if old not in text:
+              if 'current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA' not in text:
+                  raise SystemExit('no-change deployment anchor not found')
+          else:
+              text = text.replace(old, new, 1)
+
+          old = '''if [ -x "$STREAMLIT_VENV/bin/python" ] && [ -f dashboard/requirements.txt ]; then\n  if [ "$BEFORE" = "$AFTER" ] || ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt; then\n    "$STREAMLIT_VENV/bin/python" -m pip install --quiet -r dashboard/requirements.txt || \\\n      log "WARNING: dashboard dependency refresh failed"\n  fi\nfi\n\nsudo systemctl restart "$SERVICE"\n'''
+          new = '''if [ -x "$STREAMLIT_VENV/bin/python" ] && [ -f dashboard/requirements.txt ]; then\n  if [ "$BEFORE" = "$AFTER" ] || ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt; then\n    "$STREAMLIT_VENV/bin/python" -m pip install --quiet -r dashboard/requirements.txt || \\\n      log "WARNING: dashboard dependency refresh failed"\n  fi\nfi\n\nif ! set_runtime_build_sha "$AFTER"; then\n  if [ "$BEFORE" != "$AFTER" ]; then\n    git reset --hard --quiet "$BEFORE"\n    "$VENV/bin/python" -m pip install --quiet -e . || true\n  fi\n  write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"\n  exit 1\nfi\nsudo systemctl restart "$SERVICE"\n'''
+          if old not in text:
+              if 'set_runtime_build_sha "$AFTER"' not in text:
+                  raise SystemExit('deploy restart anchor not found')
+          else:
+              text = text.replace(old, new, 1)
+
+          old = '''if [ "$BEFORE" != "$AFTER" ]; then\n  git reset --hard --quiet "$BEFORE"\n  "$VENV/bin/python" -m pip install --quiet -e . || true\n  sudo systemctl restart "$SERVICE"\n'''
+          new = '''if [ "$BEFORE" != "$AFTER" ]; then\n  git reset --hard --quiet "$BEFORE"\n  "$VENV/bin/python" -m pip install --quiet -e . || true\n  set_runtime_build_sha "$BEFORE" || true\n  sudo systemctl restart "$SERVICE"\n'''
+          if old not in text:
+              if 'set_runtime_build_sha "$BEFORE"' not in text:
+                  raise SystemExit('rollback restart anchor not found')
+          else:
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Validate deployment contract
+        run: |
+          bash -n deploy/lightsail_release.sh
+          python -m pytest -q tests/architecture/test_lightsail_release_contract.py
+          git diff --check
+      - name: Commit validated deploy fix
+        run: |
+          if git diff --quiet -- deploy/lightsail_release.sh; then
+            echo 'Release runner already contains validated fix.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add deploy/lightsail_release.sh
+          git commit -m 'fix(deploy): publish exact runtime build SHA'
+          git push origin HEAD:${{ github.head_ref }}
