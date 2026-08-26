@@ -17,32 +17,26 @@ jobs:
         with:
           ref: fix/flat-row-realized-pnl-20260826
           fetch-depth: 0
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install project
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
-
       - name: Add regression tests only
         env:
           TEST_ADDITION_B64: CgoKZGVmIHRlc3RfZmxhdF9icm9rZXJfcm93X3VzZXNfZGF5X3BubF93aGVuX3JlYWxpc2VkX3plcm8odG1wX3BhdGgpIC0+IE5vbmU6CiAgICBtYW5hZ2VyID0gUG9zaXRpb25NYW5hZ2VyKHN0YXRlX2ZpbGU9c3RyKHRtcF9wYXRoIC8gInBvc2l0aW9ucy5qc29uIikpCiAgICBtYW5hZ2VyLmVzdGFibGlzaF9wbmxfc2Vzc2lvbl9iYXNlbGluZSgwLjApCiAgICBtYW5hZ2VyLnN5bmNocm9uaXplX3dpdGhfYnJva2VyKAogICAgICAgIFt7InN5bWJvbCI6IFNZTUJPTCwgInByb2R1Y3QiOiAiTUlTIiwgInF1YW50aXR5IjogMCwgInBubCI6IC0yMzQuMCwgInJlYWxpc2VkIjogMC4wfV0KICAgICkKICAgIHNuYXBzaG90ID0gbWFuYWdlci5wbmxfcmVjb25jaWxpYXRpb25fc25hcHNob3QoKQogICAgYXNzZXJ0IHNuYXBzaG90WyJicm9rZXJfcmVhbGl6ZWRfc25hcHNob3QiXSA9PSBweXRlc3QuYXBwcm94KC0yMzQuMCkKICAgIGFzc2VydCBtYW5hZ2VyLmdldF9yZWFsaXplZF9wbmwoKSA9PSBweXRlc3QuYXBwcm94KC0yMzQuMCkKCgpkZWYgdGVzdF9mbGF0X2Jyb2tlcl9yb3dfcHJlc2VydmVzX25vbnplcm9fcmVhbGlzZWRfb3Zlcl9kYXlfcG5sKHRtcF9wYXRoKSAtPiBOb25lOgogICAgbWFuYWdlciA9IFBvc2l0aW9uTWFuYWdlcihzdGF0ZV9maWxlPXN0cih0bXBfcGF0aCAvICJwb3NpdGlvbnMuanNvbiIpKQogICAgbWFuYWdlci5lc3RhYmxpc2hfcG5sX3Nlc3Npb25fYmFzZWxpbmUoMC4wKQogICAgbWFuYWdlci5zeW5jaHJvbml6ZV93aXRoX2Jyb2tlcigKICAgICAgICBbeyJzeW1ib2wiOiBTWU1CT0wsICJwcm9kdWN0IjogIk1JUyIsICJxdWFudGl0eSI6IDAsICJwbmwiOiAtMjM0LjAsICJyZWFsaXNlZCI6IC0yMTAuMH1dCiAgICApCiAgICBzbmFwc2hvdCA9IG1hbmFnZXIucG5sX3JlY29uY2lsaWF0aW9uX3NuYXBzaG90KCkKICAgIGFzc2VydCBzbmFwc2hvdFsiYnJva2VyX3JlYWxpemVkX3NuYXBzaG90Il0gPT0gcHl0ZXN0LmFwcHJveCgtMjEwLjApCiAgICBhc3NlcnQgbWFuYWdlci5nZXRfcmVhbGl6ZWRfcG5sKCkgPT0gcHl0ZXN0LmFwcHJveCgtMjEwLjApCgoKZGVmIHRlc3Rfb3Blbl9icm9rZXJfcm93X25ldmVyX3Byb21vdGVzX2RheV9wbmxfdG9fcmVhbGlzZWQodG1wX3BhdGgpIC0+IE5vbmU6CiAgICBtYW5hZ2VyID0gUG9zaXRpb25NYW5hZ2VyKHN0YXRlX2ZpbGU9c3RyKHRtcF9wYXRoIC8gInBvc2l0aW9ucy5qc29uIikpCiAgICBtYW5hZ2VyLmVzdGFibGlzaF9wbmxfc2Vzc2lvbl9iYXNlbGluZSgwLjApCiAgICBtYW5hZ2VyLnN5bmNocm9uaXplX3dpdGhfYnJva2VyKAogICAgICAgIFt7CiAgICAgICAgICAgICJzeW1ib2wiOiBTWU1CT0wsCiAgICAgICAgICAgICJwcm9kdWN0IjogIk1JUyIsCiAgICAgICAgICAgICJxdWFudGl0eSI6IDY1LAogICAgICAgICAgICAiYXZlcmFnZV9wcmljZSI6IDEwMC4wLAogICAgICAgICAgICAibGFzdF9wcmljZSI6IDk2LjQsCiAgICAgICAgICAgICJwbmwiOiAtMjM0LjAsCiAgICAgICAgICAgICJyZWFsaXNlZCI6IDAuMCwKICAgICAgICB9XQogICAgKQogICAgc25hcHNob3QgPSBtYW5hZ2VyLnBubF9yZWNvbmNpbGlhdGlvbl9zbmFwc2hvdCgpCiAgICBhc3NlcnQgc25hcHNob3RbImJyb2tlcl9yZWFsaXplZF9zbmFwc2hvdCJdID09IHB5dGVzdC5hcHByb3goMC4wKQogICAgYXNzZXJ0IG1hbmFnZXIuZ2V0X3JlYWxpemVkX3BubCgpID09IHB5dGVzdC5hcHByb3goMC4wKQo=
         run: |
           python - <<'PY'
-          import base64
-          import os
+          import base64, os
           from pathlib import Path
           path = Path('tests/execution/test_trading_incident_regressions.py')
           text = path.read_text()
-          marker = 'def test_flat_broker_row_uses_day_pnl_when_realised_zero'
-          if marker not in text:
+          if 'def test_flat_broker_row_uses_day_pnl_when_realised_zero' not in text:
               addition = base64.b64decode(os.environ['TEST_ADDITION_B64']).decode()
-              path.write_text(text.rstrip() + addition + '\n')
+              path.write_text(text.rstrip() + addition.rstrip() + '\n')
           PY
-
       - name: Prove regression is red before source fix
         run: |
           set +e
@@ -54,33 +48,28 @@ jobs:
             exit 1
           fi
           echo 'Expected RED reproduced.'
-
       - name: Apply narrow source repair
         env:
           OLD_B64: ICAgICAgICAgICAgICAgIHF1YW50aXR5ID0gcm93LnF1YW50aXR5CiAgICAgICAgICAgICAgICByZWFsaXplZF9wbmwgPSBnZXRfZmxvYXQocmVjb3JkLCAoInJlYWxpc2VkIiwgInJlYWxpemVkIiksIGRlZmF1bHQ9MC4wKQogICAgICAgICAgICAgICAgaWYgInJlYWxpc2VkIiBpbiByZWNvcmQgb3IgInJlYWxpemVkIiBpbiByZWNvcmQ6CiAgICAgICAgICAgICAgICAgICAgc25hcHNob3RfcmVhbGl6ZWRfc2VlbiA9IFRydWUKICAgICAgICAgICAgICAgICAgICBzbmFwc2hvdF9yZWFsaXplZF9wbmwgKz0gcmVhbGl6ZWRfcG5sCiAgICAgICAgICAgICAgICBpZiBxdWFudGl0eSA9PSAwOgo=
           NEW_B64: ICAgICAgICAgICAgICAgIHF1YW50aXR5ID0gcm93LnF1YW50aXR5CiAgICAgICAgICAgICAgICByZWFsaXplZF9maWVsZF9wcmVzZW50ID0gInJlYWxpc2VkIiBpbiByZWNvcmQgb3IgInJlYWxpemVkIiBpbiByZWNvcmQKICAgICAgICAgICAgICAgIHJlYWxpemVkX3BubCA9IGdldF9mbG9hdChyZWNvcmQsICgicmVhbGlzZWQiLCAicmVhbGl6ZWQiKSwgZGVmYXVsdD0wLjApCiAgICAgICAgICAgICAgICBpZiAoCiAgICAgICAgICAgICAgICAgICAgcXVhbnRpdHkgPT0gMAogICAgICAgICAgICAgICAgICAgIGFuZCByZWFsaXplZF9maWVsZF9wcmVzZW50CiAgICAgICAgICAgICAgICAgICAgYW5kIHJlYWxpemVkX3BubCA9PSAwLjAKICAgICAgICAgICAgICAgICAgICBhbmQgInBubCIgaW4gcmVjb3JkCiAgICAgICAgICAgICAgICApOgogICAgICAgICAgICAgICAgICAgICMgWmVyb2RoYSBjYW4gbGVhdmUgYHJlYWxpc2VkYCBhdCB6ZXJvIG9uIGEgZnVsbHkgY2xvc2VkIE1JUwogICAgICAgICAgICAgICAgICAgICMgcm93IHdoaWxlIGBwbmxgIGNhcnJpZXMgdGhlIGJyb2tlcidzIGN1bXVsYXRpdmUgZGF5IFAmTC4KICAgICAgICAgICAgICAgICAgICAjIE9wZW4tcG9zaXRpb24gYHBubGAgaW5jbHVkZXMgdW5yZWFsaXNlZCBQJkwgYW5kIG11c3QgbmV2ZXIKICAgICAgICAgICAgICAgICAgICAjIGJlY29tZSByZWFsaXNlZCBhdXRob3JpdHkuCiAgICAgICAgICAgICAgICAgICAgcmVhbGl6ZWRfcG5sID0gZ2V0X2Zsb2F0KHJlY29yZCwgKCJwbmwiLCksIGRlZmF1bHQ9MC4wKQogICAgICAgICAgICAgICAgaWYgcmVhbGl6ZWRfZmllbGRfcHJlc2VudDoKICAgICAgICAgICAgICAgICAgICBzbmFwc2hvdF9yZWFsaXplZF9zZWVuID0gVHJ1ZQogICAgICAgICAgICAgICAgICAgIHNuYXBzaG90X3JlYWxpemVkX3BubCArPSByZWFsaXplZF9wbmwKICAgICAgICAgICAgICAgIGlmIHF1YW50aXR5ID09IDA6Cg==
         run: |
           python - <<'PY'
-          import base64
-          import os
+          import base64, os
           from pathlib import Path
           path = Path('src/nifty_scalper_bot/execution/position_manager.py')
           text = path.read_text()
           old = base64.b64decode(os.environ['OLD_B64']).decode()
           new = base64.b64decode(os.environ['NEW_B64']).decode()
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f'expected one source anchor, found {count}')
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one source anchor, found {text.count(old)}')
           path.write_text(text.replace(old, new, 1))
           PY
-
       - name: Focused validation
         run: |
           pytest -q tests/execution/test_trading_incident_regressions.py -k 'flat_broker_row or authoritative_broker_realized or snapshot_without_realized or repeated_authoritative_broker_pnl_sync'
           pytest -q tests/execution/test_lifecycle_entry_guards.py tests/execution/test_execution_safety_audit_fixes.py
           python -m compileall -q src
           git diff --check
-
       - name: Commit tested source and regressions
         run: |
           git config user.name 'github-actions[bot]'
