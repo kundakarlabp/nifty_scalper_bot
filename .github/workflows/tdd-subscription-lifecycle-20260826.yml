@@ -1,0 +1,82 @@
+name: TDD subscription lifecycle 20260826
+
+on:
+  push:
+    branches:
+      - fix/subscription-lifecycle-20260826
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/subscription-lifecycle-20260826
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: RED - prove lifecycle regressions fail on current main
+        run: |
+          if python -m pytest -q tests/data/test_subscription_lifecycle_regression.py; then
+            echo 'Expected pre-fix regression failure did not occur'
+            exit 1
+          fi
+      - name: Apply two minimal lifecycle corrections
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          datahub_path = Path('src/nifty_scalper_bot/data/data_hub.py')
+          datahub = datahub_path.read_text()
+          old_datahub = '        if not self._tick_subscribers.get(normalized):\n'
+          new_datahub = '''        # The MDM delegate is shared by every DataHub consumer for this instrument.\n        # Detach it only after symbol/alias and token listeners are all gone.\n        if not any(\n            self._tick_subscribers.get(alias) for alias in aliases\n        ) and not (\n            token_int is not None\n            and self._tick_subscribers_by_token.get(token_int)\n        ):\n'''
+          assert datahub.count(old_datahub) == 1, datahub.count(old_datahub)
+          datahub_path.write_text(datahub.replace(old_datahub, new_datahub, 1))
+
+          runner_path = Path('src/nifty_scalper_bot/strategies/runner.py')
+          runner = runner_path.read_text()
+          old_runner = '            attached = normalized in getattr(self, "_datahub_registered_symbols", set())\n'
+          new_runner = '            attached = self.has_datahub_subscription(normalized)\n'
+          assert runner.count(old_runner) == 1, runner.count(old_runner)
+          runner_path.write_text(runner.replace(old_runner, new_runner, 1))
+          PY
+      - name: GREEN - focused lifecycle tests
+        run: |
+          python -m pytest -q \
+            tests/data/test_subscription_lifecycle_regression.py \
+            tests/data/test_datahub_token_subscription_bridge.py \
+            tests/data/test_mdm_callback_dispatch.py \
+            tests/core/test_selected_option_runtime_delivery.py \
+            tests/strategies/test_runner_symbol_role_gate.py
+      - name: Compile and lint changed runtime files
+        run: |
+          python -m compileall -q src tests
+          python -m ruff check \
+            src/nifty_scalper_bot/data/data_hub.py \
+            src/nifty_scalper_bot/strategies/runner.py \
+            tests/data/test_subscription_lifecycle_regression.py
+      - name: Full non-slow regression suite
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: python -m pytest -q -m 'not slow and not live_runtime_e2e'
+      - name: Commit only the targeted source corrections
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/tdd-subscription-lifecycle-20260826.yml
+          git add \
+            src/nifty_scalper_bot/data/data_hub.py \
+            src/nifty_scalper_bot/strategies/runner.py
+          git diff --cached --check
+          git commit -m 'fix(runtime): make subscription lifecycle authoritative'
+          git push origin HEAD:fix/subscription-lifecycle-20260826
