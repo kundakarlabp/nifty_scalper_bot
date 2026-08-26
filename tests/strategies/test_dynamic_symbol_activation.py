@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from nifty_scalper_bot.core.active_basket import ActiveContractSelection
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
@@ -100,3 +101,40 @@ def test_runner_activation_uses_mdm_tracking_not_runner_sets():
 
     assert activation.executable is False
     assert "mdm_not_tracked" in activation.blockers
+
+
+def test_active_basket_drift_rebuilds_eval_whitelist_for_new_selected_pair():
+    old_ce = "NFO:NIFTY26AUG24200CE"
+    old_pe = "NFO:NIFTY26AUG24200PE"
+    new_ce = "NFO:NIFTY26AUG24250CE"
+    new_pe = "NFO:NIFTY26AUG24250PE"
+
+    r = StrategyRunner.__new__(StrategyRunner)
+    r._active_selected_ce = old_ce
+    r._active_selected_pe = old_pe
+    r._selected_ce_symbol = old_ce
+    r._selected_pe_symbol = old_pe
+    r._active_atm_strike = 24200
+    r._active_option_symbols = {old_ce, old_pe, new_ce, new_pe}
+    r._eval_option_whitelist = {old_ce, old_pe}
+    r._active_selection_drift_log_key = None
+    r._active_selection_sync_log_key = None
+    r._logger = SimpleNamespace(
+        warning=lambda *args, **kwargs: None,
+        info=lambda *args, **kwargs: None,
+    )
+
+    selection = ActiveContractSelection(
+        selected_ce=new_ce,
+        selected_pe=new_pe,
+        atm_strike=24250,
+        option_symbols=(old_ce, old_pe, new_ce, new_pe),
+        basket_version="roll-24250",
+    )
+
+    r._sync_active_selection_from_basket(selection)
+
+    assert r._active_selected_ce == new_ce
+    assert r._active_selected_pe == new_pe
+    assert new_ce in r._eval_option_whitelist
+    assert new_pe in r._eval_option_whitelist
