@@ -1,3 +1,5 @@
+"""Regression coverage for authoritative live subscription ownership."""
+
 from __future__ import annotations
 
 from collections import defaultdict
