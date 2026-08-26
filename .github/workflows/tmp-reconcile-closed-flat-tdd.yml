@@ -1,0 +1,28 @@
+name: Temporary Reconcile Closed Flat TDD
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/nifty_scalper_bot/core/app.py'
+      - 'tests/core/test_reconcile_readiness_lifecycle.py'
+      - '.github/workflows/tmp-reconcile-closed-flat-tdd.yml'
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Reconciliation lifecycle regression
+        env:
+          BRACKET_AUTO_RESTORE: 'false'
+        run: python -m pytest -q tests/core/test_reconcile_readiness_lifecycle.py
