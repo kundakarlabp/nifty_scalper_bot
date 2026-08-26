@@ -10888,7 +10888,7 @@ def _ensure_selected_option_runtime_delivery(
     selected_pe: str | None,
     reason: str,
 ) -> dict[str, bool]:
-    """Reassert selected-pair delivery without resetting Runner symbol state."""
+    """Verify and repair both selected-pair callback edges idempotently."""
     results: dict[str, bool] = {}
     runner = getattr(ctx, "strategy_runner", None)
     mdm = getattr(ctx, "market_data_manager", None)
@@ -10901,6 +10901,42 @@ def _ensure_selected_option_runtime_delivery(
         str(sym).strip().upper() for sym in (selected_ce, selected_pe) if sym
     ):
         token = token_map.get(symbol) or mdm_token_map.get(symbol)
+
+        def _runner_callback_ready() -> bool:
+            checker = getattr(runner, "has_datahub_subscription", None)
+            if not callable(checker):
+                return False
+            try:
+                return bool(checker(symbol, token))
+            except Exception:
+                return False
+
+        def _mdm_delegate_ready() -> bool | None:
+            checker = getattr(mdm, "has_subscription", None)
+            callback = getattr(hub, "ingest_tick_sync", None)
+            if callable(checker) and callable(callback):
+                try:
+                    return bool(checker(symbol, callback))
+                except Exception:
+                    return False
+            return None
+
+        runner_callback_ready = _runner_callback_ready()
+        mdm_delegate_ready = _mdm_delegate_ready()
+        repaired = False
+
+        if token is not None and runner_callback_ready and mdm_delegate_ready is True:
+            results[symbol] = True
+            LOGGER.debug(
+                "SELECTED_OPTION_RUNTIME_DELIVERY symbol=%s token=%s ready=true "
+                "runner_callback_ready=true mdm_delegate_ready=true repaired=false "
+                "reason=%s",
+                symbol,
+                token,
+                reason,
+            )
+            continue
+
         if mdm is not None and token is not None:
             if hasattr(mdm, "ensure_tracking"):
                 mdm.ensure_tracking(symbol, seed=False, subscribe=False)
@@ -10911,34 +10947,49 @@ def _ensure_selected_option_runtime_delivery(
 
         # Existing context options must be promoted in place. Calling
         # add_symbol() here would reset their data phase to HYDRATION.
-        if runner is not None and symbol in tracked:
+        if not runner_callback_ready and runner is not None and symbol in tracked:
             subscribe = getattr(runner, "_subscribe_symbol", None)
             if callable(subscribe):
                 subscribe(symbol)
-        if hub is not None and runner is not None and hasattr(hub, "subscribe_ticks"):
+                repaired = True
+                runner_callback_ready = _runner_callback_ready()
+                mdm_delegate_ready = _mdm_delegate_ready()
+        if (
+            (not runner_callback_ready or mdm_delegate_ready is not True)
+            and hub is not None
+            and runner is not None
+            and hasattr(hub, "subscribe_ticks")
+        ):
             hub.subscribe_ticks(
                 symbol, runner.on_datahub_tick, token=token, force_live=True
             )
+            repaired = True
 
-        delivery_ready = False
-        checker = getattr(runner, "has_datahub_subscription", None)
-        if callable(checker):
-            try:
-                delivery_ready = bool(checker(symbol, token))
-            except Exception:
-                delivery_ready = False
-        results[symbol] = bool(token is not None and delivery_ready)
+        runner_callback_ready = _runner_callback_ready()
+        mdm_delegate_ready = _mdm_delegate_ready()
+        results[symbol] = bool(
+            token is not None
+            and runner_callback_ready
+            and mdm_delegate_ready is not False
+        )
         LOGGER.info(
-            "SELECTED_OPTION_RUNTIME_DELIVERY symbol=%s token=%s ready=%s reason=%s",
+            "SELECTED_OPTION_RUNTIME_DELIVERY symbol=%s token=%s ready=%s "
+            "runner_callback_ready=%s mdm_delegate_ready=%s repaired=%s reason=%s",
             symbol,
             token,
             results[symbol],
+            runner_callback_ready,
+            mdm_delegate_ready,
+            repaired,
             reason,
             extra={
                 "event": "SELECTED_OPTION_RUNTIME_DELIVERY",
                 "symbol": symbol,
                 "token": token,
                 "ready": results[symbol],
+                "runner_callback_ready": runner_callback_ready,
+                "mdm_delegate_ready": mdm_delegate_ready,
+                "repaired": repaired,
                 "reason": reason,
             },
         )
@@ -13761,12 +13812,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         atm_strike=commit_atm_strike,
                                     )
                                 )
-                                _ensure_selected_option_runtime_delivery(
-                                    ctx,
-                                    selected_ce=committed_ce,
-                                    selected_pe=committed_pe,
-                                    reason="dynamic_basket_committed",
-                                )
                                 for _sym in dict.fromkeys(
                                     [*add_symbols, committed_ce, committed_pe]
                                 ):
@@ -13929,6 +13974,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 )
                             except Exception:  # pragma: no cover - obs must not raise
                                 pass
+
+                        # A stable basket still needs live callback liveness.
+                        # Exact edge probes make this a no-op while healthy and
+                        # repair MDM -> DataHub or DataHub -> Runner drift without
+                        # resetting Runner history or strategy state.
+                        _ensure_selected_option_runtime_delivery(
+                            ctx,
+                            selected_ce=getattr(ctx, "selected_ce", None),
+                            selected_pe=getattr(ctx, "selected_pe", None),
+                            reason=(
+                                "dynamic_basket_committed"
+                                if add_symbols or drop_symbols or selection_changed
+                                else "periodic_liveness"
+                            ),
+                        )
                     except Exception as exc:
                         LOGGER.error(
                             "Failure in option universe sync loop: %s",
