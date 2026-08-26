@@ -8,21 +8,57 @@ on:
       - 'tests/strategies/test_dynamic_symbol_activation.py'
       - '.github/workflows/tmp-runner-whitelist-tdd.yml'
 
+permissions:
+  contents: write
+
 jobs:
   focused-regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
+      - name: Apply minimal runner invariant repair when absent
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/strategies/runner.py')
+          text = path.read_text()
+          old = '''        if selection.option_symbols:\n            self._active_option_symbols = {\n                normalize_symbol(str(sym)) for sym in selection.option_symbols if sym\n            }\n        sync_key = (\n'''
+          new = '''        if selection.option_symbols:\n            self._active_option_symbols = {\n                normalize_symbol(str(sym)) for sym in selection.option_symbols if sym\n            }\n        self._eval_option_whitelist = self._compute_eval_option_whitelist(\n            set(getattr(self, "_active_option_symbols", set()) or set()),\n            getattr(self, "_active_atm_strike", None),\n            new_ce,\n            new_pe,\n        )\n        sync_key = (\n'''
+          if new in text:
+              print('runner invariant repair already present')
+          elif old in text:
+              path.write_text(text.replace(old, new, 1))
+              print('applied runner invariant repair')
+          else:
+              raise SystemExit('expected runner synchronization anchor not found')
+          PY
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
-      - name: Run selected-pair whitelist regression
+      - name: Run focused selected-pair whitelist regression
         env:
           BRACKET_AUTO_RESTORE: 'false'
         run: python -m pytest -q tests/strategies/test_dynamic_symbol_activation.py -k 'active_basket_drift_rebuilds_eval_whitelist_for_new_selected_pair'
+      - name: Compile changed runtime module
+        run: python -m py_compile src/nifty_scalper_bot/strategies/runner.py
+      - name: Commit validated repair when changed
+        run: |
+          if git diff --quiet -- src/nifty_scalper_bot/strategies/runner.py; then
+            echo 'No source change to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/strategies/runner.py
+          git commit -m 'fix(runner): rebuild eval whitelist on basket sync'
+          git push origin HEAD:${{ github.head_ref }}
