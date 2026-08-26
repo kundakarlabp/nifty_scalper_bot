@@ -3766,6 +3766,12 @@ class StrategyRunner:
             self._active_option_symbols = {
                 normalize_symbol(str(sym)) for sym in selection.option_symbols if sym
             }
+        self._eval_option_whitelist = self._compute_eval_option_whitelist(
+            set(getattr(self, "_active_option_symbols", set()) or set()),
+            getattr(self, "_active_atm_strike", None),
+            new_ce,
+            new_pe,
+        )
         sync_key = (
             str(new_ce),
             str(new_pe),
