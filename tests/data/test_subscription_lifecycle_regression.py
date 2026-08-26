@@ -49,7 +49,7 @@ def _runner_with_datahub_probe(symbol: str, *, attached: bool) -> StrategyRunner
     return runner
 
 
-def test_datahub_unsubscribe_preserves_upstream_delegate_for_remaining_token_listener() -> None:
+def test_unsubscribe_keeps_mdm_delegate_for_token_listener() -> None:
     """One consumer leaving must not cut MDM delivery for another token listener."""
     mdm = _MdmStub()
     hub = DataHub(mdm, defer_live_symbol_subscriptions=False)
@@ -77,7 +77,7 @@ def test_datahub_unsubscribe_preserves_upstream_delegate_for_remaining_token_lis
     assert mdm.has_subscription(symbol, hub.ingest_tick_sync) is True
 
 
-def test_runner_delivery_readiness_rejects_stale_local_registration() -> None:
+def test_runner_readiness_rejects_stale_local_registration() -> None:
     """Runner readiness must reflect the concrete DataHub callback, not a stale set."""
     symbol = "NFO:NIFTY26AUG24600CE"
     runner = _runner_with_datahub_probe(symbol, attached=False)
@@ -86,7 +86,7 @@ def test_runner_delivery_readiness_rejects_stale_local_registration() -> None:
     assert symbol not in runner._datahub_registered_symbols
 
 
-def test_runner_delivery_readiness_accepts_actual_callback_even_if_local_set_was_empty() -> None:
+def test_runner_readiness_accepts_actual_callback() -> None:
     """The concrete DataHub callback is authoritative in both directions."""
     symbol = "NFO:NIFTY26AUG24600PE"
     runner = _runner_with_datahub_probe(symbol, attached=True)
