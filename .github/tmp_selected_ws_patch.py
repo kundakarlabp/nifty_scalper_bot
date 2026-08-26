@@ -56,7 +56,7 @@ async def test_selected_option_missing_active_ws_token_activates_poll_recovery(
     fallback.start.assert_called_once()
 '''
 if 'test_selected_option_missing_active_ws_token_activates_poll_recovery' not in test_text:
-    test_path.write_text(test_text.rstrip() + regression + '\n')
+    test_path.write_text(test_text.rstrip() + regression.rstrip() + '\n')
 
 red = run(
     'python', '-m', 'pytest', '-q',
