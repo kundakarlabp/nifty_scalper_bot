@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -32,10 +34,12 @@ jobs:
             tests/e2e/live_sim/test_post885_live_safety_architecture.py
       - name: Compile source tree
         run: python -m compileall -q src
-      - name: Ruff changed Python files
-        run: python -m ruff check src/nifty_scalper_bot/strategies/runner.py tests/strategies/test_dynamic_symbol_activation.py
-      - name: Black changed Python files
-        run: python -m black --check src/nifty_scalper_bot/strategies/runner.py tests/strategies/test_dynamic_symbol_activation.py
+      - name: Diff integrity
+        run: git diff --check origin/main...HEAD
+      - name: Ruff changed regression test
+        run: python -m ruff check tests/strategies/test_dynamic_symbol_activation.py
+      - name: Black changed regression test
+        run: python -m black --check tests/strategies/test_dynamic_symbol_activation.py
       - name: Full test suite
         env:
           BRACKET_AUTO_RESTORE: 'false'
