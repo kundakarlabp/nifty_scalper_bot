@@ -173,3 +173,117 @@ def test_runtime_reconciliation_freshness_contract_is_authoritative(
     )
     assert "_reconciliation_is_fresh(ctx)" in rearm_source
     assert "position_reconciliation_stale" in recompute_source
+
+
+class _PositionManager:
+    def __init__(self, positions=None, *, raises: bool = False) -> None:
+        self._positions = list(positions or [])
+        self._raises = raises
+
+    def get_open_positions(self):
+        if self._raises:
+            raise RuntimeError("position state unavailable")
+        return list(self._positions)
+
+
+def _selfcheck_context(
+    *,
+    age_seconds: float = 300.0,
+    completed: bool = True,
+    failed: bool = False,
+    positions=None,
+    position_manager_present: bool = True,
+    position_read_raises: bool = False,
+    unprotected: bool = False,
+    unresolved: bool = False,
+):
+    ctx = _Ctx(
+        completed=completed,
+        completed_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+    )
+    ctx.position_reconciliation_failed = failed
+    ctx.unprotected_broker_positions = {"NFO:TEST"} if unprotected else set()
+    ctx.unprotected_broker_position = bool(unprotected)
+    ctx.unresolved_reconciliation_symbols = {"NFO:TEST"} if unresolved else set()
+    ctx.position_manager = (
+        _PositionManager(positions, raises=position_read_raises)
+        if position_manager_present
+        else None
+    )
+    return ctx
+
+
+def test_closed_flat_book_suspends_age_only_reconciliation_staleness(monkeypatch) -> None:
+    from nifty_scalper_bot.core import app as app_module
+    from nifty_scalper_bot.utils.market_hours import MarketState
+
+    monkeypatch.setenv("POSITION_RECONCILE_MAX_AGE_SECONDS", "60")
+    monkeypatch.setattr(app_module, "get_market_state", lambda: MarketState.CLOSED)
+    ctx = _selfcheck_context(positions=[])
+
+    ok, detail, meta = app_module.RuntimeSelfChecker(ctx)._check_position_reconciliation()
+
+    assert ok is True
+    assert detail == "position_reconciliation_age_suspended_market_closed"
+    assert meta["market_state"] == MarketState.CLOSED.value
+    assert meta["age_check_suspended"] is True
+
+
+def test_market_open_stale_reconciliation_still_fails_closed(monkeypatch) -> None:
+    from nifty_scalper_bot.core import app as app_module
+    from nifty_scalper_bot.utils.market_hours import MarketState
+
+    monkeypatch.setenv("POSITION_RECONCILE_MAX_AGE_SECONDS", "60")
+    monkeypatch.setattr(app_module, "get_market_state", lambda: MarketState.OPEN)
+    ctx = _selfcheck_context(positions=[])
+
+    ok, detail, meta = app_module.RuntimeSelfChecker(ctx)._check_position_reconciliation()
+
+    assert ok is False
+    assert detail == "position_reconciliation_stale"
+    assert meta["blocker"] == "position_reconciliation_stale"
+
+
+def test_closed_book_with_exposure_or_unknown_state_never_suspends_age(monkeypatch) -> None:
+    from nifty_scalper_bot.core import app as app_module
+    from nifty_scalper_bot.utils.market_hours import MarketState
+
+    monkeypatch.setenv("POSITION_RECONCILE_MAX_AGE_SECONDS", "60")
+    monkeypatch.setattr(app_module, "get_market_state", lambda: MarketState.CLOSED)
+
+    contexts = [
+        _selfcheck_context(positions=[{"symbol": "NFO:TEST"}]),
+        _selfcheck_context(position_read_raises=True),
+        _selfcheck_context(position_manager_present=False),
+    ]
+    for ctx in contexts:
+        ok, detail, meta = app_module.RuntimeSelfChecker(ctx)._check_position_reconciliation()
+        assert ok is False
+        assert detail == "position_reconciliation_stale"
+        assert meta["blocker"] == "position_reconciliation_stale"
+
+
+def test_closed_flat_book_never_hides_hard_reconciliation_failures(monkeypatch) -> None:
+    from nifty_scalper_bot.core import app as app_module
+    from nifty_scalper_bot.utils.market_hours import MarketState
+
+    monkeypatch.setenv("POSITION_RECONCILE_MAX_AGE_SECONDS", "60")
+    monkeypatch.setattr(app_module, "get_market_state", lambda: MarketState.CLOSED)
+
+    cases = [
+        (_selfcheck_context(failed=True, positions=[]), "position_reconciliation_failed"),
+        (
+            _selfcheck_context(completed=False, positions=[]),
+            "position_reconciliation_incomplete",
+        ),
+        (_selfcheck_context(unprotected=True, positions=[]), "unprotected_broker_position"),
+        (
+            _selfcheck_context(unresolved=True, positions=[]),
+            "position_reconciliation_unresolved",
+        ),
+    ]
+    for ctx, expected in cases:
+        ok, detail, meta = app_module.RuntimeSelfChecker(ctx)._check_position_reconciliation()
+        assert ok is False
+        assert detail == expected
+        assert meta["blocker"] == expected
