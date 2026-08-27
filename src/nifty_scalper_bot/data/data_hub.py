@@ -1789,7 +1789,14 @@ class DataHub:
                 self._tick_subscribers.pop(alias, None)
             if token_int is not None:
                 self._tick_subscribers_by_token.pop(token_int, None)
-        if not self._tick_subscribers.get(normalized):
+        # The MDM delegate is shared by every DataHub consumer for this instrument.
+        # Detach it only after symbol/alias and token listeners are all gone.
+        if not any(
+            self._tick_subscribers.get(alias) for alias in aliases
+        ) and not (
+            token_int is not None
+            and self._tick_subscribers_by_token.get(token_int)
+        ):
             self._pending_live_symbols.discard(normalized)
             self._mdm_subscribed_symbols.discard(normalized)
             mdm_unsub = getattr(self._mdm, "unsubscribe", None)

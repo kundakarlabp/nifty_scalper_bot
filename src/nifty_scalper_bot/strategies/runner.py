@@ -13040,7 +13040,7 @@ class StrategyRunner:
         normalized = normalize_symbol(str(symbol or ""))
         symbol_accepted = normalized in getattr(self, "_active_symbols", set())
         if getattr(self, "_data_hub", None) is not None:
-            attached = normalized in getattr(self, "_datahub_registered_symbols", set())
+            attached = self.has_datahub_subscription(normalized)
         else:
             callback = getattr(self, "_callbacks", {}).get(normalized) or getattr(
                 self, "_callbacks", {}
