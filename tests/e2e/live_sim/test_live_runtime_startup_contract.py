@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -245,7 +245,7 @@ class _NoNetworkRobustProvider:
 
 
 def _instrument_dump() -> list[dict[str, Any]]:
-    expiry = date(2026, 8, 26)
+    expiry = pd.Timestamp.now(tz="Asia/Kolkata").date()
     rows: list[dict[str, Any]] = [
         {
             "instrument_token": 900001,
