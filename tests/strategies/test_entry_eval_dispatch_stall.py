@@ -107,6 +107,22 @@ def test_watchdog_interval_reads_the_configured_environment_value() -> None:
         )
 
 
+def test_context_progress_does_not_hide_selected_eval_stall() -> None:
+    """Context-only drain heartbeats must not keep selected-option eval looking alive."""
+    runner, now = _runner(tick_age_s=0.5, progress_age_s=1.0)
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN24000PE"
+    runner._last_selected_option_tick_ts = now - 0.4
+    runner._last_selected_candidate_eval_completed_ts = now - 300.0
+    runner._runner_started_mono = now - 400.0
+    runner._entry_eval_last_progress_ts = now - 1.0
+
+    state = runner._entry_eval_liveness_snapshot(now)
+
+    assert state["dispatch_stalled"] is True
+    assert state["evaluation_alive"] is False
+
+
 class _NullLogger:
     def critical(self, *_args: object, **_kwargs: object) -> None:
         return None

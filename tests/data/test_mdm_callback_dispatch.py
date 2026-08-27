@@ -166,3 +166,57 @@ def test_datahub_repairs_stale_mdm_delegate_subscription() -> None:
     )
     assert seen
     assert seen[-1]["ltp"] == 101.0
+
+
+def test_ws_tick_still_reaches_subscribers_when_cache_rejects_older_event() -> None:
+    """Live WS ticks must reach DataHub even if MDM cache kept a newer timestamp.
+
+    Startup replay can leave _latest_ticks with a wall-clock/synthetic event
+    time ahead of subsequent exchange timestamps. Readiness still looks fresh
+    via _last_valid_live_tick_mono, but the old `_store_tick` reject returned
+    before subscriber fanout — the replay-vs-live divergence.
+    """
+    mdm = MarketDataManager(DummyBroker(), websocket=None)
+    symbol = "NFO:NIFTY26AUG25000CE"
+    token = 123
+    mdm.register_symbol(symbol, token)
+    mdm._selected_ce_symbol = symbol
+    seen: list[dict[str, Any]] = []
+
+    def callback(tick: dict[str, Any]) -> None:
+        seen.append(tick)
+
+    mdm.subscribe(symbol, callback)
+    future = datetime.now(timezone.utc).timestamp() + 60.0
+    mdm._latest_ticks[mdm._canonical_symbol(symbol)] = {
+        "symbol": symbol,
+        "instrument_token": token,
+        "ltp": 100.0,
+        "timestamp": future,
+        "exchange_timestamp": future,
+        "source": "ws",
+        "depth": {"buy": [{"price": 99.9}], "sell": [{"price": 100.1}]},
+        "bid": 99.9,
+        "ask": 100.1,
+    }
+    exchange_ts = datetime.now(timezone.utc).timestamp()
+    mdm._emit_tick(
+        symbol,
+        {
+            "symbol": symbol,
+            "instrument_token": token,
+            "ltp": 101.5,
+            "bid": 101.4,
+            "ask": 101.6,
+            "timestamp": exchange_ts,
+            "exchange_timestamp": exchange_ts,
+            "source": "ws",
+            "depth": {"buy": [{"price": 101.4}], "sell": [{"price": 101.6}]},
+        },
+        source="ws",
+    )
+    assert (
+        seen
+    ), "current-generation WS tick must fan out even if cache write is rejected"
+    assert seen[-1]["ltp"] == 101.5
+    assert mdm._mdm_selected_tick_count >= 1

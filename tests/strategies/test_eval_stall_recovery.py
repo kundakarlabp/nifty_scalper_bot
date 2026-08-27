@@ -148,7 +148,7 @@ def test_recovery_does_not_reschedule_when_a_drain_is_already_active() -> None:
     runner._last_global_eval_ts = time.monotonic() - 120.0
     runner._running = True
     runner._entry_eval_shutdown = False
-    runner._entry_eval_active = True          # already draining
+    runner._entry_eval_active = True  # already draining
     runner._entry_eval_drain_scheduled = False
     runner._entry_eval_drain_count = 1
     runner._runtime_loop_attached = True
@@ -205,3 +205,50 @@ def test_pending_unscheduled_worker_is_classified_as_stranded() -> None:
     assert state["work_outstanding"] is True
     assert state["drain_stranded"] is True
     assert state["worker_stalled"] is True
+
+
+def test_drain_finally_does_not_clear_the_stall_latch() -> None:
+    src = inspect.getsource(StrategyRunner._drain_pending_entry_evaluations)
+    assert "self._entry_eval_stall_disarmed = False" not in src
+
+
+def test_recovery_latch_clears_after_selected_candidate_eval() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = MagicMock()
+    runner._eval_gate_lock = threading.Lock()
+    runner._entry_eval_stall_disarmed = True
+    runner._runtime_evaluation_ready = True
+    runner._runtime_readiness_reason = "strategy_evaluation_stalled"
+    runner._market_data = MagicMock()
+    runner._market_data._pipeline_overloaded = False
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN24000PE"
+
+    runner._clear_entry_eval_stall_after_selected_eval()
+
+    assert runner._entry_eval_stall_disarmed is False
+    events = [
+        call.kwargs["extra"]["event"] for call in runner._logger.info.call_args_list
+    ]
+    assert "ENTRY_EVAL_RECOVERY_SUCCEEDED" in events
+    assert "ENTRY_EVAL_REARMED" in events
+
+
+def test_recovery_latch_remains_when_pipeline_is_overloaded() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = MagicMock()
+    runner._eval_gate_lock = threading.Lock()
+    runner._entry_eval_stall_disarmed = True
+    runner._runtime_evaluation_ready = True
+    runner._runtime_readiness_reason = "strategy_evaluation_stalled"
+    runner._market_data = MagicMock()
+    runner._market_data._pipeline_overloaded = True
+    runner._active_selected_ce = "NFO:NIFTY26JUN24000CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN24000PE"
+
+    runner._clear_entry_eval_stall_after_selected_eval()
+
+    assert runner._entry_eval_stall_disarmed is True
+    assert runner._logger.warning.call_args[1]["extra"]["event"] == (
+        "ENTRY_EVAL_RECOVERY_FAILED"
+    )

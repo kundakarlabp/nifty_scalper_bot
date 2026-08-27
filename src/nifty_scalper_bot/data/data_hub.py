@@ -278,6 +278,8 @@ class DataHub:
         self._active_contract_basket: Mapping[str, Any] | Any | None = None
         self._tick_subscribers: Dict[str, set[TickListener]] = defaultdict(set)
         self._tick_subscribers_by_token: dict[int, set[TickListener]] = defaultdict(set)
+        self._datahub_runner_delivery_count = 0
+        self._last_datahub_runner_delivery_at: float = 0.0
         self._symbol_aliases: dict[str, set[str]] = defaultdict(set)
         self._order_subscribers: list[OrderListener] = []
         self._mdm_subscribed_symbols: set[str] = set()
@@ -1239,9 +1241,15 @@ class DataHub:
             last_ts = self._last_ts.get(symbol, 0.0)
             last_arr = self._last_arrival.get(symbol, 0.0)
             last_ws = self._last_ws_arrival.get(symbol, 0.0)
+            deliver_older_ws = False
             if ts_ms < last_ts:
-                return
-            if ts_ms == last_ts and now_ms <= last_arr:
+                # Replay/cache authority can stamp a newer synthetic event time
+                # than subsequent live WS ticks. Still deliver those WS ticks to
+                # Runner so entry evaluation does not stop after startup replay.
+                if source not in {"ws", "websocket", "stream"}:
+                    return
+                deliver_older_ws = True
+            if (not deliver_older_ws) and ts_ms == last_ts and now_ms <= last_arr:
                 return
             if source == "poll" and (now_ms - last_ws) < self._poll_block_ms:
                 return
@@ -1255,29 +1263,33 @@ class DataHub:
             if token is not None:
                 canonical_tick["instrument_token"] = token
                 canonical_tick["token"] = token
-                self._ticks[token] = canonical_tick
-                self._token_quotes[token] = canonical_tick
-                self._token_by_symbol[symbol] = token
-                self._symbol_by_token[token] = symbol
+                if not deliver_older_ws:
+                    self._ticks[token] = canonical_tick
+                    self._token_quotes[token] = canonical_tick
+                    self._token_by_symbol[symbol] = token
+                    self._symbol_by_token[token] = symbol
             first_seen = symbol not in self._quotes
-            self._quotes[symbol] = canonical_tick
-            self._last_ts[symbol] = ts_ms
-            self._last_arrival[symbol] = now_ms
-            self._last_arrival_mono[symbol] = mono_now
+            if not deliver_older_ws:
+                self._quotes[symbol] = canonical_tick
+                self._last_ts[symbol] = ts_ms
+                self._last_arrival[symbol] = now_ms
+                self._last_arrival_mono[symbol] = mono_now
             if source in {"ws", "websocket", "stream"}:
                 self._last_ws_arrival[symbol] = now_ms
                 self._last_global_ws_arrival = now_ms
-                self._set_subscription_state(
-                    symbol,
-                    SubscriptionState.LIVE,
-                    reason="first_live_tick" if first_seen else "live_tick",
-                    token=token,
-                )
+                if not deliver_older_ws:
+                    self._set_subscription_state(
+                        symbol,
+                        SubscriptionState.LIVE,
+                        reason="first_live_tick" if first_seen else "live_tick",
+                        token=token,
+                    )
             elif source in {"poll", "rest"}:
                 self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
-            self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
-            canonical_tick["quote_update_version"] = int(self._quote_update_versions[symbol])
+            if not deliver_older_ws:
+                self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
+            canonical_tick["quote_update_version"] = int(self._quote_update_versions.get(symbol, 0))
             token_value = canonical_tick.get("instrument_token") or canonical_tick.get("token")
             token_int = None
             try:
@@ -1324,6 +1336,11 @@ class DataHub:
 
         self._capture_option_metrics(symbol, canonical_tick, derive_missing=False)
 
+        if subscribers:
+            self._datahub_runner_delivery_count = int(
+                getattr(self, "_datahub_runner_delivery_count", 0) or 0
+            ) + 1
+            self._last_datahub_runner_delivery_at = time.monotonic()
         for callback in subscribers:
             try:
                 callback(dict(canonical_tick))
