@@ -16,6 +16,7 @@ import math
 from collections.abc import Mapping
 
 from nifty_scalper_bot.execution import order_manager_core as _core
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 
 for _name in dir(_core):
     if not _name.startswith("__"):
@@ -50,7 +51,70 @@ def _enrich_trade_plan_exit_provenance(plan):
 _runtime._enrich_trade_plan_exit_provenance = _enrich_trade_plan_exit_provenance
 RuntimeOrderManager = _runtime.RuntimeOrderManager
 
+_original_extract_quote_diagnostics = RuntimeOrderManager._extract_quote_diagnostics
 _original_get_latest_quote_safe = RuntimeOrderManager._get_latest_quote_safe
+
+
+def _depth_top_quantity(quote, side):
+    """Return positive top-level executable quantity from Zerodha FULL depth."""
+    if not isinstance(quote, Mapping):
+        return 0
+    depth = quote.get("depth")
+    if not isinstance(depth, Mapping):
+        return 0
+    levels = depth.get(side)
+    if not isinstance(levels, (list, tuple)) or not levels:
+        return 0
+    top = levels[0]
+    if not isinstance(top, Mapping):
+        return 0
+    for key in ("quantity", "qty"):
+        value = top.get(key)
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return 0
+
+
+def _extract_quote_diagnostics_canonical(self, quote):
+    """Extend core diagnostics with the existing canonical Zerodha depth resolver."""
+    diagnostics = dict(_original_extract_quote_diagnostics(self, quote))
+    if not isinstance(quote, Mapping):
+        return diagnostics
+
+    current_bid = float(diagnostics.get("bid") or 0.0)
+    current_ask = float(diagnostics.get("ask") or 0.0)
+    if current_bid <= 0.0 or current_ask <= 0.0:
+        bid, ask, spread_pct, _source = resolve_quote_bid_ask_spread(dict(quote))
+        if bid is not None and ask is not None and bid > 0.0 and ask > bid:
+            diagnostics["bid"] = float(bid)
+            diagnostics["ask"] = float(ask)
+            diagnostics["spread"] = float(ask - bid)
+            if spread_pct is not None:
+                diagnostics["spread_pct"] = float(spread_pct)
+
+    try:
+        bid_qty = int(diagnostics.get("bid_qty") or 0)
+    except (TypeError, ValueError):
+        bid_qty = 0
+    try:
+        ask_qty = int(diagnostics.get("ask_qty") or 0)
+    except (TypeError, ValueError):
+        ask_qty = 0
+    if bid_qty <= 0:
+        bid_qty = _depth_top_quantity(quote, "buy")
+        diagnostics["bid_qty"] = bid_qty
+    if ask_qty <= 0:
+        ask_qty = _depth_top_quantity(quote, "sell")
+        diagnostics["ask_qty"] = ask_qty
+    diagnostics["depth_qty"] = max(0, bid_qty) + max(0, ask_qty)
+    return diagnostics
+
+
+RuntimeOrderManager._extract_quote_diagnostics = _extract_quote_diagnostics_canonical
 
 
 def _quote_age_ms(manager, quote):
