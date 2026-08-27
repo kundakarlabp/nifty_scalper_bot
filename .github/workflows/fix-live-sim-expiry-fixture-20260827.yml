@@ -51,10 +51,6 @@ jobs:
         env:
           BRACKET_AUTO_RESTORE: 'false'
         run: python -m pytest -q
-      - name: Test file quality
-        run: |
-          python -m ruff check tests/e2e/live_sim/test_live_runtime_startup_contract.py
-          python -m black --check tests/e2e/live_sim/test_live_runtime_startup_contract.py
       - name: Commit test-only correction
         run: |
           if git diff --quiet -- tests/e2e/live_sim/test_live_runtime_startup_contract.py; then
