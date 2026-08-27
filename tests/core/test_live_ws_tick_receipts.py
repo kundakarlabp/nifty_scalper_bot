@@ -28,6 +28,7 @@ def _seed_future_cache(mdm: MarketDataManager, symbol: str, token: int) -> None:
 
 def _activate_selected_pe(mdm: MarketDataManager, symbol: str) -> None:
     mdm._selected_pe_symbol = symbol  # noqa: SLF001
+    mdm.subscribe(symbol, lambda _tick: None)
 
 
 def _emit_live_tick(
@@ -62,7 +63,6 @@ def test_cache_rejected_current_generation_ws_ticks_count_for_live_execution() -
     token = 123
     mdm.register_symbol(symbol, token)
     _activate_selected_pe(mdm, symbol)
-    mdm.subscribe(symbol, lambda _tick: None)
     _seed_future_cache(mdm, symbol, token)
 
     _emit_live_tick(mdm, symbol, token, ltp=101.0)
