@@ -1171,6 +1171,21 @@ class StrategyRunner:
         self._eval_gate_lock = threading.Lock()
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
+        self._runner_started_mono: float = self._last_tick_seen_ts
+        self._last_selected_option_tick_ts: float = 0.0
+        self._last_selected_candidate_eval_completed_ts: float = 0.0
+        self._runner_tick_received_count: int = 0
+        self._last_runner_tick_received_at: float = 0.0
+        self._entry_eligible_tick_count: int = 0
+        self._last_entry_eligible_tick_at: float = 0.0
+        self._entry_eval_enqueue_count: int = 0
+        self._last_entry_eval_enqueued_at: float = 0.0
+        self._entry_eval_started_count: int = 0
+        self._last_entry_eval_started_at: float = 0.0
+        self._entry_eval_completed_count: int = 0
+        self._last_entry_eval_completed_at: float = 0.0
+        self._selected_candidate_eval_completed_count: int = 0
+        self._last_dispatch_stall_logged: bool = False
         self._last_tick_time_by_symbol: dict[str, float] = defaultdict(float)
         self._runtime_indicators: dict[str, dict[str, Any]] = {}
         self._last_direction_context: dict[str, Any] | None = None
@@ -1239,11 +1254,10 @@ class StrategyRunner:
         self._eval_in_progress_symbols: set[str] = set()
         # Bounded new-entry evaluation coalescing (protected by
         # _eval_gate_lock, reused rather than a new lock). Ticks routed to
-        # OPTION_CANDIDATE/UNDERLYING mark the symbol pending here and
-        # schedule at most one drain task instead of running the heavy
-        # phase9 body inline on the MDM/DataHub tick-ingestion call stack.
-        # POSITION_MANAGEMENT and CONTEXT_ONLY routes are unaffected and
-        # continue to call _on_tick synchronously exactly as before.
+        # OPTION_CANDIDATE/UNDERLYING/CONTEXT_ONLY mark the symbol pending
+        # here and schedule at most one drain task instead of running the
+        # heavy phase9 body inline on the MDM/DataHub tick-ingestion stack.
+        # POSITION_MANAGEMENT is never deferred.
         self._pending_entry_eval_symbols: set[str] = set()
         self._entry_eval_generation_by_symbol: dict[str, int] = defaultdict(int)
         self._entry_eval_drained_generation: dict[str, int] = {}
@@ -4587,6 +4601,9 @@ class StrategyRunner:
             "startup_ready": self._runtime_startup_ready,
             "data_hard_ready": self._runtime_data_hard_ready,
             "evaluation_ready": self._runtime_evaluation_ready,
+            "evaluation_alive": bool(
+                (self.get_entry_eval_lifecycle_snapshot() or {}).get("evaluation_alive")
+            ),
             "live_orders_armed": self._runtime_live_orders_armed,
             "reason": self._runtime_readiness_reason,
             "selected_ce": self._active_selected_ce,
@@ -7923,7 +7940,11 @@ class StrategyRunner:
                 )
                 return
             price = tick.get("last_price") or tick.get("ltp")
-            if not isinstance(price, (int, float)):
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+            if not isinstance(price, (int, float)) or price <= 0:
                 self._emit_runner_eval_decision(
                     symbol=symbol,
                     stage="message_ingress",
@@ -8047,6 +8068,12 @@ class StrategyRunner:
             self._mirror_authoritative_candle_engine(normalized_symbol)
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
+            self._runner_tick_received_count = int(
+                getattr(self, "_runner_tick_received_count", 0) or 0
+            ) + 1
+            self._last_runner_tick_received_at = now_mono
+            if self._is_selected_option_symbol(normalized_symbol):
+                self._last_selected_option_tick_ts = now_mono
 
             # ── OBSERVABILITY ────────────────────────────────────────────────
             # Pipeline candles are populated exclusively by MDM's closed bars
@@ -8064,11 +8091,13 @@ class StrategyRunner:
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
             )
             self._eval_counter += 1
+            skip_inline_duplicate = False
             with self._eval_gate_lock:
                 last_eval = self._last_eval_ts[normalized_symbol]
                 if now_mono - last_eval < 0.05:
-                    return
-                self._last_eval_ts[normalized_symbol] = now_mono
+                    skip_inline_duplicate = True
+                else:
+                    self._last_eval_ts[normalized_symbol] = now_mono
             self._logger.debug(
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
@@ -8131,7 +8160,14 @@ class StrategyRunner:
                     normalized_symbol,
                     {**dict(tick), "trace_id": trace_id},
                 )
+                if route == EntryEvaluationRoute.OPTION_CANDIDATE:
+                    self._entry_eligible_tick_count = int(
+                        getattr(self, "_entry_eligible_tick_count", 0) or 0
+                    ) + 1
+                    self._last_entry_eligible_tick_at = now_mono
                 self._notify_entry_eval_pending(normalized_symbol, trace_id=trace_id)
+                return
+            if skip_inline_duplicate:
                 return
 
             with self._eval_gate_lock:
@@ -8326,12 +8362,19 @@ class StrategyRunner:
             # the next time the loop is driven. Evaluation is never inline.
             return False
         try:
-            loop.call_soon_threadsafe(
-                lambda: safe_task(self._drain_pending_entry_evaluations())
-            )
+            def _start_drain() -> None:
+                try:
+                    safe_task(self._drain_pending_entry_evaluations())
+                except Exception:
+                    with self._eval_gate_lock:
+                        self._entry_eval_drain_scheduled = False
+
+            loop.call_soon_threadsafe(_start_drain)
             return True
         except RuntimeError:
             # Loop closed between the check and the submission.
+            return False
+        except Exception:
             return False
 
     def _notify_entry_eval_pending(
@@ -8356,6 +8399,10 @@ class StrategyRunner:
                 ):
                     self._entry_eval_last_progress_ts = time.monotonic()
                 self._pending_entry_eval_symbols.add(symbol)
+                self._entry_eval_enqueue_count = int(
+                    getattr(self, "_entry_eval_enqueue_count", 0) or 0
+                ) + 1
+                self._last_entry_eval_enqueued_at = time.monotonic()
                 if trace_id:
                     self._entry_eval_trace_id_by_symbol[symbol] = trace_id
                 should_schedule = (
@@ -8456,6 +8503,35 @@ class StrategyRunner:
             # a stall in its own right. Derived, never latched, so it clears as
             # soon as evaluation resumes.
             tick_seen = float(getattr(self, "_last_tick_seen_ts", 0.0) or 0.0)
+            selected_tick_seen = float(
+                getattr(self, "_last_selected_option_tick_ts", 0.0) or 0.0
+            )
+            selected_eval_at = float(
+                getattr(self, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
+            )
+            selected_eval_age: float | None = (
+                max(0.0, now - selected_eval_at) if selected_eval_at > 0.0 else None
+            )
+            has_selected = bool(
+                getattr(self, "_active_selected_ce", None)
+                or getattr(self, "_active_selected_pe", None)
+            )
+            # Context-only drain progress must not mask a dead selected-CE/PE
+            # entry path. When selected contracts exist, stall detection keys
+            # off selected-option ticks and selected candidate completions.
+            if has_selected and selected_tick_seen > 0.0:
+                tick_seen = selected_tick_seen
+                if selected_eval_at > 0.0:
+                    last_progress = selected_eval_at
+                else:
+                    last_progress = float(
+                        getattr(self, "_runner_started_mono", 0.0) or 0.0
+                    )
+                progress_age = (
+                    max(0.0, now - last_progress)
+                    if last_progress > 0.0
+                    else progress_age
+                )
             tick_age = max(0.0, now - tick_seen) if tick_seen > 0.0 else float("inf")
             dispatch_stall_s = float(
                 getattr(self, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
@@ -8481,6 +8557,19 @@ class StrategyRunner:
                 "drain_active": drain_active,
                 "drain_active_age_s": round(active_age, 1),
                 "last_progress_age_s": round(progress_age, 1),
+                "selected_eval_age_s": (
+                    round(selected_eval_age, 1) if selected_eval_age is not None else None
+                ),
+                "evaluation_alive": bool(
+                    selected_eval_at > 0.0
+                    and selected_eval_age is not None
+                    and selected_eval_age
+                    < float(
+                        getattr(self, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
+                    )
+                )
+                if has_selected
+                else bool(progress_age < 120.0),
                 "work_outstanding": work_outstanding,
                 "drain_stranded": drain_stranded,
                 "worker_stalled": worker_stalled,
@@ -8514,16 +8603,66 @@ class StrategyRunner:
             if dispatch_stalled and not drain_overdue
             else "entry_eval_worker_stalled"
         )
+        stall_event = (
+            "ENTRY_EVAL_DISPATCH_STALLED"
+            if dispatch_stalled and not drain_overdue
+            else "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED"
+        )
         self._logger.critical(
-            "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED"
-            " symbol=%s phase=%s age_s=%s reason=%s",
+            "%s symbol=%s phase=%s age_s=%s reason=%s selected_ce=%s selected_pe=%s "
+            "tick_age_s=%s last_progress_age_s=%s pending=%s drain_scheduled=%s "
+            "drain_active=%s loop_attached=%s",
+            stall_event,
             state.get("active_symbol"),
             state.get("active_phase"),
             state.get("drain_active_age_s"),
             self._runtime_readiness_reason,
+            getattr(self, "_active_selected_ce", None),
+            getattr(self, "_active_selected_pe", None),
+            state.get("tick_age_s"),
+            state.get("last_progress_age_s"),
+            state.get("pending_entry_eval"),
+            state.get("drain_scheduled"),
+            state.get("drain_active"),
+            state.get("runtime_loop_attached"),
             extra={
-                "event": "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED",
+                "event": stall_event,
                 "reason": self._runtime_readiness_reason,
+                "selected_ce": getattr(self, "_active_selected_ce", None),
+                "selected_pe": getattr(self, "_active_selected_pe", None),
+                "last_selected_tick_age_s": (
+                    round(
+                        max(
+                            0.0,
+                            time.monotonic()
+                            - float(
+                                getattr(self, "_last_selected_option_tick_ts", 0.0)
+                                or 0.0
+                            ),
+                        ),
+                        1,
+                    )
+                    if float(getattr(self, "_last_selected_option_tick_ts", 0.0) or 0.0)
+                    > 0.0
+                    else None
+                ),
+                "last_datahub_runner_delivery_at": getattr(
+                    getattr(self, "_data_hub", None),
+                    "_last_datahub_runner_delivery_at",
+                    None,
+                ),
+                "runner_tick_received_count": getattr(
+                    self, "_runner_tick_received_count", 0
+                ),
+                "entry_eval_enqueue_count": getattr(self, "_entry_eval_enqueue_count", 0),
+                "entry_eval_started_count": getattr(self, "_entry_eval_started_count", 0),
+                "entry_eval_completed_count": getattr(
+                    self, "_entry_eval_completed_count", 0
+                ),
+                "selected_candidate_eval_completed_count": getattr(
+                    self, "_selected_candidate_eval_completed_count", 0
+                ),
+                "build_sha": (getattr(self, "_build_info", {}) or {}).get("git_sha"),
                 **dict(state),
             },
         )
@@ -8612,7 +8751,6 @@ class StrategyRunner:
                 self._entry_eval_active_started_at = None
                 self._entry_eval_active_symbol = None
                 self._entry_eval_active_phase = None
-                self._entry_eval_stall_disarmed = False
                 needs_next = bool(self._pending_entry_eval_symbols) and not (
                     self._entry_eval_shutdown
                 )
@@ -8684,6 +8822,10 @@ class StrategyRunner:
                 },
             )
             return
+        self._entry_eval_started_count = int(
+            getattr(self, "_entry_eval_started_count", 0) or 0
+        ) + 1
+        self._last_entry_eval_started_at = time.monotonic()
         tick_payload = dict(latest_tick)
         tick_payload["trace_id"] = (
             trace_id or tick_payload.get("trace_id") or f"{symbol}-drain"
@@ -8692,6 +8834,18 @@ class StrategyRunner:
         # was ingested, so _on_tick must not run it a second time.
         tick_payload["_protection_already_handled"] = True
         self._on_tick(symbol, tick_payload)
+        self._entry_eval_completed_count = int(
+            getattr(self, "_entry_eval_completed_count", 0) or 0
+        ) + 1
+        self._last_entry_eval_completed_at = time.monotonic()
+        if route == EntryEvaluationRoute.OPTION_CANDIDATE:
+            self._selected_candidate_eval_completed_count = int(
+                getattr(self, "_selected_candidate_eval_completed_count", 0) or 0
+            ) + 1
+            self._last_selected_candidate_eval_completed_at = (
+                self._last_entry_eval_completed_at
+            )
+            self._clear_entry_eval_stall_after_selected_eval()
 
     def _run_health_watchdog_on_cadence(self) -> None:
         """Dispatch the health watchdog off-thread at most once per interval.
@@ -9115,6 +9269,119 @@ class StrategyRunner:
                     )
 
     # Watchdog recovery for a genuine live eval stall while ticks are flowing.
+    def _clear_entry_eval_stall_after_selected_eval(self) -> None:
+        """Clear the fail-closed stall latch only after a real selected eval."""
+        if not bool(getattr(self, "_entry_eval_stall_disarmed", False)):
+            return
+        mdm = getattr(self, "_market_data", None) or getattr(self, "_data_hub", None)
+        overloaded = bool(getattr(mdm, "_pipeline_overloaded", False))
+        if overloaded:
+            self._logger.warning(
+                "ENTRY_EVAL_RECOVERY_FAILED reason=pipeline_overload",
+                extra={"event": "ENTRY_EVAL_RECOVERY_FAILED", "reason": "pipeline_overload"},
+            )
+            return
+        reason = str(getattr(self, "_runtime_readiness_reason", "") or "")
+        if reason and reason not in {
+            "strategy_evaluation_stalled",
+            "entry_eval_worker_stalled",
+            "ready",
+            "",
+        }:
+            self._logger.warning(
+                "ENTRY_EVAL_RECOVERY_FAILED reason=%s",
+                reason,
+                extra={"event": "ENTRY_EVAL_RECOVERY_FAILED", "reason": reason},
+            )
+            return
+        with self._eval_gate_lock:
+            self._entry_eval_stall_disarmed = False
+        self._logger.info(
+            "ENTRY_EVAL_RECOVERY_SUCCEEDED selected_ce=%s selected_pe=%s",
+            getattr(self, "_active_selected_ce", None),
+            getattr(self, "_active_selected_pe", None),
+            extra={
+                "event": "ENTRY_EVAL_RECOVERY_SUCCEEDED",
+                "selected_ce": getattr(self, "_active_selected_ce", None),
+                "selected_pe": getattr(self, "_active_selected_pe", None),
+            },
+        )
+        self._logger.info(
+            "ENTRY_EVAL_REARMED",
+            extra={"event": "ENTRY_EVAL_REARMED"},
+        )
+
+    def get_entry_eval_lifecycle_snapshot(self) -> dict[str, Any]:
+        """Cheap counters/timestamps for /health/trading and diagnostics."""
+        now = time.monotonic()
+        liveness = self._entry_eval_liveness_snapshot(now)
+        hub = getattr(self, "_data_hub", None)
+        mdm = getattr(self, "_market_data", None)
+        selected_tick_at = float(getattr(self, "_last_selected_option_tick_ts", 0.0) or 0.0)
+        selected_eval_at = float(
+            getattr(self, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
+        )
+        last_eval_at = float(getattr(self, "_last_entry_eval_completed_at", 0.0) or 0.0)
+        stall_s = float(getattr(self, "_entry_eval_dispatch_stall_s", 120.0) or 120.0)
+        evaluation_alive = bool(liveness.get("evaluation_alive"))
+        return {
+            "evaluation_ready": bool(getattr(self, "_runtime_evaluation_ready", False)),
+            "evaluation_alive": evaluation_alive,
+            "evaluation_age_s": (
+                round(max(0.0, now - last_eval_at), 1) if last_eval_at > 0.0 else None
+            ),
+            "selected_eval_age_s": liveness.get("selected_eval_age_s"),
+            "strategy_evaluation_stalled": bool(liveness.get("dispatch_stalled")),
+            "entry_eval_worker_stalled": bool(liveness.get("worker_stalled")),
+            "mdm_selected_tick_count": int(getattr(mdm, "_mdm_selected_tick_count", 0) or 0),
+            "last_mdm_selected_tick_at": getattr(mdm, "_last_mdm_selected_tick_at", None),
+            "datahub_runner_delivery_count": int(
+                getattr(hub, "_datahub_runner_delivery_count", 0) or 0
+            ),
+            "last_datahub_runner_delivery_at": getattr(
+                hub, "_last_datahub_runner_delivery_at", None
+            ),
+            "runner_tick_received_count": int(
+                getattr(self, "_runner_tick_received_count", 0) or 0
+            ),
+            "last_runner_tick_received_at": getattr(
+                self, "_last_runner_tick_received_at", None
+            ),
+            "entry_eligible_tick_count": int(
+                getattr(self, "_entry_eligible_tick_count", 0) or 0
+            ),
+            "last_entry_eligible_tick_at": getattr(
+                self, "_last_entry_eligible_tick_at", None
+            ),
+            "entry_eval_enqueue_count": int(
+                getattr(self, "_entry_eval_enqueue_count", 0) or 0
+            ),
+            "last_entry_eval_enqueued_at": getattr(
+                self, "_last_entry_eval_enqueued_at", None
+            ),
+            "entry_eval_started_count": int(
+                getattr(self, "_entry_eval_started_count", 0) or 0
+            ),
+            "last_entry_eval_started_at": getattr(self, "_last_entry_eval_started_at", None),
+            "entry_eval_completed_count": int(
+                getattr(self, "_entry_eval_completed_count", 0) or 0
+            ),
+            "last_entry_eval_completed_at": getattr(
+                self, "_last_entry_eval_completed_at", None
+            ),
+            "selected_candidate_eval_completed_count": int(
+                getattr(self, "_selected_candidate_eval_completed_count", 0) or 0
+            ),
+            "last_selected_candidate_eval_completed_at": selected_eval_at or None,
+            "last_selected_option_tick_age_s": (
+                round(max(0.0, now - selected_tick_at), 1)
+                if selected_tick_at > 0.0
+                else None
+            ),
+            "dispatch_stall_s": stall_s,
+            **liveness,
+        }
+
     def _recover_strategy_eval_stall_once(self, now: float | None = None) -> None:
         """Recompute readiness and reschedule one stranded entry-eval drain."""
         now = time.monotonic() if now is None else now
@@ -9124,10 +9391,10 @@ class StrategyRunner:
             float(worker_state.get("last_progress_age_s") or 0.0),
         )
         self._logger.warning(
-            "STRATEGY_EVAL_STALL_RECOVERY_ONCE stall_sec=%s action=recompute_readiness_and_reschedule_drain",
+            "ENTRY_EVAL_RECOVERY_ATTEMPT stall_sec=%s action=recompute_readiness_and_reschedule_drain",
             round(stall_sec, 1),
             extra={
-                "event": "STRATEGY_EVAL_STALL_RECOVERY_ONCE",
+                "event": "ENTRY_EVAL_RECOVERY_ATTEMPT",
                 "stall_sec": round(stall_sec, 1),
                 "action": "recompute_readiness_and_reschedule_drain",
             },
@@ -9164,10 +9431,15 @@ class StrategyRunner:
         drain_rescheduled = False
         if not self._entry_eval_shutdown:
             with self._eval_gate_lock:
+                scheduled_stuck = bool(
+                    self._entry_eval_drain_scheduled
+                    and not self._entry_eval_active
+                    and float(worker_state.get("last_progress_age_s") or 0.0) >= 90.0
+                )
                 needs_drain = (
                     bool(self._pending_entry_eval_symbols)
                     and not self._entry_eval_active
-                    and not self._entry_eval_drain_scheduled
+                    and (not self._entry_eval_drain_scheduled or scheduled_stuck)
                 )
                 if needs_drain:
                     self._entry_eval_drain_scheduled = True

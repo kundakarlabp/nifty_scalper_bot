@@ -416,6 +416,8 @@ class MarketDataManager:
         self._last_tick_hash: dict[str, int] = {}
         self._tick_cache: dict[str, dict[str, Any]] = {}
         self._tick_counter = 0
+        self._mdm_selected_tick_count = 0
+        self._last_mdm_selected_tick_at: float = 0.0
         self._last_tick_log_time = time.monotonic()
         self._last_tick_time: dict[str, float] = {}
         self._tick_bus: Any | None = None
@@ -9482,6 +9484,38 @@ class MarketDataManager:
                 level=logging.WARNING,
             )
 
+    def _is_selected_option_tick_symbol(self, symbol: str) -> bool:
+        """Return whether *symbol* is the active selected CE or PE."""
+        candidates: set[str] = set()
+        for attr in ("_selected_ce_symbol", "_selected_pe_symbol", "selected_ce_symbol", "selected_pe_symbol"):
+            value = getattr(self, attr, None)
+            if value:
+                candidates.add(str(value))
+        basket = getattr(self, "_active_contract_basket", None) or getattr(
+            self, "_active_basket", None
+        )
+        if basket is not None:
+            for key in ("selected_ce", "selected_pe"):
+                try:
+                    value = self._basket_value(basket, key, None)
+                except Exception:
+                    value = None
+                if value:
+                    candidates.add(str(value))
+        if not candidates:
+            return False
+        try:
+            canonical = self._canonical_symbol(symbol)
+        except Exception:
+            canonical = str(symbol or "")
+        normalized_candidates = set()
+        for item in candidates:
+            try:
+                normalized_candidates.add(self._canonical_symbol(item))
+            except Exception:
+                normalized_candidates.add(str(item))
+        return canonical in normalized_candidates or str(symbol) in candidates
+
     def _ingest_normalized_tick(self, tick: Mapping[str, Any]) -> None:
         """Ingest one canonical live tick. Args: tick; Returns: none; Raises: none."""
         symbol = str(tick["symbol"])
@@ -9581,8 +9615,23 @@ class MarketDataManager:
                     )
             except Exception:
                 pass
-        if not self._store_tick(symbol, tick):
+        stored = self._store_tick(symbol, tick)
+        # Current-generation WS ticks must still reach DataHub/Runner even when
+        # the cache writer rejects the payload as not-newer. Readiness uses
+        # _last_valid_live_tick_mono (updated above), so a synthetic/future
+        # cached timestamp would otherwise look fresh while live evaluation
+        # silently stops. REST/poll rejects stay cache-only.
+        if not stored and source != "ws":
             return
+        try:
+            canonical_emit_symbol = self._canonical_symbol(symbol)
+        except Exception:
+            canonical_emit_symbol = symbol
+        if self._is_selected_option_tick_symbol(canonical_emit_symbol):
+            self._mdm_selected_tick_count = int(
+                getattr(self, "_mdm_selected_tick_count", 0) or 0
+            ) + 1
+            self._last_mdm_selected_tick_at = time.monotonic()
         callbacks: list[TickCallback]
         tick_payload = to_json_safe(dict(tick))
         ts_payload = pd.to_datetime(
@@ -9598,8 +9647,10 @@ class MarketDataManager:
             tick_payload.get("received_at") or time.time()
         )
         with self._lock:
-            self._last_tick_source[symbol] = source
-            callbacks = list(self._subscribers.get(symbol, ()))
+            self._last_tick_source[canonical_emit_symbol] = source
+            callbacks = list(self._subscribers.get(canonical_emit_symbol, ()))
+            if not callbacks:
+                callbacks = list(self._subscribers.get(symbol, ()))
             self._tick_counter += 1
         self._publish_tick_to_bus_safe(
             {

@@ -2926,11 +2926,55 @@ def get_http_app() -> FastAPI:
                 "data_hard_ready": bool(getattr(ctx, "data_hard_ready", False))
             },
             "strategy": {
-                "evaluation_ready": bool(getattr(ctx, "evaluation_ready", False))
+                "evaluation_ready": bool(getattr(ctx, "evaluation_ready", False)),
+                "evaluation_alive": None,
             },
             "uptime_seconds": int(time_module.monotonic() - _START_TIME),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        runner = getattr(ctx, "strategy_runner", None)
+        getter = getattr(runner, "get_entry_eval_lifecycle_snapshot", None)
+        if callable(getter):
+            try:
+                lifecycle = dict(getter() or {})
+            except Exception:
+                lifecycle = {}
+            strategy_block = payload.get("strategy")
+            if isinstance(strategy_block, dict):
+                strategy_block["evaluation_ready"] = bool(
+                    lifecycle.get(
+                        "evaluation_ready", strategy_block.get("evaluation_ready")
+                    )
+                )
+                strategy_block["evaluation_alive"] = lifecycle.get("evaluation_alive")
+                strategy_block["evaluation_age_s"] = lifecycle.get("evaluation_age_s")
+                strategy_block["selected_eval_age_s"] = lifecycle.get(
+                    "selected_eval_age_s"
+                )
+                strategy_block["strategy_evaluation_stalled"] = lifecycle.get(
+                    "strategy_evaluation_stalled"
+                )
+                strategy_block["entry_eval_worker_stalled"] = lifecycle.get(
+                    "entry_eval_worker_stalled"
+                )
+                strategy_block["entry_eval_completed_count"] = lifecycle.get(
+                    "entry_eval_completed_count"
+                )
+                strategy_block["selected_candidate_eval_completed_count"] = lifecycle.get(
+                    "selected_candidate_eval_completed_count"
+                )
+            if lifecycle.get("strategy_evaluation_stalled"):
+                blockers.append("strategy_evaluation_stalled")
+            elif lifecycle.get("entry_eval_worker_stalled"):
+                blockers.append("entry_eval_worker_stalled")
+            blockers = list(dict.fromkeys(blockers))
+            primary = blockers[0] if blockers else None
+            payload["primary_blocker"] = primary
+            payload["blockers"] = blockers
+            payload["status"] = "ready" if primary is None else "blocked"
+            payload["ready"] = primary is None
+            if primary is not None:
+                payload["live_orders_armed"] = False
         code = 200 if primary is None else 503
         return code, payload
 
