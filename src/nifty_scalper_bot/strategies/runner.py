@@ -1187,8 +1187,16 @@ class StrategyRunner:
         self._health_watchdog_last_run: float = 0.0
         self._health_watchdog_running: bool = False
         self._health_watchdog_skipped: int = 0
+        # parse_float_env takes the *value*, not the variable name: passing the
+        # name made every deployment fall back to the default with a warning.
         self._health_watchdog_interval_s: float = parse_float_env(
-            "HEALTH_WATCHDOG_INTERVAL_SECONDS", 5.0
+            os.getenv("HEALTH_WATCHDOG_INTERVAL_SECONDS"), 5.0
+        )
+        # Longest silence tolerated from the entry evaluator while live ticks
+        # keep arriving. Bar-close evaluation is ~60s, so the default allows two
+        # full cycles before declaring the dispatch path dead.
+        self._entry_eval_dispatch_stall_s: float = parse_float_env(
+            os.getenv("ENTRY_EVAL_DISPATCH_STALL_SECONDS"), 120.0
         )
         # Compatibility mirror of authoritative MDM CandleEngine objects only.
         # StrategyRunner must never instantiate or mutate separate engines.
@@ -4084,9 +4092,17 @@ class StrategyRunner:
                     else:
                         self._runtime_symbol_last_ready_at.pop(runtime_key, None)
             self._runtime_execution_ready_by_symbol = normalized_execution_ready
-        self._runtime_readiness_reason = (
-            "entry_eval_worker_stalled" if worker_stalled else reason
-        )
+        if worker_stalled:
+            # Preserve the more specific dispatch-stall reason set by the
+            # watchdog instead of flattening every stall to one blocker code.
+            previous = getattr(self, "_runtime_readiness_reason", None)
+            self._runtime_readiness_reason = (
+                previous
+                if previous == "strategy_evaluation_stalled"
+                else "entry_eval_worker_stalled"
+            )
+        else:
+            self._runtime_readiness_reason = reason
         self._runtime_startup_ready = bool(
             self._runtime_data_hard_ready and self._runtime_evaluation_ready
         )
@@ -8433,6 +8449,22 @@ class StrategyRunner:
             progress_age = max(0.0, now - last_progress)
             work_outstanding = bool(pending or drain_active or drain_scheduled)
             drain_stranded = bool(pending and not drain_active and not drain_scheduled)
+            # A stall that happens before work is queued is invisible to the
+            # test below: nothing is pending, no drain is scheduled or active,
+            # so continuous ticks with a silent evaluator look identical to a
+            # legitimately idle one. Fresh ticks with no evaluation progress is
+            # a stall in its own right. Derived, never latched, so it clears as
+            # soon as evaluation resumes.
+            tick_seen = float(getattr(self, "_last_tick_seen_ts", 0.0) or 0.0)
+            tick_age = max(0.0, now - tick_seen) if tick_seen > 0.0 else float("inf")
+            dispatch_stall_s = float(
+                getattr(self, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
+            )
+            dispatch_stalled = bool(
+                not work_outstanding
+                and tick_age <= 5.0
+                and progress_age >= dispatch_stall_s
+            )
             worker_stalled = bool(
                 work_outstanding
                 and (
@@ -8440,8 +8472,10 @@ class StrategyRunner:
                     if drain_active
                     else progress_age >= 90.0
                 )
-            )
+            ) or dispatch_stalled
             return {
+                "tick_age_s": round(tick_age, 1) if tick_age != float("inf") else None,
+                "dispatch_stalled": dispatch_stalled,
                 "pending_entry_eval": pending,
                 "drain_scheduled": drain_scheduled,
                 "drain_active": drain_active,
@@ -8461,23 +8495,35 @@ class StrategyRunner:
 
     def _disarm_stalled_entry_worker_if_needed(self, state: Mapping[str, Any]) -> bool:
         """Freeze new entries when the sole worker exceeds its safe age."""
-        if (
-            not bool(state.get("drain_active"))
-            or float(state.get("drain_active_age_s") or 0.0) < 90.0
-            or bool(getattr(self, "_entry_eval_stall_disarmed", False))
+        dispatch_stalled = bool(state.get("dispatch_stalled"))
+        drain_overdue = (
+            bool(state.get("drain_active"))
+            and float(state.get("drain_active_age_s") or 0.0) >= 90.0
+        )
+        if (not drain_overdue and not dispatch_stalled) or bool(
+            getattr(self, "_entry_eval_stall_disarmed", False)
         ):
             return False
         with self._eval_gate_lock:
             self._entry_eval_stall_disarmed = True
         self._runtime_live_orders_armed = False
-        self._runtime_readiness_reason = "entry_eval_worker_stalled"
+        # An evaluator that never receives work is a different fault from a
+        # worker stuck mid-drain; name it so operators can tell them apart.
+        self._runtime_readiness_reason = (
+            "strategy_evaluation_stalled"
+            if dispatch_stalled and not drain_overdue
+            else "entry_eval_worker_stalled"
+        )
         self._logger.critical(
-            "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED symbol=%s phase=%s age_s=%s",
+            "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED"
+            " symbol=%s phase=%s age_s=%s reason=%s",
             state.get("active_symbol"),
             state.get("active_phase"),
             state.get("drain_active_age_s"),
+            self._runtime_readiness_reason,
             extra={
                 "event": "ENTRY_EVAL_WORKER_STALLED_ENTRIES_DISARMED",
+                "reason": self._runtime_readiness_reason,
                 **dict(state),
             },
         )
