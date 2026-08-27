@@ -148,7 +148,7 @@ def test_recovery_does_not_reschedule_when_a_drain_is_already_active() -> None:
     runner._last_global_eval_ts = time.monotonic() - 120.0
     runner._running = True
     runner._entry_eval_shutdown = False
-    runner._entry_eval_active = True          # already draining
+    runner._entry_eval_active = True  # already draining
     runner._entry_eval_drain_scheduled = False
     runner._entry_eval_drain_count = 1
     runner._runtime_loop_attached = True
@@ -227,7 +227,9 @@ def test_recovery_latch_clears_after_selected_candidate_eval() -> None:
     runner._clear_entry_eval_stall_after_selected_eval()
 
     assert runner._entry_eval_stall_disarmed is False
-    events = [call.kwargs["extra"]["event"] for call in runner._logger.info.call_args_list]
+    events = [
+        call.kwargs["extra"]["event"] for call in runner._logger.info.call_args_list
+    ]
     assert "ENTRY_EVAL_RECOVERY_SUCCEEDED" in events
     assert "ENTRY_EVAL_REARMED" in events
 
@@ -250,4 +252,3 @@ def test_recovery_latch_remains_when_pipeline_is_overloaded() -> None:
     assert runner._logger.warning.call_args[1]["extra"]["event"] == (
         "ENTRY_EVAL_RECOVERY_FAILED"
     )
-

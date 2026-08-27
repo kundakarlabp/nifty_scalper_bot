@@ -215,7 +215,8 @@ def test_ws_tick_still_reaches_subscribers_when_cache_rejects_older_event() -> N
         },
         source="ws",
     )
-    assert seen, "current-generation WS tick must fan out even if cache write is rejected"
+    assert (
+        seen
+    ), "current-generation WS tick must fan out even if cache write is rejected"
     assert seen[-1]["ltp"] == 101.5
     assert mdm._mdm_selected_tick_count >= 1
-
