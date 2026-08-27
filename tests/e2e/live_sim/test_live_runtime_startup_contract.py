@@ -245,7 +245,7 @@ class _NoNetworkRobustProvider:
 
 
 def _instrument_dump() -> list[dict[str, Any]]:
-    expiry = date(2026, 8, 26)
+    expiry = pd.Timestamp.now(tz="Asia/Kolkata").date()
     rows: list[dict[str, Any]] = [
         {
             "instrument_token": 900001,
