@@ -3,12 +3,33 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import time
 
+import pytest
+
 from nifty_scalper_bot.core.live_ws_tick_receipts import apply_patch
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 
 class DummyBroker:
     pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_class_patch():
+    """Do not leak the test-installed MDM adapter into unrelated test modules."""
+    original_emit = MarketDataManager._emit_tick
+    original_snapshot = MarketDataManager.get_symbol_snapshot
+    marker_name = "_live_ws_tick_receipt_patch_installed"
+    marker_present = hasattr(MarketDataManager, marker_name)
+    marker_value = getattr(MarketDataManager, marker_name, None)
+    try:
+        yield
+    finally:
+        MarketDataManager._emit_tick = original_emit  # type: ignore[method-assign]
+        MarketDataManager.get_symbol_snapshot = original_snapshot  # type: ignore[method-assign]
+        if marker_present:
+            setattr(MarketDataManager, marker_name, marker_value)
+        elif hasattr(MarketDataManager, marker_name):
+            delattr(MarketDataManager, marker_name)
 
 
 def _seed_future_cache(mdm: MarketDataManager, symbol: str, token: int) -> None:
