@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+import nifty_scalper_bot.core as core
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -104,6 +105,15 @@ class ReplayHarness:
         contract_catalog: HistoricalContractCatalog | None = None,
         calibration_outcomes: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
+        runtime_proof = core.install_runtime_hardening()
+        if not isinstance(runtime_proof, Mapping) or not runtime_proof:
+            raise RuntimeError("runtime_hardening_incomplete proof_unavailable")
+        missing = sorted(name for name, installed in runtime_proof.items() if not installed)
+        if missing:
+            raise RuntimeError(
+                f"runtime_hardening_incomplete missing={missing} proof={dict(runtime_proof)}"
+            )
+
         self._runner = runner
         self._paper = paper_engine
         self._option_symbol = option_symbol

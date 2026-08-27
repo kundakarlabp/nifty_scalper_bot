@@ -17,6 +17,19 @@ from nifty_scalper_bot.utils.pricing import canonical_price_source  # compat
 _CORE_TRUTHY = {"1", "true", "yes", "y", "on", "live"}
 _APP_MODULE_NAME = "nifty_scalper_bot.core.app"
 _APP_IMPORT_HOOK_ATTR = "_nifty_scalper_core_app_patch_hook"
+_RUNTIME_HARDENING_REQUIRED = (
+    "market_data_hardening",
+    "dynamic_universe",
+    "live_ws_tick_receipts",
+    "runtime_reliability",
+    "runner_candle_cache",
+    "strategy_context_fast_path",
+    "off_market_controller",
+    "off_market_app",
+    "session_boundary",
+    "boot_readiness",
+    "polling_failover",
+)
 
 
 def _core_env_true(name: str) -> bool:
@@ -93,7 +106,7 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
         extra={"event": "BOOT_LOG_RATE_CONTROL_FAILED", "error_type": type(exc).__name__},
     )
 
-__all__ = ["NiftyScalperApp", "canonical_price_source"]
+__all__ = ["NiftyScalperApp", "canonical_price_source", "install_runtime_hardening"]
 
 _LOGGER = get_logger(__name__)
 
@@ -162,9 +175,129 @@ def _install_runner_candle_engine_cache_patch() -> bool:
     return True
 
 
-def _apply_app_runtime_patches(app_module: Any) -> None:
-    # The production app import is the single authoritative installation point.
-    # Do not require tests or callers to invoke market-data hardening manually.
+def _marked_callable(owner: Any, name: str, marker: str) -> bool:
+    value = getattr(owner, name, None)
+    return callable(value) and bool(getattr(value, marker, False))
+
+
+def _boot_readiness_installation_complete(app_module: Any) -> bool:
+    """Verify every class/function adapter installed by boot_readiness_safety."""
+    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+    from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    checks = (
+        _marked_callable(
+            app_module,
+            "compute_live_readiness",
+            "_session_readiness_adapted",
+        ),
+        _marked_callable(
+            app_module,
+            "_replay_latest_mdm_ticks_to_bus",
+            "_inactive_bus_replay_guarded",
+        ),
+        _marked_callable(
+            app_module,
+            "_register_and_subscribe_live_symbol",
+            "_runner_activation_gated",
+        ),
+        _marked_callable(
+            app_module,
+            "_wire_and_start_message_bus",
+            "_direct_mdm_bus_detach_adapted",
+        ),
+        _marked_callable(
+            StrategyRunner,
+            "sync_history_from_mdm",
+            "_history_role_corrected",
+        ),
+        _marked_callable(
+            MarketDataManager,
+            "_update_pipeline_overload_locked",
+            "_active_drain_overload_recovery_guarded",
+        ),
+        _marked_callable(
+            IndicatorEngine,
+            "get_history",
+            "_missing_history_single_log_adapted",
+        ),
+        _marked_callable(
+            IndicatorEngine,
+            "get_indicators",
+            "_option_direction_context_authority_adapted",
+        ),
+    )
+    return all(checks)
+
+
+def _runtime_hardening_install_proof(
+    app_module: Any,
+    *,
+    runtime_reliability_state: Any,
+) -> dict[str, bool]:
+    """Return explicit proof that replay and LIVE share all runtime adapters."""
+    from nifty_scalper_bot.core.strategy_manager import StrategyManager
+    from nifty_scalper_bot.core.universe_controller import UniverseController
+    from nifty_scalper_bot.data.candle_engine import CandleEngine
+    from nifty_scalper_bot.data.data_hub import DataHub
+    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+    from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    reliability = (
+        isinstance(runtime_reliability_state, dict)
+        and bool(runtime_reliability_state)
+        and all(bool(value) for value in runtime_reliability_state.values())
+    )
+    market_data = all(
+        (
+            bool(getattr(CandleEngine, "_candle_state_hardening_installed", False)),
+            bool(
+                getattr(
+                    MarketDataManager,
+                    "_candle_clock_flush_hardening_installed",
+                    False,
+                )
+            ),
+            bool(getattr(DataHub, "_active_basket_subscription_hardening_installed", False)),
+            bool(getattr(MarketDataManager, "_freshness_hardening_installed", False)),
+            bool(getattr(WebSocketManager, "_market_data_hardening_installed", False)),
+        )
+    )
+    return {
+        "market_data_hardening": market_data,
+        "dynamic_universe": bool(
+            getattr(StrategyRunner, "_dynamic_universe_safety_installed", False)
+        ),
+        "live_ws_tick_receipts": bool(
+            getattr(MarketDataManager, "_live_ws_tick_receipt_patch_installed", False)
+        ),
+        "runtime_reliability": reliability,
+        "runner_candle_cache": bool(
+            getattr(StrategyRunner, "_candle_engine_mirror_cache_patch_installed", False)
+        ),
+        "strategy_context_fast_path": bool(
+            getattr(StrategyManager, "_context_only_fast_path_installed", False)
+        ),
+        "off_market_controller": bool(
+            getattr(UniverseController, "_off_market_basket_safety_installed", False)
+        ),
+        "off_market_app": bool(
+            getattr(app_module, "_off_market_basket_commit_safety_installed", False)
+        ),
+        "session_boundary": bool(
+            getattr(app_module, "_session_boundary_rearm_installed", False)
+        ),
+        "boot_readiness": _boot_readiness_installation_complete(app_module),
+        "polling_failover": bool(
+            getattr(app_module, "_polling_failover_runtime_patch_installed", False)
+        ),
+    }
+
+
+def _apply_app_runtime_patches(app_module: Any) -> dict[str, bool]:
+    """Install and verify the single runtime-hardening contract idempotently."""
     _install_market_data_runtime_hardening()
 
     from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
@@ -189,7 +322,7 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
 
     _dynamic_universe_adapter()
     _live_ws_receipt_adapter()
-    _runtime_reliability_adapter()
+    runtime_reliability_state = _runtime_reliability_adapter()
     _install_runner_candle_engine_cache_patch()
     _strategy_context_fast_path_adapter()
     _off_market_controller_adapter()
@@ -197,6 +330,40 @@ def _apply_app_runtime_patches(app_module: Any) -> None:
     _session_boundary_adapter(app_module)
     _ready_adapter(app_module)
     _polling_adapter(app_module)
+
+    proof = _runtime_hardening_install_proof(
+        app_module,
+        runtime_reliability_state=runtime_reliability_state,
+    )
+    missing = [name for name in _RUNTIME_HARDENING_REQUIRED if not proof.get(name)]
+    if missing:
+        _LOGGER.error(
+            "RUNTIME_HARDENING_INCOMPLETE missing=%s proof=%s",
+            missing,
+            proof,
+            extra={
+                "event": "RUNTIME_HARDENING_INCOMPLETE",
+                "missing": missing,
+                "proof": proof,
+            },
+        )
+        raise RuntimeError(
+            f"runtime_hardening_incomplete missing={missing} proof={proof}"
+        )
+    setattr(app_module, "_runtime_hardening_install_proof", dict(proof))
+    return proof
+
+
+def install_runtime_hardening() -> dict[str, bool]:
+    """Install the exact production runtime adapters for LIVE, replay and tests.
+
+    The public contract is intentionally explicit: validation code must not rely
+    on whether an import hook happened to run. Missing hardening is an error, not
+    a silently degraded replay mode.
+    """
+    from . import app as _app_module
+
+    return _apply_app_runtime_patches(_app_module)
 
 
 class _CoreAppPatchLoader(importlib.abc.Loader):
