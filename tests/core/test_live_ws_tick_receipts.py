@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
 
-from nifty_scalper_bot.core.runtime_reliability_hardening import apply_patches
+from nifty_scalper_bot.core.live_ws_tick_receipts import apply_patch
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 
@@ -51,7 +52,7 @@ def _emit_live_tick(
 
 def test_cache_rejected_current_generation_ws_ticks_count_for_live_execution() -> None:
     """#1157 fanout ticks must also satisfy the genuine live-tick execution gate."""
-    apply_patches()
+    apply_patch()
     mdm = MarketDataManager(DummyBroker(), websocket=None)
     symbol = "NFO:NIFTY26AUG25000PE"
     token = 123
@@ -69,7 +70,7 @@ def test_cache_rejected_current_generation_ws_ticks_count_for_live_execution() -
 
 def test_poll_ticks_do_not_inflate_genuine_ws_receipt_count() -> None:
     """REST/poll freshness must not satisfy the LIVE real-WebSocket-tick proof."""
-    apply_patches()
+    apply_patch()
     mdm = MarketDataManager(DummyBroker(), websocket=None)
     symbol = "NFO:NIFTY26AUG25000PE"
     token = 123
@@ -80,3 +81,36 @@ def test_poll_ticks_do_not_inflate_genuine_ws_receipt_count() -> None:
 
     snapshot = mdm.get_symbol_snapshot(symbol)
     assert snapshot.real_ticks_last_60s == 0
+
+
+def test_live_ws_receipt_proof_expires_after_sixty_seconds() -> None:
+    """Receipt proof is rolling, not a session-long latch."""
+    apply_patch()
+    mdm = MarketDataManager(DummyBroker(), websocket=None)
+    symbol = "NFO:NIFTY26AUG25000PE"
+    token = 123
+    mdm.register_symbol(symbol, token)
+    _seed_future_cache(mdm, symbol, token)
+
+    _emit_live_tick(mdm, symbol, token, ltp=101.0)
+    receipts = mdm._live_ws_receipts_60s[mdm._canonical_symbol(symbol)]  # noqa: SLF001
+    receipts.clear()
+    receipts.extend([time.monotonic() - 61.0, time.monotonic() - 60.5])
+
+    snapshot = mdm.get_symbol_snapshot(symbol)
+    assert snapshot.real_ticks_last_60s == 0
+
+
+def test_stored_ws_ticks_are_not_double_counted() -> None:
+    """Normal stored WS history and receipt proof represent the same observations."""
+    apply_patch()
+    mdm = MarketDataManager(DummyBroker(), websocket=None)
+    symbol = "NFO:NIFTY26AUG25000PE"
+    token = 123
+    mdm.register_symbol(symbol, token)
+
+    _emit_live_tick(mdm, symbol, token, ltp=101.0)
+    _emit_live_tick(mdm, symbol, token, ltp=101.5)
+
+    snapshot = mdm.get_symbol_snapshot(symbol)
+    assert snapshot.real_ticks_last_60s == 2
