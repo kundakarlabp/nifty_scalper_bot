@@ -26,6 +26,10 @@ def _seed_future_cache(mdm: MarketDataManager, symbol: str, token: int) -> None:
     }
 
 
+def _activate_selected_pe(mdm: MarketDataManager, symbol: str) -> None:
+    mdm._selected_pe_symbol = symbol  # noqa: SLF001
+
+
 def _emit_live_tick(
     mdm: MarketDataManager, symbol: str, token: int, *, ltp: float, source: str = "ws"
 ) -> None:
@@ -57,7 +61,7 @@ def test_cache_rejected_current_generation_ws_ticks_count_for_live_execution() -
     symbol = "NFO:NIFTY26AUG25000PE"
     token = 123
     mdm.register_symbol(symbol, token)
-    mdm._selected_pe_symbol = symbol  # noqa: SLF001
+    _activate_selected_pe(mdm, symbol)
     mdm.subscribe(symbol, lambda _tick: None)
     _seed_future_cache(mdm, symbol, token)
 
@@ -90,6 +94,7 @@ def test_live_ws_receipt_proof_expires_after_sixty_seconds() -> None:
     symbol = "NFO:NIFTY26AUG25000PE"
     token = 123
     mdm.register_symbol(symbol, token)
+    _activate_selected_pe(mdm, symbol)
     _seed_future_cache(mdm, symbol, token)
 
     _emit_live_tick(mdm, symbol, token, ltp=101.0)
@@ -108,6 +113,7 @@ def test_stored_ws_ticks_are_not_double_counted() -> None:
     symbol = "NFO:NIFTY26AUG25000PE"
     token = 123
     mdm.register_symbol(symbol, token)
+    _activate_selected_pe(mdm, symbol)
 
     _emit_live_tick(mdm, symbol, token, ltp=101.0)
     _emit_live_tick(mdm, symbol, token, ltp=101.5)
