@@ -67,7 +67,10 @@ def _handle_bracket_update_single_owner(self, order, previous_status, payload):
     """
 
     bracket_manager = getattr(self, "_bracket_manager", None)
-    if bracket_manager is not None:
+    virtual_owner_bound = callable(
+        getattr(bracket_manager, "register_virtual_bracket", None)
+    )
+    if virtual_owner_bound:
         order_id = str(getattr(order, "order_id", "") or "")
         bracket_index = getattr(self, "_bracket_index", {})
         legacy_brackets = getattr(self, "_brackets", {})
