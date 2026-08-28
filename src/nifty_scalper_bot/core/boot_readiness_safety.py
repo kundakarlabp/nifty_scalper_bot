@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Awaitable, Callable, TypeVar
 
+from nifty_scalper_bot.core.trading_switch import trading_switch
 from nifty_scalper_bot.utils.logging import log_throttled
 
 _LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
@@ -39,6 +40,18 @@ def adapt_compute_live_readiness(
 
         armed, reasons = original(**adjusted)
         normalized_reasons = list(reasons or [])
+        if bool(adjusted.get("live_mode")) and bool(armed):
+            switch = trading_switch()
+            arm_for_runtime = getattr(switch, "arm_for_runtime", None)
+            switch_ready = (
+                bool(arm_for_runtime())
+                if callable(arm_for_runtime)
+                else bool(switch.can_trade())
+            )
+            if not switch_ready:
+                armed = False
+                if "trading_switch_off" not in normalized_reasons:
+                    normalized_reasons.append("trading_switch_off")
         if bool(adjusted.get("live_mode")) and not armed and not normalized_reasons:
             minimum = int(adjusted.get("option_exec_min_bars") or 1)
             if not bool(adjusted.get("hard_ready")):

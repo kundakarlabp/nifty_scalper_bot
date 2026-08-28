@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nifty_scalper_bot.core import session_boundary_rearm
 from nifty_scalper_bot.core.session_boundary_rearm import apply_app_patch
 from nifty_scalper_bot.utils.market_hours import MarketState
 
@@ -65,3 +66,73 @@ async def test_boundary_patch_preserves_original_loop_failure() -> None:
 
     with pytest.raises(RuntimeError, match="original failure"):
         await app_module._live_readiness_rearm_loop(object())
+
+
+@pytest.mark.asyncio
+async def test_runtime_readiness_push_arms_pristine_trading_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    switch = SimpleNamespace(
+        arm_for_runtime=lambda: calls.append("armed") or True,
+    )
+    monkeypatch.setattr(session_boundary_rearm, "trading_switch", lambda: switch)
+
+    async def original_loop(_ctx) -> None:
+        return None
+
+    async def recompute(ctx, *, reason: str) -> None:
+        ctx.live_orders_armed = True
+        ctx.execution_armed = True
+        ctx.live_block_reason = None
+        ctx.execution_block_reason = None
+
+    app_module = SimpleNamespace(
+        _live_readiness_rearm_loop=original_loop,
+        get_market_state=lambda: MarketState.CLOSED,
+        _next_nse_open_after=lambda now: now,
+        _ensure_strategy_runner_started=lambda *_args, **_kwargs: None,
+        _recompute_and_push_runtime_readiness=recompute,
+    )
+    apply_app_patch(app_module)
+    ctx = SimpleNamespace(live_orders_armed=False, execution_armed=False)
+
+    await app_module._recompute_and_push_runtime_readiness(ctx, reason="test")
+
+    assert calls == ["armed"]
+    assert ctx.live_orders_armed is True
+    assert ctx.execution_armed is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_readiness_push_preserves_operator_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    switch = SimpleNamespace(arm_for_runtime=lambda: False)
+    monkeypatch.setattr(session_boundary_rearm, "trading_switch", lambda: switch)
+
+    async def original_loop(_ctx) -> None:
+        return None
+
+    async def recompute(ctx, *, reason: str) -> None:
+        ctx.live_orders_armed = True
+        ctx.execution_armed = True
+        ctx.live_block_reason = None
+        ctx.execution_block_reason = None
+
+    app_module = SimpleNamespace(
+        _live_readiness_rearm_loop=original_loop,
+        get_market_state=lambda: MarketState.CLOSED,
+        _next_nse_open_after=lambda now: now,
+        _ensure_strategy_runner_started=lambda *_args, **_kwargs: None,
+        _recompute_and_push_runtime_readiness=recompute,
+    )
+    apply_app_patch(app_module)
+    ctx = SimpleNamespace(live_orders_armed=False, execution_armed=False)
+
+    await app_module._recompute_and_push_runtime_readiness(ctx, reason="test")
+
+    assert ctx.live_orders_armed is False
+    assert ctx.execution_armed is False
+    assert ctx.live_block_reason == "execution_not_armed:trading_switch_off"
+    assert ctx.execution_block_reason == "execution_not_armed:trading_switch_off"

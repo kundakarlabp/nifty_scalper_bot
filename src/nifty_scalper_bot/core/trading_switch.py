@@ -28,6 +28,7 @@ class TradingSwitch:
         self._lock = threading.RLock()
         self._enabled = False
         self._resume_at = 0.0
+        self._operator_paused = False
 
     def pause(self) -> None:
         """Pause trading until explicitly resumed.
@@ -50,6 +51,7 @@ class TradingSwitch:
             with self._lock:
                 self._enabled = False
                 self._resume_at = 0.0
+                self._operator_paused = True
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in TradingSwitch.pause: %s",
@@ -83,6 +85,7 @@ class TradingSwitch:
             with self._lock:
                 self._enabled = True
                 self._resume_at = 0.0
+                self._operator_paused = False
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in TradingSwitch.resume: %s",
@@ -94,6 +97,44 @@ class TradingSwitch:
             "Condition met: trading switch resumed",
             extra={"event": "trading_switch_resumed"},
         )
+
+    def arm_for_runtime(self) -> bool:
+        """Enable a pristine switch after canonical LIVE readiness passes.
+
+        Runtime arming never overrides an explicit operator/emergency pause or
+        an active cooldown. It synchronizes the readiness SSOT with the final
+        OrderManager entry switch.
+
+        Returns:
+            ``True`` when the switch is ready for new entries.
+        """
+
+        now = time.time()
+        changed = False
+        try:
+            with self._lock:
+                if self._operator_paused:
+                    return False
+                if self._resume_at > now:
+                    return False
+                if self._resume_at > 0.0:
+                    self._resume_at = 0.0
+                if not self._enabled:
+                    self._enabled = True
+                    changed = True
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "Failure in TradingSwitch.arm_for_runtime: %s",
+                exc,
+                extra={"event": "trading_switch_runtime_arm_error"},
+            )
+            raise
+        if changed:
+            log.info(
+                "Condition met: trading switch runtime armed",
+                extra={"event": "trading_switch_runtime_armed"},
+            )
+        return True
 
     def cooldown(self, seconds: float) -> None:
         """Pause trading for a finite number of seconds.
@@ -163,6 +204,7 @@ class TradingSwitch:
             with self._lock:
                 enabled = self._enabled
                 resume_at = self._resume_at
+                operator_paused = self._operator_paused
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in TradingSwitch.can_trade: %s",
@@ -171,7 +213,11 @@ class TradingSwitch:
             )
             raise
         now = time.time()
-        allowed = bool(enabled and (resume_at == 0.0 or now >= resume_at))
+        allowed = bool(
+            enabled
+            and not operator_paused
+            and (resume_at == 0.0 or now >= resume_at)
+        )
         if not allowed:
             remaining = max(resume_at - now, 0.0)
             log.info(
@@ -180,6 +226,7 @@ class TradingSwitch:
                     "event": "trading_switch_blocking",
                     "remaining": round(remaining, 3),
                     "enabled": enabled,
+                    "operator_paused": operator_paused,
                     "resume_at": resume_at,
                 },
             )
@@ -236,6 +283,7 @@ class TradingSwitch:
             with self._lock:
                 enabled = self._enabled
                 resume_at = self._resume_at
+                operator_paused = self._operator_paused
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in TradingSwitch.snapshot: %s",
@@ -245,7 +293,11 @@ class TradingSwitch:
             raise
         now = time.time()
         remaining = max(resume_at - now, 0.0)
-        allowed = bool(enabled and (resume_at == 0.0 or remaining == 0.0))
+        allowed = bool(
+            enabled
+            and not operator_paused
+            and (resume_at == 0.0 or remaining == 0.0)
+        )
         state = TradingSwitchState(
             enabled=enabled,
             resume_at=resume_at,
@@ -257,6 +309,7 @@ class TradingSwitch:
             extra={
                 "event": "trading_switch_snapshot",
                 "enabled": enabled,
+                "operator_paused": operator_paused,
                 "resume_at": resume_at,
                 "remaining": round(remaining, 3),
                 "can_trade": allowed,
