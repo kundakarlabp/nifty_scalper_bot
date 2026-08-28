@@ -31,7 +31,17 @@ class TradingSwitch:
         self._operator_paused = False
 
     def pause(self) -> None:
-        """Pause trading until explicitly resumed."""
+        """Pause trading until explicitly resumed.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
 
         log.debug(
             "Entered TradingSwitch.pause",
@@ -55,7 +65,17 @@ class TradingSwitch:
         )
 
     def resume(self) -> None:
-        """Resume trading immediately and clear cooldown timers."""
+        """Resume trading immediately and clear cooldown timers.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
 
         log.debug(
             "Entered TradingSwitch.resume",
@@ -81,9 +101,12 @@ class TradingSwitch:
     def arm_for_runtime(self) -> bool:
         """Enable a pristine switch after canonical LIVE readiness passes.
 
-        Runtime arming must never override an explicit operator/emergency pause or
-        an active cooldown. This method exists only to synchronize the technical
-        readiness SSOT with the independent final OrderManager safety switch.
+        Runtime arming never overrides an explicit operator/emergency pause or
+        an active cooldown. It synchronizes the readiness SSOT with the final
+        OrderManager entry switch.
+
+        Returns:
+            ``True`` when the switch is ready for new entries.
         """
 
         now = time.time()
@@ -114,7 +137,17 @@ class TradingSwitch:
         return True
 
     def cooldown(self, seconds: float) -> None:
-        """Pause trading for a finite number of seconds."""
+        """Pause trading for a finite number of seconds.
+
+        Args:
+            seconds: Cooldown duration in seconds.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
 
         log.debug(
             "Entered TradingSwitch.cooldown",
@@ -151,7 +184,17 @@ class TradingSwitch:
         )
 
     def can_trade(self) -> bool:
-        """Return ``True`` when trading is allowed by the switch."""
+        """Return ``True`` when trading is allowed by the switch.
+
+        Args:
+            None.
+
+        Returns:
+            ``True`` when trading is permitted.
+
+        Raises:
+            None.
+        """
 
         log.debug(
             "Entered TradingSwitch.can_trade",
@@ -190,7 +233,17 @@ class TradingSwitch:
         return allowed
 
     def remaining(self) -> float:
-        """Return the remaining cooldown seconds (0 if none)."""
+        """Return the remaining cooldown seconds (0 if none).
+
+        Args:
+            None.
+
+        Returns:
+            Remaining seconds in cooldown window.
+
+        Raises:
+            None.
+        """
 
         log.debug(
             "Entered TradingSwitch.remaining",
@@ -206,10 +259,21 @@ class TradingSwitch:
                 extra={"event": "trading_switch_remaining_error"},
             )
             raise
-        return max(resume_at - time.time(), 0.0)
+        remaining = max(resume_at - time.time(), 0.0)
+        return remaining
 
     def snapshot(self) -> TradingSwitchState:
-        """Return a snapshot describing the current switch state."""
+        """Return a snapshot describing the current switch state.
+
+        Args:
+            None.
+
+        Returns:
+            TradingSwitchState describing the switch configuration.
+
+        Raises:
+            None.
+        """
 
         log.debug(
             "Entered TradingSwitch.snapshot",
@@ -258,7 +322,17 @@ _SWITCH = TradingSwitch()
 
 
 def trading_switch() -> TradingSwitch:
-    """Return the singleton trading switch instance."""
+    """Return the singleton trading switch instance.
+
+    Args:
+        None.
+
+    Returns:
+        TradingSwitch: Global operator trading switch.
+
+    Raises:
+        None.
+    """
 
     log.debug(
         "Entered trading_switch",
