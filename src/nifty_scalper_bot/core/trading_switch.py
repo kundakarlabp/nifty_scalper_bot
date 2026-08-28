@@ -161,6 +161,7 @@ class TradingSwitch:
             with self._lock:
                 enabled = self._enabled
                 resume_at = self._resume_at
+                operator_paused = self._operator_paused
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in TradingSwitch.can_trade: %s",
@@ -169,7 +170,11 @@ class TradingSwitch:
             )
             raise
         now = time.time()
-        allowed = bool(enabled and (resume_at == 0.0 or now >= resume_at))
+        allowed = bool(
+            enabled
+            and not operator_paused
+            and (resume_at == 0.0 or now >= resume_at)
+        )
         if not allowed:
             remaining = max(resume_at - now, 0.0)
             log.info(
@@ -178,6 +183,7 @@ class TradingSwitch:
                     "event": "trading_switch_blocking",
                     "remaining": round(remaining, 3),
                     "enabled": enabled,
+                    "operator_paused": operator_paused,
                     "resume_at": resume_at,
                 },
             )
@@ -213,6 +219,7 @@ class TradingSwitch:
             with self._lock:
                 enabled = self._enabled
                 resume_at = self._resume_at
+                operator_paused = self._operator_paused
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in TradingSwitch.snapshot: %s",
@@ -222,7 +229,11 @@ class TradingSwitch:
             raise
         now = time.time()
         remaining = max(resume_at - now, 0.0)
-        allowed = bool(enabled and (resume_at == 0.0 or remaining == 0.0))
+        allowed = bool(
+            enabled
+            and not operator_paused
+            and (resume_at == 0.0 or remaining == 0.0)
+        )
         state = TradingSwitchState(
             enabled=enabled,
             resume_at=resume_at,
@@ -234,6 +245,7 @@ class TradingSwitch:
             extra={
                 "event": "trading_switch_snapshot",
                 "enabled": enabled,
+                "operator_paused": operator_paused,
                 "resume_at": resume_at,
                 "remaining": round(remaining, 3),
                 "can_trade": allowed,
