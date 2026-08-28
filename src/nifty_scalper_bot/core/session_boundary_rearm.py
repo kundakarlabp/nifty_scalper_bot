@@ -9,11 +9,43 @@ from functools import wraps
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.core.trading_switch import trading_switch
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import MarketState
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
+
+
+def _sync_trading_switch_with_readiness(ctx: Any) -> bool:
+    """Keep the final entry switch consistent with canonical LIVE arming."""
+
+    if not bool(getattr(ctx, "live_orders_armed", False)):
+        return False
+    switch = trading_switch()
+    arm_for_runtime = getattr(switch, "arm_for_runtime", None)
+    switch_ready = (
+        bool(arm_for_runtime())
+        if callable(arm_for_runtime)
+        else bool(getattr(switch, "can_trade", lambda: False)())
+    )
+    if switch_ready:
+        return True
+
+    ctx.live_orders_armed = False
+    with suppress(Exception):
+        ctx.execution_armed = False
+    ctx.live_block_reason = "execution_not_armed:trading_switch_off"
+    with suppress(Exception):
+        ctx.execution_block_reason = ctx.live_block_reason
+    LOGGER.warning(
+        "TRADING_SWITCH_READINESS_BLOCK live_orders_armed=False reason=trading_switch_off",
+        extra={
+            "event": "TRADING_SWITCH_READINESS_BLOCK",
+            "reason": "trading_switch_off",
+        },
+    )
+    return False
 
 
 async def _market_open_boundary_worker(app_module: Any, ctx: Any) -> None:
@@ -52,8 +84,18 @@ def apply_app_patch(app_module: Any) -> None:
     if getattr(app_module, "_session_boundary_rearm_installed", False):
         return
     original = getattr(app_module, "_live_readiness_rearm_loop", None)
+    original_recompute = getattr(
+        app_module, "_recompute_and_push_runtime_readiness", None
+    )
     if not callable(original):
         raise RuntimeError("live readiness rearm loop unavailable")
+    if not callable(original_recompute):
+        raise RuntimeError("runtime readiness recompute unavailable")
+
+    @wraps(original_recompute)
+    async def recompute_and_sync(ctx: Any, *args: Any, **kwargs: Any) -> None:
+        await original_recompute(ctx, *args, **kwargs)
+        _sync_trading_switch_with_readiness(ctx)
 
     @wraps(original)
     async def rearm_loop(ctx: Any) -> None:
@@ -69,6 +111,8 @@ def apply_app_patch(app_module: Any) -> None:
                 await boundary_task
 
     app_module._session_boundary_rearm_original = original
+    app_module._session_boundary_readiness_recompute_original = original_recompute
+    app_module._recompute_and_push_runtime_readiness = recompute_and_sync
     app_module._live_readiness_rearm_loop = rearm_loop
     app_module._session_boundary_rearm_installed = True
 
