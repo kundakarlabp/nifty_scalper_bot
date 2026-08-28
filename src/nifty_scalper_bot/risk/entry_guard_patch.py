@@ -454,8 +454,10 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
             and prospective_stop_risk > remaining_day_budget
         ):
             reason = (
-                "remaining daily loss budget insufficient: "
-                f"{prospective_stop_risk:.2f}/{remaining_day_budget:.2f}"
+                "daily stop-risk cap exceeded: "
+                f"required={prospective_stop_risk:.2f} "
+                f"available={remaining_day_budget:.2f} "
+                f"day_loss={current_day_loss:.2f} cap={max_day_loss:.2f}"
             )
             self._last_rejection = "DAILY_RISK_BUDGET"
             logger = getattr(self, "_logger", None)
