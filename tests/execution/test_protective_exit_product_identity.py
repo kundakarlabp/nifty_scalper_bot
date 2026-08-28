@@ -3,11 +3,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from nifty_scalper_bot.execution import live_safety_identity  # noqa: F401
+from nifty_scalper_bot.execution import live_safety_identity
 from nifty_scalper_bot.execution.bracket_core import BracketManager
 
 
 SYMBOL = "NFO:NIFTY2690124150PE"
+
+# Exercise the same runtime override that production installs.
+live_safety_identity._patch_bracket_manager()
 
 
 class _Positions:
@@ -24,7 +27,11 @@ class _Positions:
 class _OrderManager:
     def __init__(self) -> None:
         self._positions = _Positions()
-        self._broker = SimpleNamespace(get_positions=lambda: [{"symbol": SYMBOL, "quantity": 65, "product": "NRML"}])
+        self._broker = SimpleNamespace(
+            get_positions=lambda: [
+                {"symbol": SYMBOL, "quantity": 65, "product": "NRML"}
+            ]
+        )
         self._last_order_decision: dict[str, Any] = {}
         self.place_calls: list[dict[str, Any]] = []
 
