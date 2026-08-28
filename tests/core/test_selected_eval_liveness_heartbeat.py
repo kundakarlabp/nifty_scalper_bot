@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -37,7 +36,7 @@ def _runner(*, selected_eval_age_s: float, now: float) -> StrategyRunner:
 
 def test_recent_selected_eval_producer_timestamp_keeps_watchdog_alive() -> None:
     assert apply_patch() is True
-    now = time.monotonic()
+    now = 10_000.0
     runner = _runner(selected_eval_age_s=1.0, now=now)
 
     state = runner._entry_eval_liveness_snapshot(now)
@@ -50,7 +49,7 @@ def test_recent_selected_eval_producer_timestamp_keeps_watchdog_alive() -> None:
 
 def test_stale_selected_eval_still_trips_fail_closed_watchdog() -> None:
     assert apply_patch() is True
-    now = time.monotonic()
+    now = 10_000.0
     runner = _runner(selected_eval_age_s=300.0, now=now)
 
     state = runner._entry_eval_liveness_snapshot(now)
