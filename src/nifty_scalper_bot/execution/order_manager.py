@@ -51,6 +51,59 @@ def _enrich_trade_plan_exit_provenance(plan):
 _runtime._enrich_trade_plan_exit_provenance = _enrich_trade_plan_exit_provenance
 RuntimeOrderManager = _runtime.RuntimeOrderManager
 
+_original_handle_bracket_update = RuntimeOrderManager._handle_bracket_update
+
+
+def _handle_bracket_update_single_owner(self, order, previous_status, payload):
+    """Prevent legacy broker SL/TP children when the virtual bracket owner is bound.
+
+    ``order_manager_core`` still contains a compatibility auto-bracket path that
+    creates real broker stop/target child orders after a filled entry. Production
+    already binds the canonical virtual BracketManager, which independently owns
+    SL, TP1/final target and trailing. Running both creates two reducing exit
+    owners for the same position. Suppress only *new* legacy bracket creation;
+    existing legacy bracket state is still delegated to the original handler so
+    restart/reconciliation can close or cancel already-live broker children.
+    """
+
+    bracket_manager = getattr(self, "_bracket_manager", None)
+    virtual_owner_bound = callable(
+        getattr(bracket_manager, "register_virtual_bracket", None)
+    )
+    if virtual_owner_bound:
+        order_id = str(getattr(order, "order_id", "") or "")
+        bracket_index = getattr(self, "_bracket_index", {})
+        legacy_brackets = getattr(self, "_brackets", {})
+        entry_id = bracket_index.get(order_id) if isinstance(bracket_index, Mapping) else None
+        if not entry_id and isinstance(legacy_brackets, Mapping) and order_id in legacy_brackets:
+            entry_id = order_id
+
+        status = getattr(order, "status", None)
+        has_exit_geometry = bool(
+            getattr(order, "stop_loss", None) or getattr(order, "take_profit", None)
+        )
+        if not entry_id and status == _core.OrderStatus.FILLED and has_exit_geometry:
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "info", None)
+            if callable(log):
+                log(
+                    "LEGACY_BROKER_BRACKET_SUPPRESSED order_id=%s symbol=%s canonical_owner=BracketManager",
+                    order_id,
+                    getattr(order, "symbol", None),
+                    extra={
+                        "event": "LEGACY_BROKER_BRACKET_SUPPRESSED",
+                        "order_id": order_id,
+                        "symbol": getattr(order, "symbol", None),
+                        "canonical_owner": "BracketManager",
+                    },
+                )
+            return None
+
+    return _original_handle_bracket_update(self, order, previous_status, payload)
+
+
+RuntimeOrderManager._handle_bracket_update = _handle_bracket_update_single_owner
+
 _original_extract_quote_diagnostics = RuntimeOrderManager._extract_quote_diagnostics
 _original_get_latest_quote_safe = RuntimeOrderManager._get_latest_quote_safe
 
