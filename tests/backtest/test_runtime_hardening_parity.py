@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +39,39 @@ def test_runtime_hardening_install_proof_is_complete() -> None:
 
     proof = installer()
 
+    assert _REQUIRED <= set(proof)
+    assert all(proof[name] is True for name in _REQUIRED)
+
+
+def test_runtime_hardening_cold_import_does_not_recurse() -> None:
+    """A pristine interpreter must install hardening without package self-recursion."""
+    script = "\n".join(
+        (
+            "import json",
+            "from nifty_scalper_bot.core import install_runtime_hardening",
+            "proof = install_runtime_hardening()",
+            "print('RUNTIME_PROOF=' + json.dumps(proof, sort_keys=True))",
+        )
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    output = f"{completed.stdout}\n{completed.stderr}"
+
+    assert completed.returncode == 0, output
+    assert "RecursionError" not in output, output
+    assert "Failure in core.__getattr__" not in output, output
+
+    proof_line = next(
+        (line for line in completed.stdout.splitlines() if line.startswith("RUNTIME_PROOF=")),
+        None,
+    )
+    assert proof_line is not None, output
+    proof = json.loads(proof_line.removeprefix("RUNTIME_PROOF="))
     assert _REQUIRED <= set(proof)
     assert all(proof[name] is True for name in _REQUIRED)
 
