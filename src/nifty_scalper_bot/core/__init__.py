@@ -361,7 +361,7 @@ def install_runtime_hardening() -> dict[str, bool]:
     on whether an import hook happened to run. Missing hardening is an error, not
     a silently degraded replay mode.
     """
-    from . import app as _app_module
+    _app_module = importlib.import_module(_APP_MODULE_NAME)
 
     return _apply_app_runtime_patches(_app_module)
 
@@ -424,7 +424,7 @@ def __getattr__(name: str) -> Any:
     )
     if name in {"NiftyScalperApp", "app"}:
         try:
-            from . import app as _app_module
+            _app_module = importlib.import_module(_APP_MODULE_NAME)
 
             _apply_app_runtime_patches(_app_module)
             if name == "app":
