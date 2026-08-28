@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
@@ -41,8 +43,8 @@ def test_final_live_rr_does_not_charge_entry_half_spread_twice(monkeypatch) -> N
     # The order price is already the executable ask, so only the future SELL
     # crossing remains to be modelled. The generic cost helper still models
     # both crossings by default; the final live gate must remove one half-spread.
-    assert result.target_cost == full_crossing_cost - (0.50 * 65)
-    assert result.half_spread == 0.50
+    assert result.target_cost == pytest.approx(full_crossing_cost - (0.50 * 65))
+    assert result.half_spread == pytest.approx(0.50)
 
 
 def test_reference_price_rr_keeps_full_round_trip_spread_cost(monkeypatch) -> None:
@@ -66,7 +68,7 @@ def test_reference_price_rr_keeps_full_round_trip_spread_cost(monkeypatch) -> No
         quantity=65,
         half_spread=0.50,
     ).total
-    assert result.target_cost == full_crossing_cost
+    assert result.target_cost == pytest.approx(full_crossing_cost)
 
 
 def test_daily_risk_rejection_reports_full_cap_when_no_loss_today(monkeypatch) -> None:
@@ -98,5 +100,5 @@ def test_daily_risk_rejection_reports_full_cap_when_no_loss_today(monkeypatch) -
         "day_loss=0.00 cap=311.79"
     )
     assert risk._last_rejection == "DAILY_RISK_BUDGET"
-    assert risk._switches.day_loss() == 0.0
-    assert risk._switches.max_day_loss == 311.792
+    assert risk._switches.day_loss() == pytest.approx(0.0)
+    assert risk._switches.max_day_loss == pytest.approx(311.792)
