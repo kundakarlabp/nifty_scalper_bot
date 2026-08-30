@@ -7176,12 +7176,40 @@ class OrderManager:
         if not entry_id and order.order_id in self._brackets:
             entry_id = order.order_id
 
+        # The canonical virtual BracketManager independently owns SL, TP1/final
+        # target and trailing once bound. If it is bound, this legacy
+        # auto-bracket path must not also create broker-resident SL/TP
+        # children for the same fill — doing so produces two independent
+        # reducing exit owners on the same position (the dual-exit-owner
+        # incident). Only *new* legacy bracket creation is suppressed here;
+        # already-live legacy children still fall through to the standard
+        # update/reconciliation logic below so restart/reconciliation can
+        # still close or cancel them.
+        bracket_manager = getattr(self, "_bracket_manager", None)
+        virtual_owner_bound = callable(
+            getattr(bracket_manager, "register_virtual_bracket", None)
+        )
+
         # If this is a filled entry with SL/TP intent but no bracket orders yet
         if (
             not entry_id
             and order.status == OrderStatus.FILLED
             and (order.stop_loss or order.take_profit)
         ):
+            if virtual_owner_bound:
+                self._logger.info(
+                    "LEGACY_BROKER_BRACKET_SUPPRESSED order_id=%s symbol=%s canonical_owner=BracketManager",
+                    order.order_id,
+                    order.symbol,
+                    extra={
+                        "event": "LEGACY_BROKER_BRACKET_SUPPRESSED",
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "canonical_owner": "BracketManager",
+                    },
+                )
+                return
+
             self._logger.info(
                 f"🛡️ Auto-initializing bracket for simple order {order.order_id}",
                 extra={"event": "auto_bracket_init", "order_id": order.order_id},
