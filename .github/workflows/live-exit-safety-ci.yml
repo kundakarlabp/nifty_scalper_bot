@@ -117,4 +117,14 @@ jobs:
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
       - name: Full test suite
-        run: python -m pytest -q
+        run: |
+          set +e
+          python -m pytest -q --maxfail=1000 > /tmp/pytest_out.txt 2>&1
+          code=$?
+          tail -n 200 /tmp/pytest_out.txt
+          if [ $code -ne 0 ]; then
+            grep -E "^(FAILED|ERROR)" /tmp/pytest_out.txt | while read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          exit $code
