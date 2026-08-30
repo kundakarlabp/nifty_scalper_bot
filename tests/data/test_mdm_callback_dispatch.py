@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import nifty_scalper_bot.data.data_hub as data_hub_module
@@ -11,6 +11,19 @@ from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 class DummyBroker:
     pass
+
+
+def _unexpired_option_symbol(strike: int = 25000, side: str = "CE") -> str:
+    """Build an NFO option symbol with an expiry that is always in the future.
+
+    A previously hardcoded "NIFTY26AUG25000CE" fixture expired mid-run once
+    the calendar passed 28-Aug-2026, silently disabling the IV-derivation
+    path this test exercises (``_parse_option_symbol`` -> ``ttm_years <= 0``
+    -> early return). Deriving the month/year from "now" keeps the contract
+    perpetually unexpired.
+    """
+    expiry = datetime.now(timezone.utc) + timedelta(days=45)
+    return f"NFO:NIFTY{expiry:%y%b}{strike}{side}".upper()
 
 
 def test_sync_callback_none_no_error() -> None:
@@ -74,7 +87,7 @@ def test_datahub_ingest_tick_sync_returns_none() -> None:
 
 def test_tick_ingestion_defers_missing_option_analytics(monkeypatch) -> None:
     hub = DataHub(MarketDataManager(DummyBroker(), websocket=None))
-    symbol = "NFO:NIFTY26AUG25000CE"
+    symbol = _unexpired_option_symbol()
     calls: list[float] = []
     monkeypatch.setattr(hub, "get_latest_price", lambda _symbol: 25_000.0)
     monkeypatch.setattr(
