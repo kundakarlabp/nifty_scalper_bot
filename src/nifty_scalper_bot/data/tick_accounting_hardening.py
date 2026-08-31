@@ -34,7 +34,11 @@ def install_tick_accounting_hardening(manager_cls: type[Any]) -> None:
     original_pop = getattr(manager_cls, "_pop_pending_tick_batch", None)
     original_drain = getattr(manager_cls, "_drain_latest_ticks", None)
     original_stats = getattr(manager_cls, "get_tick_pressure_stats", None)
-    if not callable(original_pop) or not callable(original_drain) or not callable(original_stats):
+    if (
+        not callable(original_pop)
+        or not callable(original_drain)
+        or not callable(original_stats)
+    ):
         raise RuntimeError("tick_accounting_required_methods_missing")
 
     setattr(manager_cls, _ORIGINAL_POP_ATTR, original_pop)
