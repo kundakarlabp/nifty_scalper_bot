@@ -4,9 +4,93 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import wraps
+import time
 from typing import Any, Callable
 
 from nifty_scalper_bot.utils.symbols import normalize_symbol
+
+
+def _active_selected_pair(runner: Any) -> tuple[str | None, str | None]:
+    ce = normalize_symbol(str(getattr(runner, "_active_selected_ce", None) or "")) or None
+    pe = normalize_symbol(str(getattr(runner, "_active_selected_pe", None) or "")) or None
+    return ce, pe
+
+
+def _refresh_selected_pair_epoch(
+    runner: Any, *, now: float | None = None
+) -> tuple[tuple[str | None, str | None], float]:
+    """Start a liveness epoch only when the authoritative selected pair changes."""
+    now = time.monotonic() if now is None else float(now)
+    pair = _active_selected_pair(runner)
+    previous = getattr(runner, "_selected_entry_eval_epoch_pair", None)
+    started = float(
+        getattr(runner, "_selected_entry_eval_epoch_started_at", 0.0) or 0.0
+    )
+    if previous != pair or (any(pair) and started <= 0.0):
+        setattr(runner, "_selected_entry_eval_epoch_pair", pair)
+        started = now if any(pair) else 0.0
+        setattr(runner, "_selected_entry_eval_epoch_started_at", started)
+    return pair, started
+
+
+def _apply_selected_pair_epoch_liveness(
+    runner: Any,
+    state: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Prevent previous-pair timestamps from poisoning current-pair liveness."""
+    now = time.monotonic() if now is None else float(now)
+    adjusted = dict(state)
+    pair, epoch_started = _refresh_selected_pair_epoch(runner, now=now)
+    adjusted["selected_pair_epoch_current"] = True
+    adjusted["selected_pair_epoch_age_s"] = (
+        round(max(0.0, now - epoch_started), 1) if epoch_started > 0.0 else None
+    )
+    if not any(pair) or epoch_started <= 0.0:
+        return adjusted
+
+    selected_eval_at = float(
+        getattr(runner, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
+    )
+    if selected_eval_at >= epoch_started:
+        adjusted["selected_eval_in_current_epoch"] = True
+        return adjusted
+
+    adjusted["selected_eval_in_current_epoch"] = False
+    epoch_age = max(0.0, now - epoch_started)
+    selected_tick_at = float(
+        getattr(runner, "_last_selected_option_tick_ts", 0.0) or 0.0
+    )
+    tick_in_epoch = selected_tick_at >= epoch_started
+    tick_age = max(0.0, now - selected_tick_at) if tick_in_epoch else None
+    timeout_s = float(
+        getattr(runner, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
+    )
+    work_outstanding = bool(adjusted.get("work_outstanding"))
+    drain_active = bool(adjusted.get("drain_active"))
+    drain_active_age = float(adjusted.get("drain_active_age_s") or 0.0)
+
+    dispatch_stalled = bool(
+        not work_outstanding
+        and tick_age is not None
+        and tick_age <= 5.0
+        and epoch_age >= timeout_s
+    )
+    if drain_active:
+        worker_stalled = drain_active_age >= 90.0
+    elif work_outstanding:
+        worker_stalled = epoch_age >= 90.0
+    else:
+        worker_stalled = dispatch_stalled
+
+    adjusted["tick_age_s"] = round(tick_age, 1) if tick_age is not None else None
+    adjusted["dispatch_stalled"] = dispatch_stalled
+    adjusted["last_progress_age_s"] = round(epoch_age, 1)
+    adjusted["selected_eval_age_s"] = None
+    adjusted["evaluation_alive"] = epoch_age < timeout_s
+    adjusted["worker_stalled"] = worker_stalled
+    return adjusted
 
 
 def apply_patches() -> None:
@@ -20,6 +104,7 @@ def apply_patches() -> None:
     original_sync = StrategyRunner._sync_active_selection_from_basket
     original_mark_live = StrategyRunner._mark_live
     original_on_tick = StrategyRunner._on_tick
+    original_liveness = StrategyRunner._entry_eval_liveness_snapshot
 
     @wraps(original_validate)
     def validate_symbol_for_cycle(self: Any, symbol: str) -> bool:
@@ -70,8 +155,10 @@ def apply_patches() -> None:
                     atm_strike=getattr(selection, "atm_strike", None),
                     option_symbols=getattr(selection, "option_symbols", None),
                 )
+                _refresh_selected_pair_epoch(self)
                 return
         original_sync(self, selection)
+        _refresh_selected_pair_epoch(self)
 
     @wraps(original_mark_live)
     def mark_live(self: Any, symbol: str) -> Any:
@@ -124,15 +211,29 @@ def apply_patches() -> None:
             clean_tick.pop("data_version", None)
         return original_on_tick(self, normalized, clean_tick)
 
+    @wraps(original_liveness)
+    def entry_eval_liveness_snapshot(
+        self: Any, now: float | None = None
+    ) -> dict[str, Any]:
+        resolved_now = time.monotonic() if now is None else float(now)
+        canonical = original_liveness(self, resolved_now)
+        return _apply_selected_pair_epoch_liveness(self, canonical, now=resolved_now)
+
     StrategyRunner._dynamic_universe_safety_original_validate = original_validate
     StrategyRunner._dynamic_universe_safety_original_sync = original_sync
     StrategyRunner._dynamic_universe_safety_original_mark_live = original_mark_live
     StrategyRunner._dynamic_universe_safety_original_on_tick = original_on_tick
+    StrategyRunner._dynamic_universe_safety_original_liveness = original_liveness
     StrategyRunner._validate_symbol_for_cycle = validate_symbol_for_cycle
     StrategyRunner._sync_active_selection_from_basket = sync_active_selection_from_basket
     StrategyRunner._mark_live = mark_live
     StrategyRunner._on_tick = on_tick
+    StrategyRunner._entry_eval_liveness_snapshot = entry_eval_liveness_snapshot
     StrategyRunner._dynamic_universe_safety_installed = True
 
 
-__all__ = ["apply_patches"]
+__all__ = [
+    "_apply_selected_pair_epoch_liveness",
+    "_refresh_selected_pair_epoch",
+    "apply_patches",
+]
