@@ -27,6 +27,10 @@ class MinimumLotAffordability:
     margin_factor: float
     margin_buffer: float
     balance_source: str
+    per_trade_risk_budget: float | None = None
+    remaining_daily_risk_budget: float | None = None
+    effective_one_lot_risk_budget: float | None = None
+    max_stop_distance_one_lot: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -71,6 +75,56 @@ def _available_balance(
     if parsed_fallback is not None:
         return parsed_fallback, "broker_balance_snapshot"
     return None, "unavailable"
+
+
+def _risk_budget_snapshot(
+    order_manager: Any | None, lot_size: int
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Return per-trade/day/effective risk budgets and one-lot stop distance.
+
+    This is observability only. The authoritative per-signal decision remains the
+    MarginEngine followed by RiskManager.check_order().
+    """
+    manager = getattr(order_manager, "_risk_manager", None)
+    if manager is None or lot_size <= 0:
+        return None, None, None, None
+
+    balance = _finite_float(getattr(manager, "account_balance", None), minimum=0.0)
+    settings = getattr(manager, "settings", None)
+    risk_pct = _finite_float(
+        getattr(settings, "per_trade_risk_pct", None), minimum=0.0
+    )
+    per_trade = (
+        balance * risk_pct / 100.0
+        if balance is not None and balance > 0.0 and risk_pct is not None
+        else None
+    )
+
+    remaining = None
+    switches = getattr(manager, "_switches", None)
+    if switches is not None:
+        max_day_loss = _finite_float(
+            getattr(switches, "max_day_loss", None), minimum=0.0
+        )
+        if max_day_loss is not None and max_day_loss > 0.0:
+            reader = getattr(switches, "day_loss", None)
+            if callable(reader):
+                try:
+                    current = max(float(reader() or 0.0), 0.0)
+                    remaining = max(max_day_loss - current, 0.0)
+                except Exception:
+                    remaining = 0.0
+            else:
+                remaining = 0.0
+
+    budgets = [value for value in (per_trade, remaining) if value is not None]
+    effective = min(budgets) if budgets else None
+    max_stop_distance = (
+        effective / float(lot_size)
+        if effective is not None and lot_size > 0
+        else None
+    )
+    return per_trade, remaining, effective, max_stop_distance
 
 
 def evaluate_minimum_lot_affordability(
@@ -159,6 +213,12 @@ def evaluate_minimum_lot_affordability(
     required = ask * lot_size * margin_factor
     executable_capacity = available * margin_buffer
     affordable = bool(required > 0 and executable_capacity >= required)
+    (
+        per_trade_risk_budget,
+        remaining_daily_risk_budget,
+        effective_one_lot_risk_budget,
+        max_stop_distance_one_lot,
+    ) = _risk_budget_snapshot(order_manager, lot_size)
     return MinimumLotAffordability(
         normalized_symbol,
         affordable,
@@ -172,6 +232,10 @@ def evaluate_minimum_lot_affordability(
         margin_factor,
         margin_buffer,
         balance_source,
+        per_trade_risk_budget=per_trade_risk_budget,
+        remaining_daily_risk_budget=remaining_daily_risk_budget,
+        effective_one_lot_risk_budget=effective_one_lot_risk_budget,
+        max_stop_distance_one_lot=max_stop_distance_one_lot,
     )
 
 
