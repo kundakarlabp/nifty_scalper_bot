@@ -12,14 +12,21 @@ from __future__ import annotations
 
 import inspect
 import threading
-import time
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
+# Keep the synthetic monotonic epoch comfortably above every age used below.
+# ``time.monotonic()`` is relative to an arbitrary system/VM reference point,
+# so a freshly booted CI runner can legitimately return < 400 seconds.  Building
+# fake history as ``real_now - 300``/``real_now - 400`` would then create
+# negative timestamps, which production correctly interprets as "not observed".
+_TEST_MONOTONIC_NOW = 10_000.0
+
+
 def _runner(*, tick_age_s: float, progress_age_s: float, **overrides: object):
     runner = StrategyRunner.__new__(StrategyRunner)
-    now = time.monotonic()
+    now = _TEST_MONOTONIC_NOW
     runner._eval_gate_lock = threading.Lock()
     runner._entry_eval_active = False
     runner._entry_eval_active_started_at = None
