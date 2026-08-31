@@ -5025,6 +5025,65 @@ class OrderManager:
 
         per_trade_risk_pct = _f("per_trade_risk_pct", 0.5)
         per_trade_cap_pct = _f("per_trade_cap_pct", per_trade_risk_pct)
+
+        # The final RiskManager already rejects an entry whose stop-risk exceeds
+        # the remaining daily-loss budget. Feed that same absolute capacity into
+        # the canonical MarginEngine *before* broker submission so an impossible
+        # one-lot setup is rejected at sizing rather than several layers later.
+        # No limit is relaxed: this can only tighten the configured per-trade risk.
+        configured_per_trade_risk_pct = per_trade_risk_pct
+        remaining_daily_risk_budget = None
+        switches = getattr(getattr(self, "_risk_manager", None), "_switches", None)
+        if switches is not None:
+            try:
+                max_day_loss = max(
+                    float(getattr(switches, "max_day_loss", 0.0) or 0.0), 0.0
+                )
+                if max_day_loss > 0.0:
+                    day_loss_reader = getattr(switches, "day_loss", None)
+                    if callable(day_loss_reader):
+                        current_day_loss = max(float(day_loss_reader() or 0.0), 0.0)
+                        remaining_daily_risk_budget = max(
+                            max_day_loss - current_day_loss, 0.0
+                        )
+                    else:
+                        # A configured daily cap with unreadable consumption is
+                        # an indeterminate safety state: fail closed at sizing.
+                        remaining_daily_risk_budget = 0.0
+            except Exception:
+                # Preserve fail-closed semantics when the daily risk circuit exists
+                # but cannot provide a trustworthy remaining budget.
+                remaining_daily_risk_budget = 0.0
+
+        if remaining_daily_risk_budget is not None:
+            if available_balance > 0.0:
+                daily_budget_risk_pct = (
+                    remaining_daily_risk_budget / float(available_balance) * 100.0
+                )
+                per_trade_risk_pct = min(
+                    per_trade_risk_pct, max(daily_budget_risk_pct, 0.0)
+                )
+            else:
+                per_trade_risk_pct = 0.0
+            self._logger.info(
+                "ENTRY_RISK_BUDGET_APPLIED symbol=%s configured_risk_pct=%.4f "
+                "effective_risk_pct=%.4f remaining_daily_risk_budget=%.2f "
+                "available_balance=%.2f",
+                plan.symbol,
+                configured_per_trade_risk_pct,
+                per_trade_risk_pct,
+                remaining_daily_risk_budget,
+                available_balance,
+                extra={
+                    "event": "ENTRY_RISK_BUDGET_APPLIED",
+                    "symbol": plan.symbol,
+                    "configured_per_trade_risk_pct": configured_per_trade_risk_pct,
+                    "effective_per_trade_risk_pct": per_trade_risk_pct,
+                    "remaining_daily_risk_budget": remaining_daily_risk_budget,
+                    "available_balance": available_balance,
+                    "trace_id": plan.trace_id,
+                },
+            )
         min_lots = max(1, int(_f("min_lots_per_trade", 1)))
         max_lots = max(min_lots, int(_f("max_lots_per_trade", 1)))
         atr_multiple = _f("atr_stop_multiple", 1.0)
