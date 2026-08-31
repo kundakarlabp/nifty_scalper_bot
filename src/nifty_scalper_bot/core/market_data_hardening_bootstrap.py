@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 _MDM_HARDENING_ATTR = "_freshness_hardening_installed"
+_TICK_ACCOUNTING_HARDENING_ATTR = "_tick_accounting_hardening_installed"
 _DATAHUB_HARDENING_ATTR = "_active_basket_subscription_hardening_installed"
 _WS_HARDENING_ATTR = "_market_data_hardening_installed"
 _CANDLE_HARDENING_ATTR = "_candle_state_hardening_installed"
@@ -33,6 +34,9 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
         install_market_data_manager_hardening,
     )
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+    from nifty_scalper_bot.data.tick_accounting_hardening import (
+        install_tick_accounting_hardening,
+    )
     from nifty_scalper_bot.streaming.market_data_hardening import (
         install_websocket_market_data_hardening,
     )
@@ -40,6 +44,7 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
 
     install_candle_state_hardening(CandleEngine)
     install_market_data_manager_hardening(MarketDataManager)
+    install_tick_accounting_hardening(MarketDataManager)
     install_candle_clock_flush_hardening(MarketDataManager)
     install_data_hub_subscription_hardening(DataHub)
     install_websocket_market_data_hardening(WebSocketManager)
@@ -51,6 +56,9 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
         ),
         "datahub": bool(getattr(DataHub, _DATAHUB_HARDENING_ATTR, False)),
         "mdm": bool(getattr(MarketDataManager, _MDM_HARDENING_ATTR, False)),
+        "tick_accounting": bool(
+            getattr(MarketDataManager, _TICK_ACCOUNTING_HARDENING_ATTR, False)
+        ),
         "websocket": bool(getattr(WebSocketManager, _WS_HARDENING_ATTR, False)),
     }
     # Preserve the established API used by startup callers and existing tests.
@@ -58,12 +66,13 @@ def install_market_data_hardening_or_raise(logger: Any | None = None) -> dict[st
 
     if logger is not None:
         logger.info(
-            "MARKET_DATA_HARDENING_INSTALLED mdm=%s websocket=%s candle=%s clock_flush=%s datahub=%s",
+            "MARKET_DATA_HARDENING_INSTALLED mdm=%s websocket=%s candle=%s clock_flush=%s datahub=%s tick_accounting=%s",
             full_state["mdm"],
             full_state["websocket"],
             full_state["candle"],
             full_state["clock_flush"],
             full_state["datahub"],
+            full_state["tick_accounting"],
             extra={"event": "MARKET_DATA_HARDENING_INSTALLED", **full_state},
         )
 
