@@ -44,6 +44,22 @@ def _exit_identity_kwargs(bracket: Any | None, bracket_id: str | None) -> dict[s
     }
 
 
+def _exit_product(bracket: Any | None) -> str:
+    """Return the broker product owned by the entry bracket.
+
+    Protective exits must close the same broker product as the long position.
+    Hard-coding MIS can turn an NRML-closing SELL into a naked short and make the
+    broker demand option-writing margin. Bracket registration already persists
+    the entry product, so reuse that SSOT and retain MIS only as the historical
+    fail-safe when a legacy bracket has no usable product.
+    """
+
+    product = str(getattr(bracket, "product", "") or "").strip().upper()
+    if product in {"MIS", "NRML"}:
+        return product
+    return "MIS"
+
+
 def _canonical_key(symbol: object) -> str:
     return normalize_symbol(str(symbol or ""))
 
@@ -185,6 +201,21 @@ def _patch_bracket_manager() -> None:
             },
         )
         try:
+            product = _exit_product(bracket)
+            _bracket_core.LOGGER.info(
+                "EXIT_PRODUCT_RESOLVED bracket_id=%s symbol=%s product=%s source=%s",
+                bracket_id,
+                normalized_symbol,
+                product,
+                "bracket" if bracket is not None else "legacy_fallback",
+                extra={
+                    "event": "EXIT_PRODUCT_RESOLVED",
+                    "bracket_id": bracket_id,
+                    "symbol": normalized_symbol,
+                    "product": product,
+                    "source": "bracket" if bracket is not None else "legacy_fallback",
+                },
+            )
             kwargs: dict[str, Any] = {
                 "symbol": normalized_symbol,
                 "side": side,
@@ -192,7 +223,7 @@ def _patch_bracket_manager() -> None:
                 "order_type": order_type,
                 "tag": correlation_tag or f"exit_{reason[:3]}_{bracket_id[:8]}",
                 "check_risk": False,
-                "product": "MIS",
+                "product": product,
                 **_exit_identity_kwargs(bracket, bracket_id),
             }
             if price is not None:
@@ -208,6 +239,7 @@ def _patch_bracket_manager() -> None:
                         "order_id": str(order_id),
                         "order_type": order_type,
                         "side": side,
+                        "product": product,
                         "intent": "EXIT",
                         "linked_entry_order_id": kwargs.get("linked_entry_order_id"),
                         "trade_lifecycle_id": kwargs.get("trade_lifecycle_id"),
@@ -323,6 +355,20 @@ def _patch_bracket_manager() -> None:
             if not symbol or qty <= 0:
                 return
             try:
+                product = _exit_product(bracket)
+                _bracket_core.LOGGER.info(
+                    "EXIT_PRODUCT_RESOLVED bracket_id=%s symbol=%s product=%s source=bracket_escalation",
+                    bracket.bracket_id,
+                    symbol,
+                    product,
+                    extra={
+                        "event": "EXIT_PRODUCT_RESOLVED",
+                        "bracket_id": bracket.bracket_id,
+                        "symbol": symbol,
+                        "product": product,
+                        "source": "bracket_escalation",
+                    },
+                )
                 order_id = self.order_manager.place_order(
                     symbol=symbol,
                     side=side,
@@ -330,7 +376,7 @@ def _patch_bracket_manager() -> None:
                     order_type="MARKET",
                     tag=f"EXIT_MKT_{bracket.bracket_id[:8]}",
                     check_risk=False,
-                    product="MIS",
+                    product=product,
                     **_exit_identity_kwargs(bracket, bracket.bracket_id),
                 )
             except Exception as exc:  # noqa: BLE001

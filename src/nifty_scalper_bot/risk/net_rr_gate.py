@@ -88,6 +88,28 @@ def estimate_half_spread(signal: Any, entry: float) -> float:
     return entry * 0.0025
 
 
+def _cost_model_half_spread(signal: Any, entry: float, half_spread: float) -> float:
+    """Return the spread input appropriate for the generic round-trip cost model.
+
+    ``estimate_round_trip_cost`` charges its half-spread input twice: once for
+    the BUY crossing and once for the SELL crossing. At the final live gate the
+    BUY order price is commonly already the executable ask. In that case the
+    entry crossing is already embedded in ``entry`` and charging it again would
+    double-count entry spread. Keep one conservative future SELL half-spread by
+    halving the generic model's input. Reference/mid-priced signals retain the
+    original two-crossing model unchanged.
+    """
+
+    spread = max(0.0, float(half_spread))
+    if spread <= 0.0:
+        return 0.0
+    metadata = _metadata(signal)
+    ask = _positive(metadata.get("ask") or metadata.get("best_ask"))
+    if ask is not None and entry + 1e-9 >= ask:
+        return spread / 2.0
+    return spread
+
+
 def _minimum_net_rr() -> float:
     """Compatibility wrapper for the canonical cost-model threshold owner."""
 
@@ -135,12 +157,13 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
         return None
 
     half_spread = estimate_half_spread(signal, entry)
+    cost_half_spread = _cost_model_half_spread(signal, entry, half_spread)
     economics = evaluate_net_reward_risk(
         entry_price=entry,
         stop_price=stop,
         target_price=target,
         quantity=quantity,
-        half_spread=half_spread,
+        half_spread=cost_half_spread,
     )
     return NetRRResult(
         allowed=economics.allowed,
@@ -196,11 +219,12 @@ def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float 
         return None
 
     half_spread = estimate_half_spread(signal, entry)
+    cost_half_spread = _cost_model_half_spread(signal, entry, half_spread)
     stop_cost = estimate_round_trip_cost(
         entry_price=entry,
         exit_price=stop,
         quantity=quantity,
-        half_spread=half_spread,
+        half_spread=cost_half_spread,
     ).total
     net_risk = (entry - stop) * quantity + stop_cost
     minimum = _minimum_net_rr()
@@ -212,7 +236,7 @@ def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float 
             entry_price=entry,
             exit_price=candidate,
             quantity=quantity,
-            half_spread=half_spread,
+            half_spread=cost_half_spread,
         ).total
         net_reward = (candidate - entry) * quantity - target_cost
         return net_reward / net_risk if net_reward > 0.0 else 0.0
