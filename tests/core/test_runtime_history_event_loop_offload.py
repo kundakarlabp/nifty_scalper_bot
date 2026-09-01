@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.core import app
+from nifty_scalper_bot.core import app, history_readiness
 
 
 class _MDM:
@@ -64,10 +64,16 @@ def _context(mdm: _MDM, runner: _Runner):
     )
 
 
+def _force_open_market(monkeypatch) -> None:
+    """Keep both runtime-history policy owners deterministic in CI."""
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    monkeypatch.setattr(history_readiness, "get_runtime_market_mode", lambda: "OPEN")
+
+
 @pytest.mark.asyncio
 async def test_cold_far_context_hydration_is_not_on_atm_commit_path(monkeypatch) -> None:
     """A newly-added far strike must return before its non-gating history reseed."""
-    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    _force_open_market(monkeypatch)
     mdm = _MDM(spot=24102.0, bars=0)
     runner = _Runner()
     context = _context(mdm, runner)
@@ -95,7 +101,7 @@ async def test_cold_far_context_hydration_is_not_on_atm_commit_path(monkeypatch)
 @pytest.mark.asyncio
 async def test_atm_context_candidate_stays_synchronous_fail_closed(monkeypatch) -> None:
     """A genuinely new ATM contract must be hydrated before the call returns."""
-    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    _force_open_market(monkeypatch)
     mdm = _MDM(spot=24102.0, bars=0)
     runner = _Runner()
     context = _context(mdm, runner)
@@ -117,7 +123,7 @@ async def test_atm_context_candidate_stays_synchronous_fail_closed(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_selected_option_role_is_never_deferred(monkeypatch) -> None:
-    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    _force_open_market(monkeypatch)
     mdm = _MDM(spot=24102.0, bars=0)
     runner = _Runner()
     context = _context(mdm, runner)
