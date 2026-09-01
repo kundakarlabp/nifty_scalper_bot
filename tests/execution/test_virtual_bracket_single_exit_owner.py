@@ -127,8 +127,6 @@ def test_already_live_legacy_bracket_still_reconciles_with_virtual_owner_bound()
         critical=lambda *a, **kw: None,
     )
 
-    # The entry itself reporting FILLED again (e.g. a duplicate/late poll
-    # update) must not be treated as a new stop/TP fill and must not raise.
     order = OrderDetails(
         order_id="entry-1",
         symbol="NFO:NIFTY2690124100PE",
@@ -156,15 +154,8 @@ def test_already_live_legacy_bracket_still_reconciles_with_virtual_owner_bound()
 def test_legacy_stop_loss_fill_reconciles_without_creating_virtual_owner() -> None:
     """A broker-side legacy SL fill must be reconciled, not re-registered.
 
-    Regression for a latent defect exposed by the single-owner guard: the
-    now-removed "register with virtual sniper" block inside
-    ``_handle_bracket_update`` evaluated ``OrderStatus.COMPLETE`` (an enum
-    member that does not exist), so *any* call to this method while a
-    virtual ``BracketManager`` was bound raised ``AttributeError`` before
-    the state machine below it ever ran -- silently disabling stop-loss and
-    take-profit fill reconciliation for legacy/restored brackets. This test
-    proves the fill is processed end-to-end with no exception and no
-    duplicate virtual registration for a plain EXIT fill.
+    This is also a current-main revalidation guard: the call must remain safe
+    when newer risk and market-data changes are present in the PR merge ref.
     """
     from nifty_scalper_bot.execution.order_manager_core import BracketState
 
@@ -210,8 +201,6 @@ def test_legacy_stop_loss_fill_reconciles_without_creating_virtual_owner() -> No
         product="MIS",
     )
 
-    # Must not raise -- this is the exact call shape that previously crashed
-    # unconditionally on the invalid OrderStatus.COMPLETE tuple member.
     manager._handle_bracket_update(stop_fill, OrderStatus.SUBMITTED, {})
 
     assert cancel_calls == [state]
@@ -220,13 +209,7 @@ def test_legacy_stop_loss_fill_reconciles_without_creating_virtual_owner() -> No
 
 
 def test_parse_status_normalizes_complete_to_filled_not_a_distinct_member() -> None:
-    """Document why ``OrderStatus.COMPLETE`` must never appear in internal code.
-
-    Broker payloads report the terminal fill state as the string
-    ``"COMPLETE"``; ``_parse_status`` is the single normalization point that
-    maps it onto the canonical ``OrderStatus.FILLED`` member. There is no
-    ``OrderStatus.COMPLETE`` enum member, and there should never need to be.
-    """
+    """Broker COMPLETE is normalized at the boundary to internal FILLED."""
     manager = OrderManager.__new__(OrderManager)
     assert manager._parse_status("COMPLETE") is OrderStatus.FILLED
     assert manager._parse_status("FILLED") is OrderStatus.FILLED
