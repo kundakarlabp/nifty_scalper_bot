@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import wraps
+import sys
 import time
 from typing import Any, Callable
 
@@ -104,7 +105,17 @@ def _apply_selected_pair_transition_liveness(
 
 def apply_patches() -> None:
     """Install the dynamic-universe and selected-option evaluation fixes once."""
+    from nifty_scalper_bot.core.runtime_history_event_loop_hardening import (
+        apply_app_patch as _apply_runtime_history_patch,
+    )
     from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    # core.app is fully loaded when the production runtime-hardening installer
+    # calls this function. Patch the app function before the class idempotency
+    # return so an app-module reload cannot lose the history deferral adapter.
+    app_module = sys.modules.get("nifty_scalper_bot.core.app")
+    if app_module is not None:
+        _apply_runtime_history_patch(app_module)
 
     if getattr(StrategyRunner, "_dynamic_universe_safety_installed", False):
         return
