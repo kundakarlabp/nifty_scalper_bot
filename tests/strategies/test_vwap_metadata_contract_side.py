@@ -151,6 +151,74 @@ def test_vwap_thesis_uses_stable_structural_id_until_closed_candle_reset(monkeyp
     assert next_thesis.metadata['setup_id'] != first.metadata['setup_id']
 
 
+def test_vwap_thesis_does_not_leak_across_same_side_contracts(monkeypatch):
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    assert strategy._evaluate_signal(
+        'NFO:NIFTY2690124100CE',
+        _indicators(
+            session_date='2026-09-01',
+            close=99.5,
+            open=100.2,
+            high=100.4,
+            low=99.2,
+        ),
+        99.5,
+    ) is None
+    assert strategy.last_no_vote_reason == 'vwap_thesis_reset'
+
+    rotated = strategy._evaluate_signal(
+        'NFO:NIFTY2690124050CE',
+        _indicators(
+            session_date='2026-09-01',
+            latest_bar_ts=BAR_TS + 60.0,
+            close=103.0,
+            open=102.0,
+            high=103.2,
+            low=101.8,
+        ),
+        103.0,
+    )
+
+    assert rotated is None
+    assert strategy.last_no_vote_reason == 'vwap_thesis_not_armed'
+
+
+def test_vwap_thesis_does_not_leak_across_sessions(monkeypatch):
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+    symbol = 'NFO:NIFTY2690124100CE'
+
+    assert strategy._evaluate_signal(
+        symbol,
+        _indicators(
+            session_date='2026-09-01',
+            close=99.5,
+            open=100.2,
+            high=100.4,
+            low=99.2,
+        ),
+        99.5,
+    ) is None
+
+    next_session = strategy._evaluate_signal(
+        symbol,
+        _indicators(
+            session_date='2026-09-02',
+            latest_bar_ts=BAR_TS + 86_400.0,
+            close=103.0,
+            open=102.0,
+            high=103.2,
+            low=101.8,
+        ),
+        103.0,
+    )
+
+    assert next_session is None
+    assert strategy.last_no_vote_reason == 'vwap_thesis_not_armed'
+
+
 def test_real_vwap_vote_clears_default_live_quality_gate(monkeypatch):
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
     monkeypatch.setenv('ENABLE_LIVE', 'true')
