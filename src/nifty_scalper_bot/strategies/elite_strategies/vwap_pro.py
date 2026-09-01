@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 from typing import Any
 
@@ -25,6 +26,30 @@ def _fmt_optional(value: float | None, digits: int) -> str:
         return "unavailable"
 
 
+def _resolve_session_token(indicators: dict[str, Any], bar_anchor: Any) -> str:
+    """Resolve a stable trading-session identity without broker access."""
+    explicit = indicators.get("session_date")
+    if explicit not in (None, ""):
+        return str(explicit).strip()
+
+    if bar_anchor not in (None, ""):
+        text = str(bar_anchor).strip()
+        if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+            return text[:10]
+        try:
+            timestamp = float(text)
+            if timestamp > 100_000_000_000:
+                timestamp /= 1000.0
+            if timestamp > 0:
+                return datetime.fromtimestamp(timestamp, tz=timezone.utc).date().isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+
+    # No session proof means no previously armed, dated thesis can match this
+    # scope. This is deliberately fail-closed rather than reusing another day.
+    return "unknown"
+
+
 class VWAPProStrategy(EliteStrategy):
     """VWAP continuation/pullback strategy emitting scored strategy votes."""
 
@@ -44,10 +69,10 @@ class VWAPProStrategy(EliteStrategy):
             0.0,
             float(os.getenv("VWAP_MIN_PENETRATION_ATR_MULT", "0.15") or 0.15),
         )
-        # The last finalized below-VWAP/reclaim anchor defines the thesis.
-        # It is structural, not an order-state latch; the runner persists the
-        # resulting setup_id and owns accepted/failed order lifecycle.
-        self._thesis_anchor_by_side: dict[str, str] = {}
+        # A reclaim thesis belongs to one concrete option contract in one
+        # trading session. Keying only by CE/PE allowed ATM rotations to inherit
+        # another contract's structural state.
+        self._thesis_anchor_by_scope: dict[tuple[str, str], str] = {}
         self._futures_slope_neutral_eps = float(os.getenv("VWAP_FUTURES_SLOPE_NEUTRAL_EPS", "0.00005") or 0.00005)
         self._allow_early_trend_pullback = str(
             os.getenv("VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK_LIVE", "false")
@@ -196,14 +221,17 @@ class VWAPProStrategy(EliteStrategy):
                 ),
                 None,
             )
+            symbol_scope = str(symbol or "").strip().upper()
+            session_scope = _resolve_session_token(indicators, bar_anchor)
+            thesis_scope = (symbol_scope, session_scope)
             if close < vwap:
                 if bar_anchor is not None:
-                    self._thesis_anchor_by_side[contract_side] = str(bar_anchor)
+                    self._thesis_anchor_by_scope[thesis_scope] = str(bar_anchor)
                 self._no_vote('vwap_thesis_reset')
                 return None
             if (open_price < vwap or low < vwap) and bar_anchor is not None:
-                self._thesis_anchor_by_side[contract_side] = str(bar_anchor)
-            thesis_anchor = self._thesis_anchor_by_side.get(contract_side)
+                self._thesis_anchor_by_scope[thesis_scope] = str(bar_anchor)
+            thesis_anchor = self._thesis_anchor_by_scope.get(thesis_scope)
             if not thesis_anchor:
                 self._no_vote('vwap_thesis_not_armed')
                 return None
@@ -430,7 +458,7 @@ class VWAPProStrategy(EliteStrategy):
                 'trade_side': contract_side,
                 'side': contract_side,
                 'contract_side': contract_side,
-                'setup_id': f"vwap:{contract_side}:{thesis_anchor}",
+                'setup_id': f"vwap:{contract_side}:{thesis_anchor}:{session_scope}:{symbol_scope}",
                 'premium_above_vwap': premium_above_vwap,
                 'direction_bias': direction if direction in {'CE', 'PE'} else None,
                 "underlying_direction_bias": underlying_direction if underlying_direction in {"CE", "PE"} else None,
@@ -480,6 +508,8 @@ class VWAPProStrategy(EliteStrategy):
                 'vwap_penetration_atr': round(penetration_atr, 4),
                 'vwap_event_confirmed': event_confirmed,
                 'early_trend_pullback': early_trend_pullback,
+                'thesis_scope_symbol': symbol_scope,
+                'thesis_scope_session': session_scope,
                 'setup_invalidation_premium': current_price - atr_safe,
                 'invalidation_level_domain': 'option_premium',
                 'premium_stop_distance': atr_safe,
