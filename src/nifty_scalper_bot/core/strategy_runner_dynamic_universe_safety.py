@@ -4,9 +4,102 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import wraps
+import time
 from typing import Any, Callable
 
 from nifty_scalper_bot.utils.symbols import normalize_symbol
+
+
+def _active_selected_pair(runner: Any) -> tuple[str | None, str | None]:
+    """Return the authoritative active CE/PE pair."""
+    ce = normalize_symbol(str(getattr(runner, "_active_selected_ce", None) or "")) or None
+    pe = normalize_symbol(str(getattr(runner, "_active_selected_pe", None) or "")) or None
+    return ce, pe
+
+
+def _record_selected_pair_transition(
+    runner: Any,
+    before: tuple[str | None, str | None],
+    after: tuple[str | None, str | None],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Record only a real active-pair rotation, never initial selection."""
+    if before == after or not all(before) or not all(after):
+        return False
+    started = time.monotonic() if now is None else float(now)
+    setattr(runner, "_selected_entry_eval_epoch_pair", after)
+    setattr(runner, "_selected_entry_eval_epoch_started_at", started)
+    return True
+
+
+def _apply_selected_pair_transition_liveness(
+    runner: Any,
+    state: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Ignore previous-pair completion age only inside a recorded rotation epoch."""
+    adjusted = dict(state)
+    current_pair = _active_selected_pair(runner)
+    epoch_pair = getattr(runner, "_selected_entry_eval_epoch_pair", None)
+    epoch_started = float(
+        getattr(runner, "_selected_entry_eval_epoch_started_at", 0.0) or 0.0
+    )
+    if epoch_pair != current_pair or epoch_started <= 0.0 or not all(current_pair):
+        return adjusted
+
+    resolved_now = time.monotonic() if now is None else float(now)
+    selected_eval_at = float(
+        getattr(runner, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
+    )
+    adjusted["selected_pair_epoch_age_s"] = round(
+        max(0.0, resolved_now - epoch_started), 1
+    )
+    adjusted["selected_pair_epoch_current"] = True
+
+    # Once this pair has produced its own selected-candidate completion, the
+    # canonical runner liveness calculation is authoritative again.
+    if selected_eval_at >= epoch_started:
+        adjusted["selected_eval_in_current_epoch"] = True
+        return adjusted
+
+    adjusted["selected_eval_in_current_epoch"] = False
+    epoch_age = max(0.0, resolved_now - epoch_started)
+    selected_tick_at = float(
+        getattr(runner, "_last_selected_option_tick_ts", 0.0) or 0.0
+    )
+    tick_in_epoch = selected_tick_at >= epoch_started
+    tick_age = (
+        max(0.0, resolved_now - selected_tick_at) if tick_in_epoch else None
+    )
+    dispatch_stall_s = float(
+        getattr(runner, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
+    )
+    work_outstanding = bool(adjusted.get("work_outstanding"))
+    drain_active = bool(adjusted.get("drain_active"))
+    drain_active_age = float(adjusted.get("drain_active_age_s") or 0.0)
+
+    dispatch_stalled = bool(
+        not work_outstanding
+        and tick_age is not None
+        and tick_age <= 5.0
+        and epoch_age >= dispatch_stall_s
+    )
+    worker_stalled = bool(
+        work_outstanding
+        and (
+            drain_active_age >= 90.0 if drain_active else epoch_age >= 90.0
+        )
+    ) or dispatch_stalled
+
+    adjusted["tick_age_s"] = round(tick_age, 1) if tick_age is not None else None
+    adjusted["dispatch_stalled"] = dispatch_stalled
+    adjusted["last_progress_age_s"] = round(epoch_age, 1)
+    adjusted["selected_eval_age_s"] = None
+    adjusted["evaluation_alive"] = epoch_age < dispatch_stall_s
+    adjusted["worker_stalled"] = worker_stalled
+    return adjusted
 
 
 def apply_patches() -> None:
@@ -20,6 +113,7 @@ def apply_patches() -> None:
     original_sync = StrategyRunner._sync_active_selection_from_basket
     original_mark_live = StrategyRunner._mark_live
     original_on_tick = StrategyRunner._on_tick
+    original_liveness = StrategyRunner._entry_eval_liveness_snapshot
 
     @wraps(original_validate)
     def validate_symbol_for_cycle(self: Any, symbol: str) -> bool:
@@ -49,6 +143,7 @@ def apply_patches() -> None:
     @wraps(original_sync)
     def sync_active_selection_from_basket(self: Any, selection: Any) -> None:
         """Do not promote a newly selected CE/PE pair before its indicator history is warm."""
+        before_pair = _active_selected_pair(self)
         new_ce = normalize_symbol(str(getattr(selection, "selected_ce", None) or "")) or None
         new_pe = normalize_symbol(str(getattr(selection, "selected_pe", None) or "")) or None
         runtime_ready = hasattr(self, "_option_required_bars") and hasattr(
@@ -70,8 +165,12 @@ def apply_patches() -> None:
                     atm_strike=getattr(selection, "atm_strike", None),
                     option_symbols=getattr(selection, "option_symbols", None),
                 )
+                _record_selected_pair_transition(
+                    self, before_pair, _active_selected_pair(self)
+                )
                 return
         original_sync(self, selection)
+        _record_selected_pair_transition(self, before_pair, _active_selected_pair(self))
 
     @wraps(original_mark_live)
     def mark_live(self: Any, symbol: str) -> Any:
@@ -113,9 +212,9 @@ def apply_patches() -> None:
             and normalized not in live_seen
             and current_version > last_version
         ):
-            state = (getattr(self, "_symbol_state", {}) or {}).get(normalized)
-            if state is not None:
-                state._last_eval_bar_ts = None
+            symbol_state = (getattr(self, "_symbol_state", {}) or {}).get(normalized)
+            if symbol_state is not None:
+                symbol_state._last_eval_bar_ts = None
 
         clean_tick = tick
         if isinstance(tick, Mapping) and ("version" in tick or "data_version" in tick):
@@ -124,15 +223,31 @@ def apply_patches() -> None:
             clean_tick.pop("data_version", None)
         return original_on_tick(self, normalized, clean_tick)
 
+    @wraps(original_liveness)
+    def entry_eval_liveness_snapshot(
+        self: Any, now: float | None = None
+    ) -> dict[str, Any]:
+        resolved_now = time.monotonic() if now is None else float(now)
+        canonical = original_liveness(self, resolved_now)
+        return _apply_selected_pair_transition_liveness(
+            self, canonical, now=resolved_now
+        )
+
     StrategyRunner._dynamic_universe_safety_original_validate = original_validate
     StrategyRunner._dynamic_universe_safety_original_sync = original_sync
     StrategyRunner._dynamic_universe_safety_original_mark_live = original_mark_live
     StrategyRunner._dynamic_universe_safety_original_on_tick = original_on_tick
+    StrategyRunner._dynamic_universe_safety_original_liveness = original_liveness
     StrategyRunner._validate_symbol_for_cycle = validate_symbol_for_cycle
     StrategyRunner._sync_active_selection_from_basket = sync_active_selection_from_basket
     StrategyRunner._mark_live = mark_live
     StrategyRunner._on_tick = on_tick
+    StrategyRunner._entry_eval_liveness_snapshot = entry_eval_liveness_snapshot
     StrategyRunner._dynamic_universe_safety_installed = True
 
 
-__all__ = ["apply_patches"]
+__all__ = [
+    "_apply_selected_pair_transition_liveness",
+    "_record_selected_pair_transition",
+    "apply_patches",
+]
