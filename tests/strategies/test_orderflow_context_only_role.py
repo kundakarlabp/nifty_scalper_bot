@@ -80,8 +80,8 @@ def test_trigger_permission_is_no_longer_environment_controlled() -> None:
 def test_context_role_is_reported_as_the_block_reason() -> None:
     """Blocked triggers must read as a role statement, not a toggle."""
     src = inspect.getsource(order_flow)
-    assert "'context_only_role'" in src
-    assert "'trigger_role_disabled'" not in src
+    assert "context_only_role" in src
+    assert "trigger_role_disabled" not in src
 
 
 def test_confirmation_scoring_path_is_retained() -> None:
