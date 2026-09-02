@@ -51,6 +51,72 @@ async def test_periodic_rearm_gets_an_exact_market_open_boundary_wake() -> None:
 
 
 @pytest.mark.asyncio
+async def test_market_close_boundary_disarms_readiness_and_runtime_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OPEN -> CLOSED must clear both readiness SSOT and final entry switch."""
+
+    state_calls = 0
+    sleep_calls = 0
+    calls: list[tuple[str, str]] = []
+    switch_calls: list[str] = []
+
+    def market_state() -> MarketState:
+        nonlocal state_calls
+        state_calls += 1
+        return MarketState.OPEN if state_calls == 1 else MarketState.CLOSED
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 2:
+            raise asyncio.CancelledError
+
+    async def ensure_started(_ctx, *, reason: str) -> None:
+        calls.append(("runner", reason))
+
+    async def recompute(ctx, *, reason: str) -> None:
+        calls.append(("readiness", reason))
+        ctx.live_orders_armed = reason == "market_open_boundary"
+        ctx.execution_armed = ctx.live_orders_armed
+        ctx.live_block_reason = None if ctx.live_orders_armed else "market_closed"
+        ctx.execution_block_reason = ctx.live_block_reason
+
+    switch = SimpleNamespace(
+        arm_for_runtime=lambda: switch_calls.append("arm") or True,
+        disarm_for_runtime=lambda: switch_calls.append("disarm"),
+    )
+    monkeypatch.setattr(session_boundary_rearm, "trading_switch", lambda: switch)
+    monkeypatch.setattr(session_boundary_rearm.asyncio, "sleep", fake_sleep)
+
+    async def original_loop(_ctx) -> None:
+        return None
+
+    app_module = SimpleNamespace(
+        _live_readiness_rearm_loop=original_loop,
+        get_market_state=market_state,
+        _next_nse_open_after=lambda now: now,
+        _ensure_strategy_runner_started=ensure_started,
+        _recompute_and_push_runtime_readiness=recompute,
+    )
+    apply_app_patch(app_module)
+    ctx = SimpleNamespace(live_orders_armed=False, execution_armed=False)
+
+    with pytest.raises(asyncio.CancelledError):
+        await session_boundary_rearm._market_open_boundary_worker(app_module, ctx)
+
+    assert calls == [
+        ("runner", "market_open_boundary"),
+        ("readiness", "market_open_boundary"),
+        ("readiness", "market_close_boundary"),
+    ]
+    assert switch_calls == ["arm", "disarm"]
+    assert ctx.live_orders_armed is False
+    assert ctx.execution_armed is False
+    assert ctx.live_block_reason == "market_closed"
+
+
+@pytest.mark.asyncio
 async def test_boundary_patch_preserves_original_loop_failure() -> None:
     async def original_loop(_ctx) -> None:
         raise RuntimeError("original failure")
