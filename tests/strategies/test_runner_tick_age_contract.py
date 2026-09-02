@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import apply_patches
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
@@ -26,6 +27,7 @@ def test_live_option_freshness_prefers_genuine_ws_age_over_fresh_cached_quote(
 ) -> None:
     """A poll/cache refresh must not make a stale genuine WS option tick fresh."""
 
+    apply_patches()
     runner = object.__new__(StrategyRunner)
     runner._data_hub = None
     runner._market_data = SimpleNamespace(
