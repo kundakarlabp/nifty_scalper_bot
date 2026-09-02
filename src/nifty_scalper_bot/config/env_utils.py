@@ -98,10 +98,13 @@ def setdefault_env(key: str, value: str) -> None:
         os.environ[key] = value
 
 
+def _is_lightsail_production() -> bool:
+    return (os.getenv('DEPLOYMENT_PLATFORM') or '').strip().lower() == 'aws_lightsail'
+
+
 def _production_live_default_enabled() -> bool:
     """Return whether this Lightsail host needs its one-time LIVE migration."""
-    platform = (os.getenv('DEPLOYMENT_PLATFORM') or '').strip().lower()
-    if platform != 'aws_lightsail':
+    if not _is_lightsail_production():
         return False
     if truthy(os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)):
         return False
@@ -183,11 +186,15 @@ def normalise_live_env_defaults() -> None:
             'SHADOW_MODE': 'true',
         }
 
+    production_initialized = _is_lightsail_production() and truthy(
+        os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)
+    )
     for key, value in defaults.items():
-        if production_default_live:
-            # Existing Lightsail installs preserve a legacy SHADOW env. Migrate
-            # that state exactly once; after the marker is persisted, explicit
-            # admin LIVE/SHADOW choices remain authoritative across restarts.
+        if production_default_live or production_initialized:
+            # On the first upgraded boot, migrate the legacy SHADOW env to LIVE.
+            # Thereafter ENABLE_LIVE + EXECUTION_MODE are canonical and the
+            # derived aliases are synchronized in-process, so an explicit admin
+            # switch back to SHADOW remains authoritative across restarts.
             os.environ[key] = value
         else:
             setdefault_env(key, value)
