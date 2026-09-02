@@ -35,6 +35,11 @@ def test_live_option_freshness_prefers_genuine_ws_age_over_fresh_cached_quote(
     monkeypatch.setattr(runner, "_is_tradable_symbol", lambda symbol: True)
     monkeypatch.setattr(
         runner,
+        "_resolve_execution_mode_snapshot",
+        lambda: SimpleNamespace(is_live_mode=True),
+    )
+    monkeypatch.setattr(
+        runner,
         "_get_cached_quote_for_live_entry",
         lambda symbol: {
             "quote_age_s": 0.1,
