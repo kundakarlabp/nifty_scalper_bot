@@ -167,9 +167,9 @@ def test_bullish_swing_breach_without_reclaim_is_rejected(monkeypatch):
     strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
     indicators = _ready_smc_indicators(
         high=99.0,
-        low=97.0,
+        low=97.5,
         open=98.5,
-        close=97.5,
+        close=97.8,
         prior_swing_low=98.0,
         prior_swing_high=101.0,
     )
