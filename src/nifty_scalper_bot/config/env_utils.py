@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 LIVE_PER_TRADE_RISK_PCT = "7.0"
+PRODUCTION_LIVE_DEFAULT_INITIALIZED = "PRODUCTION_LIVE_DEFAULT_INITIALIZED"
 
 
 def _strip_inline_comment(text: str) -> str:
@@ -96,11 +98,72 @@ def setdefault_env(key: str, value: str) -> None:
         os.environ[key] = value
 
 
+def _is_lightsail_production() -> bool:
+    return (os.getenv('DEPLOYMENT_PLATFORM') or '').strip().lower() == 'aws_lightsail'
+
+
+def _production_live_default_enabled() -> bool:
+    """Return whether this Lightsail host needs its one-time LIVE migration."""
+    if not _is_lightsail_production():
+        return False
+    if truthy(os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)):
+        return False
+    preference = os.getenv('PRODUCTION_DEFAULT_LIVE')
+    if preference is not None and preference.strip() and not truthy(preference):
+        return False
+    return True
+
+
+def _persist_production_live_defaults(defaults: dict[str, str]) -> None:
+    """Persist the one-time Lightsail LIVE migration without touching secrets."""
+    env_path = (os.getenv('BOT_ENV_FILE') or '').strip()
+    if not env_path:
+        return
+    path = Path(env_path).expanduser()
+    if not path.exists() or not path.is_file():
+        return
+
+    updates = dict(defaults)
+    updates[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = 'true'
+    existing = path.read_text(encoding='utf-8').splitlines()
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in existing:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or '=' not in stripped:
+            out.append(line)
+            continue
+        key = stripped.split('=', 1)[0].strip()
+        if key in updates:
+            if key not in seen:
+                out.append(f'{key}={updates[key]}')
+                seen.add(key)
+            continue
+        out.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            out.append(f'{key}={value}')
+
+    tmp = path.with_name(f'.{path.name}.live-default.tmp')
+    try:
+        tmp.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        os.environ[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = 'true'
+    except OSError as exc:
+        LOGGER.warning('Could not persist Lightsail LIVE default migration: %s', exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def normalise_live_env_defaults() -> None:
     """Derive live/paper env defaults. Args: none. Returns: None. Raises: none."""
     enable_live = truthy(os.getenv('ENABLE_LIVE'))
     execution_mode = (os.getenv('EXECUTION_MODE') or '').strip().upper()
-    live_requested = enable_live or execution_mode == 'LIVE'
+    production_default_live = _production_live_default_enabled()
+    live_requested = production_default_live or enable_live or execution_mode == 'LIVE'
 
     if live_requested:
         defaults = {
@@ -113,18 +176,32 @@ def normalise_live_env_defaults() -> None:
             'SHADOW_MODE': 'false',
         }
     else:
+        non_live_mode = execution_mode if execution_mode in {'SHADOW', 'PAPER'} else 'PAPER'
         defaults = {
             'ENABLE_LIVE': 'false',
             'ENABLE_LIVE_TRADING': 'false',
-            'EXECUTION_MODE': 'PAPER',
+            'EXECUTION_MODE': non_live_mode,
             'ORDERS__ENABLE_LIVE': 'false',
             'PAPER__ENABLED': 'true',
             'PAPER_MODE': 'true',
             'SHADOW_MODE': 'true',
         }
 
+    production_initialized = _is_lightsail_production() and truthy(
+        os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)
+    )
     for key, value in defaults.items():
-        setdefault_env(key, value)
+        if production_default_live or production_initialized:
+            # On the first upgraded boot, migrate the legacy SHADOW env to LIVE.
+            # Thereafter ENABLE_LIVE + EXECUTION_MODE are canonical and the
+            # derived aliases are synchronized in-process, so an explicit admin
+            # switch back to SHADOW remains authoritative across restarts.
+            os.environ[key] = value
+        else:
+            setdefault_env(key, value)
+
+    if production_default_live:
+        _persist_production_live_defaults(defaults)
 
     if live_requested:
         # One canonical live risk value. Keep both accepted aliases aligned so
