@@ -16,7 +16,6 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.runtime_context_contract import (
     resolve_context_age_seconds,
 )
-from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
@@ -526,15 +525,12 @@ class SMCStrategy(EliteStrategy):
                 self._no_vote("stale_or_invalid_data")
                 return None
 
-            contract_side, option_premium_domain, _ = resolve_signal_domain(
-                symbol, indicators
-            )
-            if not option_premium_domain:
-                self._no_vote("smc_executable_symbol_not_option")
-                return None
-            contract_side = contract_side or self._side_from_symbol(symbol)
+            # Execution identity is owned by the evaluated candidate symbol.
+            # Underlying/futures context may describe structure, but it cannot
+            # turn a validated CE/PE candidate into a non-option instrument.
+            contract_side = self._side_from_symbol(symbol)
             if contract_side not in {"CE", "PE"}:
-                self._no_vote("smc_contract_side_unknown")
+                self._no_vote("smc_executable_symbol_not_option")
                 return None
 
             snapshot = self._underlying_snapshot(indicators)
