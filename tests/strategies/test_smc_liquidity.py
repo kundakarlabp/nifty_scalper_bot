@@ -182,7 +182,7 @@ def test_bullish_swing_breach_and_reclaim_arms_confirmation_not_entry(monkeypatc
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     strategy = SMCStrategy(SMCStrategyConfig(sweep_distance_points=0.5), indicator_engine=None)
     indicators = _ready_smc_indicators(
-        low=98.0,
+        low=98.5,
         close=100.0,
         prior_swing_low=99.0,
         prior_swing_high=102.0,
@@ -234,7 +234,7 @@ def test_manager_swing_low_alias_is_consumed_for_shadow_underlying_replay(monkey
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     strategy = SMCStrategy(SMCStrategyConfig(sweep_distance_points=0.5), indicator_engine=None)
     indicators = _ready_smc_indicators(
-        low=98.0,
+        low=98.5,
         close=100.0,
         swing_low=99.0,
         swing_high=102.0,
