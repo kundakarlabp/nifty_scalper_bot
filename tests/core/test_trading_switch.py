@@ -53,6 +53,20 @@ def test_runtime_arm_enables_only_pristine_switch() -> None:
     assert switch.can_trade() is True
 
 
+def test_runtime_disarm_does_not_create_operator_pause_latch() -> None:
+    """Session close may disarm entries without preventing next-session rearm."""
+
+    switch = TradingSwitch()
+    assert switch.arm_for_runtime() is True
+    assert switch.can_trade() is True
+
+    switch.disarm_for_runtime()
+    assert switch.can_trade() is False
+
+    assert switch.arm_for_runtime() is True
+    assert switch.can_trade() is True
+
+
 def test_runtime_arm_does_not_clear_active_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

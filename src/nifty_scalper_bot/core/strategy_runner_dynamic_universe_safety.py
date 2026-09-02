@@ -103,6 +103,47 @@ def _apply_selected_pair_transition_liveness(
     return adjusted
 
 
+def _live_ws_option_tick_fresh(
+    runner: Any,
+    symbol: str,
+    *,
+    max_age_s: float | None,
+) -> bool | None:
+    """Return LIVE WS freshness when that authority is available.
+
+    ``None`` means the runner is not in LIVE mode or its MDM does not expose
+    genuine WebSocket age, so the caller may preserve the existing fallback.
+    In LIVE mode, an exposed MDM probe is authoritative and fails closed when
+    no genuine WS tick exists.
+    """
+
+    try:
+        live_mode = bool(runner._resolve_execution_mode_snapshot().is_live_mode)
+    except Exception:  # noqa: BLE001 - legacy/test runners keep old fallback
+        live_mode = False
+    if not live_mode:
+        return None
+
+    mdm = getattr(runner, "_market_data", None)
+    time_since_live_ws = getattr(mdm, "time_since_last_live_ws_tick", None)
+    if not callable(time_since_live_ws):
+        return None
+
+    normalized = normalize_symbol(str(symbol or "")) or symbol
+    try:
+        age = time_since_live_ws(normalized)
+    except (TypeError, ValueError, RuntimeError):
+        return False
+    if age is None:
+        return False
+    try:
+        age_s = max(0.0, float(age))
+        limit_s = 60.0 if max_age_s is None else max(0.0, float(max_age_s))
+    except (TypeError, ValueError):
+        return False
+    return age_s <= limit_s
+
+
 def apply_patches() -> None:
     """Install the dynamic-universe and selected-option evaluation fixes once."""
     from nifty_scalper_bot.core.runtime_history_event_loop_hardening import (
@@ -125,6 +166,7 @@ def apply_patches() -> None:
     original_mark_live = StrategyRunner._mark_live
     original_on_tick = StrategyRunner._on_tick
     original_liveness = StrategyRunner._entry_eval_liveness_snapshot
+    original_option_tick_fresh = StrategyRunner._is_option_symbol_tick_fresh
 
     @wraps(original_validate)
     def validate_symbol_for_cycle(self: Any, symbol: str) -> bool:
@@ -244,21 +286,37 @@ def apply_patches() -> None:
             self, canonical, now=resolved_now
         )
 
+    @wraps(original_option_tick_fresh)
+    def option_symbol_tick_fresh(
+        self: Any, symbol: str, *, max_age_s: float | None = None
+    ) -> bool:
+        live_ws_fresh = _live_ws_option_tick_fresh(
+            self, symbol, max_age_s=max_age_s
+        )
+        if live_ws_fresh is not None:
+            return live_ws_fresh
+        return bool(original_option_tick_fresh(self, symbol, max_age_s=max_age_s))
+
     StrategyRunner._dynamic_universe_safety_original_validate = original_validate
     StrategyRunner._dynamic_universe_safety_original_sync = original_sync
     StrategyRunner._dynamic_universe_safety_original_mark_live = original_mark_live
     StrategyRunner._dynamic_universe_safety_original_on_tick = original_on_tick
     StrategyRunner._dynamic_universe_safety_original_liveness = original_liveness
+    StrategyRunner._dynamic_universe_safety_original_option_tick_fresh = (
+        original_option_tick_fresh
+    )
     StrategyRunner._validate_symbol_for_cycle = validate_symbol_for_cycle
     StrategyRunner._sync_active_selection_from_basket = sync_active_selection_from_basket
     StrategyRunner._mark_live = mark_live
     StrategyRunner._on_tick = on_tick
     StrategyRunner._entry_eval_liveness_snapshot = entry_eval_liveness_snapshot
+    StrategyRunner._is_option_symbol_tick_fresh = option_symbol_tick_fresh
     StrategyRunner._dynamic_universe_safety_installed = True
 
 
 __all__ = [
     "_apply_selected_pair_transition_liveness",
+    "_live_ws_option_tick_fresh",
     "_record_selected_pair_transition",
     "apply_patches",
 ]

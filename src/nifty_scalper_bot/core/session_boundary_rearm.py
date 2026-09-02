@@ -1,4 +1,4 @@
-"""Wake live-readiness exactly at the NSE session-open boundary."""
+"""Synchronize live-readiness at NSE session open and close boundaries."""
 
 from __future__ import annotations
 
@@ -20,9 +20,13 @@ _IST = ZoneInfo("Asia/Kolkata")
 def _sync_trading_switch_with_readiness(ctx: Any) -> bool:
     """Keep the final entry switch consistent with canonical LIVE arming."""
 
-    if not bool(getattr(ctx, "live_orders_armed", False)):
-        return False
     switch = trading_switch()
+    if not bool(getattr(ctx, "live_orders_armed", False)):
+        disarm_for_runtime = getattr(switch, "disarm_for_runtime", None)
+        if callable(disarm_for_runtime):
+            disarm_for_runtime()
+        return False
+
     arm_for_runtime = getattr(switch, "arm_for_runtime", None)
     switch_ready = (
         bool(arm_for_runtime())
@@ -49,8 +53,10 @@ def _sync_trading_switch_with_readiness(ctx: Any) -> bool:
 
 
 async def _market_open_boundary_worker(app_module: Any, ctx: Any) -> None:
-    """Perform one idempotent readiness refresh at each trading-day open."""
+    """Refresh readiness when NSE opens and disarm it when the session closes."""
+
     last_rearmed_date = None
+    last_market_state: MarketState | None = None
     while True:
         state = app_module.get_market_state()
         now_ist = datetime.now(_IST)
@@ -71,8 +77,32 @@ async def _market_open_boundary_worker(app_module: Any, ctx: Any) -> None:
                         "date": now_ist.date().isoformat(),
                     },
                 )
-            await asyncio.sleep(60.0)
+            last_market_state = state
+            # Keep this lightweight boundary watcher responsive enough that the
+            # readiness SSOT cannot remain armed for a full post-close minute.
+            await asyncio.sleep(15.0)
             continue
+
+        if last_market_state == MarketState.OPEN or bool(
+            getattr(ctx, "live_orders_armed", False)
+        ):
+            await app_module._recompute_and_push_runtime_readiness(
+                ctx, reason="market_close_boundary"
+            )
+            LOGGER.info(
+                "MARKET_CLOSE_BOUNDARY_DISARM_COMPLETE date=%s state=%s",
+                now_ist.date().isoformat(),
+                getattr(state, "value", state),
+                extra={
+                    "event": "MARKET_CLOSE_BOUNDARY_DISARM_COMPLETE",
+                    "date": now_ist.date().isoformat(),
+                    "market_state": str(getattr(state, "value", state)),
+                    "live_orders_armed": bool(
+                        getattr(ctx, "live_orders_armed", False)
+                    ),
+                },
+            )
+        last_market_state = state
 
         next_open = app_module._next_nse_open_after(now_ist)
         delay = max(0.0, (next_open - now_ist).total_seconds())
@@ -80,7 +110,7 @@ async def _market_open_boundary_worker(app_module: Any, ctx: Any) -> None:
 
 
 def apply_app_patch(app_module: Any) -> None:
-    """Run the exact-boundary worker beside the existing periodic rearm loop."""
+    """Run the session-boundary worker beside the existing periodic rearm loop."""
     if getattr(app_module, "_session_boundary_rearm_installed", False):
         return
     original = getattr(app_module, "_live_readiness_rearm_loop", None)

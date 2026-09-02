@@ -136,6 +136,33 @@ class TradingSwitch:
             )
         return True
 
+    def disarm_for_runtime(self) -> None:
+        """Disable runtime entries without creating an operator pause latch.
+
+        Session/readiness transitions use this path so the next valid market
+        session can re-arm normally. Existing operator-pause and cooldown state
+        remains authoritative and is not cleared.
+        """
+
+        changed = False
+        try:
+            with self._lock:
+                if self._enabled:
+                    self._enabled = False
+                    changed = True
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "Failure in TradingSwitch.disarm_for_runtime: %s",
+                exc,
+                extra={"event": "trading_switch_runtime_disarm_error"},
+            )
+            raise
+        if changed:
+            log.info(
+                "Condition met: trading switch runtime disarmed",
+                extra={"event": "trading_switch_runtime_disarmed"},
+            )
+
     def cooldown(self, seconds: float) -> None:
         """Pause trading for a finite number of seconds.
 
