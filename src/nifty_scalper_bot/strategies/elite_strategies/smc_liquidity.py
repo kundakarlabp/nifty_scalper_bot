@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import logging
 import os
-from typing import Any
+from typing import Any, Mapping
 
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
-from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
-from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    SMCStrategyConfig,
+)
+from nifty_scalper_bot.strategies.runtime_context_contract import (
+    resolve_context_age_seconds,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
@@ -28,41 +36,463 @@ def _first_not_none(*values: int | None) -> int | None:
 
 def safe_float_env(name: str, default: float) -> float:
     from nifty_scalper_bot.config.env_utils import parse_float_env
+
     return parse_float_env(os.getenv(name), default)
 
 
-class SMCStrategy(EliteStrategy):
-    """SMC liquidity sweep strategy producing structured votes only."""
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(float(os.getenv(name, str(default)) or default)))
+    except (TypeError, ValueError):
+        return max(minimum, int(default))
 
-    MIN_BARS_REQUIRED = 30
-    ROLE = 'trigger'
-    TRIGGER_KEY = 'smc_lite'
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        result = value
+    elif isinstance(value, (int, float)):
+        number = float(value)
+        if number > 10_000_000_000:
+            number /= 1000.0
+        result = datetime.fromtimestamp(number, tz=timezone.utc)
+    elif isinstance(value, str) and value.strip():
+        try:
+            result = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+class SMCStrategy(EliteStrategy):
+    """Underlying-led liquidity sweep/reclaim trigger for selected NIFTY options.
+
+    The executable symbol remains the selected option. NIFTY futures are the
+    primary market-structure source, with spot as a context-only fallback.
+    Option-premium structure may add confirmation but cannot manufacture a
+    liquidity sweep in LIVE trading.
+    """
+
+    # Only a small option history is needed for premium/quality context. The
+    # SMC-specific 30-bar requirement is enforced on the underlying structure
+    # source inside _underlying_snapshot.
+    MIN_BARS_REQUIRED = 5
+    ROLE = "trigger"
+    TRIGGER_KEY = "smc_liquidity_v2"
 
     def __init__(self, config: SMCStrategyConfig, indicator_engine: Any) -> None:
-        """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
+        self._events: dict[tuple[str, str], dict[str, Any]] = {}
+        self._last_emitted_bar: dict[tuple[str, str], datetime] = {}
+        self.last_sweep_diagnostics: dict[str, Any] = {}
 
     def get_required_indicators(self) -> set[str]:
-        """Args: none. Returns: indicators set. Raises: Exception."""
-        return {'high', 'low', 'close', 'open', 'atr', 'direction_bias', 'bos_confirmed', 'choch_confirmed', 'retest_confirmed'}
+        return {
+            "high",
+            "low",
+            "close",
+            "open",
+            "atr",
+            "direction_bias",
+            "underlying_direction_bias",
+            "bos_confirmed",
+            "choch_confirmed",
+            "retest_confirmed",
+            "premium_reclaim",
+            "spread_pct",
+            "tradable_quote",
+            "quote_depth_valid",
+            "stale_data_used",
+            "futures_symbol",
+            "spot_symbol",
+        }
 
-    def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
-        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
+    def _read_completed_bars(self, symbol: str) -> list[dict[str, Any]]:
+        engine = self._indicator_engine
+        if engine is None or not symbol or not hasattr(engine, "get_history"):
+            return []
+        try:
+            rows = engine.get_history(symbol, field="bars")
+        except TypeError:
+            rows = engine.get_history(symbol)
+        except Exception:
+            return []
+
+        completed: list[dict[str, Any]] = []
+        for raw in rows or ():
+            if not isinstance(raw, Mapping):
+                continue
+            if raw.get("is_provisional") is True or raw.get("is_complete") is False:
+                continue
+            ts = _coerce_datetime(raw.get("timestamp"))
+            open_price = _safe_float(raw.get("open"))
+            high = _safe_float(raw.get("high"))
+            low = _safe_float(raw.get("low"))
+            close = _safe_float(raw.get("close"))
+            volume = _safe_float(raw.get("volume")) or 0.0
+            if ts is None or None in {open_price, high, low, close}:
+                continue
+            assert (
+                open_price is not None
+                and high is not None
+                and low is not None
+                and close is not None
+            )
+            if min(open_price, high, low, close) <= 0:
+                continue
+            completed.append(
+                {
+                    "timestamp": ts,
+                    "open": open_price,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": max(0.0, volume),
+                }
+            )
+        completed.sort(key=lambda row: row["timestamp"])
+        return completed
+
+    @staticmethod
+    def _atr(rows: list[dict[str, Any]], period: int = 14) -> float:
+        if not rows:
+            return 1.0
+        sample = rows[-max(2, period + 1) :]
+        true_ranges: list[float] = []
+        previous_close: float | None = None
+        for row in sample:
+            high = float(row["high"])
+            low = float(row["low"])
+            close = float(row["close"])
+            true_range = high - low
+            if previous_close is not None:
+                true_range = max(
+                    true_range,
+                    abs(high - previous_close),
+                    abs(low - previous_close),
+                )
+            true_ranges.append(max(0.0, true_range))
+            previous_close = close
+        selected = true_ranges[-period:]
+        average = sum(selected) / len(selected) if selected else 0.0
+        return max(1.0, average)
+
+    @staticmethod
+    def _volume_ratio(rows: list[dict[str, Any]]) -> float:
+        if not rows:
+            return 0.0
+        current = float(rows[-1].get("volume") or 0.0)
+        prior = [
+            float(row.get("volume") or 0.0)
+            for row in rows[-21:-1]
+            if float(row.get("volume") or 0.0) > 0.0
+        ]
+        if current <= 0 or not prior:
+            return 0.0
+        average = sum(prior) / len(prior)
+        return current / average if average > 0 else 0.0
+
+    @staticmethod
+    def _latest_confirmed_pivots(
+        rows: list[dict[str, Any]], *, strength: int, lookback: int
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Return latest confirmed pivot low/high before the evaluation bar."""
+        if len(rows) < (strength * 2) + 2:
+            return None, None
+        history = rows[:-1]
+        start = max(strength, len(history) - max(lookback, strength * 2 + 1))
+        stop = len(history) - strength
+        pivot_low: dict[str, Any] | None = None
+        pivot_high: dict[str, Any] | None = None
+
+        for index in range(start, stop):
+            left = history[index - strength : index]
+            right = history[index + 1 : index + 1 + strength]
+            if len(left) < strength or len(right) < strength:
+                continue
+            row = history[index]
+            low = float(row["low"])
+            high = float(row["high"])
+            neighbor_lows = [float(item["low"]) for item in (*left, *right)]
+            neighbor_highs = [float(item["high"]) for item in (*left, *right)]
+            if low <= min(neighbor_lows) and low < max(neighbor_lows):
+                pivot_low = row
+            if high >= max(neighbor_highs) and high > min(neighbor_highs):
+                pivot_high = row
+        return pivot_low, pivot_high
+
+    def _underlying_snapshot(
+        self, indicators: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        required = max(10, int(HistoryReadinessPolicy.from_env().smc_min_bars))
+        strength = _env_int("SMC_PIVOT_STRENGTH", 2)
+        lookback = _env_int(
+            "SMC_PIVOT_LOOKBACK", 30, minimum=(strength * 2) + 1
+        )
+        candidates = (
+            (str(indicators.get("futures_symbol") or "").strip(), "futures"),
+            (str(indicators.get("spot_symbol") or "").strip(), "spot_fallback"),
+        )
+        option_anchor = _coerce_datetime(
+            indicators.get("latest_bar_ts")
+            or indicators.get("bar_timestamp")
+            or indicators.get("setup_candle_timestamp")
+        )
+        max_lag_seconds = max(
+            60.0,
+            safe_float_env("SMC_UNDERLYING_MAX_LAG_SECONDS", 120.0),
+        )
+
+        for underlying_symbol, source in candidates:
+            if not underlying_symbol:
+                continue
+            rows = self._read_completed_bars(underlying_symbol)
+            if len(rows) < required:
+                continue
+            current = rows[-1]
+            current_ts = current["timestamp"]
+            if (
+                option_anchor is not None
+                and abs((option_anchor - current_ts).total_seconds())
+                > max_lag_seconds
+            ):
+                continue
+            pivot_low, pivot_high = self._latest_confirmed_pivots(
+                rows, strength=strength, lookback=lookback
+            )
+            return {
+                "source": source,
+                "symbol": underlying_symbol,
+                "rows": rows,
+                "current": current,
+                "current_ts": current_ts,
+                "atr": self._atr(rows),
+                "volume_ratio": self._volume_ratio(rows),
+                "pivot_low": pivot_low,
+                "pivot_high": pivot_high,
+                "history_count": len(rows),
+            }
+
+        # Backward-compatible diagnostic/replay path only. It is deliberately
+        # unavailable in LIVE, so option-premium OHLC can never become the
+        # authoritative SMC structure source.
+        execution_mode = str(
+            os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
+        ).upper()
+        source_symbol = str(indicators.get("source_symbol") or "").strip()
+        source_upper = source_symbol.upper()
+        explicit_underlying = bool(
+            source_symbol
+            and not source_upper.endswith(("CE", "PE"))
+            and (
+                source_upper.startswith("NSE:")
+                or "FUT" in source_upper
+                or str(indicators.get("history_domain_used") or "").lower()
+                in {"spot", "underlying"}
+            )
+        )
+        if execution_mode != "LIVE" and explicit_underlying:
+            current_ts = option_anchor or datetime.now(timezone.utc).replace(
+                microsecond=0
+            )
+            current = {
+                "timestamp": current_ts,
+                "open": float(indicators.get("open") or 0.0),
+                "high": float(indicators.get("high") or 0.0),
+                "low": float(indicators.get("low") or 0.0),
+                "close": float(indicators.get("close") or 0.0),
+                "volume": float(indicators.get("volume") or 0.0),
+            }
+            pivot_low_value = _safe_float(
+                indicators.get("prior_swing_low")
+                if indicators.get("prior_swing_low") is not None
+                else indicators.get("swing_low")
+            )
+            pivot_high_value = _safe_float(
+                indicators.get("prior_swing_high")
+                if indicators.get("prior_swing_high") is not None
+                else indicators.get("swing_high")
+            )
+            pivot_low = (
+                {"timestamp": current_ts, "low": pivot_low_value}
+                if pivot_low_value is not None
+                else None
+            )
+            pivot_high = (
+                {"timestamp": current_ts, "high": pivot_high_value}
+                if pivot_high_value is not None
+                else None
+            )
+            if min(
+                float(current["open"]),
+                float(current["high"]),
+                float(current["low"]),
+                float(current["close"]),
+            ) > 0:
+                return {
+                    "source": "legacy_shadow_underlying_payload",
+                    "symbol": source_symbol,
+                    "rows": [current],
+                    "current": current,
+                    "current_ts": current_ts,
+                    "atr": max(
+                        1.0,
+                        float(
+                            indicators.get("underlying_atr")
+                            or indicators.get("atr")
+                            or 1.0
+                        ),
+                    ),
+                    "volume_ratio": float(
+                        indicators.get("volume_spike_ratio") or 0.0
+                    ),
+                    "pivot_low": pivot_low,
+                    "pivot_high": pivot_high,
+                    "history_count": int(
+                        indicators.get("underlying_history_count") or 0
+                    ),
+                }
+        return None
+
+    def _sweep_diagnostics(
+        self, snapshot: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        current = snapshot["current"]
+        atr = max(1.0, float(snapshot["atr"]))
+        min_sweep_atr = max(
+            0.0, safe_float_env("SMC_MIN_SWEEP_ATR", 0.08)
+        )
+        max_sweep_atr = max(
+            min_sweep_atr,
+            safe_float_env("SMC_MAX_SWEEP_ATR", 0.75),
+        )
+        reclaim_buffer_atr = max(
+            0.0, safe_float_env("SMC_RECLAIM_BUFFER_ATR", 0.03)
+        )
+        # sweep_distance_points was previously dead configuration. In v2 it is
+        # an absolute cap on the ATR-normalised minimum, preventing shock-vol
+        # regimes from demanding an unrealistically large minimum penetration.
+        configured_cap = max(
+            0.05, float(self._cfg.sweep_distance_points or 0.05)
+        )
+        effective_min = max(
+            0.05, min(configured_cap, atr * min_sweep_atr)
+        )
+        reclaim_buffer = atr * reclaim_buffer_atr
+
+        bullish: dict[str, Any] = {
+            "exists": False,
+            "valid": False,
+            "reason": "missing_pivot",
+        }
+        pivot_low = snapshot.get("pivot_low")
+        if isinstance(pivot_low, Mapping) and pivot_low.get("low") is not None:
+            level = float(pivot_low["low"])
+            depth = level - float(current["low"])
+            reclaim = float(current["close"]) - level
+            bullish = {
+                "exists": depth > 0,
+                "valid": bool(
+                    depth >= effective_min
+                    and depth <= atr * max_sweep_atr
+                    and reclaim >= reclaim_buffer
+                ),
+                "level": level,
+                "depth_points": max(0.0, depth),
+                "depth_atr": max(0.0, depth) / atr,
+                "reclaim_points": reclaim,
+                "reclaim_atr": reclaim / atr,
+                "too_shallow": bool(0 < depth < effective_min),
+                "too_deep": bool(depth > atr * max_sweep_atr),
+                "reclaim_failed": bool(
+                    depth > 0 and reclaim < reclaim_buffer
+                ),
+            }
+
+        bearish: dict[str, Any] = {
+            "exists": False,
+            "valid": False,
+            "reason": "missing_pivot",
+        }
+        pivot_high = snapshot.get("pivot_high")
+        if isinstance(pivot_high, Mapping) and pivot_high.get("high") is not None:
+            level = float(pivot_high["high"])
+            depth = float(current["high"]) - level
+            reclaim = level - float(current["close"])
+            bearish = {
+                "exists": depth > 0,
+                "valid": bool(
+                    depth >= effective_min
+                    and depth <= atr * max_sweep_atr
+                    and reclaim >= reclaim_buffer
+                ),
+                "level": level,
+                "depth_points": max(0.0, depth),
+                "depth_atr": max(0.0, depth) / atr,
+                "reclaim_points": reclaim,
+                "reclaim_atr": reclaim / atr,
+                "too_shallow": bool(0 < depth < effective_min),
+                "too_deep": bool(depth > atr * max_sweep_atr),
+                "reclaim_failed": bool(
+                    depth > 0 and reclaim < reclaim_buffer
+                ),
+            }
+
+        self.last_sweep_diagnostics = {
+            "effective_min_sweep_points": effective_min,
+            "min_sweep_atr": min_sweep_atr,
+            "max_sweep_atr": max_sweep_atr,
+            "reclaim_buffer_atr": reclaim_buffer_atr,
+            "configured_sweep_distance_points": configured_cap,
+            "underlying_atr": atr,
+            "bullish": dict(bullish),
+            "bearish": dict(bearish),
+        }
+        return bullish, bearish
+
+    @staticmethod
+    def _side_from_symbol(symbol: str) -> str:
+        upper = str(symbol or "").strip().upper()
+        if upper.endswith("CE"):
+            return "CE"
+        if upper.endswith("PE"):
+            return "PE"
+        return ""
+
+    def _evaluate_signal(
+        self,
+        symbol: str,
+        indicators: dict[str, Any],
+        current_price: float,
+        position: Any | None = None,
+    ) -> EliteSignal | None:
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            high = float(indicators.get('high') or current_price)
-            low = float(indicators.get('low') or current_price)
-            close = float(indicators.get('close') or current_price)
-            open_price = float(indicators.get('open') or current_price)
-            atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
             direction = str(indicators.get("direction_bias") or "").upper()
-            stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
-            context_age_seconds = resolve_context_age_seconds(indicators)
-            underlying_direction = str(indicators.get("underlying_direction_bias") or "").upper()
+            underlying_direction = str(
+                indicators.get("underlying_direction_bias") or ""
+            ).upper()
             effective_direction = underlying_direction or direction
-            if str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper() == 'LIVE' and not effective_direction:
+            execution_mode = str(
+                os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
+            ).strip().upper()
+            is_live = execution_mode == "LIVE"
+
+            if is_live and not effective_direction:
                 self._no_vote("direction_context_not_ready")
                 log_throttled(
                     LOGGER,
@@ -71,554 +501,401 @@ class SMCStrategy(EliteStrategy):
                     symbol,
                     direction,
                     underlying_direction,
-                    interval_sec=float(os.getenv("SMC_DIRECTION_CONTEXT_NO_VOTE_LOG_THROTTLE_SECONDS", "45") or "45"),
-                    level=30,
-                    extra={"event": "STRATEGY_NO_VOTE", "strategy": "SMC", "symbol": symbol, "reason": "direction_context_not_ready"},
-                )
-                return None
-            min_bars_required = HistoryReadinessPolicy.from_env().smc_min_bars
-            execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
-            is_live = execution_mode == 'LIVE'
-            history_domain_used = str(indicators.get("history_domain_used") or "unknown").lower()
-            option_history_count = _safe_history_int(indicators.get("option_history_count"))
-            underlying_history_count = _safe_history_int(indicators.get("underlying_history_count"))
-            spot_history_count = _safe_history_int(indicators.get("spot_history_count"))
-            indicator_history_count = _safe_history_int(indicators.get("indicator_history_count"))
-            raw_history_count = _safe_history_int(indicators.get("history_count"))
-            resolved_count = _safe_history_int(indicators.get("history_resolved_count"))
-            if history_domain_used == "options":
-                resolved_history_count = _first_not_none(
-                    option_history_count,
-                    resolved_count,
-                    raw_history_count,
-                    indicator_history_count,
-                )
-            elif history_domain_used == "spot":
-                resolved_history_count = _first_not_none(
-                    spot_history_count,
-                    underlying_history_count,
-                    resolved_count,
-                    raw_history_count,
-                    indicator_history_count,
-                )
-            elif history_domain_used == "underlying":
-                resolved_history_count = _first_not_none(
-                    underlying_history_count,
-                    spot_history_count,
-                    resolved_count,
-                    raw_history_count,
-                    indicator_history_count,
-                )
-            else:
-                resolved_history_count = _first_not_none(
-                    resolved_count,
-                    raw_history_count,
-                    indicator_history_count,
-                    option_history_count,
-                    underlying_history_count,
-                    spot_history_count,
-                )
-            if is_live and resolved_history_count is None:
-                self._no_vote("smc_history_count_missing")
-                log_throttled(
-                    LOGGER,
-                    f"smc_history_no_vote:{symbol}:smc_history_count_missing:{history_domain_used}",
-                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_history_count_missing min_bars=%s history_domain_used=%s",
-                    symbol,
-                    min_bars_required,
-                    history_domain_used,
-                    interval_sec=float(os.getenv("SMC_HISTORY_NO_VOTE_LOG_THROTTLE_SECONDS", "60") or "60"),
-                    level=30,
+                    interval_sec=float(
+                        os.getenv(
+                            "SMC_DIRECTION_CONTEXT_NO_VOTE_LOG_THROTTLE_SECONDS",
+                            "45",
+                        )
+                        or "45"
+                    ),
+                    level=logging.WARNING,
                     extra={
                         "event": "STRATEGY_NO_VOTE",
                         "strategy": "SMC",
                         "symbol": symbol,
-                        "reason": "smc_history_count_missing",
-                        "min_bars_required": min_bars_required,
-                        "resolved_history_count": resolved_history_count,
-                        "history_domain_used": history_domain_used,
-                        "option_history_count": option_history_count,
-                        "underlying_history_count": underlying_history_count,
-                        "spot_history_count": spot_history_count,
-                        "indicator_history_count": indicator_history_count,
-                        "history_source": indicators.get("history_source"),
-                        "history_symbol_key": indicators.get("history_symbol_key"),
-                        "oldest_bar_ts": indicators.get("oldest_bar_ts"),
-                        "latest_bar_ts": indicators.get("latest_bar_ts"),
-                        "data_phase": indicators.get("data_phase"),
-                        "eval_id": indicators.get("eval_id"),
-                    },
-                )
-                return None
-            history_count = int(resolved_history_count or 0)
-            if is_live and history_count < min_bars_required:
-                self._no_vote("smc_insufficient_history")
-                log_throttled(
-                    LOGGER,
-                    f"smc_history_no_vote:{symbol}:smc_insufficient_history:{history_domain_used}",
-                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_insufficient_history history_count=%s min_bars=%s",
-                    symbol,
-                    history_count,
-                    min_bars_required,
-                    interval_sec=float(os.getenv("SMC_HISTORY_NO_VOTE_LOG_THROTTLE_SECONDS", "60") or "60"),
-                    level=30,
-                    extra={
-                        "event": "STRATEGY_NO_VOTE",
-                        "strategy": "SMC",
-                        "symbol": symbol,
-                        "reason": "smc_insufficient_history",
-                        "history_count": history_count,
-                        "min_bars_required": min_bars_required,
-                        "resolved_history_count": resolved_history_count,
-                        "history_domain_used": history_domain_used,
-                        "option_history_count": option_history_count,
-                        "underlying_history_count": underlying_history_count,
-                        "spot_history_count": spot_history_count,
-                        "indicator_history_count": indicator_history_count,
-                        "history_source": indicators.get("history_source"),
-                        "history_symbol_key": indicators.get("history_symbol_key"),
-                        "oldest_bar_ts": indicators.get("oldest_bar_ts"),
-                        "latest_bar_ts": indicators.get("latest_bar_ts"),
-                        "data_phase": indicators.get("data_phase"),
-                        "eval_id": indicators.get("eval_id"),
+                        "reason": "direction_context_not_ready",
                     },
                 )
                 return None
 
+            stale_data = bool(indicators.get("stale_data_used")) or float(
+                indicators.get("data_age_seconds") or 0.0
+            ) > 120.0
             if stale_data or current_price <= 0:
                 self._no_vote("stale_or_invalid_data")
-                LOGGER.debug(
-                    "STRATEGY_NO_VOTE strategy=SMC reason=stale_or_invalid_data symbol=%s",
-                    symbol,
-                    extra={
-                        "event": "STRATEGY_NO_VOTE",
-                        "strategy": "SMC",
-                        "symbol": symbol,
-                        "reason": "stale_or_invalid_data",
-                        "stale_data": stale_data,
-                        "current_price": current_price,
-                    },
+                return None
+
+            # Execution identity is owned by the evaluated candidate symbol.
+            # Underlying/futures context may describe structure, but it cannot
+            # turn a validated CE/PE candidate into a non-option instrument.
+            contract_side = self._side_from_symbol(symbol)
+            if contract_side not in {"CE", "PE"}:
+                self._no_vote("smc_executable_symbol_not_option")
+                return None
+
+            snapshot = self._underlying_snapshot(indicators)
+            if snapshot is None:
+                self._no_vote("underlying_context_not_ready")
+                return None
+
+            underlying_symbol = str(snapshot["symbol"])
+            current = snapshot["current"]
+            current_ts = snapshot["current_ts"]
+            event_key = (underlying_symbol, contract_side)
+            if self._last_emitted_bar.get(event_key) == current_ts:
+                self._no_vote("smc_duplicate_confirmation_bar")
+                return None
+
+            event = self._events.get(event_key)
+            if event is not None:
+                max_age_minutes = max(
+                    1.0,
+                    safe_float_env("SMC_CONFIRMATION_MAX_MINUTES", 5.0),
                 )
-                return None
-
-            body = abs(close - open_price)
-            displacement_score = body / atr
-            raw_swing_low = indicators.get("prior_swing_low")
-            if raw_swing_low is None:
-                raw_swing_low = indicators.get("swing_low")
-            raw_swing_high = indicators.get("prior_swing_high")
-            if raw_swing_high is None:
-                raw_swing_high = indicators.get("swing_high")
-
-            prior_swing_low = (
-                float(raw_swing_low) if raw_swing_low is not None else None
-            )
-            prior_swing_high = (
-                float(raw_swing_high) if raw_swing_high is not None else None
-            )
-            bullish_sweep = bool(
-                indicators.get("liquidity_sweep_confirmed")
-            ) or (
-                prior_swing_low is not None
-                and low < prior_swing_low
-                and close > prior_swing_low
-            )
-            bearish_sweep = bool(
-                indicators.get("liquidity_sweep_confirmed_bear")
-            ) or (
-                prior_swing_high is not None
-                and high > prior_swing_high
-                and close < prior_swing_high
-            )
-            if not bullish_sweep and not bearish_sweep:
-                self._no_vote('no_liquidity_sweep')
-                LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
-                return None
-
-            contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
-            if option_premium_domain and bearish_sweep:
-                self._no_vote("premium_not_reversing_up")
-                LOGGER.info(
-                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s "
-                    "reason=premium_not_reversing_up bearish_sweep=%s",
-                    symbol,
-                    bearish_sweep,
+                age_minutes = max(
+                    0.0,
+                    (current_ts - event["sweep_ts"]).total_seconds() / 60.0,
                 )
-                return None
-            required_features = ("premium_reclaim", "bullish_reversal", "choch_confirmed", "bos_confirmed", "retest_confirmed")
-            present_features = [name for name in required_features if indicators.get(name) is not None]
-            feature_completeness = float(len(present_features)) / float(len(required_features))
-            feature_threshold = safe_float_env("SMC_FEATURE_COMPLETENESS_THRESHOLD", 0.6)
-            missing_features = [name for name in required_features if name not in present_features]
-            history_count = indicators.get("history_count")
-            missing_feature_sources = {
-                "bos_confirmed": {"missing": indicators.get("bos_confirmed") is None, "source": "structure_detector", "required_inputs": ["swing_high", "swing_low", "close", "history_count"], "history_count": history_count, "swing_high": indicators.get("swing_high"), "swing_low": indicators.get("swing_low")},
-                "choch_confirmed": {"missing": indicators.get("choch_confirmed") is None, "source": "structure_detector", "required_inputs": ["swing_high", "swing_low", "close", "history_count"], "history_count": history_count, "swing_high": indicators.get("swing_high"), "swing_low": indicators.get("swing_low")},
-                "retest_confirmed": {"missing": indicators.get("retest_confirmed") is None and indicators.get("mitigation_confirmed") is None, "source": "retest_detector", "required_inputs": ["retest_confirmed|mitigation_confirmed", "history_count"], "history_count": history_count},
-                "premium_reclaim": {"missing": indicators.get("premium_reclaim") is None, "source": "premium_flow", "required_inputs": ["premium_current", "premium_vwap", "premium_prev_close"], "premium_current": indicators.get("premium_current"), "premium_vwap": indicators.get("premium_vwap"), "premium_prev_close": indicators.get("premium_prev_close")},
-                "bullish_reversal": {"missing": indicators.get("bullish_reversal") is None, "source": "reversal_detector", "required_inputs": ["open", "close", "high", "low", "atr"], "context_age_seconds": indicators.get("context_age_seconds")},
-            }
-            feature_ready = feature_completeness >= feature_threshold
-            log_throttled(
-                LOGGER,
-                f"smc_feature_readiness:{symbol}",
-                "SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s missing_feature_sources=%s live_enabled=%s vote_allowed=%s hard_veto=%s",
-                symbol, feature_completeness, ",".join(missing_features), missing_feature_sources, is_live, feature_ready, False,
-                interval_sec=60.0,
-                level=__import__("logging").DEBUG,
-                extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})
-            if option_premium_domain:
-                premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))
-                structure_flip = bool(indicators.get('choch_confirmed') or indicators.get('bos_confirmed'))
-                partial_features_used = False
-                if not feature_ready:
-                    fallback_enabled = str(os.getenv("SMC_ALLOW_DERIVED_FEATURE_FALLBACK_LIVE", "false")).lower() in {"1", "true", "yes", "on"}
-                    momentum_min = float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80")
-                    fallback_signal_present = bool(
-                        indicators.get("premium_reclaim")
-                        or indicators.get("bos_confirmed")
-                        or indicators.get("choch_confirmed")
-                        or indicators.get("retest_confirmed")
-                        or (bullish_sweep and displacement_score >= 0.9)
-                    )
-                    fallback_allowed = bool(
-                        is_live
-                        and fallback_enabled
-                        and effective_direction in {"CE", "PE"}
-                        and displacement_score >= momentum_min
-                        and fallback_signal_present
-                    )
-                    if fallback_allowed:
-                        partial_features_used = True
-                        LOGGER.info(
-                            "SMC_DERIVED_FEATURE_FALLBACK symbol=%s feature_completeness=%.3f displacement_score=%.3f effective_direction=%s",
-                            symbol,
-                            feature_completeness,
-                            displacement_score,
-                            effective_direction,
-                            extra={"event": "SMC_DERIVED_FEATURE_FALLBACK", "symbol": symbol, "feature_completeness": feature_completeness, "displacement_score": displacement_score, "effective_direction": effective_direction},
-                        )
-                    else:
-                        self._no_vote('strategy_feature_unavailable')
-                        LOGGER.info(
-                            "SMC_FEATURE_UNAVAILABLE symbol=%s missing_features=%s missing_feature_sources=%s",
-                            symbol,
-                            ",".join(missing_features),
-                            missing_feature_sources,
-                            extra={"event": "SMC_FEATURE_UNAVAILABLE", "symbol": symbol, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources},
-                        )
-                        return None
-                if not premium_reversal and not structure_flip:
-                    self._no_vote('premium_not_reversing_up')
-                    LOGGER.info(
-                        "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=premium_not_reversing_up "
-                        "bullish_sweep=%s bearish_sweep=%s premium_reclaim=%s bullish_reversal=%s "
-                        "choch_confirmed=%s bos_confirmed=%s direction=%s underlying_direction=%s "
-                        "context_age_seconds=%.2f",
-                        symbol,
-                        bullish_sweep,
-                        bearish_sweep,
-                        bool(indicators.get("premium_reclaim")),
-                        bool(indicators.get("bullish_reversal")),
-                        bool(indicators.get("choch_confirmed")),
-                        bool(indicators.get("bos_confirmed")),
-                        direction,
-                        underlying_direction,
-                        context_age_seconds,
-                        extra={
-                            "event": "STRATEGY_NO_VOTE",
-                            "strategy": "SMC",
-                            "symbol": symbol,
-                            "reason": "premium_not_reversing_up",
-                            "bullish_sweep": bullish_sweep,
-                            "bearish_sweep": bearish_sweep,
-                            "premium_reclaim": bool(indicators.get("premium_reclaim")),
-                            "bullish_reversal": bool(indicators.get("bullish_reversal")),
-                            "choch_confirmed": bool(indicators.get("choch_confirmed")),
-                            "bos_confirmed": bool(indicators.get("bos_confirmed")),
-                            "direction": direction,
-                            "underlying_direction": underlying_direction,
-                            "context_age_seconds": context_age_seconds,
-                        },
-                    )
+                if age_minutes > max_age_minutes:
+                    self._events.pop(event_key, None)
+                    self._no_vote("smc_sweep_expired")
                     return None
-                side = contract_side
-            else:
-                partial_features_used = False
-                side = 'CE' if bullish_sweep else 'PE'
-            sweep_level = low if bullish_sweep else high
-            choch_confirmed = bool(indicators.get('choch_confirmed'))
-            bos_confirmed = bool(indicators.get('bos_confirmed'))
-            premium_reclaim = bool(indicators.get('premium_reclaim'))
-            structure_confirmed = bool(bos_confirmed or choch_confirmed)
-            retest_confirmed = bool(indicators.get('retest_confirmed') or indicators.get('mitigation_confirmed'))
 
-            score = 2.0
-            reasons = ['liquidity_sweep']
-            if displacement_score >= 0.7:
-                score += 2.0
-                reasons.append('displacement')
-            if structure_confirmed:
-                score += 2.0
-                reasons.append('structure_confirmation')
-            elif displacement_score >= 0.6:
-                score += 1.0
-                reasons.append('displacement_only')
-            if retest_confirmed:
-                score += 1.0
-                reasons.append('retest_mitigation')
-            direction_aligned = effective_direction in {'CE', 'PE'} and effective_direction == side
-            if direction_aligned:
-                score += 2.0
-                reasons.append('direction_alignment')
-            elif premium_reclaim:
-                score += 1.0
-                reasons.append('premium_reclaim_support')
-            if displacement_score >= 0.9:
-                score += 1.0
-                reasons.append('clean_invalidation_rr')
+                side = str(event["side"])
+                if side == "CE" and float(current["close"]) <= float(
+                    event["sweep_extreme"]
+                ):
+                    self._events.pop(event_key, None)
+                    self._no_vote("smc_sweep_invalidated")
+                    return None
+                if side == "PE" and float(current["close"]) >= float(
+                    event["sweep_extreme"]
+                ):
+                    self._events.pop(event_key, None)
+                    self._no_vote("smc_sweep_invalidated")
+                    return None
 
-            strategy_score = max(0.0, min(10.0, score))
-            if partial_features_used:
-                strategy_score = max(0.0, strategy_score - 0.5)
-                reasons.append('derived_feature_fallback')
-            min_score = float(os.getenv('SMC_MIN_SCORE_LIVE', '6.5') if is_live else os.getenv('SMC_MIN_SCORE_SHADOW', '4.5'))
-            require_structure_live = str(os.getenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'true')).lower() in {'1', 'true', 'yes', 'on'}
-            allow_momentum_without_structure = str(os.getenv("SMC_ALLOW_MOMENTUM_WITHOUT_STRUCTURE_LIVE", "true")).lower() in {"1", "true", "yes", "on"}
-            momentum_confirmed = (
-                allow_momentum_without_structure
-                and displacement_score >= float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80")
-                and direction_aligned
-                and (premium_reclaim or retest_confirmed or str(os.getenv("SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST", "true")).lower() not in {"1", "true", "yes", "on"})
+                if current_ts <= event["sweep_ts"]:
+                    self._no_vote("smc_awaiting_confirmation")
+                    return None
+
+                atr = max(1.0, float(snapshot["atr"]))
+                body = abs(float(current["close"]) - float(current["open"]))
+                displacement_score = body / atr
+                displacement_min = max(
+                    0.05,
+                    safe_float_env(
+                        "SMC_CONFIRMATION_DISPLACEMENT_ATR", 0.25
+                    ),
+                )
+                if side == "CE":
+                    price_confirmation = float(current["close"]) > float(
+                        event["sweep_bar_high"]
+                    )
+                else:
+                    price_confirmation = float(current["close"]) < float(
+                        event["sweep_bar_low"]
+                    )
+                displacement_confirmed = bool(
+                    price_confirmation
+                    and displacement_score >= displacement_min
+                )
+                if not displacement_confirmed:
+                    self._no_vote("smc_awaiting_confirmation")
+                    return None
+
+                if (
+                    effective_direction in {"CE", "PE"}
+                    and effective_direction != contract_side
+                ):
+                    self._events.pop(event_key, None)
+                    self._no_vote("smc_direction_conflict")
+                    return None
+
+                bos_confirmed = bool(indicators.get("bos_confirmed"))
+                choch_confirmed = bool(indicators.get("choch_confirmed"))
+                structure_confirmed = bool(bos_confirmed or choch_confirmed)
+                retest_confirmed = bool(
+                    indicators.get("retest_confirmed")
+                    or indicators.get("mitigation_confirmed")
+                )
+                premium_reclaim = bool(indicators.get("premium_reclaim"))
+                direction_aligned = (
+                    effective_direction in {"CE", "PE"}
+                    and effective_direction == contract_side
+                )
+
+                score = 5.0
+                reasons = [
+                    "underlying_liquidity_sweep",
+                    "reclaim",
+                    "displacement_confirmation",
+                ]
+                if direction_aligned:
+                    score += 1.5
+                    reasons.append("direction_alignment")
+                if bool(event["volume_confirmation"]):
+                    score += 1.0
+                    reasons.append("volume_confirmation")
+                if structure_confirmed:
+                    score += 1.0
+                    reasons.append("structure_confirmation")
+                if retest_confirmed:
+                    score += 0.5
+                    reasons.append("retest_mitigation")
+                if premium_reclaim:
+                    score += 0.5
+                    reasons.append("premium_reclaim_support")
+                depth_atr = float(event["depth_atr"])
+                if 0.12 <= depth_atr <= 0.50:
+                    score += 0.5
+                    reasons.append("balanced_sweep_depth")
+
+                strategy_score = max(0.0, min(10.0, score))
+                min_score = float(
+                    os.getenv("SMC_MIN_SCORE_LIVE", "6.5")
+                    if is_live
+                    else os.getenv("SMC_MIN_SCORE_SHADOW", "4.5")
+                )
+                if strategy_score < min_score:
+                    self._no_vote("smc_low_score")
+                    return None
+
+                option_atr = max(
+                    float(indicators.get("atr") or 0.0),
+                    current_price * 0.01,
+                    1.0,
+                )
+                invalidation_buffer = atr * max(
+                    0.02,
+                    safe_float_env("SMC_INVALIDATION_BUFFER_ATR", 0.05),
+                )
+                if contract_side == "CE":
+                    underlying_invalidation = (
+                        float(event["sweep_extreme"])
+                        - invalidation_buffer
+                    )
+                else:
+                    underlying_invalidation = (
+                        float(event["sweep_extreme"])
+                        + invalidation_buffer
+                    )
+
+                feature_names = (
+                    "premium_reclaim",
+                    "bullish_reversal",
+                    "bearish_reversal",
+                    "choch_confirmed",
+                    "bos_confirmed",
+                    "retest_confirmed",
+                )
+                feature_completeness = sum(
+                    1
+                    for name in feature_names
+                    if indicators.get(name) is not None
+                ) / float(len(feature_names))
+                context_age_seconds = resolve_context_age_seconds(indicators)
+                metadata = {
+                    "strategy": "SMC",
+                    "strategy_name": "SMC",
+                    "role": "trigger",
+                    "signal_family": "directional_trigger",
+                    "trade_side": contract_side,
+                    "side": contract_side,
+                    "contract_side": contract_side,
+                    "direction_bias": contract_side,
+                    "underlying_direction_bias": (
+                        underlying_direction
+                        if underlying_direction in {"CE", "PE"}
+                        else None
+                    ),
+                    "context_age_seconds": context_age_seconds,
+                    "source_domain": "underlying_price",
+                    "structure_source": snapshot["source"],
+                    "structure_symbol": underlying_symbol,
+                    "preliminary_only": True,
+                    "requires_runner_final_score": True,
+                    "requires_orderflow_confirmation": True,
+                    "orderflow_confirmation_owner": "StrategyManager",
+                    "direction_score": strategy_score,
+                    "strategy_score": strategy_score,
+                    "data_score": 8.0,
+                    "score_reasons": reasons,
+                    "setup_quality": strategy_score,
+                    "setup_type": "liquidity_sweep_reclaim_confirmation",
+                    "required_data_present": True,
+                    "stale_data_used": stale_data,
+                    "candidate_symbol": symbol,
+                    "rejection_reasons": [],
+                    "sweep_level": float(event["sweep_level"]),
+                    "sweep_extreme": float(event["sweep_extreme"]),
+                    "sweep_depth_points": float(event["depth_points"]),
+                    "sweep_depth_atr": depth_atr,
+                    "reclaim_distance_points": float(
+                        event["reclaim_points"]
+                    ),
+                    "reclaim_distance_atr": float(event["reclaim_atr"]),
+                    "displacement_score": round(displacement_score, 3),
+                    "structure_confirmed": structure_confirmed,
+                    "momentum_confirmed": True,
+                    "structure_or_momentum_confirmed": True,
+                    "smc_sweep_type": (
+                        "bullish" if contract_side == "CE" else "bearish"
+                    ),
+                    "structure_confirmation_used": structure_confirmed,
+                    "premium_reclaim_used": premium_reclaim,
+                    "retest_confirmed": retest_confirmed,
+                    "volume_ratio": float(event["volume_ratio"]),
+                    "volume_confirmation": bool(
+                        event["volume_confirmation"]
+                    ),
+                    "volume_spike_threshold": float(
+                        self._cfg.volume_spike_mult
+                    ),
+                    "effective_min_sweep_points": float(
+                        event["effective_min_sweep_points"]
+                    ),
+                    "underlying_atr": atr,
+                    "underlying_invalidation_level": underlying_invalidation,
+                    "premium_stop_distance": max(
+                        option_atr,
+                        current_price * 0.02,
+                        1.0,
+                    ),
+                    "premium_target_rr": 2.0,
+                    "partial_features_used": False,
+                    "feature_completeness": feature_completeness,
+                    "smc_quality_score": strategy_score,
+                    "smc_block_reason": "",
+                    "latest_bar_ts": current_ts,
+                    "setup_candle_timestamp": current_ts,
+                    "sweep_timestamp": event["sweep_ts"],
+                }
+                self._events.pop(event_key, None)
+                self._last_emitted_bar[event_key] = current_ts
+                LOGGER.info(
+                    "STRATEGY_VOTE strategy=SMC side=%s score=%.2f source=%s "
+                    "sweep_depth_atr=%.3f displacement_atr=%.3f",
+                    contract_side,
+                    strategy_score,
+                    snapshot["source"],
+                    depth_atr,
+                    displacement_score,
+                )
+                return EliteSignal(
+                    symbol=symbol,
+                    signal="BUY",
+                    confidence=max(
+                        0.1, min(0.88, strategy_score / 10.0)
+                    ),
+                    entry_price=current_price,
+                    stop_loss=None,
+                    target=None,
+                    quantity=self._cfg.quantity or 1,
+                    strategy_name="SMC",
+                    metadata=metadata,
+                )
+
+            bullish, bearish = self._sweep_diagnostics(snapshot)
+            desired = bullish if contract_side == "CE" else bearish
+            opposite = bearish if contract_side == "CE" else bullish
+
+            if bool(desired.get("too_shallow")):
+                self._no_vote("smc_sweep_too_shallow")
+                return None
+            if bool(desired.get("too_deep")):
+                self._no_vote("smc_sweep_too_deep")
+                return None
+            if bool(desired.get("reclaim_failed")):
+                self._no_vote("smc_reclaim_failed")
+                return None
+            if not bool(desired.get("valid")):
+                if bool(opposite.get("valid")):
+                    self._no_vote("smc_underlying_side_mismatch")
+                else:
+                    self._no_vote("underlying_no_liquidity_sweep")
+                return None
+
+            side = contract_side
+            if (
+                effective_direction in {"CE", "PE"}
+                and effective_direction != side
+            ):
+                self._no_vote("smc_direction_conflict")
+                return None
+
+            volume_ratio = float(snapshot["volume_ratio"])
+            volume_threshold = max(
+                0.0, float(self._cfg.volume_spike_mult or 0.0)
             )
-            if is_live and require_structure_live and feature_ready and not (structure_confirmed or momentum_confirmed):
-                self._no_vote('smc_structure_required_live')
-                premium_reclaim_source = indicators.get("premium_reclaim_source")
-                premium_current = indicators.get("premium_current")
-                premium_prev_close = indicators.get("premium_prev_close")
-                premium_vwap = indicators.get("premium_vwap")
-                retest_reason = indicators.get("retest_reason")
-                LOGGER.info(
-                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_structure_required_live "
-                    "choch_confirmed=%s bos_confirmed=%s retest_confirmed=%s displacement_score=%.3f "
-                    "premium_reclaim=%s direction_aligned=%s direction=%s underlying_direction=%s "
-                    "context_age_seconds=%.2f",
-                    symbol,
-                    choch_confirmed,
-                    bos_confirmed,
-                    retest_confirmed,
-                    displacement_score,
-                    premium_reclaim,
-                    direction_aligned,
-                    direction,
-                    underlying_direction,
-                    context_age_seconds,
-                    extra={
-                        "event": "STRATEGY_NO_VOTE",
-                        "strategy": "SMC",
-                        "symbol": symbol,
-                        "reason": "smc_structure_required_live",
-                        "choch_confirmed": choch_confirmed,
-                        "bos_confirmed": bos_confirmed,
-                        "retest_confirmed": retest_confirmed,
-                        "displacement_score": displacement_score,
-                        "premium_reclaim": premium_reclaim,
-                        "direction_aligned": direction_aligned,
-                        "direction": direction,
-                        "underlying_direction": underlying_direction,
-                        "context_age_seconds": context_age_seconds,
-                        "momentum_confirmed": momentum_confirmed,
-                        "effective_direction": effective_direction,
-                        "min_score": min_score,
-                        "strategy_score": strategy_score,
-                        "SMC_MOMENTUM_DISPLACEMENT_MIN": float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80"),
-                        "SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST": str(os.getenv("SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST", "true")).lower() in {"1", "true", "yes", "on"},
-                    },
-                )
-                LOGGER.info(
-                    "SMC_RECLAIM_DIAGNOSTICS symbol=%s premium_reclaim=%s premium_reclaim_source=%s premium_current=%s premium_prev_close=%s premium_vwap=%s retest_confirmed=%s retest_reason=%s choch_confirmed=%s bos_confirmed=%s displacement_score=%.3f direction_aligned=%s direction=%s underlying_direction=%s reason=smc_structure_required_live",
-                    symbol,
-                    premium_reclaim,
-                    premium_reclaim_source if premium_reclaim_source is not None else "unavailable",
-                    premium_current if premium_current is not None else "unavailable",
-                    premium_prev_close if premium_prev_close is not None else "unavailable",
-                    premium_vwap if premium_vwap is not None else "unavailable",
-                    retest_confirmed,
-                    retest_reason if retest_reason is not None else "unavailable",
-                    choch_confirmed,
-                    bos_confirmed,
-                    displacement_score,
-                    direction_aligned,
-                    direction or "unavailable",
-                    underlying_direction or "unavailable",
-                    extra={
-                        "event": "SMC_RECLAIM_DIAGNOSTICS",
-                        "symbol": symbol,
-                        "premium_reclaim": premium_reclaim,
-                        "premium_reclaim_source": premium_reclaim_source,
-                        "premium_current": premium_current,
-                        "premium_prev_close": premium_prev_close,
-                        "premium_vwap": premium_vwap,
-                        "retest_confirmed": retest_confirmed,
-                        "retest_reason": retest_reason,
-                        "choch_confirmed": choch_confirmed,
-                        "bos_confirmed": bos_confirmed,
-                        "displacement_score": displacement_score,
-                        "direction_aligned": direction_aligned,
-                        "direction": direction,
-                        "underlying_direction": underlying_direction,
-                        "reason": "smc_structure_required_live",
-                        "effective_direction": effective_direction,
-                        "momentum_confirmed": momentum_confirmed,
-                        "min_score": min_score,
-                        "strategy_score": strategy_score,
-                        "SMC_MOMENTUM_DISPLACEMENT_MIN": float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80"),
-                        "SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST": str(os.getenv("SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST", "true")).lower() in {"1", "true", "yes", "on"},
-                    },
-                )
-                return None
-            if not (bullish_sweep or bearish_sweep or premium_reclaim) or not (displacement_score >= 0.6 or structure_confirmed) or not (direction_aligned or premium_reclaim):
-                self._no_vote('smc_quality_gate_failed')
-                LOGGER.info(
-                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_quality_gate_failed "
-                    "bullish_sweep=%s bearish_sweep=%s premium_reclaim=%s "
-                    "displacement_score=%.3f structure_confirmed=%s direction_aligned=%s",
-                    symbol,
-                    bullish_sweep,
-                    bearish_sweep,
-                    premium_reclaim,
-                    displacement_score,
-                    structure_confirmed,
-                    direction_aligned,
-                    extra={
-                        "event": "STRATEGY_NO_VOTE",
-                        "strategy": "SMC",
-                        "symbol": symbol,
-                        "reason": "smc_quality_gate_failed",
-                        "bullish_sweep": bullish_sweep,
-                        "bearish_sweep": bearish_sweep,
-                        "premium_reclaim": premium_reclaim,
-                        "displacement_score": displacement_score,
-                        "structure_confirmed": structure_confirmed,
-                        "direction_aligned": direction_aligned,
-                    },
-                )
-                return None
-            if strategy_score < min_score:
-                self._no_vote("smc_low_score")
-                LOGGER.info(
-                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_low_score "
-                    "score=%.2f min_score=%.2f reasons=%s direction=%s underlying_direction=%s",
-                    symbol,
-                    strategy_score,
-                    min_score,
-                    reasons,
-                    direction,
-                    underlying_direction,
-                    extra={
-                        "event": "STRATEGY_NO_VOTE",
-                        "strategy": "SMC",
-                        "symbol": symbol,
-                        "reason": "smc_low_score",
-                        "score": strategy_score,
-                        "min_score": min_score,
-                        "score_reasons": reasons,
-                        "direction": direction,
-                        "underlying_direction": underlying_direction,
-                        "context_age_seconds": context_age_seconds,
-                    },
-                )
-                LOGGER.info(
-                    "SMC_SCORE_BREAKDOWN symbol=%s raw_score=%.2f min_score=%.2f bos_confirmed=%s choch_confirmed=%s retest_confirmed=%s premium_reclaim=%s bullish_reversal=%s bearish_reversal=%s history_count=%s",
-                    symbol,
-                    strategy_score,
-                    min_score,
-                    bos_confirmed,
-                    choch_confirmed,
-                    retest_confirmed,
-                    premium_reclaim,
-                    bool(indicators.get("bullish_reversal")),
-                    bool(indicators.get("bearish_reversal")),
-                    indicators.get("history_count") or indicators.get("indicator_history_count"),
-                    extra={
-                        "event": "SMC_SCORE_BREAKDOWN",
-                        "symbol": symbol,
-                        "raw_score": strategy_score,
-                        "min_score": min_score,
-                        "bos_confirmed": bos_confirmed,
-                        "choch_confirmed": choch_confirmed,
-                        "retest_confirmed": retest_confirmed,
-                        "premium_reclaim": premium_reclaim,
-                        "bullish_reversal": bool(indicators.get("bullish_reversal")),
-                        "bearish_reversal": bool(indicators.get("bearish_reversal")),
-                        "history_count": indicators.get("history_count") or indicators.get("indicator_history_count"),
-                    },
-                )
-                return None
-
-            metadata = {
-                'strategy': 'SMC',
-                'strategy_name': 'SMC',
-                'role': 'trigger',
-                'signal_family': 'directional_trigger',
-                'trade_side': side,
-                'side': side,
-                'direction_bias': side,
-                "underlying_direction_bias": underlying_direction if underlying_direction in {"CE", "PE"} else None,
-                "context_age_seconds": context_age_seconds,
-                'source_domain': 'option_premium' if option_premium_domain else 'underlying_price',
-                'preliminary_only': True,
-                'requires_runner_final_score': True,
-                'direction_score': strategy_score,
-                'strategy_score': strategy_score,
-                'data_score': 8.0 if not stale_data else 3.0,
-                'score_reasons': reasons,
-                'setup_quality': strategy_score,
-                'setup_type': 'liquidity_sweep_retest',
-                'required_data_present': True,
-                'stale_data_used': stale_data,
-                'candidate_symbol': symbol,
-                'rejection_reasons': [],
-                'sweep_level': sweep_level,
-                'displacement_score': round(displacement_score, 3),
-                'structure_confirmed': structure_confirmed,
-                'momentum_confirmed': momentum_confirmed,
-                'structure_or_momentum_confirmed': bool(structure_confirmed or momentum_confirmed),
-                'smc_sweep_type': 'bullish' if bullish_sweep else 'bearish',
-                'structure_confirmation_used': structure_confirmed,
-                'premium_reclaim_used': premium_reclaim,
-                'smc_quality_score': strategy_score,
-                'smc_block_reason': '',
-                'retest_confirmed': retest_confirmed,
-                'underlying_invalidation_level': sweep_level,
-                'premium_stop_distance': max(atr * 1.2, current_price * 0.025, 1.0),
-                'premium_target_rr': 2.0,
-                'premium_reversal_gate_mode': 'hard' if option_premium_domain and not premium_reclaim and not structure_confirmed else 'soft',
-                'partial_features_used': partial_features_used,
-                'feature_completeness': feature_completeness,
-                'smc_fallback_reason': 'derived_feature_fallback' if partial_features_used else '',
+            volume_confirmation = bool(
+                volume_threshold > 0 and volume_ratio >= volume_threshold
+            )
+            sweep_extreme = (
+                float(current["low"])
+                if side == "CE"
+                else float(current["high"])
+            )
+            self._events[event_key] = {
+                "side": side,
+                "sweep_ts": current_ts,
+                "sweep_level": float(desired["level"]),
+                "sweep_extreme": sweep_extreme,
+                "sweep_bar_high": float(current["high"]),
+                "sweep_bar_low": float(current["low"]),
+                "depth_points": float(desired["depth_points"]),
+                "depth_atr": float(desired["depth_atr"]),
+                "reclaim_points": float(desired["reclaim_points"]),
+                "reclaim_atr": float(desired["reclaim_atr"]),
+                "volume_ratio": volume_ratio,
+                "volume_confirmation": volume_confirmation,
+                "effective_min_sweep_points": float(
+                    self.last_sweep_diagnostics[
+                        "effective_min_sweep_points"
+                    ]
+                ),
             }
-            LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', side, strategy_score)
-            return EliteSignal(
-                symbol=symbol,
-                signal='BUY',
-                confidence=max(0.1, min(0.88, strategy_score / 10.0)),
-                entry_price=current_price,
-                stop_loss=None,
-                target=None,
-                quantity=self._cfg.quantity or 1,
-                strategy_name='SMC',
-                metadata=metadata,
+            self._no_vote("smc_awaiting_confirmation")
+            LOGGER.info(
+                "SMC_SWEEP_ARMED symbol=%s option_side=%s "
+                "structure_symbol=%s source=%s sweep_level=%.2f "
+                "depth_points=%.2f depth_atr=%.3f reclaim_points=%.2f "
+                "volume_ratio=%.2f",
+                symbol,
+                side,
+                underlying_symbol,
+                snapshot["source"],
+                float(desired["level"]),
+                float(desired["depth_points"]),
+                float(desired["depth_atr"]),
+                float(desired["reclaim_points"]),
+                volume_ratio,
+                extra={
+                    "event": "SMC_SWEEP_ARMED",
+                    "symbol": symbol,
+                    "side": side,
+                    "structure_symbol": underlying_symbol,
+                    "structure_source": snapshot["source"],
+                    "sweep_level": float(desired["level"]),
+                    "sweep_depth_points": float(desired["depth_points"]),
+                    "sweep_depth_atr": float(desired["depth_atr"]),
+                    "reclaim_points": float(desired["reclaim_points"]),
+                    "volume_ratio": volume_ratio,
+                    "volume_confirmation": volume_confirmation,
+                },
             )
-        except Exception as e:
+            return None
+        except Exception as exc:
             LOGGER.error(
-                "Failure in SMCStrategy._evaluate_signal symbol=%s last_no_vote_reason=%s error=%s",
+                "Failure in SMCStrategy._evaluate_signal symbol=%s "
+                "last_no_vote_reason=%s error=%s",
                 symbol,
                 getattr(self, "last_no_vote_reason", None),
-                e,
-                exc_info=e,
+                exc,
+                exc_info=exc,
             )
+            self._no_vote("evaluation_failed")
             return None
 
 
-__all__ = ['SMCStrategy']
+__all__ = ["SMCStrategy"]
