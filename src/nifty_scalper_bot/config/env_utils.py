@@ -96,11 +96,28 @@ def setdefault_env(key: str, value: str) -> None:
         os.environ[key] = value
 
 
+def _production_live_default_enabled() -> bool:
+    """Return whether AWS Lightsail should boot in LIVE mode by default.
+
+    Production defaults to LIVE when no explicit operator preference exists.
+    Setting ``PRODUCTION_DEFAULT_LIVE=false`` is the durable opt-out used by the
+    admin SHADOW control; explicit live flags still remain authoritative.
+    """
+    platform = (os.getenv('DEPLOYMENT_PLATFORM') or '').strip().lower()
+    if platform != 'aws_lightsail':
+        return False
+    preference = os.getenv('PRODUCTION_DEFAULT_LIVE')
+    if preference is None or not preference.strip():
+        return True
+    return truthy(preference)
+
+
 def normalise_live_env_defaults() -> None:
     """Derive live/paper env defaults. Args: none. Returns: None. Raises: none."""
     enable_live = truthy(os.getenv('ENABLE_LIVE'))
     execution_mode = (os.getenv('EXECUTION_MODE') or '').strip().upper()
-    live_requested = enable_live or execution_mode == 'LIVE'
+    production_default_live = _production_live_default_enabled()
+    live_requested = production_default_live or enable_live or execution_mode == 'LIVE'
 
     if live_requested:
         defaults = {
@@ -124,7 +141,14 @@ def normalise_live_env_defaults() -> None:
         }
 
     for key, value in defaults.items():
-        setdefault_env(key, value)
+        if production_default_live:
+            # Existing Lightsail installs preserve an external env file that may
+            # still contain the historical SHADOW defaults. Production policy is
+            # LIVE-by-default, so normalize those stale values in-process. All
+            # broker, reconciliation, market-data and risk gates remain intact.
+            os.environ[key] = value
+        else:
+            setdefault_env(key, value)
 
     if live_requested:
         # One canonical live risk value. Keep both accepted aliases aligned so
