@@ -176,10 +176,11 @@ def normalise_live_env_defaults() -> None:
             'SHADOW_MODE': 'false',
         }
     else:
+        non_live_mode = execution_mode if execution_mode in {'SHADOW', 'PAPER'} else 'PAPER'
         defaults = {
             'ENABLE_LIVE': 'false',
             'ENABLE_LIVE_TRADING': 'false',
-            'EXECUTION_MODE': 'PAPER',
+            'EXECUTION_MODE': non_live_mode,
             'ORDERS__ENABLE_LIVE': 'false',
             'PAPER__ENABLED': 'true',
             'PAPER_MODE': 'true',
