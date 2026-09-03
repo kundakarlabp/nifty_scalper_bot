@@ -157,6 +157,7 @@ def _context_sync_runner(
     runner._spot_symbol = SPOT
     runner._active_symbols = {FUTURE}
     runner._context_required_bars = 20
+    runner._symbol_history = {FUTURE: list(indicator_rows)}
     runner._indicator_engine = _Indicator({FUTURE: indicator_rows})
     runner._active_context_symbols_for_history = lambda: [FUTURE]
     runner._history_count_for_symbol = lambda symbol: len(
@@ -193,7 +194,7 @@ async def test_context_history_syncs_when_mdm_completed_bar_advances(monkeypatch
 
 
 async def test_context_history_does_not_reseed_when_already_aligned(monkeypatch) -> None:
-    """No-op when MDM and IndicatorEngine already expose the same completed bar."""
+    """No-op when MDM, Runner and IndicatorEngine expose the same completed state."""
     monkeypatch.setenv("ORB_ENABLED", "false")
     monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
     apply_patches()
