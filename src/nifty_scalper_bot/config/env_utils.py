@@ -8,11 +8,9 @@ from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 LIVE_PER_TRADE_RISK_PCT = "7.0"
-# The live order path caps each entry to the remaining daily-loss budget before
-# broker submission. A daily ceiling below the canonical per-trade envelope
-# therefore makes that per-trade setting unattainable for an indivisible NIFTY
-# lot. Keep the two LIVE envelopes coherent; all existing daily-loss and
-# RiskManager breakers remain in force.
+# Each live entry is capped to the remaining daily-loss budget before broker
+# submission. Keep that budget coherent with the canonical LIVE per-trade risk
+# so an indivisible NIFTY lot is not constrained by contradictory percentages.
 LIVE_DAILY_LOSS_PCT = LIVE_PER_TRADE_RISK_PCT
 PRODUCTION_LIVE_DEFAULT_INITIALIZED = "PRODUCTION_LIVE_DEFAULT_INITIALIZED"
 
@@ -23,16 +21,24 @@ def _strip_inline_comment(text: str) -> str:
     Env files sometimes contain ``KEY=30.0   # note`` and the value read back
     includes the comment, which breaks ``float()``/``int()``.
     """
+    # Only treat ``#`` as a comment when it is clearly trailing (preceded by a
+    # space) or starts the value; this avoids mangling values that legitimately
+    # contain ``#``. For numeric config this is safe.
     if "#" in text:
         text = text.split("#", 1)[0]
     return text.strip().strip('"').strip("'").strip()
 
 
 def parse_float_env(value: object, default: float) -> float:
-    """Safely parse a float from a config/env value."""
+    """Safely parse a float from a config/env value.
+
+    Accepts an int/float directly, or a string that may contain surrounding
+    whitespace, quotes, or an inline ``# comment``. Returns *default* for
+    None/blank/invalid input (logging a warning on invalid), never raising.
+    """
     if value is None:
         return default
-    if isinstance(value, bool):
+    if isinstance(value, bool):  # guard: bool is a subclass of int
         return float(value)
     if isinstance(value, (int, float)):
         return float(value)
@@ -190,6 +196,10 @@ def normalise_live_env_defaults() -> None:
     )
     for key, value in defaults.items():
         if production_default_live or production_initialized:
+            # On the first upgraded boot, migrate the legacy SHADOW env to LIVE.
+            # Thereafter ENABLE_LIVE + EXECUTION_MODE are canonical and the
+            # derived aliases are synchronized in-process, so an explicit admin
+            # switch back to SHADOW remains authoritative across restarts.
             os.environ[key] = value
         else:
             setdefault_env(key, value)
@@ -198,22 +208,25 @@ def normalise_live_env_defaults() -> None:
         _persist_production_live_defaults(defaults)
 
     if live_requested:
-        # Canonical LIVE risk envelope. The execution layer already clamps each
-        # entry to the *remaining* daily budget and RiskManager re-checks it, so
-        # aligning these percentages removes the contradictory 7%-vs-2% config
-        # without bypassing any safety gate.
+        # One canonical live risk envelope. Keep accepted aliases aligned so
+        # legacy deployment values cannot silently make the 7% per-trade policy
+        # unattainable behind a lower daily-loss ceiling. Existing remaining-day
+        # sizing clamps and final RiskManager breakers remain unchanged.
         os.environ['RISK__PER_TRADE_RISK_PCT'] = LIVE_PER_TRADE_RISK_PCT
         os.environ['RISK_PER_TRADE_PCT'] = LIVE_PER_TRADE_RISK_PCT
         os.environ['RISK_DAILY_LOSS_PCT'] = LIVE_DAILY_LOSS_PCT
         os.environ['RISK_DAILY_PNL_CAP_PCT'] = LIVE_DAILY_LOSS_PCT
-        # Legacy/base-config aliases are kept synchronized for diagnostics and
-        # any older path that still reads the AppConfig risk model.
         os.environ['RISK_MAX_DAILY_LOSS_PCT'] = LIVE_DAILY_LOSS_PCT
         os.environ['DAILY_PNL_CAP_PCT'] = LIVE_DAILY_LOSS_PCT
 
 
 def resolve_build_sha() -> str:
-    """Canonical build/commit SHA for the running deployment."""
+    """Canonical build/commit SHA for the running deployment.
+
+    Single source of truth for main.py startup banner, runner status blocks
+    and the Telegram /status command — previously three divergent env
+    fallback chains. Railway sets RAILWAY_GIT_COMMIT_SHA.
+    """
     import os
 
     return (
