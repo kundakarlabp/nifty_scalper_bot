@@ -1,0 +1,71 @@
+name: Fix PR1187 consolidation regressions
+
+on:
+  push:
+    branches:
+      - fix/candle-engine-ssot-consolidation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply depth and policy corrections
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_one(path: str, old: str, new: str, label: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 target, got {count}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          replace_one(
+              'src/nifty_scalper_bot/strategies/runner.py',
+              '''        needs_seed = bool(\n            rows\n            and (not indicator_current or not runner_current)\n            and (source_count > min(indicator_count, runner_before) or source_ready)\n        )''',
+              '''        needs_seed = bool(\n            rows\n            and (\n                source_count > runner_before\n                or source_count > indicator_count\n                or not indicator_current\n                or not runner_current\n            )\n        )''',
+              'canonical sync depth expansion',
+          )
+          replace_one(
+              'src/nifty_scalper_bot/strategies/runner.py',
+              '''                needs_sync = bool(\n                    indicator_count < minimum\n                    or runner_count < minimum\n                    or stale_projection\n                )''',
+              '''                needs_sync = bool(\n                    indicator_count < minimum\n                    or runner_count < minimum\n                    or source_count > indicator_count\n                    or source_count > runner_count\n                    or stale_projection\n                )''',
+              'context depth divergence',
+          )
+          replace_one(
+              'src/nifty_scalper_bot/core/history_readiness.py',
+              '''    deep_cap = max(role_cap, deep_caps.get(role, role_cap))\n\n    orb_enabled = str(os.getenv("ORB_ENABLED", "true") or "true").strip().lower() in {''',
+              '''    deep_cap = max(role_cap, deep_caps.get(role, role_cap))\n    # Ordinary context hydration remains bounded by its normal role cap.\n    # ORB's full-session window is a structural target, not a new generic\n    # hydration target or execution-readiness minimum.\n    target = max(required, min(target, role_cap))\n\n    orb_enabled = str(os.getenv("ORB_ENABLED", "true") or "true").strip().lower() in {''',
+              'normal role target clamp',
+          )
+          replace_one(
+              'tests/e2e/live_sim/test_post885_live_safety_architecture.py',
+              '''def test_mdm_history_is_authoritative_over_indicator_diagnostics(live_sim_system):\n    system = live_sim_system\n    _bootstrap(system)\n    symbol = system.scenario.ce_symbol\n    assert system.market_data.get_latest_closed_bar(symbol) is not None\n    # Diagnostic divergence: indicator history can be present while\n    # canonical MDM is intentionally removed.\n    indicator_count = system.indicator_engine.history_count(symbol)\n    with system.market_data._lock:  # noqa: SLF001\n        system.market_data._ohlc.pop(symbol, None)  # noqa: SLF001\n    assert indicator_count > 0\n    assert system.market_data.get_latest_closed_bar(symbol) is None''',
+              '''def test_candle_engine_history_survives_projection_removal(live_sim_system):\n    system = live_sim_system\n    _bootstrap(system)\n    symbol = system.scenario.ce_symbol\n    before = system.market_data.get_latest_closed_bar(symbol)\n    assert before is not None\n    indicator_count = system.indicator_engine.history_count(symbol)\n    # `_ohlc` is derived compatibility/diagnostic projection state only.\n    # Removing it must not remove the authoritative CandleEngine history.\n    with system.market_data._lock:  # noqa: SLF001\n        system.market_data._ohlc.pop(symbol, None)  # noqa: SLF001\n    after = system.market_data.get_latest_closed_bar(symbol)\n    assert indicator_count > 0\n    assert after is not None\n    assert after["timestamp"] == before["timestamp"]''',
+              'obsolete projection authority test',
+          )
+          PY
+      - name: Syntax check
+        run: python -m compileall -q src/nifty_scalper_bot
+      - name: Remove one-shot workflow
+        run: rm .github/workflows/fix-pr1187-regressions.yml
+      - name: Commit fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: preserve canonical history depth and structural targets"
+          git push origin HEAD:fix/candle-engine-ssot-consolidation
