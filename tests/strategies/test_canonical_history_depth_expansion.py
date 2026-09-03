@@ -32,6 +32,8 @@ def _seed_indicator(engine: IndicatorEngine, rows: list[dict[str, object]]) -> N
 async def test_sync_reseeds_when_canonical_depth_expands_with_same_latest_timestamp() -> None:
     canonical = _bars(80)
     shallow = canonical[-50:]
+    assert shallow[-1]["timestamp"] == canonical[-1]["timestamp"]
+
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
     runner._normalize_symbol = lambda value: str(value)
