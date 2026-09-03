@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+import threading
 
 import pandas as pd
 
@@ -119,6 +122,29 @@ def test_explicit_constructor_cache_len_keeps_legacy_combined_semantics(
 
     assert len(mdm.get_ohlc_bars(SYMBOL)) == 2
     assert mdm._ohlc[SYMBOL].maxlen == 2
+
+
+def test_manual_partial_mdm_uses_legacy_combined_cache_limit(monkeypatch) -> None:
+    monkeypatch.setenv("MDM_OHLC_CACHE_LEN", "500")
+    install_mdm_ohlc_capacity_contract()
+    mdm = MarketDataManager.__new__(MarketDataManager)
+    mdm._logger = SimpleNamespace(warning=lambda *a, **k: None)
+    mdm._cache_len = 1
+    mdm._lock = threading.RLock()
+    mdm._ohlc = defaultdict(lambda: deque(maxlen=1))
+    mdm._engines = {}
+    mdm._candle_metrics = defaultdict(float)
+    mdm._candle_projection_diagnostics = {}
+    mdm._bar_symbol_key = lambda value: str(value)
+    mdm._canonical_symbol = lambda value: str(value)
+    rows = _bars(2)
+    engine = mdm.get_candle_engine(SYMBOL)
+    engine.import_history(pd.DataFrame(rows), mode="bootstrap", source="historical")
+
+    refreshed = mdm._refresh_candle_projection(SYMBOL)
+
+    assert len(refreshed) == 1
+    assert mdm._ohlc[SYMBOL].maxlen == 1
 
 
 def test_small_history_requests_remain_bounded(monkeypatch) -> None:
