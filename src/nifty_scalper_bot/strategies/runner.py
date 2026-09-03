@@ -2342,8 +2342,30 @@ class StrategyRunner:
         except (AttributeError, TypeError, ValueError) as exc:
             indicator_before = 0
             failure_reason = f"indicator_count_failed:{type(exc).__name__}"
+        # Runner/Indicator are derived projections of CandleEngine-owned MDM history.
+        # Do not truncate a warm canonical cache to the execution-readiness minimum:
+        # deeper cached bars are required by derived indicators such as ADX (28 bars)
+        # even when the selected-option readiness minimum is lower.  This is a
+        # cache-only read; it never triggers broker history from the tick path.
+        read_limit = max(target, indicator_before)
+        for provider in (
+            getattr(self, "_market_data", None),
+            getattr(self, "_data_hub", None),
+        ):
+            capacity_for = getattr(provider, "history_capacity_for", None)
+            if not callable(capacity_for):
+                continue
+            try:
+                canonical_capacity = int(capacity_for(normalized))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            except Exception:
+                continue
+            if canonical_capacity > 0:
+                read_limit = max(read_limit, canonical_capacity)
+                break
         try:
-            rows = self._get_mdm_bars(normalized, max(target, indicator_before))
+            rows = self._get_mdm_bars(normalized, read_limit)
         except (AttributeError, TypeError, ValueError) as exc:
             rows = []
             failure_reason = f"mdm_history_read_failed:{type(exc).__name__}"
