@@ -104,6 +104,7 @@ async def test_selected_option_sync_mirrors_canonical_depth_beyond_readiness_min
     )
 
     assert result.success is True
+    assert result.required_bars == 20
     assert result.mdm_bars == 50
     assert result.runner_bars == 50
     assert result.indicator_bars == 50
