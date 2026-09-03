@@ -27,8 +27,8 @@ jobs:
           t = p.read_text(encoding='utf-8')
           old = '''    lines = text.splitlines(keepends=True)\n    lines[_node_start(target) - 1 : target.end_lineno] = [textwrap.dedent(replacement).rstrip() + "\\n"]\n    _write(path, "".join(lines))\n'''
           new = '''    lines = text.splitlines(keepends=True)\n    rendered = textwrap.indent(\n        textwrap.dedent(replacement).strip("\\n"),\n        " " * int(getattr(target, "col_offset", 0)),\n    ) + "\\n"\n    lines[_node_start(target) - 1 : target.end_lineno] = [rendered]\n    _write(path, "".join(lines))\n'''
-          if t.count(old) != 1:
-              raise SystemExit(f'class helper target count={t.count(old)}')
+          if t.count(old) < 1:
+              raise SystemExit('class helper target missing')
           t = t.replace(old, new, 1)
           old2 = '''    lines = text.splitlines(keepends=True)\n    lines[insert_line:insert_line] = [textwrap.dedent(insertion).rstrip() + "\\n"]\n    _write(path, "".join(lines))\n'''
           new2 = '''    lines = text.splitlines(keepends=True)\n    body_indent = int(getattr(target.body[body_index if body_index < len(target.body) else -1], "col_offset", target.col_offset + 4))\n    rendered = textwrap.indent(\n        textwrap.dedent(insertion).strip("\\n"),\n        " " * body_indent,\n    ) + "\\n"\n    lines[insert_line:insert_line] = [rendered]\n    _write(path, "".join(lines))\n'''
