@@ -7,7 +7,9 @@ ORB therefore lost the 09:15 opening range late in the session.
 
 This adapter changes only the normal MDM projection refresh path. CandleEngine
 remains the sole owner of finalized history and MDM reads never regenerate a
-projection that has been deliberately removed for diagnostics/tests.
+projection that has been deliberately removed for diagnostics/tests. Explicit
+legacy ``cache_len`` overrides remain authoritative for callers that deliberately
+use the historical combined tick/OHLC capacity contract.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from typing import Any, Mapping
 _DEFAULT_OHLC_CAPACITY = 500
 _MIN_SESSION_CAPACITY = 400
 _MAX_NATIVE_CAPACITY = 500
+_LEGACY_DEFAULT_CACHE_LEN = 1000
 
 
 def configured_ohlc_capacity() -> int:
@@ -33,6 +36,34 @@ def configured_ohlc_capacity() -> int:
     return min(max(_MIN_SESSION_CAPACITY, configured), _MAX_NATIVE_CAPACITY)
 
 
+def _projection_capacity(manager: Any) -> int:
+    """Resolve decoupled capacity while preserving explicit legacy overrides."""
+    configured = configured_ohlc_capacity()
+    try:
+        current_raw = max(1, int(getattr(manager, "_cache_len", configured) or configured))
+    except (TypeError, ValueError):
+        current_raw = configured
+
+    baseline = getattr(manager, "_ohlc_raw_cache_baseline", None)
+    legacy_explicit = bool(
+        getattr(manager, "_ohlc_legacy_explicit_cache_len", False)
+    )
+    try:
+        baseline_value = int(baseline) if baseline is not None else None
+    except (TypeError, ValueError):
+        baseline_value = None
+
+    # ``MDM_TICK_CACHE_LEN`` is intentionally decoupled from completed OHLC.
+    # An explicit constructor ``cache_len=...`` or a later direct runtime
+    # override retains the historical combined-capacity semantics used by
+    # diagnostics/tests and specialised callers.
+    if legacy_explicit or (
+        baseline_value is not None and current_raw != baseline_value
+    ):
+        return min(configured, current_raw)
+    return configured
+
+
 def _expanded_projection(
     manager: Any,
     symbol: str,
@@ -41,15 +72,18 @@ def _expanded_projection(
     native_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Project deeper canonical history after the native refresh write path."""
-    capacity = configured_ohlc_capacity()
+    capacity = _projection_capacity(manager)
     try:
         engine = manager.get_candle_engine(symbol)
         completed = list(engine.get_completed_bars() or [])
     except Exception:
         return native_rows
 
-    if len(completed) <= len(native_rows):
-        return native_rows
+    # Never widen an explicit legacy projection cap. The native refresh may
+    # already satisfy it; otherwise project the same canonical suffix at the
+    # resolved capacity.
+    if len(native_rows) >= min(len(completed), capacity):
+        return native_rows[-capacity:]
 
     normalized = (
         manager._canonical_symbol(symbol)
@@ -93,7 +127,25 @@ def install_mdm_ohlc_capacity_contract() -> bool:
     if bool(getattr(MarketDataManager, marker, False)):
         return True
 
+    original_init = MarketDataManager.__init__
     original_refresh = MarketDataManager._refresh_candle_projection
+
+    @wraps(original_init)
+    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+        requested_cache_len = kwargs.get("cache_len", _LEGACY_DEFAULT_CACHE_LEN)
+        original_init(self, *args, **kwargs)
+        try:
+            baseline = max(1, int(getattr(self, "_cache_len", 1) or 1))
+        except (TypeError, ValueError):
+            baseline = 1
+        self._ohlc_raw_cache_baseline = baseline
+        try:
+            explicit_value = int(requested_cache_len)
+        except (TypeError, ValueError):
+            explicit_value = _LEGACY_DEFAULT_CACHE_LEN
+        self._ohlc_legacy_explicit_cache_len = (
+            explicit_value != _LEGACY_DEFAULT_CACHE_LEN
+        )
 
     @wraps(original_refresh)
     def _refresh_candle_projection(
@@ -107,6 +159,7 @@ def install_mdm_ohlc_capacity_contract() -> bool:
             native_rows=native_rows,
         )
 
+    MarketDataManager.__init__ = __init__  # type: ignore[method-assign]
     MarketDataManager._refresh_candle_projection = _refresh_candle_projection  # type: ignore[method-assign]
     setattr(MarketDataManager, marker, True)
     return True
