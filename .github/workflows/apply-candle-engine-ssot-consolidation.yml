@@ -1,0 +1,37 @@
+name: Apply CandleEngine SSOT consolidation
+
+on:
+  push:
+    branches:
+      - fix/candle-engine-ssot-consolidation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply deterministic source transformation
+        run: python tools/apply_candle_engine_ssot_consolidation.py
+      - name: Syntax check transformed production source
+        run: python -m compileall -q src/nifty_scalper_bot
+      - name: Remove one-shot transformation machinery
+        run: |
+          rm tools/apply_candle_engine_ssot_consolidation.py
+          rm .github/workflows/apply-candle-engine-ssot-consolidation.yml
+      - name: Commit transformed source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "refactor: make CandleEngine the authoritative OHLC SSOT"
+          git push origin HEAD:fix/candle-engine-ssot-consolidation
