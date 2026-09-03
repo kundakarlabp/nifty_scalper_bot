@@ -39,6 +39,101 @@ def _record_selected_pair_transition(
     return True
 
 
+def _selected_pair_eval_stall_seconds(runner: Any) -> float:
+    """Return the short fail-closed window for a newly rotated selected pair."""
+    dispatch_limit = float(
+        getattr(runner, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
+    )
+    raw = os.getenv("SELECTED_PAIR_EVAL_STALL_SECONDS", "15")
+    try:
+        configured = float(raw or 15.0)
+    except (TypeError, ValueError):
+        configured = 15.0
+    return min(dispatch_limit, max(5.0, configured))
+
+
+def _schedule_selected_pair_evaluation(
+    runner: Any,
+    pair: tuple[str | None, str | None],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Force the newly selected CE/PE pair onto the entry-eval worker.
+
+    A real ATM rotation must not inherit a stale ``drain_scheduled`` latch from
+    the previous pair. Production showed the exact stranded state
+    ``pending + drain_scheduled + not drain_active`` for several minutes. On a
+    pair transition we therefore coalesce both selected symbols, reset the
+    scheduler latch when no drain is active, and explicitly schedule one drain.
+    The normal single-worker generation contract still owns evaluation and
+    prevents duplicate order paths.
+    """
+    if not all(pair):
+        return False
+    lock = getattr(runner, "_eval_gate_lock", None)
+    scheduler = getattr(runner, "_schedule_entry_eval_drain", None)
+    pending = getattr(runner, "_pending_entry_eval_symbols", None)
+    generations = getattr(runner, "_entry_eval_generation_by_symbol", None)
+    if lock is None or not callable(scheduler) or not isinstance(pending, set):
+        return False
+    if generations is None or not hasattr(generations, "get"):
+        return False
+
+    resolved_now = time.monotonic() if now is None else float(now)
+    should_schedule = False
+    with lock:
+        if bool(getattr(runner, "_entry_eval_shutdown", False)):
+            return False
+        for symbol in pair:
+            assert symbol is not None
+            generations[symbol] = int(generations.get(symbol, 0) or 0) + 1
+            pending.add(symbol)
+        setattr(runner, "_entry_eval_last_progress_ts", resolved_now)
+        setattr(runner, "_last_entry_eval_enqueued_at", resolved_now)
+        if not bool(getattr(runner, "_entry_eval_active", False)):
+            # A stale True latch with no active drain was the production stall.
+            setattr(runner, "_entry_eval_drain_scheduled", True)
+            should_schedule = True
+
+    if not should_schedule:
+        return True
+    if bool(scheduler()):
+        logger = getattr(runner, "_logger", None)
+        if logger is not None:
+            logger.info(
+                "SELECTED_PAIR_ENTRY_EVAL_RESCHEDULED selected_ce=%s selected_pe=%s",
+                pair[0],
+                pair[1],
+                extra={
+                    "event": "SELECTED_PAIR_ENTRY_EVAL_RESCHEDULED",
+                    "selected_ce": pair[0],
+                    "selected_pe": pair[1],
+                },
+            )
+        return True
+
+    # If a real runtime pair cannot schedule its sole evaluator, fail closed
+    # immediately instead of advertising LIVE/armed until the watchdog timeout.
+    with lock:
+        setattr(runner, "_entry_eval_drain_scheduled", False)
+    setattr(runner, "_entry_eval_stall_disarmed", True)
+    setattr(runner, "_runtime_live_orders_armed", False)
+    setattr(runner, "_runtime_readiness_reason", "strategy_evaluation_stalled")
+    logger = getattr(runner, "_logger", None)
+    if logger is not None:
+        logger.warning(
+            "SELECTED_PAIR_ENTRY_EVAL_SCHEDULE_FAILED selected_ce=%s selected_pe=%s",
+            pair[0],
+            pair[1],
+            extra={
+                "event": "SELECTED_PAIR_ENTRY_EVAL_SCHEDULE_FAILED",
+                "selected_ce": pair[0],
+                "selected_pe": pair[1],
+            },
+        )
+    return False
+
+
 def _apply_selected_pair_transition_liveness(
     runner: Any,
     state: Mapping[str, Any],
@@ -82,20 +177,23 @@ def _apply_selected_pair_transition_liveness(
     dispatch_stall_s = float(
         getattr(runner, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
     )
+    selected_pair_stall_s = _selected_pair_eval_stall_seconds(runner)
     work_outstanding = bool(adjusted.get("work_outstanding"))
     drain_active = bool(adjusted.get("drain_active"))
     drain_active_age = float(adjusted.get("drain_active_age_s") or 0.0)
-
-    dispatch_stalled = bool(
-        not work_outstanding
-        and tick_age is not None
+    selected_pair_stalled = bool(
+        tick_age is not None
         and tick_age <= 5.0
-        and epoch_age >= dispatch_stall_s
+        and epoch_age >= selected_pair_stall_s
     )
+
+    dispatch_stalled = bool(not work_outstanding and selected_pair_stalled)
     worker_stalled = bool(
         work_outstanding
         and (
-            drain_active_age >= 90.0 if drain_active else epoch_age >= 90.0
+            drain_active_age >= 90.0
+            if drain_active
+            else selected_pair_stalled or epoch_age >= 90.0
         )
     ) or dispatch_stalled
 
@@ -103,7 +201,10 @@ def _apply_selected_pair_transition_liveness(
     adjusted["dispatch_stalled"] = dispatch_stalled
     adjusted["last_progress_age_s"] = round(epoch_age, 1)
     adjusted["selected_eval_age_s"] = None
-    adjusted["evaluation_alive"] = epoch_age < dispatch_stall_s
+    adjusted["selected_pair_eval_stall_s"] = selected_pair_stall_s
+    adjusted["evaluation_alive"] = bool(
+        not selected_pair_stalled and epoch_age < dispatch_stall_s
+    )
     adjusted["worker_stalled"] = worker_stalled
     return adjusted
 
@@ -284,12 +385,14 @@ def apply_patches() -> None:
                     atm_strike=getattr(selection, "atm_strike", None),
                     option_symbols=getattr(selection, "option_symbols", None),
                 )
-                _record_selected_pair_transition(
-                    self, before_pair, _active_selected_pair(self)
-                )
+                after_pair = _active_selected_pair(self)
+                if _record_selected_pair_transition(self, before_pair, after_pair):
+                    _schedule_selected_pair_evaluation(self, after_pair)
                 return
         original_sync(self, selection)
-        _record_selected_pair_transition(self, before_pair, _active_selected_pair(self))
+        after_pair = _active_selected_pair(self)
+        if _record_selected_pair_transition(self, before_pair, after_pair):
+            _schedule_selected_pair_evaluation(self, after_pair)
 
     @wraps(original_mark_live)
     def mark_live(self: Any, symbol: str) -> Any:
@@ -393,5 +496,6 @@ __all__ = [
     "_context_history_read_limit",
     "_live_ws_option_tick_fresh",
     "_record_selected_pair_transition",
+    "_schedule_selected_pair_evaluation",
     "apply_patches",
 ]
