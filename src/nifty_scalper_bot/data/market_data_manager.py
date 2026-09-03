@@ -1353,15 +1353,31 @@ class MarketDataManager:
         projection: list[tuple[Any, float, float, float, float, float]],
         canonical: list[tuple[Any, float, float, float, float, float]],
     ) -> bool:
-        """Return True when projection rows are a contiguous canonical slice."""
+        """Return True when retained projection data agrees with canonical OHLC.
+
+        A bounded CandleEngine window may legitimately roll older bars out between
+        projection refreshes. In that case the old projection is no longer wholly
+        contained in the new canonical window, but its retained suffix must equal
+        the new canonical prefix. Any mismatch in the overlapping OHLCV rows still
+        represents genuine projection divergence.
+        """
         if not projection:
             return True
-        if len(projection) > len(canonical):
+        if not canonical:
             return False
-        width = len(projection)
+
+        if len(projection) <= len(canonical):
+            width = len(projection)
+            if any(
+                canonical[start : start + width] == projection
+                for start in range(len(canonical) - width + 1)
+            ):
+                return True
+
+        max_overlap = min(len(projection), len(canonical))
         return any(
-            canonical[start : start + width] == projection
-            for start in range(len(canonical) - width + 1)
+            projection[-overlap:] == canonical[:overlap]
+            for overlap in range(max_overlap, 0, -1)
         )
 
     def _candle_projection_fingerprint(
