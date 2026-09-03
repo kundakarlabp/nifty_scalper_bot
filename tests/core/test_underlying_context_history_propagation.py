@@ -43,9 +43,17 @@ class _Indicator:
     def __init__(self, rows_by_symbol: dict[str, list[dict[str, object]]]) -> None:
         self.rows_by_symbol = rows_by_symbol
 
-    def get_history(self, symbol: str, field: str = "bars"):
+    def get_history(
+        self,
+        symbol: str,
+        count: int | None = None,
+        field: str = "bars",
+    ):
         del field
-        return list(self.rows_by_symbol.get(symbol, []))
+        rows = list(self.rows_by_symbol.get(symbol, []))
+        if count is None:
+            return rows
+        return rows[-int(count) :]
 
 
 def _runner(rows: list[dict[str, object]]) -> StrategyRunner:
