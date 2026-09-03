@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import wraps
+import os
 import sys
 import time
 from typing import Any, Callable
 
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.utils.symbols import normalize_symbol
+
+_CONTEXT_SESSION_HISTORY_BARS = 400
+_TRUE_VALUES = {"1", "true", "yes", "y", "on", "enable", "enabled"}
 
 
 def _active_selected_pair(runner: Any) -> tuple[str | None, str | None]:
@@ -144,6 +149,62 @@ def _live_ws_option_tick_fresh(
     return age_s <= limit_s
 
 
+def _env_enabled(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in _TRUE_VALUES
+
+
+def _context_history_read_limit(runner: Any, symbol: str, limit: int) -> int:
+    """Return the minimum cached-history read needed by underlying-led strategies.
+
+    ORB v2 derives its opening range from NIFTY futures/spot rather than option
+    premium, so those context symbols must retain the session-open bars. SMC also
+    requires its own structural minimum even when the generic context readiness
+    target is shorter. This function only broadens cached MDM reads; it never
+    fetches broker history and it leaves option-symbol reads unchanged.
+    """
+    requested = max(1, int(limit or 1))
+    normalized = normalize_symbol(str(symbol or "")) or str(symbol or "")
+    role = None
+    resolver = getattr(runner, "_history_role_for_symbol", None)
+    if callable(resolver):
+        try:
+            role = str(resolver(normalized) or "")
+        except Exception:  # noqa: BLE001 - role fallback below is deterministic
+            role = None
+    if role not in {"spot_context", "futures_context"}:
+        active_future = normalize_symbol(
+            str(getattr(runner, "_active_futures_symbol", None) or "")
+        )
+        spot_symbol = normalize_symbol(
+            str(getattr(runner, "_spot_symbol", None) or "NSE:NIFTY")
+        )
+        if normalized == active_future and active_future:
+            role = "futures_context"
+        elif normalized == spot_symbol and spot_symbol:
+            role = "spot_context"
+    if role not in {"spot_context", "futures_context"}:
+        return requested
+
+    try:
+        smc_min = max(1, int(HistoryReadinessPolicy.from_env().smc_min_bars))
+    except Exception:  # noqa: BLE001 - keep fail-safe structural default
+        try:
+            smc_min = max(1, int(float(os.getenv("SMC_MIN_BARS_REQUIRED", "30"))))
+        except (TypeError, ValueError):
+            smc_min = 30
+
+    resolved = max(requested, smc_min)
+    if _env_enabled("ORB_ENABLED", True):
+        # 400 covers the full 375-minute NSE session. It guarantees the 09:15
+        # opening-range anchor remains available to ORB for its configured entry
+        # lifetime without creating a new history owner or broker fetch path.
+        resolved = max(resolved, _CONTEXT_SESSION_HISTORY_BARS)
+    return resolved
+
+
 def apply_patches() -> None:
     """Install the dynamic-universe and selected-option evaluation fixes once."""
     from nifty_scalper_bot.core.runtime_history_event_loop_hardening import (
@@ -167,6 +228,7 @@ def apply_patches() -> None:
     original_on_tick = StrategyRunner._on_tick
     original_liveness = StrategyRunner._entry_eval_liveness_snapshot
     original_option_tick_fresh = StrategyRunner._is_option_symbol_tick_fresh
+    original_get_mdm_bars = StrategyRunner._get_mdm_bars
 
     @wraps(original_validate)
     def validate_symbol_for_cycle(self: Any, symbol: str) -> bool:
@@ -297,6 +359,12 @@ def apply_patches() -> None:
             return live_ws_fresh
         return bool(original_option_tick_fresh(self, symbol, max_age_s=max_age_s))
 
+    @wraps(original_get_mdm_bars)
+    def get_mdm_bars(self: Any, symbol: str, limit: int) -> list[dict[str, Any]]:
+        normalized = normalize_symbol(str(symbol or "")) or symbol
+        resolved_limit = _context_history_read_limit(self, normalized, limit)
+        return list(original_get_mdm_bars(self, normalized, resolved_limit) or [])
+
     StrategyRunner._dynamic_universe_safety_original_validate = original_validate
     StrategyRunner._dynamic_universe_safety_original_sync = original_sync
     StrategyRunner._dynamic_universe_safety_original_mark_live = original_mark_live
@@ -305,17 +373,20 @@ def apply_patches() -> None:
     StrategyRunner._dynamic_universe_safety_original_option_tick_fresh = (
         original_option_tick_fresh
     )
+    StrategyRunner._dynamic_universe_safety_original_get_mdm_bars = original_get_mdm_bars
     StrategyRunner._validate_symbol_for_cycle = validate_symbol_for_cycle
     StrategyRunner._sync_active_selection_from_basket = sync_active_selection_from_basket
     StrategyRunner._mark_live = mark_live
     StrategyRunner._on_tick = on_tick
     StrategyRunner._entry_eval_liveness_snapshot = entry_eval_liveness_snapshot
     StrategyRunner._is_option_symbol_tick_fresh = option_symbol_tick_fresh
+    StrategyRunner._get_mdm_bars = get_mdm_bars
     StrategyRunner._dynamic_universe_safety_installed = True
 
 
 __all__ = [
     "_apply_selected_pair_transition_liveness",
+    "_context_history_read_limit",
     "_live_ws_option_tick_fresh",
     "_record_selected_pair_transition",
     "apply_patches",
