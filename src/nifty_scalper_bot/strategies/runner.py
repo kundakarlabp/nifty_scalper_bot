@@ -207,6 +207,9 @@ RELAX_REGIME_FILTER = (
     os.getenv("RELAX_REGIME_FILTER", "true").lower() != "false"
 )  # default True: regime starts with no snapshot
 MIN_EVAL_INTERVAL_SECONDS = 5.0
+_CONTEXT_SESSION_HISTORY_BARS = 400
+_CONTEXT_HISTORY_PROBE_INTERVAL_SECONDS = 5.0
+_CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS = 30.0
 _CANDIDATE_RANK_MISSING_TICK_AGE_MS = 999000.0
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -1892,13 +1895,25 @@ class StrategyRunner:
         self._hydrate_from_mdm_cache(symbol)
 
     def _get_mdm_bars(self, symbol: str, limit: int) -> list[dict[str, Any]]:
-        """Fetch cached bars from MDM/DataHub only. Args: symbol, limit. Returns: rows. Raises: None."""
-        # MDM retains only the opening-range anchor beyond the recent tail.
-        # Keep it when ORB is enabled so IndicatorEngine can restore ORB state.
-        retain_orb_anchor = bool(
-            normalize_symbol(symbol).endswith(("CE", "PE"))
-            and _env_bool("ORB_ENABLED", True)
-        )
+        """Read canonical cached bars; broaden only underlying context windows."""
+        normalized = self._normalize_symbol(symbol)
+        resolved_limit = max(1, int(limit or 1))
+        role = self._history_role_for_symbol(normalized)
+        if role in {"spot_context", "futures_context"}:
+            try:
+                smc_min = max(
+                    1, int(HistoryReadinessPolicy.from_env().smc_min_bars)
+                )
+            except Exception:
+                smc_min = safe_positive_int_env(
+                    "SMC_MIN_BARS_REQUIRED", 30, minimum=1
+                )
+            resolved_limit = max(resolved_limit, smc_min)
+            if _env_bool("ORB_ENABLED", True):
+                resolved_limit = max(
+                    resolved_limit, _CONTEXT_SESSION_HISTORY_BARS
+                )
+
         for source in (self._market_data, self._data_hub):
             if source is None:
                 continue
@@ -1908,18 +1923,11 @@ class StrategyRunner:
                     continue
                 try:
                     try:
-                        bars = (
-                            fn(symbol)
-                            if retain_orb_anchor
-                            else fn(symbol, limit=limit)
-                        )
+                        bars = fn(normalized, limit=resolved_limit)
                     except TypeError:
-                        bars = fn(symbol)
+                        bars = fn(normalized)
                     if bars:
-                        selected = (
-                            list(bars) if retain_orb_anchor else list(bars)[-limit:]
-                        )
-                        return [dict(row) for row in selected]
+                        return [dict(row) for row in list(bars)[-resolved_limit:]]
                 except Exception:
                     continue
         return []
@@ -2531,83 +2539,131 @@ class StrategyRunner:
     def _sync_context_history_if_cold(
         self, *, source: str = "context_history_sync"
     ) -> None:
-        """Ensure spot/futures cached history is visible to IndicatorEngine."""
+        """Keep spot/futures derived histories aligned with CandleEngine via MDM."""
+        try:
+            smc_min = max(1, int(HistoryReadinessPolicy.from_env().smc_min_bars))
+        except Exception:
+            smc_min = safe_positive_int_env("SMC_MIN_BARS_REQUIRED", 30, minimum=1)
+        minimum = max(1, int(self._context_required_bars or 1), smc_min)
+        target = minimum
+        if _env_bool("ORB_ENABLED", True):
+            target = max(target, _CONTEXT_SESSION_HISTORY_BARS)
+
+        request_state = getattr(self, "_context_structural_request_at", None)
+        if not isinstance(request_state, dict):
+            request_state = {}
+            self._context_structural_request_at = request_state
+
         for ctx_symbol in self._active_context_symbols_for_history():
-            count = self._history_count_for_symbol(ctx_symbol)
-            if count >= self._context_required_bars:
-                # Already warm — skip sync and suppress duplicate_noop trace.
+            normalized = self._normalize_symbol(ctx_symbol)
+            role = self._history_role_for_symbol(normalized)
+            if role not in {"spot_context", "futures_context"}:
                 continue
             try:
-                after = self._sync_history_from_mdm_cache(
-                    ctx_symbol,
-                    required_bars=self._context_required_bars,
-                    source=source,
+                mdm_rows = self._get_mdm_bars(normalized, target)
+                source_count = len(mdm_rows)
+                indicator_count = self._history_count_for_symbol(normalized)
+                runner_count = len(
+                    getattr(self, "_symbol_history", {}).get(normalized, []) or []
                 )
-                if after < self._context_required_bars:
-                    # _sync_history_from_mdm_cache already dispatched an async REST
-                    # hydration request. On the first few cold passes that fetch is
-                    # simply still in flight — not a failure. Track consecutive cold
-                    # passes per symbol and only escalate to a warning once the
-                    # hydration has had time to land; otherwise log a quiet pending.
-                    cold_passes = getattr(self, "_context_cold_passes", None)
-                    if cold_passes is None:
-                        cold_passes = {}
-                        self._context_cold_passes = cold_passes
-                    cold_passes[ctx_symbol] = cold_passes.get(ctx_symbol, 0) + 1
+                mdm_last = (
+                    self._history_row_timestamp(mdm_rows[-1]) if mdm_rows else None
+                )
+                runner_last = self._runner_history_last_timestamp(normalized)
+                indicator_last = self._indicator_history_last_timestamp(normalized)
+                stale_projection = bool(
+                    mdm_last is not None
+                    and (
+                        runner_last is None
+                        or indicator_last is None
+                        or runner_last < mdm_last
+                        or indicator_last < mdm_last
+                    )
+                )
+                needs_sync = bool(
+                    indicator_count < minimum
+                    or runner_count < minimum
+                    or stale_projection
+                )
+                after = indicator_count
+                if needs_sync:
+                    after = self._sync_history_from_mdm_cache(
+                        normalized,
+                        required_bars=minimum,
+                        source=source,
+                        request_if_short=source_count < minimum,
+                    )
+
+                if source_count < target:
+                    now = time.monotonic()
+                    last_request = float(request_state.get(normalized, 0.0) or 0.0)
+                    if now - last_request >= _CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS:
+                        if self._schedule_runtime_history_ensure(
+                            normalized,
+                            role=role,
+                            phase="runner_sync",
+                            reason=source,
+                            required_bars=minimum,
+                            target_bars=target,
+                        ):
+                            request_state[normalized] = now
+
+                cold_passes = getattr(self, "_context_cold_passes", None)
+                if cold_passes is None:
+                    cold_passes = {}
+                    self._context_cold_passes = cold_passes
+                if after < minimum:
+                    cold_passes[normalized] = cold_passes.get(normalized, 0) + 1
                     grace = safe_positive_int_env(
                         "CONTEXT_HISTORY_COLD_GRACE_PASSES", 3, minimum=1
                     )
-                    if cold_passes[ctx_symbol] <= grace:
+                    if cold_passes[normalized] <= grace:
                         log_throttled(
                             self._logger,
-                            f"context_history_pending:{ctx_symbol}",
+                            f"context_history_pending:{normalized}",
                             "CONTEXT_HISTORY_HYDRATION_PENDING symbol=%s source=%s have=%d need=%d pass=%d",
-                            ctx_symbol,
+                            normalized,
                             source,
                             after,
-                            self._context_required_bars,
-                            cold_passes[ctx_symbol],
+                            minimum,
+                            cold_passes[normalized],
                             interval_sec=10.0,
                             extra={
                                 "event": "CONTEXT_HISTORY_HYDRATION_PENDING",
-                                "symbol": ctx_symbol,
+                                "symbol": normalized,
                                 "source": source,
                                 "indicator_history_count": after,
-                                "required_bars": self._context_required_bars,
-                                "cold_pass": cold_passes[ctx_symbol],
+                                "required_bars": minimum,
+                                "cold_pass": cold_passes[normalized],
                             },
                         )
                     else:
                         self._logger.warning(
                             "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
-                            ctx_symbol,
+                            normalized,
                             source,
-                            "insufficient_cached_bars",
+                            "insufficient_canonical_bars",
                             extra={
                                 "event": "CONTEXT_HISTORY_HYDRATION_FAILED",
-                                "symbol": ctx_symbol,
+                                "symbol": normalized,
                                 "source": source,
-                                "error": "insufficient_cached_bars",
+                                "error": "insufficient_canonical_bars",
                                 "indicator_history_count": after,
-                                "required_bars": self._context_required_bars,
-                                "cold_pass": cold_passes[ctx_symbol],
+                                "required_bars": minimum,
+                                "cold_pass": cold_passes[normalized],
                             },
                         )
                 else:
-                    cold_passes = getattr(self, "_context_cold_passes", None)
-                    if cold_passes is not None:
-                        cold_passes.pop(ctx_symbol, None)
-            except (
-                Exception
-            ) as exc:  # noqa: BLE001 - keep evaluation safely blocked with diagnostics
+                    cold_passes.pop(normalized, None)
+            except Exception as exc:  # noqa: BLE001 - fail closed with diagnostics
                 self._logger.warning(
                     "CONTEXT_HISTORY_HYDRATION_FAILED symbol=%s source=%s error=%s",
-                    ctx_symbol,
+                    normalized,
                     source,
                     exc,
                     extra={
                         "event": "CONTEXT_HISTORY_HYDRATION_FAILED",
-                        "symbol": ctx_symbol,
+                        "symbol": normalized,
                         "source": source,
                         "error": str(exc),
                     },
@@ -14173,6 +14229,28 @@ class StrategyRunner:
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
+        try:
+            _context_symbol = self._normalize_symbol(symbol)
+            if self._history_role_for_symbol(_context_symbol) in {
+                "spot_context",
+                "futures_context",
+            }:
+                _probe_state = getattr(self, "_context_history_probe_at", None)
+                if not isinstance(_probe_state, dict):
+                    _probe_state = {}
+                    self._context_history_probe_at = _probe_state
+                _probe_now = time.monotonic()
+                _last_probe = float(_probe_state.get(_context_symbol, 0.0) or 0.0)
+                if (
+                    _probe_now - _last_probe
+                    >= _CONTEXT_HISTORY_PROBE_INTERVAL_SECONDS
+                ):
+                    _probe_state[_context_symbol] = _probe_now
+                    self._sync_context_history_if_cold(
+                        source="context_tick_bar_sync"
+                    )
+        except Exception:
+            pass
         self._logger.debug(
             "Entered StrategyRunner._on_tick",
             extra={"event": "tick_enter", "symbol": symbol},

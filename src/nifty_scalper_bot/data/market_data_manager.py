@@ -4,8 +4,8 @@ Runtime role:
 - Receives broker ticks (WebSocket/REST), maintains the live quote cache, and
   routes accepted ticks/history through CandleEngine for one-minute OHLC bars.
 - Fans ticks out to subscribers via the message bus.
-- Performs broker history fetch/backfill (ensure_history) and is the sole holder
-  of the OHLC bar cache used for readiness and indicators.
+- Performs broker history fetch/backfill (ensure_history) into the per-symbol
+  CandleEngine registry used as the finalized-OHLC SSOT.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -1052,7 +1052,8 @@ class MarketDataManager:
             diag_before = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
             engine.import_history(frame, mode="incremental", source="historical")
             diag_after = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
-            after = self._refresh_candle_projection(normalized_symbol)
+            self._refresh_candle_projection(normalized_symbol)
+            after = self.get_ohlc_bars(normalized_symbol)
             self.update_hydration_status(normalized_symbol, after)
             latest = engine.latest_finalized_minute()
             if latest is not None:
@@ -5485,16 +5486,26 @@ class MarketDataManager:
             )
 
     def is_ohlc_ready(self, symbol: str, required_bars: int | None = None) -> bool:
-        """Return canonical OHLC readiness for a symbol; raw ticks do not count."""
+        """Return readiness from authoritative finalized CandleEngine bars."""
         normalized = normalize_symbol(str(symbol or ""))
         needed = max(
             1,
             int(
-                required_bars if required_bars is not None else self._min_required_bars
+                required_bars
+                if required_bars is not None
+                else self._min_required_bars
             ),
         )
-        with self._lock:
-            return len(self._ohlc.get(self._bar_symbol_key(normalized), ())) >= needed
+        try:
+            engine = self.get_candle_engine(normalized)
+            return len(engine.get_completed_bars() or []) >= needed
+        except Exception:
+            # Partial compatibility objects used by diagnostics/tests may not
+            # have a usable engine registry. They are not production owners.
+            if hasattr(self, "_raw_tick_history") and hasattr(self, "_settings"):
+                return False
+            projection = getattr(self, "_ohlc", {}) or {}
+            return len(projection.get(self._bar_symbol_key(normalized), ())) >= needed
 
     def is_market_data_ready(self, symbol: str) -> bool:
         """Return live-market readiness: raw ticks and canonical OHLC are both ready."""
@@ -11958,7 +11969,7 @@ class MarketDataManager:
                 if str(row.get("source") or source).lower() == "ws"
                 and (self._tick_wallclock(row) or 0.0) >= recent_cutoff
             )
-            bars = list(self._ohlc.get(self._bar_symbol_key(canonical), ()))
+            bars = self.get_ohlc_bars(canonical, limit=1)
         if ltp is None:
             latest_bar = bars[-1] if bars else {}
             candle_close = (
@@ -12184,65 +12195,49 @@ class MarketDataManager:
     def get_ohlc_bars(
         self, symbol: str, *, limit: int | None = None
     ) -> list[dict[str, Any]]:
-        """Return canonical completed one-minute OHLC bars for *symbol*.
+        """Return canonical finalized OHLC directly from CandleEngine.
 
-        The canonical view is a pure read: it merges accepted broker-history rows
-        with completed live-built candles for the normalized bar key, deduplicates
-        by candle timestamp, prefers completed live candles over broker history on
-        identical timestamps, and never exposes provisional current candles.
+        ``_ohlc`` is a compatibility/diagnostic projection only. Production
+        readiness, hydration and strategy consumers must remain correct even
+        when that projection is stale or absent.
         """
-
         if limit is not None and limit < 0:
             raise ValueError("limit must be non-negative or None")
         if limit == 0:
             return []
-        bar_symbol = self._bar_symbol_key(symbol)
-        raw_symbol = str(symbol or "").strip()
-        # Canonical-key storage is authoritative. Reading the raw symbol key is
-        # temporary backward compatibility for rows written before canonical live
-        # candle storage was enforced; no new writes may target the raw key.
-        candidate_keys = [bar_symbol]
-        if raw_symbol and raw_symbol != bar_symbol:
-            candidate_keys.append(raw_symbol)
-        merged: dict[datetime, tuple[int, int, dict[str, Any]]] = {}
-        sequence = 0
-        with self._lock:
-            rows: list[dict[str, Any]] = []
-            for key in candidate_keys:
-                if not key:
+        normalized = self._canonical_symbol(symbol)
+        try:
+            engine = self.get_candle_engine(normalized)
+            completed = list(engine.get_completed_bars() or [])
+        except Exception:
+            completed = []
+        if completed:
+            bars: list[dict[str, Any]] = []
+            for raw in completed:
+                if not isinstance(raw, Mapping):
                     continue
-                rows.extend(dict(row) for row in self._ohlc.get(key, ()) or ())
-        invalid_rows = 0
-        for row in rows:
-            sequence += 1
-            if bool(row.get("provisional")):
-                continue
-            normalized_ts = self._normalize_bar_timestamp(row)
-            if normalized_ts is None:
-                invalid_rows += 1
-                continue
-            ts_key, market_ts = normalized_ts
-            row["timestamp"] = market_ts
-            row.setdefault("symbol", bar_symbol)
-            precedence = self._completed_bar_precedence(row)
-            existing = merged.get(ts_key)
-            if existing is None or precedence > existing[0]:
-                merged[ts_key] = (precedence, sequence, row)
-        if invalid_rows:
-            log_throttled(
-                getattr(self, "_logger", _logger),
-                f"canonical_ohlc_rejected:{bar_symbol}",
-                "CANONICAL_OHLC_ROWS_REJECTED symbol=%s rows_seen=%d rows_rejected=%d reason=invalid_timestamp"
-                % (bar_symbol, len(rows), invalid_rows),
-                interval_sec=30.0,
-                level=logging.WARNING,
-            )
-        bars = [
-            entry[2] for _, entry in sorted(merged.items(), key=lambda item: item[0])
-        ]
-        if limit is not None:
-            bars = bars[-limit:]
-        return bars
+                row = dict(raw)
+                if bool(row.get("provisional") or row.get("is_provisional")):
+                    continue
+                if row.get("is_complete") is False:
+                    continue
+                row.setdefault("symbol", normalized)
+                row.setdefault("source", "candle_engine")
+                bars.append(row)
+            return bars[-limit:] if limit is not None else bars
+
+        # Compatibility only for deliberately partial legacy/test objects
+        # that never passed through the production constructor. A normally
+        # initialized runtime never falls back to the projection.
+        fully_initialized = hasattr(self, "_raw_tick_history") and hasattr(
+            self, "_settings"
+        )
+        if fully_initialized:
+            return []
+        projection = getattr(self, "_ohlc", {}) or {}
+        key = self._bar_symbol_key(normalized)
+        rows = [dict(row) for row in projection.get(key, ()) or ()]
+        return rows[-limit:] if limit is not None else rows
 
     def get_latest_closed_bar(self, symbol: str) -> dict[str, Any] | None:
         """Return the latest canonical finalized OHLC bar without exposing a forming candle."""
@@ -13652,12 +13647,18 @@ class MarketDataManager:
             return self._last_hydration_result_by_symbol.get(normalized)
 
     def history_capacity_for(self, symbol: str, interval: str = "minute") -> int:
-        """Args: symbol, interval. Returns: max bars the canonical OHLC cache can
-        retain for this symbol (deque maxlen). Used to clamp hydration targets so
-        an impossible target (e.g. 1125 into a 1000-deep cache) can never be
-        requested. Raises: none.
+        """Return the authoritative CandleEngine retention for ``symbol``.
+
+        Raw tick retention is intentionally unrelated. Hydration targets are
+        bounded by CandleEngine because it is the sole finalized-OHLC SSOT.
         """
-        return int(getattr(self, "_cache_len", 0) or 0)
+        del interval
+        try:
+            normalized = self._canonical_symbol(symbol)
+            engine = self.get_candle_engine(normalized)
+            return max(1, int(getattr(engine, "max_bars", 0) or 0))
+        except Exception:
+            return 0
 
     async def ensure_history(
         self,

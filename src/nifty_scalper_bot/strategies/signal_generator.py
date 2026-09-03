@@ -21,6 +21,7 @@ from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Proto
 
 from nifty_scalper_bot.config.env_utils import parse_bool_env, parse_float_env
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
+from nifty_scalper_bot.core.strategy_context_builder import build_strategy_history_context
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
@@ -33,114 +34,6 @@ _TREND_TAGS: tuple[str, ...] = ("Crossover", "MACD", "Breakout", "ORB")
 logger = get_logger(__name__)
 
 
-def build_strategy_history_context(
-    *,
-    symbol: str,
-    indicator_engine: Any,
-    data_hub: Any | None,
-    runner_context: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build domain-aware strategy history metadata."""
-
-    def _safe_get_bars(source: Any, sym: str) -> list[Any]:
-        if source is None:
-            return []
-        for method_name in ("get_ohlc_bars", "get_history", "get_bars"):
-            method = getattr(source, method_name, None)
-            if callable(method):
-                with suppress(Exception):
-                    bars = list(method(sym) or [])
-                    if bars:
-                        return bars
-        return []
-
-    def _safe_int(value: Any, default: int = 0) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _bar_ts(bar: Any) -> Any:
-        if isinstance(bar, Mapping):
-            return (
-                bar.get("timestamp")
-                or bar.get("ts")
-                or bar.get("datetime")
-                or bar.get("time")
-            )
-        return (
-            getattr(bar, "timestamp", None)
-            or getattr(bar, "ts", None)
-            or getattr(bar, "datetime", None)
-            or getattr(bar, "time", None)
-        )
-
-    data_hub_bars = _safe_get_bars(data_hub, symbol)
-    indicator_bars = _safe_get_bars(indicator_engine, symbol)
-    bars: list[Any] = data_hub_bars or indicator_bars
-    history_source = (
-        "data_hub"
-        if data_hub_bars
-        else "indicator_engine" if indicator_bars else "unavailable"
-    )
-
-    symbol_upper = str(symbol or "").upper()
-    is_option = symbol_upper.endswith(("CE", "PE"))
-    is_spot = symbol_upper in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}
-    is_underlying_or_future = not is_option and not is_spot
-    raw_count = len(bars)
-    option_count = raw_count if is_option else 0
-    spot_count = raw_count if is_spot else 0
-    underlying_count = raw_count if is_underlying_or_future else 0
-    if runner_context:
-        option_count = max(
-            option_count, _safe_int(runner_context.get("option_history_count"), 0)
-        )
-        spot_count = max(
-            spot_count, _safe_int(runner_context.get("spot_history_count"), 0)
-        )
-        underlying_count = max(
-            underlying_count,
-            _safe_int(runner_context.get("underlying_history_count"), 0),
-        )
-    history_domain_used = (
-        "options" if is_option else "spot" if is_spot else "underlying"
-    )
-    resolved_history_count = (
-        option_count
-        if history_domain_used == "options"
-        else spot_count if history_domain_used == "spot" else underlying_count
-    )
-    policy = HistoryReadinessPolicy.from_env()
-    if history_domain_used == "options":
-        domain_min_required = policy.option_eval_min_bars
-    else:
-        domain_min_required = policy.context_min_bars
-    smc_min_required = policy.smc_min_bars
-    context: dict[str, Any] = {
-        "history_count": resolved_history_count,
-        "indicator_history_count": raw_count,
-        "option_history_count": option_count,
-        "spot_history_count": spot_count,
-        "underlying_history_count": underlying_count,
-        "history_symbol_key": symbol,
-        "history_source": history_source,
-        "history_domain_used": history_domain_used,
-        "history_resolved_count": resolved_history_count,
-        "oldest_bar_ts": None,
-        "latest_bar_ts": None,
-        "history_quality": (
-            "warm" if resolved_history_count >= domain_min_required else "cold"
-        ),
-        "history_required_min": domain_min_required,
-        "history_ready": resolved_history_count >= domain_min_required,
-        "smc_history_required_min": smc_min_required,
-        "history_ready_for_smc": resolved_history_count >= smc_min_required,
-    }
-    if bars:
-        context["oldest_bar_ts"] = _bar_ts(bars[0])
-        context["latest_bar_ts"] = _bar_ts(bars[-1])
-    return context
 
 
 class Position(Protocol):

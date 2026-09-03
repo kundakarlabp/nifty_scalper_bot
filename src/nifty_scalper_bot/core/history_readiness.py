@@ -1130,6 +1130,7 @@ def compute_selected_option_history_readiness(
     )
 
 
+
 def resolve_history_policy(
     ctx: "BotContext",
     symbol: str,
@@ -1138,7 +1139,7 @@ def resolve_history_policy(
     phase: str,
     reason: str,
 ) -> HistoryPolicyDecision:
-    """Resolve role-aware history policy without changing configured thresholds."""
+    """Resolve role-aware history policy without changing execution minima."""
     runner = getattr(ctx, "strategy_runner", None)
     role = str(role or "option_context")
     phase = str(phase or "dynamic_update")
@@ -1151,7 +1152,8 @@ def resolve_history_policy(
     )
     context_env = int(
         os.getenv(
-            "READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")
+            "READINESS_CONTEXT_MIN_BARS",
+            os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20"),
         )
         or 20
     )
@@ -1179,43 +1181,42 @@ def resolve_history_policy(
         required = max(option_min, 1)
         target = max(required, generic_required)
         priority = 1
-    # Only explicit closed sessions block option-context broker fetch.
-    # A transient UNKNOWN mode (startup, clock lag, calendar hiccup near open)
-    # must NOT keep context strategies cold: UNKNOWN != "OPEN" previously
-    # evaluated as closed and suppressed SMC/context votes.
+
     market_closed_context = (
         role == "option_context"
-        and get_runtime_market_mode() in {"PRE_MARKET", "POST_MARKET", "HOLIDAY"}
+        and get_runtime_market_mode()
+        in {"PRE_MARKET", "POST_MARKET", "HOLIDAY"}
         and phase != "recovery"
     )
-    _role_caps = {
+    role_caps = {
         "selected_option": int(os.getenv("HYDRATION_CAP_SELECTED_OPTION", "75") or 75),
         "option_context": int(os.getenv("HYDRATION_CAP_OPTION_CONTEXT", "50") or 50),
         "spot_context": int(os.getenv("HYDRATION_CAP_SPOT_CONTEXT", "100") or 100),
-        "futures_context": int(
-            os.getenv("HYDRATION_CAP_FUTURES_CONTEXT", "100") or 100
-        ),
-        "recovery_or_open_position": int(
-            os.getenv("HYDRATION_CAP_RECOVERY", "100") or 100
-        ),
+        "futures_context": int(os.getenv("HYDRATION_CAP_FUTURES_CONTEXT", "100") or 100),
+        "recovery_or_open_position": int(os.getenv("HYDRATION_CAP_RECOVERY", "100") or 100),
     }
-    role_cap = _role_caps.get(role, int(os.getenv("HYDRATION_CAP_DEFAULT", "75") or 75))
-    _deep_caps = {
-        "selected_option": int(
-            os.getenv("HYDRATION_DEEP_SELECTED_OPTION", "300") or 300
-        ),
-        "option_context": int(
-            os.getenv("HYDRATION_DEEP_OPTION_CONTEXT", str(role_cap)) or role_cap
-        ),
+    role_cap = role_caps.get(
+        role, int(os.getenv("HYDRATION_CAP_DEFAULT", "75") or 75)
+    )
+    deep_caps = {
+        "selected_option": int(os.getenv("HYDRATION_DEEP_SELECTED_OPTION", "300") or 300),
+        "option_context": int(os.getenv("HYDRATION_DEEP_OPTION_CONTEXT", str(role_cap)) or role_cap),
         "spot_context": int(os.getenv("HYDRATION_DEEP_SPOT_CONTEXT", "300") or 300),
-        "futures_context": int(
-            os.getenv("HYDRATION_DEEP_FUTURES_CONTEXT", "300") or 300
-        ),
-        "recovery_or_open_position": int(
-            os.getenv("HYDRATION_DEEP_RECOVERY", "300") or 300
-        ),
+        "futures_context": int(os.getenv("HYDRATION_DEEP_FUTURES_CONTEXT", "300") or 300),
+        "recovery_or_open_position": int(os.getenv("HYDRATION_DEEP_RECOVERY", "300") or 300),
     }
-    deep_cap = max(role_cap, _deep_caps.get(role, role_cap))
+    deep_cap = max(role_cap, deep_caps.get(role, role_cap))
+
+    orb_enabled = str(os.getenv("ORB_ENABLED", "true") or "true").strip().lower() in {
+        "1", "true", "yes", "y", "on", "enable", "enabled"
+    }
+    if role in {"spot_context", "futures_context"} and orb_enabled:
+        structural_target = 400
+        role_cap = max(role_cap, structural_target)
+        deep_cap = max(deep_cap, structural_target)
+        if phase == "startup" and reason == "startup_hydration":
+            target = max(target, structural_target)
+
     safety_max = int(os.getenv("HYDRATION_MAX_BARS", "0") or 0)
     if safety_max > 0:
         role_cap = min(role_cap, safety_max)
