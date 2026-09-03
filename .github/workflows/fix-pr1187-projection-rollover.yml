@@ -1,0 +1,101 @@
+name: Fix PR1187 projection rollover diagnostic
+
+on:
+  push:
+    branches:
+      - fix/candle-engine-ssot-consolidation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/candle-engine-ssot-consolidation
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Fix bounded-rollover divergence semantics
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/data/market_data_manager.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    @staticmethod
+    def _projection_matches_canonical_slice(
+        projection: list[tuple[Any, float, float, float, float, float]],
+        canonical: list[tuple[Any, float, float, float, float, float]],
+    ) -> bool:
+        """Return True when projection rows are a contiguous canonical slice."""
+        if not projection:
+            return True
+        if len(projection) > len(canonical):
+            return False
+        width = len(projection)
+        return any(
+            canonical[start : start + width] == projection
+            for start in range(len(canonical) - width + 1)
+        )
+'''
+          new = '''    @staticmethod
+    def _projection_matches_canonical_slice(
+        projection: list[tuple[Any, float, float, float, float, float]],
+        canonical: list[tuple[Any, float, float, float, float, float]],
+    ) -> bool:
+        """Return True when retained projection data agrees with canonical OHLC.
+
+        A bounded CandleEngine window may legitimately roll older bars out between
+        projection refreshes. In that case the old projection is no longer wholly
+        contained in the new canonical window, but its retained suffix must equal
+        the new canonical prefix. Any mismatch in the overlapping OHLCV rows still
+        represents genuine projection divergence.
+        """
+        if not projection:
+            return True
+        if not canonical:
+            return False
+
+        if len(projection) <= len(canonical):
+            width = len(projection)
+            if any(
+                canonical[start : start + width] == projection
+                for start in range(len(canonical) - width + 1)
+            ):
+                return True
+
+        max_overlap = min(len(projection), len(canonical))
+        return any(
+            projection[-overlap:] == canonical[:overlap]
+            for overlap in range(max_overlap, 0, -1)
+        )
+'''
+          if old not in text:
+              raise SystemExit('expected helper block not found; refusing broad edit')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Run rollover and corruption regressions
+        run: |
+          python -m compileall -q src/nifty_scalper_bot/data/market_data_manager.py
+          python -m pytest -q \
+            tests/data/test_mdm_runner_candle_engine_registry.py::test_normal_projection_append_and_rolling_maxlen_do_not_count_divergence \
+            tests/data/test_mdm_history_import_result_contract.py::test_projection_divergence_detects_equal_length_ohlcv_mismatch \
+            tests/data/test_mdm_history_import_result_contract.py::test_projection_refresh_reuses_precomputed_timestamp_fingerprints \
+            tests/data/test_candle_engine_authoritative_mdm_reads.py
+      - name: Remove one-shot workflow and commit
+        run: |
+          rm .github/workflows/fix-pr1187-projection-rollover.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/data/market_data_manager.py .github/workflows/fix-pr1187-projection-rollover.yml
+          git commit -m 'fix: ignore normal CandleEngine projection rollover divergence'
+          git push origin HEAD:fix/candle-engine-ssot-consolidation
