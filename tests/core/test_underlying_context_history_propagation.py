@@ -57,7 +57,7 @@ def _runner(rows: list[dict[str, object]]) -> StrategyRunner:
     return runner
 
 
-def test_futures_context_history_preserves_session_opening_range_when_orb_enabled(
+async def test_futures_context_history_preserves_session_opening_range_when_orb_enabled(
     monkeypatch,
 ) -> None:
     """Underlying-led ORB must retain 09:15 bars after the normal context tail rolls."""
@@ -73,7 +73,7 @@ def test_futures_context_history_preserves_session_opening_range_when_orb_enable
     assert runner._market_data.requested_limits[-1] >= 150
 
 
-def test_spot_fallback_history_preserves_session_opening_range_when_orb_enabled(
+async def test_spot_fallback_history_preserves_session_opening_range_when_orb_enabled(
     monkeypatch,
 ) -> None:
     """ORB spot fallback needs the same structural history contract as futures."""
@@ -88,7 +88,9 @@ def test_spot_fallback_history_preserves_session_opening_range_when_orb_enabled(
     assert rows[0]["timestamp"] == SESSION_OPEN
 
 
-def test_context_history_never_falls_below_smc_structural_minimum(monkeypatch) -> None:
+async def test_context_history_never_falls_below_smc_structural_minimum(
+    monkeypatch,
+) -> None:
     """SMC must see its minimum underlying-bar window even when generic context is shorter."""
     monkeypatch.setenv("ORB_ENABLED", "false")
     monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
@@ -101,7 +103,7 @@ def test_context_history_never_falls_below_smc_structural_minimum(monkeypatch) -
     assert runner._market_data.requested_limits[-1] == 30
 
 
-def test_option_history_read_limit_is_unchanged(monkeypatch) -> None:
+async def test_option_history_read_limit_is_unchanged(monkeypatch) -> None:
     """The context fix must not broaden unrelated option-history reads."""
     monkeypatch.setenv("ORB_ENABLED", "false")
     monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
@@ -114,7 +116,7 @@ def test_option_history_read_limit_is_unchanged(monkeypatch) -> None:
     assert runner._market_data.requested_limits[-1] == 20
 
 
-def test_orb_context_policy_targets_full_session_history(monkeypatch) -> None:
+async def test_orb_context_policy_targets_full_session_history(monkeypatch) -> None:
     """Startup hydration must fetch enough underlying bars to keep 09:15 through close."""
     monkeypatch.setenv("ORB_ENABLED", "true")
     monkeypatch.delenv("HYDRATION_MAX_BARS", raising=False)
@@ -171,7 +173,7 @@ def _context_sync_runner(
     return runner, calls
 
 
-def test_context_history_syncs_when_mdm_completed_bar_advances(monkeypatch) -> None:
+async def test_context_history_syncs_when_mdm_completed_bar_advances(monkeypatch) -> None:
     """Warm-by-count context must still propagate a newly completed MDM bar."""
     monkeypatch.setenv("ORB_ENABLED", "false")
     monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
@@ -190,7 +192,7 @@ def test_context_history_syncs_when_mdm_completed_bar_advances(monkeypatch) -> N
     assert int(calls[-1][1]["required_bars"]) >= 30
 
 
-def test_context_history_does_not_reseed_when_already_aligned(monkeypatch) -> None:
+async def test_context_history_does_not_reseed_when_already_aligned(monkeypatch) -> None:
     """No-op when MDM and IndicatorEngine already expose the same completed bar."""
     monkeypatch.setenv("ORB_ENABLED", "false")
     monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
@@ -203,7 +205,9 @@ def test_context_history_does_not_reseed_when_already_aligned(monkeypatch) -> No
     assert calls == []
 
 
-def test_orb_context_requests_structural_target_even_when_warm_by_count(monkeypatch) -> None:
+async def test_orb_context_requests_structural_target_even_when_warm_by_count(
+    monkeypatch,
+) -> None:
     """100 warm bars are insufficient for ORB once the 09:15 range has rolled out."""
     monkeypatch.setenv("ORB_ENABLED", "true")
     monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
