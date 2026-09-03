@@ -1,156 +1,118 @@
-"""Decouple completed OHLC retention from raw tick retention.
+"""Decouple completed OHLC projection retention from raw tick retention.
 
-The MarketDataManager intentionally keeps only a small raw-tick cache to bound
-memory on the production Lightsail host. ORB, however, needs the 09:15 opening
-range to remain available for the full NSE session. This adapter enlarges only
-completed one-minute candle retention; raw tick retention is untouched.
+MarketDataManager intentionally keeps a small raw-tick cache to bound memory on
+the production host. CandleEngine already owns up to 500 finalized one-minute
+bars, but MDM's read-only projection was truncated to the raw-tick cache length.
+ORB therefore lost the 09:15 opening range late in the session.
+
+This adapter changes only the normal MDM projection refresh path. CandleEngine
+remains the sole owner of finalized history and MDM reads never regenerate a
+projection that has been deliberately removed for diagnostics/tests.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import deque
 from functools import wraps
 import os
 from typing import Any, Mapping
 
 _DEFAULT_OHLC_CAPACITY = 500
 _MIN_SESSION_CAPACITY = 400
+_MAX_NATIVE_CAPACITY = 500
 
 
 def configured_ohlc_capacity() -> int:
-    """Return bounded completed-candle capacity required by intraday strategies."""
+    """Return completed-projection capacity supported by native CandleEngine."""
     try:
         configured = int(
             float(os.getenv("MDM_OHLC_CACHE_LEN", str(_DEFAULT_OHLC_CAPACITY)))
         )
     except (TypeError, ValueError):
         configured = _DEFAULT_OHLC_CAPACITY
-    return max(_MIN_SESSION_CAPACITY, configured)
+    return min(max(_MIN_SESSION_CAPACITY, configured), _MAX_NATIVE_CAPACITY)
 
 
-def _resize(value: Any, capacity: int) -> deque[Any]:
-    rows = list(value or [])
-    return deque(rows[-capacity:], maxlen=capacity)
-
-
-def ensure_ohlc_capacity(manager: Any) -> int:
-    """Enlarge completed-candle storage on an existing MDM instance once."""
+def _expanded_projection(
+    manager: Any,
+    symbol: str,
+    *,
+    source: str | None,
+    native_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project deeper canonical history after the native refresh write path."""
     capacity = configured_ohlc_capacity()
-    if int(getattr(manager, "_ohlc_capacity_contract_ready", 0) or 0) == capacity:
-        return capacity
+    try:
+        engine = manager.get_candle_engine(symbol)
+        completed = list(engine.get_completed_bars() or [])
+    except Exception:
+        return native_rows
 
-    setattr(manager, "_ohlc_cache_len", capacity)
-    projection = getattr(manager, "_ohlc", None)
-    if isinstance(projection, Mapping):
-        replacement = defaultdict(lambda: deque(maxlen=capacity))
-        for symbol, rows in list(projection.items()):
-            replacement[symbol] = _resize(rows, capacity)
-        try:
-            manager._ohlc = replacement
-        except Exception:
-            pass
+    if len(completed) <= len(native_rows):
+        return native_rows
 
-    engines = getattr(manager, "_engines", None)
-    if isinstance(engines, Mapping):
-        for engine in list(engines.values()):
-            completed = getattr(engine, "_completed_candles", None)
-            if completed is not None and getattr(completed, "maxlen", None) != capacity:
-                try:
-                    engine._completed_candles = _resize(completed, capacity)
-                except Exception:
-                    continue
+    normalized = (
+        manager._canonical_symbol(symbol)
+        if callable(getattr(manager, "_canonical_symbol", None))
+        else str(symbol)
+    )
+    key = (
+        manager._bar_symbol_key(normalized)
+        if callable(getattr(manager, "_bar_symbol_key", None))
+        else normalized
+    )
+    projected: deque[dict[str, Any]] = deque(maxlen=capacity)
+    for row in completed[-capacity:]:
+        bar = dict(row)
+        bar["symbol"] = normalized
+        bar["source"] = source or bar.get("source") or "candle_engine"
+        projected.append(bar)
+
+    with manager._lock:
+        manager._ohlc[key] = projected
+        metrics = getattr(manager, "_candle_metrics", None)
+        if isinstance(metrics, Mapping):
             try:
-                if int(getattr(engine, "max_bars", 0) or 0) < capacity:
-                    engine.max_bars = capacity
+                metrics["candle_projection_size"] = float(len(projected))
             except Exception:
                 pass
+        diagnostics = getattr(manager, "_candle_projection_diagnostics", None)
+        if isinstance(diagnostics, dict):
+            current = diagnostics.get(normalized)
+            if isinstance(current, dict):
+                current["projection_size"] = len(projected)
 
-    setattr(manager, "_ohlc_capacity_contract_ready", capacity)
-    return capacity
+    return [dict(row) for row in projected]
 
 
 def install_mdm_ohlc_capacity_contract() -> bool:
-    """Install the completed-OHLC capacity adapter exactly once."""
+    """Install the completed-OHLC projection adapter exactly once."""
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
     marker = "_completed_ohlc_capacity_contract_installed"
     if bool(getattr(MarketDataManager, marker, False)):
         return True
 
-    original_init = MarketDataManager.__init__
-    original_get_engine = MarketDataManager._get_engine
-    original_get_ohlc = MarketDataManager.get_ohlc_bars
+    original_refresh = MarketDataManager._refresh_candle_projection
 
-    @wraps(original_init)
-    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-        original_init(self, *args, **kwargs)
-        ensure_ohlc_capacity(self)
+    @wraps(original_refresh)
+    def _refresh_candle_projection(
+        self: Any, symbol: str, *, source: str | None = None
+    ) -> list[dict[str, Any]]:
+        native_rows = list(original_refresh(self, symbol, source=source) or [])
+        return _expanded_projection(
+            self,
+            symbol,
+            source=source,
+            native_rows=native_rows,
+        )
 
-    @wraps(original_get_engine)
-    def _get_engine(self: Any, symbol: str) -> Any:
-        engine = original_get_engine(self, symbol)
-        capacity = ensure_ohlc_capacity(self)
-        completed = getattr(engine, "_completed_candles", None)
-        if completed is not None and getattr(completed, "maxlen", None) != capacity:
-            try:
-                engine._completed_candles = _resize(completed, capacity)
-            except Exception:
-                pass
-        try:
-            if int(getattr(engine, "max_bars", 0) or 0) < capacity:
-                engine.max_bars = capacity
-        except Exception:
-            pass
-        return engine
-
-    @wraps(original_get_ohlc)
-    def get_ohlc_bars(
-        self: Any, symbol: str, *, limit: int | None = None
-    ) -> list[Any]:
-        """Return canonical completed bars without raw-tick 250-row truncation."""
-        capacity = ensure_ohlc_capacity(self)
-        requested = capacity if limit is None else max(1, min(int(limit), capacity))
-
-        # Preserve native symbol normalization and projection diagnostics first.
-        native = list(original_get_ohlc(self, symbol, limit=requested) or [])
-        try:
-            engine = self._get_engine(symbol)
-            canonical = list(engine.get_completed_bars() or [])
-        except Exception:
-            canonical = []
-
-        # CandleEngine is MDM's authoritative finalized-history owner. Prefer it
-        # only when it proves a deeper canonical view than the legacy projection.
-        rows = canonical if len(canonical) > len(native) else native
-        if limit is not None:
-            rows = rows[-requested:]
-        elif len(rows) > capacity:
-            rows = rows[-capacity:]
-
-        key_resolver = getattr(self, "_bar_symbol_key", None)
-        if callable(key_resolver):
-            try:
-                key = key_resolver(symbol)
-                current = getattr(self, "_ohlc", {}).get(key)
-                if (
-                    current is None
-                    or getattr(current, "maxlen", None) != capacity
-                    or len(current) != len(rows)
-                ):
-                    self._ohlc[key] = _resize(rows, capacity)
-            except Exception:
-                pass
-        return [dict(row) if isinstance(row, Mapping) else row for row in rows]
-
-    MarketDataManager.__init__ = __init__  # type: ignore[method-assign]
-    MarketDataManager._get_engine = _get_engine  # type: ignore[method-assign]
-    MarketDataManager.get_ohlc_bars = get_ohlc_bars  # type: ignore[method-assign]
+    MarketDataManager._refresh_candle_projection = _refresh_candle_projection  # type: ignore[method-assign]
     setattr(MarketDataManager, marker, True)
     return True
 
 
 __all__ = [
     "configured_ohlc_capacity",
-    "ensure_ohlc_capacity",
     "install_mdm_ohlc_capacity_contract",
 ]
