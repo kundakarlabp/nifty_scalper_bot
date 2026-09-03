@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import os
 from typing import Any, Mapping
 
+from nifty_scalper_bot.utils.symbols import normalize_symbol
+
 SPOT_SYMBOLS = {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}
 OPTION_SUFFIXES = ("CE", "PE")
 _HISTORY_METHODS = ("get_ohlc_bars", "get_history", "get_bars")
@@ -84,6 +86,56 @@ def _bar_ts(bar: Any) -> Any:
     )
 
 
+def _basket_get(basket: Any, key: str, default: Any = None) -> Any:
+    if isinstance(basket, Mapping):
+        return basket.get(key, default)
+    return getattr(basket, key, default)
+
+
+def _active_basket(data_hub: Any | None) -> Any | None:
+    if data_hub is None:
+        return None
+    getter = getattr(data_hub, "get_active_contract_basket", None)
+    if callable(getter):
+        with suppress(Exception):
+            basket = getter()
+            if basket is not None:
+                return basket
+    mdm = getattr(data_hub, "_mdm", None)
+    getter = getattr(mdm, "get_active_contract_basket", None)
+    if callable(getter):
+        with suppress(Exception):
+            basket = getter()
+            if basket is not None:
+                return basket
+    return None
+
+
+def _resolve_underlying_symbols(
+    data_hub: Any | None,
+    runner_context: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Resolve active spot/futures identities for option strategy evaluation.
+
+    StrategyManager passes the result of this builder directly into SMC/ORB.
+    Those strategies read completed underlying bars by ``futures_symbol`` and
+    ``spot_symbol``. Keeping the identities here prevents healthy nested context
+    snapshots from becoming unusable simply because the top-level keys were
+    absent after an ATM basket rotation.
+    """
+    context = runner_context or {}
+    basket = _active_basket(data_hub)
+    raw_spot = context.get("spot_symbol") or _basket_get(basket, "spot_symbol") or "NSE:NIFTY"
+    raw_future = (
+        context.get("futures_symbol")
+        or _basket_get(basket, "futures_symbol")
+        or _basket_get(basket, "future_symbol")
+    )
+    spot = normalize_symbol(str(raw_spot or "")) or None
+    future = normalize_symbol(str(raw_future or "")) or None
+    return spot, future
+
+
 def classify_history_domain(symbol: str) -> str:
     symbol_upper = str(symbol or "").upper()
     if symbol_upper.endswith(OPTION_SUFFIXES):
@@ -153,7 +205,7 @@ def build_strategy_history_context(
     oldest_bar_ts = _bar_ts(bars[0]) if bars else None
     latest_bar_ts = _bar_ts(bars[-1]) if bars else None
 
-    return StrategyHistoryContext(
+    result = StrategyHistoryContext(
         history_count=resolved_history_count,
         indicator_history_count=raw_count,
         option_history_count=option_count,
@@ -171,6 +223,13 @@ def build_strategy_history_context(
         smc_history_required_min=smc_min_bars,
         history_ready_for_smc=resolved_history_count >= smc_min_bars,
     ).to_dict()
+
+    if history_domain_used == "options":
+        spot_symbol, futures_symbol = _resolve_underlying_symbols(data_hub, runner_context)
+        result["spot_symbol"] = spot_symbol
+        result["futures_symbol"] = futures_symbol
+
+    return result
 
 
 __all__ = [
