@@ -40,7 +40,9 @@ def _projection_capacity(manager: Any) -> int:
     """Resolve decoupled capacity while preserving explicit legacy overrides."""
     configured = configured_ohlc_capacity()
     try:
-        current_raw = max(1, int(getattr(manager, "_cache_len", configured) or configured))
+        current_raw = max(
+            1, int(getattr(manager, "_cache_len", configured) or configured)
+        )
     except (TypeError, ValueError):
         current_raw = configured
 
@@ -52,6 +54,16 @@ def _projection_capacity(manager: Any) -> int:
         baseline_value = int(baseline) if baseline is not None else None
     except (TypeError, ValueError):
         baseline_value = None
+
+    # Some diagnostics/tests and specialised callers intentionally construct
+    # MDM with ``__new__`` and provide only the legacy cache/projection fields.
+    # Such partial instances never passed through the normal constructor, so
+    # their supplied ``_cache_len`` remains the authoritative combined limit.
+    fully_initialized = hasattr(manager, "_raw_tick_history") and hasattr(
+        manager, "_settings"
+    )
+    if baseline_value is None and not fully_initialized:
+        return min(configured, current_raw)
 
     # ``MDM_TICK_CACHE_LEN`` is intentionally decoupled from completed OHLC.
     # An explicit constructor ``cache_len=...`` or a later direct runtime
