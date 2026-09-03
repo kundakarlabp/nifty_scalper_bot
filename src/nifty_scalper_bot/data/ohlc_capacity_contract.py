@@ -20,7 +20,9 @@ _MIN_SESSION_CAPACITY = 400
 def configured_ohlc_capacity() -> int:
     """Return bounded completed-candle capacity required by intraday strategies."""
     try:
-        configured = int(float(os.getenv("MDM_OHLC_CACHE_LEN", str(_DEFAULT_OHLC_CAPACITY))))
+        configured = int(
+            float(os.getenv("MDM_OHLC_CACHE_LEN", str(_DEFAULT_OHLC_CAPACITY)))
+        )
     except (TypeError, ValueError):
         configured = _DEFAULT_OHLC_CAPACITY
     return max(_MIN_SESSION_CAPACITY, configured)
@@ -32,10 +34,12 @@ def _resize(value: Any, capacity: int) -> deque[Any]:
 
 
 def ensure_ohlc_capacity(manager: Any) -> int:
-    """Enlarge completed-candle storage on an existing MDM instance in place."""
+    """Enlarge completed-candle storage on an existing MDM instance once."""
     capacity = configured_ohlc_capacity()
-    setattr(manager, "_ohlc_cache_len", capacity)
+    if int(getattr(manager, "_ohlc_capacity_contract_ready", 0) or 0) == capacity:
+        return capacity
 
+    setattr(manager, "_ohlc_cache_len", capacity)
     projection = getattr(manager, "_ohlc", None)
     if isinstance(projection, Mapping):
         replacement = defaultdict(lambda: deque(maxlen=capacity))
@@ -50,7 +54,7 @@ def ensure_ohlc_capacity(manager: Any) -> int:
     if isinstance(engines, Mapping):
         for engine in list(engines.values()):
             completed = getattr(engine, "_completed_candles", None)
-            if completed is not None:
+            if completed is not None and getattr(completed, "maxlen", None) != capacity:
                 try:
                     engine._completed_candles = _resize(completed, capacity)
                 except Exception:
@@ -60,6 +64,8 @@ def ensure_ohlc_capacity(manager: Any) -> int:
                     engine.max_bars = capacity
             except Exception:
                 pass
+
+    setattr(manager, "_ohlc_capacity_contract_ready", capacity)
     return capacity
 
 
@@ -91,32 +97,47 @@ def install_mdm_ohlc_capacity_contract() -> bool:
             except Exception:
                 pass
         try:
-            engine.max_bars = max(int(getattr(engine, "max_bars", 0) or 0), capacity)
+            if int(getattr(engine, "max_bars", 0) or 0) < capacity:
+                engine.max_bars = capacity
         except Exception:
             pass
         return engine
 
     @wraps(original_get_ohlc)
-    def get_ohlc_bars(self: Any, symbol: str, *, limit: int | None = None) -> list[Any]:
-        """Return canonical completed bars without the raw-tick 250-row truncation."""
+    def get_ohlc_bars(
+        self: Any, symbol: str, *, limit: int | None = None
+    ) -> list[Any]:
+        """Return canonical completed bars without raw-tick 250-row truncation."""
         capacity = ensure_ohlc_capacity(self)
         requested = capacity if limit is None else max(1, min(int(limit), capacity))
+
+        # Preserve native symbol normalization and projection diagnostics first.
         native = list(original_get_ohlc(self, symbol, limit=requested) or [])
         try:
             engine = self._get_engine(symbol)
             canonical = list(engine.get_completed_bars() or [])
         except Exception:
             canonical = []
+
+        # CandleEngine is MDM's authoritative finalized-history owner. Prefer it
+        # only when it proves a deeper canonical view than the legacy projection.
         rows = canonical if len(canonical) > len(native) else native
         if limit is not None:
             rows = rows[-requested:]
         elif len(rows) > capacity:
             rows = rows[-capacity:]
+
         key_resolver = getattr(self, "_bar_symbol_key", None)
         if callable(key_resolver):
             try:
                 key = key_resolver(symbol)
-                self._ohlc[key] = _resize(rows, capacity)
+                current = getattr(self, "_ohlc", {}).get(key)
+                if (
+                    current is None
+                    or getattr(current, "maxlen", None) != capacity
+                    or len(current) != len(rows)
+                ):
+                    self._ohlc[key] = _resize(rows, capacity)
             except Exception:
                 pass
         return [dict(row) if isinstance(row, Mapping) else row for row in rows]
