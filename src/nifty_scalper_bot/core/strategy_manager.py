@@ -30,10 +30,10 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.signal_quality import infer_option_side
-from nifty_scalper_bot.strategies.signal_generator import (
-    Signal,
+from nifty_scalper_bot.core.strategy_context_builder import (
     build_strategy_history_context,
 )
+from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )

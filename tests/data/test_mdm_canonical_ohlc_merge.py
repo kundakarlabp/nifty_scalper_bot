@@ -1,368 +1,138 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import deque
 from datetime import datetime, timedelta, timezone
-import threading
 
+import pandas as pd
 import pytest
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-import nifty_scalper_bot.data.market_data_manager as mdm_module
 
 
-def _mdm() -> MarketDataManager:
-    mdm = MarketDataManager.__new__(MarketDataManager)
-    mdm._lock = threading.RLock()
-    mdm._cache_len = 250
-    mdm._ohlc = defaultdict(lambda: deque(maxlen=mdm._cache_len))
-    return mdm
+SYMBOL = "NFO:NIFTY26JUN24000CE"
 
 
-def _bar(
-    i: int,
-    *,
-    source: str = "historical",
-    provisional: bool = False,
-    close: float | None = None,
-) -> dict:
-    ts = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc) + timedelta(minutes=i)
-    return {
-        "symbol": "NFO:NIFTY26JUN24000CE",
-        "timestamp": ts,
-        "open": 100 + i,
-        "high": 101 + i,
-        "low": 99 + i,
-        "close": float(close if close is not None else 100 + i),
-        "volume": i,
-        "source": source,
-        "provisional": provisional,
-        "synthetic": False,
-        "timestamp_quality": "broker",
-    }
+def _rows(count: int) -> list[dict[str, object]]:
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    return [
+        {
+            "timestamp": start + timedelta(minutes=index),
+            "open": 100.0 + index,
+            "high": 101.0 + index,
+            "low": 99.0 + index,
+            "close": 100.5 + index,
+            "volume": 1_000 + index,
+        }
+        for index in range(count)
+    ]
 
 
-def test_canonical_getter_merges_history_and_live_dedupes_overlaps() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    for i in range(50):
-        mdm._ohlc[key].append(_bar(i, source="historical"))
-    for i in range(35, 50):
-        mdm._ohlc[symbol].append(_bar(i, source="ws_candle", close=1000 + i))
+def _mdm_with_history(count: int = 50) -> tuple[MarketDataManager, list[dict[str, object]]]:
+    mdm = MarketDataManager(broker=None, websocket=None)
+    rows = _rows(count)
+    engine = mdm.get_candle_engine(SYMBOL)
+    engine.import_history(pd.DataFrame(rows), mode="bootstrap", source="historical")
+    return mdm, rows
 
-    bars = mdm.get_ohlc_bars(symbol)
+
+def test_canonical_getter_reads_candle_engine_and_ignores_projection_overlap() -> None:
+    mdm, rows = _mdm_with_history(50)
+
+    # `_ohlc` is compatibility/diagnostic projection state only. A stale legacy
+    # projection with overlapping timestamps and different prices must not alter
+    # the canonical CandleEngine view.
+    with mdm._lock:
+        mdm._ohlc[SYMBOL] = deque(
+            [
+                {
+                    **rows[index],
+                    "close": 1_000.0 + index,
+                    "source": "legacy_projection",
+                }
+                for index in range(35, 50)
+            ],
+            maxlen=250,
+        )
+
+    bars = mdm.get_ohlc_bars(SYMBOL)
 
     assert len(bars) == 50
-    assert [bar["timestamp"] for bar in bars] == sorted(
-        bar["timestamp"] for bar in bars
-    )
-    assert len({bar["timestamp"] for bar in bars}) == 50
-    assert bars[-1]["close"] == 1049.0
-
-
-def test_canonical_getter_does_not_let_provisional_current_candle_overwrite_history() -> (
-    None
-):
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[key].append(_bar(1, source="historical", close=101.0))
-    mdm._ohlc[key].append(_bar(1, source="ws_candle", provisional=True, close=999.0))
-
-    bars = mdm.get_ohlc_bars(symbol)
-
-    assert len(bars) == 1
-    assert bars[0]["close"] == 101.0
-    assert bars[0]["source"] == "historical"
-
-
-def test_completed_live_candle_precedes_historical_on_same_timestamp() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[key].append(_bar(2, source="historical", close=102.0))
-    mdm._ohlc[key].append(_bar(2, source="ws_candle", close=202.0))
-
-    bars = mdm.get_ohlc_bars(symbol)
-
-    assert len(bars) == 1
-    assert bars[0]["close"] == 202.0
-    assert bars[0]["source"] == "ws_candle"
-
-
-def test_canonical_getter_applies_limit_after_merge_and_does_not_mutate_storage() -> (
-    None
-):
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    for i in range(10):
-        mdm._ohlc[key].append(_bar(i, source="historical"))
-    before = list(mdm._ohlc[key])
-
-    bars = mdm.get_ohlc_bars(symbol, limit=3)
-
-    assert [bar["timestamp"] for bar in bars] == [
-        before[-3]["timestamp"],
-        before[-2]["timestamp"],
-        before[-1]["timestamp"],
+    assert [pd.Timestamp(bar["timestamp"]) for bar in bars] == [
+        pd.Timestamp(row["timestamp"]) for row in rows
     ]
-    assert list(mdm._ohlc[key]) == before
+    assert bars[-1]["close"] == rows[-1]["close"]
 
 
-def _custom_bar(
-    timestamp: object,
-    *,
-    source: str,
-    close: float,
-    provisional: bool = False,
-    synthetic: bool = False,
-    timestamp_quality: str = "broker",
-) -> dict:
-    return {
-        "symbol": "NFO:NIFTY26JUN24000CE",
-        "timestamp": timestamp,
-        "open": close,
-        "high": close + 1,
-        "low": close - 1,
-        "close": close,
-        "volume": 1,
-        "source": source,
-        "provisional": provisional,
-        "synthetic": synthetic,
-        "timestamp_quality": timestamp_quality,
-    }
-
-
-def _assert_single_live_winner(mdm: MarketDataManager, symbol: str) -> None:
-    bars = mdm.get_ohlc_bars(symbol)
-    assert len(bars) == 1
-    assert bars[0]["source"] == "ws_candle"
-    assert bars[0]["synthetic"] is True
-    assert bars[0]["timestamp_quality"] == "exchange_timestamp"
-    assert bars[0]["provisional"] is False
-    assert bars[0]["close"] == 222.0
-
-
-def test_naive_ist_history_and_aware_ist_live_timestamp_dedupe_with_metadata() -> None:
-    from zoneinfo import ZoneInfo
-
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15),
-            source="historical",
-            close=111.0,
-            timestamp_quality="broker_naive",
+def test_projection_provisional_row_cannot_overwrite_finalized_canonical_bar() -> None:
+    mdm, rows = _mdm_with_history(2)
+    with mdm._lock:
+        mdm._ohlc[SYMBOL] = deque(
+            [
+                {
+                    **rows[-1],
+                    "close": 999.0,
+                    "provisional": True,
+                    "source": "legacy_projection",
+                }
+            ],
+            maxlen=250,
         )
-    )
-    mdm._ohlc[key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
-            source="ws_candle",
-            close=222.0,
-            synthetic=True,
-            timestamp_quality="exchange_timestamp",
-        )
-    )
 
-    _assert_single_live_winner(mdm, symbol)
+    bars = mdm.get_ohlc_bars(SYMBOL)
+
+    assert len(bars) == 2
+    assert bars[-1]["close"] == rows[-1]["close"]
 
 
-def test_naive_ist_history_and_equivalent_utc_live_timestamp_dedupe() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[key].append(
-        _custom_bar(datetime(2026, 1, 1, 9, 15), source="historical", close=111.0)
-    )
-    mdm._ohlc[key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 3, 45, 45, tzinfo=timezone.utc),
-            source="ws_candle",
-            close=222.0,
-            synthetic=True,
-            timestamp_quality="exchange_timestamp",
-        )
-    )
+def test_canonical_getter_applies_limit_after_candle_engine_read() -> None:
+    mdm, rows = _mdm_with_history(10)
+    projection_before = list(mdm._ohlc.get(SYMBOL, ()))
 
-    _assert_single_live_winner(mdm, symbol)
+    bars = mdm.get_ohlc_bars(SYMBOL, limit=3)
+
+    assert len(bars) == 3
+    assert [pd.Timestamp(bar["timestamp"]) for bar in bars] == [
+        pd.Timestamp(row["timestamp"]) for row in rows[-3:]
+    ]
+    assert list(mdm._ohlc.get(SYMBOL, ())) == projection_before
 
 
-def test_iso_timestamp_with_ist_offset_dedupes_to_same_minute() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[key].append(
-        _custom_bar("2026-01-01T09:15:00+05:30", source="historical", close=111.0)
-    )
-    mdm._ohlc[key].append(
-        _custom_bar(
-            "2026-01-01T03:45:40Z",
-            source="ws_candle",
-            close=222.0,
-            synthetic=True,
-            timestamp_quality="exchange_timestamp",
-        )
-    )
+def test_canonical_getter_is_deterministic_and_returns_defensive_rows() -> None:
+    mdm, rows = _mdm_with_history(5)
 
-    _assert_single_live_winner(mdm, symbol)
-
-
-def test_unix_epoch_timestamp_dedupes_to_same_minute() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    epoch = datetime(2026, 1, 1, 3, 45, 10, tzinfo=timezone.utc).timestamp()
-    mdm._ohlc[key].append(_custom_bar(epoch, source="historical", close=111.0))
-    mdm._ohlc[key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15, 55),
-            source="ws_candle",
-            close=222.0,
-            synthetic=True,
-            timestamp_quality="exchange_timestamp",
-        )
-    )
-
-    _assert_single_live_winner(mdm, symbol)
-
-
-def test_invalid_timestamp_is_rejected_deterministically() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[key].append(
-        _custom_bar("not-a-timestamp", source="historical", close=111.0)
-    )
-    mdm._ohlc[key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15),
-            source="ws_candle",
-            close=222.0,
-            synthetic=True,
-            timestamp_quality="exchange_timestamp",
-        )
-    )
-
-    bars = mdm.get_ohlc_bars(symbol)
-
-    assert len(bars) == 1
-    assert bars[0]["source"] == "ws_candle"
-    assert bars[0]["timestamp_quality"] == "exchange_timestamp"
-
-
-def test_canonical_and_raw_key_merge_order_is_deterministic_and_canonical_authoritative() -> (
-    None
-):
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    raw_symbol = "  NFO:NIFTY26JUN24000CE  "
-    canonical_key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[canonical_key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15),
-            source="historical",
-            close=111.0,
-            synthetic=False,
-            timestamp_quality="canonical_history",
-        )
-    )
-    mdm._ohlc[raw_symbol].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15),
-            source="historical",
-            close=999.0,
-            synthetic=True,
-            timestamp_quality="legacy_raw_history",
-        )
-    )
-
-    first = mdm.get_ohlc_bars(raw_symbol)
-    second = mdm.get_ohlc_bars(raw_symbol)
+    first = mdm.get_ohlc_bars(SYMBOL)
+    second = mdm.get_ohlc_bars(SYMBOL)
 
     assert first == second
-    assert len(first) == 1
-    assert first[0]["close"] == 111.0
-    assert first[0]["timestamp_quality"] == "canonical_history"
-    assert first[0]["synthetic"] is False
+    first[-1]["close"] = -1.0
+    third = mdm.get_ohlc_bars(SYMBOL)
+    assert third[-1]["close"] == rows[-1]["close"]
 
 
-def test_repeated_canonical_getter_calls_keep_same_live_winner_metadata() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    mdm._ohlc[key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15),
-            source="historical",
-            close=111.0,
-            synthetic=False,
-            timestamp_quality="broker_history",
+def test_projection_only_state_is_not_canonical_for_fully_initialized_mdm() -> None:
+    mdm = MarketDataManager(broker=None, websocket=None)
+    with mdm._lock:
+        mdm._ohlc[SYMBOL] = deque(
+            [
+                {
+                    "timestamp": datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc),
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1_000,
+                }
+            ],
+            maxlen=250,
         )
-    )
-    mdm._ohlc[key].append(
-        _custom_bar(
-            datetime(2026, 1, 1, 9, 15, 30),
-            source="ws_candle",
-            close=222.0,
-            synthetic=True,
-            timestamp_quality="exchange_timestamp",
-            provisional=False,
-        )
-    )
 
-    first = mdm.get_ohlc_bars(symbol)
-    second = mdm.get_ohlc_bars(symbol)
-
-    assert first == second
-    assert len(first) == 1
-    assert first[0]["source"] == "ws_candle"
-    assert first[0]["synthetic"] is True
-    assert first[0]["timestamp_quality"] == "exchange_timestamp"
-    assert first[0]["provisional"] is False
-
-
-def test_canonical_getter_accepts_date_only_and_aggregates_invalid_rows(
-    monkeypatch,
-) -> None:
-    calls = []
-    monkeypatch.setattr(
-        mdm_module,
-        "log_throttled",
-        lambda logger, key, message, **kwargs: calls.append(message),
-    )
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    key = mdm._bar_symbol_key(symbol)
-    source = _bar(0, source="historical")
-    source.pop("timestamp")
-    source["date"] = "2026-01-01T09:15:00+05:30"
-    stored = dict(source)
-    mdm._ohlc[key].append(source)
-    mdm._ohlc[key].append(
-        {"timestamp": "bad", "open": 1, "high": 1, "low": 1, "close": 1}
-    )
-    mdm._ohlc[key].append(
-        {"date": "also-bad", "open": 1, "high": 1, "low": 1, "close": 1}
-    )
-
-    bars = mdm.get_ohlc_bars(symbol)
-
-    assert len(bars) == 1
-    assert bars[0]["timestamp"].tzinfo is not None
-    assert bars[0]["timestamp"].utcoffset().total_seconds() == 19800
-    assert dict(mdm._ohlc[key][0]) == stored
-    assert len(calls) == 1
-    assert "rows_seen=3 rows_rejected=2" in calls[0]
+    assert mdm.get_ohlc_bars(SYMBOL) == []
+    assert mdm.get_latest_closed_bar(SYMBOL) is None
 
 
 def test_canonical_getter_limit_zero_and_negative_limit() -> None:
-    mdm = _mdm()
-    symbol = "NFO:NIFTY26JUN24000CE"
-    mdm._ohlc[mdm._bar_symbol_key(symbol)].append(_bar(0))
-    assert mdm.get_ohlc_bars(symbol, limit=0) == []
+    mdm, _rows_data = _mdm_with_history(1)
+
+    assert mdm.get_ohlc_bars(SYMBOL, limit=0) == []
     with pytest.raises(ValueError):
-        mdm.get_ohlc_bars(symbol, limit=-1)
+        mdm.get_ohlc_bars(SYMBOL, limit=-1)

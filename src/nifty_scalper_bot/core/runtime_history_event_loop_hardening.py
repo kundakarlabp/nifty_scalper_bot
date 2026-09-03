@@ -12,9 +12,6 @@ from functools import wraps
 from typing import Any, Mapping
 
 from nifty_scalper_bot.core.active_basket import extract_symbol_strike
-from nifty_scalper_bot.data.ohlc_capacity_contract import (
-    install_mdm_ohlc_capacity_contract,
-)
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -167,8 +164,7 @@ def _current_result(
 
 
 def apply_app_patch(app_module: Any) -> bool:
-    """Defer cold far-context history and install completed-OHLC capacity."""
-    install_mdm_ohlc_capacity_contract()
+    """Defer cold far-context history; CandleEngine ownership stays native."""
     if bool(getattr(app_module, _PATCH_ATTR, False)):
         return True
     original = getattr(app_module, "ensure_symbol_runtime_history", None)

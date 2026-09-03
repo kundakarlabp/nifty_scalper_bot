@@ -259,15 +259,18 @@ def test_open_position_exit_continues_after_direction_context_degrades(live_sim_
     system.bracket_manager.on_tick(symbol, 95.0)
 
 
-def test_mdm_history_is_authoritative_over_indicator_diagnostics(live_sim_system):
+def test_candle_engine_history_survives_projection_removal(live_sim_system):
     system = live_sim_system
     _bootstrap(system)
     symbol = system.scenario.ce_symbol
-    assert system.market_data.get_latest_closed_bar(symbol) is not None
-    # Diagnostic divergence: indicator history can be present while
-    # canonical MDM is intentionally removed.
+    before = system.market_data.get_latest_closed_bar(symbol)
+    assert before is not None
     indicator_count = system.indicator_engine.history_count(symbol)
+    # `_ohlc` is derived compatibility/diagnostic projection state only.
+    # Removing it must not remove the authoritative CandleEngine history.
     with system.market_data._lock:  # noqa: SLF001
         system.market_data._ohlc.pop(symbol, None)  # noqa: SLF001
+    after = system.market_data.get_latest_closed_bar(symbol)
     assert indicator_count > 0
-    assert system.market_data.get_latest_closed_bar(symbol) is None
+    assert after is not None
+    assert after["timestamp"] == before["timestamp"]
