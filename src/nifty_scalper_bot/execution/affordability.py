@@ -31,8 +31,6 @@ class MinimumLotAffordability:
     remaining_daily_risk_budget: float | None = None
     effective_one_lot_risk_budget: float | None = None
     max_stop_distance_one_lot: float | None = None
-    daily_loss_headroom: float | None = None
-    risk_budget_semantics: str = "per_trade_sizing"
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -82,13 +80,10 @@ def _available_balance(
 def _risk_budget_snapshot(
     order_manager: Any | None, lot_size: int
 ) -> tuple[float | None, float | None, float | None, float | None]:
-    """Return actual sizing risk plus independent daily-loss headroom telemetry.
+    """Return per-trade/day/effective risk budgets and one-lot stop distance.
 
-    ``RiskManager.check_order()`` and ``suggest_position_size()`` size against the
-    configured per-trade risk budget. The daily-loss switch is a realised-PnL
-    circuit breaker; its remaining headroom is not a pre-trade stop-distance
-    budget. Keep both visible, but do not collapse them into a fictitious tighter
-    execution limit.
+    This is observability only. The authoritative per-signal decision remains the
+    MarginEngine followed by RiskManager.check_order().
     """
     manager = getattr(order_manager, "_risk_manager", None)
     if manager is None or lot_size <= 0:
@@ -122,7 +117,8 @@ def _risk_budget_snapshot(
             else:
                 remaining = 0.0
 
-    effective = per_trade
+    budgets = [value for value in (per_trade, remaining) if value is not None]
+    effective = min(budgets) if budgets else None
     max_stop_distance = (
         effective / float(lot_size)
         if effective is not None and lot_size > 0
@@ -155,6 +151,8 @@ def evaluate_minimum_lot_affordability(
     raw_buffer = _finite_float(
         getattr(order_manager, "_margin_buffer", None), minimum=0.0
     )
+    # MarginEngine compares available * buffer against required. Values above
+    # 1 would create synthetic buying power, so readiness clamps conservatively.
     margin_buffer = min(raw_buffer if raw_buffer and raw_buffer > 0 else 1.0, 1.0)
 
     ask = _finite_float(_field(quote, "ask", "best_ask"), minimum=0.0)
@@ -238,8 +236,6 @@ def evaluate_minimum_lot_affordability(
         remaining_daily_risk_budget=remaining_daily_risk_budget,
         effective_one_lot_risk_budget=effective_one_lot_risk_budget,
         max_stop_distance_one_lot=max_stop_distance_one_lot,
-        daily_loss_headroom=remaining_daily_risk_budget,
-        risk_budget_semantics="per_trade_sizing",
     )
 
 
