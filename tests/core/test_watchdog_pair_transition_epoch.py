@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import (
     _apply_selected_pair_transition_liveness,
     _record_selected_pair_transition,
+    _schedule_selected_pair_evaluation,
 )
 
 OLD_PAIR = ("NFO:NIFTY2690124050CE", "NFO:NIFTY2690124050PE")
 NEW_PAIR = ("NFO:NIFTY2690124000CE", "NFO:NIFTY2690124000PE")
+
+
+class _Logger:
+    def info(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def warning(self, *_args: object, **_kwargs: object) -> None:
+        return None
 
 
 def _runner() -> SimpleNamespace:
@@ -97,6 +107,23 @@ def test_rotated_pair_without_completion_stalls_after_configured_timeout() -> No
     assert adjusted["evaluation_alive"] is False
 
 
+def test_rotated_pair_fails_closed_on_short_selected_pair_deadline(monkeypatch) -> None:
+    monkeypatch.setenv("SELECTED_PAIR_EVAL_STALL_SECONDS", "15")
+    runner = _runner()
+    _record_selected_pair_transition(runner, OLD_PAIR, NEW_PAIR, now=100.0)
+    runner._last_selected_option_tick_ts = 115.5
+
+    adjusted = _apply_selected_pair_transition_liveness(
+        runner,
+        _state(work_outstanding=True, drain_active=False),
+        now=116.0,
+    )
+
+    assert adjusted["selected_pair_eval_stall_s"] == 15.0
+    assert adjusted["worker_stalled"] is True
+    assert adjusted["evaluation_alive"] is False
+
+
 def test_rotated_pair_active_worker_over_90_seconds_still_fails_closed() -> None:
     runner = _runner()
     _record_selected_pair_transition(runner, OLD_PAIR, NEW_PAIR, now=100.0)
@@ -145,3 +172,48 @@ def test_current_pair_completion_restores_canonical_liveness_result() -> None:
     assert adjusted["last_progress_age_s"] == 1.0
     assert adjusted["worker_stalled"] is False
     assert adjusted["evaluation_alive"] is True
+
+
+def test_pair_rotation_forces_both_selected_legs_and_reschedules_stale_latch() -> None:
+    calls: list[bool] = []
+    runner = SimpleNamespace(
+        _eval_gate_lock=threading.Lock(),
+        _pending_entry_eval_symbols=set(),
+        _entry_eval_generation_by_symbol={},
+        _entry_eval_shutdown=False,
+        _entry_eval_active=False,
+        _entry_eval_drain_scheduled=True,
+        _schedule_entry_eval_drain=lambda: (calls.append(True), True)[1],
+        _logger=_Logger(),
+    )
+
+    assert _schedule_selected_pair_evaluation(runner, NEW_PAIR, now=100.0) is True
+
+    assert runner._pending_entry_eval_symbols == set(NEW_PAIR)
+    assert runner._entry_eval_generation_by_symbol[NEW_PAIR[0]] == 1
+    assert runner._entry_eval_generation_by_symbol[NEW_PAIR[1]] == 1
+    assert calls == [True]
+    assert runner._entry_eval_drain_scheduled is True
+
+
+def test_pair_rotation_schedule_failure_disarms_immediately() -> None:
+    runner = SimpleNamespace(
+        _eval_gate_lock=threading.Lock(),
+        _pending_entry_eval_symbols=set(),
+        _entry_eval_generation_by_symbol={},
+        _entry_eval_shutdown=False,
+        _entry_eval_active=False,
+        _entry_eval_drain_scheduled=True,
+        _schedule_entry_eval_drain=lambda: False,
+        _entry_eval_stall_disarmed=False,
+        _runtime_live_orders_armed=True,
+        _runtime_readiness_reason=None,
+        _logger=_Logger(),
+    )
+
+    assert _schedule_selected_pair_evaluation(runner, NEW_PAIR, now=100.0) is False
+
+    assert runner._entry_eval_drain_scheduled is False
+    assert runner._entry_eval_stall_disarmed is True
+    assert runner._runtime_live_orders_armed is False
+    assert runner._runtime_readiness_reason == "strategy_evaluation_stalled"
