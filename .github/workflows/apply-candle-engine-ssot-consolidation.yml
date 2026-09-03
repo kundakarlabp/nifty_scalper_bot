@@ -19,6 +19,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Repair transformer indentation helpers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply_candle_engine_ssot_consolidation.py')
+          t = p.read_text(encoding='utf-8')
+          old = '''    lines = text.splitlines(keepends=True)\n    lines[_node_start(target) - 1 : target.end_lineno] = [textwrap.dedent(replacement).rstrip() + "\\n"]\n    _write(path, "".join(lines))\n'''
+          new = '''    lines = text.splitlines(keepends=True)\n    rendered = textwrap.indent(\n        textwrap.dedent(replacement).strip("\\n"),\n        " " * int(getattr(target, "col_offset", 0)),\n    ) + "\\n"\n    lines[_node_start(target) - 1 : target.end_lineno] = [rendered]\n    _write(path, "".join(lines))\n'''
+          if t.count(old) != 1:
+              raise SystemExit(f'class helper target count={t.count(old)}')
+          t = t.replace(old, new, 1)
+          old2 = '''    lines = text.splitlines(keepends=True)\n    lines[insert_line:insert_line] = [textwrap.dedent(insertion).rstrip() + "\\n"]\n    _write(path, "".join(lines))\n'''
+          new2 = '''    lines = text.splitlines(keepends=True)\n    body_indent = int(getattr(target.body[body_index if body_index < len(target.body) else -1], "col_offset", target.col_offset + 4))\n    rendered = textwrap.indent(\n        textwrap.dedent(insertion).strip("\\n"),\n        " " * body_indent,\n    ) + "\\n"\n    lines[insert_line:insert_line] = [rendered]\n    _write(path, "".join(lines))\n'''
+          if t.count(old2) != 1:
+              raise SystemExit(f'insertion helper target count={t.count(old2)}')
+          p.write_text(t.replace(old2, new2, 1), encoding='utf-8')
+          PY
       - name: Apply deterministic source transformation
         run: python tools/apply_candle_engine_ssot_consolidation.py
       - name: Syntax check transformed production source
