@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import nifty_scalper_bot.data.market_data_manager as mdm_module
+from nifty_scalper_bot.data.candle_engine import CandleEngine
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 SYMBOL = "NSE:NIFTY"
@@ -272,7 +273,10 @@ def test_malformed_rows_are_counted_on_validation_failure() -> None:
 
 def test_history_import_new_bar_counter_idempotent_and_rollover() -> None:
     mdm = _mdm()
+    # Raw tick retention is independent from finalized OHLC retention. Exercise
+    # rollover by configuring the authoritative CandleEngine itself.
     mdm._cache_len = 1
+    mdm._engines[SYMBOL] = CandleEngine(max_bars=1, symbol=SYMBOL)
     first = mdm.import_historical_ohlc(SYMBOL, [_bar()])
     same = mdm.import_historical_ohlc(SYMBOL, [_bar()])
     row2 = _bar(close=3.0)
