@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Awaitable, Callable, TypeVar
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
 from nifty_scalper_bot.utils.logging import log_throttled
 
 _LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 _T = TypeVar("_T")
+_INDIA_TZ = ZoneInfo("Asia/Kolkata")
 _OPTION_DIRECTION_CONTEXT_KEYS = {
     "direction_bias",
     "underlying_direction_bias",
@@ -237,8 +241,91 @@ def adapt_wire_and_start_message_bus(
     return wrapped
 
 
+def _bar_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    """Return a UTC bar timestamp for safe same-session history reconciliation."""
+    value = row.get("timestamp")
+    if isinstance(value, datetime):
+        result = value
+    elif isinstance(value, (int, float)):
+        number = float(value)
+        if number > 10_000_000_000:
+            number /= 1000.0
+        try:
+            result = datetime.fromtimestamp(number, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    elif isinstance(value, str) and value.strip():
+        try:
+            result = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _indicator_bar_rows(runner: Any, symbol: str) -> list[dict[str, Any]]:
+    """Read completed IndicatorEngine bars without reaching into broker hydration."""
+    engine = getattr(runner, "_indicator_engine", None)
+    getter = getattr(engine, "get_history", None)
+    if not callable(getter):
+        return []
+    try:
+        rows = getter(symbol, field="bars")
+    except Exception:  # noqa: BLE001 - preservation is defensive, not readiness authority
+        return []
+    result: list[dict[str, Any]] = []
+    for row in rows or ():
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("is_provisional") is True or row.get("is_complete") is False:
+            continue
+        ts = _bar_timestamp(row)
+        if ts is None:
+            continue
+        copied = dict(row)
+        copied["timestamp"] = ts
+        result.append(copied)
+    result.sort(key=lambda item: item["timestamp"])
+    return result
+
+
+def _same_session_merge(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge only the latest IST trading session, preferring post-sync MDM rows."""
+    if not before or not after:
+        return after
+    latest_after = _bar_timestamp(after[-1])
+    if latest_after is None:
+        return after
+    session_date = latest_after.astimezone(_INDIA_TZ).date()
+    merged: dict[datetime, dict[str, Any]] = {}
+    for row in before:
+        ts = _bar_timestamp(row)
+        if ts is not None and ts.astimezone(_INDIA_TZ).date() == session_date:
+            merged[ts] = dict(row)
+    for row in after:
+        ts = _bar_timestamp(row)
+        if ts is not None and ts.astimezone(_INDIA_TZ).date() == session_date:
+            copied = dict(row)
+            copied["timestamp"] = ts
+            merged[ts] = copied
+    return [merged[key] for key in sorted(merged)]
+
+
 def adapt_sync_history_from_mdm(original: Callable[..., _T]) -> Callable[..., _T]:
-    """Correct unambiguous spot/futures history-role mismatches at the SSOT."""
+    """Correct history roles and prevent destructive underlying-session reseeds.
+
+    The canonical MDM fetch policy intentionally caps hot-path spot/futures fetches.
+    A later reseed must not turn that fetch cap into an in-memory retention cap by
+    replacing a longer already-observed session with only the newest slice. ORB
+    needs the 09:15 opening range while current bars remain fresh. We therefore
+    preserve already-known bars from the same IST session for spot/futures only;
+    incoming MDM rows remain authoritative for duplicate timestamps.
+    """
 
     @wraps(original)
     def wrapped(self: Any, symbol: str, *args: Any, **kwargs: Any) -> _T:
@@ -251,7 +338,82 @@ def adapt_sync_history_from_mdm(original: Callable[..., _T]) -> Callable[..., _T
             and role != "spot_context"
         ):
             kwargs["role"] = "spot_context"
-        return original(self, symbol, *args, **kwargs)
+        role = str(kwargs.get("role") or role).strip().lower()
+
+        preserve_context = role in {"spot_context", "futures_context"}
+        canonicalizer = getattr(self, "_normalize_symbol", None)
+        canonical_symbol = (
+            str(canonicalizer(symbol)) if callable(canonicalizer) else str(symbol)
+        )
+        before = (
+            _indicator_bar_rows(self, canonical_symbol) if preserve_context else []
+        )
+
+        result = original(self, symbol, *args, **kwargs)
+        if not preserve_context or not before or not bool(getattr(result, "success", True)):
+            return result
+
+        after = _indicator_bar_rows(self, canonical_symbol)
+        merged = _same_session_merge(before, after)
+        if len(merged) <= len(after):
+            return result
+
+        try:
+            raw_cap = os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500"
+            cap = max(1, int(float(raw_cap)))
+        except (TypeError, ValueError):
+            cap = 500
+        merged = merged[-cap:]
+        required = max(1, int(kwargs.get("required_bars") or 1))
+        reason = str(kwargs.get("reason") or "runtime_sync")
+        try:
+            restored_count = int(
+                self.reseed_history_from_bars(
+                    canonical_symbol,
+                    merged,
+                    source=f"{reason}:preserve_context_session",
+                    min_bars=min(required, len(merged)),
+                )
+                or 0
+            )
+            indicator_after = len(_indicator_bar_rows(self, canonical_symbol))
+            if hasattr(result, "runner_bars"):
+                result.runner_bars = max(int(getattr(result, "runner_bars", 0) or 0), restored_count)
+            if hasattr(result, "indicator_bars"):
+                result.indicator_bars = max(
+                    int(getattr(result, "indicator_bars", 0) or 0), indicator_after
+                )
+            log_throttled(
+                _LOGGER,
+                f"context_session_history_preserved:{role}:{canonical_symbol}",
+                "CONTEXT_SESSION_HISTORY_PRESERVED "
+                f"symbol={canonical_symbol} role={role} before={len(before)} "
+                f"post_sync={len(after)} restored={indicator_after}",
+                interval_sec=300.0,
+                level=logging.INFO,
+                extra={
+                    "event": "CONTEXT_SESSION_HISTORY_PRESERVED",
+                    "symbol": canonical_symbol,
+                    "role": role,
+                    "before_bars": len(before),
+                    "post_sync_bars": len(after),
+                    "restored_bars": indicator_after,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - keep canonical sync result authoritative
+            _LOGGER.warning(
+                "CONTEXT_SESSION_HISTORY_PRESERVE_FAILED symbol=%s role=%s error=%s",
+                canonical_symbol,
+                role,
+                exc,
+                extra={
+                    "event": "CONTEXT_SESSION_HISTORY_PRESERVE_FAILED",
+                    "symbol": canonical_symbol,
+                    "role": role,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        return result
 
     return wrapped
 
