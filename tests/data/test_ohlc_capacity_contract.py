@@ -96,6 +96,31 @@ def test_projection_remains_authoritative_for_reads(monkeypatch) -> None:
     assert mdm.get_latest_closed_bar(SYMBOL) is None
 
 
+def test_runtime_legacy_cache_override_remains_authoritative(monkeypatch) -> None:
+    monkeypatch.setenv("MDM_OHLC_CACHE_LEN", "500")
+    install_mdm_ohlc_capacity_contract()
+    mdm = MarketDataManager(broker=None, websocket=None)
+    mdm._cache_len = 1
+
+    _seed_and_refresh(mdm, 2)
+
+    assert len(mdm.get_ohlc_bars(SYMBOL)) == 1
+    assert mdm._ohlc[SYMBOL].maxlen == 1
+
+
+def test_explicit_constructor_cache_len_keeps_legacy_combined_semantics(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MDM_OHLC_CACHE_LEN", "500")
+    install_mdm_ohlc_capacity_contract()
+    mdm = MarketDataManager(broker=None, websocket=None, cache_len=2)
+
+    _seed_and_refresh(mdm, 3)
+
+    assert len(mdm.get_ohlc_bars(SYMBOL)) == 2
+    assert mdm._ohlc[SYMBOL].maxlen == 2
+
+
 def test_small_history_requests_remain_bounded(monkeypatch) -> None:
     monkeypatch.setenv("MDM_OHLC_CACHE_LEN", "500")
     install_mdm_ohlc_capacity_contract()
