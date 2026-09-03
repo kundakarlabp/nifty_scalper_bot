@@ -207,15 +207,19 @@ def _context_history_read_limit(runner: Any, symbol: str, limit: int) -> int:
 
 def apply_patches() -> None:
     """Install the dynamic-universe and selected-option evaluation fixes once."""
+    from nifty_scalper_bot.core.context_history_continuity import (
+        apply_patches as _apply_context_history_continuity,
+    )
     from nifty_scalper_bot.core.runtime_history_event_loop_hardening import (
         apply_app_patch as _apply_runtime_history_patch,
     )
     from nifty_scalper_bot.strategies.runner import StrategyRunner
 
     # core.app is fully loaded when the production runtime-hardening installer
-    # calls this function. Patch the app function before the class idempotency
-    # return so an app-module reload cannot lose the history deferral adapter.
+    # calls this function. Patch app policy + runtime history orchestration before
+    # the class idempotency return so module reloads cannot lose either adapter.
     app_module = sys.modules.get("nifty_scalper_bot.core.app")
+    _apply_context_history_continuity(app_module)
     if app_module is not None:
         _apply_runtime_history_patch(app_module)
 
