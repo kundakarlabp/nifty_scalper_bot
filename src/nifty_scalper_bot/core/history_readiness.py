@@ -1206,6 +1206,10 @@ def resolve_history_policy(
         "recovery_or_open_position": int(os.getenv("HYDRATION_DEEP_RECOVERY", "300") or 300),
     }
     deep_cap = max(role_cap, deep_caps.get(role, role_cap))
+    # Ordinary context hydration remains bounded by its normal role cap.
+    # ORB's full-session window is a structural target, not a new generic
+    # hydration target or execution-readiness minimum.
+    target = max(required, min(target, role_cap))
 
     orb_enabled = str(os.getenv("ORB_ENABLED", "true") or "true").strip().lower() in {
         "1", "true", "yes", "y", "on", "enable", "enabled"

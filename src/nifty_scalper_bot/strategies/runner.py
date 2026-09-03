@@ -2373,8 +2373,12 @@ class StrategyRunner:
         )
         needs_seed = bool(
             rows
-            and (not indicator_current or not runner_current)
-            and (source_count > min(indicator_count, runner_before) or source_ready)
+            and (
+                source_count > runner_before
+                or source_count > indicator_count
+                or not indicator_current
+                or not runner_current
+            )
         )
         if needs_seed:
             try:
@@ -2583,6 +2587,8 @@ class StrategyRunner:
                 needs_sync = bool(
                     indicator_count < minimum
                     or runner_count < minimum
+                    or source_count > indicator_count
+                    or source_count > runner_count
                     or stale_projection
                 )
                 after = indicator_count
