@@ -12,6 +12,10 @@ from dataclasses import dataclass
 import os
 from typing import Any, Mapping
 
+from nifty_scalper_bot.core.underlying_context_contract import (
+    resolve_active_underlying_symbols,
+)
+
 SPOT_SYMBOLS = {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}
 OPTION_SUFFIXES = ("CE", "PE")
 _HISTORY_METHODS = ("get_ohlc_bars", "get_history", "get_bars")
@@ -75,7 +79,12 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 
 def _bar_ts(bar: Any) -> Any:
     if isinstance(bar, Mapping):
-        return bar.get("timestamp") or bar.get("ts") or bar.get("datetime") or bar.get("time")
+        return (
+            bar.get("timestamp")
+            or bar.get("ts")
+            or bar.get("datetime")
+            or bar.get("time")
+        )
     return (
         getattr(bar, "timestamp", None)
         or getattr(bar, "ts", None)
@@ -120,7 +129,11 @@ def build_strategy_history_context(
     indicator_bars = collect_history_bars(indicator_engine, symbol)
     bars = data_hub_bars or indicator_bars
     history_source = (
-        "data_hub" if data_hub_bars else "indicator_engine" if indicator_bars else "unavailable"
+        "data_hub"
+        if data_hub_bars
+        else "indicator_engine"
+        if indicator_bars
+        else "unavailable"
     )
 
     history_domain_used = classify_history_domain(symbol)
@@ -130,8 +143,14 @@ def build_strategy_history_context(
     underlying_count = raw_count if history_domain_used == "underlying" else 0
 
     if runner_context:
-        option_count = max(option_count, _safe_int(runner_context.get("option_history_count"), 0))
-        spot_count = max(spot_count, _safe_int(runner_context.get("spot_history_count"), 0))
+        option_count = max(
+            option_count,
+            _safe_int(runner_context.get("option_history_count"), 0),
+        )
+        spot_count = max(
+            spot_count,
+            _safe_int(runner_context.get("spot_history_count"), 0),
+        )
         underlying_count = max(
             underlying_count,
             _safe_int(runner_context.get("underlying_history_count"), 0),
@@ -153,7 +172,7 @@ def build_strategy_history_context(
     oldest_bar_ts = _bar_ts(bars[0]) if bars else None
     latest_bar_ts = _bar_ts(bars[-1]) if bars else None
 
-    return StrategyHistoryContext(
+    context = StrategyHistoryContext(
         history_count=resolved_history_count,
         indicator_history_count=raw_count,
         option_history_count=option_count,
@@ -165,12 +184,29 @@ def build_strategy_history_context(
         history_resolved_count=resolved_history_count,
         oldest_bar_ts=oldest_bar_ts,
         latest_bar_ts=latest_bar_ts,
-        history_quality="warm" if resolved_history_count >= domain_min_required else "cold",
+        history_quality=(
+            "warm" if resolved_history_count >= domain_min_required else "cold"
+        ),
         history_required_min=domain_min_required,
         history_ready=resolved_history_count >= domain_min_required,
         smc_history_required_min=smc_min_bars,
         history_ready_for_smc=resolved_history_count >= smc_min_bars,
     ).to_dict()
+
+    # ORB/SMC evaluate an option symbol but derive structure from the active
+    # underlying. Carry only canonical symbol identity here; completed bars stay
+    # in MDM -> Runner -> shared IndicatorEngine. This closes the previous gap
+    # where nested spot_context/futures_context existed but scalar identities
+    # required by the strategies were absent.
+    spot_symbol, futures_symbol = resolve_active_underlying_symbols(
+        data_hub,
+        runner_context,
+    )
+    if spot_symbol:
+        context["spot_symbol"] = spot_symbol
+    if futures_symbol:
+        context["futures_symbol"] = futures_symbol
+    return context
 
 
 __all__ = [
