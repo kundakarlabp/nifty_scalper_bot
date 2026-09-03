@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from nifty_scalper_bot.core import history_readiness
+from nifty_scalper_bot.core import app
 from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import apply_patches
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -120,6 +120,7 @@ def test_orb_context_policy_targets_full_session_history(monkeypatch) -> None:
     monkeypatch.delenv("HYDRATION_MAX_BARS", raising=False)
     monkeypatch.delenv("HYDRATION_CAP_FUTURES_CONTEXT", raising=False)
     monkeypatch.delenv("HYDRATION_DEEP_FUTURES_CONTEXT", raising=False)
+    apply_patches()
     ctx = SimpleNamespace(
         strategy_runner=SimpleNamespace(
             _context_required_bars=100,
@@ -128,7 +129,7 @@ def test_orb_context_policy_targets_full_session_history(monkeypatch) -> None:
         market_data_manager=SimpleNamespace(_min_required_bars=0),
     )
 
-    policy = history_readiness.resolve_history_policy(
+    policy = app.resolve_history_policy(
         ctx,
         FUTURE,
         role="futures_context",
@@ -159,6 +160,7 @@ def _context_sync_runner(
     runner._history_count_for_symbol = lambda symbol: len(
         runner._indicator_engine.get_history(symbol)
     )
+    runner._schedule_runtime_history_ensure = lambda *_args, **_kwargs: True
     calls: list[tuple[str, dict[str, object]]] = []
 
     def _sync(symbol: str, **kwargs: object) -> int:
@@ -208,8 +210,14 @@ def test_orb_context_requests_structural_target_even_when_warm_by_count(monkeypa
     apply_patches()
     rows = _bars(100)
     runner, calls = _context_sync_runner(mdm_rows=rows, indicator_rows=rows)
+    scheduled: list[dict[str, object]] = []
+    runner._schedule_runtime_history_ensure = lambda _symbol, **kwargs: (
+        scheduled.append(dict(kwargs)) or True
+    )
 
     runner._sync_context_history_if_cold(source="test_orb_structural_target")
 
-    assert calls
-    assert int(calls[-1][1]["required_bars"]) >= 400
+    assert calls == []  # aligned 100-bar state must not be needlessly reseeded
+    assert scheduled
+    assert int(scheduled[-1]["required_bars"]) >= 30
+    assert int(scheduled[-1]["target_bars"]) >= 400
