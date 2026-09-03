@@ -277,32 +277,43 @@ def _sync_context_completed_state(runner: Any, *, source: str) -> None:
         role = _context_role(runner, symbol)
         if not symbol or role is None:
             continue
-        mdm_rows = _mdm_rows(runner, symbol, target)
         indicator_rows = _indicator_rows(runner, symbol)
         runner_rows = _runner_rows(runner, symbol)
         if not runner_rows:
             runner_rows = indicator_rows
+        existing_depth = max(len(indicator_rows), len(runner_rows), minimum)
+        # Preserve an already-warm window when ORB is disabled, while ORB keeps
+        # the larger session structural target. This avoids shrinking a 100-bar
+        # context to the 30-bar SMC minimum during incremental propagation.
+        read_target = max(target, existing_depth)
+        mdm_rows = _mdm_rows(runner, symbol, read_target)
+        mdm_completed = _completed_rows(mdm_rows)
 
         if _needs_completed_bar_sync(
             mdm_rows=mdm_rows,
             runner_rows=runner_rows,
             indicator_rows=indicator_rows,
-        ) and callable(sync):
-            # required_bars stays at the execution/SMC minimum. The patched
-            # cached read may return the deeper structural window, so the
-            # canonical reseed mirrors every available completed MDM bar without
-            # falsely marking a 100-bar-ready context as HYDRATING for 400.
+        ) and callable(sync) and len(mdm_completed) >= minimum:
+            # Ask canonical sync to preserve the current warm depth, but never
+            # demand more than MDM currently has. The dynamic cached-read adapter
+            # still returns the full ORB window when enabled, so every available
+            # completed bar is mirrored without turning the 400-bar target into
+            # a false execution-readiness blocker.
+            sync_required = max(
+                minimum,
+                min(len(mdm_completed), existing_depth),
+            )
             try:
                 sync(
                     symbol,
-                    required_bars=minimum,
+                    required_bars=sync_required,
                     source=source,
                     request_if_short=False,
                 )
             except Exception:  # noqa: BLE001 - existing readiness remains authoritative
                 pass
 
-        if len(_completed_rows(mdm_rows)) < target:
+        if len(mdm_completed) < target:
             _schedule_structural_target(
                 runner,
                 symbol=symbol,
