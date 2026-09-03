@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from nifty_scalper_bot.core import _install_runner_candle_engine_cache_patch
+from nifty_scalper_bot.data.candle_engine import CandleEngine
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -144,11 +145,15 @@ def test_live_finalization_through_mdm_engine_is_visible_to_runner() -> None:
 
 def test_normal_projection_append_and_rolling_maxlen_do_not_count_divergence() -> None:
     mdm = _mdm()
+    # Exercise finalized-history rollover at the authoritative owner. `_cache_len`
+    # is raw-tick retention and must not implicitly resize CandleEngine history.
+    mdm._engines[SYMBOL] = CandleEngine(max_bars=3, symbol=SYMBOL)
 
     assert mdm.ingest_historical_ohlc(SYMBOL, [_row(0, 100.0), _row(1, 101.0)]) == 2
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 0
     assert mdm.ingest_historical_ohlc(SYMBOL, [_row(2, 102.0), _row(3, 103.0)]) == 2
 
+    assert mdm.get_candle_engine(SYMBOL).max_bars == 3
     assert len(mdm.get_ohlc_bars(SYMBOL)) == 3
     assert [bar["close"] for bar in mdm.get_ohlc_bars(SYMBOL)] == [101.0, 102.0, 103.0]
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 0
