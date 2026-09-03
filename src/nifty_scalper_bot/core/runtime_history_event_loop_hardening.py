@@ -12,6 +12,9 @@ from functools import wraps
 from typing import Any, Mapping
 
 from nifty_scalper_bot.core.active_basket import extract_symbol_strike
+from nifty_scalper_bot.data.ohlc_capacity_contract import (
+    install_mdm_ohlc_capacity_contract,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -77,7 +80,9 @@ def _already_selected(ctx: Any, symbol: str) -> bool:
     return normalized in {item for item in candidates if item}
 
 
-def _safe_far_context_candidate(ctx: Any, symbol: str) -> tuple[bool, float | None, int | None]:
+def _safe_far_context_candidate(
+    ctx: Any, symbol: str
+) -> tuple[bool, float | None, int | None]:
     """Return deferral eligibility only with strong proof the symbol is non-ATM."""
     if _already_selected(ctx, symbol):
         return False, None, None
@@ -87,9 +92,6 @@ def _safe_far_context_candidate(ctx: Any, symbol: str) -> tuple[bool, float | No
         return False, spot, strike
     step = _strike_step(ctx)
     atm = round(float(spot) / float(step)) * step
-    # Keep ATM and the first wing synchronous. A genuinely new selected pair or
-    # nearest-contract fallback therefore remains fail-closed even on a large
-    # ATM jump. The rolling ±3-strike universe adds its cold edge at >=2 steps.
     return abs(float(strike) - float(atm)) >= float(2 * step), spot, int(atm)
 
 
@@ -112,7 +114,9 @@ def _current_result(
     except Exception:
         mdm_bars = 0
     try:
-        runner_bars = len((getattr(runner, "_symbol_history", {}) or {}).get(symbol, []) or [])
+        runner_bars = len(
+            (getattr(runner, "_symbol_history", {}) or {}).get(symbol, []) or []
+        )
     except Exception:
         runner_bars = 0
     try:
@@ -120,8 +124,12 @@ def _current_result(
         if callable(counter):
             indicator_bars = int(counter(symbol) or 0)
         else:
-            history_getter = getattr(getattr(runner, "_indicator_engine", None), "get_history", None)
-            indicator_bars = len(history_getter(symbol) or []) if callable(history_getter) else 0
+            history_getter = getattr(
+                getattr(runner, "_indicator_engine", None), "get_history", None
+            )
+            indicator_bars = (
+                len(history_getter(symbol) or []) if callable(history_getter) else 0
+            )
     except Exception:
         indicator_bars = 0
     readiness = app_module.compute_history_readiness(
@@ -132,7 +140,9 @@ def _current_result(
         runner_bars=runner_bars,
         indicator_bars=indicator_bars,
     )
-    failure_reason = None if readiness.minimum_ready else "dynamic_context_hydration_deferred"
+    failure_reason = (
+        None if readiness.minimum_ready else "dynamic_context_hydration_deferred"
+    )
     return app_module.RuntimeHistoryResult(
         symbol=symbol,
         role=policy.role,
@@ -157,7 +167,8 @@ def _current_result(
 
 
 def apply_app_patch(app_module: Any) -> bool:
-    """Defer only cold far-context history while preserving canonical ownership."""
+    """Defer cold far-context history and install completed-OHLC capacity."""
+    install_mdm_ohlc_capacity_contract()
     if bool(getattr(app_module, _PATCH_ATTR, False)):
         return True
     original = getattr(app_module, "ensure_symbol_runtime_history", None)
@@ -221,13 +232,15 @@ def apply_app_patch(app_module: Any) -> bool:
             )
             _TASKS[key] = task
 
-            def _done(completed: asyncio.Task[Any], *, task_key: tuple[int, str] = key) -> None:
+            def _done(
+                completed: asyncio.Task[Any], *, task_key: tuple[int, str] = key
+            ) -> None:
                 _TASKS.pop(task_key, None)
                 if completed.cancelled():
                     return
                 try:
                     completed.result()
-                except Exception as exc:  # noqa: BLE001 - background context is non-gating
+                except Exception as exc:  # noqa: BLE001
                     _LOG.warning(
                         "DYNAMIC_CONTEXT_HISTORY_BACKGROUND_FAILED symbol=%s error_type=%s error=%s",
                         normalized,

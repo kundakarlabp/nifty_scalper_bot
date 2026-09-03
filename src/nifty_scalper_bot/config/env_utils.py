@@ -8,6 +8,10 @@ from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 LIVE_PER_TRADE_RISK_PCT = "7.0"
+# Each live entry is capped to the remaining daily-loss budget before broker
+# submission. Keep that budget coherent with the canonical LIVE per-trade risk
+# so an indivisible NIFTY lot is not constrained by contradictory percentages.
+LIVE_DAILY_LOSS_PCT = LIVE_PER_TRADE_RISK_PCT
 PRODUCTION_LIVE_DEFAULT_INITIALIZED = "PRODUCTION_LIVE_DEFAULT_INITIALIZED"
 
 
@@ -204,10 +208,16 @@ def normalise_live_env_defaults() -> None:
         _persist_production_live_defaults(defaults)
 
     if live_requested:
-        # One canonical live risk value. Keep both accepted aliases aligned so
-        # an older private deployment value cannot silently retain the 4% cap.
+        # One canonical live risk envelope. Keep accepted aliases aligned so
+        # legacy deployment values cannot silently make the 7% per-trade policy
+        # unattainable behind a lower daily-loss ceiling. Existing remaining-day
+        # sizing clamps and final RiskManager breakers remain unchanged.
         os.environ['RISK__PER_TRADE_RISK_PCT'] = LIVE_PER_TRADE_RISK_PCT
         os.environ['RISK_PER_TRADE_PCT'] = LIVE_PER_TRADE_RISK_PCT
+        os.environ['RISK_DAILY_LOSS_PCT'] = LIVE_DAILY_LOSS_PCT
+        os.environ['RISK_DAILY_PNL_CAP_PCT'] = LIVE_DAILY_LOSS_PCT
+        os.environ['RISK_MAX_DAILY_LOSS_PCT'] = LIVE_DAILY_LOSS_PCT
+        os.environ['DAILY_PNL_CAP_PCT'] = LIVE_DAILY_LOSS_PCT
 
 
 def resolve_build_sha() -> str:
