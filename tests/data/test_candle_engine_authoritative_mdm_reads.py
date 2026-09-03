@@ -36,6 +36,12 @@ async def test_history_capacity_comes_from_candle_engine_not_tick_cache(monkeypa
     assert mdm.history_capacity_for(SYMBOL) == engine.max_bars
     assert mdm.history_capacity_for(SYMBOL) >= 400
 
+    # Raw-tick retention may change independently at runtime/tests; finalized
+    # OHLC capacity must continue to come from the already-owned CandleEngine.
+    mdm._cache_len = 1
+    assert mdm.history_capacity_for(SYMBOL) == engine.max_bars
+    assert mdm.history_capacity_for(SYMBOL) >= 400
+
 
 async def test_canonical_reads_survive_missing_projection(monkeypatch) -> None:
     monkeypatch.setenv("MDM_TICK_CACHE_LEN", "50")
