@@ -53,7 +53,7 @@ def _blocked_manager(authority: object) -> RuntimeOrderManager:
     return manager
 
 
-def test_terminal_unfilled_and_broker_flat_releases_exact_entry_lifecycle_blocker() -> None:
+def test_cancelled_flat_entry_releases_exact_lifecycle_blocker() -> None:
     """A cancelled entry proven flat must not block all future entries forever."""
     manager = _blocked_manager(_BracketAuthority(status="CANCELLED", flat=True))
 
@@ -102,7 +102,7 @@ def test_entry_lifecycle_release_cannot_clear_a_newer_blocker() -> None:
     assert manager._entry_lifecycle_blocker is newer
 
 
-def test_selected_option_completion_updates_canonical_liveness_timestamp(monkeypatch) -> None:
+def test_selected_eval_updates_canonical_liveness_timestamp(monkeypatch) -> None:
     """Selected evaluation completion must update the timestamp read by watchdogs."""
     runner, _sm, _risk, _order, selected_ce = _selected_option_runner(monkeypatch)
     before = float(runner._last_selected_candidate_eval_completed_ts)
