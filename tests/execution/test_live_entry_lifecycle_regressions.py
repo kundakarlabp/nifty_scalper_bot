@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
-from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
 from tests.strategies.test_continuous_live_entry_eval import _selected_option_runner
 from tests.strategies.test_entry_eval_coalescing import (
     _run_loop_in_thread,
@@ -11,6 +10,7 @@ from tests.strategies.test_entry_eval_coalescing import (
     _wait_until,
 )
 
+from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
 
 SYMBOL = "NFO:NIFTY2690823900PE"
 ORDER_ID = "2095721522198405120"
@@ -30,9 +30,9 @@ class _BracketAuthority:
         assert order_id == ORDER_ID
         return {"status": self.status}, True
 
-    def _position_flat_for_symbol(self, symbol: str) -> bool:
+    def _broker_position_quantity(self, symbol: str) -> int:
         assert symbol == SYMBOL
-        return self.flat
+        return 0 if self.flat else 65
 
 
 def _blocked_manager(authority: object) -> RuntimeOrderManager:
@@ -89,9 +89,9 @@ def test_entry_lifecycle_release_cannot_clear_a_newer_blocker() -> None:
     }
 
     class _RacingAuthority(_BracketAuthority):
-        def _position_flat_for_symbol(self, symbol: str) -> bool:
+        def _broker_position_quantity(self, symbol: str) -> int:
             manager._entry_lifecycle_blocker = newer
-            return super()._position_flat_for_symbol(symbol)
+            return super()._broker_position_quantity(symbol)
 
     manager._bracket_manager = _RacingAuthority(status="CANCELLED", flat=True)
 

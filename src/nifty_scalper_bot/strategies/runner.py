@@ -8926,7 +8926,7 @@ class StrategyRunner:
             self._selected_candidate_eval_completed_count = int(
                 getattr(self, "_selected_candidate_eval_completed_count", 0) or 0
             ) + 1
-            self._last_selected_candidate_eval_completed_at = (
+            self._last_selected_candidate_eval_completed_ts = (
                 self._last_entry_eval_completed_at
             )
             self._clear_entry_eval_stall_after_selected_eval()
