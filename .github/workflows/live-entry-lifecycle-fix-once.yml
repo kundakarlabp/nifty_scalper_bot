@@ -33,12 +33,10 @@ jobs:
       - name: Apply canonical corrections
         run: |
           python scripts/apply_live_entry_lifecycle_fix.py
-      - name: Format corrected files
+      - name: Format new regression test only
         run: |
-          python -m black \
-            src/nifty_scalper_bot/execution/runtime_order_manager.py \
-            src/nifty_scalper_bot/strategies/runner.py \
-            tests/execution/test_live_entry_lifecycle_regressions.py
+          python -m ruff check --fix tests/execution/test_live_entry_lifecycle_regressions.py
+          python -m black tests/execution/test_live_entry_lifecycle_regressions.py
       - name: Incident and adjacent regressions
         run: |
           python -m pytest -q \
@@ -53,15 +51,12 @@ jobs:
       - name: Compile and changed-file quality
         run: |
           python -m compileall -q src dashboard scripts
-          python -m ruff check \
-            src/nifty_scalper_bot/execution/runtime_order_manager.py \
-            tests/execution/test_live_entry_lifecycle_regressions.py
           python -m ruff check --ignore E501 \
-            src/nifty_scalper_bot/strategies/runner.py
-          python -m black --check \
             src/nifty_scalper_bot/execution/runtime_order_manager.py \
-            src/nifty_scalper_bot/strategies/runner.py \
+            src/nifty_scalper_bot/strategies/runner.py
+          python -m ruff check \
             tests/execution/test_live_entry_lifecycle_regressions.py
+          python -m black --check tests/execution/test_live_entry_lifecycle_regressions.py
       - name: Full repository suite
         run: python -m pytest -q
       - name: Clean temporary implementation files
