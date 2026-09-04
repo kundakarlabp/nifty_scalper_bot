@@ -89,10 +89,10 @@ entry_geometry.write_text(text.replace(old_release_geometry, new_release_geometr
 # 5) Fail-closed live direction flips at the authoritative context snapshot.
 manager = Path("src/nifty_scalper_bot/core/strategy_manager.py")
 text = manager.read_text(encoding="utf-8")
-import_marker = "from nifty_scalper_bot.core.strategy_context_contract import"
+import_marker = "from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds"
 idx = text.find(import_marker)
 if idx < 0:
-    raise SystemExit("strategy_manager.py: context-contract import marker missing")
+    raise SystemExit("strategy_manager.py: runtime-context import marker missing")
 line_start = text.rfind("\n", 0, idx) + 1
 insert = "from nifty_scalper_bot.core.direction_stability import DirectionStabilityGate\n"
 if insert not in text:
