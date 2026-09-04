@@ -284,8 +284,102 @@ class RuntimeOrderManager(_core.OrderManager):
         # aligned so a broker-flat snapshot can clear a completed exit lifecycle.
         self._bracket_manager = provider
 
+    def _release_resolved_entry_reconciliation_blocker(
+        self, blocker: Mapping[str, Any]
+    ) -> Mapping[str, Any] | None:
+        """Release only a terminal-unfilled entry blocker proven broker-flat.
+
+        The entry-recovery latch is intentionally fail-closed while broker truth is
+        uncertain. Once the same broker order is authoritatively terminal-unfilled
+        and the canonical bracket authority proves zero broker exposure for the same
+        symbol, keeping the manager-global latch would block unrelated future entries
+        indefinitely. Broker I/O occurs outside the OrderManager lock; the lock is
+        used only for the final identity-checked state transition so a newer blocker
+        cannot be cleared by an older reconciliation result.
+        """
+        if str(blocker.get("block_reason") or "").strip().lower() != (
+            "entry_reconciliation_pending"
+        ):
+            return blocker
+        details = blocker.get("details")
+        if not isinstance(details, Mapping):
+            return blocker
+        order_id = str(details.get("order_id") or "").strip()
+        symbol = str(details.get("symbol") or "").strip()
+        if not order_id or not symbol:
+            return blocker
+
+        authority = getattr(self, "_bracket_manager", None)
+        order_status = getattr(authority, "_broker_entry_order_status", None)
+        broker_quantity = getattr(authority, "_broker_position_quantity", None)
+        if not callable(order_status) or not callable(broker_quantity):
+            return blocker
+
+        try:
+            status_payload, status_known = order_status(order_id)
+        except Exception:
+            return blocker
+        if not status_known or not isinstance(status_payload, Mapping):
+            return blocker
+        status = str(status_payload.get("status") or "").strip().upper()
+        if status not in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED"}:
+            return blocker
+
+        try:
+            quantity = broker_quantity(symbol)
+        except Exception:
+            return blocker
+        if quantity is None:
+            return blocker
+        try:
+            if int(quantity) != 0:
+                return blocker
+        except (TypeError, ValueError):
+            return blocker
+
+        def _clear_if_current() -> Mapping[str, Any] | None:
+            current = getattr(self, "_entry_lifecycle_blocker", None)
+            if current is not blocker:
+                return current if isinstance(current, Mapping) else None
+            self._entry_lifecycle_blocker = None
+            if getattr(self, "_last_order_decision", None) is blocker:
+                self._last_order_decision = {}
+            return None
+
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            remaining = _clear_if_current()
+        else:
+            try:
+                with lock:
+                    remaining = _clear_if_current()
+            except Exception:
+                return blocker
+
+        if remaining is None:
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "info", None)
+            if callable(log):
+                log(
+                    "ENTRY_RECONCILIATION_RESOLVED_FLAT "
+                    "order_id=%s symbol=%s status=%s",
+                    order_id,
+                    symbol,
+                    status,
+                    extra={
+                        "event": "ENTRY_RECONCILIATION_RESOLVED_FLAT",
+                        "order_id": order_id,
+                        "symbol": symbol,
+                        "order_status": status,
+                    },
+                )
+        return remaining
+
     def current_entry_blocker(self) -> Mapping[str, Any] | None:
-        return _current_entry_blocker(self)
+        blocker = _current_entry_blocker(self)
+        if not isinstance(blocker, Mapping):
+            return None
+        return self._release_resolved_entry_reconciliation_blocker(blocker)
 
     def _blocked(
         self,
