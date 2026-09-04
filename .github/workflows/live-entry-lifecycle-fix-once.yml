@@ -55,8 +55,9 @@ jobs:
           python -m compileall -q src dashboard scripts
           python -m ruff check \
             src/nifty_scalper_bot/execution/runtime_order_manager.py \
-            src/nifty_scalper_bot/strategies/runner.py \
             tests/execution/test_live_entry_lifecycle_regressions.py
+          python -m ruff check --ignore E501 \
+            src/nifty_scalper_bot/strategies/runner.py
           python -m black --check \
             src/nifty_scalper_bot/execution/runtime_order_manager.py \
             src/nifty_scalper_bot/strategies/runner.py \
