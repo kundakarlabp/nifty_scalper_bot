@@ -52,11 +52,23 @@ jobs:
         run: |
           python -m compileall -q src dashboard scripts
           python -m ruff check --ignore E501 \
-            src/nifty_scalper_bot/execution/runtime_order_manager.py \
-            src/nifty_scalper_bot/strategies/runner.py
+            src/nifty_scalper_bot/execution/runtime_order_manager.py
           python -m ruff check \
             tests/execution/test_live_entry_lifecycle_regressions.py
           python -m black --check tests/execution/test_live_entry_lifecycle_regressions.py
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+
+          runner = Path('src/nifty_scalper_bot/strategies/runner.py')
+          ast.parse(runner.read_text(encoding='utf-8'), filename=str(runner))
+          text = runner.read_text(encoding='utf-8')
+          good = 'self._last_selected_candidate_eval_completed_ts = ('
+          bad = 'self._last_selected_candidate_eval_completed_at = ('
+          if text.count(good) != 1 or bad in text:
+              raise SystemExit('selected evaluation completion timestamp contract not canonical')
+          print('runner timestamp contract validated')
+          PY
       - name: Full repository suite
         run: python -m pytest -q
       - name: Clean temporary implementation files
