@@ -1,0 +1,146 @@
+name: Trade Economics Guardrails Once
+
+on:
+  push:
+    branches:
+      - fix/trade-economics-guardrails-20260904
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      BRACKET_AUTO_RESTORE: "false"
+      NSB_TEST_MODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/trade-economics-guardrails-20260904
+          fetch-depth: 50
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Apply canonical source corrections
+        run: python scripts/apply_trade_economics_guardrails_20260904.py
+      - name: Format new focused code and tests
+        run: |
+          python -m ruff check --fix \
+            src/nifty_scalper_bot/core/direction_stability.py \
+            tests/core/test_direction_stability_20260904.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/config/test_live_risk_envelope.py
+          python -m black \
+            src/nifty_scalper_bot/core/direction_stability.py \
+            tests/core/test_direction_stability_20260904.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/config/test_live_risk_envelope.py
+      - name: Incident and adjacent regressions
+        run: |
+          python -m pytest -q \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/core/test_direction_stability_20260904.py \
+            tests/config/test_live_risk_envelope.py \
+            tests/risk/test_risk_check_order_daily_limits.py \
+            tests/risk/test_risk_rejection_codes.py \
+            tests/execution/test_execution_safety_audit_fixes.py \
+            tests/execution/test_order_manager_preflight.py \
+            tests/execution/test_order_manager_trade_plan.py \
+            tests/execution/test_entry_recovery_hardening.py \
+            tests/execution/test_live_entry_lifecycle_regressions.py \
+            tests/core/test_postmerge_trade_path.py \
+            tests/strategies/test_selected_option_live_path.py
+      - name: Compile and scoped quality
+        run: |
+          python -m compileall -q src dashboard scripts
+          python -m ruff check \
+            src/nifty_scalper_bot/core/direction_stability.py \
+            src/nifty_scalper_bot/execution/entry_geometry.py \
+            tests/core/test_direction_stability_20260904.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/config/test_live_risk_envelope.py
+          python -m black --check \
+            src/nifty_scalper_bot/core/direction_stability.py \
+            tests/core/test_direction_stability_20260904.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/config/test_live_risk_envelope.py
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+          for name in (
+              'src/nifty_scalper_bot/config/env_utils.py',
+              'src/nifty_scalper_bot/config/settings.py',
+              'src/nifty_scalper_bot/risk/entry_guard_patch.py',
+              'src/nifty_scalper_bot/risk/risk_manager.py',
+              'src/nifty_scalper_bot/execution/order_manager_core.py',
+              'src/nifty_scalper_bot/core/strategy_manager.py',
+          ):
+              path = Path(name)
+              ast.parse(path.read_text(encoding='utf-8'), filename=name)
+          print('all changed production modules parse')
+          PY
+      - name: Full repository suite
+        run: python -m pytest -q
+      - name: Clean temporary implementation files
+        run: |
+          git checkout -- positions.json 2>/dev/null || true
+          rm -rf .pytest-data-dir .pytest_cache
+          rm -f scripts/apply_trade_economics_guardrails_20260904.py
+          rm -f .github/workflows/trade-economics-guardrails-once.yml
+      - name: Verify final diff scope
+        run: |
+          git status --short
+          python - <<'PY'
+          import subprocess
+          allowed = {
+              '.env.example',
+              'src/nifty_scalper_bot/config/env_utils.py',
+              'src/nifty_scalper_bot/config/settings.py',
+              'src/nifty_scalper_bot/core/direction_stability.py',
+              'src/nifty_scalper_bot/core/strategy_manager.py',
+              'src/nifty_scalper_bot/execution/entry_geometry.py',
+              'src/nifty_scalper_bot/execution/order_manager_core.py',
+              'src/nifty_scalper_bot/risk/entry_guard_patch.py',
+              'src/nifty_scalper_bot/risk/risk_manager.py',
+              'tests/config/test_live_risk_envelope.py',
+              'tests/core/test_direction_stability_20260904.py',
+              'tests/execution/test_trade_economics_guardrails_20260904.py',
+              'scripts/apply_trade_economics_guardrails_20260904.py',
+              '.github/workflows/trade-economics-guardrails-once.yml',
+          }
+          lines = subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines()
+          changed = {line[3:] for line in lines if len(line) > 3}
+          unexpected = sorted(changed - allowed)
+          if unexpected:
+              raise SystemExit(f'unexpected files: {unexpected}')
+          required = {
+              'src/nifty_scalper_bot/config/env_utils.py',
+              'src/nifty_scalper_bot/config/settings.py',
+              'src/nifty_scalper_bot/core/direction_stability.py',
+              'src/nifty_scalper_bot/core/strategy_manager.py',
+              'src/nifty_scalper_bot/execution/entry_geometry.py',
+              'src/nifty_scalper_bot/execution/order_manager_core.py',
+              'src/nifty_scalper_bot/risk/entry_guard_patch.py',
+              'src/nifty_scalper_bot/risk/risk_manager.py',
+          }
+          missing = sorted(required - changed)
+          if missing:
+              raise SystemExit(f'missing expected source changes: {missing}')
+          print('validated final files:', sorted(changed))
+          PY
+      - name: Commit validated correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(trading): harden entry atomicity and live risk economics'
+          git push origin HEAD:fix/trade-economics-guardrails-20260904
